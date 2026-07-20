@@ -1,3 +1,6 @@
+# Source PNG for the README illustration (only the .webp is committed)
+/franken_manim_illustration.png
+
 # Build artifacts
 /target
 /target_local
