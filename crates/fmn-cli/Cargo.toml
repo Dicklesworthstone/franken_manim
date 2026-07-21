@@ -1,0 +1,24 @@
+[package]
+name = "fmn-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The `fmn` binary"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-config.workspace = true
+fmn-platform.workspace = true
+fmn-runtime.workspace = true
+fmn-scene.workspace = true
+fmn-studio.workspace = true
+fmn-output.workspace = true
+fmn-library.workspace = true
+
+[features]
+batch = []
+cli = []
+
+[lints]
+workspace = true

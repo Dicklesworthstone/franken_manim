@@ -1,0 +1,25 @@
+[package]
+name = "fmn-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lumen"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-dmath.workspace = true
+fmn-geom.workspace = true
+fmn-mobject.workspace = true
+fmn-frame.workspace = true
+fmn-hash.workspace = true
+fmn-cache.workspace = true
+
+[features]
+wasm = []
+accel-annex = []
+metal = ["accel-annex"]
+cuda = ["accel-annex"]
+
+[lints]
+workspace = true

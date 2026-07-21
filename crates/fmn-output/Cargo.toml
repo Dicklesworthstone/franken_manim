@@ -1,0 +1,18 @@
+[package]
+name = "fmn-output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sink orchestration, the negotiated ffmpeg boundary, and sound (§14)."
+
+[dependencies]
+fmn-core.workspace = true
+fmn-hash.workspace = true
+fmn-platform.workspace = true
+fmn-frame.workspace = true
+fmn-codec.workspace = true
+fmn-cache.workspace = true
+
+[lints]
+workspace = true

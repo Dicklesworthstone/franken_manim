@@ -1,0 +1,15 @@
+[package]
+name = "fmn-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scribe I"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-geom.workspace = true
+fmn-mobject.workspace = true
+
+[lints]
+workspace = true

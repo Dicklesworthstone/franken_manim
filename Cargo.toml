@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fmn-core",
+    "crates/fmn-dmath",
+    "crates/fmn-hash",
+    "crates/fmn-config",
+    "crates/fmn-platform",
+    "crates/fmn-frame",
+    "crates/fmn-codec",
+    "crates/fmn-cache",
+    "crates/fmn-geom",
+    "crates/fmn-mobject",
+    "crates/fmn-anim",
+    "crates/fmn-render",
+    "crates/fmn-text",
+    "crates/fmn-tex",
+    "crates/fmn-library",
+    "crates/fmn-scene",
+    "crates/fmn-studio",
+    "crates/fmn-output",
+    "crates/fmn-runtime",
+    "crates/fmn-cli",
+    "crates/fmn-conformance",
+    "crates/fmn-python",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Dicklesworthstone/franken_manim"
+
+# The governed closure (D1): workspace-internal crates only. FrankenSuite
+# foundations (fnp, fsci, fmd-font, fmd-math, fnx, fp, ft, asupersync) enter
+# here as they are consumed, pinned via SUITE.lock; nothing else does.
+[workspace.dependencies]
+fmn-core = { path = "crates/fmn-core" }
+fmn-dmath = { path = "crates/fmn-dmath" }
+fmn-hash = { path = "crates/fmn-hash" }
+fmn-config = { path = "crates/fmn-config" }
+fmn-platform = { path = "crates/fmn-platform" }
+fmn-frame = { path = "crates/fmn-frame" }
+fmn-codec = { path = "crates/fmn-codec" }
+fmn-cache = { path = "crates/fmn-cache" }
+fmn-geom = { path = "crates/fmn-geom" }
+fmn-mobject = { path = "crates/fmn-mobject" }
+fmn-anim = { path = "crates/fmn-anim" }
+fmn-render = { path = "crates/fmn-render" }
+fmn-text = { path = "crates/fmn-text" }
+fmn-tex = { path = "crates/fmn-tex" }
+fmn-library = { path = "crates/fmn-library" }
+fmn-scene = { path = "crates/fmn-scene" }
+fmn-studio = { path = "crates/fmn-studio" }
+fmn-output = { path = "crates/fmn-output" }
+fmn-runtime = { path = "crates/fmn-runtime" }
+fmn-cli = { path = "crates/fmn-cli" }
+fmn-conformance = { path = "crates/fmn-conformance" }
+fmn-python = { path = "crates/fmn-python" }
+
+# Baseline: clippy::all at warn, promoted to errors by scripts/check.sh's
+# `-D warnings`. Crates opt in via [lints] workspace = true.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"

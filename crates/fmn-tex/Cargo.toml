@@ -1,0 +1,17 @@
+[package]
+name = "fmn-tex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scribe II"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-config.workspace = true
+fmn-mobject.workspace = true
+fmn-text.workspace = true
+fmn-cache.workspace = true
+
+[lints]
+workspace = true

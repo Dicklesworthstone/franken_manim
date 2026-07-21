@@ -1,0 +1,13 @@
+[package]
+name = "fmn-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Filesystem/process/clock/AssetFetcher capability traits plus HardwareTopology introspection (§17.4)."
+
+[dependencies]
+fmn-core.workspace = true
+
+[lints]
+workspace = true

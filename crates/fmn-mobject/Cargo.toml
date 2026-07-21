@@ -1,0 +1,15 @@
+[package]
+name = "fmn-mobject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Marionette"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-geom.workspace = true
+fmn-hash.workspace = true
+
+[lints]
+workspace = true

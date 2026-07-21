@@ -1,0 +1,8 @@
+[toolchain]
+# Exact pinned nightly (no "or later") — required for std::simd and safe
+# #[target_feature] (target-feature-1.1), and the date SUITE.lock records.
+# Matches asupersync's deliberate pin so the FrankenSuite resolves one
+# nightly. Bump deliberately, together with any std-API migration the new
+# nightly requires and a SUITE.lock update.
+channel = "nightly-2026-07-05"
+components = ["rustfmt", "clippy"]

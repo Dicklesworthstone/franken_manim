@@ -1,0 +1,21 @@
+[package]
+name = "fmn-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Gauntlet"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-hash.workspace = true
+fmn-geom.workspace = true
+fmn-mobject.workspace = true
+fmn-anim.workspace = true
+fmn-render.workspace = true
+fmn-library.workspace = true
+fmn-scene.workspace = true
+fmn-output.workspace = true
+
+[lints]
+workspace = true
