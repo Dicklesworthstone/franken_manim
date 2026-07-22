@@ -1,0 +1,47 @@
+# SUITE.lock — the governed universe (D1, §2.8, §3; fm-g2c).
+#
+# Everything FrankenManim builds against is pinned HERE: the exact rustc
+# nightly (never "or later"), the exact commit of every FrankenSuite
+# foundation repo, and the certified target-feature sets per SIMD build
+# tier. CI builds only from this lock. The companion per-package
+# allowlist is SUITE_ALLOWLIST.tsv; the enforcement is
+# crates/fmn-conformance/tests/governed_closure.rs, which fails on any
+# package in the workspace's Cargo.lock that this pair does not admit.
+#
+# THE UPGRADE RITUAL (R17): upgrades are deliberate, never incidental.
+# 1. Bump the pin here (and the allowlist rows it affects) in a commit
+#    that does nothing else.
+# 2. Run the full Gauntlet; diff self-goldens and the Look Gallery.
+#    A drifted golden is a finding to adjudicate, not noise to re-bless.
+# 3. Record the adjudication in the commit message; land only green.
+# Line format: section-tagged, tab-separated, std-parseable — no TOML/
+# YAML dependency anywhere in the checker.
+
+[toolchain]
+rustc	nightly-2026-07-05
+edition	2024
+
+[repos]
+# repo	commit	notes
+franken_numpy	8d7415dc48887efc8925b9c2536ceec1d0a2bb9c	fnp-* workspace; RNG + arrays (consumed after fm-g2c wiring beads)
+frankenscipy	5b1441b13a0997901ad2f9835c30072f87ca93b2	fsci-* workspace; solves/quadrature/assignment
+franken_markdown	236454e26f17fdd1b9e23902cc11633146bba95d	single-package today; fmd-font/fmd-math land via fm-ydw (cross-repo) and re-pin here
+franken_networkx	9d710b1c33e99412c94de7fa4de2f7ce4954110f	enhanced-tier Graph mobjects; never blocks core gates
+frankenpandas	da85cf65df48965e027b2f5aa21b7d0ce6a7e29c	enhanced-tier Data mobjects; never blocks core gates
+frankentorch	e4c6bdd5ec629ae70b40da9314da345ade012ca7	the only GPU gateway (Accelerator Annex); standard-only
+asupersync	e464a484cb65c1a55be0d9c925e6e9c20318edcb	batch farms + scheduler lab; never in the frame loop
+
+[reference]
+# The design oracle — never a build input.
+3b1b/manim	6199a00d4c1b1127ebe45cb629c3f22538b10e13	checked out (gitignored) at scripts/manim_ref for fixture generation
+
+[target-features]
+# Certified SIMD build tiers (§17.3, D-15). The certified engine's scalar
+# path is the definition; every tier must match it bit-for-bit under the
+# §10.5 lane rules (fixed-order, lane-count-independent reductions; no
+# FMA contraction on certified paths even where the tier enables the
+# instruction set).
+portable	baseline	no target-feature flags; the definition tier
+x86-64-v3	+avx2,+bmi2,+fma	fma enabled at ISA level, forbidden in certified kernels by construction (§10.5d)
+x86-64-v4	+avx512f,+avx512bw,+avx512dq,+avx512vl	weekly-matrix tier (R22)
+aarch64-neon	+neon	baseline on aarch64; certified matrix member

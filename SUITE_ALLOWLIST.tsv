@@ -1,0 +1,46 @@
+# SUITE_ALLOWLIST.tsv — the per-package allowlist of the governed closure
+# (D1, fm-g2c). EVERY package in the workspace's Cargo.lock must have a
+# row here; the CI check (crates/fmn-conformance/tests/governed_closure.rs)
+# fails on any package it cannot admit, or whose checksum drifts.
+#
+# class: workspace | runtime | ffi | build | dev | fuzz | pending
+#   pending = pre-authorized by D1 but not yet consumed; the row records
+#   the standing policy so consumption is a checksum fill-in, never a
+#   policy decision made in a hurry.
+# checksum: Cargo.lock checksum; "-" for path/workspace members (none).
+# unsafe_audit: forbid = crate roots carry forbid(unsafe_code);
+#   expansion = unsafe arises only in vendored/macro expansion (fmn-python
+#   PyO3 rule); pending = audit owed before first consumption.
+#
+# name	version	source	checksum	features	license	build_script	proc_macro	native_link	build_net	unsafe_audit	class	reason	owner	upgrade_policy
+fmn-core	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	substrate	fm	with-crate
+fmn-dmath	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	certified transcendentals	fm	with-crate
+fmn-hash	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	canonical hashing	fm	with-crate
+fmn-config	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	config	fm	with-crate
+fmn-platform	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	capability traits	fm	with-crate
+fmn-frame	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	frame buffers	fm	with-crate
+fmn-codec	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	native codecs	fm	with-crate
+fmn-cache	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	content-addressed cache	fm	with-crate
+fmn-geom	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Chisel	fm	with-crate
+fmn-mobject	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Marionette	fm	with-crate
+fmn-anim	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Choreo	fm	with-crate
+fmn-render	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Lumen	fm	with-crate
+fmn-text	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Scribe I	fm	with-crate
+fmn-tex	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Scribe II	fm	with-crate
+fmn-library	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Menagerie+Atlas	fm	with-crate
+fmn-scene	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Proscenium	fm	with-crate
+fmn-studio	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Studio	fm	with-crate
+fmn-output	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Reel	fm	with-crate
+fmn-runtime	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	runtime glue	fm	with-crate
+fmn-cli	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	fmn CLI	fm	with-crate
+fmn-conformance	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Gauntlet	fm	with-crate
+fmn-python	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	expansion	workspace	manimlib bridge (sole non-forbid crate)	fm	with-crate
+fmn-spike-object-model	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	G0-1 spike (publish=false)	fm	with-crate
+# --- pre-authorized, not yet consumed (D1); checksum filled at consumption ---
+pyo3	TBD	crates-io	TBD	extension-module	MIT/Apache-2.0	yes	yes	python	no	expansion	pending	fmn-python only; the one FFI gateway	fm	deliberate+gauntlet
+clap	TBD	crates-io	TBD	derive	MIT/Apache-2.0	no	via-derive	no	no	pending	pending	cli feature only	fm	deliberate+gauntlet
+wasm-bindgen	TBD	crates-io	TBD	default	MIT/Apache-2.0	no	yes	no	no	pending	pending	wasm feature only	fm	deliberate+gauntlet
+# FrankenSuite crates enter as consumed, one row per crate, pinned via
+# SUITE.lock commits (path or git sources), when their wiring beads land
+# (fm-ai1, fm-go7, fm-n1b, fm-ydw, ...). Nothing else enters without
+# amending this file deliberately (the CI check makes forgetting loud).
