@@ -102,6 +102,10 @@ pub struct Entry {
     /// `suspend_updating` state: while set, [`Stage::update`] prunes this
     /// entry's whole subtree (the Reference's early return).
     updating_suspended: bool,
+    /// `set_animating_status` state (§9.1): set on the whole family *and*
+    /// every ancestor while an animation plays; read through
+    /// [`Stage::is_changing`] (the Reference's render-cache probe).
+    is_animating: bool,
     /// ValueTracker state (§8.6), if this mobject is a tracker; plain
     /// mobjects carry `None`. Copied by value with the entry.
     pub(crate) tracker: Option<crate::dynamics::Tracker>,
@@ -127,6 +131,7 @@ impl Entry {
             parents: Vec::new(),
             updaters: Vec::new(),
             updating_suspended: false,
+            is_animating: false,
             tracker: None,
             pins: 0,
             pending_delete: false,
@@ -190,6 +195,7 @@ struct SnapshotEntry {
     parents: Vec<Mob>,
     updaters: Vec<UpdaterSlot>,
     updating_suspended: bool,
+    is_animating: bool,
     tracker: Option<crate::dynamics::Tracker>,
     pins: usize,
     pending_delete: bool,
@@ -500,6 +506,7 @@ impl Stage {
                 parents: entry.parents.clone(),         // remapped below
                 updaters: entry.updaters.clone(),       // by reference
                 updating_suspended: entry.updating_suspended,
+                is_animating: entry.is_animating,
                 tracker: entry.tracker,
                 pins: 0,
                 pending_delete: false,
@@ -706,6 +713,65 @@ impl Stage {
         self.get(mob).is_some_and(|e| e.updating_suspended)
     }
 
+    /// Reference `set_animating_status` (§9.1): mark the family under `mob`
+    /// (all of it when `recurse`, else `mob` alone) **and every transitive
+    /// ancestor** — the Reference iterates `(*get_family(recurse),
+    /// *get_ancestors())`, and `get_ancestors` always walks the full parent
+    /// closure regardless of `recurse`.
+    pub fn set_animating_status(&mut self, mob: Mob, is_animating: bool, recurse: bool) {
+        let mut targets = if recurse {
+            self.family(mob)
+        } else if self.contains(mob) {
+            vec![mob]
+        } else {
+            Vec::new()
+        };
+        // Ancestor closure: parents, grandparents, … (dedup; order is
+        // irrelevant for a flag write).
+        let mut pending = self
+            .get(mob)
+            .map(|e| e.parents().to_vec())
+            .unwrap_or_default();
+        while let Some(parent) = pending.pop() {
+            if targets.contains(&parent) {
+                continue;
+            }
+            targets.push(parent);
+            pending.extend(
+                self.get(parent)
+                    .map(|e| e.parents().to_vec())
+                    .unwrap_or_default(),
+            );
+        }
+        for target in targets {
+            if let Some(entry) = self.get_mut(target) {
+                entry.is_animating = is_animating;
+            }
+        }
+    }
+
+    /// Whether `mob` itself is currently marked animating.
+    #[must_use]
+    pub fn is_animating(&self, mob: Mob) -> bool {
+        self.get(mob).is_some_and(|e| e.is_animating)
+    }
+
+    /// Reference `is_changing`: animating, or carrying updaters of its own
+    /// (self-only, not the family) — the render-cache invalidation probe.
+    #[must_use]
+    pub fn is_changing(&self, mob: Mob) -> bool {
+        self.get(mob)
+            .is_some_and(|e| e.is_animating || !e.updaters.is_empty())
+    }
+
+    /// Reference `Mobject.update(dt)`: one mobject's family update pass
+    /// (children first, insertion order, suspension-pruned) — the per-target
+    /// slot §9.1's `Animation::update_mobjects` drives for starting/target
+    /// copies, while [`Stage::update`] remains the whole-scene pass.
+    pub fn update_mobject(&mut self, mob: Mob, dt: f64) {
+        self.update_mob(mob, dt);
+    }
+
     /// Suspend updating on `mob` (and, with `recurse`, its children,
     /// transitively) — Reference `suspend_updating`. A suspended node
     /// prunes its whole subtree in [`Stage::update`], which is exactly how
@@ -833,6 +899,7 @@ impl Stage {
                             parents: entry.parents.clone(),
                             updaters: entry.updaters.clone(),
                             updating_suspended: entry.updating_suspended,
+                            is_animating: entry.is_animating,
                             tracker: entry.tracker,
                             pins: entry.pins,
                             pending_delete: entry.pending_delete,
@@ -861,6 +928,7 @@ impl Stage {
                     parents: e.parents.clone(),
                     updaters: e.updaters.clone(),
                     updating_suspended: e.updating_suspended,
+                    is_animating: e.is_animating,
                     tracker: e.tracker,
                     pins: e.pins,
                     pending_delete: e.pending_delete,
