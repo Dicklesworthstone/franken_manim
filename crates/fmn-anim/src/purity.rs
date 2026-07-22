@@ -103,6 +103,19 @@ pub struct SegmentReport {
     pub run_time: f64,
 }
 
+impl std::fmt::Debug for SegmentReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentReport")
+            .field("kind", &self.kind)
+            .field("purity", &self.purity)
+            .field("has_begin_state", &self.begin_state.is_some())
+            .field("base_frame", &self.base_frame)
+            .field("n_frames", &self.n_frames)
+            .field("run_time", &self.run_time)
+            .finish()
+    }
+}
+
 /// Push an effect at most once (presence, not multiplicity, is recorded).
 fn note(effects: &mut Vec<ImpureEffect>, effect: ImpureEffect) {
     if !effects.contains(&effect) {
@@ -180,7 +193,11 @@ pub fn reconstruct_pure_frame(
     rng: &RngRoot,
     sample: &FrameSample,
 ) -> Result<FramePacket, AnimError> {
-    let Some(begin_state) = report.begin_state.as_ref().filter(|_| report.purity.is_pure()) else {
+    let Some(begin_state) = report
+        .begin_state
+        .as_ref()
+        .filter(|_| report.purity.is_pure())
+    else {
         return Err(AnimError::SegmentNotPure);
     };
     stage.restore(begin_state);
