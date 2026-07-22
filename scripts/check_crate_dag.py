@@ -28,7 +28,7 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-cache": {"fmn-core", "fmn-hash", "fmn-platform"},
     "fmn-geom": {"fmn-core", "fmn-dmath"},
     "fmn-mobject": {"fmn-core", "fmn-geom", "fmn-hash"},
-    "fmn-anim": {"fmn-core", "fmn-mobject"},
+    "fmn-anim": {"fmn-core", "fmn-dmath", "fmn-mobject"},
     "fmn-render": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-frame", "fmn-hash", "fmn-cache"},
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},

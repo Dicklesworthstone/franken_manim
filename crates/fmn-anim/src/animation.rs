@@ -52,7 +52,7 @@
 
 use fmn_core::rate;
 use fmn_mobject::animate::{AnimateArgs, AnimateError, IntoAnimate};
-use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Stage};
+use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Stage, StageError};
 
 /// The Reference's `DEFAULT_ANIMATION_RUN_TIME`.
 pub const DEFAULT_ANIMATION_RUN_TIME: f64 = 1.0;
@@ -250,6 +250,14 @@ pub enum AnimError {
     /// only pure segments carry a begin-state snapshot to reconstruct from
     /// (§9.5).
     SegmentNotPure,
+    /// `MoveToTarget` on a mobject that never ran `generate_target` (the
+    /// Reference's "MoveToTarget called on mobject without target").
+    MissingTarget,
+    /// `Restore` on a mobject that never ran `save_state`.
+    MissingSavedState,
+    /// The Stage refused an alignment or copy operation (malformed point
+    /// run, mixed schemas).
+    Stage(StageError),
 }
 
 impl std::fmt::Display for AnimError {
@@ -275,6 +283,14 @@ impl std::fmt::Display for AnimError {
                 f,
                 "frame reconstruction requires a pure, unskipped segment's begin state"
             ),
+            Self::MissingTarget => write!(
+                f,
+                "MoveToTarget called on mobject without a generated target"
+            ),
+            Self::MissingSavedState => {
+                write!(f, "Restore called on mobject without a saved state")
+            }
+            Self::Stage(e) => write!(f, "stage refused the operation: {e}"),
         }
     }
 }
@@ -286,6 +302,12 @@ impl std::error::Error for AnimError {
             Self::Clock(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<StageError> for AnimError {
+    fn from(e: StageError) -> Self {
+        Self::Stage(e)
     }
 }
 
@@ -520,7 +542,19 @@ pub trait Animation {
         //    alpha-zero frame is ever emitted; this is where alpha zero
         //    happens instead).
         self.interpolate(stage, 0.0);
+        // 7. Post-begin subclass hook — the Reference's Transform locks
+        //    matching data *after* `super().begin()` (transform.py:54);
+        //    this slot keeps that order with the canonical sequence
+        //    written once.
+        self.after_begin(stage);
         Ok(())
+    }
+
+    /// Subclass slot run at the end of [`Animation::begin`], after the
+    /// zero interpolation (the Reference's post-`super().begin()` code —
+    /// Transform's `lock_matching_data` call site). Default: nothing.
+    fn after_begin(&mut self, stage: &mut Stage) {
+        let _ = stage;
     }
 
     /// The Reference's `finish`: land on `final_alpha_value`, clear the
@@ -537,6 +571,16 @@ pub trait Animation {
             // call_updater pass (which runs update(0) exactly once — C-5).
             stage.resume_updating(mobject, true, true);
         }
+        // Subclass slot — the Reference's Transform unlocks data in its
+        // `finish` override (transform.py:74).
+        self.teardown(stage);
+    }
+
+    /// Subclass slot run at the end of [`Animation::finish`] (the
+    /// Reference's `finish` overrides — Transform's `unlock_data` call
+    /// site). Default: nothing.
+    fn teardown(&mut self, stage: &mut Stage) {
+        let _ = stage;
     }
 
     /// The mean of an animation: the Reference's `interpolate` (alias of

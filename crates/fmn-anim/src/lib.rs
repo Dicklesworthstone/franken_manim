@@ -24,6 +24,7 @@ pub mod animation;
 pub mod clock;
 pub mod frame;
 pub mod purity;
+pub mod transform;
 
 pub use animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, DEFAULT_ANIMATION_LAG_RATIO,
@@ -35,4 +36,9 @@ pub use frame::{FramePacket, play_segment, wait_segment};
 pub use purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
     reconstruct_pure_frame,
+};
+pub use transform::{
+    PathFunc, STRAIGHT_PATH_THRESHOLD, Transform, apply_function, cyclic_replace,
+    interpolate_fields, move_to_target, replacement_transform, restore, scale_in_place,
+    shrink_to_center, swap, transform_from_copy,
 };
