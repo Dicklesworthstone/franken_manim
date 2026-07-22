@@ -629,6 +629,23 @@ impl RecordBuffer {
             locked: self.locked.clone(),
         }
     }
+
+    /// Reference `set_data`, the `become` data plane (§8.3): replace this
+    /// buffer's records with an independent copy of `other`'s. Schemas must
+    /// match — the Reference asserts dtype equality — else this returns
+    /// `false` and leaves the buffer untouched. Flows through the
+    /// copy-on-resize path: a fresh generation with every revision bumped
+    /// past the old ones, so mirrors and bounding-box signatures resync and
+    /// outstanding views detach exactly as under resize (V6).
+    pub fn assign_from(&mut self, other: &RecordBuffer) -> bool {
+        if !(Arc::ptr_eq(&self.schema, &other.schema) || *self.schema == *other.schema) {
+            return false;
+        }
+        let cells = other.storage.copy_cells().into_vec();
+        self.swap_in(cells);
+        self.len = other.len;
+        true
+    }
 }
 
 /// A live view over one storage generation — the engine-side model of the

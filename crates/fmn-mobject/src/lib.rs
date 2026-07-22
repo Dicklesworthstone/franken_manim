@@ -19,7 +19,11 @@
 //! group-addition correction ([`dynamics`]), and the `.animate` builder
 //! with the Reference's real chaining rules ([`animate`]).
 //!
-//! Still to land here: copy semantics beyond the arena core (fm-ncq).
+//! Copy semantics (§8.3, fm-ncq) are complete: the [`stage::CopyMap`]
+//! remap hook for the binding tier, the `generate_target` / `save_state` /
+//! `restore_mobject` machinery with the Reference's exact link topology,
+//! and `become` (over already-aligned families; `align_family` itself
+//! lands with the Transform machinery, fm-cye).
 #![forbid(unsafe_code)]
 
 pub mod animate;
@@ -37,7 +41,7 @@ pub use dynamics::{Tracker, TrackerKind};
 pub use mobject::Mobject;
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
-pub use stage::{Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
+pub use stage::{CopyMap, Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
 pub use uniforms::{JointType, Uniforms};
 
 /// Errors from the mobject engine's ownership layer.
@@ -51,6 +55,16 @@ pub enum StageError {
     /// Attaching this edge would make the family graph cyclic (the
     /// Reference would recurse forever on such a graph; we refuse it).
     CycleDetected,
+    /// `restore` without a prior `save_state` — the Reference raises
+    /// "Trying to restore without having saved".
+    NoSavedState,
+    /// `become` between families of different shapes. The Reference aligns
+    /// families first (`align_family`); alignment lands with the Transform
+    /// machinery (fm-cye), and until then the shapes must already agree.
+    FamilyShapeMismatch,
+    /// `become` between records of different schemas — the Reference's
+    /// `set_data` asserts dtype equality; this is the typed refusal.
+    SchemaMismatch,
 }
 
 impl std::fmt::Display for StageError {
@@ -61,6 +75,19 @@ impl std::fmt::Display for StageError {
             }
             Self::CycleDetected => {
                 write!(f, "attachment would create a cycle in the family graph")
+            }
+            Self::NoSavedState => {
+                write!(f, "trying to restore without having saved")
+            }
+            Self::FamilyShapeMismatch => {
+                write!(
+                    f,
+                    "become between families of different shapes \
+                     (family alignment lands with fm-cye)"
+                )
+            }
+            Self::SchemaMismatch => {
+                write!(f, "become between records of different schemas")
             }
         }
     }

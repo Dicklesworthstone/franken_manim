@@ -109,6 +109,14 @@ pub struct Entry {
     /// ValueTracker state (§8.6), if this mobject is a tracker; plain
     /// mobjects carry `None`. Copied by value with the entry.
     pub(crate) tracker: Option<crate::dynamics::Tracker>,
+    /// The `generate_target` copy (§8.3). Cleared on every copy — the
+    /// Reference's `stash_mobject_pointers` list is exactly
+    /// `["parents", "target", "saved_state"]` — and re-linked only by the
+    /// target machinery.
+    target: Option<Mob>,
+    /// The `save_state` copy (§8.3) that `restore_mobject` becomes.
+    /// Cleared on every copy, like `target`.
+    saved_state: Option<Mob>,
     pins: usize,
     pending_delete: bool,
     /// Per-object typed uniform state (§8.4): scene code reads and writes this
@@ -133,6 +141,8 @@ impl Entry {
             updating_suspended: false,
             is_animating: false,
             tracker: None,
+            target: None,
+            saved_state: None,
             pins: 0,
             pending_delete: false,
             uniforms: Uniforms::default(),
@@ -197,9 +207,56 @@ struct SnapshotEntry {
     updating_suspended: bool,
     is_animating: bool,
     tracker: Option<crate::dynamics::Tracker>,
+    target: Option<Mob>,
+    saved_state: Option<Mob>,
     pins: usize,
     pending_delete: bool,
     uniforms: Uniforms,
+}
+
+/// The stable old-handle → new-handle map a family copy produces — the
+/// engine-side hook fmn-python's `__dict__` remapping walks (§8.3). Pairs
+/// are in family (depth-first) order and the copy preserves that order, so
+/// `family(copy)[i]` is always the copy of `family(original)[i]` — exactly
+/// the `family.index(value)` remap rule the Reference's `copy()` applies to
+/// attribute aliases.
+#[derive(Debug, Clone)]
+pub struct CopyMap {
+    pairs: Vec<(Mob, Mob)>,
+}
+
+impl CopyMap {
+    /// The copy of the family root (the handle `copy_family` returns).
+    #[must_use]
+    pub fn root(&self) -> Mob {
+        self.pairs[0].1
+    }
+
+    /// All `(original, copy)` pairs, in family (depth-first) order.
+    #[must_use]
+    pub fn pairs(&self) -> &[(Mob, Mob)] {
+        &self.pairs
+    }
+
+    /// The copy of `original`, if `original` was in the copied family.
+    #[must_use]
+    pub fn get(&self, original: Mob) -> Option<Mob> {
+        self.pairs
+            .iter()
+            .find(|(old, _)| *old == original)
+            .map(|(_, new)| *new)
+    }
+
+    /// Number of copied family members.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
 }
 
 /// The arena.
@@ -487,17 +544,54 @@ impl Stage {
     }
 
     // --------------------------------------------------------------- copy
+    //
+    // manim `copy()` (§8.3) — the category rules, to the letter
+    // (`mobject.py::copy` + the `stash_mobject_pointers` list, which is
+    // exactly `["parents", "target", "saved_state"]`):
+    //
+    // | Reference attribute          | Rule              | Here                          |
+    // |------------------------------|-------------------|-------------------------------|
+    // | `data` (ndarray records)     | deep copy         | `RecordBuffer::deep_clone`    |
+    // | `uniforms`                   | deep copy         | `Uniforms` copied by value    |
+    // | `submobjects` (family)       | recursive copy,   | whole family copied; edges    |
+    // |                              | edges remapped    | remapped through the map      |
+    // | family-internal attr aliases | remap by family   | [`CopyMap`] preserves family  |
+    // | (`self.arrow is family[i]`)  | index             | order; the binding tier walks |
+    // |                              |                   | it for `__dict__` remapping   |
+    // | updater callables            | by reference      | `Rc` clone, shared `UpdaterId`|
+    // | `parents` (external edges)   | cleared           | dropped — a detached family   |
+    // | scene membership             | cleared           | the copy is never rooted      |
+    // | `target` / `saved_state`     | cleared           | `None` on every copied member |
+    // | render caches / live views   | reset             | fresh storage, zero views     |
+    //
+    // The Reference's `deep` flag (`deepcopy`) differs only for arbitrary
+    // Python `__dict__` attributes — a binding-tier (fmn-python)
+    // distinction; the engine has exactly one copy operation (Python
+    // `deepcopy` of a function object returns the same object, so even
+    // `deepcopy` keeps updater callables by reference). Diamond-shared
+    // members follow the ratified family model (G0-1/D-11): each family
+    // member is copied exactly once and the sharing is preserved, where the
+    // Reference's per-child recursion would silently duplicate them.
 
     /// manim `copy()` (§8.3): deep-copy the family subtree; family-internal
     /// references remap; family-external edges drop (the copy is a detached
     /// family); updater callables shared by reference; record data
-    /// independent.
+    /// independent. See [`Stage::copy_family_mapped`] for the remap hook.
     pub fn copy_family(&mut self, mob: Mob) -> Result<Mob, StageError> {
+        Ok(self.copy_family_mapped(mob)?.root())
+    }
+
+    /// [`Stage::copy_family`], returning the stable old-handle → new-handle
+    /// [`CopyMap`] — the engine-side hook the binding tier (fmn-python,
+    /// fm-aqv) walks to remap `__dict__` attribute aliases exactly as the
+    /// Reference's `copy()` does with `family.index(value)`.
+    pub fn copy_family_mapped(&mut self, mob: Mob) -> Result<CopyMap, StageError> {
         if !self.contains(mob) {
             return Err(StageError::StaleHandle);
         }
         let family = self.family(mob);
-        let mut map: HashMap<Mob, Mob> = HashMap::new();
+        let mut pairs: Vec<(Mob, Mob)> = Vec::with_capacity(family.len());
+        let mut map: HashMap<Mob, Mob> = HashMap::with_capacity(family.len());
         for &old in &family {
             let entry = self.get(old).expect("family members resolve");
             let new_entry = Entry {
@@ -508,6 +602,8 @@ impl Stage {
                 updating_suspended: entry.updating_suspended,
                 is_animating: entry.is_animating,
                 tracker: entry.tracker,
+                target: None,      // stash_mobject_pointers: cleared
+                saved_state: None, // stash_mobject_pointers: cleared
                 pins: 0,
                 pending_delete: false,
                 uniforms: entry.uniforms, // copy semantics: independent state
@@ -515,10 +611,11 @@ impl Stage {
                 bbox: RefCell::new(BboxCache::default()),
             };
             let new = self.alloc(new_entry);
+            pairs.push((old, new));
             map.insert(old, new);
         }
-        for new in map.values() {
-            let entry = self.get_mut(*new).expect("just allocated");
+        for &(_, new) in &pairs {
+            let entry = self.get_mut(new).expect("just allocated");
             for edges in [&mut entry.submobjects, &mut entry.parents] {
                 let mut seen: Vec<Mob> = Vec::new();
                 edges.retain_mut(|m| match map.get(m) {
@@ -535,7 +632,142 @@ impl Stage {
                 });
             }
         }
-        Ok(map[&mob])
+        Ok(CopyMap { pairs })
+    }
+
+    // ------------------------------------------- target / saved state (§8.3)
+
+    /// Reference `generate_target`: `self.target = self.copy()`, with the
+    /// fresh target's `saved_state` pointing at the **same** saved state as
+    /// the original (`target.saved_state = self.saved_state` — a shared
+    /// link, not a copy). A previous target is unlinked but stays alive
+    /// (explicit [`Stage::delete`] is the only destructor — exactly the
+    /// Reference, where a replaced target survives as long as user code
+    /// holds it).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`].
+    pub fn generate_target(&mut self, mob: Mob) -> Result<Mob, StageError> {
+        let target = self.copy_family(mob)?;
+        let saved = self.try_get(mob)?.saved_state;
+        self.get_mut(target).expect("just copied").saved_state = saved;
+        self.get_mut(mob).expect("copy checked liveness").target = Some(target);
+        Ok(target)
+    }
+
+    /// The current `generate_target` copy, if one was generated. The link
+    /// is a plain handle: deleting the target leaves it stale, a defined
+    /// state.
+    #[must_use]
+    pub fn target(&self, mob: Mob) -> Option<Mob> {
+        self.get(mob).and_then(|e| e.target)
+    }
+
+    /// Reference `save_state`: `self.saved_state = self.copy()`, with the
+    /// fresh copy's `target` pointing at the **same** target as the
+    /// original (`saved_state.target = self.target`). Returns the
+    /// saved-state handle (the Reference returns `self`; the handle is the
+    /// useful value under the arena).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`].
+    pub fn save_state(&mut self, mob: Mob) -> Result<Mob, StageError> {
+        let saved = self.copy_family(mob)?;
+        let target = self.try_get(mob)?.target;
+        self.get_mut(saved).expect("just copied").target = target;
+        self.get_mut(mob)
+            .expect("copy checked liveness")
+            .saved_state = Some(saved);
+        Ok(saved)
+    }
+
+    /// The current `save_state` copy, if one was saved.
+    #[must_use]
+    pub fn saved_state(&self, mob: Mob) -> Option<Mob> {
+        self.get(mob).and_then(|e| e.saved_state)
+    }
+
+    /// Reference `Mobject.restore` (named for the per-mobject slot — the
+    /// whole-stage [`Stage::restore`] is the snapshot path): `become` the
+    /// saved state. The saved link survives, so repeated restores work,
+    /// exactly as in the Reference.
+    ///
+    /// # Errors
+    /// [`StageError::NoSavedState`] without a prior [`Stage::save_state`]
+    /// (the Reference's "Trying to restore without having saved");
+    /// [`StageError::StaleHandle`] if the saved copy was deleted; any
+    /// [`Stage::become`] error.
+    pub fn restore_mobject(&mut self, mob: Mob) -> Result<(), StageError> {
+        let saved = self
+            .try_get(mob)?
+            .saved_state
+            .ok_or(StageError::NoSavedState)?;
+        self.become_mobject(mob, saved, false)
+    }
+
+    /// Reference `become` (§8.3) — named `become_mobject` because `become`
+    /// is a Rust 2024 reserved keyword, following the
+    /// [`Stage::update_mobject`] convention: edit `mob`'s data to be
+    /// identical to `other`'s. The Reference aligns families first
+    /// (`align_family`);
+    /// alignment lands with the Transform machinery (fm-cye), so until then
+    /// the two families must already share a shape — equal member count,
+    /// member-for-member equal child counts. Per zipped member: record data
+    /// (schema-checked — the Reference's `set_data` asserts dtype
+    /// equality), uniforms, and tracker state copy across; outstanding live
+    /// views on `mob` detach as under resize (V6). Updater lists are
+    /// untouched unless `match_updaters`, which then shares the root's
+    /// list by reference (the Reference's `match_updaters` call — root
+    /// only, not the family). Animating/suspension flags, scene membership,
+    /// and the target/saved-state links stay `mob`'s own.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`], [`StageError::FamilyShapeMismatch`],
+    /// [`StageError::SchemaMismatch`].
+    pub fn become_mobject(
+        &mut self,
+        mob: Mob,
+        other: Mob,
+        match_updaters: bool,
+    ) -> Result<(), StageError> {
+        let family1 = self.family(mob);
+        let family2 = self.family(other);
+        if family1.is_empty() || family2.is_empty() {
+            return Err(StageError::StaleHandle);
+        }
+        if family1.len() != family2.len() {
+            return Err(StageError::FamilyShapeMismatch);
+        }
+        // Precheck the whole zip so a failure never leaves a half-become.
+        for (&a, &b) in family1.iter().zip(family2.iter()) {
+            let e1 = self.try_get(a)?;
+            let e2 = self.try_get(b)?;
+            if e1.submobjects.len() != e2.submobjects.len() {
+                return Err(StageError::FamilyShapeMismatch);
+            }
+            if e1.buffer.schema() != e2.buffer.schema() {
+                return Err(StageError::SchemaMismatch);
+            }
+        }
+        for (&a, &b) in family1.iter().zip(family2.iter()) {
+            if a == b {
+                continue;
+            }
+            let (src, uniforms, tracker) = {
+                let e2 = self.get(b).expect("prechecked");
+                (e2.buffer.snapshot_clone(), e2.uniforms, e2.tracker)
+            };
+            let e1 = self.get_mut(a).expect("prechecked");
+            if !e1.buffer.assign_from(&src) {
+                return Err(StageError::SchemaMismatch); // unreachable: prechecked
+            }
+            e1.uniforms = uniforms;
+            e1.tracker = tracker;
+        }
+        if match_updaters {
+            self.match_updaters(mob, other)?;
+        }
+        Ok(())
     }
 
     /// Cross-stage transfer under the two-scene policy: content moves by
@@ -924,6 +1156,8 @@ impl Stage {
                             updating_suspended: entry.updating_suspended,
                             is_animating: entry.is_animating,
                             tracker: entry.tracker,
+                            target: entry.target,
+                            saved_state: entry.saved_state,
                             pins: entry.pins,
                             pending_delete: entry.pending_delete,
                             uniforms: entry.uniforms,
@@ -953,6 +1187,8 @@ impl Stage {
                     updating_suspended: e.updating_suspended,
                     is_animating: e.is_animating,
                     tracker: e.tracker,
+                    target: e.target,
+                    saved_state: e.saved_state,
                     pins: e.pins,
                     pending_delete: e.pending_delete,
                     uniforms: e.uniforms,
