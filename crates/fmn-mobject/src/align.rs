@@ -177,8 +177,10 @@ impl Stage {
     }
 
     /// Reference `invisible_copy`'s `set_opacity(0)`: zero the alpha lane
-    /// of every `*rgba` field across the whole family.
-    fn set_family_opacity_zero(&mut self, mob: Mob) {
+    /// of every `*rgba` field across the whole family. Public because the
+    /// fade mechanism family (fading.py's `set_opacity(0)` ghosts, §9.4)
+    /// shares the exact rule.
+    pub fn set_family_opacity_zero(&mut self, mob: Mob) {
         for member in self.family(mob) {
             let Some(entry) = self.get_mut(member) else {
                 continue;
@@ -256,6 +258,221 @@ impl Stage {
             }
             _ => Err(StageError::SchemaMismatch),
         }
+    }
+
+    /// Reference `pointwise_become_partial` (vectorized_mobject.py:1050):
+    /// make `mob`'s points the restriction of `source`'s to the proportion
+    /// window `[a, b]` (by curve index), copying `source`'s joint angles
+    /// and zeroing them over the collapsed flanks. The partial-reveal
+    /// mechanism family (ShowCreation, Write, the passing flashes — §9.4)
+    /// drives every frame through this one operation.
+    ///
+    /// An empty `source` is a no-op (nothing to restrict); a childless
+    /// point run with no curves keeps `mob`'s points untouched, exactly as
+    /// the Reference (its zeroed array is written to a discarded copy).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`]; [`StageError::SchemaMismatch`] when
+    /// either side of a non-empty pair is not vmobject-shaped (the
+    /// Reference asserts `isinstance(vmobject, VMobject)`).
+    pub fn pointwise_become_partial(
+        &mut self,
+        mob: Mob,
+        source: Mob,
+        a: f64,
+        b: f64,
+    ) -> Result<(), StageError> {
+        let src_len = self.try_get(source)?.buffer.len();
+        if src_len == 0 {
+            // Nothing to restrict; the Reference would copy an empty
+            // joint-angle column and leave the points loop degenerate.
+            return Ok(());
+        }
+        if !is_vmobject_schema(self, mob)? || !is_vmobject_schema(self, source)? {
+            return Err(StageError::SchemaMismatch);
+        }
+        let src_points = self
+            .try_get(source)?
+            .buffer
+            .read_column("point")
+            .ok_or(StageError::SchemaMismatch)?;
+        let src_angles = self
+            .try_get(source)?
+            .buffer
+            .read_column("joint_angle")
+            .ok_or(StageError::SchemaMismatch)?;
+        {
+            let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            if entry.buffer.len() != src_len {
+                entry.buffer.resize_preserving_order(src_len);
+            }
+            // `self.data["joint_angle"] = vmobject.data["joint_angle"]`
+            // happens before the full-range short-circuit, so it lands in
+            // both branches.
+            entry.buffer.write_range("joint_angle", 0, &src_angles);
+        }
+        if a <= 0.0 && b >= 1.0 {
+            let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            entry.buffer.write_range("point", 0, &src_points);
+            return Ok(());
+        }
+        let pts: Vec<Vec3> = src_points
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])
+            .collect();
+        let Some((new_points, i1, i4)) = QuadPath::partial_points(&pts, a, b) else {
+            return Ok(()); // no curves — the Reference's discarded-copy no-op
+        };
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let flat: Vec<f32> = new_points
+            .iter()
+            .flat_map(|p| p.iter().map(|v| *v as f32))
+            .collect();
+        entry.buffer.write_range("point", 0, &flat);
+        // joint_angle[:i1] = 0; joint_angle[i4:] = 0.
+        let mut angles = src_angles;
+        for angle in &mut angles[..i1.min(src_len)] {
+            *angle = 0.0;
+        }
+        for angle in &mut angles[i4.min(src_len)..] {
+            *angle = 0.0;
+        }
+        entry.buffer.write_range("joint_angle", 0, &angles);
+        Ok(())
+    }
+
+    /// `point_from_proportion` under the original name, constant-speed by
+    /// true arc length (BN-03): the point `alpha` of the way along `mob`'s
+    /// path measured by arc length, via the W2 inverse-arclength layer.
+    /// The Reference's `quick_point_from_proportion` (equal-curve-length
+    /// approximation) is deliberately not the rule `MoveAlongPath` rides —
+    /// that is the Behavior-Noted improvement.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`]; [`StageError::SchemaMismatch`] on a
+    /// pointless mobject; [`StageError::Geometry`] on a malformed run.
+    pub fn point_from_proportion(&self, mob: Mob, alpha: f64) -> Result<Vec3, StageError> {
+        let points = read_points(self, mob)?;
+        if points.is_empty() {
+            return Err(StageError::SchemaMismatch);
+        }
+        let path = QuadPath::from_points(points).map_err(StageError::Geometry)?;
+        path.point_from_proportion(alpha)
+            .ok_or(StageError::SchemaMismatch)
+    }
+
+    /// Reference `make_approximately_smooth` over the family: every
+    /// vmobject member's handles are recomputed for smooth joins, point
+    /// counts kept. The `SmoothedVectorizedHomotopy` hook
+    /// (`apply_points_function(..., make_smooth=True)`).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`], [`StageError::Geometry`].
+    pub fn make_family_smooth(&mut self, mob: Mob) -> Result<(), StageError> {
+        for member in self.family(mob) {
+            if !is_vmobject_schema(self, member)? {
+                continue;
+            }
+            let points = read_points(self, member)?;
+            if points.len() < 3 {
+                continue;
+            }
+            let mut path = QuadPath::from_points(points).map_err(StageError::Geometry)?;
+            path.make_smooth(true).map_err(StageError::Geometry)?;
+            let smoothed = path.points().to_vec();
+            write_points(self, member, &smoothed)?;
+        }
+        Ok(())
+    }
+
+    /// Reference `reverse_points` (vectorized_mobject.py:1248 over
+    /// mobject.py:276): per family member with points, re-mark the
+    /// subpath-break handles (`point[e+1] = point[e+2]` at each inner
+    /// end), invert the odd `base_normal` rows, then reverse **every**
+    /// record row wholesale — colors, widths, and angles travel with
+    /// their points, exactly as `data[::-1]` does.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`], [`StageError::Geometry`].
+    pub fn reverse_family_points(&mut self, mob: Mob) -> Result<(), StageError> {
+        for member in self.family(mob) {
+            let len = self.try_get(member)?.buffer.len();
+            if len == 0 {
+                continue;
+            }
+            if is_vmobject_schema(self, member)? {
+                let mut points = read_points(self, member)?;
+                let path = QuadPath::from_points(points.clone()).map_err(StageError::Geometry)?;
+                let end_indices = path.subpath_end_indices();
+                for &e in &end_indices[..end_indices.len().saturating_sub(1)] {
+                    if e + 2 < points.len() {
+                        points[e + 1] = points[e + 2];
+                    }
+                }
+                let entry = self.get_mut(member).ok_or(StageError::StaleHandle)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let flat: Vec<f32> = points
+                    .iter()
+                    .flat_map(|p| p.iter().map(|v| *v as f32))
+                    .collect();
+                entry.buffer.write_range("point", 0, &flat);
+                if let Some(mut normals) = entry.buffer.read_column("base_normal") {
+                    for row in normals.as_chunks_mut::<3>().0.iter_mut().skip(1).step_by(2) {
+                        for lane in row {
+                            *lane = -*lane;
+                        }
+                    }
+                    entry.buffer.write_range("base_normal", 0, &normals);
+                }
+            }
+            // data[::-1]: reverse rows of every field.
+            let entry = self.get_mut(member).ok_or(StageError::StaleHandle)?;
+            let fields: Vec<(String, usize)> = entry
+                .buffer
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| (f.name.clone(), f.width))
+                .collect();
+            for (field, width) in fields {
+                if let Some(column) = entry.buffer.read_column(&field) {
+                    let reversed: Vec<f32> = column
+                        .chunks_exact(width)
+                        .rev()
+                        .flatten()
+                        .copied()
+                        .collect();
+                    entry.buffer.write_range(&field, 0, &reversed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reference `refresh_joint_angles` (vectorized_mobject.py:1159) made
+    /// eager: recompute every vmobject family member's joint-angle column
+    /// from its current points (the Reference marks lazily; our data plane
+    /// keeps the column current — same observable state). Non-vmobject and
+    /// empty members are skipped.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`], [`StageError::Geometry`] on a
+    /// malformed point run.
+    pub fn refresh_family_joint_angles(&mut self, mob: Mob) -> Result<(), StageError> {
+        for member in self.family(mob) {
+            if !is_vmobject_schema(self, member)? {
+                continue;
+            }
+            let points = read_points(self, member)?;
+            if points.is_empty() {
+                continue;
+            }
+            write_points(self, member, &points)?;
+        }
+        Ok(())
     }
 
     /// vectorized_mobject.py:964, step for step.

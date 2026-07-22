@@ -11,7 +11,7 @@ use fmn_core::constants::{DOWN, OUT, RIGHT, UP};
 use fmn_core::types::Vec3;
 
 /// Row-major 3×3 matrix: `m[row][col]`.
-pub(crate) type Mat3 = [[f64; 3]; 3];
+pub type Mat3 = [[f64; 3]; 3];
 
 pub(crate) const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
@@ -92,8 +92,10 @@ pub(crate) fn angle_between_vectors(v1: Vec3, v2: Vec3) -> f64 {
 }
 
 /// `space_ops.rotation_matrix`: rotation about `axis` by `angle`
-/// (Rodrigues form, equivalent to scipy `Rotation.from_rotvec`).
-pub(crate) fn rotation_matrix(angle: f64, axis: Vec3) -> Mat3 {
+/// (Rodrigues form, equivalent to scipy `Rotation.from_rotvec`). Public
+/// because the mobject plane's `rotate` (and through it the rotation
+/// animations, §9.4) consumes it; the full space_ops surface is fm-ngx.
+pub fn rotation_matrix(angle: f64, axis: Vec3) -> Mat3 {
     let n = norm(axis);
     if n == 0.0 {
         return IDENTITY;

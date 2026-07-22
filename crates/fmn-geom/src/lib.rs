@@ -24,6 +24,7 @@ mod vec;
 
 pub use arclength::{ArcLengthTable, CachedArcLength};
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
+pub use vec::{Mat3, rotation_matrix};
 
 /// Errors from the geometry kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

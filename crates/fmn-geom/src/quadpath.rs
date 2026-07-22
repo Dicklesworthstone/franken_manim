@@ -682,6 +682,95 @@ impl QuadPath {
         new_points
     }
 
+    /// `integer_interpolate` (utils/bezier.py): the integer sample index
+    /// along `[start, end)` at `alpha`, plus the fractional residue toward
+    /// the next index. `alpha >= 1` pins to `(end - 1, 1.0)`; `alpha <= 0`
+    /// to `(start, 0.0)` — the Reference's exact clamping.
+    #[must_use]
+    pub fn integer_interpolate(start: i64, end: i64, alpha: f64) -> (i64, f64) {
+        if alpha >= 1.0 {
+            return (end - 1, 1.0);
+        }
+        if alpha <= 0.0 {
+            return (start, 0.0);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let value = (start as f64 + alpha * (end - start) as f64).floor() as i64;
+        let residue = ((end - start) as f64 * alpha).rem_euclid(1.0);
+        (value, residue)
+    }
+
+    /// The pure-geometry core of `pointwise_become_partial`
+    /// (vectorized_mobject.py:1050): restrict a shared-anchor run to the
+    /// proportion window `[a, b]` **by curve index** (uniform over curves,
+    /// not arc length — that is the Reference's rule; true-proportion
+    /// reveals compose this with the arclength layer's alpha remap).
+    ///
+    /// The partial run keeps the original point count: points before the
+    /// window collapse onto the window's first point, points after onto its
+    /// last, and the boundary curves are [`bezier::partial_quadratic`]
+    /// restrictions. Returns `(new_points, i1, i4)` where `[..i1]` and
+    /// `[i4..]` are the collapsed flanks (the Reference zeroes
+    /// `joint_angle` there); `None` when the run has no curves (the
+    /// Reference mutates a discarded copy — a deliberate no-op).
+    #[must_use]
+    pub fn partial_points(points: &[Vec3], a: f64, b: f64) -> Option<(Vec<Vec3>, usize, usize)> {
+        // get_num_curves() is get_num_points() // 2 — identical to
+        // (len − 1) / 2 on every valid shared-anchor run (odd length);
+        // the latter also stays in-bounds on a malformed even run, where
+        // the Reference would raise IndexError.
+        let num_curves = points.len().saturating_sub(1) / 2;
+        if num_curves == 0 {
+            return None;
+        }
+        let end = i64::try_from(num_curves).ok()?;
+        let (lower_index, lower_residue) = Self::integer_interpolate(0, end, a);
+        let (upper_index, upper_residue) = Self::integer_interpolate(0, end, b);
+        #[allow(clippy::cast_sign_loss)]
+        let (lower_index, upper_index) = (lower_index as usize, upper_index as usize);
+        let i1 = 2 * lower_index;
+        let i2 = 2 * lower_index + 3;
+        let i3 = 2 * upper_index;
+        let i4 = 2 * upper_index + 3;
+
+        let mut new_points = points.to_vec();
+        if lower_index == upper_index {
+            let tup = bezier::partial_quadratic(
+                &[points[i1], points[i1 + 1], points[i1 + 2]],
+                lower_residue,
+                upper_residue,
+            );
+            for p in &mut new_points[..i1] {
+                *p = tup[0];
+            }
+            new_points[i1..i4].copy_from_slice(&tup);
+            for p in &mut new_points[i4..] {
+                *p = tup[2];
+            }
+        } else {
+            let low_tup = bezier::partial_quadratic(
+                &[points[i1], points[i1 + 1], points[i1 + 2]],
+                lower_residue,
+                1.0,
+            );
+            let high_tup = bezier::partial_quadratic(
+                &[points[i3], points[i3 + 1], points[i3 + 2]],
+                0.0,
+                upper_residue,
+            );
+            for p in &mut new_points[..i1] {
+                *p = low_tup[0];
+            }
+            new_points[i1..i2].copy_from_slice(&low_tup);
+            // i2..i3 keeps the middle section exactly.
+            new_points[i3..i4].copy_from_slice(&high_tup);
+            for p in &mut new_points[i4..] {
+                *p = high_tup[2];
+            }
+        }
+        Some((new_points, i1, i4))
+    }
+
     /// `insert_n_curves`.
     pub fn insert_n_curves(&mut self, n: usize) -> &mut Self {
         if self.num_curves() > 0 {

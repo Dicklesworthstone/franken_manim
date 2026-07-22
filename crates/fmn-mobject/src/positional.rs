@@ -341,6 +341,81 @@ impl Stage {
         }
     }
 
+    /// The Reference's `apply_points_function` made public: apply `f` to
+    /// every family point about the resolved pivot (an explicit
+    /// `about_point` wins; else the box point at `about_edge`; both `None`
+    /// transforms in place). `Mobject.apply_function`'s default is
+    /// `about_point = ORIGIN` — pass `Some(ORIGIN)` for that surface.
+    pub fn apply_points_function(
+        &mut self,
+        mob: Mob,
+        f: impl Fn(Vec3) -> Vec3,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> &mut Self {
+        let pivot = self.resolve_pivot(mob, about_point, about_edge);
+        self.transform_points(mob, pivot, f);
+        self
+    }
+
+    /// Reference `rotate` (mobject.py): rotate the family about `axis` by
+    /// `angle`, pivoting on `about_point` (or the box point at
+    /// `about_edge`; both `None` defaults to the box center, the
+    /// Reference's `about_edge = ORIGIN`).
+    pub fn rotate(
+        &mut self,
+        mob: Mob,
+        angle: f64,
+        axis: Vec3,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> &mut Self {
+        let m = fmn_geom::rotation_matrix(angle, axis);
+        let edge = if about_point.is_none() && about_edge.is_none() {
+            Some(ORIGIN)
+        } else {
+            about_edge
+        };
+        let pivot = self.resolve_pivot(mob, about_point, edge);
+        self.transform_points(mob, pivot, move |p| {
+            [
+                m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
+                m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
+                m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
+            ]
+        });
+        self
+    }
+
+    /// Reference `match_points` (mobject.py:311): resize `mob`'s records
+    /// to `source`'s count (order-preserving) and copy every pointlike
+    /// column. Applies member-for-member is the *caller's* concern — this
+    /// is the single-entry rule, exactly the Reference's.
+    pub fn match_points(&mut self, mob: Mob, source: Mob) {
+        let (len, columns): (usize, Vec<(String, Vec<f32>)>) = match self.get(source) {
+            Some(entry) => (
+                entry.buffer.len(),
+                entry
+                    .buffer
+                    .schema()
+                    .pointlike_keys()
+                    .iter()
+                    .filter_map(|k| entry.buffer.read_column(k).map(|c| (k.clone(), c)))
+                    .collect(),
+            ),
+            None => return,
+        };
+        let Some(entry) = self.get_mut(mob) else {
+            return;
+        };
+        if entry.buffer.len() != len {
+            entry.buffer.resize_preserving_order(len);
+        }
+        for (field, column) in columns {
+            entry.buffer.write_range(&field, 0, &column);
+        }
+    }
+
     // ---------------------------------------------------------- positional API
 
     /// Shift every point by `vector`.

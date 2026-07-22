@@ -304,3 +304,143 @@ fn resize_preserving_order_empty_zero_fills() {
             .all(|v| *v == 0.0)
     );
 }
+
+// ------------------------------------------- pointwise_become_partial
+
+fn xs_of(stage: &Stage, mob: Mob) -> Vec<f32> {
+    points_of(stage, mob)
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| c[0])
+        .collect()
+}
+
+/// A 2-curve straight-line vmobject with x = [0, 1, 2, 3, 4].
+fn line5(stage: &mut Stage) -> Mob {
+    vmob(
+        stage,
+        &[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ],
+    )
+}
+
+#[test]
+fn partial_full_range_copies_source() {
+    let mut stage = Stage::new();
+    let src = line5(&mut stage);
+    stage.get_mut(src).unwrap().buffer.write_range(
+        "joint_angle",
+        0,
+        &[10.0, 20.0, 30.0, 40.0, 50.0],
+    );
+    let dst = vmob(&mut stage, &[[9.0, 9.0, 9.0]; 5]);
+    stage.pointwise_become_partial(dst, src, 0.0, 1.0).unwrap();
+    assert_eq!(points_of(&stage, dst), points_of(&stage, src));
+    assert_eq!(
+        stage.get(dst).unwrap().buffer.read_column("joint_angle"),
+        Some(vec![10.0, 20.0, 30.0, 40.0, 50.0]),
+    );
+}
+
+#[test]
+fn partial_single_curve_restriction_matches_reference_formula() {
+    let mut stage = Stage::new();
+    // One straight-line curve: x(t) = 2t.
+    let src = vmob(
+        &mut stage,
+        &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+    );
+    let dst = vmob(&mut stage, &[[0.0; 3]; 3]);
+    stage
+        .pointwise_become_partial(dst, src, 0.25, 0.75)
+        .unwrap();
+    // partial_quadratic([0,1,2], 0.25, 0.75) = [0.5, 1.0, 1.5].
+    assert_eq!(xs_of(&stage, dst), vec![0.5, 1.0, 1.5]);
+}
+
+#[test]
+fn partial_upper_half_collapses_leading_flank() {
+    let mut stage = Stage::new();
+    let src = line5(&mut stage);
+    stage.get_mut(src).unwrap().buffer.write_range(
+        "joint_angle",
+        0,
+        &[10.0, 20.0, 30.0, 40.0, 50.0],
+    );
+    let dst = vmob(&mut stage, &[[0.0; 3]; 5]);
+    stage.pointwise_become_partial(dst, src, 0.5, 1.0).unwrap();
+    // lower == upper == curve 1: i1 = 2, the flank collapses onto the
+    // window start; joint_angle[..2] zeroes, the rest copies.
+    assert_eq!(xs_of(&stage, dst), vec![2.0, 2.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        stage.get(dst).unwrap().buffer.read_column("joint_angle"),
+        Some(vec![0.0, 0.0, 30.0, 40.0, 50.0]),
+    );
+}
+
+#[test]
+fn partial_interior_window_spans_two_curves() {
+    let mut stage = Stage::new();
+    let src = line5(&mut stage);
+    let dst = vmob(&mut stage, &[[0.0; 3]; 5]);
+    stage
+        .pointwise_become_partial(dst, src, 0.25, 0.75)
+        .unwrap();
+    // low_tup = partial([0,1,2], .5, 1) = [1, 1.5, 2];
+    // high_tup = partial([2,3,4], 0, .5) = [2, 2.5, 3].
+    assert_eq!(xs_of(&stage, dst), vec![1.0, 1.5, 2.0, 2.5, 3.0]);
+}
+
+#[test]
+fn partial_empty_source_is_noop() {
+    let mut stage = Stage::new();
+    let src = vmob(&mut stage, &[]);
+    let dst = vmob(&mut stage, &[[7.0, 0.0, 0.0]; 3]);
+    stage.pointwise_become_partial(dst, src, 0.2, 0.8).unwrap();
+    assert_eq!(xs_of(&stage, dst), vec![7.0, 7.0, 7.0]);
+}
+
+#[test]
+fn partial_single_point_source_keeps_dst_points() {
+    let mut stage = Stage::new();
+    // One point → zero curves → the Reference's discarded-copy no-op,
+    // but the joint-angle copy still lands.
+    let src = vmob(&mut stage, &[[5.0, 0.0, 0.0]]);
+    let dst = vmob(&mut stage, &[[7.0, 0.0, 0.0]]);
+    stage.pointwise_become_partial(dst, src, 0.2, 0.8).unwrap();
+    assert_eq!(xs_of(&stage, dst), vec![7.0]);
+}
+
+#[test]
+fn partial_on_base_schema_is_refused() {
+    let mut stage = Stage::new();
+    let src = base(&mut stage, &[[0.0; 3], [1.0; 3], [2.0; 3]]);
+    let dst = base(&mut stage, &[[0.0; 3], [1.0; 3], [2.0; 3]]);
+    assert_eq!(
+        stage.pointwise_become_partial(dst, src, 0.0, 0.5),
+        Err(StageError::SchemaMismatch),
+    );
+}
+
+#[test]
+fn refresh_family_joint_angles_recomputes_from_points() {
+    let mut stage = Stage::new();
+    let mob = line5(&mut stage);
+    stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .write_range("joint_angle", 0, &[9.0, 9.0, 9.0, 9.0, 9.0]);
+    stage.refresh_family_joint_angles(mob).unwrap();
+    // A straight line has zero joint angles everywhere.
+    assert_eq!(
+        stage.get(mob).unwrap().buffer.read_column("joint_angle"),
+        Some(vec![0.0; 5]),
+    );
+}
