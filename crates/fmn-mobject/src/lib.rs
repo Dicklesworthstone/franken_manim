@@ -26,6 +26,7 @@
 //! lands with the Transform machinery, fm-cye).
 #![forbid(unsafe_code)]
 
+pub mod align;
 pub mod animate;
 pub mod bbox;
 pub mod dynamics;
@@ -65,6 +66,10 @@ pub enum StageError {
     /// `become` between records of different schemas — the Reference's
     /// `set_data` asserts dtype equality; this is the typed refusal.
     SchemaMismatch,
+    /// A point field whose contents violate the shared-anchor layout
+    /// reached the geometry kernel (alignment reads point runs as
+    /// [`fmn_geom::QuadPath`]s).
+    Geometry(fmn_geom::GeomError),
 }
 
 impl std::fmt::Display for StageError {
@@ -88,6 +93,9 @@ impl std::fmt::Display for StageError {
             }
             Self::SchemaMismatch => {
                 write!(f, "become between records of different schemas")
+            }
+            Self::Geometry(err) => {
+                write!(f, "malformed point run in alignment: {err}")
             }
         }
     }

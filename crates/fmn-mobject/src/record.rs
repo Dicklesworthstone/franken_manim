@@ -535,6 +535,29 @@ impl RecordBuffer {
         self.len = new_len;
     }
 
+    /// `resize_preserving_order` (`utils/iterables.py`): record `i` of the
+    /// result is old record `i * old_len / new_len` — proportional index
+    /// repetition, order-preserving, no interpolation. The family-alignment
+    /// resize primitive (§9.4). An empty buffer zero-fills (NumPy
+    /// `np.resize` of an empty array). Same copy-on-resize generation rules
+    /// as [`RecordBuffer::resize`] (V1/V3).
+    pub fn resize_preserving_order(&mut self, new_len: usize) {
+        if new_len == self.len {
+            return;
+        }
+        let stride = self.schema.stride();
+        let mut cells = vec![0.0f32; new_len * stride];
+        if self.len > 0 {
+            let old = self.storage.copy_cells();
+            for (i, record) in cells.chunks_exact_mut(stride).enumerate() {
+                let src = i * self.len / new_len;
+                record.copy_from_slice(&old[src * stride..(src + 1) * stride]);
+            }
+        }
+        self.swap_in(cells);
+        self.len = new_len;
+    }
+
     fn swap_in(&mut self, cells: Vec<f32>) {
         let n_fields = self.schema.fields().len();
         let fresh = Storage::new(cells.into_boxed_slice(), n_fields);
