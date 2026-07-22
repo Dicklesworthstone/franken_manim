@@ -12,4 +12,5 @@
 pub mod color;
 pub mod constants;
 pub mod rate;
+pub mod rng;
 pub mod types;
