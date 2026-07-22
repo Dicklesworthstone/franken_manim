@@ -383,3 +383,61 @@ fn c6_group_add_is_a_value_operation() {
     stage.delete(dead).unwrap();
     assert_eq!(stage.group_add(a1, dead), Err(StageError::StaleHandle));
 }
+
+#[test]
+fn animating_status_covers_family_and_all_ancestors() {
+    // §9.1's set_animating_status: family (per recurse) + the transitive
+    // ancestor closure — including a diamond's second parent.
+    let mut stage = Stage::new();
+    let child = stage.add(square());
+    let parent_a = stage.add(Mobject::new());
+    let parent_b = stage.add(Mobject::new());
+    let grandparent = stage.add(Mobject::new());
+    stage.attach(parent_a, child).unwrap();
+    stage.attach(parent_b, child).unwrap();
+    stage.attach(grandparent, parent_a).unwrap();
+
+    stage.set_animating_status(child, true, true);
+    for mob in [child, parent_a, parent_b, grandparent] {
+        assert!(stage.is_animating(mob), "{mob:?} must be marked");
+    }
+    stage.set_animating_status(child, false, true);
+    for mob in [child, parent_a, parent_b, grandparent] {
+        assert!(!stage.is_animating(mob), "{mob:?} must be cleared");
+    }
+
+    // Non-recursive: the mobject itself + ancestors, not the subtree.
+    let inner = stage.add(square());
+    stage.attach(child, inner).unwrap();
+    stage.set_animating_status(child, true, false);
+    assert!(stage.is_animating(child));
+    assert!(stage.is_animating(parent_a), "ancestors always marked");
+    assert!(
+        !stage.is_animating(inner),
+        "subtree untouched without recurse"
+    );
+}
+
+#[test]
+fn is_changing_reads_animating_or_own_updaters() {
+    let mut stage = Stage::new();
+    let mob = stage.add(square());
+    assert!(!stage.is_changing(mob));
+
+    let id = stage.add_updater(mob, |_stage, _mob| {}, false).unwrap();
+    assert!(stage.is_changing(mob), "own updaters count");
+    stage.remove_updater(mob, id);
+    assert!(!stage.is_changing(mob));
+
+    stage.set_animating_status(mob, true, true);
+    assert!(stage.is_changing(mob), "animating counts");
+
+    // Self-only, as in the Reference: a child's updater does not make the
+    // parent 'changing'.
+    let child = stage.add(square());
+    stage.attach(mob, child).unwrap();
+    stage.set_animating_status(mob, false, true);
+    stage.add_updater(child, |_stage, _mob| {}, false).unwrap();
+    assert!(stage.is_changing(child));
+    assert!(!stage.is_changing(mob), "is_changing is self-only");
+}
