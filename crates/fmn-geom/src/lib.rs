@@ -13,6 +13,7 @@
 //! ear-clip (fm-81u), and the full space_ops surface (fm-ngx).
 #![forbid(unsafe_code)]
 
+pub mod arclength;
 pub mod bezier;
 pub mod cubic;
 pub mod quadpath;
@@ -21,6 +22,7 @@ pub mod smoothing;
 mod scalar;
 mod vec;
 
+pub use arclength::{ArcLengthTable, CachedArcLength};
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
 
 /// Errors from the geometry kernel.

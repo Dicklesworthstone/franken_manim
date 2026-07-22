@@ -29,3 +29,8 @@ pub(crate) fn acos(x: f64) -> f64 {
 pub(crate) fn atan2(y: f64, x: f64) -> f64 {
     fmn_dmath::atan2(y, x)
 }
+
+#[inline]
+pub(crate) fn ln(x: f64) -> f64 {
+    fmn_dmath::ln(x)
+}
