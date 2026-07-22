@@ -111,3 +111,31 @@ fn every_manifest_row_has_its_file_and_hash() {
         assert_eq!(&dims.join("x"), shape, "{name}: manifest shape");
     }
 }
+
+// ------------------------------------------- per-field snapshot export
+
+/// §8.7's fixture-interchange hook (fm-879): any snapshot record column
+/// exports as a `.npy` NumPy can read — here locked by round-tripping
+/// through the owned writer/reader (whose byte-compatibility with numpy's
+/// writer the re-encode test above already pins).
+#[test]
+fn snapshot_field_exports_as_npy() {
+    use fmn_conformance::npy::{NpyArray, NpyData};
+    use fmn_mobject::record::{RecordBuffer, RecordSchema};
+    use fmn_mobject::{Mobject, Stage};
+
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new());
+    let entry = stage.get_mut(mob).unwrap();
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), 3);
+    let flat: Vec<f32> = vec![0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 2.0, 0.0, 0.0];
+    entry.buffer.write_range("point", 0, &flat);
+
+    let column = stage.get(mob).unwrap().buffer.read_column("point").unwrap();
+    let rows = column.len() / 3;
+    let array = NpyArray::new(vec![rows, 3], NpyData::F32(column.clone())).unwrap();
+    let bytes = write_npy(&array);
+    let back = read_npy(&bytes).unwrap();
+    assert_eq!(back.as_f32().unwrap(), column.as_slice());
+    assert_eq!(back.shape, vec![3, 3]);
+}

@@ -31,6 +31,7 @@ pub mod animate;
 pub mod bbox;
 pub mod dynamics;
 pub mod mobject;
+pub mod persist;
 pub mod positional;
 pub mod record;
 pub mod stage;
@@ -40,6 +41,10 @@ pub use animate::{AnimBuilder, AnimateArgs, AnimateError, BuiltAnimate, IntoAnim
 pub use bbox::BoundingBox;
 pub use dynamics::{Tracker, TrackerKind};
 pub use mobject::Mobject;
+pub use persist::{
+    DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,
+    SceneState, UpdaterKindTag, UpdaterManifest,
+};
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
 pub use stage::{CopyMap, Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};

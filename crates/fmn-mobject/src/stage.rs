@@ -48,6 +48,23 @@ impl Mob {
     pub(crate) fn bits(self) -> u64 {
         (u64::from(self.index) << 32) | u64::from(self.generation)
     }
+
+    /// The durable identity a serialized snapshot records: (slot index,
+    /// generation). The stage id is deliberately NOT part of it — it is a
+    /// process-local mint, re-bound at decode (§8.7).
+    pub(crate) fn parts(self) -> (u32, u32) {
+        (self.index, self.generation)
+    }
+
+    /// Rebuild a handle for `stage_id` from its durable parts (the
+    /// persistence layer's decode hook).
+    pub(crate) fn from_parts(stage_id: u64, index: u32, generation: u32) -> Self {
+        Self {
+            stage_id,
+            index,
+            generation,
+        }
+    }
 }
 
 /// A non-dt updater closure: receives the stage and its own handle — the
@@ -79,6 +96,15 @@ pub enum UpdaterFn {
 /// mobject it acts on.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct UpdaterId(u64);
+
+impl UpdaterId {
+    /// The raw token — what a durable snapshot records as the updater's
+    /// identity (§8.7: callables never serialize; identity + the §13.4
+    /// effect model's hashes are the replay vocabulary).
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
+}
 
 /// One registered updater: identity plus callable.
 #[derive(Clone)]
@@ -194,24 +220,24 @@ struct Slot {
 /// A CoW snapshot of the whole stage: begin-states for §9.5's frame-parallel
 /// pure segments, Studio undo, and replay barriers.
 pub struct Snapshot {
-    slots: Vec<(u32, Option<SnapshotEntry>)>,
-    free: Vec<u32>,
-    roots: Vec<Mob>,
+    pub(crate) slots: Vec<(u32, Option<SnapshotEntry>)>,
+    pub(crate) free: Vec<u32>,
+    pub(crate) roots: Vec<Mob>,
 }
 
-struct SnapshotEntry {
-    buffer: RecordBuffer,
-    submobjects: Vec<Mob>,
-    parents: Vec<Mob>,
-    updaters: Vec<UpdaterSlot>,
-    updating_suspended: bool,
-    is_animating: bool,
-    tracker: Option<crate::dynamics::Tracker>,
-    target: Option<Mob>,
-    saved_state: Option<Mob>,
-    pins: usize,
-    pending_delete: bool,
-    uniforms: Uniforms,
+pub(crate) struct SnapshotEntry {
+    pub(crate) buffer: RecordBuffer,
+    pub(crate) submobjects: Vec<Mob>,
+    pub(crate) parents: Vec<Mob>,
+    pub(crate) updaters: Vec<UpdaterSlot>,
+    pub(crate) updating_suspended: bool,
+    pub(crate) is_animating: bool,
+    pub(crate) tracker: Option<crate::dynamics::Tracker>,
+    pub(crate) target: Option<Mob>,
+    pub(crate) saved_state: Option<Mob>,
+    pub(crate) pins: usize,
+    pub(crate) pending_delete: bool,
+    pub(crate) uniforms: Uniforms,
 }
 
 /// The stable old-handle → new-handle map a family copy produces — the
@@ -294,6 +320,12 @@ impl Stage {
     #[must_use]
     pub fn time(&self) -> f64 {
         self.time
+    }
+
+    /// The process-local stage mint the persistence layer re-binds decoded
+    /// handles to (§8.7). Never serialized.
+    pub(crate) fn stage_id(&self) -> u64 {
+        self.id
     }
 
     // ------------------------------------------------------------ handles
