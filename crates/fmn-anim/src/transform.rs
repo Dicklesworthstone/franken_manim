@@ -272,6 +272,75 @@ fn unlock_family_data(stage: &mut Stage, mobject: Mob) {
 
 // -------------------------------------------------------------- Transform
 
+/// Mutations applied to the starting copy right after it is taken — the
+/// Reference's `create_starting_mobject` overrides (fading.py:37,
+/// growing.py:30) as journal-able data instead of subclasses. Application
+/// order is fixed: opacity → scale → shift → move_to → color, which
+/// realizes both the FadeIn sequence (`set_opacity(0)`, `scale(1/f)`,
+/// `shift(−v)`) and the GrowFromPoint sequence (`scale(0)`,
+/// `move_to(point)`, `set_color`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StartPrep {
+    /// `set_opacity(0)` over the whole family.
+    pub opacity_zero: bool,
+    /// `scale(k)` about the copy's center.
+    pub scale: Option<f64>,
+    /// `shift(v)`.
+    pub shift: Option<Vec3>,
+    /// `move_to(point)`.
+    pub move_to: Option<Vec3>,
+    /// `set_color(rgb)`: overwrite the rgb lanes of every `*rgba` field,
+    /// alphas kept (growing.py's `point_color`).
+    pub color: Option<[f32; 3]>,
+}
+
+impl StartPrep {
+    fn apply(&self, stage: &mut Stage, mob: Mob) {
+        if self.opacity_zero {
+            stage.set_family_opacity_zero(mob);
+        }
+        if let Some(k) = self.scale {
+            stage.scale(mob, k);
+        }
+        if let Some(v) = self.shift {
+            stage.shift(mob, v);
+        }
+        if let Some(p) = self.move_to {
+            stage.move_to(mob, p, [0.0, 0.0, 0.0]);
+        }
+        if let Some(rgb) = self.color {
+            set_family_rgb(stage, mob, rgb);
+        }
+    }
+}
+
+/// Reference `set_color` over a family: overwrite the rgb lanes of every
+/// `*rgba` field, alphas kept. Shared by [`StartPrep`] and the
+/// indication family's recolored targets.
+pub(crate) fn set_family_rgb(stage: &mut Stage, mob: Mob, rgb: [f32; 3]) {
+    for member in stage.family(mob) {
+        let Some(entry) = stage.get_mut(member) else {
+            continue;
+        };
+        let fields: Vec<String> = entry
+            .buffer
+            .schema()
+            .fields()
+            .iter()
+            .filter(|f| f.name.ends_with("rgba"))
+            .map(|f| f.name.clone())
+            .collect();
+        for field in fields {
+            if let Some(mut column) = entry.buffer.read_column(&field) {
+                for row in column.as_chunks_mut::<4>().0 {
+                    row[..3].copy_from_slice(&rgb);
+                }
+                entry.buffer.write_range(&field, 0, &column);
+            }
+        }
+    }
+}
+
 /// The Transform animation (transform.py:24): align, then lerp fields
 /// from the starting copy to an aligned target copy through the path
 /// function.
@@ -282,6 +351,7 @@ pub struct Transform {
     target_copy: Option<Mob>,
     path: PathFunc,
     replace_in_scene: bool,
+    start_prep: Option<StartPrep>,
 }
 
 impl Transform {
@@ -298,7 +368,16 @@ impl Transform {
             target_copy: None,
             path: PathFunc::Straight,
             replace_in_scene: false,
+            start_prep: None,
         }
+    }
+
+    /// Attach a [`StartPrep`] (the fade/grow families' starting-copy
+    /// mutation).
+    #[must_use]
+    pub fn with_start_prep(mut self, prep: StartPrep) -> Self {
+        self.start_prep = Some(prep);
+        self
     }
 
     /// `path_arc` / `path_arc_axis` (the Reference's `init_path_func`).
@@ -374,6 +453,19 @@ impl Animation for Transform {
         stage.align_data_and_family(mobject, target_copy)?;
         self.target_copy = Some(target_copy);
         Ok(())
+    }
+
+    /// The default deep copy, then the [`StartPrep`] mutation (the
+    /// fade/grow families' `create_starting_mobject` overrides).
+    fn create_starting_mobject(&self, stage: &mut Stage) -> Result<Mob, AnimError> {
+        let mobject = self.state().mobject();
+        let starting = stage
+            .copy_family(mobject)
+            .map_err(|_| AnimError::StaleHandle(mobject))?;
+        if let Some(prep) = &self.start_prep {
+            prep.apply(stage, starting);
+        }
+        Ok(starting)
     }
 
     /// transform.py:69 — lock matching data after `super().begin()`.
@@ -480,6 +572,132 @@ pub fn apply_function(
     f(stage, target);
     let mut t = Transform::new(mobject, target);
     t.state.config.name = "ApplyFunction".to_owned();
+    Ok(t)
+}
+
+/// `ApplyPointwiseFunction` (transform.py:198):
+/// `ApplyMethod(mobject.apply_function, f)` at `run_time = 3` — the
+/// target is a copy with every family point mapped through `f` about the
+/// true origin (`apply_function`'s default pivot).
+///
+/// # Errors
+/// As [`apply_function`].
+pub fn apply_pointwise_function(
+    stage: &mut Stage,
+    mobject: Mob,
+    f: impl Fn(Vec3) -> Vec3,
+) -> Result<Transform, AnimError> {
+    let mut t = apply_function(stage, mobject, |s, m| {
+        s.apply_points_function(m, f, Some([0.0, 0.0, 0.0]), None);
+    })?;
+    t.state.config.name = "ApplyPointwiseFunction".to_owned();
+    t.state.config.run_time = 3.0;
+    Ok(t)
+}
+
+/// `ApplyPointwiseFunctionToCenter` (transform.py:209): the target is a
+/// copy moved to `f(center)`.
+///
+/// # Errors
+/// As [`apply_function`].
+pub fn apply_pointwise_function_to_center(
+    stage: &mut Stage,
+    mobject: Mob,
+    f: impl FnOnce(Vec3) -> Vec3,
+) -> Result<Transform, AnimError> {
+    let center = stage.get_center(mobject);
+    let destination = f(center);
+    let mut t = apply_function(stage, mobject, |s, m| {
+        s.move_to(m, destination, [0.0, 0.0, 0.0]);
+    })?;
+    t.state.config.name = "ApplyPointwiseFunctionToCenter".to_owned();
+    Ok(t)
+}
+
+/// `FadeToColor` (transform.py:223): `ApplyMethod(mobject.set_color, c)`.
+///
+/// # Errors
+/// As [`apply_function`].
+pub fn fade_to_color(
+    stage: &mut Stage,
+    mobject: Mob,
+    rgb: [f32; 3],
+) -> Result<Transform, AnimError> {
+    let mut t = apply_function(stage, mobject, |s, m| {
+        set_family_rgb(s, m, rgb);
+    })?;
+    t.state.config.name = "FadeToColor".to_owned();
+    Ok(t)
+}
+
+/// `ApplyMatrix` (transform.py:272): `ApplyPointwiseFunction` under
+/// `p ↦ M·p` (the Reference's `np.dot(p, M.T)`).
+///
+/// # Errors
+/// As [`apply_function`].
+pub fn apply_matrix(
+    stage: &mut Stage,
+    mobject: Mob,
+    matrix: [[f64; 3]; 3],
+) -> Result<Transform, AnimError> {
+    let mut t = apply_pointwise_function(stage, mobject, move |p| {
+        [
+            matrix[0][0] * p[0] + matrix[0][1] * p[1] + matrix[0][2] * p[2],
+            matrix[1][0] * p[0] + matrix[1][1] * p[1] + matrix[1][2] * p[2],
+            matrix[2][0] * p[0] + matrix[2][1] * p[1] + matrix[2][2] * p[2],
+        ]
+    })?;
+    t.state.config.name = "ApplyMatrix".to_owned();
+    Ok(t)
+}
+
+/// The Reference's 2×2 acceptance for [`apply_matrix`]: embedded into the
+/// identity's upper-left block (transform.py:286).
+///
+/// # Errors
+/// As [`apply_matrix`].
+pub fn apply_matrix_2d(
+    stage: &mut Stage,
+    mobject: Mob,
+    m: [[f64; 2]; 2],
+) -> Result<Transform, AnimError> {
+    apply_matrix(
+        stage,
+        mobject,
+        [
+            [m[0][0], m[0][1], 0.0],
+            [m[1][0], m[1][1], 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+}
+
+/// `ApplyComplexFunction` (transform.py:297): map the `(x, y)` plane
+/// through a complex function (`z` kept), with the Reference's derived
+/// `path_arc = Im(log(f(1)))` — the argument of `f(1)`.
+///
+/// # Errors
+/// As [`apply_function`].
+pub fn apply_complex_function(
+    stage: &mut Stage,
+    mobject: Mob,
+    f: impl Fn(f64, f64) -> (f64, f64),
+) -> Result<Transform, AnimError> {
+    let (re1, im1) = f(1.0, 0.0);
+    let path_arc = fmn_dmath::atan2(im1, re1);
+    let mut t = apply_function(stage, mobject, |s, m| {
+        s.apply_points_function(
+            m,
+            |p| {
+                let (re, im) = f(p[0], p[1]);
+                [re, im, p[2]]
+            },
+            Some([0.0, 0.0, 0.0]),
+            None,
+        );
+    })?
+    .with_path_arc(path_arc, [0.0, 0.0, 1.0]);
+    t.state.config.name = "ApplyComplexFunction".to_owned();
     Ok(t)
 }
 

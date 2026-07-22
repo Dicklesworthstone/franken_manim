@@ -255,6 +255,10 @@ pub enum AnimError {
     MissingTarget,
     /// `Restore` on a mobject that never ran `save_state`.
     MissingSavedState,
+    /// An animation that needs a point to anchor on (`GrowArrow`'s
+    /// `get_start`, `MoveAlongPath`'s path) got a pointless mobject — the
+    /// Reference raises `IndexError`; this is the typed refusal.
+    EmptyMobject,
     /// The Stage refused an alignment or copy operation (malformed point
     /// run, mixed schemas).
     Stage(StageError),
@@ -289,6 +293,9 @@ impl std::fmt::Display for AnimError {
             ),
             Self::MissingSavedState => {
                 write!(f, "Restore called on mobject without a saved state")
+            }
+            Self::EmptyMobject => {
+                write!(f, "animation requires a mobject with points")
             }
             Self::Stage(e) => write!(f, "stage refused the operation: {e}"),
         }

@@ -280,3 +280,90 @@ fn swap_exchanges_centers() {
         }
     }
 }
+
+// ------------------------------------------------- late transform zoo
+
+use fmn_anim::{
+    apply_complex_function, apply_matrix_2d, apply_pointwise_function_to_center, fade_to_color,
+};
+
+#[test]
+fn apply_matrix_lands_the_mapped_points() {
+    let mut stage = Stage::new();
+    let mob = vmob(
+        &mut stage,
+        &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        [0.1, 0.2, 0.3, 1.0],
+    );
+    // Scale x by 2, y by 3.
+    let mut anim = apply_matrix_2d(&mut stage, mob, [[2.0, 0.0], [0.0, 3.0]]).unwrap();
+    assert_eq!(anim.state().config.name, "ApplyMatrix");
+    assert_eq!(anim.state().config.run_time, 3.0);
+    anim.begin(&mut stage).unwrap();
+    anim.finish(&mut stage);
+    let xs: Vec<f32> = points_of(&stage, mob)
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| c[0])
+        .collect();
+    assert_eq!(xs, vec![2.0, 4.0, 6.0]);
+}
+
+#[test]
+fn fade_to_color_lands_the_rgb() {
+    let mut stage = Stage::new();
+    let mob = vmob(
+        &mut stage,
+        &[[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        [0.1, 0.2, 0.3, 1.0],
+    );
+    let mut anim = fade_to_color(&mut stage, mob, [0.0, 1.0, 0.0]).unwrap();
+    anim.begin(&mut stage).unwrap();
+    anim.finish(&mut stage);
+    let fill = stage
+        .get(mob)
+        .unwrap()
+        .buffer
+        .read_column("fill_rgba")
+        .unwrap();
+    assert_eq!(&fill[..4], &[0.0, 1.0, 0.0, 1.0]);
+}
+
+#[test]
+fn apply_complex_function_derives_the_path_arc() {
+    let mut stage = Stage::new();
+    let mob = vmob(
+        &mut stage,
+        &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        [0.1, 0.2, 0.3, 1.0],
+    );
+    // f(z) = i·z: rotate the plane 90°; arg(f(1)) = π/2 becomes path_arc.
+    let mut anim = apply_complex_function(&mut stage, mob, |re, im| (-im, re)).unwrap();
+    assert_eq!(anim.state().config.name, "ApplyComplexFunction");
+    anim.begin(&mut stage).unwrap();
+    anim.finish(&mut stage);
+    let pts = points_of(&stage, mob);
+    let (xs, ys): (Vec<f32>, Vec<f32>) =
+        pts.as_chunks::<3>().0.iter().map(|c| (c[0], c[1])).unzip();
+    for x in xs {
+        assert!(x.abs() < 1e-5, "x collapses to 0");
+    }
+    assert_eq!(ys, vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn apply_pointwise_function_to_center_moves_to_mapped_center() {
+    let mut stage = Stage::new();
+    let mob = vmob(
+        &mut stage,
+        &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        [0.1, 0.2, 0.3, 1.0],
+    );
+    let mut anim =
+        apply_pointwise_function_to_center(&mut stage, mob, |c| [c[0] + 10.0, c[1], c[2]]).unwrap();
+    anim.begin(&mut stage).unwrap();
+    anim.finish(&mut stage);
+    let center = stage.get_center(mob);
+    assert!((center[0] - 12.0).abs() < 1e-5);
+}
