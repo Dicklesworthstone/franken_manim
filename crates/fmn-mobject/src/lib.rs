@@ -18,7 +18,7 @@ pub mod record;
 pub mod stage;
 
 pub use mobject::Mobject;
-pub use record::{FieldSpec, RecordBuffer, RecordSchema, RecordView};
+pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
 pub use stage::{Entry, Mob, Snapshot, Stage, Updater};
 
 /// Errors from the mobject engine's ownership layer.

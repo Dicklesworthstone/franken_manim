@@ -30,7 +30,7 @@ impl Mobject {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            buffer: RecordBuffer::new(RecordSchema::manim_default(), 0),
+            buffer: RecordBuffer::new(RecordSchema::mobject(), 0),
             submobjects: Vec::new(),
         }
     }
@@ -39,7 +39,7 @@ impl Mobject {
     /// in, record f32 stored, per §6.1).
     #[must_use]
     pub fn from_points(points: &[Vec3]) -> Self {
-        let mut buffer = RecordBuffer::new(RecordSchema::manim_default(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), points.len());
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
         }
@@ -53,7 +53,7 @@ impl Mobject {
     #[must_use]
     pub fn group(children: Vec<Mobject>) -> Self {
         Self {
-            buffer: RecordBuffer::new(RecordSchema::manim_default(), 0),
+            buffer: RecordBuffer::new(RecordSchema::mobject(), 0),
             submobjects: children,
         }
     }
