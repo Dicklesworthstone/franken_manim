@@ -132,3 +132,6 @@ repro_*.rs
 
 # Python tooling cache (scripts/)
 __pycache__/
+
+# Local Reference checkout for fixture generation (never committed)
+scripts/manim_ref/
