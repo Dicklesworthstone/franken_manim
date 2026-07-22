@@ -50,9 +50,44 @@ impl Mob {
     }
 }
 
-/// An updater closure: receives the stage, its own handle, and `dt`.
+/// A non-dt updater closure: receives the stage and its own handle — the
+/// Reference's `lambda m: ...` form, and the overwhelmingly common one.
 /// `Rc` because manim's `copy()` keeps updater callables by reference.
-pub type Updater = Rc<RefCell<dyn FnMut(&mut Stage, Mob, f64)>>;
+pub type NonDtUpdater = Rc<RefCell<dyn FnMut(&mut Stage, Mob)>>;
+
+/// A dt updater closure: additionally receives the frame's `dt` — the
+/// Reference's `lambda m, dt: ...` form (detected there by signature
+/// inspection; a typed registration here).
+pub type DtUpdater = Rc<RefCell<dyn FnMut(&mut Stage, Mob, f64)>>;
+
+/// The two updater kinds behind one insertion-ordered list (§8.6): the
+/// Reference keeps a single `self.updaters` list mixing both and passes
+/// `dt` only to the dt-kind; execution order is pure insertion order across
+/// kinds, and that is exact semantics.
+#[derive(Clone)]
+pub enum UpdaterFn {
+    /// Called as `f(stage, mob)`.
+    NonDt(NonDtUpdater),
+    /// Called as `f(stage, mob, dt)`.
+    Dt(DtUpdater),
+}
+
+/// Identity of a registered updater — the removal token (closures have no
+/// equality; the Reference removes by function identity, this is the typed
+/// equivalent). Copies of a mobject share updaters *and* their ids, exactly
+/// as Reference copies share function objects; removal always names the
+/// mobject it acts on.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct UpdaterId(u64);
+
+/// One registered updater: identity plus callable.
+#[derive(Clone)]
+pub struct UpdaterSlot {
+    /// The removal token.
+    pub id: UpdaterId,
+    /// The callable, by kind.
+    pub func: UpdaterFn,
+}
 
 /// Arena entry: record data plus graph edges and lifetime state. Edges are
 /// private so every structural mutation flows through [`Stage`] and the
@@ -63,7 +98,13 @@ pub struct Entry {
     pub buffer: RecordBuffer,
     submobjects: Vec<Mob>,
     parents: Vec<Mob>,
-    updaters: Vec<Updater>,
+    updaters: Vec<UpdaterSlot>,
+    /// `suspend_updating` state: while set, [`Stage::update`] prunes this
+    /// entry's whole subtree (the Reference's early return).
+    updating_suspended: bool,
+    /// ValueTracker state (§8.6), if this mobject is a tracker; plain
+    /// mobjects carry `None`. Copied by value with the entry.
+    pub(crate) tracker: Option<crate::dynamics::Tracker>,
     pins: usize,
     pending_delete: bool,
     /// Per-object typed uniform state (§8.4): scene code reads and writes this
@@ -85,6 +126,8 @@ impl Entry {
             submobjects: Vec::new(),
             parents: Vec::new(),
             updaters: Vec::new(),
+            updating_suspended: false,
+            tracker: None,
             pins: 0,
             pending_delete: false,
             uniforms: Uniforms::default(),
@@ -145,7 +188,9 @@ struct SnapshotEntry {
     buffer: RecordBuffer,
     submobjects: Vec<Mob>,
     parents: Vec<Mob>,
-    updaters: Vec<Updater>,
+    updaters: Vec<UpdaterSlot>,
+    updating_suspended: bool,
+    tracker: Option<crate::dynamics::Tracker>,
     pins: usize,
     pending_delete: bool,
     uniforms: Uniforms,
@@ -158,6 +203,7 @@ pub struct Stage {
     free: Vec<u32>,
     roots: Vec<Mob>,
     time: f64,
+    next_updater_id: u64,
 }
 
 impl Default for Stage {
@@ -175,6 +221,7 @@ impl Stage {
             free: Vec::new(),
             roots: Vec::new(),
             time: 0.0,
+            next_updater_id: 1,
         }
     }
 
@@ -452,6 +499,8 @@ impl Stage {
                 submobjects: entry.submobjects.clone(), // remapped below
                 parents: entry.parents.clone(),         // remapped below
                 updaters: entry.updaters.clone(),       // by reference
+                updating_suspended: entry.updating_suspended,
+                tracker: entry.tracker,
                 pins: 0,
                 pending_delete: false,
                 uniforms: entry.uniforms, // copy semantics: independent state
@@ -498,43 +547,268 @@ impl Stage {
     }
 
     // ----------------------------------------------------------- updaters
+    //
+    // The §8.6 dynamic-behavior surface (fm-yra). Exact semantics, mirroring
+    // the pinned Reference:
+    // - ONE insertion-ordered list per mobject mixing dt and non-dt kinds;
+    //   execution is pure insertion order (the Reference distinguishes kinds
+    //   by signature inspection; registration is typed here).
+    // - `update(dt)` runs each rooted family child-first (the Reference
+    //   recurses submobjects before running its own updaters) and prunes a
+    //   subtree at any suspended node or any node with no updaters anywhere
+    //   in its family.
+    // - The updater list is snapshotted per node per tick, so add/remove
+    //   during iteration has a defined outcome: changes take effect next
+    //   tick (§8.6's "snapshot the list per tick").
+    // - `add_updater(call = true)` runs `update(dt = 0)` exactly ONCE — the
+    //   Reference calls it twice (C-5), a fixed bug (Behavior Note
+    //   BN-07-updater-and-group-fixes).
 
-    /// Insertion-ordered updater registration. `call_now` runs the updater
-    /// exactly once, immediately (the Reference's double-call is a bug we
-    /// fix — Behavior Note, finalized with fm-yra).
+    fn register_updater(
+        &mut self,
+        mob: Mob,
+        func: UpdaterFn,
+        index: Option<usize>,
+        call: bool,
+    ) -> Result<UpdaterId, StageError> {
+        let id = UpdaterId(self.next_updater_id);
+        self.next_updater_id += 1;
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        let slot = UpdaterSlot { id, func };
+        match index {
+            Some(i) => {
+                let i = i.min(entry.updaters.len());
+                entry.updaters.insert(i, slot);
+            }
+            None => entry.updaters.push(slot),
+        }
+        if call {
+            // C-5 correction: exactly one update pass (the Reference runs
+            // `self.update(dt=0)` and then unconditionally `self.update()`
+            // again — a double call).
+            self.update_mob(mob, 0.0);
+        }
+        Ok(id)
+    }
+
+    /// Register a non-dt updater (the Reference's `lambda m: ...`),
+    /// appended in insertion order. `call` runs an immediate `update(0)`
+    /// pass over this mobject's family — exactly once (C-5 fixed).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`].
     pub fn add_updater(
         &mut self,
         mob: Mob,
+        updater: impl FnMut(&mut Stage, Mob) + 'static,
+        call: bool,
+    ) -> Result<UpdaterId, StageError> {
+        self.register_updater(
+            mob,
+            UpdaterFn::NonDt(Rc::new(RefCell::new(updater))),
+            None,
+            call,
+        )
+    }
+
+    /// Register a dt updater (the Reference's `lambda m, dt: ...`).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`].
+    pub fn add_dt_updater(
+        &mut self,
+        mob: Mob,
         updater: impl FnMut(&mut Stage, Mob, f64) + 'static,
-        call_now: bool,
-    ) -> Result<(), StageError> {
-        let updater: Updater = Rc::new(RefCell::new(updater));
-        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
-        entry.updaters.push(Rc::clone(&updater));
-        if call_now {
-            updater.borrow_mut()(self, mob, 0.0);
+        call: bool,
+    ) -> Result<UpdaterId, StageError> {
+        self.register_updater(
+            mob,
+            UpdaterFn::Dt(Rc::new(RefCell::new(updater))),
+            None,
+            call,
+        )
+    }
+
+    /// Insert a non-dt updater at `index` in the list (Reference
+    /// `insert_updater`; no immediate call, matching it).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`].
+    pub fn insert_updater(
+        &mut self,
+        mob: Mob,
+        index: usize,
+        updater: impl FnMut(&mut Stage, Mob) + 'static,
+    ) -> Result<UpdaterId, StageError> {
+        self.register_updater(
+            mob,
+            UpdaterFn::NonDt(Rc::new(RefCell::new(updater))),
+            Some(index),
+            false,
+        )
+    }
+
+    /// Remove every occurrence of `id` from `mob`'s updater list (the
+    /// Reference removes by function identity, all occurrences).
+    pub fn remove_updater(&mut self, mob: Mob, id: UpdaterId) {
+        if let Some(entry) = self.get_mut(mob) {
+            entry.updaters.retain(|slot| slot.id != id);
         }
+    }
+
+    /// Clear updaters on `mob` (and, with `recurse`, its whole family).
+    pub fn clear_updaters(&mut self, mob: Mob, recurse: bool) {
+        let targets = if recurse {
+            self.family(mob)
+        } else if self.contains(mob) {
+            vec![mob]
+        } else {
+            Vec::new()
+        };
+        for target in targets {
+            if let Some(entry) = self.get_mut(target) {
+                entry.updaters.clear();
+            }
+        }
+    }
+
+    /// Copy `source`'s updater list onto `mob` (Reference `match_updaters`:
+    /// callables shared by reference).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if either handle is dead.
+    pub fn match_updaters(&mut self, mob: Mob, source: Mob) -> Result<(), StageError> {
+        let updaters = self.try_get(source)?.updaters.clone();
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        entry.updaters = updaters;
         Ok(())
     }
 
-    /// Run every rooted family's updaters in insertion order, then advance
-    /// time. (The six-step frame order is Choreo's; the arena provides only
-    /// the execution slot.)
-    pub fn update(&mut self, dt: f64) {
-        let targets: Vec<Mob> = self
-            .roots
-            .clone()
-            .into_iter()
-            .flat_map(|root| self.family(root))
-            .collect();
+    /// The registered updater ids on `mob`, in execution order.
+    #[must_use]
+    pub fn updater_ids(&self, mob: Mob) -> Vec<UpdaterId> {
+        self.get(mob)
+            .map(|e| e.updaters.iter().map(|s| s.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether `mob` or anything in its family has updaters.
+    #[must_use]
+    pub fn has_updaters_in_family(&self, mob: Mob) -> bool {
+        self.family(mob)
+            .iter()
+            .any(|m| self.get(*m).is_some_and(|e| !e.updaters.is_empty()))
+    }
+
+    /// Whether updating is suspended on `mob` itself.
+    #[must_use]
+    pub fn is_updating_suspended(&self, mob: Mob) -> bool {
+        self.get(mob).is_some_and(|e| e.updating_suspended)
+    }
+
+    /// Suspend updating on `mob` (and, with `recurse`, its children,
+    /// transitively) — Reference `suspend_updating`. A suspended node
+    /// prunes its whole subtree in [`Stage::update`], which is exactly how
+    /// an animated mobject's updaters pause during a play (§9.1's
+    /// `suspend_mobject_updating` hooks in here).
+    pub fn suspend_updating(&mut self, mob: Mob, recurse: bool) {
+        let targets = if recurse {
+            self.family(mob)
+        } else if self.contains(mob) {
+            vec![mob]
+        } else {
+            Vec::new()
+        };
         for target in targets {
-            let updaters = match self.get(target) {
-                Some(entry) => entry.updaters.clone(),
-                None => continue,
-            };
-            for updater in updaters {
-                updater.borrow_mut()(self, target, dt);
+            if let Some(entry) = self.get_mut(target) {
+                entry.updating_suspended = true;
             }
+        }
+    }
+
+    /// Resume updating — Reference `resume_updating`, rule for rule: clears
+    /// the flag on `mob` (and, with `recurse`, its children), clears it on
+    /// the whole ancestor chain *without* recursing into their subtrees or
+    /// calling their updaters (each Reference parent resumes its own
+    /// parents in turn — the clear is transitive upward), then (with
+    /// `call_updater`) runs one `update(0)` pass over `mob`.
+    pub fn resume_updating(&mut self, mob: Mob, recurse: bool, call_updater: bool) {
+        let targets = if recurse {
+            self.family(mob)
+        } else if self.contains(mob) {
+            vec![mob]
+        } else {
+            Vec::new()
+        };
+        if targets.is_empty() {
+            return;
+        }
+        for target in &targets {
+            if let Some(entry) = self.get_mut(*target) {
+                entry.updating_suspended = false;
+            }
+        }
+        // Transitive ancestor clear (no subtree recursion, no updater call).
+        let mut pending = self
+            .get(mob)
+            .map(|e| e.parents().to_vec())
+            .unwrap_or_default();
+        let mut seen: Vec<Mob> = Vec::new();
+        while let Some(parent) = pending.pop() {
+            if seen.contains(&parent) {
+                continue;
+            }
+            seen.push(parent);
+            if let Some(entry) = self.get_mut(parent) {
+                entry.updating_suspended = false;
+            }
+            pending.extend(
+                self.get(parent)
+                    .map(|e| e.parents().to_vec())
+                    .unwrap_or_default(),
+            );
+        }
+        if call_updater {
+            self.update_mob(mob, 0.0);
+        }
+    }
+
+    /// One node's update pass, in the Reference's exact order: prune if the
+    /// node is suspended or its family has no updaters; recurse children
+    /// first; then run this node's own updaters in insertion order over a
+    /// per-tick snapshot of the list.
+    fn update_mob(&mut self, mob: Mob, dt: f64) {
+        let Some(entry) = self.get(mob) else {
+            return;
+        };
+        if entry.updating_suspended || !self.has_updaters_in_family(mob) {
+            return;
+        }
+        let children = self
+            .get(mob)
+            .map(|e| e.submobjects().to_vec())
+            .unwrap_or_default();
+        for child in children {
+            self.update_mob(child, dt);
+        }
+        let updaters = self
+            .get(mob)
+            .map(|e| e.updaters.clone())
+            .unwrap_or_default();
+        for slot in updaters {
+            match slot.func {
+                UpdaterFn::NonDt(f) => f.borrow_mut()(self, mob),
+                UpdaterFn::Dt(f) => f.borrow_mut()(self, mob, dt),
+            }
+        }
+    }
+
+    /// Run every rooted family's updaters (child-first, insertion order,
+    /// suspension-pruned), then advance time. (The six-step frame order is
+    /// Choreo's; the arena provides the execution slot.)
+    pub fn update(&mut self, dt: f64) {
+        for root in self.roots.clone() {
+            self.update_mob(root, dt);
         }
         self.time += dt;
     }
@@ -558,6 +832,8 @@ impl Stage {
                             submobjects: entry.submobjects.clone(),
                             parents: entry.parents.clone(),
                             updaters: entry.updaters.clone(),
+                            updating_suspended: entry.updating_suspended,
+                            tracker: entry.tracker,
                             pins: entry.pins,
                             pending_delete: entry.pending_delete,
                             uniforms: entry.uniforms,
@@ -584,6 +860,8 @@ impl Stage {
                     submobjects: e.submobjects.clone(),
                     parents: e.parents.clone(),
                     updaters: e.updaters.clone(),
+                    updating_suspended: e.updating_suspended,
+                    tracker: e.tracker,
                     pins: e.pins,
                     pending_delete: e.pending_delete,
                     uniforms: e.uniforms,

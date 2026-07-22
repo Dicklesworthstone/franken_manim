@@ -13,22 +13,31 @@
 //! `move_to`/`align_to`/`arrange`/…), and the typed [`Uniforms`] inventory
 //! (including the C-2/BN-07 and C-7 rulings).
 //!
-//! Still to land here: copy semantics beyond the arena core, and updaters/
-//! ValueTrackers/`.animate` (fm-yra).
+//! The dynamic-behavior surface (§8.6, fm-yra): insertion-ordered dt/non-dt
+//! updaters with suspend/resume and the C-5 once-only `call` fix
+//! ([`stage`]), ValueTrackers and `always_redraw`/`f_always` plus the C-6
+//! group-addition correction ([`dynamics`]), and the `.animate` builder
+//! with the Reference's real chaining rules ([`animate`]).
+//!
+//! Still to land here: copy semantics beyond the arena core (fm-ncq).
 #![forbid(unsafe_code)]
 
+pub mod animate;
 pub mod bbox;
+pub mod dynamics;
 pub mod mobject;
 pub mod positional;
 pub mod record;
 pub mod stage;
 pub mod uniforms;
 
+pub use animate::{AnimBuilder, AnimateArgs, AnimateError, BuiltAnimate, IntoAnimate};
 pub use bbox::BoundingBox;
+pub use dynamics::{Tracker, TrackerKind};
 pub use mobject::Mobject;
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
-pub use stage::{Entry, Mob, Snapshot, Stage, Updater};
+pub use stage::{Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
 pub use uniforms::{JointType, Uniforms};
 
 /// Errors from the mobject engine's ownership layer.

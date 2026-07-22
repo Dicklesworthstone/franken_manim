@@ -39,7 +39,7 @@ use crate::uniforms::Uniforms;
 /// literal point. Methods that accept "a mobject or a point" take
 /// `impl Into<PosTarget>`, so both `stage.move_to(a, b, ORIGIN)` and
 /// `stage.move_to(a, [1.0, 0.0, 0.0], ORIGIN)` read naturally.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PosTarget {
     /// Align against another mobject's bounding box.
     Mob(Mob),

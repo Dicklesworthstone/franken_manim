@@ -106,7 +106,7 @@ fn s6_copy_remapping() {
     let parent = stage.add(Mobject::new());
     let child = stage.add(square());
     stage.attach(parent, child).unwrap();
-    stage.add_updater(child, |_, _, _| {}, false).unwrap();
+    stage.add_updater(child, |_, _| {}, false).unwrap();
 
     let copy = stage.copy_family(parent).unwrap();
     let copy_children: Vec<Mob> = stage.get(copy).unwrap().submobjects().to_vec();
@@ -193,7 +193,7 @@ fn s9_updater_closures() {
     stage.add_to_scene(leader).unwrap();
 
     stage
-        .add_updater(
+        .add_dt_updater(
             follower,
             move |stage, me, dt| {
                 let target = stage.get(leader).unwrap().buffer.read(0, "point").unwrap();
@@ -233,7 +233,7 @@ fn s9_updater_closures() {
     let counter = std::rc::Rc::new(std::cell::Cell::new(0));
     let seen = std::rc::Rc::clone(&counter);
     stage
-        .add_updater(follower, move |_, _, _| seen.set(seen.get() + 1), true)
+        .add_updater(follower, move |_, _| seen.set(seen.get() + 1), true)
         .unwrap();
     assert_eq!(counter.get(), 1);
 }
