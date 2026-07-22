@@ -7,19 +7,29 @@
 //! lifetime scenarios are this crate's permanent regression suite
 //! (`tests/scenarios.rs`).
 //!
-//! Still to land here: the full RecordBuffer surface + lazy revisioned
-//! render mirrors (fm-cus), family/positional API + bounding boxes +
-//! uniforms (fm-jru), copy semantics beyond the arena core, and updaters/
+//! The family/positional API, bounding boxes, and the uniform inventory land
+//! here (fm-jru): [`BoundingBox`] with automatic subtree-signature
+//! invalidation, the positional surface on [`Stage`] (`shift`/`next_to`/
+//! `move_to`/`align_to`/`arrange`/…), and the typed [`Uniforms`] inventory
+//! (including the C-2/BN-07 and C-7 rulings).
+//!
+//! Still to land here: copy semantics beyond the arena core, and updaters/
 //! ValueTrackers/`.animate` (fm-yra).
 #![forbid(unsafe_code)]
 
+pub mod bbox;
 pub mod mobject;
+pub mod positional;
 pub mod record;
 pub mod stage;
+pub mod uniforms;
 
+pub use bbox::BoundingBox;
 pub use mobject::Mobject;
+pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
 pub use stage::{Entry, Mob, Snapshot, Stage, Updater};
+pub use uniforms::{JointType, Uniforms};
 
 /// Errors from the mobject engine's ownership layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

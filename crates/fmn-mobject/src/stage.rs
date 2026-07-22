@@ -26,8 +26,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::StageError;
+use crate::bbox::BboxCache;
 use crate::mobject::Mobject;
 use crate::record::RecordBuffer;
+use crate::uniforms::Uniforms;
 
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -37,6 +39,15 @@ pub struct Mob {
     stage_id: u64,
     index: u32,
     generation: u32,
+}
+
+impl Mob {
+    /// A stable per-handle bit pattern (slot index + generation) used to fold
+    /// structural identity into the bounding-box subtree signature. Not an
+    /// address and never serialized — an in-memory cache-keying aid only.
+    pub(crate) fn bits(self) -> u64 {
+        (u64::from(self.index) << 32) | u64::from(self.generation)
+    }
 }
 
 /// An updater closure: receives the stage, its own handle, and `dt`.
@@ -55,9 +66,16 @@ pub struct Entry {
     updaters: Vec<Updater>,
     pins: usize,
     pending_delete: bool,
+    /// Per-object typed uniform state (§8.4): scene code reads and writes this
+    /// directly; Lumen's StyleTable synchronizes from it.
+    uniforms: Uniforms,
     /// Cached family flattening (§1.1 API surface), invalidated on any
     /// structural change in the subtree.
     family_cache: RefCell<Option<Vec<Mob>>>,
+    /// Lazily recomputed bounding box, keyed by a subtree signature so any
+    /// point write or structural change invalidates it automatically, through
+    /// any channel (fm-jru).
+    bbox: RefCell<BboxCache>,
 }
 
 impl Entry {
@@ -69,8 +87,26 @@ impl Entry {
             updaters: Vec::new(),
             pins: 0,
             pending_delete: false,
+            uniforms: Uniforms::default(),
             family_cache: RefCell::new(None),
+            bbox: RefCell::new(BboxCache::default()),
         }
+    }
+
+    /// The per-object uniform inventory (read access — §8.4 API surface).
+    #[must_use]
+    pub fn uniforms(&self) -> &Uniforms {
+        &self.uniforms
+    }
+
+    /// Mutable access to the uniform inventory (scene code writes
+    /// `mobject.uniforms` directly).
+    pub fn uniforms_mut(&mut self) -> &mut Uniforms {
+        &mut self.uniforms
+    }
+
+    pub(crate) fn bbox_cell(&self) -> &RefCell<BboxCache> {
+        &self.bbox
     }
 
     /// Direct children, in insertion order.
@@ -112,6 +148,7 @@ struct SnapshotEntry {
     updaters: Vec<Updater>,
     pins: usize,
     pending_delete: bool,
+    uniforms: Uniforms,
 }
 
 /// The arena.
@@ -417,7 +454,9 @@ impl Stage {
                 updaters: entry.updaters.clone(),       // by reference
                 pins: 0,
                 pending_delete: false,
+                uniforms: entry.uniforms, // copy semantics: independent state
                 family_cache: RefCell::new(None),
+                bbox: RefCell::new(BboxCache::default()),
             };
             let new = self.alloc(new_entry);
             map.insert(old, new);
@@ -521,6 +560,7 @@ impl Stage {
                             updaters: entry.updaters.clone(),
                             pins: entry.pins,
                             pending_delete: entry.pending_delete,
+                            uniforms: entry.uniforms,
                         }),
                     )
                 })
@@ -546,7 +586,9 @@ impl Stage {
                     updaters: e.updaters.clone(),
                     pins: e.pins,
                     pending_delete: e.pending_delete,
+                    uniforms: e.uniforms,
                     family_cache: RefCell::new(None),
+                    bbox: RefCell::new(BboxCache::default()),
                 }),
             })
             .collect();
