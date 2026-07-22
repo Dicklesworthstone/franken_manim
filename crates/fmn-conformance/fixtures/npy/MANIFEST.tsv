@@ -1,0 +1,8 @@
+# fmn npy fixture manifest v1
+# reference: 3b1b/manim @ 6199a00d4c1b1127ebe45cb629c3f22538b10e13
+# generator: scripts/gen_npy_fixtures.py (numpy 2.5.1)
+# columns: file	dtype	shape	sha256	formula
+arc_quarter_n4.npy	<f8	9x3	5d1019d7270ec7e7576d0f4d7ac968a5185134793075be689c13fbcbff5e2c29	quadratic_bezier_points_for_arc(TAU/4, n_components=4)
+arc_full_n8.npy	<f8	17x3	33ff40c203ecf68d1051ae1323a32d7eff864cbbd33af613344efa0548fae517	quadratic_bezier_points_for_arc(TAU, n_components=8)
+arc_neg_third_n2.npy	<f8	5x3	7f4b1061ed524e9f50c7c9d3d40415200600132611eb12eb285238f053e4e0ea	quadratic_bezier_points_for_arc(-TAU/3, n_components=2)
+partial_quad.npy	<f8	3x3	acdf740923ae14f4f8a6ac7b161be06e7b6d023a8376ea205d38205f05cb7a1f	partial_quadratic_bezier_points(PARTIAL_QUAD, 0.25, 0.75)

@@ -135,3 +135,8 @@ __pycache__/
 
 # Local Reference checkout for fixture generation (never committed)
 scripts/manim_ref/
+
+# Look Gallery Reference captures: private fixtures per §15.3 — kept on disk
+# and in the capture archive, recorded in docs/look_gallery/CAPTURE_INVENTORY.md,
+# never committed.
+/gallery/reference_captures/

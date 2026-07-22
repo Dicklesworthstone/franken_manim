@@ -1,0 +1,3 @@
+# fmn-golden-lock v1 suite=self_goldens key=linux-x86_64
+geom_lifecycle.v1	1316	f0e73e89cc16b0eb7fb5aab97def9bb69b126371ef790a4b320dd1d504a061f3
+stage_lifecycle.v1	325	3ff84b3b17e76407c20967c79cd3c69fb8026f645b8d8024bbebb02e3e6d364b
