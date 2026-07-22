@@ -243,6 +243,9 @@ pub enum AnimError {
     PathArcUnsupported,
     /// The `.animate` build failed (stale handle, chaining-rule violation).
     Builder(AnimateError),
+    /// The segment's run time was refused by the clock (non-finite, or
+    /// beyond the frame counter's range).
+    Clock(crate::clock::ClockError),
 }
 
 impl std::fmt::Display for AnimError {
@@ -263,6 +266,7 @@ impl std::fmt::Display for AnimError {
                  not yet available on built .animate chains"
             ),
             Self::Builder(e) => write!(f, "animate build failed: {e}"),
+            Self::Clock(e) => write!(f, "segment refused by the clock: {e}"),
         }
     }
 }
@@ -271,6 +275,7 @@ impl std::error::Error for AnimError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Builder(e) => Some(e),
+            Self::Clock(e) => Some(e),
             _ => None,
         }
     }

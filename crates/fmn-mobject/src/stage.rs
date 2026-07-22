@@ -869,14 +869,17 @@ impl Stage {
         }
     }
 
-    /// Run every rooted family's updaters (child-first, insertion order,
-    /// suspension-pruned), then advance time. (The six-step frame order is
-    /// Choreo's; the arena provides the execution slot.)
+    /// The scene-updater step of the frame order (§9.3 steps 3–4): time
+    /// advances FIRST (the Reference's `increment_time` precedes
+    /// `update_mobjects`, so an updater reading scene time observes the
+    /// post-advance value), then every rooted family's updaters run
+    /// (child-first, insertion order, suspension-pruned). The full
+    /// six-step order is Choreo's; the arena provides the execution slot.
     pub fn update(&mut self, dt: f64) {
+        self.time += dt;
         for root in self.roots.clone() {
             self.update_mob(root, dt);
         }
-        self.time += dt;
     }
 
     // ---------------------------------------------------------- snapshots

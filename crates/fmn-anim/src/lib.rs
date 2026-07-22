@@ -6,14 +6,18 @@
 //! fm-67a): the constructor surface, the `begin → interpolate(alpha) →
 //! finish` lifecycle, the one normalized-alpha pipeline (`time_span` →
 //! lag → rate), and the typed [`prepare_animation`] boundary shared with
-//! fmn-mobject's `.animate` builder. Still to land: the six-step frame
-//! order + FramePacket (fm-x79), the five mechanism families (fm-cye),
-//! composition and timeline algebra (fm-hfe), segment purity
-//! classification.
+//! fmn-mobject's `.animate` builder — and the six-step frame order with
+//! the [`FramePacket`] freeze (§9.3, D-19, fm-x79): [`play_segment`] /
+//! [`wait_segment`] drive the load-bearing order exactly (BN-10 corrects
+//! the Reference's skip-mode double-dt), and capture freezes an immutable
+//! CoW packet with derivable keyed RNG forks. Still to land: the five
+//! mechanism families (fm-cye), composition and timeline algebra (fm-hfe),
+//! segment purity classification (fm-3xk).
 #![forbid(unsafe_code)]
 
 pub mod animation;
 pub mod clock;
+pub mod frame;
 
 pub use animation::{
     AnimConfig, AnimError, AnimState, Animation, DEFAULT_ANIMATION_LAG_RATIO,
@@ -21,3 +25,4 @@ pub use animation::{
     sub_alpha, time_spanned_alpha,
 };
 pub use clock::{ClockError, FrameSample, FrameSegment, RationalFrameClock, RationalTime};
+pub use frame::{FramePacket, play_segment, wait_segment};
