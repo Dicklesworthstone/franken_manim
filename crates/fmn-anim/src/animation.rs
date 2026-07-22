@@ -246,6 +246,10 @@ pub enum AnimError {
     /// The segment's run time was refused by the clock (non-finite, or
     /// beyond the frame counter's range).
     Clock(crate::clock::ClockError),
+    /// Frame reconstruction was asked of a stateful (or skipped) segment —
+    /// only pure segments carry a begin-state snapshot to reconstruct from
+    /// (§9.5).
+    SegmentNotPure,
 }
 
 impl std::fmt::Display for AnimError {
@@ -267,6 +271,10 @@ impl std::fmt::Display for AnimError {
             ),
             Self::Builder(e) => write!(f, "animate build failed: {e}"),
             Self::Clock(e) => write!(f, "segment refused by the clock: {e}"),
+            Self::SegmentNotPure => write!(
+                f,
+                "frame reconstruction requires a pure, unskipped segment's begin state"
+            ),
         }
     }
 }
@@ -400,6 +408,24 @@ impl AnimState {
     pub fn families(&self) -> &[Vec<Mob>] {
         &self.families
     }
+}
+
+// -------------------------------------------------------------- signature
+
+/// An animation's declared effect signature — §9.5's purity vocabulary
+/// (shared with the §13.4 effect model). Membership in `Pure` is a closed
+/// allowlist: only animations whose every interpolation provably writes
+/// state as a function of the begin snapshot and alpha alone declare it.
+/// The default is [`AnimationSignature::Unclassified`], and the
+/// conservative rule (R20) demotes unclassified animations' segments to
+/// stateful — misclassification would be a correctness bug, so unknown
+/// always means impure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationSignature {
+    /// Provably pure interpolation (allowlist member).
+    Pure,
+    /// No declaration — conservatively treated as effectful.
+    Unclassified,
 }
 
 // ------------------------------------------------------------------ trait
@@ -592,6 +618,14 @@ pub trait Animation {
     fn is_remover(&self) -> bool {
         self.state().config.remover
     }
+
+    /// The declared effect signature (§9.5). Default: unclassified —
+    /// which the segment-purity classifier conservatively demotes (R20).
+    /// Override to [`AnimationSignature::Pure`] only for animations whose
+    /// interpolation is provably a function of (begin snapshot, alpha).
+    fn effect_signature(&self) -> AnimationSignature {
+        AnimationSignature::Unclassified
+    }
 }
 
 // ------------------------------------------------------- MethodAnimation
@@ -638,6 +672,12 @@ impl Animation for MethodAnimation {
 
     fn state_mut(&mut self) -> &mut AnimState {
         &mut self.state
+    }
+
+    /// Allowlist member: the interpolation below writes records as a pure
+    /// function of the frozen start/target pair and alpha.
+    fn effect_signature(&self) -> AnimationSignature {
+        AnimationSignature::Pure
     }
 
     /// Verify the by-construction alignment still holds (family shape and

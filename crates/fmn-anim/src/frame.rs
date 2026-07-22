@@ -50,6 +50,7 @@ use fmn_mobject::{Mob, Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation};
 use crate::clock::{FrameSample, RationalFrameClock, RationalTime};
+use crate::purity::{SegmentKind, SegmentReport, classify_play, classify_wait};
 
 /// The immutable frame boundary (§9.3 step 5): everything after capture
 /// consumes only this. Cheap to hold several in flight (CoW snapshot
@@ -219,14 +220,19 @@ fn finish_animations(stage: &mut Stage, animations: &mut [Box<dyn Animation>]) {
     update_scene_mobjects(stage, 0.0);
 }
 
-/// One `play()` segment under the six-step frame order: begin → the
-/// per-sample steps over the §9.2 progression (or the single skip step) →
-/// finish. Emits one [`FramePacket`] per sample in frame order; emits
-/// nothing under skip.
+/// One `play()` segment under the six-step frame order: begin → automatic
+/// purity classification (§9.5) → the per-sample steps over the §9.2
+/// progression (or the single skip step) → finish. Emits one
+/// [`FramePacket`] per sample in frame order (nothing under skip) and
+/// returns the segment's [`SegmentReport`] — the journal record, carrying
+/// the begin-state snapshot when the segment classified pure.
 ///
 /// The play-level `run_time`/`rate_func`/`lag_ratio` overrides and the
 /// pre/post-play scaffolding (writer, window) are the scene runtime's
 /// (fm-5xm) — it calls `update_rate_info` before handing animations here.
+/// Frame-parallel dispatch of pure segments is fmn-runtime's (fm-3df);
+/// this driver always executes serially and the report is what makes the
+/// parallel path legal.
 ///
 /// # Errors
 /// [`AnimError`] from `begin` (stale handles, hollow `time_span`) or a
@@ -238,7 +244,7 @@ pub fn play_segment(
     animations: &mut [Box<dyn Animation>],
     skip: bool,
     emit: &mut dyn FnMut(FramePacket),
-) -> Result<(), AnimError> {
+) -> Result<SegmentReport, AnimError> {
     begin_animations(stage, animations)?;
     // The Reference's np.max over get_run_time (begin already widened each
     // animation's own run_time in place).
@@ -247,6 +253,9 @@ pub fn play_segment(
         .map(|a| a.get_run_time())
         .fold(f64::NEG_INFINITY, f64::max);
     let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
+    let purity = classify_play(stage, animations);
+    let base_frame = clock.now().frames();
+    let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
     if skip {
         // The whole segment in one step: one big dt, no capture, no emit.
         if let Some(sample) = segment.skip_sample() {
@@ -271,7 +280,14 @@ pub fn play_segment(
         }
     }
     finish_animations(stage, animations);
-    Ok(())
+    Ok(SegmentReport {
+        kind: SegmentKind::Play,
+        purity,
+        begin_state,
+        base_frame,
+        n_frames: segment.n_frames(),
+        run_time,
+    })
 }
 
 /// The Reference's `wait` / `wait_until`: an initial scene-updater pass at
@@ -279,7 +295,9 @@ pub fn play_segment(
 /// is checked **after** each frame's emit (the frame where it turns true
 /// is emitted, then the wait ends) and forces per-frame stepping even
 /// under skip (the Reference's `override_skip_animations`) — capture stays
-/// off while skipping.
+/// off while skipping. Returns the segment's [`SegmentReport`]; a stop
+/// condition demotes to stateful by vocabulary (its callback reads
+/// per-frame state and decides the segment's length).
 ///
 /// # Errors
 /// [`AnimError::Clock`] for a non-finite or oversized duration.
@@ -291,9 +309,20 @@ pub fn wait_segment(
     mut stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
     skip: bool,
     emit: &mut dyn FnMut(FramePacket),
-) -> Result<(), AnimError> {
+) -> Result<SegmentReport, AnimError> {
     update_scene_mobjects(stage, 0.0);
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
+    let purity = classify_wait(stage, stop_condition.is_some());
+    let base_frame = clock.now().frames();
+    let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
+    let report = SegmentReport {
+        kind: SegmentKind::Wait,
+        purity,
+        begin_state,
+        base_frame,
+        n_frames: segment.n_frames(),
+        run_time: duration,
+    };
     if skip && stop_condition.is_none() {
         if let Some(sample) = segment.skip_sample() {
             let dt = segment.end_time().to_f64();
@@ -301,7 +330,7 @@ pub fn wait_segment(
             stage.update(dt);
             let _ = sample; // no capture, no emit under skip
         }
-        return Ok(());
+        return Ok(report);
     }
     let dt = clock.dt().to_f64();
     for sample in segment.samples() {
@@ -316,5 +345,5 @@ pub fn wait_segment(
             break;
         }
     }
-    Ok(())
+    Ok(report)
 }

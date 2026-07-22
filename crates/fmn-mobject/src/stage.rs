@@ -707,6 +707,26 @@ impl Stage {
             .any(|m| self.get(*m).is_some_and(|e| !e.updaters.is_empty()))
     }
 
+    /// `(non_dt, dt)` updater counts across `mob`'s whole family — the
+    /// §9.5 purity classifier's probe (a dt-updater and a non-dt updater
+    /// demote a segment for different recorded reasons).
+    #[must_use]
+    pub fn family_updater_kinds(&self, mob: Mob) -> (usize, usize) {
+        let mut non_dt = 0;
+        let mut dt = 0;
+        for member in self.family(mob) {
+            if let Some(entry) = self.get(member) {
+                for slot in &entry.updaters {
+                    match slot.func {
+                        UpdaterFn::NonDt(_) => non_dt += 1,
+                        UpdaterFn::Dt(_) => dt += 1,
+                    }
+                }
+            }
+        }
+        (non_dt, dt)
+    }
+
     /// Whether updating is suspended on `mob` itself.
     #[must_use]
     pub fn is_updating_suspended(&self, mob: Mob) -> bool {
