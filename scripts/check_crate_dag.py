@@ -54,13 +54,23 @@ def main() -> int:
     )
     workspace_ids = set(meta["workspace_members"])
     actual: dict[str, set[str]] = {}
+    spikes: set[str] = set()
     for pkg in meta["packages"]:
         if pkg["id"] not in workspace_ids:
             continue
         deps = {d["name"] for d in pkg["dependencies"] if d["name"].startswith("fmn-")}
+        # G0 spikes (spikes/, fmn-spike-*) are sanctioned prototype crates
+        # outside the §19 map (§20.1). They are exempt from the map itself,
+        # but no §19 crate may ever depend on one (checked below).
+        if pkg["name"].startswith("fmn-spike-"):
+            spikes.add(pkg["name"])
+            continue
         actual[pkg["name"]] = deps
 
     errors: list[str] = []
+    for name, deps in sorted(actual.items()):
+        for dep in sorted(deps & spikes):
+            errors.append(f"{name}: production crate depends on spike {dep}")
     for missing in EXPECTED.keys() - actual.keys():
         errors.append(f"crate missing from workspace: {missing}")
     for extra in actual.keys() - EXPECTED.keys():
