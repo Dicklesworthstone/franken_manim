@@ -180,6 +180,7 @@ dependencies = [
  "fmn-anim",
  "fmn-config",
  "fmn-core",
+ "fmn-hash",
  "fmn-mobject",
  "fmn-platform",
  "fmn-render",
