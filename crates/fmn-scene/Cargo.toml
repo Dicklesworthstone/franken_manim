@@ -9,6 +9,7 @@ description = "Proscenium"
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true
+fmn-hash.workspace = true
 fmn-platform.workspace = true
 fmn-mobject.workspace = true
 fmn-anim.workspace = true
