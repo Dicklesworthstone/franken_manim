@@ -24,6 +24,7 @@ members = [
     "crates/fmn-conformance",
     "crates/fmn-python",
     "spikes/g0-1-object-model",
+    "spikes/g0-3-fmd-math",
 ]
 
 [workspace.package]

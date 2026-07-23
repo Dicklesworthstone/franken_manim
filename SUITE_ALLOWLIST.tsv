@@ -36,6 +36,7 @@ fmn-cli	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	fmn CLI	fm	wi
 fmn-conformance	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Gauntlet	fm	with-crate
 fmn-python	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	expansion	workspace	manimlib bridge (sole non-forbid crate)	fm	with-crate
 fmn-spike-object-model	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	G0-1 spike (publish=false)	fm	with-crate
+g0-3-fmd-math	0.0.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	G0-3 spike (publish=false)	fm	with-crate
 # --- pre-authorized, not yet consumed (D1); checksum filled at consumption ---
 fmd-font	0.1.0	git+franken_markdown@SUITE.lock	-	bundled-faces	MIT+rider	no	no	no	no	forbid	runtime	Scribe's font subsystem (§11.1): sfnt reader + glyf outline decoder + bundled OFL faces; rev must equal the SUITE.lock franken_markdown pin (governed_closure enforces)	fm	suite-lock-ritual
 pyo3	TBD	crates-io	TBD	extension-module	MIT/Apache-2.0	yes	yes	python	no	expansion	pending	fmn-python only; the one FFI gateway	fm	deliberate+gauntlet

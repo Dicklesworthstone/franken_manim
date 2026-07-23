@@ -230,3 +230,10 @@ dependencies = [
  "fmn-geom",
  "fmn-mobject",
 ]
+
+[[package]]
+name = "g0-3-fmd-math"
+version = "0.0.0"
+dependencies = [
+ "fmd-font",
+]
