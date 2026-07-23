@@ -34,6 +34,7 @@ asupersync	e464a484cb65c1a55be0d9c925e6e9c20318edcb	batch farms + scheduler lab;
 [reference]
 # The design oracle — never a build input.
 3b1b/manim	6199a00d4c1b1127ebe45cb629c3f22538b10e13	checked out (gitignored) at scripts/manim_ref for fixture generation
+3b1b/videos	e317d6c5eaa8370a2deb4d148c246b0d0e9fbe6f	checked out (gitignored) at scripts/videos_ref; the G0-4 corpus-harvest source and the coverage-ratchet denominator's pin (fm-or4, §11.5)
 
 [target-features]
 # Certified SIMD build tiers (§17.3, D-15). The certified engine's scalar

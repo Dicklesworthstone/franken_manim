@@ -136,6 +136,16 @@ __pycache__/
 # Local Reference checkout for fixture generation (never committed)
 scripts/manim_ref/
 
+# Local 3b1b/videos checkout for the G0-4 corpus harvest (never committed;
+# pin recorded in SUITE.lock [reference])
+scripts/videos_ref/
+
+# The harvested TeX-string corpus: 3b1b-authored strings are private
+# fixtures under the CC BY-NC-SA fixture policy (§15.3). The committed,
+# publishable artifacts live in docs/g0/g0-4-corpus/ (hashes + counts +
+# construct names, never the strings).
+/corpus/
+
 # Look Gallery Reference captures: private fixtures per §15.3 — kept on disk
 # and in the capture archive, recorded in docs/look_gallery/CAPTURE_INVENTORY.md,
 # never committed.
