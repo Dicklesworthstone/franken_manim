@@ -32,10 +32,13 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dicklesworthstone/franken_manim"
 
-# The governed closure (D1): workspace-internal crates only. FrankenSuite
-# foundations (fnp, fsci, fmd-font, fmd-math, fnx, fp, ft, asupersync) enter
-# here as they are consumed, pinned via SUITE.lock; nothing else does.
+# The governed closure (D1): workspace-internal crates plus consumed
+# FrankenSuite foundations (fnp, fsci, fmd-font, fmd-math, fnx, fp, ft,
+# asupersync), each entering as a git dependency whose rev MUST equal its
+# repo's SUITE.lock pin (governed_closure.rs enforces the equality); nothing
+# else enters.
 [workspace.dependencies]
+fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "d7cda47985cfef3eb6d46570cfea9b2d820365f0", features = ["bundled-faces"] }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
 fmn-hash = { path = "crates/fmn-hash" }

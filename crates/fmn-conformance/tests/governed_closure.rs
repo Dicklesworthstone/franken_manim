@@ -93,6 +93,59 @@ fn stale_consumed_rows_are_caught() {
 }
 
 #[test]
+fn git_dependencies_ride_their_suite_lock_pins() {
+    // ADR-0004: every foundation crate consumed as a git dependency must
+    // resolve to exactly the commit its repo's SUITE.lock row pins — the
+    // lock is the single authority, and a drifted rev is a closure
+    // violation even if the allowlist row matches.
+    let suite_lock = repo_file("SUITE.lock");
+    let pin_for = |repo: &str| -> String {
+        suite_lock
+            .lines()
+            .find(|l| l.starts_with(&format!("{repo}\t")))
+            .and_then(|l| l.split('\t').nth(1))
+            .unwrap_or_else(|| panic!("SUITE.lock must pin {repo}"))
+            .to_string()
+    };
+    let cargo_lock = repo_file("Cargo.lock");
+    // (git-dep package name, owning repo in SUITE.lock)
+    let git_deps = [("fmd-font", "franken_markdown")];
+    for (pkg, repo) in git_deps {
+        let pin = pin_for(repo);
+        let mut found = false;
+        let mut lines = cargo_lock.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() == format!("name = \"{pkg}\"") {
+                // The package's source line follows within its block.
+                for follow in lines.by_ref() {
+                    if follow.starts_with("[[package]]") {
+                        break;
+                    }
+                    if let Some(source) = follow.trim().strip_prefix("source = \"") {
+                        assert!(
+                            source.starts_with("git+"),
+                            "{pkg}: expected a git source, got {source}"
+                        );
+                        let resolved = source
+                            .split('#')
+                            .nth(1)
+                            .map(|s| s.trim_end_matches('"'))
+                            .unwrap_or("");
+                        assert_eq!(
+                            resolved, pin,
+                            "{pkg}: Cargo.lock resolves {resolved} but SUITE.lock pins {repo} at {pin} — run the §6 upgrade ritual"
+                        );
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(found, "{pkg} not found in Cargo.lock with a source line");
+    }
+}
+
+#[test]
 fn suite_lock_parses_and_matches_the_pinned_toolchain() {
     let suite_lock = repo_file("SUITE.lock");
     // The rustc pin must equal rust-toolchain.toml's channel — one truth.

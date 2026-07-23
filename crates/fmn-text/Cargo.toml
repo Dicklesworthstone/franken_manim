@@ -10,6 +10,9 @@ description = "Scribe I"
 fmn-core.workspace = true
 fmn-geom.workspace = true
 fmn-mobject.workspace = true
+# The typography foundation (§11.1): sfnt reader, glyf outline decoder, and
+# the bundled OFL faces — pinned to the SUITE.lock franken_markdown rev.
+fmd-font.workspace = true
 
 [lints]
 workspace = true

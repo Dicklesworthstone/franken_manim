@@ -3,6 +3,11 @@
 version = 4
 
 [[package]]
+name = "fmd-font"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=d7cda47985cfef3eb6d46570cfea9b2d820365f0#d7cda47985cfef3eb6d46570cfea9b2d820365f0"
+
+[[package]]
 name = "fmn-anim"
 version = "0.1.0"
 dependencies = [
@@ -220,6 +225,7 @@ dependencies = [
 name = "fmn-text"
 version = "0.1.0"
 dependencies = [
+ "fmd-font",
  "fmn-core",
  "fmn-geom",
  "fmn-mobject",
