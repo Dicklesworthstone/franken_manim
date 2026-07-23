@@ -647,9 +647,9 @@ pub fn deflate(data: &[u8], level: CompressionLevel) -> Vec<u8> {
     deflate_segment(&[], data, level, true)
 }
 
-/// Compress `data` as a zlib stream (RFC 1950).
+/// The two-byte zlib header (RFC 1950) for `level`.
 #[must_use]
-pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
+pub fn zlib_header(level: CompressionLevel) -> [u8; 2] {
     let flevel: u8 = match level {
         CompressionLevel::Fast => 0,
         CompressionLevel::Default => 2,
@@ -661,7 +661,13 @@ pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
     if check != 0 {
         flg += (31 - check) as u8;
     }
-    let mut out = vec![cmf, flg];
+    [cmf, flg]
+}
+
+/// Compress `data` as a zlib stream (RFC 1950).
+#[must_use]
+pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
+    let mut out = zlib_header(level).to_vec();
     out.extend_from_slice(&deflate(data, level));
     out.extend_from_slice(&adler32(data).to_be_bytes());
     out

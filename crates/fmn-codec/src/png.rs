@@ -738,6 +738,12 @@ fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], body: &[u8]) {
 /// bug, not an input condition.
 #[must_use]
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], level: CompressionLevel) -> Vec<u8> {
+    let filtered = filtered_stream(width, height, rgba);
+    assemble_png(width, height, &zlib_compress(&filtered, level))
+}
+
+/// Min-SAD per-row filter selection into the filtered byte stream.
+fn filtered_stream(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     assert_eq!(
         rgba.len(),
         width as usize * height as usize * 4,
@@ -772,7 +778,10 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], level: CompressionLeve
         filtered.push(best_filter);
         filtered.extend_from_slice(&best);
     }
+    filtered
+}
 
+fn assemble_png(width: u32, height: u32, idat: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&SIGNATURE);
     let mut ihdr = Vec::with_capacity(13);
@@ -782,7 +791,90 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], level: CompressionLeve
     write_chunk(&mut out, b"IHDR", &ihdr);
     write_chunk(&mut out, b"sRGB", &[0]); // perceptual
     write_chunk(&mut out, b"gAMA", &45455u32.to_be_bytes());
-    write_chunk(&mut out, b"IDAT", &zlib_compress(&filtered, level));
+    write_chunk(&mut out, b"IDAT", idat);
     write_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// The fixed DEFLATE segment size of the canonical sequence form —
+/// boundaries are a function of content length alone, never of thread
+/// count (§14.2's load-bearing determinism property).
+const SEQUENCE_SEGMENT_BYTES: usize = 1 << 18;
+
+/// Encode one frame in the canonical **segmented** form: the filtered
+/// stream is compressed as fixed-boundary DEFLATE segments (the
+/// W8CODEC interlock), so the byte-identical file can be produced
+/// serially or by parallel workers compressing segments independently.
+///
+/// # Panics
+/// As [`encode_rgba8`].
+#[must_use]
+pub fn encode_rgba8_segmented(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    level: CompressionLevel,
+) -> Vec<u8> {
+    let filtered = filtered_stream(width, height, rgba);
+    let mut idat = crate::deflate::zlib_header(level).to_vec();
+    let count = filtered.len().div_ceil(SEQUENCE_SEGMENT_BYTES).max(1);
+    for i in 0..count {
+        let start = i * SEQUENCE_SEGMENT_BYTES;
+        let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
+        idat.extend_from_slice(&crate::deflate::deflate_segment(
+            &filtered[..start],
+            &filtered[start..end],
+            level,
+            i + 1 == count,
+        ));
+    }
+    idat.extend_from_slice(&crate::checksum::adler32(&filtered).to_be_bytes());
+    assemble_png(width, height, &idat)
+}
+
+/// Encode a frame sequence in the canonical segmented form, frames
+/// fanned across `threads` workers — **bit-identical output at any
+/// thread count** (PG-5 covers these bytes under `certified`).
+///
+/// # Panics
+/// As [`encode_rgba8`], per frame.
+#[must_use]
+pub fn encode_png_sequence(
+    width: u32,
+    height: u32,
+    frames: &[&[u8]],
+    level: CompressionLevel,
+    threads: usize,
+) -> Vec<Vec<u8>> {
+    let workers = threads.max(1).min(frames.len().max(1));
+    if workers <= 1 {
+        return frames
+            .iter()
+            .map(|frame| encode_rgba8_segmented(width, height, frame, level))
+            .collect();
+    }
+    let mut out: Vec<Vec<u8>> = vec![Vec::new(); frames.len()];
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            handles.push(scope.spawn(move || {
+                let mut produced = Vec::new();
+                let mut index = worker;
+                while index < frames.len() {
+                    produced.push((
+                        index,
+                        encode_rgba8_segmented(width, height, frames[index], level),
+                    ));
+                    index += workers;
+                }
+                produced
+            }));
+        }
+        for handle in handles {
+            for (index, bytes) in handle.join().expect("png sequence worker panicked") {
+                out[index] = bytes;
+            }
+        }
+    });
     out
 }
