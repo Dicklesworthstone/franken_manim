@@ -3,8 +3,8 @@
 //! ems on a y-up baseline. Tests may use `unwrap`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use g0_3_fmd_math::metrics::CM;
-use g0_3_fmd_math::{Style, typeset};
+use fmn_spike_fmd_math::metrics::CM;
+use fmn_spike_fmd_math::{Style, typeset};
 
 const THETA: f64 = 0.04; // ξ8
 const AXIS: f64 = 0.25; // σ22
@@ -184,7 +184,7 @@ fn big_op_limits_display_vs_text() {
     // (∑ resolves through the Noto fallback face — multi-face layout.)
     assert!(matches!(
         d.glyphs.iter().find(|g| g.ch == '∑').unwrap().face,
-        g0_3_fmd_math::Face::NotoMath
+        fmn_spike_fmd_math::Face::NotoMath
     ));
 }
 
@@ -215,7 +215,7 @@ fn unsupported_constructs_error_precisely() {
     // The ratchet contract survives layout: named command, exact span.
     let err = typeset(r"\frac{1}{\oint x}", Style::Display).unwrap_err();
     match err {
-        g0_3_fmd_math::MathError::UnsupportedCommand { name, span } => {
+        fmn_spike_fmd_math::MathError::UnsupportedCommand { name, span } => {
             assert_eq!(name, "oint");
             assert_eq!(&r"\frac{1}{\oint x}"[span], r"\oint");
         }
@@ -228,7 +228,7 @@ fn spacing_table_binary_vs_unary_minus() {
     // "a-b": Bin with medium spaces. "(-b": the minus degrades to Ord.
     let bin = typeset(r"a-b", Style::Text).expect("binary");
     let una = typeset(r"(-b", Style::Text).expect("unary");
-    let gap = |l: &g0_3_fmd_math::Layout, from: char, to: char| {
+    let gap = |l: &fmn_spike_fmd_math::Layout, from: char, to: char| {
         let f = l.glyphs.iter().find(|g| g.ch == from).unwrap();
         let t = l.glyphs.iter().find(|g| g.ch == to).unwrap();
         t.x - f.x
@@ -248,7 +248,7 @@ fn script_styles_suppress_spacing() {
     let scripted = typeset(r"x^{a+b}", Style::Text).expect("scripted");
     let sup_a = scripted.glyphs.iter().find(|g| g.ch == 'a').unwrap();
     assert!((sup_a.size - 0.7).abs() < 1e-9);
-    let width_of = |l: &g0_3_fmd_math::Layout| {
+    let width_of = |l: &fmn_spike_fmd_math::Layout| {
         let a = l.glyphs.iter().find(|g| g.ch == 'a').unwrap();
         let b = l.glyphs.iter().find(|g| g.ch == 'b').unwrap();
         b.x - a.x

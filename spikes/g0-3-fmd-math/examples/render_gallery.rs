@@ -3,7 +3,7 @@
 //! same input per the fm-nh0 acceptance (the note records verdicts).
 
 use fmd_font::Font;
-use g0_3_fmd_math::{Style, typeset};
+use fmn_spike_fmd_math::{Style, typeset};
 
 fn main() {
     let cm = Font::parse(fmd_font::bundled::CM_REGULAR.to_vec()).expect("CM parses");

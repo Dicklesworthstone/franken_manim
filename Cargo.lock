@@ -192,6 +192,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmn-spike-fmd-math"
+version = "0.0.0"
+dependencies = [
+ "fmd-font",
+]
+
+[[package]]
 name = "fmn-spike-object-model"
 version = "0.1.0"
 dependencies = [
@@ -229,11 +236,4 @@ dependencies = [
  "fmn-core",
  "fmn-geom",
  "fmn-mobject",
-]
-
-[[package]]
-name = "g0-3-fmd-math"
-version = "0.0.0"
-dependencies = [
- "fmd-font",
 ]

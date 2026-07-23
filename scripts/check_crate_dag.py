@@ -23,7 +23,7 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-hash": {"fmn-core"},
     "fmn-config": {"fmn-core", "fmn-hash"},
     "fmn-platform": {"fmn-core"},
-    "fmn-frame": {"fmn-core"},
+    "fmn-frame": {"fmn-core", "fmn-dmath"},  # dmath: deterministic transfer functions (D-17, fm-a25)
     "fmn-codec": {"fmn-core", "fmn-frame", "fmn-hash"},
     "fmn-cache": {"fmn-core", "fmn-hash", "fmn-platform"},
     "fmn-geom": {"fmn-core", "fmn-dmath"},
@@ -33,7 +33,7 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},
     "fmn-library": {"fmn-core", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex"},
-    "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render"},
+    "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash"},  # hash: journal serialization + digests (§13.4, fm-y7u)
     "fmn-studio": {"fmn-core", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-render", "fmn-scene"},
     "fmn-output": {"fmn-core", "fmn-hash", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-cache"},
     "fmn-runtime": {"fmn-core", "fmn-platform"},
