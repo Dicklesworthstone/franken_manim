@@ -18,8 +18,10 @@
 pub mod checksum;
 pub mod deflate;
 pub mod inflate;
+pub mod jpeg;
 pub mod png;
 
 pub use deflate::{CompressionLevel, deflate as deflate_bytes, deflate_segment, zlib_compress};
 pub use inflate::{InflateError, inflate as inflate_bytes, zlib_decompress};
+pub use jpeg::{DecodedJpeg, JpegError, JpegLimits, decode as decode_jpeg};
 pub use png::{DecodedPng, PngError, PngLimits, decode as decode_png, encode_rgba8};
