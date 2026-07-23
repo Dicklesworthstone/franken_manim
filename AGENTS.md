@@ -194,9 +194,20 @@ CLI robot mode must be: stable versioned schema, deterministic where possible, e
 
 ---
 
+## Program Governance (R9) — read before claiming a bead
+
+The governance machinery lives in [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md); the two rules you touch every session:
+
+- **The activation check (GOVERNANCE.md §1).** At most **4 workstreams active** (≥1 bead `in_progress`) at once; G0 counts as one. Before claiming a bead in a workstream that has nothing in progress: `br list --status=in_progress`, count distinct workstreams by title prefix, and if the cap is reached, work an already-active workstream instead. Breaching governance halts new activation, never in-flight work.
+- **The handoff checklist (GOVERNANCE.md §4).** The checkable form of "Landing the Plane" below — a handoff violating it is not a handoff.
+
+Amendments to the plan's decision log (D-01…D-24), OQ resolutions, and policy rulings under standing rules land as **ADRs** (`docs/adr/NNNN-*.md`, template + worked examples in `docs/adr/`), with the plan trued up in the same commit. Upstream-bound primitives ride [`UPSTREAM_LEDGER.md`](UPSTREAM_LEDGER.md) under the §2.9 ritual (GOVERNANCE.md §6).
+
+---
+
 ## Session Completion ("Landing the Plane")
 
-Before finishing a work session you MUST:
+The checkable version of this list is `docs/GOVERNANCE.md` §4. Before finishing a work session you MUST:
 1. File beads issues for remaining work (anything needing follow-up).
 2. Run quality gates (if code changed) — tests, clippy, fmt, `ubs`.
 3. Update issue status — close finished work, update in-progress.
