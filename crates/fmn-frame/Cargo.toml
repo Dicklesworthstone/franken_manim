@@ -8,6 +8,7 @@ description = "Frame buffers, pixel formats (RGBA/RGBA16F/NV12/P010), and transf
 
 [dependencies]
 fmn-core.workspace = true
+fmn-dmath.workspace = true
 
 [lints]
 workspace = true
