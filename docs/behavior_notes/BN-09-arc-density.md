@@ -1,7 +1,9 @@
 # BN-09 — One arc-density rule
 
-**Status:** Draft (W2, fm-e3f). Consumed by the W7 geometry lineage (fm-oab)
-when Arc/Circle land.
+**Status:** Final. Drafted in W2 (fm-e3f) with the path model; applied
+across the geometry lineage in W7 (fm-oab), where `Arc`, `Circle`, `Dot`,
+`Ellipse`, the sectors, `ArcBetweenPoints`, and every `path_arc` line are
+built through the one rule.
 
 ## What changed
 
@@ -44,9 +46,43 @@ exactly as in the Reference.
 - Anything that consumed `quadratic_bezier_points_for_arc`'s fixed default
   of 8 regardless of angle now scales with the angle instead.
 
+## Worked examples
+
+| Construction | Reference | FrankenManim |
+|---|---|---|
+| `Circle()` | 16 components, 33 points | **same** |
+| `Arc(angle=TAU/4)` | 4 components, 9 points | **same** |
+| `Arc(angle=PI)` | 8, 17 | **same** |
+| `Arc(angle=1.7)` | 5, 11 | **same** |
+| `Arc(angle=0.13·TAU)` | `int(1.95)+1 = 2` | `ceil(2.08) = 3` — finer |
+| `path.add_arc_to(p, TAU/4)` | `ceil(2) = 2` | `4` — matches `Arc` |
+| `quadratic_bezier_points_for_arc(TAU/4)` | 8, regardless of angle | `4` — scales with angle |
+| `Arc(angle=TAU, n_components=3)` | 3 | **3** — explicit wins |
+
+The first four rows are the common cases, and they are unchanged: a
+`Circle`'s 33 points are still 33 points, so code that indexes them is
+unaffected. The rows that change are the ones where the Reference was
+*inconsistent with itself*.
+
+```python
+# Before and after, in FrankenManim:
+Circle().get_points().shape          # (33, 3) — as in the Reference
+Arc(angle=TAU / 4).get_points()      # 9 points — as in the Reference
+
+path = VMobject()
+path.start_new_path(ORIGIN)
+path.add_arc_to(RIGHT, TAU / 4)      # 9 points now, 5 in the Reference
+path.add_arc_to(UP, TAU / 4, n_components=2)   # 5 points, either engine
+```
+
 ## Evidence
 
 - `crates/fmn-geom/src/bezier.rs` (`arc_n_components`, unit tests).
+- `crates/fmn-library/src/arc.rs` (the lineage; `Arc::component_count`).
+- `crates/fmn-library/tests/geometry_parity.rs`
+  (`the_arc_density_rule_is_ours_and_never_coarser`, which asserts the
+  rule's value *and* that it is never coarser than the Reference's, over
+  the fixture corpus).
 - Reference sites: `manimlib/mobject/geometry.py` (`Arc.__init__`),
   `manimlib/mobject/types/vectorized_mobject.py` (`add_arc_to`),
   `manimlib/utils/bezier.py` (`quadratic_bezier_points_for_arc`), all at
