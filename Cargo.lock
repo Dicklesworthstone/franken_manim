@@ -68,6 +68,7 @@ dependencies = [
 name = "fmn-conformance"
 version = "0.1.0"
 dependencies = [
+ "fmd-math",
  "fmn-anim",
  "fmn-core",
  "fmn-geom",
