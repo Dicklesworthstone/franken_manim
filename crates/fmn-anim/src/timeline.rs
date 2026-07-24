@@ -32,6 +32,18 @@
 //!    is no honest shortcut. Checkpoints are CoW arena snapshots taken at
 //!    segment boundaries, so the cost of holding them is O(touched).
 //!
+//! **One consequence of authoring declaratively.** A timeline holds
+//! *prepared* animations, so an `.animate` chain freezes its target when the
+//! step is authored, not when the step runs. An imperative scene calling
+//! `play(mob.animate().shift(…))` prepares at play time and therefore
+//! captures whatever the previous segment left behind; the same two steps
+//! authored up front capture the state at authoring time. This is inherent
+//! to declaring a whole schedule before running it — it is also what lets
+//! [`Timeline::compile`] derive the frame schedule without a stage — and it
+//! is named here rather than papered over. Author a step against the state
+//! it should start from, or use [`Succession`](crate::Succession), whose
+//! members begin just in time precisely to chain off each other.
+//!
 //! **What serialization promises today.** [`TimelinePlan::to_bytes`] writes
 //! the schedule — fps, every segment's kind, run time, and frame range, and
 //! every label — in fmn-hash's canonical container (`FMNA/5`), so it
@@ -542,13 +554,7 @@ impl Timeline {
         clock.advance_frames(plan.segments[index].base_frame);
         let mut discard = |_: FramePacket| {};
         while index < target {
-            run_step(
-                &mut self.steps[index],
-                stage,
-                &mut clock,
-                rng,
-                &mut discard,
-            )?;
+            run_step(&mut self.steps[index], stage, &mut clock, rng, &mut discard)?;
             index += 1;
             self.checkpoints.insert(index, Rc::new(stage.snapshot()));
         }
@@ -617,7 +623,15 @@ fn seek_within(
             // Stateful: the frames *are* the state, so the replay is the
             // answer. The segment stays open — the caller may seek forward
             // again from here, or restore over it.
-            advance_play(stage, clock, rng, animations, &mut open, offset, &mut capture)?;
+            advance_play(
+                stage,
+                clock,
+                rng,
+                animations,
+                &mut open,
+                offset,
+                &mut capture,
+            )?;
             last.ok_or(AnimError::SeekOutOfRange {
                 frame: offset,
                 total: open.segment().n_frames(),
@@ -635,11 +649,7 @@ fn seek_within(
 
 /// The `n`th (1-based) sample of a segment of `run_time` on this clock's
 /// grid.
-fn nth_sample(
-    clock: &RationalFrameClock,
-    run_time: f64,
-    n: i64,
-) -> Result<FrameSample, AnimError> {
+fn nth_sample(clock: &RationalFrameClock, run_time: f64, n: i64) -> Result<FrameSample, AnimError> {
     let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
     segment
         .samples()

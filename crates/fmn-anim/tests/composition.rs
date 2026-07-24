@@ -168,7 +168,10 @@ fn ids_of<'a>(log: &Log, pick: impl Fn(&Event) -> Option<&'a str> + Copy) -> Vec
 }
 
 fn parse_list(field: &str) -> Vec<f64> {
-    field.split(',').map(|x| x.parse().expect("float")).collect()
+    field
+        .split(',')
+        .map(|x| x.parse().expect("float"))
+        .collect()
 }
 
 // -------------------------------------------------------- fixture corpora
@@ -386,7 +389,10 @@ fn lag_ratio_spreads_member_starts() {
     let starts: Vec<f64> = group.timings().iter().map(|i| i.start).collect();
     assert!((starts[1] - DEFAULT_LAGGED_START_LAG_RATIO).abs() <= TOL);
     assert!((starts[2] - 2.0 * DEFAULT_LAGGED_START_LAG_RATIO).abs() <= TOL);
-    assert_eq!(group.max_end_time(), 1.0 + 2.0 * DEFAULT_LAGGED_START_LAG_RATIO);
+    assert_eq!(
+        group.max_end_time(),
+        1.0 + 2.0 * DEFAULT_LAGGED_START_LAG_RATIO
+    );
 }
 
 #[test]
@@ -404,7 +410,11 @@ fn lagged_start_map_builds_one_animation_per_submobject() {
     .expect("map builds");
     assert_eq!(group.animations().len(), 4);
     assert_eq!(group.group(), parent, "the caller's group is animated");
-    assert_eq!(group.get_run_time(), 2.0, "the Reference's run_time default");
+    assert_eq!(
+        group.get_run_time(),
+        2.0,
+        "the Reference's run_time default"
+    );
 }
 
 // ------------------------------------------------- the divergences (BN-11)
@@ -508,7 +518,10 @@ fn nested_groups_compose_with_independent_rate_funcs() {
     let inner_a = alphas_of(&log, "a").last().copied().expect("a ran");
     let outer_c = alphas_of(&log, "c").last().copied().expect("c ran");
     assert!((outer_c - rate::smooth(0.25)).abs() <= TOL);
-    assert!((inner_a - 2.0 * outer_c).abs() <= TOL, "a spans the first half");
+    assert!(
+        (inner_a - 2.0 * outer_c).abs() <= TOL,
+        "a spans the first half"
+    );
 }
 
 #[test]

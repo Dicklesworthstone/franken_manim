@@ -316,7 +316,10 @@ impl std::fmt::Display for AnimError {
                 write!(f, "a composition needs at least one animation")
             }
             Self::SeekOutOfRange { frame, total } => {
-                write!(f, "seek to frame {frame} outside the schedule's 1..={total}")
+                write!(
+                    f,
+                    "seek to frame {frame} outside the schedule's 1..={total}"
+                )
             }
         }
     }

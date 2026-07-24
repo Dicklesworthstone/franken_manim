@@ -15,9 +15,15 @@
 //! against a closed effect vocabulary (unknown demotes — R20), reported
 //! for the replay journal, and pure segments carry their begin-state
 //! snapshot so [`reconstruct_pure_frame`] can rebuild any frame
-//! bit-identically from (snapshot, alpha, keyed RNG fork). Still to land:
-//! the five mechanism families (fm-cye), composition and timeline algebra
-//! (fm-hfe).
+//! bit-identically from (snapshot, alpha, keyed RNG fork) — the five
+//! mechanism families and the 80 classes they parameterize (fm-cye) — and
+//! the composition and timeline algebra (§9.4, fm-hfe): one interval model
+//! under [`AnimationGroup`] / [`Succession`] / [`lagged_start`] /
+//! [`lagged_start_map`], with the two Reference defects BN-11 names fixed,
+//! and the declarative [`Timeline`] (keyframes, labels, canonical
+//! serialization, and seek that lands on the same frame a play-through
+//! produced) compiling to those very primitives rather than a second
+//! engine.
 #![forbid(unsafe_code)]
 
 pub mod animation;
