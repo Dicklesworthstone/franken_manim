@@ -1,3 +1,4 @@
 # ratchet trend (fm-mol): one row per bless, keyed by franken_markdown rev
 # rev	rules	hash	uniq_total	occ_total	parse_uniq	parse_occ	layout_uniq	layout_occ
 5310d87a9db39e7e7c0ad7decacd883ab8c0b12a	1	a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc	9269	17711	9201	17636	9101	17519
+4e5066c62818dfce75ccd940a7a54f600e1fe6a8	1	a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc	9269	17711	9201	17636	9169	17601

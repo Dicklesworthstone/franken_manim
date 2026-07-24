@@ -5,12 +5,12 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `5310d87a9db3`.**
+**Computed against franken_markdown `4e5066c62818`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | **Parse** | 99.577 % | 99.266 % |
-| **Parse + layout** | 98.916 % | 98.188 % |
+| **Parse + layout** | 99.379 % | 98.921 % |
 
 ## Pending constructs (parse plane)
 
@@ -49,24 +49,18 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 
 | Construct | Occurrences blocked | Tracked at |
 |---|---|---|
-| `env:array` | 40 | franken_manim fm-kg9 |
-| `\underbrace` | 28 | franken_manim fm-kg9 |
 | `char:U+1D53C` | 16 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
 | `char:U+1D4AA` | 14 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `\overrightarrow` | 7 | franken_manim fm-kg9 |
 | `char:U+1D4A9` | 3 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `env:align*` | 3 | franken_manim fm-kg9 |
-| `env:cases` | 2 | franken_manim fm-kg9 |
-| `\overbrace` | 1 | franken_manim fm-kg9 |
 | `char:U+1D49E` | 1 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
 | `char:U+1D4AE` | 1 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `env:aligned` | 1 | franken_manim fm-kg9 |
 
 ## Trend (by franken_markdown rev)
 
 | Rev | Parse occ. % | Parse uniq. % | Layout occ. % | Layout uniq. % |
 |---|---|---|---|---|
 | `5310d87a9db3` | 99.577 | 99.266 | 98.916 | 98.188 |
+| `4e5066c62818` | 99.577 | 99.266 | 99.379 | 98.921 |
 
 ## How this is enforced
 

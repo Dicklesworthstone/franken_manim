@@ -167,13 +167,43 @@ fn typeset_text_handles_the_textext_contract() {
 }
 
 #[test]
-fn layout_pending_constructs_stay_named_through_the_pin() {
+fn the_kg9_frontier_lays_out_through_the_pin() {
+    // fm-kg9 crossed the extensions frontier: environments, stretchy
+    // constructions, drawn oversized delimiters, and macros all produce
+    // real layouts through the pin — while what remains outside the tier
+    // still refuses with its precise, tier-tagged name.
     let engine = fmd_math::Engine::bundled().unwrap();
+    let m = engine
+        .typeset(
+            r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+            Style::Display,
+        )
+        .unwrap();
+    // Four cell glyphs; the parens exceed the 1.25× ceiling for a 2×2
+    // grid, so they arrive as drawn paths.
+    assert_eq!(m.glyphs.len(), 4, "the four cells");
+    assert_eq!(m.paths.len(), 2, "two drawn parens");
+    let b = engine.typeset(r"\overbrace{x+y}", Style::Display).unwrap();
+    assert_eq!(b.paths.len(), 1, "the drawn brace band");
+    let deep = engine
+        .typeset(
+            r"\left(\frac{\frac{1}{2}}{\frac{3}{4}}\right)",
+            Style::Display,
+        )
+        .unwrap();
+    assert!(!deep.paths.is_empty(), "drawn delimiters past the ceiling");
+    let pack = fmd_math::MacroSet::pack("fmd-math/pack/default").unwrap();
+    let mac = engine
+        .typeset_with_macros(r"a \minus b", Style::Display, &pack)
+        .unwrap();
+    assert!(mac.glyphs.iter().any(|g| g.ch == '−'), "the pack's \\minus");
+
+    // The tier boundary still names itself.
     let err = engine
-        .typeset(r"\begin{matrix} a \end{matrix}", Style::Display)
+        .typeset(r"\substack{a \\ b}", Style::Display)
         .unwrap_err();
-    assert_eq!(err.unsupported_construct(), Some("env:matrix"));
-    assert!(err.to_string().contains("fm-kg9"));
+    assert_eq!(err.unsupported_construct(), Some(r"\substack"));
+    assert!(err.to_string().contains("tier T2"), "{err}");
 }
 
 #[test]

@@ -39,8 +39,8 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 # repo's SUITE.lock pin (governed_closure.rs enforces the equality); nothing
 # else enters.
 [workspace.dependencies]
-fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "5310d87a9db39e7e7c0ad7decacd883ab8c0b12a", features = ["bundled-faces"] }
-fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "5310d87a9db39e7e7c0ad7decacd883ab8c0b12a" }
+fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8", features = ["bundled-faces"] }
+fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8" }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
 fmn-hash = { path = "crates/fmn-hash" }
