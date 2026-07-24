@@ -410,9 +410,19 @@ impl Stage {
     pub fn add(&mut self, mobject: impl Into<Mobject>) -> Mob {
         let Mobject {
             buffer,
+            uniforms,
+            shape,
             submobjects,
         } = mobject.into();
-        let mob = self.alloc(Entry::from_data(buffer));
+        let mut entry = Entry::from_data(buffer);
+        entry.uniforms = uniforms;
+        // The tag describes the points that just arrived, so it is stamped
+        // against this buffer's current revision (crate::shape).
+        entry.shape = ShapeSlot {
+            tag: shape,
+            point_revision: entry.buffer.field_revision("point"),
+        };
+        let mob = self.alloc(entry);
         for child in submobjects {
             let child_mob = self.add(child);
             self.attach(mob, child_mob)

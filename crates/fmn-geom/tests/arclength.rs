@@ -71,6 +71,61 @@ fn line_and_degenerate_lengths_are_exact() {
 }
 
 #[test]
+fn near_straight_curves_do_not_cancel_to_zero() {
+    // The regression this guards: a segment sampled at two nearby points
+    // and scaled up (a tangent line, a trimmed dash, any zoom) has a
+    // handle that is the midpoint to within rounding. Its quadratic term
+    // is ~1e-33 of its linear one, and the general antiderivative's two
+    // terms — each ~1e16 — used to cancel to exactly zero. Now the
+    // near-straight case is detected relatively and integrated as the
+    // linear-speed curve it is.
+    let cases = [
+        (
+            p(1.099_550_882_214_647_8, 4.095_488_941_355_138),
+            p(-1.500_235_056_200_356, 2.598_454_180_763_514_6),
+            p(-4.100_020_994_615_36, 1.101_419_420_171_891_2),
+        ),
+        // Deliberately perturbed midpoints across several magnitudes.
+        (p(0.0, 0.0), p(500.0 + 1e-9, 1e-9), p(1000.0, 0.0)),
+        (p(0.0, 0.0), p(0.5, 1e-12), p(1.0, 0.0)),
+        (p(-1e6, 0.0), p(0.0, 1e-7), p(1e6, 0.0)),
+    ];
+    for (a0, h, a1) in cases {
+        let closed = quadratic_arc_length(a0, h, a1);
+        let numeric = simpson_length(a0, h, a1);
+        assert!(
+            closed > 0.0,
+            "near-straight curve reported zero length: {a0:?} {h:?} {a1:?}"
+        );
+        assert!(
+            (closed - numeric).abs() <= 1e-9 * numeric.max(1.0),
+            "closed {closed} vs numeric {numeric}"
+        );
+    }
+}
+
+#[test]
+fn the_near_straight_branch_meets_the_general_one() {
+    // Sweep the quadratic term down through the branch threshold: the
+    // reported length has to stay continuous across it, or a curve would
+    // change length as it is scaled.
+    let mut previous = f64::NAN;
+    for k in 4..24 {
+        let bend = 10f64.powi(-k);
+        let length = quadratic_arc_length(p(0.0, 0.0), p(0.5, bend), p(1.0, 0.0));
+        assert!(length >= 1.0 - 1e-12, "bend {bend}: length {length}");
+        if previous.is_finite() {
+            assert!(
+                (length - previous).abs() < 1e-3,
+                "discontinuity at bend {bend}: {previous} -> {length}"
+            );
+        }
+        previous = length;
+    }
+    assert!((previous - 1.0).abs() < 1e-12, "flat limit {previous}");
+}
+
+#[test]
 fn parabola_matches_analytic_formula() {
     // (0,0) h(1,1) (2,0) is y = x(2−x)/… as a Bézier: B(t) = (2t, 2t(1−t)).
     // Speed = 2√(1 + (1−2t)²·…) — use the standard parabola arc-length

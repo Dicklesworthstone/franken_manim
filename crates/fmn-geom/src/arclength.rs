@@ -57,9 +57,28 @@ pub fn quadratic_arc_length(a0: Vec3, h: Vec3, a1: Vec3) -> f64 {
     let b = 2.0 * space_ops::dot(u, v);
     let c = space_ops::dot(v, v);
 
-    if a == 0.0 {
-        // Constant derivative: a straight segment (or a point).
-        return c.sqrt();
+    // Near-straight curves: the general antiderivative below divides by
+    // `a`, so as the quadratic term vanishes its two terms grow like
+    // `|b|·S/(4a)` and cancel to the answer — at `a/c ≈ 1e-33` (a line
+    // whose handle is the midpoint to within rounding, which is what
+    // scaling a short segment up produces) that cancellation loses every
+    // significant digit and returns zero. The test is therefore relative,
+    // not `a == 0.0`: once the quadratic term cannot matter over `[0, 1]`,
+    // integrate the linear speed exactly instead.
+    if a <= (c + b.abs()) * 1e-12 {
+        // ∫₀¹ √(c + bt) dt, written so nothing cancels: the naive
+        // antiderivative `2/(3b)·[(c+b)^{3/2} − c^{3/2}]` subtracts two
+        // nearly equal cubes and divides by the small `b` that made them
+        // nearly equal. Factoring `s₁³ − s₀³ = (s₁ − s₀)(s₁² + s₁s₀ + s₀²)`
+        // and `s₁ − s₀ = b/(s₁ + s₀)` cancels the `b` symbolically, and
+        // the remaining expression is the constant-speed answer `√c` at
+        // `b = 0` with no special case.
+        let s0 = c.max(0.0).sqrt();
+        let s1 = (c + b).max(0.0).sqrt();
+        if s0 + s1 == 0.0 {
+            return 0.0;
+        }
+        return 2.0 * (s1 * s1 + s1 * s0 + s0 * s0) / (3.0 * (s1 + s0));
     }
 
     let disc = 4.0 * a * c - b * b;
