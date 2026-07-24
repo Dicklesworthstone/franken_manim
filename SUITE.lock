@@ -25,7 +25,7 @@ edition	2024
 # repo	commit	notes
 franken_numpy	8d7415dc48887efc8925b9c2536ceec1d0a2bb9c	fnp-* workspace; RNG + arrays (consumed after fm-g2c wiring beads)
 frankenscipy	5b1441b13a0997901ad2f9835c30072f87ca93b2	fsci-* workspace; solves/quadrature/assignment
-franken_markdown	d7cda47985cfef3eb6d46570cfea9b2d820365f0	workspace since fm-ydw: fmd-font (sfnt + glyf outline decoder + bundled faces) consumed as a git dep at this rev; fmd-math lands next (fm-wgl)
+franken_markdown	4328835732c7e2c872a70f5eddd7b4e85a42e697	workspace since fm-ydw: fmd-font (sfnt + glyf outline decoder + bundled faces; unchanged d7cda47→this rev) and fmd-math (the TeX-math layout engine core, fm-wgl) consumed as git deps at this rev
 franken_networkx	9d710b1c33e99412c94de7fa4de2f7ce4954110f	enhanced-tier Graph mobjects; never blocks core gates
 frankenpandas	da85cf65df48965e027b2f5aa21b7d0ce6a7e29c	enhanced-tier Data mobjects; never blocks core gates
 frankentorch	e4c6bdd5ec629ae70b40da9314da345ade012ca7	the only GPU gateway (Accelerator Annex); standard-only

@@ -12,6 +12,10 @@ fmn-config.workspace = true
 fmn-mobject.workspace = true
 fmn-text.workspace = true
 fmn-cache.workspace = true
+# The native TeX-mathematics layout engine (§11.4): tier-1 grammar, the
+# atom/spacing engine, and style machinery — pinned to the SUITE.lock
+# franken_markdown rev (fm-wgl; layout/placement arrives with fm-hk9).
+fmd-math.workspace = true
 
 [lints]
 workspace = true

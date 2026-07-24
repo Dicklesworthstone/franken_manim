@@ -5,7 +5,12 @@ version = 4
 [[package]]
 name = "fmd-font"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=d7cda47985cfef3eb6d46570cfea9b2d820365f0#d7cda47985cfef3eb6d46570cfea9b2d820365f0"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=4328835732c7e2c872a70f5eddd7b4e85a42e697#4328835732c7e2c872a70f5eddd7b4e85a42e697"
+
+[[package]]
+name = "fmd-math"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=4328835732c7e2c872a70f5eddd7b4e85a42e697#4328835732c7e2c872a70f5eddd7b4e85a42e697"
 
 [[package]]
 name = "fmn-anim"
@@ -221,6 +226,7 @@ dependencies = [
 name = "fmn-tex"
 version = "0.1.0"
 dependencies = [
+ "fmd-math",
  "fmn-cache",
  "fmn-config",
  "fmn-core",
