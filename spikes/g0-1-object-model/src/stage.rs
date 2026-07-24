@@ -33,6 +33,16 @@ pub struct Mob {
     generation: u32,
 }
 
+impl Mob {
+    /// The raw `(stage_id, index, generation)` triple — the stable identity
+    /// the G0-5 bridge exposes for hashing/equality observability. Opaque
+    /// to semantics: only resolution through a `Stage` means anything.
+    #[must_use]
+    pub fn token(self) -> (u64, u32, u32) {
+        (self.stage_id, self.index, self.generation)
+    }
+}
+
 /// An updater closure: receives the stage, its own handle, and `dt`.
 /// `Rc` because manim's `copy()` keeps updater callables by reference.
 pub type Updater = Rc<RefCell<dyn FnMut(&mut Stage, Mob, f64)>>;

@@ -89,6 +89,12 @@ impl RecordSchema {
             .find(|f| f.name == field)
             .map(|f| f.width)
     }
+
+    /// Field names in record order (the G0-5 bridge iterates the schema of
+    /// Python-declared dtypes; production W3 keeps this surface).
+    pub fn field_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.fields.iter().map(|f| f.name)
+    }
 }
 
 /// One fixed-capacity storage generation.

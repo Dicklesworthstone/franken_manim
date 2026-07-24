@@ -140,6 +140,10 @@ scripts/manim_ref/
 # pin recorded in SUITE.lock [reference])
 scripts/videos_ref/
 
+# Non-member spike build output + the importable-module symlink run.sh makes
+spikes/*/target/
+spikes/g0-5-python-ext/py/*.so
+
 # The harvested TeX-string corpus: 3b1b-authored strings are private
 # fixtures under the CC BY-NC-SA fixture policy (§15.3). The committed,
 # publishable artifacts live in docs/g0/g0-4-corpus/ (hashes + counts +

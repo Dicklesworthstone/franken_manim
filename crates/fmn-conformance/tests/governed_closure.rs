@@ -3,12 +3,19 @@
 //! parse and agree with the pinned toolchain, and an injected unlisted
 //! package must be caught (the negative test the bead demands).
 
-use fmn_conformance::closure::{Violation, audit, parse_allowlist, parse_cargo_lock};
+use fmn_conformance::closure::{
+    Violation, audit, audit_with_aux, parse_allowlist, parse_cargo_lock,
+};
 
 fn repo_file(name: &str) -> String {
     let path = format!("{}/../../{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
 }
+
+/// Committed lockfiles of governed NON-member crates (ADR-0003: the fuzz
+/// harness, non-member spikes). Their packages carry class=dev/fuzz rows;
+/// the audit walks each lock that exists.
+const AUX_LOCKS: &[&str] = &["spikes/g0-5-python-ext/Cargo.lock", "fuzz/Cargo.lock"];
 
 #[test]
 fn workspace_closure_is_exactly_the_governed_universe() {
@@ -19,7 +26,19 @@ fn workspace_closure_is_exactly_the_governed_universe() {
         lock.len()
     );
     let allowlist = parse_allowlist(&repo_file("SUITE_ALLOWLIST.tsv"));
-    let violations = audit(&lock, &allowlist);
+    let aux: Vec<_> = AUX_LOCKS
+        .iter()
+        .filter_map(|name| {
+            let path = format!("{}/../../{name}", env!("CARGO_MANIFEST_DIR"));
+            std::fs::read_to_string(path).ok()
+        })
+        .map(|text| parse_cargo_lock(&text))
+        .collect();
+    assert!(
+        !aux.is_empty(),
+        "the G0-5 spike lock must exist and be committed (fm-87q)"
+    );
+    let violations = audit_with_aux(&lock, &aux, &allowlist);
     assert!(
         violations.is_empty(),
         "governed-closure violations:\n{}",

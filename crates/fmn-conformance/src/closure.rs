@@ -136,8 +136,28 @@ impl std::fmt::Display for Violation {
 /// exactly the governed universe.
 #[must_use]
 pub fn audit(lock: &[LockedPackage], allowlist: &[AllowRow]) -> Vec<Violation> {
+    audit_with_aux(lock, &[], allowlist)
+}
+
+/// The ADR-0003 form: non-member crates (the fuzz harness, non-member
+/// spikes like G0-5's bridge) keep their own committed lockfiles, and
+/// their packages carry allowlist rows like anything else. Admission and
+/// checksum rules are uniform across every governed lock; a consumed row
+/// is stale only when absent from all of them.
+#[must_use]
+pub fn audit_with_aux(
+    lock: &[LockedPackage],
+    aux_locks: &[Vec<LockedPackage>],
+    allowlist: &[AllowRow],
+) -> Vec<Violation> {
     let mut violations = Vec::new();
-    for package in lock {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for package in lock.iter().chain(aux_locks.iter().flatten()) {
+        let key = (package.name.as_str(), package.version.as_str());
+        if seen.contains(&key) {
+            continue; // one verdict per (name, version) across the locks
+        }
+        seen.push(key);
         match allowlist.iter().find(|row| row.name == package.name) {
             None => violations.push(Violation::Unlisted {
                 name: package.name.clone(),
@@ -157,7 +177,7 @@ pub fn audit(lock: &[LockedPackage], allowlist: &[AllowRow]) -> Vec<Violation> {
     }
     for row in allowlist {
         let consumed_class = row.class != "pending";
-        if consumed_class && !lock.iter().any(|p| p.name == row.name) {
+        if consumed_class && !seen.iter().any(|(name, _)| *name == row.name) {
             violations.push(Violation::StaleRow {
                 name: row.name.clone(),
             });
