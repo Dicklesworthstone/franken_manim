@@ -132,6 +132,51 @@ fn the_atom_engine_answers_spacing_queries() {
 }
 
 #[test]
+fn typeset_produces_placed_output_through_the_pin() {
+    let engine = fmd_math::Engine::bundled().unwrap();
+    let src = r"\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}";
+    let layout = engine.typeset(src, Style::Display).unwrap();
+    assert!(!layout.glyphs.is_empty());
+    assert!(layout.rules.len() >= 2, "fraction bar + radical overbar");
+    assert!(fmd_math::paths::spans_cover(&layout, src.len()));
+    // Placement is the published mathematics: the fraction bar is θ thick,
+    // centered on the axis.
+    let c = engine.constants();
+    let bar = layout.rules.iter().find(|r| {
+        (r.height - c.rule_thickness).abs() < 1e-9
+            && (r.y - (c.axis_height - c.rule_thickness / 2.0)).abs() < 1e-9
+    });
+    assert!(bar.is_some(), "axis-centered fraction bar");
+    // Paths resolve deterministically to identical bytes.
+    let a =
+        fmd_math::paths::canonical_dump(&fmd_math::paths::resolve_paths(&engine, &layout).unwrap());
+    let layout2 = engine.typeset(src, Style::Display).unwrap();
+    let b = fmd_math::paths::canonical_dump(
+        &fmd_math::paths::resolve_paths(&engine, &layout2).unwrap(),
+    );
+    assert_eq!(a, b);
+}
+
+#[test]
+fn typeset_text_handles_the_textext_contract() {
+    let engine = fmd_math::Engine::bundled().unwrap();
+    let layout = engine
+        .typeset_text(r"the area $\pi r^2$ of a \textbf{circle}")
+        .unwrap();
+    assert!(!layout.glyphs.is_empty());
+}
+
+#[test]
+fn layout_pending_constructs_stay_named_through_the_pin() {
+    let engine = fmd_math::Engine::bundled().unwrap();
+    let err = engine
+        .typeset(r"\begin{matrix} a \end{matrix}", Style::Display)
+        .unwrap_err();
+    assert_eq!(err.unsupported_construct(), Some("env:matrix"));
+    assert!(err.to_string().contains("fm-kg9"));
+}
+
+#[test]
 fn the_style_walk_propagates_like_tex() {
     let root = fmd_math::parse(r"\frac{n}{d}").unwrap();
     let mut seen = Vec::new();
