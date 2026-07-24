@@ -17,5 +17,10 @@ fmn-cache.workspace = true
 # franken_markdown rev (fm-wgl; layout/placement arrives with fm-hk9).
 fmd-math.workspace = true
 
+[dev-dependencies]
+# The deterministic-lab doubles (VirtualFs/FakeClock) for cache-wired
+# tests — a dev-tier edge per ADR-0003, outside §19's shipped DAG.
+fmn-platform.workspace = true
+
 [lints]
 workspace = true

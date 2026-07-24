@@ -235,6 +235,7 @@ dependencies = [
  "fmn-config",
  "fmn-core",
  "fmn-mobject",
+ "fmn-platform",
  "fmn-text",
 ]
 

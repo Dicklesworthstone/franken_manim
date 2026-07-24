@@ -58,7 +58,16 @@ def main() -> int:
     for pkg in meta["packages"]:
         if pkg["id"] not in workspace_ids:
             continue
-        deps = {d["name"] for d in pkg["dependencies"] if d["name"].startswith("fmn-")}
+        # §19's DAG governs the SHIPPED graph (ADR-0003: dev is a separate,
+        # non-shipped tier). Dev-dependencies — e.g. a test suite borrowing
+        # fmn-platform's VirtualFs/FakeClock doubles — are exempt from the
+        # layering; the governed-closure allowlist still covers their
+        # packages.
+        deps = {
+            d["name"]
+            for d in pkg["dependencies"]
+            if d["name"].startswith("fmn-") and d.get("kind") != "dev"
+        }
         # G0 spikes (spikes/, fmn-spike-*) are sanctioned prototype crates
         # outside the §19 map (§20.1). They are exempt from the map itself,
         # but no §19 crate may ever depend on one (checked below).
