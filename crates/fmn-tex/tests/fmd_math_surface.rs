@@ -177,6 +177,39 @@ fn layout_pending_constructs_stay_named_through_the_pin() {
 }
 
 #[test]
+fn span_maps_replace_the_two_render_hack_through_the_pin() {
+    // The §11.3 consumption pattern (fm-70s): tex_to_color_map / isolate /
+    // TransformMatchingTex match by source identity via occurrence spans +
+    // containment selection — no second render, no assignment alignment.
+    let engine = fmd_math::Engine::bundled().unwrap();
+    let src = r"e^{i\pi} + 1 = 0";
+    let layout = engine.typeset(src, Style::Display).unwrap();
+    // t2c("\pi"): exactly the π glyph.
+    let occ = fmd_math::find_occurrences(src, r"\pi");
+    assert_eq!(occ.len(), 1);
+    let sel = layout.select(occ[0]);
+    assert_eq!(sel.glyphs.len(), 1);
+    assert_eq!(layout.glyphs[sel.glyphs[0]].ch, 'π');
+    // t2c("i"): the exponent's i only — never the i inside \pi.
+    let hits: Vec<usize> = fmd_math::find_occurrences(src, "i")
+        .into_iter()
+        .flat_map(|s| layout.select(s).glyphs)
+        .collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(layout.glyphs[hits[0]].ch, 'i');
+    // The TransformMatchingTex seam across two formulas: shared source
+    // keys select corresponding parts on both sides.
+    let b_src = r"1 + e^{i\pi} = 0";
+    let b = engine.typeset(b_src, Style::Display).unwrap();
+    for key in [r"e^{i\pi}", "1", "0"] {
+        let sa = layout.select(fmd_math::find_occurrences(src, key)[0]);
+        let sb = b.select(fmd_math::find_occurrences(b_src, key)[0]);
+        assert!(!sa.is_empty() && !sb.is_empty(), "key `{key}`");
+        assert_eq!(sa.len(), sb.len(), "key `{key}` selects matching parts");
+    }
+}
+
+#[test]
 fn the_style_walk_propagates_like_tex() {
     let root = fmd_math::parse(r"\frac{n}{d}").unwrap();
     let mut seen = Vec::new();
