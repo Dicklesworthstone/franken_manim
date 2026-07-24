@@ -551,11 +551,7 @@ impl Stage {
     ///
     /// # Errors
     /// [`StageError::StaleHandle`] if any handle is dead.
-    pub fn replace_in_scene(
-        &mut self,
-        mob: Mob,
-        replacements: &[Mob],
-    ) -> Result<(), StageError> {
+    pub fn replace_in_scene(&mut self, mob: Mob, replacements: &[Mob]) -> Result<(), StageError> {
         for &m in replacements {
             if !self.contains(m) {
                 return Err(StageError::StaleHandle);

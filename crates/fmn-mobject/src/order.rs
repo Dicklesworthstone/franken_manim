@@ -238,7 +238,7 @@ impl Stage {
             for &root in group {
                 for mob in self.family(root) {
                     let Some(entry) = self.get(mob) else { continue };
-                    if entry.buffer.len() == 0 {
+                    if entry.buffer.is_empty() {
                         continue; // family_members_with_points
                     }
                     let key = BatchKey {
