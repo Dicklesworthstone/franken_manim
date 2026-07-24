@@ -31,6 +31,7 @@ pub mod animate;
 pub mod bbox;
 pub mod dynamics;
 pub mod mobject;
+pub mod order;
 pub mod persist;
 pub mod positional;
 pub mod record;
@@ -42,6 +43,7 @@ pub use animate::{AnimBuilder, AnimateArgs, AnimateError, BuiltAnimate, IntoAnim
 pub use bbox::BoundingBox;
 pub use dynamics::{Tracker, TrackerKind};
 pub use mobject::Mobject;
+pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{
     DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,
     SceneState, UpdaterKindTag, UpdaterManifest,

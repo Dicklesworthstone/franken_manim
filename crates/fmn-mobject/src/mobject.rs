@@ -30,6 +30,10 @@ pub struct Mobject {
     /// The semantic shape (§10.8) the constructor built, stamped against
     /// these points when the mobject enters the arena.
     pub shape: ShapeTag,
+    /// The Reference's `z_index` (§8.5): the scene list's sort key. Zero is
+    /// the Reference's default; a builder that means to sit above or below
+    /// its siblings sets it here rather than after `add`.
+    pub z_index: i32,
     /// Children still outside any arena; `Stage::add` recurses over these.
     pub submobjects: Vec<Mobject>,
 }
@@ -55,6 +59,7 @@ impl Mobject {
             buffer,
             uniforms: Uniforms::default(),
             shape: ShapeTag::General,
+            z_index: 0,
             submobjects: Vec::new(),
         }
     }
@@ -89,6 +94,13 @@ impl Mobject {
     #[must_use]
     pub fn with_uniforms(mut self, uniforms: Uniforms) -> Self {
         self.uniforms = uniforms;
+        self
+    }
+
+    /// Set the scene-list sort key (builder style, §8.5).
+    #[must_use]
+    pub fn with_z_index(mut self, z_index: i32) -> Self {
+        self.z_index = z_index;
         self
     }
 }

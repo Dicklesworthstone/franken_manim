@@ -149,6 +149,11 @@ pub struct Entry {
     /// Per-object typed uniform state (§8.4): scene code reads and writes this
     /// directly; Lumen's StyleTable synchronizes from it.
     uniforms: Uniforms,
+    /// The Reference's `z_index` (§8.5): the scene list's sort key. Plain
+    /// per-object data, not a uniform — only a *top-level* member's value
+    /// orders anything, but a child may be promoted to a root later, so the
+    /// value travels with the object (see [`crate::order`]).
+    z_index: i32,
     /// The semantic shape a constructor built, with the point revision at
     /// which its geometry was true (§10.8, [`crate::shape`]).
     shape: ShapeSlot,
@@ -176,6 +181,7 @@ impl Entry {
             pins: 0,
             pending_delete: false,
             uniforms: Uniforms::default(),
+            z_index: 0,
             shape: ShapeSlot::default(),
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
@@ -251,6 +257,7 @@ pub(crate) struct SnapshotEntry {
     pub(crate) pins: usize,
     pub(crate) pending_delete: bool,
     pub(crate) uniforms: Uniforms,
+    pub(crate) z_index: i32,
     pub(crate) shape: ShapeSlot,
 }
 
@@ -411,11 +418,13 @@ impl Stage {
         let Mobject {
             buffer,
             uniforms,
+            z_index,
             shape,
             submobjects,
         } = mobject.into();
         let mut entry = Entry::from_data(buffer);
         entry.uniforms = uniforms;
+        entry.z_index = z_index;
         // The tag describes the points that just arrived, so it is stamped
         // against this buffer's current revision (crate::shape).
         entry.shape = ShapeSlot {
@@ -431,22 +440,160 @@ impl Stage {
         mob
     }
 
-    /// Add to the scene's draw list (idempotent). Rooting is membership,
-    /// not ownership.
+    /// Add to the scene's draw list — the Reference's `Scene.add`
+    /// (`scene.py:327`) exactly: remove first (so re-adding moves a member
+    /// to the front — which is all `bring_to_front` is), append, then
+    /// **stable-sort by `(z_index, position)`**, so equal z_index keeps
+    /// insertion order (§8.5). Rooting is membership, not ownership.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead handle.
     pub fn add_to_scene(&mut self, mob: Mob) -> Result<(), StageError> {
         if !self.contains(mob) {
             return Err(StageError::StaleHandle);
         }
-        if !self.roots.contains(&mob) {
-            self.roots.push(mob);
+        self.remove_from_scene(mob);
+        self.roots.push(mob);
+        self.sort_scene_by_z_index();
+        Ok(())
+    }
+
+    /// The Reference's z-reorder, run on every `add` and nowhere else
+    /// (`scene.py:337`): a stable sort by `z_index` over the *current*
+    /// positions.
+    ///
+    /// That "and nowhere else" is semantics, not an oversight to tidy:
+    /// [`Stage::bring_to_back`] deliberately puts a member behind
+    /// everything **regardless** of its z_index, and re-sorting there would
+    /// make the call a silent no-op for any member whose z_index is high.
+    /// The list is therefore z-ordered *as of the last add*, and the next
+    /// add re-normalizes it. `docs/RENDER_ORDER.md` states the rule; the
+    /// ordering-trace corpus pins it.
+    fn sort_scene_by_z_index(&mut self) {
+        let keys: Vec<i32> = self.roots.iter().map(|&m| self.z_index(m)).collect();
+        let mut order: Vec<usize> = (0..self.roots.len()).collect();
+        // Stable by construction: ties keep their position index.
+        order.sort_by_key(|&i| (keys[i], i));
+        self.roots = order.into_iter().map(|i| self.roots[i]).collect();
+    }
+
+    /// Remove from the draw list — the Reference's `Scene.remove`
+    /// (`scene.py:371` over `recursive_mobject_remove`,
+    /// `utils/family_ops.py:23`): removing a member that lives *inside* a
+    /// rooted family replaces its ancestor in the list with that ancestor's
+    /// **other** children, spliced in place. Removing one element of a
+    /// rooted group therefore leaves the rest on stage, ungrouped, in
+    /// order — which is what makes a remover animation on a submobject
+    /// behave.
+    ///
+    /// The entry and every handle stay valid (rooted-lifetime rule); this
+    /// is a draw-list edit, never a deletion. The scene is *not* re-sorted
+    /// (see [`Stage::add_to_scene`]).
+    pub fn remove_from_scene(&mut self, mob: Mob) {
+        let roots = std::mem::take(&mut self.roots);
+        let (kept, _) = self.recursive_remove(&roots, mob);
+        self.roots = kept;
+    }
+
+    /// `recursive_mobject_remove`, structure for structure: returns the
+    /// surviving list and whether anything was removed from it.
+    fn recursive_remove(&self, members: &[Mob], target: Mob) -> (Vec<Mob>, bool) {
+        let mut kept = Vec::with_capacity(members.len());
+        let mut found = false;
+        for &member in members {
+            if member == target {
+                found = true;
+                continue;
+            }
+            let children = self
+                .get(member)
+                .map(|entry| entry.submobjects.clone())
+                .unwrap_or_default();
+            let (sub, found_below) = self.recursive_remove(&children, target);
+            if found_below {
+                kept.extend(sub);
+                found = true;
+            } else {
+                kept.push(member);
+            }
+        }
+        (kept, found)
+    }
+
+    /// The Reference's `bring_to_front` (`scene.py:389`): re-adding *is*
+    /// promotion — with the z-sort that `add` always runs.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead handle.
+    pub fn bring_to_front(&mut self, mob: Mob) -> Result<(), StageError> {
+        self.add_to_scene(mob)
+    }
+
+    /// The Reference's `bring_to_back` (`scene.py:394`): remove, then
+    /// prepend — **without** a z-sort, so the demotion holds until the next
+    /// `add` (see [`Stage::sort_scene_by_z_index`]).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead handle.
+    pub fn bring_to_back(&mut self, mob: Mob) -> Result<(), StageError> {
+        if !self.contains(mob) {
+            return Err(StageError::StaleHandle);
+        }
+        self.remove_from_scene(mob);
+        self.roots.insert(0, mob);
+        Ok(())
+    }
+
+    /// The Reference's `Scene.replace` (`scene.py:360`): splice
+    /// `replacements` into `mob`'s position in the draw list, in order. A
+    /// member that is not on stage is left alone (the Reference's `if
+    /// mobject in self.mobjects`). No z-sort, like `bring_to_back`.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if any handle is dead.
+    pub fn replace_in_scene(
+        &mut self,
+        mob: Mob,
+        replacements: &[Mob],
+    ) -> Result<(), StageError> {
+        for &m in replacements {
+            if !self.contains(m) {
+                return Err(StageError::StaleHandle);
+            }
+        }
+        if let Some(at) = self.roots.iter().position(|&m| m == mob) {
+            self.roots.splice(at..=at, replacements.iter().copied());
         }
         Ok(())
     }
 
-    /// Remove from the draw list only; the entry and every handle stay
-    /// valid (rooted-lifetime rule).
-    pub fn remove_from_scene(&mut self, mob: Mob) {
-        self.roots.retain(|m| *m != mob);
+    /// The scene-list sort key (§8.5). Zero unless set.
+    #[must_use]
+    pub fn z_index(&self, mob: Mob) -> i32 {
+        self.get(mob).map_or(0, |entry| entry.z_index)
+    }
+
+    /// The Reference's `set_z_index` (`mobject.py:1238`): write the value,
+    /// recursing over the family by default.
+    ///
+    /// Only a *top-level* member's value orders anything — the scene sort
+    /// reads the draw list, not families — but the write recurses because a
+    /// child may be promoted to a root later, and because the Reference
+    /// does. Setting it does **not** re-sort a scene that already contains
+    /// the mobject; `add_to_scene`/`bring_to_front` is what re-normalizes.
+    pub fn set_z_index(&mut self, mob: Mob, z_index: i32, recurse: bool) {
+        let targets = if recurse {
+            self.family(mob)
+        } else if self.contains(mob) {
+            vec![mob]
+        } else {
+            Vec::new()
+        };
+        for target in targets {
+            if let Some(entry) = self.get_mut(target) {
+                entry.z_index = z_index;
+            }
+        }
     }
 
     /// The scene draw list, in insertion order.
@@ -676,6 +823,7 @@ impl Stage {
                 pins: 0,
                 pending_delete: false,
                 uniforms: entry.uniforms, // copy semantics: independent state
+                z_index: entry.z_index,
                 shape,
                 family_cache: RefCell::new(None),
                 bbox: RefCell::new(BboxCache::default()),
@@ -823,15 +971,21 @@ impl Stage {
             if a == b {
                 continue;
             }
-            let (src, uniforms, tracker) = {
+            let (src, uniforms, z_index, tracker) = {
                 let e2 = self.get(b).expect("prechecked");
-                (e2.buffer.snapshot_clone(), e2.uniforms, e2.tracker)
+                (
+                    e2.buffer.snapshot_clone(),
+                    e2.uniforms,
+                    e2.z_index,
+                    e2.tracker,
+                )
             };
             let e1 = self.get_mut(a).expect("prechecked");
             if !e1.buffer.assign_from(&src) {
                 return Err(StageError::SchemaMismatch); // unreachable: prechecked
             }
             e1.uniforms = uniforms;
+            e1.z_index = z_index;
             e1.tracker = tracker;
         }
         if match_updaters {
@@ -1240,6 +1394,7 @@ impl Stage {
                             pins: entry.pins,
                             pending_delete: entry.pending_delete,
                             uniforms: entry.uniforms,
+                            z_index: entry.z_index,
                             shape: entry.shape,
                         }),
                     )
@@ -1272,6 +1427,7 @@ impl Stage {
                     pins: e.pins,
                     pending_delete: e.pending_delete,
                     uniforms: e.uniforms,
+                    z_index: e.z_index,
                     shape: e.shape,
                     family_cache: RefCell::new(None),
                     bbox: RefCell::new(BboxCache::default()),

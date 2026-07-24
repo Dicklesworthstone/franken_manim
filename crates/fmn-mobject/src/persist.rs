@@ -48,11 +48,11 @@ use crate::uniforms::{JointType, Uniforms};
 ///
 /// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
 /// stream decodes with no tag, which is exactly what `General` means.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 1);
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 2);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 1.1 — it
 /// embeds a snapshot, so it moves with [`SNAPSHOT_SCHEMA`].
-pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 1);
+pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 2);
 
 /// Errors from snapshot decode.
 #[derive(Debug, Clone, PartialEq)]
@@ -234,6 +234,11 @@ fn put_entry(w: &mut Writer, entry: &SnapshotEntry) {
     w.put_u64(entry.pins as u64).put_bool(entry.pending_delete);
     put_uniforms(w, &entry.uniforms);
     put_shape(w, &entry.shape);
+    // Minor 1.2 appends the §8.5 scene-sort key. Appended, never
+    // interleaved: a 1.1 reader stops at the shape tag and is still
+    // correct, and a 1.2 reader of a 1.1 stream defaults it to zero (the
+    // Reference's default) — the §6.7 additive-minor rule.
+    w.put_i32(entry.z_index);
 }
 
 /// The semantic shape tag (§10.8), added in schema minor 1.1.
@@ -554,6 +559,8 @@ impl Snapshot {
                 } else {
                     ShapeSlot::default()
                 };
+                // Minor 1.2 appended the scene-sort key (§8.5).
+                let z_index = if r.version().1 >= 2 { r.get_i32()? } else { 0 };
                 Some(SnapshotEntry {
                     buffer,
                     submobjects,
@@ -567,6 +574,7 @@ impl Snapshot {
                     pins,
                     pending_delete,
                     uniforms,
+                    z_index,
                     shape,
                 })
             } else {
