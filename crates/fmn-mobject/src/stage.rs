@@ -29,6 +29,7 @@ use crate::StageError;
 use crate::bbox::BboxCache;
 use crate::mobject::Mobject;
 use crate::record::RecordBuffer;
+use crate::shape::ShapeSlot;
 use crate::uniforms::Uniforms;
 
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -148,6 +149,9 @@ pub struct Entry {
     /// Per-object typed uniform state (§8.4): scene code reads and writes this
     /// directly; Lumen's StyleTable synchronizes from it.
     uniforms: Uniforms,
+    /// The semantic shape a constructor built, with the point revision at
+    /// which its geometry was true (§10.8, [`crate::shape`]).
+    shape: ShapeSlot,
     /// Cached family flattening (§1.1 API surface), invalidated on any
     /// structural change in the subtree.
     family_cache: RefCell<Option<Vec<Mob>>>,
@@ -172,6 +176,7 @@ impl Entry {
             pins: 0,
             pending_delete: false,
             uniforms: Uniforms::default(),
+            shape: ShapeSlot::default(),
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
         }
@@ -187,6 +192,14 @@ impl Entry {
     /// `mobject.uniforms` directly).
     pub fn uniforms_mut(&mut self) -> &mut Uniforms {
         &mut self.uniforms
+    }
+
+    pub(crate) fn shape(&self) -> ShapeSlot {
+        self.shape
+    }
+
+    pub(crate) fn set_shape(&mut self, slot: ShapeSlot) {
+        self.shape = slot;
     }
 
     pub(crate) fn bbox_cell(&self) -> &RefCell<BboxCache> {
@@ -238,6 +251,7 @@ pub(crate) struct SnapshotEntry {
     pub(crate) pins: usize,
     pub(crate) pending_delete: bool,
     pub(crate) uniforms: Uniforms,
+    pub(crate) shape: ShapeSlot,
 }
 
 /// The stable old-handle → new-handle map a family copy produces — the
@@ -626,8 +640,21 @@ impl Stage {
         let mut map: HashMap<Mob, Mob> = HashMap::with_capacity(family.len());
         for &old in &family {
             let entry = self.get(old).expect("family members resolve");
+            let buffer = entry.buffer.deep_clone();
+            // A copy has the same points, so it has the same semantic
+            // shape — but a deep clone starts its own revision counters,
+            // so the tag is re-stamped against the new buffer rather than
+            // arriving stale-by-accident.
+            let hint_was_live = entry.shape.point_revision.is_some()
+                && entry.shape.point_revision == entry.buffer.field_revision("point");
+            let shape = ShapeSlot {
+                tag: entry.shape.tag,
+                point_revision: hint_was_live
+                    .then(|| buffer.field_revision("point"))
+                    .flatten(),
+            };
             let new_entry = Entry {
-                buffer: entry.buffer.deep_clone(),
+                buffer,
                 submobjects: entry.submobjects.clone(), // remapped below
                 parents: entry.parents.clone(),         // remapped below
                 updaters: entry.updaters.clone(),       // by reference
@@ -639,6 +666,7 @@ impl Stage {
                 pins: 0,
                 pending_delete: false,
                 uniforms: entry.uniforms, // copy semantics: independent state
+                shape,
                 family_cache: RefCell::new(None),
                 bbox: RefCell::new(BboxCache::default()),
             };
@@ -807,7 +835,16 @@ impl Stage {
     pub fn copy_into(&self, mob: Mob, target: &mut Stage) -> Result<Mob, StageError> {
         let entry = self.try_get(mob)?;
         let children = entry.submobjects.clone();
-        let new = target.alloc(Entry::from_data(entry.buffer.deep_clone()));
+        let hint_was_live = entry.shape.point_revision.is_some()
+            && entry.shape.point_revision == entry.buffer.field_revision("point");
+        let mut copied = Entry::from_data(entry.buffer.deep_clone());
+        copied.shape = ShapeSlot {
+            tag: entry.shape.tag,
+            point_revision: hint_was_live
+                .then(|| copied.buffer.field_revision("point"))
+                .flatten(),
+        };
+        let new = target.alloc(copied);
         for child in children {
             let new_child = self.copy_into(child, target)?;
             target
@@ -1193,6 +1230,7 @@ impl Stage {
                             pins: entry.pins,
                             pending_delete: entry.pending_delete,
                             uniforms: entry.uniforms,
+                            shape: entry.shape,
                         }),
                     )
                 })
@@ -1224,6 +1262,7 @@ impl Stage {
                     pins: e.pins,
                     pending_delete: e.pending_delete,
                     uniforms: e.uniforms,
+                    shape: e.shape,
                     family_cache: RefCell::new(None),
                     bbox: RefCell::new(BboxCache::default()),
                 }),

@@ -30,7 +30,9 @@
 
 use fmn_core::constants::{DOWN, FRAME_X_RADIUS, FRAME_Y_RADIUS, IN, LEFT, ORIGIN, OUT, RIGHT, UP};
 use fmn_core::types::Vec3;
+use fmn_geom::{QuadPath, space_ops};
 
+use crate::StageError;
 use crate::bbox::{BoundingBox, BoxAccum};
 use crate::stage::{Mob, Stage};
 use crate::uniforms::Uniforms;
@@ -294,6 +296,128 @@ impl Stage {
         let n = e.buffer.len();
         let v = e.buffer.read(n.checked_sub(1)?, "point")?;
         Some([f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
+    }
+
+    /// Reference `get_start_and_end`. `None` when the entry has no points
+    /// (the Reference's `throw_error_if_no_points`).
+    #[must_use]
+    pub fn get_start_and_end(&self, mob: Mob) -> Option<(Vec3, Vec3)> {
+        Some((self.get_start(mob)?, self.get_end(mob)?))
+    }
+
+    /// Reference `get_points`: this entry's own `point` records in f64
+    /// (§6.1), not recursing into the family.
+    #[must_use]
+    pub fn get_points(&self, mob: Mob) -> Option<Vec<Vec3>> {
+        let column = self.get(mob)?.buffer.read_column("point")?;
+        Some(
+            column
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|c| [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])
+                .collect(),
+        )
+    }
+
+    /// Reference `set_points`: resize this entry's records to `points`
+    /// (order-preserving, so the surrounding style columns survive) and
+    /// write the run.
+    ///
+    /// On a vmobject-shaped record the `joint_angle` column is refreshed
+    /// from the new path in the same call — the Reference recomputes it
+    /// lazily behind `needs_new_joint_angles`, and doing it here keeps the
+    /// column true to the points through every channel that can write them.
+    /// A point run that violates the shared-anchor invariant is a typed
+    /// error, not a silently malformed path.
+    pub fn set_points(&mut self, mob: Mob, points: &[Vec3]) -> Result<(), StageError> {
+        let angles: Option<Vec<f64>> = if self.is_vmobject_schema(mob)? {
+            let path = QuadPath::from_points(points.to_vec()).map_err(StageError::Geometry)?;
+            Some(path.joint_angles())
+        } else {
+            None
+        };
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        entry.buffer.resize_preserving_order(points.len());
+        #[allow(clippy::cast_possible_truncation)]
+        let flat: Vec<f32> = points
+            .iter()
+            .flat_map(|p| p.iter().map(|v| *v as f32))
+            .collect();
+        entry.buffer.write_range("point", 0, &flat);
+        if let Some(angles) = angles {
+            #[allow(clippy::cast_possible_truncation)]
+            let flat: Vec<f32> = angles.iter().map(|a| *a as f32).collect();
+            entry.buffer.write_range("joint_angle", 0, &flat);
+        }
+        Ok(())
+    }
+
+    /// Whether this entry's records are vmobject-shaped: the `joint_angle`
+    /// field is the schema marker (present in `RecordSchema::vmobject`,
+    /// absent from the base layout).
+    pub(crate) fn is_vmobject_schema(&self, mob: Mob) -> Result<bool, StageError> {
+        Ok(self
+            .try_get(mob)?
+            .buffer
+            .schema()
+            .offset("joint_angle")
+            .is_some())
+    }
+
+    /// Reference `put_start_and_end_on` (mobject.py:1299): scale, rotate in
+    /// the xy plane, tilt out of it, and shift, so the family's first point
+    /// lands on `start` and its last on `end`.
+    ///
+    /// The Reference raises "Cannot position endpoints of closed loop" when
+    /// the current endpoints coincide; that is
+    /// [`StageError::DegenerateEndpoints`] here, because the caller
+    /// (`Line`, the tip algebra) has a real decision to make about it —
+    /// `Line::put_start_and_end_on` overrides exactly this case.
+    pub fn put_start_and_end_on(
+        &mut self,
+        mob: Mob,
+        start: Vec3,
+        end: Vec3,
+    ) -> Result<(), StageError> {
+        let (curr_start, curr_end) = self
+            .get_start_and_end(mob)
+            .ok_or(StageError::DegenerateEndpoints)?;
+        let curr_vect = sub(curr_end, curr_start);
+        if curr_vect == [0.0; 3] {
+            return Err(StageError::DegenerateEndpoints);
+        }
+        let target_vect = sub(end, start);
+        self.scale_about(
+            mob,
+            space_ops::get_norm(target_vect) / space_ops::get_norm(curr_vect),
+            Some(curr_start),
+            None,
+        );
+        self.rotate(
+            mob,
+            space_ops::angle_of_vector(target_vect) - space_ops::angle_of_vector(curr_vect),
+            OUT,
+            None,
+            None,
+        );
+        // Out-of-plane tilt, about the axis perpendicular to the target in
+        // the xy plane — the Reference's own choice of axis, degenerate
+        // axis and all (a purely vertical target rotates about zero, i.e.
+        // not at all, which is what it wants).
+        let curr_xy = space_ops::get_norm([curr_vect[0], curr_vect[1], 0.0]);
+        let target_xy = space_ops::get_norm([target_vect[0], target_vect[1], 0.0]);
+        self.rotate(
+            mob,
+            space_ops::angle_of_vector([curr_xy, curr_vect[2], 0.0])
+                - space_ops::angle_of_vector([target_xy, target_vect[2], 0.0]),
+            [-target_vect[1], target_vect[0], 0.0],
+            None,
+            None,
+        );
+        let now_start = self.get_start(mob).ok_or(StageError::DegenerateEndpoints)?;
+        self.shift(mob, sub(start, now_start));
+        Ok(())
     }
 
     // ----------------------------------------------------- the transform core

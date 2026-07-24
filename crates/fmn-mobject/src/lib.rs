@@ -34,6 +34,7 @@ pub mod mobject;
 pub mod persist;
 pub mod positional;
 pub mod record;
+pub mod shape;
 pub mod stage;
 pub mod uniforms;
 
@@ -47,6 +48,7 @@ pub use persist::{
 };
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
+pub use shape::ShapeTag;
 pub use stage::{CopyMap, Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
 pub use uniforms::{JointType, Uniforms};
 
@@ -75,6 +77,12 @@ pub enum StageError {
     /// reached the geometry kernel (alignment reads point runs as
     /// [`fmn_geom::QuadPath`]s).
     Geometry(fmn_geom::GeomError),
+    /// `put_start_and_end_on` on a family with no points, or whose first
+    /// and last points coincide — the Reference's "Cannot position
+    /// endpoints of closed loop". There is no rotation that separates two
+    /// identical points, so the caller has to decide (`Line` rebuilds its
+    /// path from the new ends instead).
+    DegenerateEndpoints,
 }
 
 impl std::fmt::Display for StageError {
@@ -101,6 +109,9 @@ impl std::fmt::Display for StageError {
             }
             Self::Geometry(err) => {
                 write!(f, "malformed point run in alignment: {err}")
+            }
+            Self::DegenerateEndpoints => {
+                write!(f, "cannot position endpoints of a closed or empty path")
             }
         }
     }

@@ -40,55 +40,18 @@ fn polyline_length(points: &[Vec3]) -> f64 {
     points.windows(2).map(|w| dist(w[0], w[1])).sum()
 }
 
-/// Whether this entry's records are vmobject-shaped: the `joint_angle`
-/// field is the schema marker (present in `RecordSchema::vmobject`, absent
-/// from the base layout).
 fn is_vmobject_schema(stage: &Stage, mob: Mob) -> Result<bool, StageError> {
-    Ok(stage
-        .try_get(mob)?
-        .buffer
-        .schema()
-        .offset("joint_angle")
-        .is_some())
+    stage.is_vmobject_schema(mob)
 }
 
 fn read_points(stage: &Stage, mob: Mob) -> Result<Vec<Vec3>, StageError> {
-    let column = stage
-        .try_get(mob)?
-        .buffer
-        .read_column("point")
-        .ok_or(StageError::SchemaMismatch)?;
-    Ok(column
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|c| [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])
-        .collect())
+    stage.get_points(mob).ok_or(StageError::StaleHandle)
 }
 
 /// Resize the whole record run preserving order, then write the new point
 /// run and (for vmobject records) refreshed joint angles.
 fn write_points(stage: &mut Stage, mob: Mob, points: &[Vec3]) -> Result<(), StageError> {
-    let angles: Option<Vec<f64>> = if is_vmobject_schema(stage, mob)? {
-        let path = QuadPath::from_points(points.to_vec()).map_err(StageError::Geometry)?;
-        Some(path.joint_angles())
-    } else {
-        None
-    };
-    let entry = stage.get_mut(mob).ok_or(StageError::StaleHandle)?;
-    entry.buffer.resize_preserving_order(points.len());
-    #[allow(clippy::cast_possible_truncation)]
-    let flat: Vec<f32> = points
-        .iter()
-        .flat_map(|p| p.iter().map(|v| *v as f32))
-        .collect();
-    entry.buffer.write_range("point", 0, &flat);
-    if let Some(angles) = angles {
-        #[allow(clippy::cast_possible_truncation)]
-        let flat: Vec<f32> = angles.iter().map(|a| *a as f32).collect();
-        entry.buffer.write_range("joint_angle", 0, &flat);
-    }
-    Ok(())
+    stage.set_points(mob, points)
 }
 
 impl Stage {

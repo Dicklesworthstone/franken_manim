@@ -37,15 +37,22 @@
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer, sha256};
 
+use fmn_core::types::Vec3;
+
 use crate::record::{RecordBuffer, RecordSchema};
+use crate::shape::{ShapeSlot, ShapeTag};
 use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn};
 use crate::uniforms::{JointType, Uniforms};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.0.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 0);
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.1.
+///
+/// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
+/// stream decodes with no tag, which is exactly what `General` means.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 1);
 
-/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.0.
-pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 0);
+/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.1 — it
+/// embeds a snapshot, so it moves with [`SNAPSHOT_SCHEMA`].
+pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 1);
 
 /// Errors from snapshot decode.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +62,9 @@ pub enum PersistError {
     Serial(SerialError),
     /// The payload parsed but violates the document's own invariants.
     Malformed(&'static str),
+    /// A shape-tag discriminant this build does not know. A newer writer
+    /// is the likely cause, and guessing would fabricate geometry.
+    UnknownShapeTag(u8),
 }
 
 impl std::fmt::Display for PersistError {
@@ -62,6 +72,9 @@ impl std::fmt::Display for PersistError {
         match self {
             Self::Serial(e) => write!(f, "snapshot container refused: {e}"),
             Self::Malformed(what) => write!(f, "snapshot payload malformed: {what}"),
+            Self::UnknownShapeTag(code) => {
+                write!(f, "snapshot carries unknown shape-tag discriminant {code}")
+            }
         }
     }
 }
@@ -70,7 +83,7 @@ impl std::error::Error for PersistError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serial(e) => Some(e),
-            Self::Malformed(_) => None,
+            Self::Malformed(_) | Self::UnknownShapeTag(_) => None,
         }
     }
 }
@@ -220,6 +233,130 @@ fn put_entry(w: &mut Writer, entry: &SnapshotEntry) {
     put_mob_opt(w, entry.saved_state);
     w.put_u64(entry.pins as u64).put_bool(entry.pending_delete);
     put_uniforms(w, &entry.uniforms);
+    put_shape(w, &entry.shape);
+}
+
+/// The semantic shape tag (§10.8), added in schema minor 1.1.
+///
+/// The tag carries durable class configuration — `Line`'s `path_arc`
+/// outlives every transform — so dropping it on a round trip would change
+/// meaning, not just performance. Encoded as a discriminant plus its
+/// payload, followed by the point revision its geometry was true at
+/// (`u64::MAX` standing for "none", which only `General` uses).
+fn put_shape(w: &mut Writer, slot: &ShapeSlot) {
+    let put_point = |w: &mut Writer, p: Vec3| {
+        w.put_f64(p[0]).put_f64(p[1]).put_f64(p[2]);
+    };
+    match slot.tag {
+        ShapeTag::General => {
+            w.put_u8(0);
+        }
+        ShapeTag::Line {
+            start,
+            end,
+            path_arc,
+            buff,
+        } => {
+            w.put_u8(1);
+            put_point(w, start);
+            put_point(w, end);
+            w.put_f64(path_arc).put_f64(buff);
+        }
+        ShapeTag::Polyline { vertices, closed } => {
+            w.put_u8(2);
+            w.put_u64(vertices as u64).put_bool(closed);
+        }
+        ShapeTag::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        } => {
+            w.put_u8(3);
+            put_point(w, center);
+            w.put_f64(radius).put_f64(start_angle).put_f64(angle);
+        }
+        ShapeTag::Circle { center, radius } => {
+            w.put_u8(4);
+            put_point(w, center);
+            w.put_f64(radius);
+        }
+        ShapeTag::Dot { center, radius } => {
+            w.put_u8(5);
+            put_point(w, center);
+            w.put_f64(radius);
+        }
+        ShapeTag::Rect {
+            center,
+            width,
+            height,
+        } => {
+            w.put_u8(6);
+            put_point(w, center);
+            w.put_f64(width).put_f64(height);
+        }
+        ShapeTag::RoundedRect {
+            center,
+            width,
+            height,
+            corner_radius,
+        } => {
+            w.put_u8(7);
+            put_point(w, center);
+            w.put_f64(width).put_f64(height).put_f64(corner_radius);
+        }
+    }
+    w.put_u64(slot.point_revision.unwrap_or(u64::MAX));
+}
+
+fn get_shape(r: &mut Reader<'_>) -> Result<ShapeSlot, PersistError> {
+    let point = |r: &mut Reader<'_>| -> Result<Vec3, PersistError> {
+        Ok([r.get_f64()?, r.get_f64()?, r.get_f64()?])
+    };
+    let tag = match r.get_u8()? {
+        0 => ShapeTag::General,
+        1 => ShapeTag::Line {
+            start: point(r)?,
+            end: point(r)?,
+            path_arc: r.get_f64()?,
+            buff: r.get_f64()?,
+        },
+        2 => ShapeTag::Polyline {
+            vertices: r.get_u64()? as usize,
+            closed: r.get_bool()?,
+        },
+        3 => ShapeTag::Arc {
+            center: point(r)?,
+            radius: r.get_f64()?,
+            start_angle: r.get_f64()?,
+            angle: r.get_f64()?,
+        },
+        4 => ShapeTag::Circle {
+            center: point(r)?,
+            radius: r.get_f64()?,
+        },
+        5 => ShapeTag::Dot {
+            center: point(r)?,
+            radius: r.get_f64()?,
+        },
+        6 => ShapeTag::Rect {
+            center: point(r)?,
+            width: r.get_f64()?,
+            height: r.get_f64()?,
+        },
+        7 => ShapeTag::RoundedRect {
+            center: point(r)?,
+            width: r.get_f64()?,
+            height: r.get_f64()?,
+            corner_radius: r.get_f64()?,
+        },
+        other => return Err(PersistError::UnknownShapeTag(other)),
+    };
+    let revision = r.get_u64()?;
+    Ok(ShapeSlot {
+        tag,
+        point_revision: (revision != u64::MAX).then_some(revision),
+    })
 }
 
 impl Snapshot {
@@ -410,6 +547,13 @@ impl Snapshot {
                     depth_test: r.get_bool()?,
                     use_winding_fill: r.get_bool()?,
                 };
+                // Schema minor 1.1 appended the shape tag; a 1.0 stream
+                // simply has no shape, which is what General means.
+                let shape = if r.version().1 >= 1 {
+                    get_shape(&mut r)?
+                } else {
+                    ShapeSlot::default()
+                };
                 Some(SnapshotEntry {
                     buffer,
                     submobjects,
@@ -423,6 +567,7 @@ impl Snapshot {
                     pins,
                     pending_delete,
                     uniforms,
+                    shape,
                 })
             } else {
                 None
