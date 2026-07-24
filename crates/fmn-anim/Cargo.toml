@@ -9,6 +9,7 @@ description = "Choreo"
 [dependencies]
 fmn-core.workspace = true
 fmn-dmath.workspace = true
+fmn-hash.workspace = true
 fmn-mobject.workspace = true
 
 [lints]
