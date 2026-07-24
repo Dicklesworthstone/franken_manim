@@ -38,6 +38,50 @@ fn std_fs_atomic_write_round_trips_and_lists_sorted() {
     assert!(!fs.exists(&dir.join("missing")));
 }
 
+#[test]
+fn std_fs_create_new_and_removal_lifecycle() {
+    let dir = scratch("stdfs_lifecycle");
+    let fs = StdFs;
+    // CARGO_TARGET_TMPDIR persists across runs; start from a clean slate so
+    // create_new's create-if-absent assertions are re-runnable.
+    let _ = fs.remove_dir_all(&dir);
+
+    // create_new: create-if-absent with full contents, atomically visible.
+    let lock = dir.join("locks/maintenance.lock");
+    assert!(fs.create_new(&lock, b"holder-1").expect("create"));
+    assert!(
+        !fs.create_new(&lock, b"holder-2")
+            .expect("second create loses")
+    );
+    assert_eq!(fs.read(&lock).expect("read"), b"holder-1");
+    // No temp residue from either attempt.
+    let residue: Vec<_> = fs
+        .list_dir(&dir.join("locks"))
+        .expect("list")
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(".fmn-new."))
+        })
+        .collect();
+    assert!(residue.is_empty(), "temp residue: {residue:?}");
+
+    // remove_file: gone, and a second removal is a precise NotFound.
+    fs.remove_file(&lock).expect("remove");
+    assert!(!fs.exists(&lock));
+    assert!(matches!(
+        fs.remove_file(&lock),
+        Err(fmn_platform::fs::FsError::NotFound { .. })
+    ));
+
+    // remove_dir_all: subtree gone, siblings untouched.
+    fs.write_atomic(&dir.join("ns/a/objects/x"), b"x").unwrap();
+    fs.write_atomic(&dir.join("ns/b/objects/y"), b"y").unwrap();
+    fs.remove_dir_all(&dir.join("ns/a")).expect("purge");
+    assert!(!fs.exists(&dir.join("ns/a")));
+    assert_eq!(fs.read(&dir.join("ns/b/objects/y")).unwrap(), b"y");
+}
+
 fn spec(program: &str, argv: &[&str]) -> ProcessSpec {
     ProcessSpec {
         program: PathBuf::from(program),

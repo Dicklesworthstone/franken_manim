@@ -7,6 +7,26 @@ use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide uniquifier for temp-file names: the pid alone is not enough,
+/// because two threads of one process writing the same destination would
+/// collide on the temp path and race each other's rename.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A temp-file sibling name unique across processes (pid) and within this
+/// process (sequence), for the write-then-rename and write-then-link
+/// protocols.
+fn unique_temp_name(prefix: &str, path: &Path) -> String {
+    format!(
+        "{prefix}.{}.{}.{}",
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed),
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    )
+}
 
 /// A filesystem failure, carrying the path it happened at.
 #[derive(Debug)]
@@ -67,6 +87,35 @@ pub trait FileSystem: Send + Sync {
     /// [`FsError::Io`].
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError>;
 
+    /// Create `path` with `bytes` **only if nothing exists there** — the
+    /// lock-file primitive. Returns `Ok(true)` if this call created the file,
+    /// `Ok(false)` if something already existed (no mutation). The created
+    /// file appears with its full contents (never empty-then-filled), so a
+    /// concurrent reader sees either absence or the complete bytes. Parent
+    /// directories are created as needed.
+    ///
+    /// # Errors
+    /// [`FsError::Io`].
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError>;
+
+    /// Remove the file at `path`. Exists for *defined* lifecycle operations —
+    /// cache eviction, stale-lock breaking, `--clear-cache` — never for
+    /// ad-hoc cleanup; every deletion a consumer performs must be part of a
+    /// specified policy.
+    ///
+    /// # Errors
+    /// [`FsError::NotFound`] if there is no file, [`FsError::Io`] otherwise.
+    fn remove_file(&self, path: &Path) -> Result<(), FsError>;
+
+    /// Remove the directory at `path` and everything under it. Same doctrine
+    /// as [`remove_file`](Self::remove_file): defined lifecycle operations
+    /// only (namespace-version purges, `--clear-cache`).
+    ///
+    /// # Errors
+    /// [`FsError::NotFound`] if the path does not exist, [`FsError::Io`]
+    /// otherwise.
+    fn remove_dir_all(&self, path: &Path) -> Result<(), FsError>;
+
     /// Whether a file exists at `path`.
     fn exists(&self, path: &Path) -> bool;
 
@@ -101,18 +150,43 @@ impl FileSystem for StdFs {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
         // Unique sibling temp name, then rename into place.
-        let tmp = parent.join(format!(
-            ".fmn-tmp.{}.{}",
-            std::process::id(),
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        ));
+        let tmp = parent.join(unique_temp_name(".fmn-tmp", path));
         let mut f = std::fs::File::create(&tmp).map_err(|err| io_error(&tmp, err))?;
         f.write_all(bytes).map_err(|err| io_error(&tmp, err))?;
         f.sync_all().map_err(|err| io_error(&tmp, err))?;
         drop(f);
         std::fs::rename(&tmp, path).map_err(|err| io_error(path, err))
+    }
+
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
+        // Write the contents to a unique sibling, then `hard_link` it into
+        // place: link creation is atomic and fails if the destination exists,
+        // so the file appears fully written or not at all — the lock-file
+        // guarantee. A plain `File::create_new` + write would expose an
+        // empty-then-filled window to concurrent readers.
+        let tmp = parent.join(unique_temp_name(".fmn-new", path));
+        let mut f = std::fs::File::create(&tmp).map_err(|err| io_error(&tmp, err))?;
+        f.write_all(bytes).map_err(|err| io_error(&tmp, err))?;
+        f.sync_all().map_err(|err| io_error(&tmp, err))?;
+        drop(f);
+        let linked = match std::fs::hard_link(&tmp, path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(err) => Err(io_error(path, err)),
+        };
+        // Best-effort: the unique temp is invisible to consumers either way.
+        let _ = std::fs::remove_file(&tmp);
+        linked
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        std::fs::remove_file(path).map_err(|err| io_error(path, err))
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        std::fs::remove_dir_all(path).map_err(|err| io_error(path, err))
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -202,6 +276,45 @@ impl FileSystem for VirtualFs {
         Ok(())
     }
 
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+        let mut files = self
+            .files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // One write-lock hold makes check-and-insert atomic, matching the
+        // host implementation's create-if-absent guarantee.
+        if files.contains_key(path) {
+            return Ok(false);
+        }
+        files.insert(path.to_path_buf(), bytes.to_vec());
+        Ok(true)
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        let mut files = self
+            .files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        files.remove(path).map(|_| ()).ok_or(FsError::NotFound {
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        let mut files = self
+            .files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = files.len();
+        files.retain(|k, _| !k.starts_with(path));
+        if files.len() == before {
+            return Err(FsError::NotFound {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(())
+    }
+
     fn exists(&self, path: &Path) -> bool {
         self.with_files(|files| {
             files.contains_key(path) || files.keys().any(|k| k.starts_with(path))
@@ -257,6 +370,37 @@ mod tests {
             fs.read_to_string(Path::new("/a/c.txt")).unwrap(),
             "replaced"
         );
+    }
+
+    #[test]
+    fn virtual_fs_create_new_is_create_if_absent() {
+        let fs = VirtualFs::new();
+        assert!(fs.create_new(Path::new("/lock"), b"a").unwrap());
+        assert!(!fs.create_new(Path::new("/lock"), b"b").unwrap());
+        // The losing create mutated nothing.
+        assert_eq!(fs.read(Path::new("/lock")).unwrap(), b"a");
+    }
+
+    #[test]
+    fn virtual_fs_remove_file_and_dir() {
+        let fs = VirtualFs::new();
+        fs.insert("/ns/a/one", b"1".to_vec());
+        fs.insert("/ns/a/two", b"2".to_vec());
+        fs.insert("/ns/b/three", b"3".to_vec());
+        fs.remove_file(Path::new("/ns/a/one")).unwrap();
+        assert!(!fs.exists(Path::new("/ns/a/one")));
+        assert!(matches!(
+            fs.remove_file(Path::new("/ns/a/one")),
+            Err(FsError::NotFound { .. })
+        ));
+        fs.remove_dir_all(Path::new("/ns/a")).unwrap();
+        assert!(!fs.exists(Path::new("/ns/a")));
+        // The sibling namespace is untouched.
+        assert_eq!(fs.read(Path::new("/ns/b/three")).unwrap(), b"3");
+        assert!(matches!(
+            fs.remove_dir_all(Path::new("/ns/a")),
+            Err(FsError::NotFound { .. })
+        ));
     }
 
     #[test]

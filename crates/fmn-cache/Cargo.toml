@@ -7,6 +7,8 @@ repository.workspace = true
 description = "The content-addressed store behind typeset, path, and render caches (§14.4)."
 
 [dependencies]
+# fmn-core is currently unused directly (float canonicalization reaches keys
+# through fmn-hash's canonical Writer) but is a declared §19 edge.
 fmn-core.workspace = true
 fmn-hash.workspace = true
 fmn-platform.workspace = true
