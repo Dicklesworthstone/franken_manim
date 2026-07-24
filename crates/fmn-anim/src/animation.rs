@@ -163,7 +163,7 @@ impl RateFunc {
 /// The Reference's `clip` (`utils/simple_functions.py`): branch-for-branch,
 /// with no panic on a hollow interval (unlike `f64::clamp`) — the pipeline
 /// must stay total.
-fn clip(value: f64, lower: f64, upper: f64) -> f64 {
+pub(crate) fn clip(value: f64, lower: f64, upper: f64) -> f64 {
     if value < lower {
         lower
     } else if value > upper {
@@ -262,6 +262,20 @@ pub enum AnimError {
     /// The Stage refused an alignment or copy operation (malformed point
     /// run, mixed schemas).
     Stage(StageError),
+    /// A composition operator (§9.4) was handed no members. The Reference
+    /// indexes `args[0]` and raises `IndexError`; `Succession.begin`
+    /// asserts. An empty composition has no timeline to derive, so it is
+    /// refused by name at construction.
+    EmptyComposition,
+    /// A `Timeline` seek named a frame outside the compiled schedule
+    /// (§9.4). Frames are 1-based and on-grid — there is no off-grid seek,
+    /// for the same reason there is no off-grid sample (D-18).
+    SeekOutOfRange {
+        /// The requested frame.
+        frame: i64,
+        /// Frames the schedule actually covers.
+        total: i64,
+    },
 }
 
 impl std::fmt::Display for AnimError {
@@ -298,6 +312,12 @@ impl std::fmt::Display for AnimError {
                 write!(f, "animation requires a mobject with points")
             }
             Self::Stage(e) => write!(f, "stage refused the operation: {e}"),
+            Self::EmptyComposition => {
+                write!(f, "a composition needs at least one animation")
+            }
+            Self::SeekOutOfRange { frame, total } => {
+                write!(f, "seek to frame {frame} outside the schedule's 1..={total}")
+            }
         }
     }
 }
@@ -668,6 +688,25 @@ pub trait Animation {
     /// Whether finishing removes the mobject from the scene.
     fn is_remover(&self) -> bool {
         self.state().config.remover
+    }
+
+    /// The Reference's `clean_up_from_scene`: a remover leaves the scene
+    /// once it has finished. Composition operators (§9.4) override this to
+    /// delegate — a `FadeOut` inside a group is still a remover, and the
+    /// container it was composed into is not.
+    fn clean_up_from_scene(&mut self, stage: &mut Stage) {
+        if self.is_remover() {
+            stage.remove_from_scene(self.state().mobject());
+        }
+    }
+
+    /// A failure recorded during `interpolate`, which has no error channel.
+    /// Only the composition operators that begin members just in time
+    /// (§9.4's `Succession`) can produce one; the drivers surface it at the
+    /// end of the segment so a mid-play failure is named rather than
+    /// silently frozen. `None` for every leaf animation.
+    fn deferred_error(&self) -> Option<AnimError> {
+        None
     }
 
     /// The declared effect signature (§9.5). Default: unclassified —

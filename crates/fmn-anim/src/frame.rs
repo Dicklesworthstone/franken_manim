@@ -49,7 +49,7 @@ use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{Mob, Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation};
-use crate::clock::{FrameSample, RationalFrameClock, RationalTime};
+use crate::clock::{FrameSample, FrameSegment, RationalFrameClock, RationalTime};
 use crate::purity::{SegmentKind, SegmentReport, classify_play, classify_wait};
 
 /// The immutable frame boundary (§9.3 step 5): everything after capture
@@ -213,11 +213,202 @@ fn frame_step(
 fn finish_animations(stage: &mut Stage, animations: &mut [Box<dyn Animation>]) {
     for animation in animations.iter_mut() {
         animation.finish(stage);
-        if animation.is_remover() {
-            stage.remove_from_scene(animation.state().mobject());
-        }
+        // `clean_up_from_scene` is the removal decision: leaves consult
+        // their own `remover` flag, composition operators (§9.4) delegate to
+        // their members — a remover composed into a group is still a
+        // remover, and the container never is.
+        animation.clean_up_from_scene(stage);
     }
     update_scene_mobjects(stage, 0.0);
+}
+
+/// What `begin_animations` + classification establish, before any sample
+/// runs: the segment on the frame grid, its classification, the frame the
+/// clock stood at, and the begin-state snapshot pure segments carry.
+struct Prologue {
+    segment: FrameSegment,
+    purity: crate::purity::Purity,
+    base_frame: i64,
+    begin_state: Option<Rc<Snapshot>>,
+    run_time: f64,
+}
+
+/// The opening of every play segment, whole or partial.
+fn play_prologue(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+    skip: bool,
+) -> Result<Prologue, AnimError> {
+    begin_animations(stage, animations)?;
+    // The Reference's np.max over get_run_time (begin already widened each
+    // animation's own run_time in place).
+    let run_time = animations
+        .iter()
+        .map(|a| a.get_run_time())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
+    let purity = classify_play(stage, animations);
+    let base_frame = clock.now().frames();
+    let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
+    Ok(Prologue {
+        segment,
+        purity,
+        base_frame,
+        begin_state,
+        run_time,
+    })
+}
+
+impl Prologue {
+    /// The journal record for the segment this prologue opened.
+    fn report(self, kind: SegmentKind) -> SegmentReport {
+        SegmentReport {
+            kind,
+            purity: self.purity,
+            begin_state: self.begin_state,
+            base_frame: self.base_frame,
+            n_frames: self.segment.n_frames(),
+            run_time: self.run_time,
+        }
+    }
+}
+
+/// A `play()` segment **opened but not finished** — the seek/scrub handle
+/// (§9.4's `Timeline`, §13.5's scrubbing).
+///
+/// Opening runs the whole prologue and nothing else: the animations are
+/// begun, the segment is classified, and a pure segment's begin-state
+/// snapshot is taken. From there the caller either reconstructs any frame in
+/// O(1) through [`reconstruct_pure_frame`](crate::purity::reconstruct_pure_frame)
+/// (pure segments) or steps frames with [`advance_play`] (stateful ones) —
+/// in both cases through this same driver, so a sought frame and a played
+/// frame are the same frame by construction rather than by agreement.
+pub struct OpenSegment {
+    report: SegmentReport,
+    segment: FrameSegment,
+    stepped: i64,
+}
+
+impl OpenSegment {
+    /// The segment's journal record (classification, begin state, frame
+    /// range).
+    #[must_use]
+    pub fn report(&self) -> &SegmentReport {
+        &self.report
+    }
+
+    /// The sampling plan the segment runs on.
+    #[must_use]
+    pub fn segment(&self) -> FrameSegment {
+        self.segment
+    }
+
+    /// How many of its frames have been stepped so far.
+    #[must_use]
+    pub fn stepped(&self) -> i64 {
+        self.stepped
+    }
+
+    /// Consume the handle for its report (after finishing, or discarding).
+    #[must_use]
+    pub fn into_report(self) -> SegmentReport {
+        self.report
+    }
+}
+
+/// Open a `play()` segment: begin the animations, classify the segment, and
+/// stop. Nothing is emitted and the clock does not move.
+///
+/// # Errors
+/// As [`play_segment`].
+pub fn open_play(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+) -> Result<OpenSegment, AnimError> {
+    let prologue = play_prologue(stage, clock, animations, false)?;
+    let segment = prologue.segment;
+    Ok(OpenSegment {
+        report: prologue.report(SegmentKind::Play),
+        segment,
+        stepped: 0,
+    })
+}
+
+/// Step an open segment forward until `upto` of its frames have run,
+/// emitting each. Idempotent past the end and a no-op when already there.
+///
+/// # Errors
+/// A composition's deferred failure ([`Animation::deferred_error`]).
+pub fn advance_play(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+    upto: i64,
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<(), AnimError> {
+    let target = upto.clamp(open.stepped, open.segment.n_frames());
+    let dt = clock.dt().to_f64();
+    for sample in open
+        .segment
+        .samples()
+        .skip(usize::try_from(open.stepped).unwrap_or(usize::MAX))
+        .take(usize::try_from(target - open.stepped).unwrap_or(0))
+    {
+        let plan = StepPlan {
+            sample,
+            dt,
+            advance: 1,
+            capture: true,
+        };
+        frame_step(stage, clock, rng, animations, &plan, emit);
+        open.stepped += 1;
+    }
+    match animations.iter().find_map(|a| a.deferred_error()) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// A `wait()` segment run partway and left open — the wait-side seek
+/// primitive, matching [`play_segment_upto`]. No stop condition: a
+/// declarative timeline has no callbacks to consult.
+///
+/// # Errors
+/// [`AnimError::Clock`] for a non-finite or oversized duration.
+pub fn wait_segment_upto(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    duration: f64,
+    upto: i64,
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<SegmentReport, AnimError> {
+    update_scene_mobjects(stage, 0.0);
+    let segment = clock.segment(duration).map_err(AnimError::Clock)?;
+    let purity = classify_wait(stage, false);
+    let base_frame = clock.now().frames();
+    let begin_state = purity.is_pure().then(|| Rc::new(stage.snapshot()));
+    let dt = clock.dt().to_f64();
+    for sample in segment
+        .samples()
+        .take(usize::try_from(upto).unwrap_or(usize::MAX))
+    {
+        clock.advance_frames(1);
+        stage.update(dt);
+        emit(FramePacket::freeze(stage, clock, rng, &sample));
+    }
+    Ok(SegmentReport {
+        kind: SegmentKind::Wait,
+        purity,
+        begin_state,
+        base_frame,
+        n_frames: segment.n_frames(),
+        run_time: duration,
+    })
 }
 
 /// One `play()` segment under the six-step frame order: begin → automatic
@@ -245,17 +436,9 @@ pub fn play_segment(
     skip: bool,
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    begin_animations(stage, animations)?;
-    // The Reference's np.max over get_run_time (begin already widened each
-    // animation's own run_time in place).
-    let run_time = animations
-        .iter()
-        .map(|a| a.get_run_time())
-        .fold(f64::NEG_INFINITY, f64::max);
-    let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
-    let purity = classify_play(stage, animations);
-    let base_frame = clock.now().frames();
-    let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
+    let prologue = play_prologue(stage, clock, animations, skip)?;
+    let segment = prologue.segment;
+    let report = prologue.report(SegmentKind::Play);
     if skip {
         // The whole segment in one step: one big dt, no capture, no emit.
         if let Some(sample) = segment.skip_sample() {
@@ -268,26 +451,29 @@ pub fn play_segment(
             frame_step(stage, clock, rng, animations, &plan, emit);
         }
     } else {
-        let dt = clock.dt().to_f64();
-        for sample in segment.samples() {
-            let plan = StepPlan {
-                sample,
-                dt,
-                advance: 1,
-                capture: true,
-            };
-            frame_step(stage, clock, rng, animations, &plan, emit);
-        }
+        let mut open = OpenSegment {
+            report: report.clone(),
+            segment,
+            stepped: 0,
+        };
+        advance_play(
+            stage,
+            clock,
+            rng,
+            animations,
+            &mut open,
+            segment.n_frames(),
+            emit,
+        )?;
     }
     finish_animations(stage, animations);
-    Ok(SegmentReport {
-        kind: SegmentKind::Play,
-        purity,
-        begin_state,
-        base_frame,
-        n_frames: segment.n_frames(),
-        run_time,
-    })
+    // A composition operator that begins members just in time has no error
+    // channel inside `interpolate` (§9.4); the segment surfaces what it
+    // recorded, by name, rather than leaving a frozen composition unexplained.
+    if let Some(err) = animations.iter().find_map(|a| a.deferred_error()) {
+        return Err(err);
+    }
+    Ok(report)
 }
 
 /// The Reference's `wait` / `wait_until`: an initial scene-updater pass at

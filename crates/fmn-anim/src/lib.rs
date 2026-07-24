@@ -22,6 +22,7 @@
 
 pub mod animation;
 pub mod clock;
+pub mod composition;
 pub mod creation;
 pub mod fading;
 pub mod frame;
@@ -30,6 +31,7 @@ pub mod indication;
 pub mod movement;
 pub mod purity;
 pub mod rotation;
+pub mod timeline;
 pub mod transform;
 pub mod transform_matching;
 pub mod update;
@@ -40,6 +42,10 @@ pub use animation::{
     sub_alpha, time_spanned_alpha,
 };
 pub use clock::{ClockError, FrameSample, FrameSegment, RationalFrameClock, RationalTime};
+pub use composition::{
+    AnimationGroup, DEFAULT_LAGGED_START_LAG_RATIO, Interval, Succession, build_timings,
+    lagged_start, lagged_start_map,
+};
 pub use creation::{
     DrawBorderThenFill, IntRound, RevealBounds, ShowIncreasingSubsets, ShowPartial, show_creation,
     show_increasing_subsets, show_passing_flash, show_submobjects_one_by_one, uncreate, write,
@@ -48,7 +54,10 @@ pub use fading::{
     FadeTransform, VFade, fade_in, fade_in_from_point, fade_out, fade_out_to_point, fade_transform,
     fade_transform_pieces, v_fade_in, v_fade_in_then_out, v_fade_out,
 };
-pub use frame::{FramePacket, play_segment, wait_segment};
+pub use frame::{
+    FramePacket, OpenSegment, advance_play, open_play, play_segment, wait_segment,
+    wait_segment_upto,
+};
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{
     INDICATION_YELLOW, VShowPassingFlash, WiggleOutThenIn, apply_wave, indicate,
@@ -60,6 +69,9 @@ pub use purity::{
     reconstruct_pure_frame,
 };
 pub use rotation::{Rotating, rotate, rotate_default};
+pub use timeline::{
+    Label, PlannedSegment, Step, TIMELINE_SCHEMA, Timeline, TimelineError, TimelinePlan,
+};
 pub use transform::{
     PathFunc, STRAIGHT_PATH_THRESHOLD, StartPrep, Transform, apply_complex_function,
     apply_function, apply_matrix, apply_matrix_2d, apply_pointwise_function,
