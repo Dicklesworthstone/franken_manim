@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use fmn_frame::ColorRange;
@@ -30,15 +31,39 @@ fn job(wire: WireFormat, container: Container, encoder: EncoderChoice) -> VideoJ
 
 static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A fresh private scratch dir for one test.
-fn scratch(tag: &str) -> PathBuf {
+/// The write-then-exec gate (fm-rvm).
+///
+/// These tests write a fake ffmpeg script and then execute it. That is a
+/// race with *any other thread in this process forking*: a child forked
+/// while the script file is still open for writing inherits that writable
+/// descriptor, and the exec that follows fails with `ETXTBSY` ("Text file
+/// busy"). Rust's test harness runs tests in parallel threads and
+/// `Command::spawn` forks, so the window is real — microseconds wide,
+/// widened by machine load, which is exactly the observed flake profile:
+/// intermittent under full-suite parallelism, green in isolation, and
+/// green on the immediate rerun.
+///
+/// Every test that writes a tool and runs it holds this gate for its whole
+/// body, so no sibling can fork inside the window. [`scratch`] hands out
+/// the guard with the directory, which is what makes it hard to forget:
+/// a test that wants a private directory gets the gate whether it thought
+/// about `ETXTBSY` or not. The cost is that the subprocess tests run one
+/// at a time — a few hundred milliseconds, against a merge gate that
+/// otherwise fails for no reason.
+static SPAWN_GATE: Mutex<()> = Mutex::new(());
+
+/// A fresh private scratch dir for one test, plus the spawn gate.
+fn scratch(tag: &str) -> (PathBuf, MutexGuard<'static, ()>) {
+    // A panicking test poisons the mutex; the gate protects a file-system
+    // race, not an invariant, so a poisoned gate is still a usable gate.
+    let gate = SPAWN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!(
         "fmn-boundary-test-{}-{}-{tag}",
         std::process::id(),
         DIR_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    (dir, gate)
 }
 
 // ---- the pure argv contract ----------------------------------------
@@ -300,7 +325,7 @@ fn scripted_tool(dir: &Path) -> (PathBuf, ScriptedRunner) {
 
 #[test]
 fn provenance_fingerprint() {
-    let dir = scratch("fingerprint");
+    let (dir, _gate) = scratch("fingerprint");
     let (tool_path, runner) = scripted_tool(&dir);
     let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     assert_eq!(
@@ -312,7 +337,7 @@ fn provenance_fingerprint() {
 
 #[test]
 fn absent_ffmpeg_is_a_capability_error_naming_the_alternative() {
-    let dir = scratch("absent");
+    let (dir, _gate) = scratch("absent");
     let runner = ScriptedRunner::new();
     let err = FfmpegTool::resolve(&dir.join("nope/ffmpeg"), &runner).unwrap_err();
     let message = err.to_string();
@@ -344,7 +369,7 @@ fn scripted_encode(
     Vec<fmn_platform::process::ProcessSpec>,
     PathBuf,
 ) {
-    let dir = scratch("contract");
+    let (dir, _gate) = scratch("contract");
     let (tool_path, runner) = scripted_tool(&dir);
     let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
@@ -428,7 +453,7 @@ fn payload_geometry_is_checked_before_spawn() {
 
 #[test]
 fn failure_modes_map_to_typed_refusals() {
-    let dir = scratch("failures");
+    let (dir, _gate) = scratch("failures");
     let (tool_path, mut runner) = scripted_tool(&dir);
     let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
@@ -544,7 +569,7 @@ fn unprobed_tool(dir: &Path, body: &str) -> (FfmpegTool, StdProcessRunner) {
 #[cfg(unix)]
 #[test]
 fn sandbox_publishes_atomically_and_pins_the_environment() {
-    let dir = scratch("sandbox");
+    let (dir, _gate) = scratch("sandbox");
     let (tool, runner) = real_tool(&dir, FAKE_FFMPEG);
     let limits = JobLimits {
         keep_workdir: true,
@@ -594,7 +619,7 @@ fn sandbox_publishes_atomically_and_pins_the_environment() {
 #[cfg(unix)]
 #[test]
 fn sandbox_timeout_kills_and_leaves_destination_untouched() {
-    let dir = scratch("timeout");
+    let (dir, _gate) = scratch("timeout");
     // `exec` so the sleep IS the direct child — the mechanism's kill
     // promise covers the direct child (a plain `sleep` line would be a
     // grandchild holding the pipes, the documented tree-kill gap).
@@ -614,7 +639,10 @@ fn sandbox_timeout_kills_and_leaves_destination_untouched() {
         &caps,
         &destination,
     );
-    assert!(matches!(result, Err(BoundaryError::JobTimedOut { .. })));
+    assert!(
+        matches!(result, Err(BoundaryError::JobTimedOut { .. })),
+        "expected a timeout, got {result:?}"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "kill was not prompt"
@@ -625,7 +653,7 @@ fn sandbox_timeout_kills_and_leaves_destination_untouched() {
 #[cfg(unix)]
 #[test]
 fn sandbox_refuses_oversized_artifacts() {
-    let dir = scratch("oversize");
+    let (dir, _gate) = scratch("oversize");
     let (tool, runner) = unprobed_tool(
         &dir,
         "#!/bin/sh\ncat > /dev/null\nfor a in \"$@\"; do last=\"$a\"; done\nhead -c 4096 /dev/zero > \"$last\"\nexit 0\n",
@@ -644,20 +672,23 @@ fn sandbox_refuses_oversized_artifacts() {
         &caps,
         &destination,
     );
-    assert!(matches!(
-        result,
-        Err(BoundaryError::ArtifactOversized {
-            bytes: 4096,
-            max: 1024
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(BoundaryError::ArtifactOversized {
+                bytes: 4096,
+                max: 1024
+            })
+        ),
+        "expected an oversized-artifact refusal, got {result:?}"
+    );
     assert!(!destination.exists());
 }
 
 #[cfg(unix)]
 #[test]
 fn sandbox_failed_job_preserves_existing_destination() {
-    let dir = scratch("failkeep");
+    let (dir, _gate) = scratch("failkeep");
     let (tool, runner) = unprobed_tool(
         &dir,
         "#!/bin/sh\ncat > /dev/null\necho 'boom' >&2\nexit 7\n",
@@ -686,7 +717,7 @@ fn sandbox_failed_job_preserves_existing_destination() {
 #[cfg(unix)]
 #[test]
 fn two_stage_mux_runs_both_stages_and_copies_video() {
-    let dir = scratch("mux");
+    let (dir, _gate) = scratch("mux");
     let (tool, runner) = real_tool(&dir, FAKE_FFMPEG);
     let limits = JobLimits {
         keep_workdir: true,
@@ -724,7 +755,7 @@ fn two_stage_mux_runs_both_stages_and_copies_video() {
 #[cfg(unix)]
 #[test]
 fn concat_writes_a_list_and_copies_streams() {
-    let dir = scratch("concat");
+    let (dir, _gate) = scratch("concat");
     let (tool, runner) = real_tool(&dir, FAKE_FFMPEG);
     let limits = JobLimits {
         keep_workdir: true,
@@ -758,7 +789,7 @@ fn real_ffmpeg_smoke() {
     let caps = EncoderCapabilities::probe(&tool, &runner).unwrap();
     assert!(caps.offers("libx264") || caps.offers("mpeg4"));
 
-    let dir = scratch("real");
+    let (dir, _gate) = scratch("real");
     let boundary = Boundary::new(tool, &runner, JobLimits::default(), dir.clone());
     let destination = dir.join("smoke.mp4");
     let mut j = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
