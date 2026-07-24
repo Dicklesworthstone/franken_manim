@@ -7,24 +7,33 @@
 //! the pinned Reference (`3b1b/manim` @ `6199a00d4c1b1127ebe45cb629c3f22538b10e13`)
 //! and locked by the fixtures in `fixtures/` and `tests/`.
 //!
+//! [`space_ops`] is the Reference's vector/rotation vocabulary ported
+//! signature for signature (§7.5), over [`rotation`], which fixes scipy
+//! `Rotation`'s quaternion and Euler conventions as our documented
+//! semantics — those conventions are stated normatively in
+//! `docs/ROTATION_CONVENTIONS.md`, not inferred from this code.
+//!
 //! Still to land in this crate: the error-bounded cubic→quadratic converter
-//! (fm-6cf), true arc length + inverse-arclength LUTs (fm-xci), path
-//! booleans (fm-8dx), the SVG document processor (fm-6nm), isolines +
-//! ear-clip (fm-81u), and the full space_ops surface (fm-ngx).
+//! (fm-6cf), path booleans (fm-8dx), the SVG document processor (fm-6nm),
+//! and isolines + ear-clip (fm-81u).
 #![forbid(unsafe_code)]
 
 pub mod arclength;
 pub mod bezier;
 pub mod cubic;
 pub mod quadpath;
+pub mod rotation;
 pub mod smoothing;
+pub mod space_ops;
 
 mod scalar;
 mod vec;
 
 pub use arclength::{ArcLengthTable, CachedArcLength};
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
-pub use vec::{Mat3, rotation_matrix};
+pub use rotation::{EulerAngles, EulerSeq, Quat};
+pub use space_ops::rotation_matrix;
+pub use vec::Mat3;
 
 /// Errors from the geometry kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

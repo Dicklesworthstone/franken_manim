@@ -17,6 +17,7 @@ use crate::bezier;
 use crate::cubic;
 use crate::scalar;
 use crate::smoothing;
+use crate::space_ops;
 use crate::vec;
 use fmn_core::constants::{DEG, OUT, PI, TAU};
 use fmn_core::types::Vec3;
@@ -93,7 +94,7 @@ impl QuadPath {
         n_components: Option<usize>,
     ) -> Self {
         let n = n_components.unwrap_or_else(|| bezier::arc_n_components(angle));
-        let rot = vec::rotation_about_z(start_angle);
+        let rot = space_ops::rotation_about_z(start_angle);
         let points = bezier::quadratic_points_for_arc(angle, n)
             .into_iter()
             .map(|p| {
@@ -251,7 +252,7 @@ impl QuadPath {
             return Ok(self);
         }
         let handle = if self.consider_points_equal(handle, last) {
-            vec::midpoint(handle, anchor)
+            space_ops::midpoint(handle, anchor)
         } else {
             handle
         };
@@ -272,11 +273,11 @@ impl QuadPath {
         let last = self.last_point().ok_or(GeomError::EmptyPath)?;
         let v1 = vec::sub(handle1, last);
         let v2 = vec::sub(anchor, handle2);
-        let angle = vec::angle_between_vectors(v1, v2);
+        let angle = space_ops::angle_between_vectors(v1, v2);
         let mut quad_approx: Vec<Vec3> = if self.use_simple_quadratic_approx && angle < 45.0 * DEG {
             vec![
                 last,
-                vec::find_intersection(last, v1, anchor, vec::scale(v2, -1.0), 1e-5),
+                space_ops::find_intersection(last, v1, anchor, vec::scale(v2, -1.0), 1e-5),
                 anchor,
             ]
         } else {
@@ -284,13 +285,13 @@ impl QuadPath {
             let mut approx = approx.to_vec();
             if self.consider_points_equal(approx[3], approx[4]) {
                 // Avoid degenerate handles (duplicate points).
-                approx[3] = vec::midpoint(approx[2], approx[3]);
+                approx[3] = space_ops::midpoint(approx[2], approx[3]);
             }
             approx
         };
         if self.consider_points_equal(quad_approx[1], last) {
             // Prevent the subpath from accidentally being marked closed.
-            quad_approx[1] = vec::midpoint(quad_approx[1], quad_approx[2]);
+            quad_approx[1] = space_ops::midpoint(quad_approx[1], quad_approx[2]);
         }
         self.points.extend_from_slice(&quad_approx[1..]);
         Ok(self)
@@ -346,8 +347,8 @@ impl QuadPath {
         let mut arc_points = bezier::quadratic_points_for_arc(angle, n);
         let target_vect = vec::sub(point, last);
         let curr_vect = vec::sub(arc_points[arc_points.len() - 1], arc_points[0]);
-        let rot = vec::rotation_between_vectors(curr_vect, target_vect);
-        let scale_factor = vec::norm(target_vect) / vec::norm(curr_vect);
+        let rot = space_ops::rotation_between_vectors(curr_vect, target_vect);
+        let scale_factor = space_ops::get_norm(target_vect) / space_ops::get_norm(curr_vect);
         for p in arc_points.iter_mut() {
             // Reference: `arc_points @ R.T` = R · p per point.
             *p = vec::scale(vec::mul_point_mat(*p, &vec::transpose(&rot)), scale_factor);
@@ -372,7 +373,7 @@ impl QuadPath {
     pub fn set_points_as_corners(&mut self, points: &[Vec3]) -> Result<&mut Self, GeomError> {
         let handles: Vec<Vec3> = points
             .windows(2)
-            .map(|w| vec::midpoint(w[0], w[1]))
+            .map(|w| space_ops::midpoint(w[0], w[1]))
             .collect();
         self.set_anchors_and_handles(points, &handles)
     }
@@ -590,8 +591,8 @@ impl QuadPath {
         }
         let mut out = vec![self.points[0]];
         for tup in self.bezier_tuples() {
-            if vec::norm(vec::sub(tup[1], tup[0])) > atol
-                || vec::norm(vec::sub(tup[2], tup[0])) > atol
+            if space_ops::get_norm(vec::sub(tup[1], tup[0])) > atol
+                || space_ops::get_norm(vec::sub(tup[2], tup[0])) > atol
             {
                 out.push(tup[1]);
                 out.push(tup[2]);
@@ -633,7 +634,7 @@ impl QuadPath {
     /// `subdivide_sharp_curves`.
     pub fn subdivide_sharp_curves(&mut self, angle_threshold: f64) -> &mut Self {
         self.subdivide_curves_by_condition(|[b0, b1, b2]| {
-            let angle = vec::angle_between_vectors(vec::sub(b1, b0), vec::sub(b2, b1));
+            let angle = space_ops::angle_between_vectors(vec::sub(b1, b0), vec::sub(b2, b1));
             (angle / angle_threshold) as usize
         })
     }
@@ -651,10 +652,10 @@ impl QuadPath {
         let mut norms: Vec<f64> = tuples
             .iter()
             .map(|tup| {
-                if vec::norm(vec::sub(tup[1], tup[0])) < tolerance {
+                if space_ops::get_norm(vec::sub(tup[1], tup[0])) < tolerance {
                     0.0
                 } else {
-                    vec::norm(vec::sub(tup[2], tup[0]))
+                    space_ops::get_norm(vec::sub(tup[2], tup[0]))
                 }
             })
             .collect();
@@ -815,7 +816,7 @@ impl QuadPath {
                         .step_by(2)
                         .zip(anchors.windows(2))
                     {
-                        *slot = vec::midpoint(pair[0], pair[1]);
+                        *slot = space_ops::midpoint(pair[0], pair[1]);
                     }
                 }
                 AnchorMode::ApproxSmooth => {
@@ -833,10 +834,10 @@ impl QuadPath {
             // following anchor (a degenerate handle).
             for i in (1..new_subpath.len()).step_by(2) {
                 if new_subpath[i - 1] == new_subpath[i] {
-                    new_subpath[i] = vec::midpoint(new_subpath[i - 1], new_subpath[i + 1]);
+                    new_subpath[i] = space_ops::midpoint(new_subpath[i - 1], new_subpath[i + 1]);
                 }
                 if new_subpath[i] == new_subpath[i + 1] {
-                    new_subpath[i] = vec::midpoint(new_subpath[i - 1], new_subpath[i + 1]);
+                    new_subpath[i] = space_ops::midpoint(new_subpath[i - 1], new_subpath[i + 1]);
                 }
             }
             self.add_subpath(&new_subpath)?;
@@ -897,11 +898,11 @@ impl QuadPath {
             return OUT;
         }
         let area_vect = self.area_vector();
-        let area = vec::norm(area_vect);
+        let area = space_ops::get_norm(area_vect);
         if area > 0.0 {
             vec::scale(area_vect, 1.0 / area)
         } else {
-            vec::unit_normal_from(
+            space_ops::get_unit_normal(
                 vec::sub(self.points[1], self.points[0]),
                 vec::sub(self.points[2], self.points[1]),
                 1e-6,
@@ -921,7 +922,7 @@ impl QuadPath {
         if n < 3 {
             return vec![0.0; n];
         }
-        let rot = vec::rotation_between_vectors(OUT, self.unit_normal());
+        let rot = space_ops::rotation_between_vectors(OUT, self.unit_normal());
         let points: Vec<Vec3> = self
             .points
             .iter()
@@ -1000,7 +1001,7 @@ mod tests {
         assert_eq!(full.num_curves(), 16);
         // Anchors sit on the circle of radius 2 about (1, 0, 0).
         for anchor in full.anchors() {
-            let r = vec::norm(vec::sub(anchor, [1.0, 0.0, 0.0]));
+            let r = space_ops::get_norm(vec::sub(anchor, [1.0, 0.0, 0.0]));
             assert!((r - 2.0).abs() < 1e-12);
         }
     }

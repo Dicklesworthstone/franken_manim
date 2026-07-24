@@ -13,6 +13,7 @@
 //! two-quad split then remains only as that converter's terminal case.
 
 use crate::bezier;
+use crate::space_ops;
 use crate::vec;
 use fmn_core::types::Vec3;
 
@@ -33,9 +34,9 @@ pub fn quadratic_approximation_of_cubic(a0: Vec3, h0: Vec3, h1: Vec3, a1: Vec3) 
         vec::add(vec::scale(h1, 3.0), a0),
     );
 
-    let a = vec::cross2d(q, r);
-    let b = vec::cross2d(p, r);
-    let c = vec::cross2d(p, q);
+    let a = space_ops::cross2d(q, r);
+    let b = space_ops::cross2d(p, r);
+    let c = space_ops::cross2d(p, q);
 
     let disc = b * b - 4.0 * a * c;
     let has_infl = disc > 0.0;
@@ -64,8 +65,8 @@ pub fn quadratic_approximation_of_cubic(a0: Vec3, h0: Vec3, h1: Vec3, a1: Vec3) 
     // The derivative direction, via the quadratic on the difference points.
     let tm = bezier::quadratic_point(vec::sub(h0, a0), vec::sub(h1, h0), vec::sub(a1, h1), t_mid);
 
-    let i0 = vec::find_intersection(a0, t0, mid, tm, 1e-5);
-    let i1 = vec::find_intersection(a1, t1, mid, tm, 1e-5);
+    let i0 = space_ops::find_intersection(a0, t0, mid, tm, 1e-5);
+    let i1 = space_ops::find_intersection(a1, t1, mid, tm, 1e-5);
 
     [a0, i0, mid, i1, a1]
 }

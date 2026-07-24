@@ -11,6 +11,7 @@
 
 use crate::GeomError;
 use crate::cubic;
+use crate::space_ops;
 use crate::vec;
 use fmn_core::types::Vec3;
 
@@ -25,7 +26,7 @@ pub fn approx_smooth_quadratic_handles(anchors: &[Vec3]) -> Vec<Vec3> {
         return vec![anchors[0]];
     }
     if n == 2 {
-        return vec![vec::midpoint(anchors[0], anchors[1])];
+        return vec![space_ops::midpoint(anchors[0], anchors[1])];
     }
     // smooth_to_right[i] = ¼ p[i] + p[i+1] − ¼ p[i+2] on the forward points;
     // smooth_to_left is the same rule on the reversed sequence.
@@ -170,7 +171,7 @@ pub fn smooth_quadratic_path(anchors: &[Vec3]) -> Result<Vec<Vec3>, GeomError> {
         return Ok(anchors.to_vec());
     }
     if anchors.len() == 2 {
-        let mean = vec::midpoint(anchors[0], anchors[1]);
+        let mean = space_ops::midpoint(anchors[0], anchors[1]);
         return Ok(vec![anchors[0], mean, anchors[1]]);
     }
 
@@ -179,11 +180,11 @@ pub fn smooth_quadratic_path(anchors: &[Vec3]) -> Result<Vec<Vec3>, GeomError> {
     let mut rot = vec::IDENTITY;
     let mut shift = 0.0;
     if !is_flat {
-        let normal = vec::cross(
+        let normal = space_ops::cross(
             vec::sub(anchors[2], anchors[1]),
             vec::sub(anchors[1], anchors[0]),
         );
-        rot = vec::z_to_vector(normal);
+        rot = space_ops::z_to_vector(normal);
         for p in working.iter_mut() {
             *p = vec::mul_point_mat(*p, &rot);
         }
@@ -410,7 +411,7 @@ mod tests {
             assert!(
                 path.iter()
                     .step_by(2)
-                    .any(|p| vec::norm(vec::sub(*p, a)) < 1e-9),
+                    .any(|p| space_ops::get_norm(vec::sub(*p, a)) < 1e-9),
                 "anchor {a:?} missing from smoothed path"
             );
         }

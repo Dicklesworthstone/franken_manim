@@ -3,6 +3,8 @@
 //! (`3b1b/manim` @ `6199a00d`), computed in f64 per §6.1.
 
 use crate::scalar;
+#[cfg(test)]
+use crate::space_ops;
 use crate::vec;
 use fmn_core::constants::TAU;
 use fmn_core::types::Vec3;
@@ -161,7 +163,7 @@ mod tests {
         assert_eq!(pts.len(), 5);
         // Anchors sit on the unit circle.
         for p in [pts[0], pts[2], pts[4]] {
-            assert!((vec::norm(p) - 1.0).abs() < 1e-12);
+            assert!((space_ops::get_norm(p) - 1.0).abs() < 1e-12);
         }
         assert!((pts[4][0]).abs() < 1e-12 && (pts[4][1] - 1.0).abs() < 1e-12);
     }

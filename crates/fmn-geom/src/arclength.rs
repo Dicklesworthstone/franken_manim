@@ -24,6 +24,7 @@
 use crate::bezier;
 use crate::quadpath::QuadPath;
 use crate::scalar;
+use crate::space_ops;
 use crate::vec;
 use fmn_core::types::Vec3;
 
@@ -52,9 +53,9 @@ fn derivative(a0: Vec3, h: Vec3, a1: Vec3, t: f64) -> Vec3 {
 pub fn quadratic_arc_length(a0: Vec3, h: Vec3, a1: Vec3) -> f64 {
     let v = vec::scale(vec::sub(h, a0), 2.0);
     let u = vec::scale(vec::add(vec::sub(a0, vec::scale(h, 2.0)), a1), 2.0);
-    let a = vec::dot(u, u);
-    let b = 2.0 * vec::dot(u, v);
-    let c = vec::dot(v, v);
+    let a = space_ops::dot(u, u);
+    let b = 2.0 * space_ops::dot(u, v);
+    let c = space_ops::dot(v, v);
 
     if a == 0.0 {
         // Constant derivative: a straight segment (or a point).
@@ -171,7 +172,7 @@ impl ArcLengthTable {
             } else {
                 lo = t;
             }
-            let dsdt = vec::norm(derivative(a0, h, a1, t));
+            let dsdt = space_ops::get_norm(derivative(a0, h, a1, t));
             let newton = if dsdt > 0.0 { t - err / dsdt } else { f64::NAN };
             t = if newton.is_finite() && newton > lo && newton < hi {
                 newton
