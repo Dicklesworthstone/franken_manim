@@ -29,6 +29,7 @@ pub struct VMobject {
     style: Style,
     uniforms: Uniforms,
     shape: ShapeTag,
+    z_index: i32,
     submobjects: Vec<VMobject>,
 }
 
@@ -47,8 +48,18 @@ impl VMobject {
             style: Style::default(),
             uniforms: Uniforms::default(),
             shape: ShapeTag::General,
+            z_index: 0,
             submobjects: Vec::new(),
         }
+    }
+
+    /// Set the scene-list sort key (§8.5): higher draws later, ties keep
+    /// insertion order. Only a top-level member's value orders anything —
+    /// see `fmn_mobject::order`.
+    #[must_use]
+    pub fn with_z_index(mut self, z_index: i32) -> Self {
+        self.z_index = z_index;
+        self
     }
 
     /// A vectorized mobject over an explicit shared-anchor point run.
@@ -430,6 +441,7 @@ impl From<VMobject> for Mobject {
             style,
             uniforms,
             shape,
+            z_index,
             submobjects,
         } = v;
 
@@ -453,6 +465,7 @@ impl From<VMobject> for Mobject {
             buffer,
             uniforms,
             shape,
+            z_index,
             submobjects: submobjects.into_iter().map(Mobject::from).collect(),
         }
     }
