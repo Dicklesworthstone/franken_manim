@@ -1,4 +1,10 @@
-# BN-08 — The Animation contract's typed edges (§9.1)
+# BN-12 — The Animation contract's typed edges (§9.1)
+
+> **Renumbered from BN-08 on 2026-07-25 (fm-nn8, ADR-0009).** §16.8 assigns
+> BN-08 to the de-TeX'd classes (§11.6); this note took that number before the
+> de-TeX'd note existed. Nothing outside this file referenced it — the Parity
+> Ledger's `BN-08` evidence cells all point at the de-TeX'd natives — so the
+> renumbering changed one heading and one filename. Numbers are never reused.
 
 **Status:** Draft (W4, fm-67a). Consumed by Choreo's mechanism families
 (fm-cye), composition operators (fm-hfe), fmn-python (whose `manimlib`
