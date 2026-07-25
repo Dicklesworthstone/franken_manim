@@ -24,23 +24,38 @@
 //!   ([`fmn_mobject::ShapeTag`]) so Lumen can route a circle to the arc
 //!   kernel; any write to the points demotes the hint automatically.
 //!
-//! Still to land here: coordinate systems and plotting (fm-v4l), the
-//! de-TeX'd natives (fm-y69), 3D solids and fields (fm-2u6), the
-//! enhanced graph and data mobjects (fm-n64), and the drawings shelf
-//! (fm-3kr). The boolean-op mobjects (`Union`/`Difference`/`Intersection`/
-//! `Exclusion`) wait on Chisel's boolean kernel (fm-8dx) and are tracked
-//! by fm-6l6.
+//! * **De-TeX'd natives** (BN-08, §11.6/§12.3). Classes the Reference routes
+//!   through LaTeX for want of anything better are built natively here:
+//!   [`brace`] is a parametric path family that is correct at any width
+//!   rather than one glyph stretched, and [`matchers`] carries the shape
+//!   matchers plus the two `pifont` marks as drawn paths.
+//!
+//! Still to land here: the text-backed half of the de-TeX'd natives —
+//! `DecimalNumber`/`Integer`, the `Matrix` family, `BulletedList`, `Title`,
+//! and the `interactive.py` controls — which all wait on the Scribe bridge
+//! that turns a `fmn_text::TextLayout` and a `fmn_tex::Typeset` into
+//! [`vmobject::VMobject`]s; then coordinate systems and plotting (fm-v4l),
+//! 3D solids and fields (fm-2u6), the enhanced graph and data mobjects
+//! (fm-n64), and the drawings shelf (fm-3kr). The boolean-op mobjects
+//! (`Union`/`Difference`/`Intersection`/`Exclusion`) wait on Chisel's
+//! boolean kernel (fm-8dx) and are tracked by fm-6l6.
 #![forbid(unsafe_code)]
 
 pub mod arc;
+pub mod brace;
 pub mod line;
+pub mod matchers;
 pub mod poly;
 pub mod style;
 pub mod tip;
 pub mod vmobject;
 
 pub use arc::{AnnularSector, Annulus, Arc, ArcBetweenPoints, Circle, Dot, Ellipse};
+pub use brace::{Brace, BraceLabel, line_brace};
 pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
+pub use matchers::{
+    SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
+};
 pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, TipStyle};
 pub use style::{Style, VStyle};
 pub use tip::TipEnd;

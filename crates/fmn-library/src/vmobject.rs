@@ -30,6 +30,10 @@ pub struct VMobject {
     uniforms: Uniforms,
     shape: ShapeTag,
     z_index: i32,
+    /// Per-point stroke widths, when the class wants a taper rather than a
+    /// uniform stroke. Resized onto the point run at conversion time, the
+    /// way the Reference's `set_stroke(width=[...])` does.
+    stroke_profile: Option<Vec<f64>>,
     submobjects: Vec<VMobject>,
 }
 
@@ -49,6 +53,7 @@ impl VMobject {
             uniforms: Uniforms::default(),
             shape: ShapeTag::General,
             z_index: 0,
+            stroke_profile: None,
             submobjects: Vec::new(),
         }
     }
@@ -135,6 +140,27 @@ impl VMobject {
     pub fn with_flat_stroke(mut self, flat: bool) -> Self {
         self.uniforms.flat_stroke = flat;
         self
+    }
+
+    /// Taper the stroke along the path (Reference `set_stroke(width=[...])`).
+    ///
+    /// The list is resized onto the point run by linear interpolation at
+    /// conversion time, so it describes the *shape* of the taper rather than
+    /// one width per point: `[0.0, 6.0, 0.0]` is "nothing at the ends, six in
+    /// the middle" whatever the path's resolution. `Cross` and `Underline`
+    /// are defined by exactly this, and it overrides the style's uniform
+    /// width.
+    #[must_use]
+    pub fn with_stroke_profile(mut self, widths: impl Into<Vec<f64>>) -> Self {
+        let widths = widths.into();
+        self.stroke_profile = (!widths.is_empty()).then_some(widths);
+        self
+    }
+
+    /// The stroke taper, if this mobject has one.
+    #[must_use]
+    pub fn stroke_profile(&self) -> Option<&[f64]> {
+        self.stroke_profile.as_deref()
     }
 
     /// Append a detached child (`VMobject.add`).
@@ -331,6 +357,140 @@ impl VMobject {
         self.shifted([point[0] - c[0], point[1] - c[1], point[2] - c[2]])
     }
 
+    /// The critical point of the family's box in a direction — the detached
+    /// twin of `Stage::get_bounding_box_point`, and the primitive the rest of
+    /// the detached positional API is built on.
+    ///
+    /// Component-wise: a positive direction picks the box's maximum, a
+    /// negative one its minimum, and a zero one the midpoint. That is the
+    /// Reference's rule exactly, and it is why `UL` names a corner while `UP`
+    /// names an edge centre.
+    ///
+    /// `None` when the family has no points at all — a caller composing an
+    /// empty group has nothing to align to, and inventing the origin would
+    /// silently place things at the wrong spot.
+    #[must_use]
+    pub fn bbox_point(&self, direction: Vec3) -> Option<Vec3> {
+        let (min, max) = self.extent()?;
+        let pick = |d: f64, lo: f64, hi: f64| {
+            if d > 0.0 {
+                hi
+            } else if d < 0.0 {
+                lo
+            } else {
+                0.5 * (lo + hi)
+            }
+        };
+        Some([
+            pick(direction[0], min[0], max[0]),
+            pick(direction[1], min[1], max[1]),
+            pick(direction[2], min[2], max[2]),
+        ])
+    }
+
+    /// Move so the family's critical point at `aligned_edge` lands on
+    /// `point` (Reference `move_to(point, aligned_edge=…)`).
+    ///
+    /// [`moved_to`](Self::moved_to) is this with `aligned_edge = ORIGIN`.
+    /// The aligned form is what grid layout needs: a matrix cell is placed by
+    /// a shared corner so that differently-sized entries line up, not by
+    /// each one's own centre.
+    #[must_use]
+    pub fn moved_to_aligned(self, point: Vec3, aligned_edge: Vec3) -> Self {
+        match self.bbox_point(aligned_edge) {
+            Some(p) => self.shifted([point[0] - p[0], point[1] - p[1], point[2] - p[2]]),
+            None => self,
+        }
+    }
+
+    /// Place next to a point, on the `direction` side, `buff` away, aligned
+    /// along `aligned_edge` (Reference `next_to` with `coor_mask = 1`).
+    #[must_use]
+    pub fn next_to_point(
+        self,
+        target: Vec3,
+        direction: Vec3,
+        buff: f64,
+        aligned_edge: Vec3,
+    ) -> Self {
+        let anchor = [
+            aligned_edge[0] - direction[0],
+            aligned_edge[1] - direction[1],
+            aligned_edge[2] - direction[2],
+        ];
+        match self.bbox_point(anchor) {
+            Some(p) => self.shifted([
+                target[0] - p[0] + direction[0] * buff,
+                target[1] - p[1] + direction[1] * buff,
+                target[2] - p[2] + direction[2] * buff,
+            ]),
+            None => self,
+        }
+    }
+
+    /// Place next to another detached mobject (Reference `next_to`).
+    ///
+    /// The target's anchor is its critical point at `aligned_edge +
+    /// direction`, and ours is at `aligned_edge - direction` — the same pair
+    /// the arena's `Stage::next_to` uses, so a class laid out detached and
+    /// one laid out on the Stage agree.
+    #[must_use]
+    pub fn next_to(self, target: &Self, direction: Vec3, buff: f64, aligned_edge: Vec3) -> Self {
+        let corner = [
+            aligned_edge[0] + direction[0],
+            aligned_edge[1] + direction[1],
+            aligned_edge[2] + direction[2],
+        ];
+        match target.bbox_point(corner) {
+            Some(point) => self.next_to_point(point, direction, buff, aligned_edge),
+            None => self,
+        }
+    }
+
+    /// Align to another mobject along the nonzero components of `direction`
+    /// (Reference `align_to`), leaving the other axes alone.
+    #[must_use]
+    pub fn aligned_to(self, target: &Self, direction: Vec3) -> Self {
+        let (Some(there), Some(here)) = (target.bbox_point(direction), self.bbox_point(direction))
+        else {
+            return self;
+        };
+        let mut offset = [0.0; 3];
+        for dim in 0..3 {
+            if direction[dim] != 0.0 {
+                offset[dim] = there[dim] - here[dim];
+            }
+        }
+        self.shifted(offset)
+    }
+
+    /// Lay a sequence out end to end along `direction`, `buff` apart,
+    /// aligned along `aligned_edge` (Reference `arrange`), returning them as
+    /// the children of one group.
+    ///
+    /// The Reference re-centres the whole arrangement afterwards; that is
+    /// left to the caller here, because a caller who is about to `next_to`
+    /// the group would only be undoing it.
+    #[must_use]
+    pub fn arranged(
+        items: impl IntoIterator<Item = Self>,
+        direction: Vec3,
+        buff: f64,
+        aligned_edge: Vec3,
+    ) -> Self {
+        let mut placed: Vec<Self> = Vec::new();
+        for item in items {
+            match placed.last() {
+                None => placed.push(item),
+                Some(previous) => {
+                    let next = item.next_to(previous, direction, buff, aligned_edge);
+                    placed.push(next);
+                }
+            }
+        }
+        Self::new().with_children(placed)
+    }
+
     /// Reference `put_start_and_end_on` for a detached builder: scale,
     /// turn, and shift so the first point lands on `start` and the last on
     /// `end`.
@@ -442,6 +602,7 @@ impl From<VMobject> for Mobject {
             uniforms,
             shape,
             z_index,
+            stroke_profile,
             submobjects,
         } = v;
 
@@ -460,6 +621,17 @@ impl From<VMobject> for Mobject {
             buffer.write_range("joint_angle", 0, &angles);
         }
         style.write(&mut buffer);
+        // A taper overrides the uniform width the style just wrote — the
+        // Reference's `set_stroke(width=[0, 6, 0])`, which resizes the list
+        // onto the point run by linear interpolation.
+        if let Some(profile) = stroke_profile {
+            #[allow(clippy::cast_possible_truncation)]
+            let widths: Vec<f32> = resize_with_interpolation(&profile, buffer.len())
+                .into_iter()
+                .map(|w| w as f32)
+                .collect();
+            buffer.write_range("stroke_width", 0, &widths);
+        }
 
         Mobject {
             buffer,
@@ -619,6 +791,38 @@ pub fn v_highlight(
 /// `stage.add(vmob)` that reads the way the README's examples do.
 pub fn add_to(stage: &mut Stage, vmob: VMobject) -> Mob {
     stage.add(vmob)
+}
+
+/// Resample `values` onto `length` evenly spaced positions by linear
+/// interpolation — the Reference's `resize_with_interpolation`, which is how
+/// a short stroke-width list becomes one width per point.
+///
+/// A single value fills; an empty list yields nothing to write.
+#[must_use]
+fn resize_with_interpolation(values: &[f64], length: usize) -> Vec<f64> {
+    if values.is_empty() || length == 0 {
+        return Vec::new();
+    }
+    if values.len() == 1 {
+        return vec![values[0]; length];
+    }
+    (0..length)
+        .map(|i| {
+            if length == 1 {
+                return values[0];
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let alpha = i as f64 / (length - 1) as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let scaled = alpha * (values.len() - 1) as f64;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let lo = (scaled.floor() as usize).min(values.len() - 1);
+            let hi = (lo + 1).min(values.len() - 1);
+            #[allow(clippy::cast_precision_loss)]
+            let t = scaled - lo as f64;
+            values[lo] + (values[hi] - values[lo]) * t
+        })
+        .collect()
 }
 
 #[cfg(test)]
