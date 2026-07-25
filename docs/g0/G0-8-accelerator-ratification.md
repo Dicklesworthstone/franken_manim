@@ -288,11 +288,14 @@ dependency. It adds no dependency (`metal` was already ft's), is stubbed off
 macOS so consumers compile everywhere, and let this spike keep
 `#![forbid(unsafe_code)]`.
 
-**Ritual status:** landed upstream as a local frankentorch commit; the push,
-the `SUITE.lock` pin bump, and the `class=ffi` allowlist rows for the Metal
-closure are steps 3–5, owned by **fm-xsz**. Until then the spike consumes the
-crate by path, under ADR-0003's non-shipped tier, with its own committed
-`Cargo.lock` and `class=dev` allowlist rows.
+**Ritual status:** landed upstream as `5dbcc1d2` on frankentorch `main` (step 2
+complete; `master` synced per that repo's branch policy). The `SUITE.lock` pin
+bump, the Gauntlet diff, and the `class=ffi` allowlist rows for the Metal
+closure are steps 3–5, owned by **fm-xsz** — which will also switch the spike
+from its path dependency to a git dependency at the pinned rev, removing the
+sibling-checkout requirement. Until then the spike consumes the crate by path,
+under ADR-0003's non-shipped tier, with its own committed `Cargo.lock` and
+`class=dev` allowlist rows.
 
 ---
 

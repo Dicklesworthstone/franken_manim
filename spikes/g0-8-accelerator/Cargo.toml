@@ -13,9 +13,11 @@
 #
 # ft-kernel-metal enters by PATH, not by git rev, and that is the honest
 # statement of where the upstream work stands: the generic Metal compute
-# gateway this spike needs (UPSTREAM_LEDGER row 8) is landed in the local
-# frankentorch checkout but not yet pinned in SUITE.lock. The pin bump is
-# fm-xsz's step-3 of the §2.9 ritual, not this spike's.
+# gateway this spike needs (UPSTREAM_LEDGER row 8) is landed upstream as
+# 5dbcc1d2 but not yet pinned in SUITE.lock. The pin bump — and the switch to
+# a git dep at that rev, which is what removes this crate's requirement that
+# frankentorch be checked out as a sibling — is fm-xsz's step 3 of the §2.9
+# ritual, not this spike's.
 [package]
 name = "fmn-spike-accelerator"
 version = "0.0.0"
