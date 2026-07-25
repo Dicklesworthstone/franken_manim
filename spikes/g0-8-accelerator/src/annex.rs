@@ -12,7 +12,9 @@
 //! [`crate::compare`] measures how far it lands from the CPU reference, and
 //! that measurement is the deliverable.
 
-use crate::ir::{FlatIr, PATH_F32_STRIDE, PATH_U32_STRIDE, RenderIr, SEGMENT_STRIDE, STYLE_STRIDE};
+use crate::ir::{
+    DrawKind, FlatIr, PATH_F32_STRIDE, PATH_U32_STRIDE, RenderIr, SEGMENT_STRIDE, STYLE_STRIDE,
+};
 use ft_kernel_metal::Error;
 use ft_kernel_metal::compute::{Gateway, Grid, MathMode};
 
@@ -68,6 +70,32 @@ pub fn render_with(
     ir: &RenderIr,
     math_mode: MathMode,
 ) -> Result<(crate::cpu::Surface, AnnexReport), Error> {
+    // The kernel implements the stroke stage and only the stroke stage. A GPU
+    // that silently skipped the fills would produce a plausible, wrong picture
+    // — and D-18 refuses GPU work in the certified path permanently, so the
+    // frame that defines the certified bits must never arrive here at all.
+    // Refusing by name is both the safe behaviour and the doctrinal one.
+    if let Some(bad) = ir.paths.iter().find(|p| p.kind != DrawKind::Stroke) {
+        return Err(Error::Kernel(format!(
+            "the annex renders {:?} only; this IR contains a {:?} path. \
+             Fills and glow are CPU-side (fm-orn spikes the fill's GPU mapping), \
+             and a certified frame must never reach a GPU at all (D-18)",
+            DrawKind::Stroke,
+            bad.kind
+        )));
+    }
+    // Same reasoning, one field lower: the shader implements no joint-angle
+    // widening, and rendering without it would silently disagree with the CPU
+    // reference rather than fail.
+    if ir.styles.iter().any(|s| s.miter_gain != 0.0) {
+        return Err(Error::Kernel(
+            "the annex's kernel implements no miter gain; a style with a \
+             nonzero `miter_gain` would render differently on the two engines. \
+             The joint-angle stand-in is CPU-side (see Style::miter_gain)"
+                .into(),
+        ));
+    }
+
     let gw = Gateway::open()?;
     let lib = gw.library_with(KERNEL_SOURCE, math_mode)?;
     let pso = lib.pipeline(KERNEL_NAME)?;
@@ -170,6 +198,35 @@ fn nonempty_u32(v: &[u32]) -> &[u32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_stroke_ir_is_refused_by_name() {
+        use crate::ir::{RenderIr, Style, TileGrid};
+        use fmn_geom::quadpath::QuadPath;
+        let mut p = QuadPath::default();
+        p.start_new_path([1.0, 1.0, 0.0]);
+        p.add_line_to([9.0, 9.0, 0.0], false).unwrap();
+        let mut ir = RenderIr::new(
+            TileGrid {
+                width: 16,
+                height: 16,
+                tile: 16,
+            },
+            [0.0; 4],
+        );
+        ir.compile_path(&p, Style::flat([1.0; 4], 2.0, 1.5), DrawKind::Fill)
+            .unwrap();
+        ir.bin();
+        // Refused BEFORE the device is opened, so the refusal is the same on a
+        // machine with no GPU as on one with a GPU — otherwise this contract
+        // would only be testable on Apple silicon.
+        match render(&ir) {
+            Err(Error::Kernel(msg)) => {
+                assert!(msg.contains("Fill"), "message must name the kind: {msg}")
+            }
+            other => panic!("a fill IR must be refused, got {other:?}"),
+        }
+    }
 
     #[test]
     fn the_kernel_source_declares_the_strides_the_ir_packs() {

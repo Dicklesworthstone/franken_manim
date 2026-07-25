@@ -1,10 +1,11 @@
 # The Input-Closure Specification (§16.7) — Draft 1
 
 > Normative draft (fm-xb3, W1's "input-closure definition" deliverable).
-> Status: **DRAFT** — the certified-matrix half is frozen by G0-6 (fm-zn9);
-> end-to-end enforcement is G4b (fm-yp0). Until those land, this document is
-> the definition every "certified" claim is tested against, and changes to it
-> are reviewed like schema changes (versioned, deliberate, Gauntlet-diffed).
+> Status: **the certified-matrix half is FROZEN** by G0-6 (fm-zn9, 2026-07-25,
+> ADR-0010) — see §5. The enumerated closure remains **DRAFT** until G4b
+> (fm-yp0) enforces it end to end. This document is the definition every
+> "certified" claim is tested against, and changes to it are reviewed like
+> schema changes (versioned, deliberate, Gauntlet-diffed).
 
 ## 1. Purpose
 
@@ -86,12 +87,37 @@ list identical `outputs[]` digests for certified artifact kinds. That
 sentence is the whole product promise, and it is what G4b's CI enforces
 across the matrix.
 
-## 5. The certified matrix (pending G0-6)
+## 5. The certified matrix — FROZEN by G0-6 (fm-zn9, 2026-07-25)
 
-linux-x86-64, linux-aarch64, macos-aarch64; windows-x86-64 runs functional CI
-from W1 with bit-certification a separate declared decision. G0-6 (fm-zn9)
-freezes this list and the certified raster arithmetic (floating vs
-fixed-point); this section inherits its outcome verbatim.
+| Platform | Status | Basis |
+|---|---|---|
+| **linux-x86-64** | **certified** | measured bit-identical, G0-6 |
+| **linux-aarch64** | **certified** | measured bit-identical, G0-6 (qemu-user; see the caveat below) |
+| **macos-aarch64** | **certified** | measured bit-identical, G0-6 |
+| windows-x86-64 | **functional CI only** | bit-certification is **OQ-6**, a separate declared decision owned post-W1 |
+
+Adding a platform to the certified list is an ADR, not a CI-config change: the
+list *is* the promise `--reproducible` makes, and widening it silently would
+mean shipping a promise nobody measured.
+
+**The certified raster arithmetic is floating-point.** ADR-0010 resolves OQ-1:
+`f64`/`f32` screen-space arithmetic with fmn-dmath transcendentals, fixed-order
+reductions and no FMA is bit-identical across the matrix, so §10.5's canonical
+fixed-point raster boundary is **retired, not deferred**, and no precision or
+rounding constants enter this closure. The four properties that result rests on
+— fmn-dmath owning every certified transcendental, no FMA contraction,
+fixed-order reductions, IEEE-754 basic operations only — are load-bearing parts
+of the closure, not implementation details: an engine that broke any of them
+would produce a manifest claiming reproducibility it no longer has.
+
+**One caveat, recorded rather than buried.** G0-6's linux-aarch64 leg ran under
+qemu-user emulation; no aarch64 Linux hardware is reachable by this program
+today. QEMU's softfloat is IEEE-754 correct for the basic operations, and
+nothing on the certified path uses anything weaker, so the leg is valid evidence
+about the *arithmetic* — but it is not evidence about an aarch64 Linux
+*machine*, and W1's CI matrix (fm-sol) replaces it with real hardware when any
+becomes available. Until then, linux-aarch64's certified status rests on
+emulated execution and this sentence.
 
 ## 6. Consumers
 
@@ -102,4 +128,8 @@ fixed-point); this section inherits its outcome verbatim.
   (engine, tier, config) using the same serialization.
 - **The self-golden rig** (crates/fmn-conformance/src/golden.rs) is the
   mechanical template: content hashes via fmn-hash, per-platform lock files
-  now, one certified lock once this spec's matrix half is frozen.
+  now, and — since §5 is frozen and the arithmetic is portable — **one
+  certified lock (`Scope::Certified`) for artifacts on the certified path**.
+  G0-6 already demonstrates the shape: its frame digest is locked as a single
+  cross-platform constant rather than three per-platform ones, so the property
+  fails on whichever machine breaks it instead of waiting for a sweep.

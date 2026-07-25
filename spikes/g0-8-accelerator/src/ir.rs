@@ -22,14 +22,26 @@
 //! designed for it and expensive to retrofit, which is precisely why this
 //! spike runs before fm-gw7 rather than during it.
 //!
-//! ## What is deliberately absent
+//! ## Two spikes, one IR
 //!
-//! Fills, images, 3D, glyph instancing, occlusion masks, and the second
-//! binning level. The stage under test is strokes, which §10.7 ranks first by
-//! ROI: "the dominant cost of typical 2D scenes, per-pixel independent".
+//! G0-8 (fm-ekx) needed the stroke stage and nothing else, and the IR was cut
+//! to exactly that. G0-6 (fm-zn9) then needed *one nontrivial frame* carrying
+//! gradient fills and glow falloff as well, through the same prototype
+//! renderer — so [`DrawKind`] joined the path header rather than a second
+//! renderer joining the tree.
 //!
-//! Everything omitted is named in the mapping report with its expected layout,
-//! so fm-gw7 inherits an assessment rather than a silence.
+//! The stroke stage's device layout ([`FlatIr`]) is deliberately **unchanged**
+//! by that addition. G0-8's Metal numbers were measured against those exact
+//! bytes, and quietly reshaping the buffers would have invalidated a published
+//! measurement to save a branch. The annex instead refuses a non-stroke IR by
+//! name, which is also what D-18 requires: the frame that defines the certified
+//! bits must never reach a GPU.
+//!
+//! ## What is still deliberately absent
+//!
+//! Images, 3D, glyph instancing, occlusion masks, and the second binning level.
+//! Each is named in the G0-8 mapping report with its expected layout, so fm-gw7
+//! inherits an assessment rather than a silence.
 
 use fmn_geom::arclength;
 use fmn_geom::quadpath::QuadPath;
@@ -80,6 +92,30 @@ pub enum PrimitiveHint {
     Line = 1,
 }
 
+/// What a compiled path draws.
+///
+/// The stroke stage (G0-8) predates this: it had one kind and did not need to
+/// say so. G0-6's determinism frame must exercise gradient fills and glow
+/// falloff too (§20.1 spike 6), and a renderer that grew a second stage by
+/// overloading the first would be the wrong thing to hash.
+///
+/// **The annex engine accepts `Stroke` only, and says so with a typed error.**
+/// That is not a limitation to apologize for: D-18 refuses GPU work in the
+/// certified path *permanently*, so the frame that defines the certified bits
+/// must never reach a GPU. A kernel that silently skipped the fills would have
+/// produced a plausible, wrong, and very hard to notice picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DrawKind {
+    /// Stroke the path: distance to the curve against the width profile.
+    Stroke = 0,
+    /// Fill the path's interior under the nonzero winding rule.
+    Fill = 1,
+    /// A radial glow disc centred on the path's first anchor, radius
+    /// [`Style::glow_radius`] — the Reference's `true_dot` profile.
+    Glow = 2,
+}
+
 /// One renderable path: a segment range, a style, and a conservative slab.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PathHeader {
@@ -91,6 +127,8 @@ pub struct PathHeader {
     pub style: u32,
     /// The primitive hint (§10.8).
     pub hint: PrimitiveHint,
+    /// What this path draws.
+    pub kind: DrawKind,
     /// Conservative screen-space stroke slab, `[min_x, min_y, max_x, max_y]`:
     /// the geometric bounds grown by `half_width + aa_width`. A pixel outside
     /// it is provably clear, so this is the kernel's per-pixel early-out and
@@ -113,6 +151,67 @@ pub struct Style {
     /// The AA band width in pixels — [`crate::sdf::ANTI_ALIAS_WIDTH_PX`]
     /// unless a mobject overrode it.
     pub aa_width: f32,
+    /// Linear-light RGBA at the far end of the gradient. Equal to [`rgba`] for
+    /// a flat style.
+    ///
+    /// For a stroke the gradient runs along **arc length**, sharing the
+    /// coordinate the width taper already uses. For a fill it runs along the
+    /// axis in [`gradient_axis`]. §10.2's real interior field (arc-length
+    /// boundary interpolation with mean-value coordinates) is fm-5oi's; this
+    /// is a *defined, deterministic stand-in* and the G0-6 note says so.
+    ///
+    /// [`rgba`]: Style::rgba
+    /// [`gradient_axis`]: Style::gradient_axis
+    pub rgba_end: [f32; 4],
+    /// Screen-space gradient axis for fills: `[x0, y0, x1, y1]`. The colour at
+    /// a pixel is [`rgba`] → [`rgba_end`] by its projection onto this segment,
+    /// clamped. Ignored by strokes.
+    ///
+    /// [`rgba`]: Style::rgba
+    /// [`rgba_end`]: Style::rgba_end
+    pub gradient_axis: [f32; 4],
+    /// Radius in pixels for [`DrawKind::Glow`]. Ignored otherwise.
+    pub glow_radius: f32,
+    /// The Reference's `glow_factor` uniform. `0` gives a hard-edged
+    /// antialiased dot (`DotCloud`'s default); `2.0` is what `GlowDots` uses.
+    /// Ignored unless the kind is [`DrawKind::Glow`].
+    pub glow_factor: f32,
+    /// How strongly the per-vertex joint angle widens the stroke at a joint.
+    ///
+    /// **A defined stand-in, not §10.3's join model.** A true-distance stroke
+    /// already produces correct round joins from the distance field alone, so
+    /// nothing in the stroke stage *needed* a joint angle. G0-6's frame does:
+    /// §20.1 spike 6 requires it to exercise "per-vertex atan2 joints", and a
+    /// joint angle that never reaches a pixel is not exercised by a frame hash.
+    /// So this scales the Reference's own `miter_factor` (its
+    /// `MITER_COS_ANGLE_THRESHOLD = -0.8` smoothstep) into a width gain near
+    /// each joint. §10.3's real miter/bevel/auto joins with a miter limit are
+    /// fm-oac's to build.
+    ///
+    /// **Zero disables it entirely**, which is what [`Style::flat`] sets and
+    /// what every G0-8 stroke uses — so the published annex-equivalence numbers
+    /// are unaffected by this field existing. The annex refuses a nonzero
+    /// value by name rather than rendering something the shader does not
+    /// implement.
+    pub miter_gain: f32,
+}
+
+impl Style {
+    /// A flat, ungraded style — the shape every G0-8 stroke used before
+    /// gradients existed.
+    pub fn flat(rgba: [f32; 4], width: f32, aa_width: f32) -> Style {
+        Style {
+            rgba,
+            width_start: width,
+            width_end: width,
+            aa_width,
+            rgba_end: rgba,
+            gradient_axis: [0.0, 0.0, 1.0, 0.0],
+            glow_radius: 0.0,
+            glow_factor: 0.0,
+            miter_gain: 0.0,
+        }
+    }
 }
 
 /// A uniform tile grid over the output surface.
@@ -167,6 +266,19 @@ pub struct CommandLists {
 pub struct RenderIr {
     /// All segments of all paths, contiguous, grouped by path.
     pub segments: Vec<Segment>,
+    /// Per-segment joint angles in radians, two per segment: the angle the
+    /// path turns through at that segment's start anchor and at its end anchor.
+    /// `0` where a segment has no neighbour (an open end).
+    ///
+    /// Computed on the host with `atan2` — deliberately, since §20.1 spike 6
+    /// requires the determinism frame to exercise per-vertex `atan2`, and the
+    /// host is where a branchy transcendental belongs (the same division of
+    /// labour that put arc length on the host, G0-8 finding F3).
+    ///
+    /// **Not part of [`FlatIr`].** The Metal layout is byte-for-byte what G0-8
+    /// measured; adding a table the shader does not read would have invalidated
+    /// a published measurement for nothing.
+    pub joint_angles: Vec<f32>,
     /// One header per path, in draw order.
     pub paths: Vec<PathHeader>,
     /// Deduplicated styles.
@@ -184,6 +296,7 @@ impl RenderIr {
     pub fn new(grid: TileGrid, background: [f32; 4]) -> RenderIr {
         RenderIr {
             segments: Vec::new(),
+            joint_angles: Vec::new(),
             paths: Vec::new(),
             styles: Vec::new(),
             grid,
@@ -216,7 +329,7 @@ impl RenderIr {
     ///
     /// Returns the new path's index, or `None` for a path with no curves
     /// (which must produce no command, not an empty draw).
-    pub fn compile_path(&mut self, path: &QuadPath, style: Style) -> Option<u32> {
+    pub fn compile_path(&mut self, path: &QuadPath, style: Style, kind: DrawKind) -> Option<u32> {
         let n = path.num_curves();
         if n == 0 {
             return None;
@@ -279,11 +392,43 @@ impl RenderIr {
             return None;
         }
 
-        // The slab must be conservative for *every* point of the curve, and a
-        // quadratic's control polygon is its convex hull — so hull bounds grown
-        // by the half-width plus the full AA band is exact-or-generous, never
-        // tight-and-wrong.
-        let grow = 0.5 * style.width_start.max(style.width_end) as f64 + style.aa_width as f64;
+        // Per-vertex joint angles, by atan2 of the tangents either side of each
+        // shared anchor. Consecutive segments in this path meet at anchors; an
+        // open end has no turn, so it gets zero.
+        let range = first_segment as usize..self.segments.len();
+        for i in range.clone() {
+            let seg = self.segments[i];
+            let t_in = tangent_at_start(&seg);
+            let start_angle = if i > range.start {
+                let prev = self.segments[i - 1];
+                turn_between(tangent_at_end(&prev), t_in)
+            } else {
+                0.0
+            };
+            let end_angle = if i + 1 < range.end {
+                let next = self.segments[i + 1];
+                turn_between(tangent_at_end(&seg), tangent_at_start(&next))
+            } else {
+                0.0
+            };
+            self.joint_angles.push(start_angle as f32);
+            self.joint_angles.push(end_angle as f32);
+        }
+
+        // The slab must be conservative for *every* point the draw can touch,
+        // and a quadratic's control polygon is its convex hull — so hull bounds
+        // grown by the right margin are exact-or-generous, never tight-and-wrong.
+        // The margin is per-kind, which is the whole reason the kind reaches
+        // this function: a fill grown by half a stroke width would clip its own
+        // antialiased edge, and a glow grown by a stroke width would clip most
+        // of the glow.
+        let grow = match kind {
+            DrawKind::Stroke => {
+                0.5 * style.width_start.max(style.width_end) as f64 + style.aa_width as f64
+            }
+            DrawKind::Fill => style.aa_width as f64,
+            DrawKind::Glow => style.glow_radius as f64 + style.aa_width as f64,
+        };
         let slab = [
             (min[0] - grow) as f32,
             (min[1] - grow) as f32,
@@ -301,6 +446,7 @@ impl RenderIr {
             } else {
                 PrimitiveHint::General
             },
+            kind,
             slab,
         });
         Some(self.paths.len() as u32 - 1)
@@ -470,16 +616,32 @@ impl FlatIr {
     }
 }
 
-fn style_bits(s: &Style) -> [u32; 7] {
-    [
-        s.rgba[0].to_bits(),
-        s.rgba[1].to_bits(),
-        s.rgba[2].to_bits(),
-        s.rgba[3].to_bits(),
-        s.width_start.to_bits(),
-        s.width_end.to_bits(),
-        s.aa_width.to_bits(),
-    ]
+fn style_bits(s: &Style) -> [u32; 18] {
+    // 4 rgba + 4 rgba_end + 4 gradient_axis + 6 scalars. The array length is
+    // asserted by construction: a field added without widening it panics here
+    // in every test rather than silently merging two distinct styles.
+    let mut b = [0u32; 18];
+    for (i, v) in s
+        .rgba
+        .iter()
+        .chain(s.rgba_end.iter())
+        .chain(s.gradient_axis.iter())
+        .chain(
+            [
+                s.width_start,
+                s.width_end,
+                s.aa_width,
+                s.glow_radius,
+                s.glow_factor,
+                s.miter_gain,
+            ]
+            .iter(),
+        )
+        .enumerate()
+    {
+        b[i] = v.to_bits();
+    }
+    b
 }
 
 /// fmn-geom marks a subpath break by repeating the anchor into the handle.
@@ -488,6 +650,45 @@ fn is_null_curve(a0: [f64; 3], h: [f64; 3], a1: [f64; 3]) -> bool {
         (p[0] - q[0]).abs() + (p[1] - q[1]).abs() + (p[2] - q[2]).abs() < 1e-12
     };
     d(a0, h) && d(h, a1)
+}
+
+/// The unit-ish tangent at `t = 0`: `B'(0) = 2(p1 - p0)`.
+fn tangent_at_start(s: &Segment) -> [f64; 2] {
+    [
+        2.0 * (s.p1[0] - s.p0[0]) as f64,
+        2.0 * (s.p1[1] - s.p0[1]) as f64,
+    ]
+}
+
+/// The tangent at `t = 1`: `B'(1) = 2(p2 - p1)`.
+fn tangent_at_end(s: &Segment) -> [f64; 2] {
+    [
+        2.0 * (s.p2[0] - s.p1[0]) as f64,
+        2.0 * (s.p2[1] - s.p1[1]) as f64,
+    ]
+}
+
+/// The signed turn from `a` to `b`, wrapped to `(-π, π]`.
+///
+/// Two `atan2` calls rather than one `atan2` of a cross/dot pair, because
+/// §20.1 spike 6 wants per-vertex `atan2` exercised and this is the form a
+/// reader recognises. A degenerate (zero-length) tangent yields no turn rather
+/// than `atan2(0, 0)`'s platform-defined answer — the kind of edge that is
+/// exactly why the certified layer owns its own transcendentals.
+fn turn_between(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (na, nb) = (a[0].abs() + a[1].abs(), b[0].abs() + b[1].abs());
+    if na <= 0.0 || nb <= 0.0 {
+        return 0.0;
+    }
+    let d = fmn_dmath::atan2(b[1], b[0]) - fmn_dmath::atan2(a[1], a[0]);
+    let tau = std::f64::consts::TAU;
+    let mut w = d % tau;
+    if w > std::f64::consts::PI {
+        w -= tau;
+    } else if w <= -std::f64::consts::PI {
+        w += tau;
+    }
+    w
 }
 
 /// True when the handle sits on the chord, so the quadratic term vanishes and
@@ -504,12 +705,7 @@ mod tests {
     use super::*;
 
     fn style() -> Style {
-        Style {
-            rgba: [1.0, 0.0, 0.0, 1.0],
-            width_start: 4.0,
-            width_end: 4.0,
-            aa_width: 1.5,
-        }
+        Style::flat([1.0, 0.0, 0.0, 1.0], 4.0, 1.5)
     }
 
     fn grid() -> TileGrid {
@@ -527,7 +723,8 @@ mod tests {
         path.add_line_to([10.0, 0.0, 0.0], false).unwrap();
         path.add_line_to([10.0, 30.0, 0.0], false).unwrap();
         let mut ir = RenderIr::new(grid(), [0.0; 4]);
-        ir.compile_path(&path, style()).expect("compiles");
+        ir.compile_path(&path, style(), DrawKind::Stroke)
+            .expect("compiles");
 
         assert_eq!(ir.segments.len(), 2);
         assert_eq!(ir.segments[0].s0, 0.0);
@@ -549,8 +746,10 @@ mod tests {
             .unwrap();
 
         let mut ir = RenderIr::new(grid(), [0.0; 4]);
-        let a = ir.compile_path(&straight, style()).unwrap();
-        let b = ir.compile_path(&curved, style()).unwrap();
+        let a = ir
+            .compile_path(&straight, style(), DrawKind::Stroke)
+            .unwrap();
+        let b = ir.compile_path(&curved, style(), DrawKind::Stroke).unwrap();
         assert_eq!(ir.paths[a as usize].hint, PrimitiveHint::Line);
         assert_eq!(ir.paths[b as usize].hint, PrimitiveHint::General);
     }
@@ -561,7 +760,7 @@ mod tests {
         path.start_new_path([20.0, 20.0, 0.0]);
         path.add_line_to([40.0, 20.0, 0.0], false).unwrap();
         let mut ir = RenderIr::new(grid(), [0.0; 4]);
-        ir.compile_path(&path, style()).unwrap();
+        ir.compile_path(&path, style(), DrawKind::Stroke).unwrap();
         let slab = ir.paths[0].slab;
         // half-width 2 + aa 1.5 = 3.5 of growth on every side.
         assert!((slab[0] - 16.5).abs() < 1e-5, "{slab:?}");
@@ -588,7 +787,7 @@ mod tests {
             let y = 8.0 + i as f64 * 16.0;
             p.start_new_path([2.0, y, 0.0]);
             p.add_line_to([60.0, y, 0.0], false).unwrap();
-            ir.compile_path(&p, style()).unwrap();
+            ir.compile_path(&p, style(), DrawKind::Stroke).unwrap();
         }
         ir.bin();
         assert_eq!(ir.tiles.offsets.len(), ir.grid.count() + 1);
@@ -611,7 +810,7 @@ mod tests {
         let mut path = QuadPath::default();
         path.start_new_path([1.0, 1.0, 0.0]);
         let mut ir = RenderIr::new(grid(), [0.0; 4]);
-        assert!(ir.compile_path(&path, style()).is_none());
+        assert!(ir.compile_path(&path, style(), DrawKind::Stroke).is_none());
         assert!(ir.paths.is_empty());
         assert!(ir.segments.is_empty());
     }
@@ -623,7 +822,7 @@ mod tests {
         path.add_quadratic_bezier_curve_to([5.0, 12.0, 0.0], [10.0, 0.0, 0.0], false)
             .unwrap();
         let mut ir = RenderIr::new(grid(), [0.1, 0.2, 0.3, 1.0]);
-        ir.compile_path(&path, style()).unwrap();
+        ir.compile_path(&path, style(), DrawKind::Stroke).unwrap();
         ir.bin();
         let flat = ir.flatten();
         assert_eq!(flat.segments.len(), ir.segments.len() * SEGMENT_STRIDE);

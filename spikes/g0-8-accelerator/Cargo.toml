@@ -30,6 +30,7 @@ description = "G0-8 spike: the render IR's stroke-SDF + AA-resolve stage on Meta
 fmn-core = { path = "../../crates/fmn-core" }
 fmn-dmath = { path = "../../crates/fmn-dmath" }
 fmn-geom = { path = "../../crates/fmn-geom" }
+fmn-hash = { path = "../../crates/fmn-hash" }
 fmn-frame = { path = "../../crates/fmn-frame" }
 fmn-codec = { path = "../../crates/fmn-codec" }
 ft-kernel-metal = { path = "../../../frankentorch/crates/ft-kernel-metal" }

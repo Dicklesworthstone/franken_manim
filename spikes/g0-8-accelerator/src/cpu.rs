@@ -15,7 +15,7 @@
 //! taken here measure the shape of the work, not the CPU engine's eventual
 //! speed, and the report says so.
 
-use crate::ir::{PrimitiveHint, RenderIr};
+use crate::ir::{DrawKind, PrimitiveHint, RenderIr};
 use crate::sdf;
 
 /// A rendered surface in linear-light f32 RGBA, straight alpha.
@@ -95,10 +95,22 @@ pub fn render(ir: &RenderIr) -> Surface {
 }
 
 /// Render `ir` on the CPU at an explicit [`Precision`].
+///
+/// One tile at a time, one pixel row at a time, one draw at a time **in
+/// painter order**, compositing into a row-sized accumulator that is written
+/// back once. The row accumulator is what lets a fill contribute a whole row of
+/// coverage from one pass over its segments while a stroke still contributes
+/// per pixel — without either of them being able to reorder the composite,
+/// because the draw loop is the outer one.
 pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
     let mut surface = Surface::cleared(ir.grid.width, ir.grid.height, ir.background);
     let cols = ir.grid.cols();
     let tile = ir.grid.tile;
+
+    // Scratch, allocated once for the whole frame rather than per tile or per
+    // row: the zero-steady-state-allocation habit §17.2 measures.
+    let mut acc_row: Vec<[f64; 4]> = vec![[0.0; 4]; tile as usize];
+    let mut cov_row: Vec<f64> = vec![0.0; tile as usize];
 
     for t in 0..ir.grid.count() {
         let tx = (t as u32 % cols) * tile;
@@ -108,49 +120,101 @@ pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
         if lo == hi {
             continue;
         }
+        let x_hi = (tx + tile).min(ir.grid.width);
+        let w = (x_hi - tx) as usize;
+
         for py in ty..(ty + tile).min(ir.grid.height) {
-            for px in tx..(tx + tile).min(ir.grid.width) {
-                // Pixel centre, matching the shader's `(gid + 0.5)`.
-                let p = [px as f64 + 0.5, py as f64 + 0.5];
-                let mut acc = surface.get(px, py).map(|c| c as f64);
-                for &draw in &ir.tiles.draws[lo..hi] {
-                    let path = &ir.paths[draw as usize];
-                    if p[0] < path.slab[0] as f64
-                        || p[0] > path.slab[2] as f64
-                        || p[1] < path.slab[1] as f64
-                        || p[1] > path.slab[3] as f64
-                    {
-                        continue;
-                    }
-                    let style = &ir.styles[path.style as usize];
-                    let (alpha, _) = shade(
+            for (k, px) in (tx..x_hi).enumerate() {
+                acc_row[k] = surface.get(px, py).map(|c| c as f64);
+            }
+
+            for &draw in &ir.tiles.draws[lo..hi] {
+                let path = &ir.paths[draw as usize];
+                // Row-level slab reject: a path whose slab misses this row
+                // entirely cannot touch any pixel in it.
+                let row_lo = py as f64;
+                let row_hi = row_lo + 1.0;
+                if path.slab[3] as f64 <= row_lo || path.slab[1] as f64 >= row_hi {
+                    continue;
+                }
+                let style = &ir.styles[path.style as usize];
+
+                if path.kind == DrawKind::Fill {
+                    crate::fill::fill_row(
                         ir,
                         path.first_segment,
                         path.segment_count,
-                        path.hint,
-                        style,
-                        p,
-                        precision,
+                        py,
+                        tx,
+                        x_hi,
+                        &mut cov_row[..w],
                     );
+                }
+
+                for (k, px) in (tx..x_hi).enumerate() {
+                    let p = [px as f64 + 0.5, py as f64 + 0.5];
+                    if p[0] < path.slab[0] as f64 || p[0] > path.slab[2] as f64 {
+                        continue;
+                    }
+                    let (alpha, colour) = match path.kind {
+                        DrawKind::Stroke => {
+                            let (a, s_coord) = shade_stroke(
+                                ir,
+                                path.first_segment,
+                                path.segment_count,
+                                path.hint,
+                                style,
+                                p,
+                                precision,
+                            );
+                            (a, lerp_rgba(style, s_coord))
+                        }
+                        DrawKind::Fill => (cov_row[k], crate::fill::gradient_at(style, p)),
+                        DrawKind::Glow => {
+                            let c = ir.segments[path.first_segment as usize].p0;
+                            let d = ((p[0] - c[0] as f64).powi(2) + (p[1] - c[1] as f64).powi(2))
+                                .sqrt();
+                            (
+                                crate::fill::glow_coverage(
+                                    d,
+                                    style.glow_radius as f64,
+                                    style.aa_width as f64,
+                                    style.glow_factor as f64,
+                                ),
+                                lerp_rgba(style, 0.0),
+                            )
+                        }
+                    };
                     if alpha <= 0.0 {
                         continue;
                     }
-                    let src = [
-                        style.rgba[0] as f64,
-                        style.rgba[1] as f64,
-                        style.rgba[2] as f64,
-                        style.rgba[3] as f64 * alpha,
-                    ];
-                    acc = sdf::over(src, acc);
+                    let src = [colour[0], colour[1], colour[2], colour[3] * alpha];
+                    acc_row[k] = sdf::over(src, acc_row[k]);
                 }
+            }
+
+            for (k, px) in (tx..x_hi).enumerate() {
                 let i = ((py * surface.width + px) * 4) as usize;
-                for (dst, src) in surface.pixels[i..i + 4].iter_mut().zip(acc) {
+                for (dst, src) in surface.pixels[i..i + 4].iter_mut().zip(acc_row[k]) {
                     *dst = src as f32;
                 }
             }
         }
     }
     surface
+}
+
+/// A stroke's colour at arc-length coordinate `s` — the gradient sharing the
+/// coordinate the width taper already uses (§10.3: "width and colour
+/// interpolated by arc length").
+fn lerp_rgba(style: &crate::ir::Style, s: f64) -> [f64; 4] {
+    let mut out = [0.0f64; 4];
+    for (k, o) in out.iter_mut().enumerate() {
+        let a = style.rgba[k] as f64;
+        let b = style.rgba_end[k] as f64;
+        *o = a + (b - a) * s;
+    }
+    out
 }
 
 /// Coverage of one path at one pixel, and the arc-length coordinate where the
@@ -160,7 +224,7 @@ pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
 /// coordinate from the winning segment's span, width lerped along it, then the
 /// kept AA profile. Taking the width at the *nearest* point rather than
 /// per-segment is what makes a tapered stroke continuous across a joint.
-fn shade(
+fn shade_stroke(
     ir: &RenderIr,
     first: u32,
     count: u32,
@@ -171,6 +235,8 @@ fn shade(
 ) -> (f64, f64) {
     let mut best_d = f64::INFINITY;
     let mut best_s = 0.0;
+    let mut best_seg = first;
+    let mut best_t = 0.0;
     for i in first..(first + count) {
         let seg = &ir.segments[i as usize];
         let p0 = [seg.p0[0] as f64, seg.p0[1] as f64];
@@ -190,11 +256,58 @@ fn shade(
         if d < best_d {
             best_d = d;
             best_s = seg.s0 as f64 + (seg.s1 - seg.s0) as f64 * t;
+            best_seg = i;
+            best_t = t;
         }
     }
-    let width = style.width_start as f64 + (style.width_end - style.width_start) as f64 * best_s;
+    let mut width =
+        style.width_start as f64 + (style.width_end - style.width_start) as f64 * best_s;
+    if style.miter_gain != 0.0 {
+        width *= 1.0 + style.miter_gain as f64 * miter_factor(ir, best_seg, best_t);
+    }
     let alpha = sdf::coverage(best_d, 0.5 * width, style.aa_width as f64);
     (alpha, best_s)
+}
+
+/// How much the joint angle widens the stroke at the nearest point.
+///
+/// The Reference's own auto-join rule, kept: it bevels for
+/// `cos(angle) > MITER_COS_ANGLE_THRESHOLD` and transitions smoothly to a
+/// miter for sharper angles, via `smoothstep(mcat1, mcat2, cos_angle)` with
+/// `mcat1 = -0.8` and `mcat2 = mix(mcat1, -1, 0.5) = -0.9`
+/// (`manimlib/shaders/quadratic_bezier/stroke/geom.glsl:108-119`). Here that
+/// factor scales a width gain instead of a ribbon corner offset, and it decays
+/// away from the joint so the widening is local to the corner.
+///
+/// This is the **defined stand-in** [`crate::ir::Style::miter_gain`] documents,
+/// not §10.3's join model. It exists so a per-vertex `atan2` reaches a pixel,
+/// which is what makes it testable by a frame hash.
+fn miter_factor(ir: &RenderIr, seg: u32, t: f64) -> f64 {
+    /// The Reference's `MITER_COS_ANGLE_THRESHOLD`.
+    const MCAT1: f64 = -0.8;
+    /// `mix(MCAT1, -1.0, 0.5)`.
+    const MCAT2: f64 = -0.9;
+
+    let joints = &ir.joint_angles;
+    let i = seg as usize * 2;
+    if i + 1 >= joints.len() {
+        return 0.0;
+    }
+    // Whichever end of this segment the nearest point sits closer to.
+    let (angle, nearness) = if t < 0.5 {
+        (joints[i] as f64, 1.0 - 2.0 * t)
+    } else {
+        (joints[i + 1] as f64, 2.0 * t - 1.0)
+    };
+    if angle == 0.0 {
+        return 0.0;
+    }
+    let cos_angle = fmn_dmath::cos(angle);
+    // smoothstep(MCAT1, MCAT2, cos_angle) — descending edges, like the AA
+    // profile, so the same clamped form reads the same way.
+    let u = ((cos_angle - MCAT1) / (MCAT2 - MCAT1)).clamp(0.0, 1.0);
+    let factor = u * u * (3.0 - 2.0 * u);
+    factor * nearness
 }
 
 /// The `PrimitiveHint::Line` fast path: distance to a segment, and the
@@ -235,16 +348,13 @@ mod tests {
             },
             [0.0, 0.0, 0.0, 1.0],
         );
-        ir.compile_path(
-            &path,
-            Style {
-                rgba: [1.0, 1.0, 1.0, 1.0],
-                width_start,
-                width_end,
-                aa_width: sdf::ANTI_ALIAS_WIDTH_PX as f32,
-            },
-        )
-        .unwrap();
+        let mut st = Style::flat(
+            [1.0, 1.0, 1.0, 1.0],
+            width_start,
+            sdf::ANTI_ALIAS_WIDTH_PX as f32,
+        );
+        st.width_end = width_end;
+        ir.compile_path(&path, st, DrawKind::Stroke).unwrap();
         ir.bin();
         ir
     }
@@ -354,16 +464,8 @@ mod tests {
             let mut p = QuadPath::default();
             p.start_new_path([4.0, 16.0, 0.0]);
             p.add_line_to([28.0, 16.0, 0.0], false).unwrap();
-            ir.compile_path(
-                &p,
-                Style {
-                    rgba,
-                    width_start: 8.0,
-                    width_end: 8.0,
-                    aa_width: 1.5,
-                },
-            )
-            .unwrap();
+            ir.compile_path(&p, Style::flat(rgba, 8.0, 1.5), DrawKind::Stroke)
+                .unwrap();
         }
         ir.bin();
         let s = render(&ir);
@@ -391,12 +493,8 @@ mod tests {
             );
             ir.compile_path(
                 &path,
-                Style {
-                    rgba: [0.9, 0.7, 0.1, 1.0],
-                    width_start: 5.0,
-                    width_end: 5.0,
-                    aa_width: 1.5,
-                },
+                Style::flat([0.9, 0.7, 0.1, 1.0], 5.0, 1.5),
+                DrawKind::Stroke,
             )
             .unwrap();
             ir.bin();

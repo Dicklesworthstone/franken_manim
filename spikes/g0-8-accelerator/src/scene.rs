@@ -24,7 +24,7 @@
 //! once here, so the frame reads as a FrankenManim frame rather than as a
 //! debug pattern.
 
-use crate::ir::{RenderIr, Style, TileGrid};
+use crate::ir::{DrawKind, RenderIr, Style, TileGrid};
 use crate::sdf::ANTI_ALIAS_WIDTH_PX;
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
@@ -54,12 +54,10 @@ fn linear(c: Srgb, alpha: f64) -> [f32; 4] {
 }
 
 fn style(color: Srgb, alpha: f64, w0: f32, w1: f32) -> Style {
-    Style {
-        rgba: linear(color, alpha),
-        width_start: w0,
-        width_end: w1,
-        aa_width: ANTI_ALIAS_WIDTH_PX as f32,
-    }
+    let mut st = Style::flat(linear(color, alpha), w0, ANTI_ALIAS_WIDTH_PX as f32);
+    st.width_end = w1;
+    st.rgba_end = st.rgba;
+    st
 }
 
 /// Build the preview frame's IR, binned and ready to dispatch.
@@ -87,14 +85,14 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
         let mut p = QuadPath::default();
         p.start_new_path([x, h * 0.06, 0.0]);
         p.add_line_to([x, h * 0.94, 0.0], false).unwrap();
-        ir.compile_path(&p, style(GREY_D, 1.0, 1.0, 1.0));
+        ir.compile_path(&p, style(GREY_D, 1.0, 1.0, 1.0), DrawKind::Stroke);
     }
     for i in 1..7 {
         let y = h * i as f64 / 7.0;
         let mut p = QuadPath::default();
         p.start_new_path([w * 0.04, y, 0.0]);
         p.add_line_to([w * 0.96, y, 0.0], false).unwrap();
-        ir.compile_path(&p, style(GREY_D, 1.0, 1.0, 1.0));
+        ir.compile_path(&p, style(GREY_D, 1.0, 1.0, 1.0), DrawKind::Stroke);
     }
 
     // ---- a Lissajous figure: dense curvature, every cubic-root branch.
@@ -135,7 +133,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
             p.add_quadratic_bezier_curve_to([handle[0], handle[1], 0.0], [b[0], b[1], 0.0], false)
                 .unwrap();
         }
-        ir.compile_path(&p, style(BLUE_B, 1.0, 3.0, 3.0));
+        ir.compile_path(&p, style(BLUE_B, 1.0, 3.0, 3.0), DrawKind::Stroke);
     }
 
     // ---- three overlapping translucent arcs: painter order under alpha.
@@ -152,7 +150,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
             [w * (0.30 + 0.20 * i as f64), h * 0.50, 0.0],
             None,
         );
-        ir.compile_path(&p, style(color, 0.55, 12.0, 12.0));
+        ir.compile_path(&p, style(color, 0.55, 12.0, 12.0), DrawKind::Stroke);
     }
 
     // ---- tapered strokes: the arc-length width interpolation.
@@ -163,7 +161,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
         p.add_quadratic_bezier_curve_to([w * 0.16, y - h * 0.07, 0.0], [w * 0.26, y, 0.0], false)
             .unwrap();
         let taper = 2.0 + 2.0 * i as f32;
-        ir.compile_path(&p, style(TEAL_C, 0.95, taper, 0.0));
+        ir.compile_path(&p, style(TEAL_C, 0.95, taper, 0.0), DrawKind::Stroke);
     }
 
     // ---- a sharp-jointed polyline: the nearest segment changes across pixels.
@@ -176,7 +174,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
             let y = if i % 2 == 0 { y0 - h * 0.11 } else { y0 };
             p.add_line_to([x, y, 0.0], false).unwrap();
         }
-        ir.compile_path(&p, style(MAROON_B, 1.0, 7.0, 7.0));
+        ir.compile_path(&p, style(MAROON_B, 1.0, 7.0, 7.0), DrawKind::Stroke);
     }
 
     // ---- a hairline thinner than the AA band: the sub-pixel regime.
@@ -185,7 +183,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
         p.start_new_path([w * 0.05, h * 0.97, 0.0]);
         p.add_quadratic_bezier_curve_to([w * 0.5, h * 0.90, 0.0], [w * 0.95, h * 0.97, 0.0], false)
             .unwrap();
-        ir.compile_path(&p, style(WHITE, 1.0, 0.4, 0.4));
+        ir.compile_path(&p, style(WHITE, 1.0, 0.4, 0.4), DrawKind::Stroke);
     }
 
     // ---- a heavy opaque underline, drawn last: proves painter order wins.
@@ -193,7 +191,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
         let mut p = QuadPath::default();
         p.start_new_path([w * 0.30, h * 0.06, 0.0]);
         p.add_line_to([w * 0.70, h * 0.06, 0.0], false).unwrap();
-        ir.compile_path(&p, style(BLUE_D, 1.0, 9.0, 9.0));
+        ir.compile_path(&p, style(BLUE_D, 1.0, 9.0, 9.0), DrawKind::Stroke);
     }
 
     ir.bin();

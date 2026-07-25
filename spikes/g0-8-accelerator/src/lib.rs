@@ -14,6 +14,8 @@
 //! | [`ir`] | the prototype compiled render IR (§10.8) and its Metal-shaped flattening |
 //! | [`sdf`] | the stage's mathematics in `f64`, mirrored by `shaders/stroke_aa.metal` in `f32` |
 //! | [`cpu`] | the CPU reference engine — what the stage *means* |
+//! | [`fill`] | nonzero-winding fill, radial glow, and the gradient field (G0-6) |
+//! | [`determinism`] | G0-6's frame, its canonical hash, and the fmn-dmath shakedown |
 //! | [`annex`] | the Metal engine, dispatched through frankentorch's compute gateway |
 //! | [`compare`] | the §16.3 engine-equivalence measurement |
 //! | [`scene`] | the preview frame, built to exercise every property the stage owns |
@@ -41,6 +43,8 @@
 pub mod annex;
 pub mod compare;
 pub mod cpu;
+pub mod determinism;
+pub mod fill;
 pub mod ir;
 pub mod scene;
 pub mod sdf;
