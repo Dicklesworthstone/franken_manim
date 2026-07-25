@@ -257,6 +257,13 @@ Named rather than silent, so fm-gw7 inherits an evaluation instead of a gap:
   threadgroup, so the natural shape is a threadgroup-local scanline reduction.
   It is the next thing to spike, and it should be spiked before W5 commits to a
   fill layout.
+
+  **Spiked, 2026-07-25 (fm-orn) — see `G0-8b-analytic-fill-ratification.md`.**
+  Verdict GO; the assessment above is refuted in the favourable direction, since
+  no threadgroup-local reduction is needed in either of the two dispatch shapes
+  that work. Both land at the `f32` arithmetic floor (max Δ8-bit = 1, against
+  this stage's 152), and the recommended shape is one thread per *pixel* — the
+  same shape as this kernel.
 - **Glyph instancing** (`InstanceTable`). Assessed as *the easiest remaining
   win*: an instance is a transform plus a style index against an interned
   outline, which is exactly the flat-table shape that already works, and
@@ -268,6 +275,12 @@ Named rather than silent, so fm-gw7 inherits an evaluation instead of a gap:
   transfer.
 - **Occlusion pruning.** Untouched. It is a host-side mask over painter order and
   should be assessed with the fill spike, since it only pays where fills are.
+
+  **Settled there (fm-orn, finding F13):** it is host-side as expected, and it is
+  *not* an independent optimization — without §10.4's interior tile class writing
+  exactly `1` for a covered command, a pruned frame differs from an unpruned one
+  in the last bit of a channel. Implemented and measured: 16.5 % of commands
+  removed, frames byte-identical.
 - **3D, depth, lighting.** Untouched.
 - **Multi-frame pipelining.** The gateway is synchronous by design (dispatch
   waits). §17.4 wants 2–4 annex frames in flight, which needs asynchronous
@@ -327,4 +340,4 @@ under ADR-0003's non-shipped tier, with its own committed `Cargo.lock` and
 | fm-xsz | The Metal annex production backend — inherits this mapping; owns the §2.9 ritual steps 3–5 for ledger row 8 |
 | fm-gw7 | The compiled render IR — consumes §3's table verdicts and F1–F6 |
 | fm-4wt | The fast CPU engine — must act on F10 before choosing `f32` anywhere in the stroke SDF |
-| (new) | Analytic-fill GPU mapping spike, before W5 commits to a fill layout (§5) |
+| fm-orn | Analytic-fill GPU mapping spike, before W5 commits to a fill layout (§5) — **done 2026-07-25**, `G0-8b-analytic-fill-ratification.md`, findings F11–F16 |

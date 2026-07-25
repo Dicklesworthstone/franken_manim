@@ -15,6 +15,7 @@
 //! taken here measure the shape of the work, not the CPU engine's eventual
 //! speed, and the report says so.
 
+use crate::analytic_fill::{MonoTable, TileClasses};
 use crate::ir::{DrawKind, PrimitiveHint, RenderIr};
 use crate::sdf;
 
@@ -89,12 +90,45 @@ pub enum Precision {
     AnnexF32,
 }
 
+/// Which fill the engine evaluates for [`DrawKind::Fill`] draws.
+///
+/// Two fills exist in this spike on purpose, and conflating them would make one
+/// of two published results a lie:
+///
+/// - [`FillKernel::Supersampled`] is G0-6's defined stand-in ([`crate::fill`]) —
+///   exact in x, four sub-scanlines in y. **The certified G0-6 frame hash is a
+///   hash of this**, so it is the default and it never changes.
+/// - [`FillKernel::Analytic`] is §10.2 as written
+///   ([`crate::analytic_fill`]) — exact in both axes, over the derived
+///   doubly-monotone table. It is fm-orn's subject and fm-5oi's eventual
+///   deliverable.
+#[derive(Debug, Clone, Copy)]
+pub enum FillKernel<'a> {
+    /// G0-6's exact-in-x, supersampled-in-y stand-in.
+    Supersampled,
+    /// §10.2's analytic coverage, over a prebuilt monotone table.
+    Analytic {
+        /// The derived doubly-monotone geometry.
+        mono: &'a MonoTable,
+        /// §10.4's per-command tile classification. `None` forces every command
+        /// through the accumulation, which is what makes "classification is an
+        /// optimization, not a semantics" a testable claim rather than an
+        /// assurance.
+        classes: Option<&'a TileClasses>,
+    },
+}
+
 /// Render `ir` on the CPU in the reference precision.
 pub fn render(ir: &RenderIr) -> Surface {
     render_at(ir, Precision::Reference)
 }
 
-/// Render `ir` on the CPU at an explicit [`Precision`].
+/// Render `ir` on the CPU at an explicit [`Precision`], with G0-6's fill.
+pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
+    render_with(ir, precision, FillKernel::Supersampled)
+}
+
+/// Render `ir` on the CPU at an explicit [`Precision`] and fill kernel.
 ///
 /// One tile at a time, one pixel row at a time, one draw at a time **in
 /// painter order**, compositing into a row-sized accumulator that is written
@@ -102,7 +136,7 @@ pub fn render(ir: &RenderIr) -> Surface {
 /// coverage from one pass over its segments while a stroke still contributes
 /// per pixel — without either of them being able to reorder the composite,
 /// because the draw loop is the outer one.
-pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
+pub fn render_with(ir: &RenderIr, precision: Precision, fill_kernel: FillKernel<'_>) -> Surface {
     let mut surface = Surface::cleared(ir.grid.width, ir.grid.height, ir.background);
     let cols = ir.grid.cols();
     let tile = ir.grid.tile;
@@ -111,6 +145,7 @@ pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
     // row: the zero-steady-state-allocation habit §17.2 measures.
     let mut acc_row: Vec<[f64; 4]> = vec![[0.0; 4]; tile as usize];
     let mut cov_row: Vec<f64> = vec![0.0; tile as usize];
+    let mut fill_scratch = crate::analytic_fill::RowScratch::for_tile(tile);
 
     for t in 0..ir.grid.count() {
         let tx = (t as u32 % cols) * tile;
@@ -128,7 +163,7 @@ pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
                 acc_row[k] = surface.get(px, py).map(|c| c as f64);
             }
 
-            for &draw in &ir.tiles.draws[lo..hi] {
+            for (k, &draw) in ir.tiles.draws[lo..hi].iter().enumerate() {
                 let path = &ir.paths[draw as usize];
                 // Row-level slab reject: a path whose slab misses this row
                 // entirely cannot touch any pixel in it.
@@ -140,15 +175,37 @@ pub fn render_at(ir: &RenderIr, precision: Precision) -> Surface {
                 let style = &ir.styles[path.style as usize];
 
                 if path.kind == DrawKind::Fill {
-                    crate::fill::fill_row(
-                        ir,
-                        path.first_segment,
-                        path.segment_count,
-                        py,
-                        tx,
-                        x_hi,
-                        &mut cov_row[..w],
-                    );
+                    match fill_kernel {
+                        FillKernel::Supersampled => crate::fill::fill_row(
+                            ir,
+                            path.first_segment,
+                            path.segment_count,
+                            py,
+                            tx,
+                            x_hi,
+                            &mut cov_row[..w],
+                        ),
+                        // §10.4's interior class: the whole tile is inside the
+                        // path, so coverage is exactly one and the per-pixel
+                        // evaluation is skipped entirely — the vectorized-span
+                        // path, and the reason occlusion pruning can be exact.
+                        FillKernel::Analytic { classes, .. }
+                            if classes.is_some_and(|c| {
+                                c.flags[lo + k] == crate::analytic_fill::CLASS_INTERIOR
+                            }) =>
+                        {
+                            cov_row[..w].fill(1.0)
+                        }
+                        FillKernel::Analytic { mono, .. } => crate::analytic_fill::fill_row_at(
+                            mono.pieces_of(draw as usize),
+                            py,
+                            tx,
+                            x_hi,
+                            precision,
+                            &mut fill_scratch,
+                            &mut cov_row[..w],
+                        ),
+                    }
                 }
 
                 for (k, px) in (tx..x_hi).enumerate() {

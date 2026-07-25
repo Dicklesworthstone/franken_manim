@@ -15,6 +15,7 @@
 //! | [`sdf`] | the stage's mathematics in `f64`, mirrored by `shaders/stroke_aa.metal` in `f32` |
 //! | [`cpu`] | the CPU reference engine — what the stage *means* |
 //! | [`fill`] | nonzero-winding fill, radial glow, and the gradient field (G0-6) |
+//! | [`analytic_fill`] | §10.2's analytic fill and its device layout (fm-orn) |
 //! | [`determinism`] | G0-6's frame, its canonical hash, and the fmn-dmath shakedown |
 //! | [`annex`] | the Metal engine, dispatched through frankentorch's compute gateway |
 //! | [`compare`] | the §16.3 engine-equivalence measurement |
@@ -40,6 +41,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod analytic_fill;
 pub mod annex;
 pub mod compare;
 pub mod cpu;

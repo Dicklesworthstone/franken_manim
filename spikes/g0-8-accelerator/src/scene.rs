@@ -198,6 +198,229 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
     ir
 }
 
+// ------------------------------------------------------------- the fill frame
+
+/// Build the fill frame's IR, binned and ready to dispatch (fm-orn).
+pub fn fill_frame() -> RenderIr {
+    build_fill(PREVIEW_WIDTH, PREVIEW_HEIGHT, TILE)
+}
+
+/// A **fill-only** frame, exercising every property §10.2's fill owns.
+///
+/// Fill-only on purpose, and for the same reason the stroke frame is
+/// stroke-only: each annex kernel refuses the other kind by name, so a mixed
+/// frame could not be dispatched without one of the two engines silently
+/// skipping half the picture. Composition of the two stages is a W5 question
+/// about pass ordering, not a mapping question, and inventing an answer here
+/// would pre-empt it.
+///
+/// What the scene is built to exercise:
+///
+/// - **doubly-monotone splitting** — circles and blobs, whose pieces need both
+///   the horizontal- and vertical-tangent cuts;
+/// - **the nonzero winding rule, twice** — an annulus (a hole made by opposing
+///   orientation) and a pentagram (a hole that *isn't* one, because the winding
+///   in its core is two and the nonzero rule fills it, which is exactly where
+///   even-odd would differ);
+/// - **the tile carry** — shapes far wider than a tile, so most tiles see no
+///   geometry at all and are covered entirely by winding that entered from the
+///   left;
+/// - **§10.4's interior class** — large convex fills whose middles are whole
+///   tiles;
+/// - **occlusion** — a layer of small fills under an opaque convex panel, so
+///   the pruning pass has something to prune and the measurement is not zero
+///   by construction;
+/// - **gradients and painter-ordered alpha** — overlapping translucent discs;
+/// - **edge-dense tiles** — a cluster of small discs, the glyph-like regime
+///   where a fill spends its time.
+pub fn build_fill(width: u32, height: u32, tile: u32) -> RenderIr {
+    let mut ir = RenderIr::new(
+        TileGrid {
+            width,
+            height,
+            tile,
+        },
+        background(),
+    );
+    let w = width as f64;
+    let h = height as f64;
+
+    let flat = |c: Srgb, alpha: f64| {
+        let mut st = Style::flat(linear(c, alpha), 0.0, ANTI_ALIAS_WIDTH_PX as f32);
+        st.rgba_end = st.rgba;
+        st
+    };
+
+    // ---- the occluded layer: small fills that a later opaque panel hides.
+    for i in 0..10 {
+        let x = w * (0.10 + 0.06 * i as f64);
+        let p = polygon(&[
+            [x, h * 0.16],
+            [x + w * 0.045, h * 0.16],
+            [x + w * 0.045, h * 0.40],
+            [x, h * 0.40],
+        ]);
+        ir.compile_path(&p, flat(MAROON_B, 1.0), DrawKind::Fill);
+    }
+
+    // ---- the opaque convex panel that hides them.
+    {
+        let p = polygon(&[
+            [w * 0.07, h * 0.12],
+            [w * 0.72, h * 0.12],
+            [w * 0.72, h * 0.44],
+            [w * 0.07, h * 0.44],
+        ]);
+        let mut st = flat(BLUE_D, 1.0);
+        // A gradient across the panel, both ends opaque — so it is still a legal
+        // occluder, which is the case worth testing (an alpha-carrying gradient
+        // must not be, and that is its own test).
+        st.rgba_end = linear(TEAL_C, 1.0);
+        st.gradient_axis = [
+            (w * 0.07) as f32,
+            (h * 0.12) as f32,
+            (w * 0.72) as f32,
+            (h * 0.44) as f32,
+        ];
+        ir.compile_path(&p, st, DrawKind::Fill);
+    }
+
+    // ---- an annulus: a hole made by opposing orientation.
+    //
+    // Two subpaths in one path, the inner one wound the other way. Starting the
+    // second explicitly is what makes them independent contours rather than one
+    // contour with a bridge across the hole.
+    {
+        let c = [w * 0.20, h * 0.70, 0.0];
+        let mut ring = QuadPath::default();
+        for (radius, angle) in [
+            (h * 0.20, std::f64::consts::TAU),
+            (h * 0.11, -std::f64::consts::TAU),
+        ] {
+            let a = QuadPath::arc(0.0, angle, radius, c, None);
+            let [start, _, _] = a.nth_curve_points(0).expect("an arc has curves");
+            ring.start_new_path(start);
+            for i in 0..a.num_curves() {
+                let [_, handle, end] = a.nth_curve_points(i).expect("in range");
+                ring.add_quadratic_bezier_curve_to(handle, end, false)
+                    .expect("appending to an open subpath");
+            }
+        }
+        ir.compile_path(&ring, flat(YELLOW_C, 1.0), DrawKind::Fill);
+    }
+
+    // ---- a lobed blob: the only shape here whose pieces actually need splitting.
+    //
+    // Worth its own paragraph, because the first draft of this scene had none.
+    // `QuadPath::arc` lays a circle out as 16 equal components starting at angle
+    // zero, so its extrema — at 0°, 90°, 180°, 270° — land exactly on component
+    // *junctions* and every piece is already monotone. A scene made of circles
+    // and polygons therefore exercises the monotone table's storage and none of
+    // its mathematics, and the GPU comparison would never see a split piece.
+    //
+    // Handles here sit at the intersection of the sampled tangents (the same
+    // construction the stroke frame's Lissajous uses), so the extrema fall
+    // wherever the curve puts them.
+    {
+        let (cx, cy, r) = (w * 0.30, h * 0.68, h * 0.17);
+        let n = 12;
+        let radius = |t: f64| r * (1.0 + 0.32 * fmn_dmath::sin(3.0 * t + 0.4));
+        let d_radius = |t: f64| r * 0.32 * 3.0 * fmn_dmath::cos(3.0 * t + 0.4);
+        let point = |t: f64| -> [f64; 2] {
+            let rr = radius(t);
+            [cx + rr * fmn_dmath::cos(t), cy + rr * fmn_dmath::sin(t)]
+        };
+        let tangent = |t: f64| -> [f64; 2] {
+            let (rr, dr) = (radius(t), d_radius(t));
+            let (c, s) = (fmn_dmath::cos(t), fmn_dmath::sin(t));
+            [dr * c - rr * s, dr * s + rr * c]
+        };
+        let at = |k: usize| k as f64 / n as f64 * std::f64::consts::TAU;
+        let a0 = point(at(0));
+        let mut p = QuadPath::default();
+        p.start_new_path([a0[0], a0[1], 0.0]);
+        for k in 1..=n {
+            let (t0, t1) = (at(k - 1), at(k));
+            let (a, b) = (point(t0), point(t1));
+            let handle = tangent_intersection(a, tangent(t0), b, tangent(t1));
+            p.add_quadratic_bezier_curve_to([handle[0], handle[1], 0.0], [b[0], b[1], 0.0], false)
+                .unwrap();
+        }
+        ir.compile_path(&p, flat(TEAL_C, 0.85), DrawKind::Fill);
+    }
+
+    // ---- a pentagram: winding two in the core, which the nonzero rule fills.
+    {
+        let (cx, cy, r) = (w * 0.50, h * 0.70, h * 0.20);
+        let mut pts = Vec::with_capacity(5);
+        for k in 0..5 {
+            // Every second vertex, which is what makes the path self-intersect.
+            let a = std::f64::consts::FRAC_PI_2 + (k as f64) * 4.0 * std::f64::consts::TAU / 10.0;
+            pts.push([cx + r * fmn_dmath::cos(a), cy - r * fmn_dmath::sin(a)]);
+        }
+        ir.compile_path(&polygon(&pts), flat(RED_C, 1.0), DrawKind::Fill);
+    }
+
+    // ---- overlapping translucent discs, in painter order.
+    for (i, color) in [GREEN_C, BLUE_B, WHITE].into_iter().enumerate() {
+        let p = QuadPath::arc(
+            0.0,
+            std::f64::consts::TAU,
+            h * 0.15,
+            [
+                w * (0.72 + 0.06 * i as f64),
+                h * (0.62 + 0.05 * i as f64),
+                0.0,
+            ],
+            None,
+        );
+        ir.compile_path(&p, flat(color, 0.5), DrawKind::Fill);
+    }
+
+    // ---- a cluster of small discs: the edge-dense, glyph-like regime.
+    for i in 0..24 {
+        let col = i % 8;
+        let row = i / 8;
+        let p = QuadPath::arc(
+            0.0,
+            std::f64::consts::TAU,
+            h * 0.022,
+            [
+                w * (0.78 + 0.024 * col as f64),
+                h * (0.10 + 0.075 * row as f64),
+                0.0,
+            ],
+            None,
+        );
+        ir.compile_path(&p, flat(GREY_D, 1.0), DrawKind::Fill);
+    }
+
+    // ---- a sliver thinner than a pixel: the sub-pixel coverage regime.
+    {
+        let p = polygon(&[
+            [w * 0.08, h * 0.955],
+            [w * 0.92, h * 0.955],
+            [w * 0.92, h * 0.9576],
+            [w * 0.08, h * 0.9576],
+        ]);
+        ir.compile_path(&p, flat(WHITE, 1.0), DrawKind::Fill);
+    }
+
+    ir.bin();
+    ir
+}
+
+/// A closed polygon through `pts`, as straight quadratics.
+fn polygon(pts: &[[f64; 2]]) -> QuadPath {
+    let mut p = QuadPath::default();
+    p.start_new_path([pts[0][0], pts[0][1], 0.0]);
+    for q in &pts[1..] {
+        p.add_line_to([q[0], q[1], 0.0], false).unwrap();
+    }
+    p.add_line_to([pts[0][0], pts[0][1], 0.0], false).unwrap();
+    p
+}
+
 /// How far a control handle may sit from its chord midpoint, as a multiple of
 /// the chord length.
 ///
