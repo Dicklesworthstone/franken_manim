@@ -1,0 +1,462 @@
+//! The retained render plan: lazy synchronization from Marionette (§10.8, §8.2).
+//!
+//! > … synchronized *lazily* from the RecordBuffer under §8.2's mirror rule …
+//!
+//! ## What "lazily" has to mean to be worth anything
+//!
+//! Not "recompute a bit less". The plan holds compiled outlines across frames
+//! and, for a renderable whose declared axes have not moved, **never reads its
+//! points at all**. That is the difference between a cache and a retained plan:
+//! a cache still has to look at the data to discover it is unchanged, and
+//! looking at the data is most of the cost — reading a glyph's points, hashing
+//! them, splitting curves, measuring arc length.
+//!
+//! So the sync loop's inner question is a comparison of seven integers
+//! ([`crate::revision`]), and everything expensive sits behind it. The cheap
+//! things that genuinely must happen every frame — the painter-order instance
+//! list — are rebuilt every frame, because an instance is an index, an offset
+//! and two more indices, and pretending otherwise would buy nothing and cost
+//! correctness.
+//!
+//! ## The observable
+//!
+//! [`SyncStats`] exists because "untouched resources never recompile" is a claim
+//! about work *not* done, which is untestable unless the work counts itself.
+//! `MirrorSet::materializations` and `CachedArcLength::rebuilds` are the same
+//! idea one layer down, and the same reason.
+
+use crate::hint::Hint;
+use crate::revision::{Axis, Dependency, Revisions};
+use crate::table::{Instance, Segment, ShapeTable, Style, StyleTable, compile_shape, shape_digest};
+use fmn_core::types::Vec3;
+use fmn_geom::quadpath::QuadPath;
+use fmn_mobject::{Mob, Stage};
+use std::collections::HashMap;
+
+/// The axes a compiled outline depends on.
+///
+/// Geometry because it *is* the geometry, topology because a point count or a
+/// family change reshapes it. Deliberately **not** style, order or camera: a
+/// recolour, a `z_index` bump and a pan must all leave a compiled outline alone,
+/// which is the §10.8 promise this constant makes checkable.
+pub const SHAPE_AXES: [Axis; 3] = [Axis::Topology, Axis::Geometry, Axis::Transform];
+
+/// The axes a style row depends on.
+pub const STYLE_AXES: [Axis; 1] = [Axis::Style];
+
+/// What one [`RenderPlan::sync`] did, and — more usefully — did not do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyncStats {
+    /// Renderables the draw plan presented.
+    pub visited: usize,
+    /// Outlines compiled from points this sync.
+    pub shapes_compiled: usize,
+    /// Renderables whose outline was reused without their points being read.
+    pub shapes_reused: usize,
+    /// Outlines that interned onto an existing compiled shape — the instancing
+    /// win, counted separately from a reuse because it is a different mechanism:
+    /// this one is two *different* mobjects sharing one outline.
+    pub shapes_shared: usize,
+    /// Style rows recomputed this sync.
+    pub styles_rebuilt: usize,
+    /// Retained entries dropped because their mobject left the draw plan.
+    pub dropped: usize,
+}
+
+/// One renderable's retained compilation.
+#[derive(Debug, Clone)]
+struct Retained {
+    shape_dep: Dependency,
+    style_dep: Dependency,
+    shape: u32,
+    style: u32,
+    /// The instance offset, kept so a reuse needs no point read.
+    offset: Vec3,
+}
+
+/// The compiled, backend-neutral render IR for a scene, retained across frames.
+#[derive(Debug, Clone, Default)]
+pub struct RenderPlan {
+    segments: Vec<Segment>,
+    styles: StyleTable,
+    shapes: ShapeTable,
+    retained: HashMap<Mob, Retained>,
+    stats: SyncStats,
+}
+
+impl RenderPlan {
+    /// An empty plan.
+    #[must_use]
+    pub fn new() -> RenderPlan {
+        RenderPlan::default()
+    }
+
+    /// Synchronize against `stage`, at camera revision `camera`.
+    ///
+    /// Walks the scene's draw plan — which is `fmn_mobject`'s pure function of
+    /// scene state, deliberately uncached there so that this cache can be
+    /// checked against it — and for each renderable either reuses its retained
+    /// compilation or rebuilds exactly the part whose axes moved.
+    pub fn sync(&mut self, stage: &Stage, camera: u64) -> SyncStats {
+        let mut stats = SyncStats::default();
+        let plan = stage.draw_plan();
+
+        // Instances are painter order, and painter order is a property of the
+        // frame rather than of any object, so the list is rebuilt every frame.
+        // The *shapes* it indexes are what persist.
+        self.shapes.clear_instances();
+
+        let mut seen: Vec<Mob> = Vec::with_capacity(plan.items().len());
+
+        for (order, item) in plan.items().iter().enumerate() {
+            let mob = item.mob;
+            let Some(now) = Revisions::read(stage, mob).map(|r| r.with_camera(camera)) else {
+                continue;
+            };
+            stats.visited += 1;
+            seen.push(mob);
+
+            let previous = self.retained.get(&mob).cloned();
+
+            // --- geometry: the expensive half, and the one that must be skipped.
+            let (shape, offset) = match &previous {
+                Some(r) if !r.shape_dep.is_stale(&now) => {
+                    stats.shapes_reused += 1;
+                    (r.shape, r.offset)
+                }
+                _ => {
+                    let Some(points) = stage.get_points(mob) else {
+                        continue;
+                    };
+                    if points.is_empty() {
+                        continue;
+                    }
+                    let offset = points[0];
+                    let digest = shape_digest(&points);
+                    let before = self.shapes.shapes().len();
+                    let first_segment = self.segments.len() as u32;
+                    let hint = Hint::of(stage, mob);
+                    let segments_out = &mut self.segments;
+                    let index = self.shapes.intern_shape(digest, || {
+                        let path = QuadPath::from_points(points.clone())
+                            .unwrap_or_else(|_| QuadPath::default());
+                        let (shape, mut segs) = compile_shape(digest, &path, hint, first_segment);
+                        segments_out.append(&mut segs);
+                        shape
+                    });
+                    if self.shapes.shapes().len() > before {
+                        stats.shapes_compiled += 1;
+                    } else {
+                        // Interned onto an outline some other mobject already
+                        // compiled: §10.8's instancing, paying for itself.
+                        stats.shapes_shared += 1;
+                    }
+                    (index, offset)
+                }
+            };
+
+            // --- style: the cheap half, gated on its own axis so a moved point
+            // does not re-intern a colour.
+            let style = match &previous {
+                Some(r) if !r.style_dep.is_stale(&now) => r.style,
+                _ => {
+                    stats.styles_rebuilt += 1;
+                    let row = read_style(stage, mob);
+                    self.styles.intern(row)
+                }
+            };
+
+            self.shapes.push_instance(Instance {
+                shape,
+                style,
+                mob,
+                offset,
+                order: order as u32,
+            });
+
+            self.retained.insert(
+                mob,
+                Retained {
+                    shape_dep: Dependency::new(now, &SHAPE_AXES),
+                    style_dep: Dependency::new(now, &STYLE_AXES),
+                    shape,
+                    style,
+                    offset,
+                },
+            );
+        }
+
+        // Drop what left the scene. Compiled outlines are *not* dropped with it:
+        // a mobject removed and re-added within a frame — which `Scene.add` does
+        // on every re-add, since it removes first — must not pay to recompile,
+        // and an interned outline is shared, so it is not this mobject's to free.
+        let live: std::collections::HashSet<Mob> = seen.into_iter().collect();
+        let before = self.retained.len();
+        self.retained.retain(|m, _| live.contains(m));
+        stats.dropped = before - self.retained.len();
+
+        self.stats = stats;
+        stats
+    }
+
+    /// The segment table.
+    #[must_use]
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
+    /// The interned style table.
+    #[must_use]
+    pub fn styles(&self) -> &StyleTable {
+        &self.styles
+    }
+
+    /// The interned shapes and their painter-ordered instances.
+    #[must_use]
+    pub fn shapes(&self) -> &ShapeTable {
+        &self.shapes
+    }
+
+    /// What the last [`sync`] did.
+    ///
+    /// [`sync`]: RenderPlan::sync
+    #[must_use]
+    pub fn stats(&self) -> SyncStats {
+        self.stats
+    }
+}
+
+/// Read one renderable's style row out of its record buffer.
+///
+/// The Reference stores these per point; this reads the ramp's endpoints, which
+/// is the subset [`Style`] documents. A point-less mobject yields the default
+/// row rather than an error — a group with no geometry of its own is normal, and
+/// it simply contributes no instance.
+fn read_style(stage: &Stage, mob: Mob) -> Style {
+    let mut row = Style::default();
+    let Some(entry) = stage.get(mob) else {
+        return row;
+    };
+    let buffer = &entry.buffer;
+    let n = buffer.len();
+    if n == 0 {
+        return row.with_uniforms(entry.uniforms());
+    }
+    let last = n - 1;
+    let rgba = |index: usize, field: &str| -> [f32; 4] {
+        buffer
+            .read(index, field)
+            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
+            .unwrap_or([0.0; 4])
+    };
+    let scalar = |index: usize, field: &str| -> f32 {
+        buffer
+            .read(index, field)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(0.0)
+    };
+    row.stroke_rgba = rgba(0, "stroke_rgba");
+    row.stroke_rgba_end = rgba(last, "stroke_rgba");
+    row.fill_rgba = rgba(0, "fill_rgba");
+    row.fill_rgba_end = rgba(last, "fill_rgba");
+    row.stroke_width = scalar(0, "stroke_width");
+    row.stroke_width_end = scalar(last, "stroke_width");
+    row.fill_border_width = scalar(0, "fill_border_width");
+    row.with_uniforms(entry.uniforms())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
+
+    fn vmobject(points: &[[f64; 3]]) -> Mobject {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        for (i, p) in points.iter().enumerate() {
+            buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
+            buffer.write(i, "stroke_rgba", &[1.0, 1.0, 1.0, 1.0]);
+            buffer.write(i, "stroke_width", &[2.0]);
+        }
+        Mobject::from_buffer(buffer)
+    }
+
+    fn tri_at(dx: f64, dy: f64) -> Mobject {
+        vmobject(&[
+            [dx, dy, 0.0],
+            [dx + 1.0, dy, 0.0],
+            [dx + 2.0, dy, 0.0],
+            [dx + 2.0, dy + 0.5, 0.0],
+            [dx + 2.0, dy + 1.0, 0.0],
+        ])
+    }
+
+    fn staged(n: usize) -> (Stage, Vec<Mob>) {
+        let mut stage = Stage::new();
+        let mut mobs = Vec::new();
+        for i in 0..n {
+            let mob = stage.add(tri_at(i as f64 * 10.0, 0.0));
+            stage.add_to_scene(mob).expect("live");
+            mobs.push(mob);
+        }
+        (stage, mobs)
+    }
+
+    #[test]
+    fn a_first_sync_compiles_and_a_second_reads_no_points() {
+        // The claim the whole module exists for. Not "recompiles less" —
+        // *nothing* is compiled on the second pass, and the points are never
+        // touched.
+        let (stage, _) = staged(3);
+        let mut plan = RenderPlan::new();
+
+        let first = plan.sync(&stage, 0);
+        assert_eq!(first.visited, 3);
+        assert_eq!(first.shapes_compiled, 1, "three copies of one outline");
+        assert_eq!(first.shapes_shared, 2);
+        assert_eq!(first.shapes_reused, 0);
+
+        let second = plan.sync(&stage, 0);
+        assert_eq!(second.visited, 3);
+        assert_eq!(second.shapes_compiled, 0);
+        assert_eq!(second.shapes_shared, 0);
+        assert_eq!(second.shapes_reused, 3);
+        assert_eq!(second.styles_rebuilt, 0);
+    }
+
+    #[test]
+    fn n_copies_of_one_outline_are_one_compiled_path_and_n_instances() {
+        // §10.8's instancing dedup, stated as the acceptance criterion does.
+        let (stage, _) = staged(8);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        assert_eq!(plan.shapes().shapes().len(), 1);
+        assert_eq!(plan.shapes().instances().len(), 8);
+        assert!((plan.shapes().instances_per_shape() - 8.0).abs() < 1e-12);
+        // And the segment table holds one outline's worth, not eight.
+        assert_eq!(plan.segments().len(), 2);
+    }
+
+    #[test]
+    fn a_recolour_rebuilds_the_style_and_not_the_geometry() {
+        // The §10.8 headline: "a color change does not regenerate curve
+        // coefficients".
+        let (mut stage, mobs) = staged(2);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+
+        stage
+            .get_mut(mobs[0])
+            .expect("live")
+            .buffer
+            .write(0, "stroke_rgba", &[1.0, 0.0, 0.0, 1.0]);
+
+        let after = plan.sync(&stage, 0);
+        assert_eq!(after.shapes_compiled, 0, "no outline may recompile");
+        assert_eq!(after.shapes_reused, 2);
+        assert_eq!(after.styles_rebuilt, 1, "exactly the one that changed");
+        assert_eq!(plan.styles().len(), 2, "and it interned as a new row");
+    }
+
+    #[test]
+    fn a_camera_move_rebuilds_nothing() {
+        // "a camera move does not re-decode font outlines" — object-space
+        // geometry cannot depend on the camera, so the axis must not reach it.
+        let (stage, _) = staged(4);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let after = plan.sync(&stage, 99);
+        assert_eq!(after.shapes_compiled, 0);
+        assert_eq!(after.styles_rebuilt, 0);
+        assert_eq!(after.shapes_reused, 4);
+    }
+
+    #[test]
+    fn moving_one_point_recompiles_exactly_one_outline() {
+        let (mut stage, mobs) = staged(3);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+
+        stage
+            .get_mut(mobs[1])
+            .expect("live")
+            .buffer
+            .write(2, "point", &[500.0, 500.0, 0.0]);
+
+        let after = plan.sync(&stage, 0);
+        assert_eq!(after.shapes_reused, 2, "the untouched two are reused");
+        assert_eq!(
+            after.shapes_compiled + after.shapes_shared,
+            1,
+            "and exactly one is recompiled"
+        );
+        assert_eq!(
+            plan.shapes().shapes().len(),
+            2,
+            "a second outline exists now"
+        );
+    }
+
+    #[test]
+    fn a_z_index_change_reuses_every_outline_but_reorders_the_instances() {
+        // Order is its own axis: the geometry cannot care, and the instance list
+        // must.
+        let (mut stage, mobs) = staged(3);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let before: Vec<Mob> = plan.shapes().instances().iter().map(|i| i.mob).collect();
+
+        stage.set_z_index(mobs[0], 10, false);
+        stage.add_to_scene(mobs[0]).expect("live");
+
+        let after = plan.sync(&stage, 0);
+        assert_eq!(after.shapes_compiled, 0);
+        assert_eq!(after.shapes_reused, 3);
+        let now: Vec<Mob> = plan.shapes().instances().iter().map(|i| i.mob).collect();
+        assert_ne!(before, now, "raising z_index must move it in painter order");
+        assert_eq!(now.last(), Some(&mobs[0]), "and put it on top");
+    }
+
+    #[test]
+    fn leaving_the_scene_drops_the_retained_entry() {
+        let (mut stage, mobs) = staged(3);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+
+        stage.remove_from_scene(mobs[2]);
+        let after = plan.sync(&stage, 0);
+        assert_eq!(after.visited, 2);
+        assert_eq!(after.dropped, 1);
+        assert_eq!(plan.shapes().instances().len(), 2);
+    }
+
+    #[test]
+    fn instances_carry_painter_order_and_the_offset_that_places_them() {
+        let (stage, mobs) = staged(3);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let instances = plan.shapes().instances();
+        assert_eq!(instances.len(), 3);
+        for (i, inst) in instances.iter().enumerate() {
+            assert_eq!(inst.order, i as u32);
+            assert_eq!(inst.mob, mobs[i]);
+            // The outline is shared, so the placement is what distinguishes the
+            // three — which is the whole reason position is excluded from the
+            // shape digest.
+            assert!((inst.offset[0] - i as f64 * 10.0).abs() < 1e-9);
+        }
+        assert_eq!(instances[0].shape, instances[2].shape);
+    }
+
+    #[test]
+    fn a_point_less_group_contributes_no_instance() {
+        // A `Group` with children but no geometry of its own is normal, and it
+        // must not appear as a degenerate compiled path.
+        let mut stage = Stage::new();
+        let group = stage.add(Mobject::new());
+        stage.add_to_scene(group).expect("live");
+        let mut plan = RenderPlan::new();
+        let stats = plan.sync(&stage, 0);
+        assert_eq!(stats.shapes_compiled, 0);
+        assert_eq!(plan.shapes().instances().len(), 0);
+    }
+}

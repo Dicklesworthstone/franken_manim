@@ -12,13 +12,19 @@
 //! |---|---|
 //! | [`revision`] | the seven independent revision axes and the staleness rule |
 //! | [`hint`] | primitive hints: kernel routing, and the invalidation rule |
+//! | [`table`] | the IR's tables: segments, interned styles, interned shapes and their instances |
+//! | [`plan`] | the retained plan: lazy synchronization from Marionette |
 //!
 //! The engines (§10.1), the analytic fill (§10.2), strokes (§10.3), and the
 //! retained compositor (§10.8) land with their own beads and consume this.
 #![forbid(unsafe_code)]
 
 pub mod hint;
+pub mod plan;
 pub mod revision;
+pub mod table;
 
 pub use hint::Hint;
+pub use plan::{RenderPlan, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};
+pub use table::{Instance, Segment, Shape, ShapeTable, Style, StyleTable};
