@@ -14,6 +14,7 @@
 //! | [`hint`] | primitive hints: kernel routing, and the invalidation rule |
 //! | [`table`] | the IR's tables: segments, interned styles, interned shapes and their instances |
 //! | [`plan`] | the retained plan: lazy synchronization from Marionette |
+//! | [`snapshot`] | the canonical, bit-lockable form of a compiled plan (§16.5) |
 //!
 //! The engines (§10.1), the analytic fill (§10.2), strokes (§10.3), and the
 //! retained compositor (§10.8) land with their own beads and consume this.
@@ -22,6 +23,7 @@
 pub mod hint;
 pub mod plan;
 pub mod revision;
+pub mod snapshot;
 pub mod table;
 
 pub use hint::Hint;
