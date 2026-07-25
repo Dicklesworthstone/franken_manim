@@ -1,0 +1,39 @@
+# G0-8: the accelerator proof spike (fm-ekx). Proves the compiled render IR
+# (§10.8) maps onto a GPU *before* W5 freezes it, by expressing the highest-ROI
+# stage — stroke signed-distance evaluation + AA resolve — as a Metal kernel
+# dispatched through frankentorch, the only GPU gateway this program admits
+# (D-22, §10.7: no wgpu, ever).
+#
+# NOT a workspace member, deliberately: per ADR-0003's non-shipped tier (the
+# g0-5-python-ext pattern), this crate never enters the workspace build graph
+# or any shipped artifact. It carries its own committed Cargo.lock; its
+# non-suite packages carry class=dev rows in SUITE_ALLOWLIST.tsv. The *shipped*
+# annex consumption happens once, with fmn-render's `metal` feature (fm-xsz),
+# against rows authored at that time — this spike only proves the mapping.
+#
+# ft-kernel-metal enters by PATH, not by git rev, and that is the honest
+# statement of where the upstream work stands: the generic Metal compute
+# gateway this spike needs (UPSTREAM_LEDGER row 8) is landed in the local
+# frankentorch checkout but not yet pinned in SUITE.lock. The pin bump is
+# fm-xsz's step-3 of the §2.9 ritual, not this spike's.
+[package]
+name = "fmn-spike-accelerator"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "G0-8 spike: the render IR's stroke-SDF + AA-resolve stage on Metal through frankentorch"
+
+[dependencies]
+fmn-core = { path = "../../crates/fmn-core" }
+fmn-dmath = { path = "../../crates/fmn-dmath" }
+fmn-geom = { path = "../../crates/fmn-geom" }
+fmn-frame = { path = "../../crates/fmn-frame" }
+fmn-codec = { path = "../../crates/fmn-codec" }
+ft-kernel-metal = { path = "../../../frankentorch/crates/ft-kernel-metal" }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Opt out of the franken_manim workspace: this crate resolves alone.
+[workspace]

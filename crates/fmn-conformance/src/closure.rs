@@ -158,7 +158,19 @@ pub fn audit_with_aux(
             continue; // one verdict per (name, version) across the locks
         }
         seen.push(key);
-        match allowlist.iter().find(|row| row.name == package.name) {
+        // Rows are keyed by (name, version), which is what the file's own
+        // schema has always said and what independently-resolved locks
+        // require: the G0-5 spike's PyO3 graph pins `syn 2`, the G0-8 spike's
+        // Metal graph pins `syn 3`, and neither can move. Keying by name alone
+        // would let one non-shipped spike's transitive constraint veto
+        // another's — a governance failure dressed as a governance check.
+        // Every version still needs its own reviewed row and its own checksum,
+        // so nothing is loosened: an unlisted *version* fails exactly like an
+        // unlisted package. (ADR-0008.)
+        match allowlist
+            .iter()
+            .find(|row| row.name == package.name && row.version == package.version)
+        {
             None => violations.push(Violation::Unlisted {
                 name: package.name.clone(),
                 version: package.version.clone(),
@@ -177,7 +189,11 @@ pub fn audit_with_aux(
     }
     for row in allowlist {
         let consumed_class = row.class != "pending";
-        if consumed_class && !seen.iter().any(|(name, _)| *name == row.name) {
+        if consumed_class
+            && !seen
+                .iter()
+                .any(|(name, version)| *name == row.name && *version == row.version)
+        {
             violations.push(Violation::StaleRow {
                 name: row.name.clone(),
             });

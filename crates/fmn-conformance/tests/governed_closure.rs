@@ -15,7 +15,11 @@ fn repo_file(name: &str) -> String {
 /// Committed lockfiles of governed NON-member crates (ADR-0003: the fuzz
 /// harness, non-member spikes). Their packages carry class=dev/fuzz rows;
 /// the audit walks each lock that exists.
-const AUX_LOCKS: &[&str] = &["spikes/g0-5-python-ext/Cargo.lock", "fuzz/Cargo.lock"];
+const AUX_LOCKS: &[&str] = &[
+    "spikes/g0-5-python-ext/Cargo.lock",
+    "spikes/g0-8-accelerator/Cargo.lock",
+    "fuzz/Cargo.lock",
+];
 
 #[test]
 fn workspace_closure_is_exactly_the_governed_universe() {
@@ -35,8 +39,9 @@ fn workspace_closure_is_exactly_the_governed_universe() {
         .map(|text| parse_cargo_lock(&text))
         .collect();
     assert!(
-        !aux.is_empty(),
-        "the G0-5 spike lock must exist and be committed (fm-87q)"
+        aux.len() >= 2,
+        "the G0-5 and G0-8 spike locks must exist and be committed (fm-87q, fm-ekx) — found {}",
+        aux.len()
     );
     let violations = audit_with_aux(&lock, &aux, &allowlist);
     assert!(
@@ -69,6 +74,46 @@ fn injected_unlisted_package_is_caught() {
         )),
         "the smuggled package was not flagged: {violations:?}"
     );
+}
+
+#[test]
+fn a_listed_package_at_an_unlisted_version_is_still_caught() {
+    // ADR-0008 keys rows by (name, version) so independently-resolved spike
+    // locks can carry different majors of a shared build-time dependency. The
+    // loosening it must NOT introduce: a package sliding to an unreviewed
+    // version because some other version of the same name happens to be listed.
+    let lock = parse_cargo_lock(
+        "[[package]]\nname = \"syn\"\nversion = \"9.9.9\"\n\
+         source = \"registry+x\"\nchecksum = \"aaaa\"\n",
+    );
+    let allowlist = parse_allowlist(
+        "syn\t2.0.119\tcrates-io\taaaa\t-\tMIT\tno\tno\tno\tno\tforbid\tdev\treason\tfm\tw\n",
+    );
+    let violations = audit(&lock, &allowlist);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, Violation::Unlisted { name, version } if name == "syn" && version == "9.9.9")),
+        "an unreviewed version slipped through: {violations:?}"
+    );
+}
+
+#[test]
+fn two_versions_of_one_package_are_admitted_when_both_are_listed() {
+    // The other half of ADR-0008, and the case that actually occurs: the G0-5
+    // spike's PyO3 graph pins `syn 2`, the G0-8 spike's Metal graph pins
+    // `syn 3`, both are non-shipped, both are reviewed.
+    let a = parse_cargo_lock(
+        "[[package]]\nname = \"syn\"\nversion = \"2.0.119\"\nsource = \"registry+x\"\nchecksum = \"aaaa\"\n",
+    );
+    let b = parse_cargo_lock(
+        "[[package]]\nname = \"syn\"\nversion = \"3.0.3\"\nsource = \"registry+x\"\nchecksum = \"bbbb\"\n",
+    );
+    let allowlist = parse_allowlist(
+        "syn\t2.0.119\tcrates-io\taaaa\t-\tMIT\tno\tno\tno\tno\tforbid\tdev\treason\tfm\tw\n\
+         syn\t3.0.3\tcrates-io\tbbbb\t-\tMIT\tno\tno\tno\tno\tforbid\tdev\treason\tfm\tw\n",
+    );
+    assert!(audit_with_aux(&a, &[b], &allowlist).is_empty());
 }
 
 #[test]
