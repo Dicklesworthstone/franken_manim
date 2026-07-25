@@ -16,6 +16,14 @@
 //!   frozen denominator, monotone by CI, pin-coupled so a SUITE.lock bump
 //!   of franken_markdown without a ratchet re-run fails.
 //!
+//! - the one API schema (§16.2, fm-vn6) — [`schema`] and
+//!   `tests/api_schema.rs`: the extracted Reference surface
+//!   (`API_SCHEMA.tsv`) merged with the authored rulings
+//!   (`API_OVERLAY.tsv`), and the generators that turn the merge into
+//!   `fmn-config`'s typed extraction, the Parity Ledger rows, the CLI flag
+//!   table, and the docs. Drift between a generated artifact and the schema
+//!   fails the build.
+//!
 //! The rest of the Gauntlet lands with its owning workstreams; see
 //! COMPREHENSIVE_PLAN §19 for the crate map.
 #![forbid(unsafe_code)]
@@ -24,4 +32,5 @@ pub mod closure;
 pub mod golden;
 pub mod npy;
 pub mod ratchet;
+pub mod schema;
 pub mod tolerance;

@@ -430,102 +430,18 @@ impl Config {
 
     /// Type a fully merged document.
     ///
+    /// The body is GENERATED from the one API schema (§16.2, fm-vn6) into
+    /// `generated.rs`: every bound key comes from `API_OVERLAY.tsv`'s
+    /// `[config_binding]` section, so the document and its reader cannot
+    /// drift apart. A key with no binding fails the schema's coverage check;
+    /// a hand-edited `generated.rs` fails the drift gate in
+    /// `fmn-conformance/tests/api_schema.rs`.
+    ///
     /// # Errors
     /// A [`ConfigError`] naming the key path and the expected-vs-found
     /// shapes.
     pub fn from_value(root: Value) -> Result<Self, ConfigError> {
-        let cx = Cx { root: &root };
-        let config = Self {
-            directories: DirectoriesConfig {
-                mirror_module_path: cx.bool("directories.mirror_module_path")?,
-                base: cx.string("directories.base")?,
-                subdirs: cx.string_map("directories.subdirs")?,
-                cache: cx.string("directories.cache")?,
-                removed_mirror_prefix: cx.opt_string("directories.removed_mirror_prefix")?,
-            },
-            window: WindowConfig {
-                position_string: cx.string("window.position_string")?,
-                monitor_index: cx.u32("window.monitor_index")?,
-                full_screen: cx.bool("window.full_screen")?,
-                position: cx.opt_tuple_i64("window.position")?,
-                size: cx.opt_tuple_u32("window.size")?,
-            },
-            camera: CameraConfig {
-                resolution: cx.tuple_u32("camera.resolution")?,
-                background_color: cx.string("camera.background_color")?,
-                fps: cx.u32("camera.fps")?,
-                background_opacity: cx.f64("camera.background_opacity")?,
-            },
-            file_writer: FileWriterConfig {
-                ffmpeg_bin: cx.string("file_writer.ffmpeg_bin")?,
-                video_codec: cx.string("file_writer.video_codec")?,
-                pixel_format: cx.string("file_writer.pixel_format")?,
-                saturation: cx.f64("file_writer.saturation")?,
-                gamma: cx.f64("file_writer.gamma")?,
-            },
-            scene: SceneConfig {
-                show_animation_progress: cx.bool("scene.show_animation_progress")?,
-                leave_progress_bars: cx.bool("scene.leave_progress_bars")?,
-                preview_while_skipping: cx.bool("scene.preview_while_skipping")?,
-                default_wait_time: cx.f64("scene.default_wait_time")?,
-            },
-            vmobject: VMobjectConfig {
-                default_stroke_width: cx.f64("vmobject.default_stroke_width")?,
-                default_stroke_color: cx.string("vmobject.default_stroke_color")?,
-                default_fill_color: cx.string("vmobject.default_fill_color")?,
-            },
-            mobject: MobjectConfig {
-                default_mobject_color: cx.string("mobject.default_mobject_color")?,
-                default_light_color: cx.string("mobject.default_light_color")?,
-            },
-            tex: TexConfig {
-                template: cx.string("tex.template")?,
-                font_size_for_unit_height: cx.f64("tex.font_size_for_unit_height")?,
-            },
-            text: TextConfig {
-                font: cx.string("text.font")?,
-                alignment: cx.string("text.alignment")?,
-                font_size_for_unit_height: cx.f64("text.font_size_for_unit_height")?,
-            },
-            embed: EmbedConfig {
-                exception_mode: cx.string("embed.exception_mode")?,
-                autoreload: cx.bool("embed.autoreload")?,
-            },
-            resolution_options: ResolutionOptions {
-                low: cx.tuple_u32("resolution_options.low")?,
-                med: cx.tuple_u32("resolution_options.med")?,
-                high: cx.tuple_u32("resolution_options.high")?,
-                uhd: cx.tuple_u32("resolution_options.4k")?,
-            },
-            sizes: SizesConfig {
-                frame_height: cx.f64("sizes.frame_height")?,
-                small_buff: cx.f64("sizes.small_buff")?,
-                med_small_buff: cx.f64("sizes.med_small_buff")?,
-                med_large_buff: cx.f64("sizes.med_large_buff")?,
-                large_buff: cx.f64("sizes.large_buff")?,
-                default_mobject_to_edge_buff: cx.f64("sizes.default_mobject_to_edge_buff")?,
-                default_mobject_to_mobject_buff: cx.f64("sizes.default_mobject_to_mobject_buff")?,
-            },
-            key_bindings: cx.string_map("key_bindings")?,
-            colors: cx.string_map("colors")?,
-            log_level: cx.log_level("log_level")?,
-            universal_import_line: cx.string("universal_import_line")?,
-            ignore_manimlib_modules_on_reload: cx.bool("ignore_manimlib_modules_on_reload")?,
-            determinism: DeterminismConfig {
-                mode: cx.determinism_mode("determinism.mode")?,
-                seed: cx.u64("determinism.seed")?,
-            },
-            render: RenderConfig {
-                engine: cx.engine("render.engine")?,
-                aa: cx.aa_policy("render.aa")?,
-                threads: cx.thread_policy("render.threads")?,
-            },
-            raw: Value::Null, // placed below, after the borrows end
-        };
-        Ok(Self {
-            raw: root,
-            ..config
-        })
+        crate::generated::config_from_value(root)
     }
 }
 
@@ -557,8 +473,9 @@ pub fn overlay<'a>(pairs: impl IntoIterator<Item = (&'a str, Value)>) -> Value {
 // Extraction
 // ---------------------------------------------------------------------------
 
-struct Cx<'a> {
-    root: &'a Value,
+pub(crate) struct Cx<'a> {
+    /// The fully merged document.
+    pub(crate) root: &'a Value,
 }
 
 impl Cx<'_> {
@@ -596,21 +513,21 @@ impl Cx<'_> {
         }
     }
 
-    fn bool(&self, path: &str) -> Result<bool, ConfigError> {
+    pub(crate) fn bool(&self, path: &str) -> Result<bool, ConfigError> {
         match self.lookup(path)? {
             Value::Bool(v) => Ok(*v),
             other => Err(Self::type_err(path, "a boolean (True/False)", other)),
         }
     }
 
-    fn string(&self, path: &str) -> Result<String, ConfigError> {
+    pub(crate) fn string(&self, path: &str) -> Result<String, ConfigError> {
         match self.lookup(path)? {
             Value::Str(v) => Ok(v.clone()),
             other => Err(Self::type_err(path, "a string", other)),
         }
     }
 
-    fn opt_string(&self, path: &str) -> Result<Option<String>, ConfigError> {
+    pub(crate) fn opt_string(&self, path: &str) -> Result<Option<String>, ConfigError> {
         match self.lookup(path) {
             Ok(Value::Str(v)) => Ok(Some(v.clone())),
             Ok(Value::Null) | Err(ConfigError::Value { .. }) => Ok(None),
@@ -619,7 +536,7 @@ impl Cx<'_> {
         }
     }
 
-    fn f64(&self, path: &str) -> Result<f64, ConfigError> {
+    pub(crate) fn f64(&self, path: &str) -> Result<f64, ConfigError> {
         match self.lookup(path)? {
             Value::Float(v) => Ok(*v),
             // The Reference's YAML gives ints where users write `144`; the
@@ -630,7 +547,7 @@ impl Cx<'_> {
         }
     }
 
-    fn u32(&self, path: &str) -> Result<u32, ConfigError> {
+    pub(crate) fn u32(&self, path: &str) -> Result<u32, ConfigError> {
         match self.lookup(path)? {
             Value::Int(v) => u32::try_from(*v).map_err(|_| ConfigError::Value {
                 path: path.to_owned(),
@@ -640,7 +557,7 @@ impl Cx<'_> {
         }
     }
 
-    fn u64(&self, path: &str) -> Result<u64, ConfigError> {
+    pub(crate) fn u64(&self, path: &str) -> Result<u64, ConfigError> {
         match self.lookup(path)? {
             Value::Int(v) => u64::try_from(*v).map_err(|_| ConfigError::Value {
                 path: path.to_owned(),
@@ -651,7 +568,7 @@ impl Cx<'_> {
     }
 
     /// An open `key: "string"` map, in file order.
-    fn string_map(&self, path: &str) -> Result<Vec<(String, String)>, ConfigError> {
+    pub(crate) fn string_map(&self, path: &str) -> Result<Vec<(String, String)>, ConfigError> {
         let value = self.lookup(path)?;
         let Value::Map(entries) = value else {
             return Err(Self::type_err(path, "a mapping", value));
@@ -667,7 +584,7 @@ impl Cx<'_> {
 
     /// A `(w, h)` tuple-string typed to `(u32, u32)` — the Reference's
     /// `literal_eval` step.
-    fn tuple_u32(&self, path: &str) -> Result<(u32, u32), ConfigError> {
+    pub(crate) fn tuple_u32(&self, path: &str) -> Result<(u32, u32), ConfigError> {
         let (a, b) = self.tuple_i64_at(path)?;
         let conv = |v: i64| {
             u32::try_from(v).map_err(|_| ConfigError::Value {
@@ -678,14 +595,14 @@ impl Cx<'_> {
         Ok((conv(a)?, conv(b)?))
     }
 
-    fn opt_tuple_u32(&self, path: &str) -> Result<Option<(u32, u32)>, ConfigError> {
+    pub(crate) fn opt_tuple_u32(&self, path: &str) -> Result<Option<(u32, u32)>, ConfigError> {
         match self.lookup(path) {
             Err(_) | Ok(Value::Null) => Ok(None), // absent or explicitly empty
             Ok(_) => self.tuple_u32(path).map(Some),
         }
     }
 
-    fn opt_tuple_i64(&self, path: &str) -> Result<Option<(i64, i64)>, ConfigError> {
+    pub(crate) fn opt_tuple_i64(&self, path: &str) -> Result<Option<(i64, i64)>, ConfigError> {
         match self.lookup(path) {
             Err(_) | Ok(Value::Null) => Ok(None), // absent or explicitly empty
             Ok(_) => self.tuple_i64_at(path).map(Some),
@@ -732,7 +649,7 @@ impl Cx<'_> {
             })
     }
 
-    fn log_level(&self, path: &str) -> Result<LogLevel, ConfigError> {
+    pub(crate) fn log_level(&self, path: &str) -> Result<LogLevel, ConfigError> {
         self.keyword(
             path,
             &[
@@ -746,7 +663,7 @@ impl Cx<'_> {
         )
     }
 
-    fn determinism_mode(&self, path: &str) -> Result<DeterminismMode, ConfigError> {
+    pub(crate) fn determinism_mode(&self, path: &str) -> Result<DeterminismMode, ConfigError> {
         self.keyword(
             path,
             &[
@@ -757,7 +674,7 @@ impl Cx<'_> {
         )
     }
 
-    fn engine(&self, path: &str) -> Result<Engine, ConfigError> {
+    pub(crate) fn engine(&self, path: &str) -> Result<Engine, ConfigError> {
         self.keyword(
             path,
             &[
@@ -769,7 +686,7 @@ impl Cx<'_> {
         )
     }
 
-    fn aa_policy(&self, path: &str) -> Result<AaPolicy, ConfigError> {
+    pub(crate) fn aa_policy(&self, path: &str) -> Result<AaPolicy, ConfigError> {
         self.keyword(
             path,
             &[
@@ -781,7 +698,7 @@ impl Cx<'_> {
         )
     }
 
-    fn thread_policy(&self, path: &str) -> Result<ThreadPolicy, ConfigError> {
+    pub(crate) fn thread_policy(&self, path: &str) -> Result<ThreadPolicy, ConfigError> {
         match self.lookup(path)? {
             Value::Str(s) if s == "auto" => Ok(ThreadPolicy::Auto),
             Value::Int(v) => {

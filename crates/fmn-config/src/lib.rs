@@ -6,11 +6,15 @@
 //!   (see its module docs for the precise subset and the named diagnostics
 //!   for everything outside it), plus the Reference-exact recursive merge.
 //! - [`config`] — the typed configuration: the Reference's
-//!   `default_config.yml` key surface as hand-written structs (migrating to
-//!   schema codegen when W10's fm-vn6 lands), resolved through the
-//!   Reference's precedence exactly — **built-in defaults → user config
-//!   file(s) → CLI overlay** — with tuple-strings typed at this layer, the
-//!   way the Reference `literal_eval`s them.
+//!   `default_config.yml` key surface, resolved through the Reference's
+//!   precedence exactly — **built-in defaults → user config file(s) → CLI
+//!   overlay** — with tuple-strings typed at this layer, the way the
+//!   Reference `literal_eval`s them. The *extraction* itself is generated:
+//!   `generated.rs` is produced from the one API schema (§16.2, fm-vn6), so
+//!   the config surface has a single definition instead of a document and a
+//!   hand-written reader that can drift apart. Adding a key to
+//!   `default_config.yml` without binding it in `API_OVERLAY.tsv` fails the
+//!   coverage check; hand-editing `generated.rs` fails the drift gate.
 //! - [`packs`] — the preamble-pack registry: the `tex_templates.yml` concept
 //!   reborn as named fmd-math preamble packs, with the compatibility mapping
 //!   for the common templates. This crate owns the registry *surface*
@@ -29,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+mod generated;
 pub mod packs;
 pub mod yaml;
 
