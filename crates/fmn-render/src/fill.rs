@@ -1049,6 +1049,346 @@ impl RowScratch {
     }
 }
 
+// ------------------------------------------------- primitive-hint fill kernels
+
+/// The screen-space budget under which a *bounded-error* fill hint is admitted.
+///
+/// One 1/256th of a pixel — §10.2's own acceptance tolerance, reused here rather
+/// than a second number nobody reconciled.
+pub const HINT_BUDGET_PX: f64 = 1.0 / 256.0;
+
+/// A hinted fill's coverage: a closed form with no walk and no accumulator.
+///
+/// ## The rule these kernels have to obey, and where it bites
+///
+/// [`crate::hint`]'s rule is absolute — *"a kernel selected by a hint must
+/// produce the same answer the general path would, so dropping every hint can
+/// only cost speed"*. For [`FillKernel::Rect`] that is free: an axis-aligned
+/// rectangle's coverage is a product of two clamped intervals, and the general
+/// path computes the same region's exact area from straight segments, so the two
+/// agree to floating point.
+///
+/// For a disc it is **not** free, and pretending otherwise would be the
+/// interesting bug in this module. A `Circle`'s or `Dot`'s compiled outline is
+/// manim's *quadratic approximation* of a circle, which encloses `(π/n)⁴/6` more
+/// area than the circle does — 2.5e-4 relative at the default 16 components,
+/// 6.3e-2 at 4. A kernel that rasterizes the true disc therefore draws a
+/// **different shape** from the general path, by up to `r·(π/n)⁴/8` pixels of
+/// edge displacement. So the disc kernel is admitted the way §10.8 admits its
+/// one other approximating route — *"nearly-linear quadratic → line fast path
+/// under an explicit screen-space error bound"* — except that the bound here is
+/// **measured off the compiled outline** rather than assumed: [`FillKernel::select`]
+/// evaluates each segment's midpoint, takes the worst radial deviation from the
+/// hinted radius, scales it to pixels, and declines the hint when it exceeds
+/// [`HINT_BUDGET_PX`].
+///
+/// The practical effect is the shape of the rule, not a compromise with it: a
+/// `Dot` at manim's default radius (0.08 units, ~10.8 px at the Reference's
+/// 135 px/unit) deviates ~0.002 px and takes the kernel; a two-unit `Circle`
+/// deviates ~0.05 px and draws through the general path. Dots are what the
+/// radial kernel was for.
+///
+/// `Arc` is deliberately absent. Filling a partial arc closes it with a chord,
+/// so the region is a circular *segment* rather than a disc, and the hint would
+/// have to carry the chord to be right. It routes to the general path, which is
+/// exact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FillKernel {
+    /// No hinted route: the general quadratic machinery.
+    General,
+    /// Axis-aligned rectangle, screen pixels, `[x0, y0, x1, y1]`.
+    Rect {
+        /// The rectangle.
+        rect: [f64; 4],
+    },
+    /// A filled disc, screen pixels.
+    Disc {
+        /// Centre.
+        center: [f64; 2],
+        /// Radius.
+        radius: f64,
+    },
+    /// An axis-aligned rectangle with circular corners, screen pixels.
+    RoundedRect {
+        /// The bounding rectangle.
+        rect: [f64; 4],
+        /// Corner radius, already clamped to half the shorter side.
+        radius: f64,
+    },
+}
+
+impl FillKernel {
+    /// Choose a kernel for one occurrence of a compiled shape.
+    ///
+    /// `segments` is the shape's own slice of the IR's segment table, in object
+    /// space; `translate` is [`instance_translation`]. Returns
+    /// [`FillKernel::General`] whenever the hint is absent, inapplicable, or
+    /// outside [`HINT_BUDGET_PX`] — the "when in doubt, draw" direction.
+    #[must_use]
+    pub fn select(
+        shape: &crate::table::Shape,
+        segments: &[crate::table::Segment],
+        map: ScreenMap,
+        translate: [f64; 2],
+    ) -> FillKernel {
+        let to_px = |p: [f64; 3]| {
+            [
+                map.origin[0] + p[0] * map.scale + translate[0],
+                map.origin[1] + p[1] * map.scale + translate[1],
+            ]
+        };
+        let scale = map.scale.abs();
+        match shape.hint {
+            crate::hint::Hint::Rect {
+                center,
+                width,
+                height,
+            } => {
+                let c = to_px(center);
+                let (hw, hh) = (0.5 * width * scale, 0.5 * height * scale);
+                FillKernel::Rect {
+                    rect: [c[0] - hw, c[1] - hh, c[0] + hw, c[1] + hh],
+                }
+            }
+            crate::hint::Hint::RoundedRect {
+                center,
+                width,
+                height,
+                corner_radius,
+            } => {
+                let c = to_px(center);
+                let (hw, hh) = (0.5 * width * scale, 0.5 * height * scale);
+                let r = (corner_radius * scale).clamp(0.0, hw.min(hh));
+                FillKernel::RoundedRect {
+                    rect: [c[0] - hw, c[1] - hh, c[0] + hw, c[1] + hh],
+                    radius: r,
+                }
+            }
+            crate::hint::Hint::Circle { center, radius }
+            | crate::hint::Hint::Dot { center, radius } => {
+                let r = radius * scale;
+                if r <= 0.0 || !Self::disc_within_budget(center, radius, segments, scale) {
+                    return FillKernel::General;
+                }
+                FillKernel::Disc {
+                    center: to_px(center),
+                    radius: r,
+                }
+            }
+            _ => FillKernel::General,
+        }
+    }
+
+    /// Is the compiled outline's worst radial deviation from the hinted circle
+    /// under [`HINT_BUDGET_PX`] once scaled to pixels?
+    ///
+    /// Measured, not assumed. A quadratic through two points on a circle with
+    /// the tangent-intersection handle deviates most at its own midpoint, so one
+    /// evaluation per segment finds the worst case; using the *actual* points
+    /// also means a hand-edited outline that still carries the tag cannot slip
+    /// past on the strength of a formula.
+    fn disc_within_budget(
+        center: [f64; 3],
+        radius: f64,
+        segments: &[crate::table::Segment],
+        scale: f64,
+    ) -> bool {
+        if segments.is_empty() {
+            return false;
+        }
+        let mut worst = 0.0f64;
+        for s in segments {
+            // B(1/2) = (p0 + 2 p1 + p2) / 4.
+            let mid = [
+                0.25 * (s.p0[0] + 2.0 * s.p1[0] + s.p2[0]) - center[0],
+                0.25 * (s.p0[1] + 2.0 * s.p1[1] + s.p2[1]) - center[1],
+            ];
+            let d = (mid[0] * mid[0] + mid[1] * mid[1]).sqrt();
+            worst = worst.max((d - radius).abs());
+        }
+        worst * scale <= HINT_BUDGET_PX
+    }
+
+    /// Exact coverage of one pixel, or `None` for [`FillKernel::General`].
+    #[must_use]
+    pub fn coverage(&self, px: u32, py: u32) -> Option<f64> {
+        let (x0, y0) = (f64::from(px), f64::from(py));
+        let (x1, y1) = (x0 + 1.0, y0 + 1.0);
+        Some(match *self {
+            FillKernel::General => return None,
+            FillKernel::Rect { rect } => box_overlap(rect, [x0, y0, x1, y1]),
+            FillKernel::Disc { center, radius } => disc_box_area(center, radius, [x0, y0, x1, y1]),
+            FillKernel::RoundedRect { rect, radius } => {
+                rounded_rect_box_area(rect, radius, [x0, y0, x1, y1])
+            }
+        })
+    }
+
+    /// Exact coverage of a run of pixels in one row.
+    ///
+    /// The same values [`FillKernel::coverage`] gives, so a caller may use
+    /// either; this exists because a row is the unit the engine schedules and a
+    /// hinted fill should not pay a match per pixel.
+    pub fn row(&self, row_y: u32, x_lo: u32, x_hi: u32, out: &mut [f64]) -> bool {
+        let w = (x_hi.saturating_sub(x_lo)) as usize;
+        debug_assert_eq!(out.len(), w);
+        if matches!(self, FillKernel::General) {
+            return false;
+        }
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = self
+                .coverage(x_lo + i as u32, row_y)
+                .expect("not the general kernel");
+        }
+        true
+    }
+}
+
+/// Area of the intersection of two axis-aligned rectangles.
+fn box_overlap(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+    let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    w * h
+}
+
+/// `∫ √(r² − v²) dv` — the antiderivative every disc-area term is built from.
+///
+/// `asin` routes through fmn-dmath (§6.6, D-17): a hinted fill must produce the
+/// same bits on every certified target as the general path it stands in for, and
+/// `f64::asin` defers to the platform's libm. `sqrt` is used directly — IEEE 754
+/// requires it correctly rounded, so it is already reproducible.
+/// The half-chord `√(r² − v²)`, factored so it does not cancel.
+///
+/// `r*r - v*v` loses every digit of the difference as `|v| → r`, and because the
+/// result is then square-rooted, an absolute error `ε` in the radicand becomes
+/// `√ε` in the answer: at `r = 6` the `4e-15` left by cancellation came out as
+/// `6e-8` of half-chord. `(r − v)(r + v)` is the same quantity with each factor
+/// computed to its own last bit, so the relative error stays at one ulp.
+///
+/// This is not academic. It showed up as a **3e-8 area error in the rounded
+/// rectangle** and nowhere else: a disc's coverage summed over a pixel grid
+/// telescopes — adjacent boxes share their corner evaluations — so the plain
+/// disc oracle reported 4e-12 and hid it completely. Only the corner
+/// decomposition, which clips each square differently and cannot telescope,
+/// exposed the conditioning.
+fn half_chord(r: f64, v: f64) -> f64 {
+    ((r - v) * (r + v)).max(0.0).sqrt()
+}
+
+/// `∫ √(r² − v²) dv = ½(v√(r² − v²) + r² asin(v/r))`, with the inverse
+/// trigonometry written as `atan2` because `asin` is the wrong function here.
+///
+/// `asin` has an infinite derivative at ±1, so a one-ulp error in `v/r` becomes
+/// an error of `1e-16/√(2δ)` in the angle when `v/r = 1 − δ`. At `r = 6` with `v`
+/// a hair under `r` that is `~8e-9` of angle and, after the `r²/2` factor,
+/// **1.4e-7 of area** — and pixels sit a hair under `r` at every disc's left and
+/// right extremes, so this is the common case rather than a corner one.
+/// `atan2(v, √(r² − v²))` is the same angle: the point `(√(r² − v²), v)` lies on
+/// the circle of radius `r`, so its argument is exactly `asin(v/r)` for
+/// `v ∈ [−r, r]`. It is also *well* conditioned there — as the second argument
+/// goes to zero the angle goes to ±π/2 linearly in it — which turns 1.4e-7 into
+/// one ulp. Both routes go through fmn-dmath (§6.6, D-17); this one is the route
+/// that is right.
+fn circle_antiderivative(r: f64, v: f64) -> f64 {
+    let vc = v.clamp(-r, r);
+    0.5 * (vc * half_chord(r, vc) + r * r * fmn_dmath::atan2(vc, half_chord(r, vc)))
+}
+
+/// Area of `{ (u, v) : u² + v² ≤ r², u ≤ x, v ≤ y }`.
+///
+/// The disc-area primitive, in the one form that composes: with it, a disc's
+/// intersection with any axis-aligned rectangle is four evaluations and an
+/// inclusion–exclusion, and no case analysis is needed at the call site.
+///
+/// Derivation. The area is `∫_{-r}^{min(y,r)} h(v) dv` with
+/// `h(v) = clamp(x, −s, s) + s` and `s(v) = √(r² − v²)`, because `h` is the
+/// length of the slice `{ u : u ≤ x, u² ≤ r² − v² }`. `h` switches form where
+/// `s(v) = |x|`, i.e. at `v = ±a` with `a = √(r² − x²)`: inside `(−a, a)` it is
+/// `x + s`; outside it is `2s` when `x > 0` and `0` when `x < 0`. Each piece
+/// integrates in closed form via [`circle_antiderivative`].
+fn disc_quadrant_area(r: f64, x: f64, y: f64) -> f64 {
+    if r <= 0.0 || y <= -r || x <= -r {
+        return 0.0;
+    }
+    let yt = y.min(r);
+    let s = |v: f64| circle_antiderivative(r, v);
+    if x >= r {
+        return 2.0 * (s(yt) - s(-r));
+    }
+    let a = half_chord(r, x);
+    let mut acc = 0.0;
+    // The middle band, where the slice is cut by `x` on one side only.
+    let hi2 = yt.min(a);
+    if hi2 > -a {
+        acc += x * (hi2 - (-a)) + (s(hi2) - s(-a));
+    }
+    if x > 0.0 {
+        // The two caps, where the whole chord is left of `x`.
+        let hi1 = yt.min(-a);
+        if hi1 > -r {
+            acc += 2.0 * (s(hi1) - s(-r));
+        }
+        if yt > a {
+            acc += 2.0 * (s(yt) - s(a));
+        }
+    }
+    acc
+}
+
+/// Area of a disc intersected with an axis-aligned rectangle, exactly.
+fn disc_box_area(center: [f64; 2], radius: f64, rect: [f64; 4]) -> f64 {
+    let f = |x: f64, y: f64| disc_quadrant_area(radius, x - center[0], y - center[1]);
+    (f(rect[2], rect[3]) - f(rect[0], rect[3]) - f(rect[2], rect[1]) + f(rect[0], rect[1])).max(0.0)
+}
+
+/// Area of a rounded rectangle intersected with an axis-aligned rectangle.
+///
+/// The rounded rectangle is the full rectangle minus, at each corner, the part
+/// of the corner's `r × r` square that lies outside the corner's quarter disc.
+/// Both of those are box intersections, so the whole thing is
+/// `box_overlap − Σ (corner-square overlap − corner-disc overlap)` — five exact
+/// terms, no new geometry.
+fn rounded_rect_box_area(rect: [f64; 4], radius: f64, b: [f64; 4]) -> f64 {
+    let mut area = box_overlap(rect, b);
+    if radius <= 0.0 {
+        return area;
+    }
+    let r = radius;
+    let corners = [
+        (
+            [rect[0], rect[1], rect[0] + r, rect[1] + r],
+            [rect[0] + r, rect[1] + r],
+        ),
+        (
+            [rect[2] - r, rect[1], rect[2], rect[1] + r],
+            [rect[2] - r, rect[1] + r],
+        ),
+        (
+            [rect[0], rect[3] - r, rect[0] + r, rect[3]],
+            [rect[0] + r, rect[3] - r],
+        ),
+        (
+            [rect[2] - r, rect[3] - r, rect[2], rect[3]],
+            [rect[2] - r, rect[3] - r],
+        ),
+    ];
+    for (square, centre) in corners {
+        let clipped = [
+            square[0].max(b[0]),
+            square[1].max(b[1]),
+            square[2].min(b[2]),
+            square[3].min(b[3]),
+        ];
+        if clipped[2] <= clipped[0] || clipped[3] <= clipped[1] {
+            continue;
+        }
+        let square_part = (clipped[2] - clipped[0]) * (clipped[3] - clipped[1]);
+        let disc_part = disc_box_area(centre, r, clipped);
+        area -= (square_part - disc_part).max(0.0);
+    }
+    area.max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1512,5 +1852,364 @@ mod tests {
         let t1 = instance_translation(&insts[1], unit());
         assert!((t1[0] - t0[0] - 4.0).abs() < 1e-12);
         assert!((t1[1] - t0[1]).abs() < 1e-12);
+    }
+
+    // ------------------------------------------------------- hinted fill kernels
+
+    use crate::hint::Hint;
+    use crate::table::{compile_shape, shape_digest};
+
+    fn shaped(path: &QuadPath, hint: Hint) -> (crate::table::Shape, Vec<crate::table::Segment>) {
+        compile_shape(shape_digest(path.points()), path, hint, 0)
+    }
+
+    /// Per-pixel coverage from a kernel over a window.
+    fn kernel_grid(k: FillKernel, w: u32, h: u32) -> Vec<f64> {
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                out.push(k.coverage(x, y).expect("hinted"));
+            }
+        }
+        out
+    }
+
+    /// Per-pixel coverage from the general path over the same window.
+    fn general_grid(pieces: &[MonoPiece], w: u32, h: u32) -> Vec<f64> {
+        let mut scratch = RowScratch::for_tile(w);
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            out.extend_from_slice(scratch.fill_row(pieces, [0.0, 0.0], y, 0, w));
+        }
+        out
+    }
+
+    #[test]
+    fn the_disc_primitive_integrates_to_pi_r_squared() {
+        // The closed form's own oracle, before any pixel is involved: the
+        // quadrant primitive at both extremes is the whole disc, and summing it
+        // over a pixel grid is the same number a third way.
+        for r in [0.5f64, 1.0, 3.7, 20.0] {
+            let whole = disc_quadrant_area(r, r, r);
+            let want = std::f64::consts::PI * r * r;
+            assert!((whole - want).abs() < 1e-12, "r={r}: {whole} vs {want}");
+
+            let c = [r + 1.3, r + 0.7];
+            let n = (2.0 * r).ceil() as u32 + 4;
+            let mut sum = 0.0;
+            for y in 0..n {
+                for x in 0..n {
+                    sum += disc_box_area(
+                        c,
+                        r,
+                        [
+                            f64::from(x),
+                            f64::from(y),
+                            f64::from(x) + 1.0,
+                            f64::from(y) + 1.0,
+                        ],
+                    );
+                }
+            }
+            // Relative, because this sums up to ~2000 terms and each carries an
+            // ulp of `want`; an absolute 1e-12 is a tolerance about r, not about
+            // the algorithm.
+            assert!(
+                (sum - want).abs() < 1e-13 * want,
+                "r={r}: grid {sum} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rect_kernel_and_the_general_path_are_the_same_pixels() {
+        // The exact-equivalence half of hint.rs's rule: dropping this hint may
+        // only cost speed, so the two must agree to floating point. Non-integer
+        // bounds, so every edge pixel is partially covered.
+        let rect = [2.4f64, 3.1, 17.6, 12.9];
+        let path = polygon(&[
+            [rect[0], rect[1]],
+            [rect[2], rect[1]],
+            [rect[2], rect[3]],
+            [rect[0], rect[3]],
+        ]);
+        let (shape, segs) = shaped(
+            &path,
+            Hint::Rect {
+                center: [0.5 * (rect[0] + rect[2]), 0.5 * (rect[1] + rect[3]), 0.0],
+                width: rect[2] - rect[0],
+                height: rect[3] - rect[1],
+            },
+        );
+        let kernel = FillKernel::select(&shape, &segs, unit(), [0.0, 0.0]);
+        assert!(matches!(kernel, FillKernel::Rect { .. }));
+
+        let a = kernel_grid(kernel, 24, 16);
+        let b = general_grid(&pieces_of_path(&path, unit()), 24, 16);
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0f64, f64::max);
+        assert!(worst < 1e-12, "rect hint vs general path: {worst}");
+    }
+
+    #[test]
+    fn a_dot_takes_the_radial_kernel_and_a_large_circle_does_not() {
+        // The bounded-error half of the rule, at the Reference's own scale:
+        // 135 px per scene unit (G0-2 L-scale). manim's default Dot radius is
+        // 0.08 units, and a two-unit Circle is an ordinary object.
+        let px_per_unit = 135.0;
+        let map = ScreenMap {
+            scale: px_per_unit,
+            origin: [0.0, 0.0],
+        };
+        for (radius, admitted) in [(0.08f64, true), (2.0f64, false)] {
+            let path = circle_path(0.0, 0.0, radius, 16);
+            let (shape, segs) = shaped(
+                &path,
+                Hint::Circle {
+                    center: [0.0, 0.0, 0.0],
+                    radius,
+                },
+            );
+            let kernel = FillKernel::select(&shape, &segs, map, [0.0, 0.0]);
+            let took = matches!(kernel, FillKernel::Disc { .. });
+            assert_eq!(
+                took,
+                admitted,
+                "radius {radius} units = {} px: kernel {kernel:?}",
+                radius * px_per_unit
+            );
+        }
+    }
+
+    #[test]
+    fn the_declined_disc_hint_is_declined_for_a_measured_reason() {
+        // Not "because the radius is big" — because the outline's own worst
+        // radial deviation, scaled to pixels, exceeds the budget. The predicted
+        // deviation is r·(π/n)⁴/8; this checks the measurement against it, so a
+        // regression in either the formula or the measurement shows up here.
+        let r_units = 2.0;
+        let scale = 135.0;
+        for n in [4usize, 8, 16, 64] {
+            let path = circle_path(0.0, 0.0, r_units, n);
+            let (_, segs) = shaped(
+                &path,
+                Hint::Circle {
+                    center: [0.0, 0.0, 0.0],
+                    radius: r_units,
+                },
+            );
+            let mut worst = 0.0f64;
+            for s in &segs {
+                let m = [
+                    0.25 * (s.p0[0] + 2.0 * s.p1[0] + s.p2[0]),
+                    0.25 * (s.p0[1] + 2.0 * s.p1[1] + s.p2[1]),
+                ];
+                worst = worst.max(((m[0] * m[0] + m[1] * m[1]).sqrt() - r_units).abs());
+            }
+            // The *exact* deviation, not its leading term. A quadratic through
+            // two points of a circle with the tangent-intersection handle has its
+            // midpoint at radius `r(cos u + sec u)/2` with `u = θ/2 = π/n`, so
+            // the deviation is `r((cos u + sec u)/2 − 1)`. The `r u⁴/8` series
+            // quoted elsewhere in this module is that expanded, and it is 22 %
+            // low at n = 4 — which is how this assertion first failed.
+            let u = std::f64::consts::PI / n as f64;
+            let predicted = r_units * ((u.cos() + 1.0 / u.cos()) / 2.0 - 1.0);
+            assert!(
+                (worst - predicted).abs() < 1e-9 * r_units,
+                "n={n}: measured {worst} vs predicted {predicted}"
+            );
+            let admitted = FillKernel::disc_within_budget([0.0, 0.0, 0.0], r_units, &segs, scale);
+            assert_eq!(admitted, worst * scale <= HINT_BUDGET_PX, "n={n}");
+        }
+    }
+
+    #[test]
+    fn the_admitted_disc_kernel_stays_inside_its_own_bound() {
+        // The bound is a promise about pixels, so it gets checked on pixels: the
+        // hinted disc and the general path must not differ by more than the
+        // outline's radial deviation, since that is how far the edge moved.
+        let r = 10.8; // manim's default Dot at 135 px/unit
+        let path = circle_path(16.4, 15.6, r, 16);
+        let pieces = pieces_of_path(&path, unit());
+        let kernel = FillKernel::Disc {
+            center: [16.4, 15.6],
+            radius: r,
+        };
+        let a = kernel_grid(kernel, 34, 32);
+        let b = general_grid(&pieces, 34, 32);
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(u, v)| (u - v).abs())
+            .fold(0.0f64, f64::max);
+        let deviation = r * (std::f64::consts::PI / 16.0f64).powi(4) / 8.0;
+        assert!(
+            worst <= 3.0 * deviation,
+            "disc kernel vs general path: {worst}, deviation {deviation}"
+        );
+        // And the two agree on total area to the enclosed-area difference, which
+        // is the geometry's, not the kernel's.
+        let sum_a: f64 = a.iter().sum();
+        let sum_b: f64 = b.iter().sum();
+        let circle = std::f64::consts::PI * r * r;
+        assert!(
+            (sum_a - circle).abs() < 1e-9,
+            "the kernel is a true disc: {sum_a}"
+        );
+        assert!(sum_b > sum_a, "the quadratic outline encloses more");
+    }
+
+    #[test]
+    fn a_rounded_rect_degenerates_to_its_two_limits() {
+        // Radius 0 is the rectangle; radius = half the shorter side is the
+        // stadium, and for a square it is the disc. Both limits are exact, which
+        // is what says the corner decomposition is right rather than plausible.
+        // Dyadic bounds, so the side is *exactly* 12 and the four corner
+        // centres coincide bit-for-bit. With 3.2/15.2 the width comes out
+        // 12 - 8.9e-16, `radius = 6` is a hair over half the side, and the
+        // corner squares overlap — a 5e-15 artefact that would sit in this
+        // test's residual pretending to be an algorithm error.
+        let rect = [3.25f64, 4.75, 15.25, 16.75]; // a 12x12 square
+        for (x, y) in [(0u32, 0u32), (4, 6), (9, 11), (15, 16)] {
+            let b = [
+                f64::from(x),
+                f64::from(y),
+                f64::from(x) + 1.0,
+                f64::from(y) + 1.0,
+            ];
+            assert!(
+                (rounded_rect_box_area(rect, 0.0, b) - box_overlap(rect, b)).abs() < 1e-12,
+                "radius 0 is the rectangle at ({x},{y})"
+            );
+            let disc = disc_box_area([9.25, 10.75], 6.0, b);
+            assert!(
+                (rounded_rect_box_area(rect, 6.0, b) - disc).abs() < 1e-12,
+                "a fully rounded square is the disc at ({x},{y})"
+            );
+        }
+        // And the total area interpolates between them, monotonically.
+        let total = |r: f64| {
+            let mut s = 0.0;
+            for y in 0..22 {
+                for x in 0..20 {
+                    s += rounded_rect_box_area(
+                        rect,
+                        r,
+                        [
+                            f64::from(x),
+                            f64::from(y),
+                            f64::from(x) + 1.0,
+                            f64::from(y) + 1.0,
+                        ],
+                    );
+                }
+            }
+            s
+        };
+        let (a, b, c) = (total(0.0), total(3.0), total(6.0));
+        assert!((a - 144.0).abs() < 1e-9, "{a}");
+        assert!((c - std::f64::consts::PI * 36.0).abs() < 1e-9, "{c}");
+        assert!(a > b && b > c, "{a} > {b} > {c}");
+    }
+
+    #[test]
+    fn the_row_form_and_the_pixel_form_of_a_kernel_agree() {
+        let kernels = [
+            FillKernel::Rect {
+                rect: [2.4, 3.1, 17.6, 12.9],
+            },
+            FillKernel::Disc {
+                center: [8.3, 7.1],
+                radius: 5.5,
+            },
+            FillKernel::RoundedRect {
+                rect: [1.5, 2.5, 15.5, 12.5],
+                radius: 3.25,
+            },
+        ];
+        for k in kernels {
+            let mut row = vec![0.0; 20];
+            for y in 0..16 {
+                assert!(k.row(y, 0, 20, &mut row));
+                for (i, v) in row.iter().enumerate() {
+                    assert_eq!(*v, k.coverage(i as u32, y).unwrap(), "{k:?} at ({i},{y})");
+                }
+            }
+        }
+        let mut row = vec![0.0; 4];
+        assert!(
+            !FillKernel::General.row(0, 0, 4, &mut row),
+            "the general kernel declines, it does not fill zeros"
+        );
+        assert_eq!(FillKernel::General.coverage(0, 0), None);
+    }
+
+    #[test]
+    fn an_arc_and_a_line_route_to_the_general_path() {
+        // Arc: filling it closes it with a chord, so the region is a circular
+        // segment and a disc kernel would be the wrong shape. Line/Polyline: the
+        // general path is already exact and already fast for straight segments —
+        // there is nothing a kernel would save.
+        let path = circle_path(0.0, 0.0, 1.0, 8);
+        for hint in [
+            Hint::Arc {
+                center: [0.0, 0.0, 0.0],
+                radius: 1.0,
+                start_angle: 0.0,
+                angle: std::f64::consts::PI,
+            },
+            Hint::Line,
+            Hint::Polyline { closed: true },
+            Hint::General,
+        ] {
+            let (shape, segs) = shaped(&path, hint);
+            assert_eq!(
+                FillKernel::select(&shape, &segs, unit(), [0.0, 0.0]),
+                FillKernel::General,
+                "{hint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kernel_is_placed_by_its_occurrence_not_by_its_outline() {
+        // The instancing rule, at the hinted path: two occurrences of one
+        // interned disc must land where their offsets say, not where the first
+        // one's points happened to be.
+        let path = circle_path(0.0, 0.0, 0.05, 16);
+        let (shape, segs) = shaped(
+            &path,
+            Hint::Dot {
+                center: [0.0, 0.0, 0.0],
+                radius: 0.05,
+            },
+        );
+        let map = ScreenMap {
+            scale: 135.0,
+            origin: [10.0, 20.0],
+        };
+        let a = FillKernel::select(&shape, &segs, map, [0.0, 0.0]);
+        let b = FillKernel::select(&shape, &segs, map, [270.0, -135.0]);
+        match (a, b) {
+            (
+                FillKernel::Disc {
+                    center: ca,
+                    radius: ra,
+                },
+                FillKernel::Disc {
+                    center: cb,
+                    radius: rb,
+                },
+            ) => {
+                assert!((ra - rb).abs() < 1e-12, "the radius is the outline's");
+                assert!((cb[0] - ca[0] - 270.0).abs() < 1e-12);
+                assert!((cb[1] - ca[1] + 135.0).abs() < 1e-12);
+                assert!((ca[0] - 10.0).abs() < 1e-12 && (ca[1] - 20.0).abs() < 1e-12);
+            }
+            other => panic!("both should be discs: {other:?}"),
+        }
     }
 }
