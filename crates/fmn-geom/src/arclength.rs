@@ -172,35 +172,62 @@ impl ArcLengthTable {
         }
         let local_target = target - self.cumulative[index];
         let [a0, h, a1] = path.nth_curve_points(index)?;
-        let partial = |t: f64| -> f64 {
-            if t <= 0.0 {
-                return 0.0;
-            }
-            let sub = bezier::partial_quadratic(&[a0, h, a1], 0.0, t.min(1.0));
-            quadratic_arc_length(sub[0], sub[1], sub[2])
-        };
-        let (mut lo, mut hi) = (0.0f64, 1.0f64);
-        let mut t = (local_target / curve_len).clamp(0.0, 1.0);
-        for _ in 0..24 {
-            let err = partial(t) - local_target;
-            if err.abs() <= 1e-14 * curve_len {
-                break; // converged (a spot-on initial guess must not bisect away)
-            }
-            if err > 0.0 {
-                hi = t;
-            } else {
-                lo = t;
-            }
-            let dsdt = space_ops::get_norm(derivative(a0, h, a1, t));
-            let newton = if dsdt > 0.0 { t - err / dsdt } else { f64::NAN };
-            t = if newton.is_finite() && newton > lo && newton < hi {
-                newton
-            } else {
-                0.5 * (lo + hi)
-            };
-        }
-        Some((index, t))
+        Some((
+            index,
+            t_at_partial_length(a0, h, a1, local_target, curve_len),
+        ))
     }
+}
+
+/// The parameter at which one quadratic has covered `frac` of its own arc
+/// length.
+///
+/// [`ArcLengthTable::curve_and_t_at`]'s inner solve, exposed for callers that
+/// hold a single curve rather than a path — §10.2's interior colour field needs
+/// to place stations by arc length along the IR's `Segment` table, where each
+/// segment already carries its normalized span and there is no `QuadPath` to
+/// hand over. Both routes run this one solve, so a renderer can never be
+/// inverting arc length by a second rule (D4: geometry lives here).
+#[must_use]
+pub fn t_at_arc_fraction(a0: Vec3, h: Vec3, a1: Vec3, frac: f64) -> f64 {
+    let total = quadratic_arc_length(a0, h, a1);
+    if total <= 0.0 {
+        return 0.0;
+    }
+    t_at_partial_length(a0, h, a1, frac.clamp(0.0, 1.0) * total, total)
+}
+
+/// Newton on the exact partial-length closed form with a bisection safeguard,
+/// fixed iteration count (deterministic on every platform).
+fn t_at_partial_length(a0: Vec3, h: Vec3, a1: Vec3, local_target: f64, curve_len: f64) -> f64 {
+    let partial = |t: f64| -> f64 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        let sub = bezier::partial_quadratic(&[a0, h, a1], 0.0, t.min(1.0));
+        quadratic_arc_length(sub[0], sub[1], sub[2])
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    let mut t = (local_target / curve_len).clamp(0.0, 1.0);
+    for _ in 0..24 {
+        let err = partial(t) - local_target;
+        if err.abs() <= 1e-14 * curve_len {
+            break; // converged (a spot-on initial guess must not bisect away)
+        }
+        if err > 0.0 {
+            hi = t;
+        } else {
+            lo = t;
+        }
+        let dsdt = space_ops::get_norm(derivative(a0, h, a1, t));
+        let newton = if dsdt > 0.0 { t - err / dsdt } else { f64::NAN };
+        t = if newton.is_finite() && newton > lo && newton < hi {
+            newton
+        } else {
+            0.5 * (lo + hi)
+        };
+    }
+    t
 }
 
 /// The revision-keyed holder for the retained table: rebuilt only when

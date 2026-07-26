@@ -1049,6 +1049,320 @@ impl RowScratch {
     }
 }
 
+// --------------------------------------------------- the interior colour field
+
+/// How many boundary stations §10.2's interior field is evaluated over.
+///
+/// A **semantic** constant, not a quality knob: it is part of the definition of
+/// the colour field, so changing it changes every gradient-filled frame's hash,
+/// and it is therefore named, fixed, and journaled into the input closure rather
+/// than passed in — the same standing this module's `SPLIT_EPS` and G0-6's
+/// `SUBSAMPLES_Y` have.
+///
+/// 64 is chosen against a measurement, not a feeling. Two numbers, because there
+/// are two effects:
+///
+/// - Stations sit at interval **midpoints**, which makes the quadrature unbiased:
+///   a disc's centre reads exactly `½` at *every* station count. A left-endpoint
+///   rule carries a `1/(2n)` bias that every interior point inherits — measured,
+///   0.49219 at 64 stations and 0.49805 at 256.
+/// - Beyond four station spacings from the ramp's **seam** (where a closed path's
+///   end meets its start and the boundary colour jumps back), 64 stations agree
+///   with 256 to better than `1/1020` of the parameter — a quarter of one 8-bit
+///   level on the colour that reads it. At the seam nothing converges, because
+///   the *data* is discontinuous there; the field stays bounded and the
+///   Reference's own gradient fill has the same seam.
+pub const GRADIENT_STATIONS: usize = 64;
+
+/// §10.2's interior colour field: **arc-length-parameterized boundary
+/// interpolation with mean value coordinates in the interior**.
+///
+/// ## What is being interpolated
+///
+/// Not the colour — the *parameter*. The field returns `t ∈ [0, 1]`, the mean
+/// value interpolant of normalized arc length along the boundary, and the ramp
+/// is evaluated at it by [`fill_rgba_at`]. Two things follow, and both are the
+/// reason it is built this way:
+///
+/// - The field is a function of **geometry alone**, so it is keyed on the
+///   geometry revision like every other derived artifact in §10.8 and survives a
+///   restyle. A field that interpolated colours would rebuild whenever anything
+///   changed colour, which is the one thing a gradient does.
+/// - For the two-endpoint ramp the IR carries today the two formulations are
+///   *identical*, not merely similar: mean value coordinates sum to one, so
+///   `Σ λᵢ c(sᵢ) = c(Σ λᵢ sᵢ)` exactly for any affine `c`. When Marionette grows
+///   a per-point ramp, `Σ λᵢ cᵢ` drops in with no change to the field.
+///
+/// ## Why mean value coordinates, and why arc length
+///
+/// §10.2 requires a field that is "specified, tested, and stable under
+/// subdivision", and the Reference's mechanism is none of those: it triangulates
+/// and lets the GPU interpolate vertex colours across the fan, so the answer
+/// depends on the triangulation. Both halves of the replacement carry a
+/// subdivision obligation:
+///
+/// - **Arc length, not parameter.** A de Casteljau split changes a curve's
+///   parameterization and not the curve, so stations placed by `t` would move
+///   and stations placed by arc length do not. Placement runs through
+///   `fmn_geom::arclength::t_at_arc_fraction` — the same solve
+///   `point_from_proportion` uses (D4: the renderer does not own a second
+///   arc-length rule).
+/// - **Stations, not vertices.** Discrete mean value coordinates over the
+///   *anchors* would change with every subdivision, because subdivision adds
+///   anchors. Over stations at fixed arc-length fractions they cannot: the
+///   station set is a function of the boundary curve and its arc-length
+///   parameterization, both of which subdivision preserves. This is a quadrature
+///   of the continuous mean value interpolant — the boundary colour averaged over
+///   viewing angle from the query point — which is the subdivision-invariant
+///   object the discrete form approximates.
+///
+/// ## The honest limit
+///
+/// Mean value coordinates are defined for one closed polygon. For a shape whose
+/// path has several subpaths the stations run over the whole path in order, so
+/// the station polygon connects one subpath's end to the next one's start; that
+/// is a specified, deterministic, subdivision-invariant field, and it coincides
+/// with the region boundary exactly when there is one subpath — which is every
+/// gradient fill in the corpus so far. A glyph counter or an annulus wants the
+/// per-loop generalization, and that is a design step rather than a parameter,
+/// so it is filed rather than guessed at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GradientField {
+    /// Station positions, shape-local screen pixels — the same frame
+    /// [`MonoPiece`] uses, so one [`instance_translation`] serves both.
+    points: Vec<[f64; 2]>,
+    /// Each station's normalized arc length along the path.
+    params: Vec<f64>,
+}
+
+impl GradientField {
+    /// Squared distance below which the query point *is* a station.
+    ///
+    /// Mean value coordinates are exact at the boundary data — the weight
+    /// `1/rᵢ` diverges — so the limit is taken explicitly rather than left to
+    /// infinity arithmetic, which would produce `NaN` rather than the answer.
+    const TOUCH_SQ: f64 = 1e-18;
+
+    /// Derive the field for one compiled shape.
+    ///
+    /// `segments` is the shape's own slice of the IR's segment table, in object
+    /// space. Returns an empty field for a shape with no drawn length, which
+    /// reads as a flat `0` parameter rather than as an error.
+    #[must_use]
+    pub fn build(segments: &[crate::table::Segment], map: ScreenMap) -> GradientField {
+        Self::build_with(GRADIENT_STATIONS, segments, map)
+    }
+
+    /// [`GradientField::build`] at an explicit station count.
+    ///
+    /// Exists so the convergence of the quadrature can be *measured* rather than
+    /// asserted — see this module's station-count test. Not a public knob:
+    /// [`GRADIENT_STATIONS`] is the shipped definition.
+    fn build_with(
+        stations: usize,
+        segments: &[crate::table::Segment],
+        map: ScreenMap,
+    ) -> GradientField {
+        if segments.is_empty() || stations == 0 {
+            return GradientField::default();
+        }
+        let mut points = Vec::with_capacity(stations);
+        let mut params = Vec::with_capacity(stations);
+        for k in 0..stations {
+            // Interval MIDPOINTS, not left endpoints. The boundary ramp is
+            // discontinuous where a closed path's end meets its start — it runs
+            // `fill_rgba → fill_rgba_end` and then jumps back — so a left-endpoint
+            // rule samples `{0, 1/n, …, (n−1)/n}`, whose mean is `½ − 1/(2n)`,
+            // and every interior point inherits that `O(1/n)` bias: measured, a
+            // disc's centre read 0.49219 at 64 stations and 0.49805 at 256, which
+            // is exactly `1/(2n)` twice. Midpoints sample `{(k+½)/n}`, whose mean
+            // is `½` for *every* `n`, so the bias is not reduced — it is gone.
+            let s = (k as f64 + 0.5) / stations as f64;
+            // The spans partition [0, 1] in order, so this is a binary search.
+            let i = segments
+                .partition_point(|g| g.s1 <= s)
+                .min(segments.len() - 1);
+            let g = &segments[i];
+            let span = g.s1 - g.s0;
+            let frac = if span > 0.0 {
+                ((s - g.s0) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let t = fmn_geom::arclength::t_at_arc_fraction(g.p0, g.p1, g.p2, frac);
+            let p = fmn_geom::bezier::quadratic_point(g.p0, g.p1, g.p2, t);
+            points.push([
+                map.origin[0] + p[0] * map.scale,
+                map.origin[1] + p[1] * map.scale,
+            ]);
+            params.push(s);
+        }
+        GradientField { points, params }
+    }
+
+    /// Are there no stations — i.e. does this shape have no drawn boundary?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// How many stations.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    /// The field's value at a screen point: mean value coordinates over the
+    /// stations, applied to their arc-length parameters.
+    ///
+    /// Allocation-free (PG-6): the previous edge's half-angle tangent is carried
+    /// in a register rather than tabulated, and the wrap-around edge is computed
+    /// once and reused at both ends of the loop.
+    #[must_use]
+    pub fn param_at(&self, p: [f64; 2], translate: [f64; 2]) -> f64 {
+        let n = self.points.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let d = |i: usize| -> [f64; 2] {
+            [
+                self.points[i][0] + translate[0] - p[0],
+                self.points[i][1] + translate[1] - p[1],
+            ]
+        };
+        if n == 1 {
+            return self.params[0];
+        }
+
+        // `tan(αᵢ/2)` for the edge (i, j), written as
+        // `(rᵢ rⱼ − dᵢ·dⱼ) / (dᵢ × dⱼ)`: algebraically `(1 − cos α)/sin α`, and
+        // preferred because it needs no inverse trigonometry at all — one fewer
+        // transcendental per station per pixel, and no `atan2` branch to keep
+        // bit-identical against an annex twin.
+        //
+        // `None` means the query point lies *on* this edge (collinear and
+        // between the endpoints, so `α = π` and the tangent diverges). The
+        // caller takes the limit, which is linear interpolation along the edge —
+        // the correct boundary behaviour, and the one place infinity arithmetic
+        // would have produced `NaN` instead of an answer.
+        let tan_half = |i: usize, j: usize| -> Option<f64> {
+            let (di, dj) = (d(i), d(j));
+            let ri = (di[0] * di[0] + di[1] * di[1]).sqrt();
+            let rj = (dj[0] * dj[0] + dj[1] * dj[1]).sqrt();
+            let dot = di[0] * dj[0] + di[1] * dj[1];
+            let cross = di[0] * dj[1] - di[1] * dj[0];
+            if cross.abs() <= 1e-14 * ri * rj {
+                return if dot < 0.0 { None } else { Some(0.0) };
+            }
+            Some((ri * rj - dot) / cross)
+        };
+
+        // Exact at a station, and exact on an edge.
+        for i in 0..n {
+            let di = d(i);
+            if di[0] * di[0] + di[1] * di[1] <= Self::TOUCH_SQ {
+                return self.params[i];
+            }
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            if tan_half(i, j).is_none() {
+                let (di, dj) = (d(i), d(j));
+                let ri = (di[0] * di[0] + di[1] * di[1]).sqrt();
+                let rj = (dj[0] * dj[0] + dj[1] * dj[1]).sqrt();
+                let f = if ri + rj > 0.0 { ri / (ri + rj) } else { 0.0 };
+                // The wrap edge closes the ramp, so it interpolates back toward
+                // the start rather than past the end.
+                let (a, b) = if j == 0 {
+                    (self.params[i], 1.0)
+                } else {
+                    (self.params[i], self.params[j])
+                };
+                return a + (b - a) * f;
+            }
+        }
+
+        let wrap = tan_half(n - 1, 0).unwrap_or(0.0);
+        let mut t_prev = wrap;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for i in 0..n {
+            let t_i = if i + 1 < n {
+                tan_half(i, i + 1).unwrap_or(0.0)
+            } else {
+                wrap
+            };
+            let di = d(i);
+            let r = (di[0] * di[0] + di[1] * di[1]).sqrt();
+            if r > 0.0 {
+                let w = (t_prev + t_i) / r;
+                num += w * self.params[i];
+                den += w;
+            }
+            t_prev = t_i;
+        }
+        if den == 0.0 || !den.is_finite() || !num.is_finite() {
+            // Defined rather than arbitrary: fall back to the nearest station,
+            // which is the value the interpolant tends to as the weights
+            // degenerate.
+            return self.nearest_param(p, translate);
+        }
+        (num / den).clamp(0.0, 1.0)
+    }
+
+    /// The parameter of the station nearest a point — the degenerate fallback.
+    fn nearest_param(&self, p: [f64; 2], translate: [f64; 2]) -> f64 {
+        let mut best = f64::INFINITY;
+        let mut out = 0.0;
+        for (q, s) in self.points.iter().zip(&self.params) {
+            let dx = q[0] + translate[0] - p[0];
+            let dy = q[1] + translate[1] - p[1];
+            let d2 = dx * dx + dy * dy;
+            if d2 < best {
+                best = d2;
+                out = *s;
+            }
+        }
+        out
+    }
+}
+
+/// The fill ramp evaluated at a field parameter.
+///
+/// The IR's [`crate::table::Style`] carries the two ends of the per-point
+/// `fill_rgba` column, which is how the Reference expresses a gradient along a
+/// path, so the boundary colour is `lerp(fill_rgba, fill_rgba_end, s)` at
+/// normalized arc length `s`. Interpolation is componentwise in the linear-light
+/// straight-alpha space the table already stores (§6.3, BN-04) — the ramp is a
+/// colour interpolation, so it happens where colour interpolation is defined and
+/// not in an encoded space.
+#[must_use]
+pub fn fill_rgba_at(style: &crate::table::Style, t: f64) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0) as f32;
+    let mut out = [0.0f32; 4];
+    for (k, o) in out.iter_mut().enumerate() {
+        let a = style.fill_rgba[k];
+        let b = style.fill_rgba_end[k];
+        *o = a + (b - a) * t;
+    }
+    out
+}
+
+/// Is this style's fill a single colour, so the interior field can be skipped?
+///
+/// Bitwise, matching how [`crate::table::StyleTable`] interns: §8.5 makes
+/// batching observable, so "the same colour" here has to mean the same thing it
+/// means there. The overwhelming majority of fills are flat, and this is the
+/// test that keeps a 64-station interpolant off their hot path entirely.
+#[must_use]
+pub fn fill_is_flat(style: &crate::table::Style) -> bool {
+    style
+        .fill_rgba
+        .iter()
+        .zip(&style.fill_rgba_end)
+        .all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
 // ------------------------------------------------- primitive-hint fill kernels
 
 /// The screen-space budget under which a *bounded-error* fill hint is admitted.
@@ -1854,10 +2168,314 @@ mod tests {
         assert!((t1[1] - t0[1]).abs() < 1e-12);
     }
 
-    // ------------------------------------------------------- hinted fill kernels
+    // ---------------------------------------------------- the interior field
 
     use crate::hint::Hint;
-    use crate::table::{compile_shape, shape_digest};
+    use crate::table::{Style, compile_shape, shape_digest};
+
+    fn field_of(path: &QuadPath, map: ScreenMap) -> GradientField {
+        let (_, segs) = shaped(path, Hint::General);
+        GradientField::build(&segs, map)
+    }
+
+    #[test]
+    fn the_field_is_exact_on_its_own_boundary_stations() {
+        // Mean value coordinates reproduce the boundary data at the boundary.
+        // That is the property that makes the field an *interpolant* rather than
+        // an approximation, and the reason the r -> 0 limit is taken explicitly.
+        let path = circle_path(20.0, 20.0, 10.0, 16);
+        let field = field_of(&path, unit());
+        assert_eq!(field.len(), GRADIENT_STATIONS);
+        for i in 0..field.len() {
+            let p = field.points[i];
+            let got = field.param_at(p, [0.0, 0.0]);
+            assert!(
+                (got - field.params[i]).abs() < 1e-12,
+                "station {i}: {got} vs {}",
+                field.params[i]
+            );
+        }
+    }
+
+    #[test]
+    fn the_field_stays_in_range_and_is_a_partition_of_unity() {
+        // Every mean-value weight is positive inside a convex boundary, so the
+        // interpolant is a convex combination of the station parameters and
+        // cannot leave [0, 1]. Checked over the interior rather than argued.
+        let path = circle_path(24.0, 24.0, 16.0, 16);
+        let pieces = pieces_of_path(&path, unit());
+        let field = field_of(&path, unit());
+        for y in 0..48 {
+            for x in 0..48 {
+                let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                if winding_at(&pieces, [0.0, 0.0], p) == 0 {
+                    continue;
+                }
+                let t = field.param_at(p, [0.0, 0.0]);
+                assert!((0.0..=1.0).contains(&t), "({x},{y}) -> {t}");
+                assert!(t.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn subdividing_a_curve_does_not_change_the_gradient() {
+        // §10.2's metamorphic law, the other half. The geometry half is covered
+        // by `subdividing_a_curve_does_not_change_the_fill`; this is the one the
+        // *field* has to survive, and the one that dictated arc-length stations
+        // instead of parameter stations and stations instead of anchors.
+        let path = circle_path(24.3, 23.7, 15.1, 8);
+        let mut split = QuadPath::default();
+        for i in 0..path.num_curves() {
+            let [p0, p1, p2] = path.nth_curve_points(i).unwrap();
+            let mid = |a: Vec3, b: Vec3| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, 0.0];
+            let q0 = mid(p0, p1);
+            let q1 = mid(p1, p2);
+            let r = mid(q0, q1);
+            if i == 0 {
+                split.start_new_path(p0);
+            }
+            split.add_quadratic_bezier_curve_to(q0, r, false).unwrap();
+            split.add_quadratic_bezier_curve_to(q1, p2, false).unwrap();
+        }
+        let a = field_of(&path, unit());
+        let b = field_of(&split, unit());
+        assert_eq!(a.len(), b.len());
+
+        // The stations themselves must land in the same places, because the
+        // boundary and its arc-length parameterization are unchanged.
+        let mut worst_station = 0.0f64;
+        for i in 0..a.len() {
+            worst_station = worst_station
+                .max((a.points[i][0] - b.points[i][0]).abs())
+                .max((a.points[i][1] - b.points[i][1]).abs());
+        }
+        assert!(worst_station < 1e-9, "station drift {worst_station}");
+
+        let mut worst = 0.0f64;
+        for y in 0..48 {
+            for x in 0..48 {
+                let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                worst = worst.max((a.param_at(p, [0.0, 0.0]) - b.param_at(p, [0.0, 0.0])).abs());
+            }
+        }
+        assert!(worst < 1e-9, "field drift under subdivision {worst}");
+    }
+
+    #[test]
+    fn the_midpoint_rule_makes_the_centre_exact_at_every_station_count() {
+        // The strongest statement available about the quadrature, and the reason
+        // stations sit at interval midpoints. At a disc's centre every station
+        // subtends the same angle, so the interpolant is the plain mean of the
+        // station parameters: `½ − 1/(2n)` for a left-endpoint rule, and exactly
+        // `½` for a midpoint rule, for every `n`. A left-endpoint rule measured
+        // 0.49219 at 64 stations and 0.49805 at 256 — the bias, twice.
+        let path = circle_path(24.0, 24.0, 16.0, 16);
+        let segs = shaped(&path, Hint::General).1;
+        for n in [8usize, 16, 64, 256] {
+            let field = GradientField::build_with(n, &segs, unit());
+            let centre = field.param_at([24.0, 24.0], [0.0, 0.0]);
+            assert!(
+                (centre - 0.5).abs() < 1e-12,
+                "n={n}: centre {centre}, not 1/2"
+            );
+        }
+    }
+
+    #[test]
+    fn sixty_four_stations_is_a_measurement_not_a_guess() {
+        // GRADIENT_STATIONS is part of the definition of the field, so what the
+        // quadrature leaves has to be a number someone measured rather than a
+        // feeling. 64 against 256, bucketed by distance from the ramp's seam.
+        //
+        // The seam is where a closed path's end meets its start, and the
+        // boundary DATA jumps there: the ramp runs fill_rgba -> fill_rgba_end and
+        // then starts over. No station count converges at a jump — that is a
+        // property of the data, not of the method — so the claim is deliberately
+        // two claims: convergent away from the seam, merely *bounded* at it. The
+        // Reference has the same seam (a gradient fill's triangle fan has a hard
+        // edge between its last and first vertex), so this is faithful rather
+        // than a defect being tolerated.
+        let r = 16.0;
+        let path = circle_path(24.0, 24.0, r, 16);
+        let pieces = pieces_of_path(&path, unit());
+        let segs = shaped(&path, Hint::General).1;
+        let coarse = GradientField::build_with(64, &segs, unit());
+        let fine = GradientField::build_with(256, &segs, unit());
+
+        // Four station spacings — the length scale the coarse quadrature can
+        // resolve, derived from the boundary rather than picked.
+        let spacing = std::f64::consts::TAU * r / 64.0;
+        let seam = [24.0 + r, 24.0]; // the path's start anchor
+        let mut worst_far = 0.0f64;
+        let mut worst_near = 0.0f64;
+        let mut far = 0usize;
+        for y in 0..48 {
+            for x in 0..48 {
+                let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                if winding_at(&pieces, [0.0, 0.0], p) == 0 {
+                    continue;
+                }
+                let e = (coarse.param_at(p, [0.0, 0.0]) - fine.param_at(p, [0.0, 0.0])).abs();
+                let d = ((p[0] - seam[0]).powi(2) + (p[1] - seam[1]).powi(2)).sqrt();
+                if d >= 4.0 * spacing {
+                    worst_far = worst_far.max(e);
+                    far += 1;
+                } else {
+                    worst_near = worst_near.max(e);
+                }
+            }
+        }
+        assert!(far > 500, "the far region must be most of the disc: {far}");
+        assert!(
+            worst_far < 1.0 / (4.0 * 255.0),
+            "64 vs 256 stations beyond four spacings: {worst_far}"
+        );
+        // At the seam the interpolant is blending a unit jump, so half of it is
+        // the most either count can differ by.
+        assert!(
+            worst_near < 0.5,
+            "the seam must be bounded, not divergent: {worst_near}"
+        );
+    }
+
+    #[test]
+    fn the_field_is_invariant_under_placement_and_covariant_under_scale() {
+        // The field is derived per interned outline, so an occurrence must read
+        // the same value at the corresponding point — otherwise a gradient would
+        // shift when a glyph moved.
+        let path = circle_path(0.0, 0.0, 8.0, 16);
+        let field = field_of(&path, unit());
+        for (x, y) in [(-4.0f64, 1.0f64), (0.0, 0.0), (3.5, -2.5)] {
+            let here = field.param_at([x, y], [0.0, 0.0]);
+            let there = field.param_at([x + 137.0, y - 42.0], [137.0, -42.0]);
+            assert!((here - there).abs() < 1e-12, "({x},{y}): {here} vs {there}");
+        }
+        // And a zoom is a scaling of the stations, so the same *relative* point
+        // reads the same parameter.
+        let zoomed = field_of(
+            &path,
+            ScreenMap {
+                scale: 3.0,
+                origin: [0.0, 0.0],
+            },
+        );
+        for (x, y) in [(-4.0f64, 1.0f64), (0.0, 0.0), (3.5, -2.5)] {
+            let a = field.param_at([x, y], [0.0, 0.0]);
+            let b = zoomed.param_at([3.0 * x, 3.0 * y], [0.0, 0.0]);
+            assert!((a - b).abs() < 1e-12, "({x},{y}): {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn a_flat_fill_needs_no_field_at_all() {
+        let flat = Style {
+            fill_rgba: [0.25, 0.5, 0.75, 1.0],
+            fill_rgba_end: [0.25, 0.5, 0.75, 1.0],
+            ..Style::default()
+        };
+        assert!(fill_is_flat(&flat));
+        assert_eq!(fill_rgba_at(&flat, 0.0), fill_rgba_at(&flat, 1.0));
+
+        // One ulp apart is a gradient, matching how StyleTable interns: §8.5
+        // makes batching observable, so "the same colour" must mean the same
+        // thing in both places.
+        let ramp = Style {
+            fill_rgba_end: [f32::from_bits(0.25f32.to_bits() + 1), 0.5, 0.75, 1.0],
+            ..flat
+        };
+        assert!(!fill_is_flat(&ramp));
+
+        // And a signed zero is not the same bits, which is the conservative
+        // direction: it costs a field evaluation, never a wrong colour.
+        let zeros = Style {
+            fill_rgba: [0.0, 0.0, 0.0, 1.0],
+            fill_rgba_end: [-0.0, 0.0, 0.0, 1.0],
+            ..Style::default()
+        };
+        assert!(!fill_is_flat(&zeros));
+    }
+
+    #[test]
+    fn the_ramp_is_linear_in_the_field_parameter() {
+        let style = Style {
+            fill_rgba: [0.0, 0.25, 1.0, 0.5],
+            fill_rgba_end: [1.0, 0.75, 0.0, 1.0],
+            ..Style::default()
+        };
+        assert_eq!(fill_rgba_at(&style, 0.0), style.fill_rgba);
+        assert_eq!(fill_rgba_at(&style, 1.0), style.fill_rgba_end);
+        let mid = fill_rgba_at(&style, 0.5);
+        for (k, ((got, a), b)) in mid
+            .iter()
+            .zip(&style.fill_rgba)
+            .zip(&style.fill_rgba_end)
+            .enumerate()
+        {
+            assert!((got - 0.5 * (a + b)).abs() < 1e-6, "channel {k}");
+        }
+        // Clamped, not extrapolated, at both ends.
+        assert_eq!(fill_rgba_at(&style, -3.0), style.fill_rgba);
+        assert_eq!(fill_rgba_at(&style, 7.0), style.fill_rgba_end);
+    }
+
+    #[test]
+    fn interpolating_the_parameter_and_interpolating_the_colours_agree() {
+        // The claim that lets the field be geometry-only: mean value coordinates
+        // are a partition of unity, so `Σ λᵢ c(sᵢ) = c(Σ λᵢ sᵢ)` exactly for an
+        // affine ramp. Checked by evaluating the ramp both ways.
+        let path = circle_path(16.0, 16.0, 10.0, 16);
+        let field = field_of(&path, unit());
+        let style = Style {
+            fill_rgba: [0.1, 0.2, 0.3, 1.0],
+            fill_rgba_end: [0.9, 0.8, 0.7, 0.4],
+            ..Style::default()
+        };
+        for (x, y) in [(16.5f64, 16.5f64), (12.0, 20.0), (20.5, 13.5)] {
+            let p = [x, y];
+            let via_param = fill_rgba_at(&style, field.param_at(p, [0.0, 0.0]));
+
+            // The same weights, applied to the colours instead.
+            let n = field.len();
+            let mut acc = [0.0f64; 4];
+            let mut den = 0.0;
+            for i in 0..n {
+                // Reconstruct λᵢ by a one-hot field: the interpolant of the
+                // indicator of station i *is* λᵢ.
+                let mut one_hot = field.clone();
+                one_hot.params = vec![0.0; n];
+                one_hot.params[i] = 1.0;
+                let lambda = one_hot.param_at(p, [0.0, 0.0]);
+                den += lambda;
+                let s = field.params[i];
+                for ((o, a), b) in acc
+                    .iter_mut()
+                    .zip(&style.fill_rgba)
+                    .zip(&style.fill_rgba_end)
+                {
+                    let (a, b) = (f64::from(*a), f64::from(*b));
+                    *o += lambda * (a + (b - a) * s);
+                }
+            }
+            assert!((den - 1.0).abs() < 1e-9, "partition of unity: {den}");
+            for (k, (got, want)) in via_param.iter().zip(&acc).enumerate() {
+                assert!(
+                    (f64::from(*got) - want).abs() < 1e-6,
+                    "({x},{y}) channel {k}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_boundary_yields_a_flat_field() {
+        let field = GradientField::build(&[], unit());
+        assert!(field.is_empty());
+        assert_eq!(field.param_at([3.0, 4.0], [0.0, 0.0]), 0.0);
+        assert_eq!(GradientField::build_with(0, &[], unit()).len(), 0);
+    }
+
+    // ------------------------------------------------------- hinted fill kernels
 
     fn shaped(path: &QuadPath, hint: Hint) -> (crate::table::Shape, Vec<crate::table::Segment>) {
         compile_shape(shape_digest(path.points()), path, hint, 0)
