@@ -14,6 +14,7 @@
 //! | [`hint`] | primitive hints: kernel routing, and the invalidation rule |
 //! | [`table`] | the IR's tables: segments, interned styles, interned shapes and their instances |
 //! | [`bin`] | two-level binning, per-tile command lists, occlusion pruning |
+//! | [`cache`] | the retained compositor's tile cache and its key |
 //! | [`plan`] | the retained plan: lazy synchronization from Marionette |
 //! | [`snapshot`] | the canonical, bit-lockable form of a compiled plan (§16.5) |
 //!
@@ -22,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bin;
+pub mod cache;
 pub mod hint;
 pub mod plan;
 pub mod revision;
@@ -29,6 +31,7 @@ pub mod snapshot;
 pub mod table;
 
 pub use bin::{Binning, ScreenMap, Tiling, Viewport};
+pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
 pub use hint::Hint;
 pub use plan::{RenderPlan, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};

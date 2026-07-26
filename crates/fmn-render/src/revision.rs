@@ -235,6 +235,24 @@ impl Revisions {
         })
     }
 
+    /// Fold all seven axes into one value.
+    ///
+    /// For consumers that key on *any* change rather than on a declared subset —
+    /// the tile cache, whose §10.8 key is "resource revisions" without
+    /// qualification, because a tile's bytes can depend on any axis.
+    #[must_use]
+    pub fn fold(&self) -> u64 {
+        mix(&[
+            self.topology,
+            self.geometry,
+            self.transform,
+            self.style,
+            self.order,
+            self.image,
+            self.camera,
+        ])
+    }
+
     /// With [`Axis::Image`] set.
     #[must_use]
     pub fn with_image(mut self, revision: u64) -> Revisions {
@@ -298,13 +316,17 @@ impl Dependency {
 
 /// Fold a list of counters into one, order-sensitively.
 ///
+/// Shared with the tile cache (`crate::cache`), which folds the same way for the
+/// same reason: it needs a cheap, stable, order-sensitive function of a handful
+/// of integers, not a content address.
+///
 /// FNV-1a over the little-endian bytes. It needs to be a *function*, cheap, and
 /// stable across runs and platforms — not cryptographic: a collision costs a
 /// missed rebuild only if two different states hash equal, and the inputs are
 /// monotone counters from one process rather than adversarial input. fmn-hash is
 /// the right tool for content addressing (§6.7) and the wrong one for a
 /// per-resource per-frame comparison.
-fn mix(values: &[u64]) -> u64 {
+pub(crate) fn mix(values: &[u64]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h = OFFSET;

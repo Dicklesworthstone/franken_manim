@@ -177,12 +177,22 @@ impl RenderPlan {
                 }
             };
 
+            // §8.2's conservative rule, read fresh every sync: a writable live
+            // view can mutate points with no Stage method called and therefore
+            // no revision bumped, so it cannot be folded into `revisions` — it
+            // has to be a separate flag that poisons any cache downstream.
+            let volatile = stage
+                .get(mob)
+                .is_some_and(|e| e.buffer.has_writable_whole_view());
+
             self.shapes.push_instance(Instance {
                 shape,
                 style,
                 mob,
                 offset,
                 order: order as u32,
+                revisions: now.fold(),
+                volatile,
             });
 
             self.retained.insert(
@@ -456,6 +466,44 @@ mod tests {
             assert!((inst.offset[0] - i as f64 * 10.0).abs() < 1e-9);
         }
         assert_eq!(instances[0].shape, instances[2].shape);
+    }
+
+    #[test]
+    fn interned_indices_are_stable_across_syncs() {
+        // The property the tile cache's key rests on (`crate::cache`): shape and
+        // style indices come from append-only interning, so a retained plan
+        // keeps them stable and adding an object cannot renumber the ones
+        // already there. A plan rebuilt each frame reshuffles them, and every
+        // tile key in the frame moves for a reason that has nothing to do with
+        // the tile — which is exactly what the cache's first test harness did.
+        let (mut stage, mobs) = staged(2);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let shapes: Vec<u32> = plan.shapes().instances().iter().map(|i| i.shape).collect();
+        let styles: Vec<u32> = plan.shapes().instances().iter().map(|i| i.style).collect();
+
+        // A newcomer *behind* the others, so it lands first in the draw sequence
+        // and shifts every instance index.
+        let newcomer = stage.add(vmobject(&[
+            [0.0, 0.0, 0.0],
+            [3.0, 1.0, 0.0],
+            [6.0, 0.0, 0.0],
+        ]));
+        stage.set_z_index(newcomer, -5, false);
+        stage.add_to_scene(newcomer).expect("live");
+        plan.sync(&stage, 0);
+
+        let instances = plan.shapes().instances();
+        assert_eq!(instances.len(), 3);
+        assert_eq!(instances[0].mob, newcomer, "the newcomer draws first");
+        for (k, mob) in mobs.iter().enumerate() {
+            let inst = instances
+                .iter()
+                .find(|i| i.mob == *mob)
+                .expect("still in the scene");
+            assert_eq!(inst.shape, shapes[k], "shape index moved for {mob:?}");
+            assert_eq!(inst.style, styles[k], "style index moved for {mob:?}");
+        }
     }
 
     #[test]

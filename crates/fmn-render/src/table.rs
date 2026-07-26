@@ -273,6 +273,22 @@ pub struct Instance {
     pub offset: Vec3,
     /// Painter order: position in the draw sequence.
     pub order: u32,
+    /// A fold of this occurrence's seven revision axes at sync time.
+    ///
+    /// Carried on the instance rather than looked up because the tile cache's
+    /// key (§10.8) is per *tile*, and a tile knows its commands rather than
+    /// their mobjects. One `u64` per occurrence is the cheapest thing that makes
+    /// the key complete.
+    pub revisions: u64,
+    /// Whether a **writable live view** exists on this occurrence's buffer.
+    ///
+    /// §8.2: "while a *writable* live view exists, the affected object … is
+    /// conservatively invalidated each frame — a live view never silently
+    /// receives weaker semantics to buy speed." A view can mutate points with no
+    /// Stage method called and therefore no revision bumped, so this is not
+    /// foldable into `revisions`: it *poisons* the tile key instead, and the
+    /// difference is that a poisoned tile can never hit however many frames pass.
+    pub volatile: bool,
 }
 
 /// Interned outlines and their occurrences.
@@ -607,6 +623,8 @@ mod tests {
                 mob,
                 offset: [pts[0][0], pts[0][1], pts[0][2]],
                 order: i as u32,
+                revisions: 0,
+                volatile: false,
             });
         }
         assert_eq!(compiles, 1, "the outline must compile once");
