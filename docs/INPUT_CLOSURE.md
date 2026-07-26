@@ -91,14 +91,34 @@ across the matrix.
 
 | Platform | Status | Basis |
 |---|---|---|
-| **linux-x86-64** | **certified** | measured bit-identical, G0-6 |
-| **linux-aarch64** | **certified** | measured bit-identical, G0-6 (qemu-user; see the caveat below) |
-| **macos-aarch64** | **certified** | measured bit-identical, G0-6 |
+| **linux-x86-64** | **certified** | measured bit-identical, G0-6; **re-measured on the engine's corpus, fm-ig3** |
+| **linux-aarch64** | **certified** | measured bit-identical, G0-6 (qemu-user; see the caveat below); **re-measured, fm-ig3** |
+| **macos-aarch64** | **certified** | measured bit-identical, G0-6; **re-measured, fm-ig3** |
 | windows-x86-64 | **functional CI only** | bit-certification is **OQ-6**, a separate declared decision owned post-W1 |
 
 Adding a platform to the certified list is an ADR, not a CI-config change: the
 list *is* the promise `--reproducible` makes, and widening it silently would
 mean shipping a promise nobody measured.
+
+**Re-measured on the real engine, 2026-07-26 (fm-ig3).** G0-6's evidence was one
+frame from a spike that is not a workspace member. The certified CPU engine's own
+corpus — three frames carrying gradient fills, a winding hole, all four joint
+settings including two miter-limit escapes, round caps at three widths, an
+arc-length taper, both hinted fill routes, an inner border, a backstroke and a
+sub-AA hairline — is locked as **one** `Scope::Certified` lock and passes on all
+three legs:
+
+| Platform | libc | Execution | Result |
+|---|---|---|---|
+| linux-x86-64 | glibc | native | blessed here; 3/3 artifacts |
+| linux-aarch64 | musl | qemu-user (cross-compiled) | 3/3 identical |
+| macos-aarch64 | Darwin libSystem | native, M4 Pro | 3/3 identical, plus 631 other tests green |
+
+The two W1 self-goldens (`geom_lifecycle.v1`, `stage_lifecycle.v1`) were measured
+identical on the same three legs and **graduated from per-platform locks to one
+certified lock** in the same pass. PG-5's {1,4,16}-thread sweep runs inside each
+leg, so thread-count inertness is measured on real multicore hardware rather than
+inferred from a single machine.
 
 **The certified raster arithmetic is floating-point.** ADR-0010 resolves OQ-1:
 `f64`/`f32` screen-space arithmetic with fmn-dmath transcendentals, fixed-order

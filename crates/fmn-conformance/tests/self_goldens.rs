@@ -12,11 +12,24 @@
 //!
 //! Snapshots are serialized through fmn-hash's canonical Writer (versioned
 //! schema, defined field order, float canonicalization, trailing checksum),
-//! so the locked bytes are the §6.7 durable form, not a Debug dump. Locks are
-//! per-platform ([`Scope::PerPlatform`]); each certified-matrix platform
-//! contributes its own lock file the first time the suite runs there, and
-//! cross-platform convergence graduates to [`Scope::Certified`] when the
-//! certified arithmetic lands (G0-6).
+//! so the locked bytes are the §6.7 durable form, not a Debug dump.
+//!
+//! **Graduated to [`Scope::Certified`] on 2026-07-26 (fm-ig3), by measurement.**
+//! This file used to say that cross-platform convergence *would* graduate these
+//! locks once the certified arithmetic landed. It has, and both artifacts were
+//! then rendered on all three certified platforms:
+//!
+//! | Platform | `geom_lifecycle.v1` | `stage_lifecycle.v1` |
+//! |---|---|---|
+//! | linux-x86_64 (glibc, native) | `f0e73e89…` | `3ff84b3b…` |
+//! | linux-aarch64 (musl, qemu-user) | `f0e73e89…` | `3ff84b3b…` |
+//! | macos-aarch64 (Darwin, M4 Pro, native) | `f0e73e89…` | `3ff84b3b…` |
+//!
+//! One lock now speaks for the matrix, which is the stronger arrangement for the
+//! reason `docs/INPUT_CLOSURE.md` §6 gives: a per-platform lock passes everywhere
+//! and waits for someone to re-run a sweep, while a shared one **fails on
+//! whichever machine breaks it**. (`self_goldens.linux-x86_64.lock` is superseded
+//! and no longer read.)
 //!
 //! Drift fails here — this is the merge blocker. Deliberate changes re-bless
 //! with `UPDATE_GOLDENS=1 cargo test -p fmn-conformance --test self_goldens`
@@ -37,7 +50,7 @@ const STAGE_SCHEMA: Schema = Schema::new(*b"FMNS", 2, 1, 0);
 
 fn store() -> GoldenStore {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("goldens");
-    GoldenStore::new(dir, "self_goldens", Scope::PerPlatform).expect("store")
+    GoldenStore::new(dir, "self_goldens", Scope::Certified).expect("store")
 }
 
 /// Append a labeled point run to the document: label, count, then x/y/z f64s.
