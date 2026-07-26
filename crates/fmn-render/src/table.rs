@@ -249,6 +249,19 @@ pub struct Shape {
     pub hint: Hint,
     /// Total object-space arc length, and the per-curve table §7.3 owns.
     pub arc_length: ArcLengthTable,
+    /// Segment indices, **relative to `first_segment`**, at which a subpath
+    /// begins. Always starts with `0` for a shape that has any segments.
+    ///
+    /// fmn-geom marks a subpath break with a null curve, and [`compile_shape`]
+    /// drops those — a null curve is not a drawn piece. Dropping them without
+    /// recording *where* they were loses the only thing they carry, and §10.2's
+    /// fill is the consumer that needs it: a fill closes each subpath, so it has
+    /// to know where one ends and the next begins. Recovering the boundaries
+    /// from anchor continuity (`p2 != p0`) is almost right, and silently wrong
+    /// exactly when one subpath begins where the previous one ended — a letter
+    /// `o` whose counter is drawn starting from the point the outer ring closed
+    /// at would fill as one ring with a chord through it.
+    pub subpath_starts: Vec<u32>,
 }
 
 /// One occurrence of a [`Shape`]: transform, style, clip, order.
@@ -419,6 +432,8 @@ pub fn compile_shape(
     let lengths = arc_length.curve_lengths();
 
     let mut segments = Vec::with_capacity(path.num_curves());
+    let mut subpath_starts: Vec<u32> = Vec::new();
+    let mut opens_subpath = true;
     let mut acc = 0.0f64;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
@@ -429,9 +444,15 @@ pub fn compile_shape(
         };
         let len = lengths.get(i).copied().unwrap_or(0.0);
         // A null curve is fmn-geom's subpath break: zero length, and not a
-        // drawn piece of the path.
+        // drawn piece of the path. It is dropped from the segment list and
+        // remembered in `subpath_starts`, because §10.2's fill closes subpaths.
         if len <= 0.0 {
+            opens_subpath = true;
             continue;
+        }
+        if opens_subpath {
+            subpath_starts.push(segments.len() as u32);
+            opens_subpath = false;
         }
         let s0 = if total > 0.0 { acc / total } else { 0.0 };
         acc += len;
@@ -468,6 +489,7 @@ pub fn compile_shape(
             bounds,
             hint,
             arc_length,
+            subpath_starts,
         },
         segments,
     )
