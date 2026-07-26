@@ -57,6 +57,22 @@ pub enum GeomError {
     },
     /// A smoothing solve hit a singular system.
     SingularSystem,
+    /// A conversion tolerance that was not a positive, finite number.
+    ///
+    /// The cubic→quadratic converter cannot fail on geometry — every finite
+    /// cubic converts — so this and [`GeomError::ToleranceUnreachable`] are
+    /// its only failure modes, and both are about the *request*.
+    InvalidTolerance,
+    /// Holding the requested tolerance would need more than
+    /// [`cubic::MAX_SEGMENTS`] quadratics.
+    ///
+    /// The piece count is closed-form, so this is a resource guard against
+    /// sizing an allocation from arithmetic; for any sane tolerance it means
+    /// the control points were not finite. Never a silently coarser curve.
+    ToleranceUnreachable {
+        /// The piece count the tolerance would have required.
+        needed: usize,
+    },
 }
 
 impl std::fmt::Display for GeomError {
@@ -72,6 +88,14 @@ impl std::fmt::Display for GeomError {
                 "need exactly one more anchor than handles (got {anchors} anchors, {handles} handles)"
             ),
             Self::SingularSystem => write!(f, "smoothing solve hit a singular linear system"),
+            Self::InvalidTolerance => {
+                write!(f, "conversion tolerance must be a positive, finite number")
+            }
+            Self::ToleranceUnreachable { needed } => write!(
+                f,
+                "tolerance would need {needed} quadratics, above the {} cap",
+                cubic::MAX_SEGMENTS
+            ),
         }
     }
 }
