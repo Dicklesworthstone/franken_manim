@@ -33,6 +33,31 @@ them:
 These operate on *user-space colors* (styles, gradients, colormaps), before
 the decode step. Compositing never uses them.
 
+## The Reference's 0.70 % fill overshoot, which we do not inherit (C-12)
+
+Worth knowing before anyone compares a filled shape side by side, because the
+difference looks like a colour bug and is the opposite of one.
+
+The Reference's fill pipeline scales fill alpha by `0.95` before its signed-alpha
+winding blend (`quadratic_bezier/fill/frag.glsl:32`), which bounds the
+`−a/(1−a)` singularity at `a = 1`, and then un-scales the resolved texture by
+`1.06` (`shader_wrapper.py:489`). But the exact inverse of `0.95` is
+`1.05263…`, so the round trip is `1.06 × 0.95 = 1.007`: **a 0.70 % overshoot
+applied to rgb *and* alpha of every filled shape in every frame the Reference has
+ever rendered.**
+
+FrankenManim's fill computes coverage analytically and has no winding-blend
+scaling, so there is nothing to un-scale and nothing to overshoot. A side-by-side
+therefore shows our fills uniformly about 0.7 % darker and slightly less opaque
+than the Reference's.
+
+**Migration:** nothing to change; this is us being right. It is written down so a
+Look Gallery reviewer measuring a filled panel does not read a systematic 0.7 %
+as a regression in our colour pipeline. Measured and traced in G0-2's look study
+(§8 of the ratification note); see also
+[BN-06's fill note](BN-06-analytic-fill.md), which owns the rest of the fill's
+differences.
+
 ## Migration guidance
 
 - Scenes that read back composited pixel values will see different (more

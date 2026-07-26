@@ -3,8 +3,7 @@
 **Status:** Draft
 **Workstream:** W5 (Lumen) · **Bead:** fm-5oi · **Plan:** §10.2, Appendix B
 **Family:** BN-06 is the renderer's note (register rule 2). This file is its
-**fill** half; strokes — round caps, principled joins, arc-length width — land as
-a sibling file under fm-oac.
+**fill** half; the stroke half is [BN-06-strokes.md](BN-06-strokes.md).
 
 ## What changed
 
@@ -110,6 +109,9 @@ Two things worth stating because they *look* like candidates:
 - [`ADR-0011`](../adr/0011-fill-border-width-is-an-inner-border-and-does-not-dilate.md)
   — the `fill_border_width` ruling and the Reference trace behind it.
 - Plan §10.2 and Appendix B's `quadratic_bezier/fill` row.
-- fm-fte carries the Reference's ×0.95/×1.06 fill round-trip (a 0.70 %
-  overshoot) as its own Appendix C entry; it is a compositing difference rather
-  than a coverage one and is not restated here.
+- Appendix C row **C-12** carries the Reference's ×0.95/×1.06 fill round-trip (a
+  0.70 % overshoot on rgb *and* alpha of every filled shape it has ever
+  rendered), written up in [BN-04](BN-04-color.md). It is a compositing
+  difference rather than a coverage one, so it is cross-referenced rather than
+  restated here — but it is the reason a side-by-side of a flat filled shape
+  shows ours uniformly ~0.7 % darker.

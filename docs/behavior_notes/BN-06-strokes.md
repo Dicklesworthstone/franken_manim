@@ -111,4 +111,5 @@ array against the old bunching will look different — better, but different.
   widths, the derived miter limit).
 - [`ADR-0012`](../adr/0012-joint-type-names-mean-what-they-say.md) — the joint
   ruling.
-- Plan §10.3.
+- Plan §10.3, and Appendix C row **C-13** (the swapped joint constants, as a
+  Reference defect with its ruling).
