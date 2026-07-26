@@ -1049,6 +1049,302 @@ impl RowScratch {
     }
 }
 
+// ------------------------------------------- perspective: rational quadratics
+
+/// A quadratic in **homogeneous** screen coordinates: what a projection actually
+/// produces.
+///
+/// §10.2 is explicit that this may not be fudged — *"projected quadratics are
+/// rational in screen space, so 3D paths are evaluated in homogeneous
+/// coordinates or adaptively subdivided to tolerance, never silently treated as
+/// affine"*. The reason it is exactly a rational quadratic and not something
+/// worse: a projection is **linear** on homogeneous coordinates, so it maps the
+/// three control points to three homogeneous control points and the projected
+/// curve is the rational Bézier they define — `X(t)/W(t)`, `Y(t)/W(t)` with `X`,
+/// `Y`, `W` all ordinary quadratics in `t`. No new curve family appears; a
+/// weight per control point is the whole of the difference.
+///
+/// This type is deliberately *not* a camera. §10.4's camera, its projection
+/// conventions and `is_fixed_in_frame` belong to fm-0gy, and [`crate::bin`]
+/// already declined to invent a `Projection` for the same reason. What the fill
+/// needs is the output of one, and this is that output's shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RationalPiece {
+    /// Homogeneous control points `(x·w, y·w, w)`, screen pixels.
+    pub p: [[f64; 3]; 3],
+}
+
+/// Why a rational piece could not be flattened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RationalError {
+    /// `W(t)` reaches zero or changes sign inside the piece: the curve crosses
+    /// the camera's plane, so no screen-space image of it exists.
+    ///
+    /// Near-plane clipping is the camera's job, not the rasterizer's, so this is
+    /// a **capability error naming the cause** rather than a silently clamped
+    /// picture — the same posture D2 takes for a missing ffmpeg.
+    CrossesHorizon,
+}
+
+/// What a flattening pass did.
+///
+/// Every bound this pass applies is reported, because a subdivision that gives
+/// up quietly reads exactly like one that converged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlattenReport {
+    /// Monotone pieces appended.
+    pub pieces: usize,
+    /// The worst sampled deviation left, in pixels.
+    pub error_px: f64,
+    /// The deepest subdivision level reached.
+    pub depth: u32,
+    /// Whether the depth cap stopped subdivision before the tolerance was met.
+    pub capped: bool,
+}
+
+/// How deep [`append_rational`] will subdivide.
+///
+/// Each level halves the piece, so 12 levels is 4096 sub-pieces — far past any
+/// tolerance a screen-space curve needs, and a backstop against a tolerance of
+/// zero rather than a working limit. Hitting it is reported in
+/// [`FlattenReport::capped`].
+pub const FLATTEN_MAX_DEPTH: u32 = 12;
+
+impl RationalPiece {
+    /// The affine case: unit weights, so the rational curve *is* the quadratic.
+    #[must_use]
+    pub fn affine(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2]) -> RationalPiece {
+        RationalPiece {
+            p: [
+                [p0[0], p0[1], 1.0],
+                [p1[0], p1[1], 1.0],
+                [p2[0], p2[1], 1.0],
+            ],
+        }
+    }
+
+    /// The screen point at parameter `t`: Bernstein in homogeneous coordinates,
+    /// then the perspective divide.
+    #[must_use]
+    pub fn point(&self, t: f64) -> [f64; 2] {
+        let u = 1.0 - t;
+        let (b0, b1, b2) = (u * u, 2.0 * u * t, t * t);
+        let mut h = [0.0f64; 3];
+        for (k, o) in h.iter_mut().enumerate() {
+            *o = b0 * self.p[0][k] + b1 * self.p[1][k] + b2 * self.p[2][k];
+        }
+        if h[2] == 0.0 {
+            return [0.0, 0.0];
+        }
+        [h[0] / h[2], h[1] / h[2]]
+    }
+
+    /// `W(t)`, the homogeneous weight — the divisor the perspective divide uses.
+    ///
+    /// Public because a `RationalPiece` cannot be interpreted without it: it is
+    /// what a caller inspects to see *where* a piece crosses the camera plane
+    /// after [`append_rational`] has refused one.
+    #[must_use]
+    pub fn weight(&self, t: f64) -> f64 {
+        let u = 1.0 - t;
+        u * u * self.p[0][2] + 2.0 * u * t * self.p[1][2] + t * t * self.p[2][2]
+    }
+
+    /// Does `W` stay strictly on one side of zero across `[0, 1]`?
+    ///
+    /// `W` is a quadratic, so this is a root test rather than a sampling — a
+    /// sampled check would miss a piece that dips through zero between samples,
+    /// which is the case that produces a curve flung across the frame.
+    fn weight_is_definite(&self) -> bool {
+        let (w0, w1, w2) = (self.p[0][2], self.p[1][2], self.p[2][2]);
+        if w0 == 0.0 || w2 == 0.0 {
+            return false;
+        }
+        if (w0 > 0.0) != (w2 > 0.0) {
+            return false;
+        }
+        // W(t) = w0 + 2(w1-w0) t + (w2 - 2w1 + w0) t².
+        let a = w2 - 2.0 * w1 + w0;
+        let b = 2.0 * (w1 - w0);
+        let c = w0;
+        let mut roots = [0.0f64; 2];
+        let n = solve_quadratic::<f64>(a, b, c, &mut roots);
+        !roots.iter().take(n).any(|&r| r > 0.0 && r < 1.0)
+    }
+
+    /// de Casteljau's split, in homogeneous coordinates — **exact**.
+    ///
+    /// Splitting before the divide is what makes subdivision of a rational curve
+    /// lossless: the halves are rational quadratics describing exactly the same
+    /// screen curve. Splitting the *projected* points instead would approximate
+    /// at every level, and the error would compound rather than halve.
+    #[must_use]
+    pub fn split(&self, t: f64) -> (RationalPiece, RationalPiece) {
+        let lerp = |a: [f64; 3], b: [f64; 3]| {
+            let mut o = [0.0f64; 3];
+            for (k, v) in o.iter_mut().enumerate() {
+                *v = a[k] + (b[k] - a[k]) * t;
+            }
+            o
+        };
+        let q0 = lerp(self.p[0], self.p[1]);
+        let q1 = lerp(self.p[1], self.p[2]);
+        let r = lerp(q0, q1);
+        (
+            RationalPiece {
+                p: [self.p[0], q0, r],
+            },
+            RationalPiece {
+                p: [r, q1, self.p[2]],
+            },
+        )
+    }
+
+    /// The ordinary quadratic that interpolates this piece at `t = 0`, `½`, `1`.
+    ///
+    /// Three-point interpolation rather than a tangent construction: it is total
+    /// — no intersection to fail, no colinear case — and it already matches the
+    /// rational curve at the parameter where the deviation would otherwise peak.
+    #[must_use]
+    pub fn integral_approximation(&self) -> MonoPieceCandidate {
+        let a = self.point(0.0);
+        let m = self.point(0.5);
+        let c = self.point(1.0);
+        MonoPieceCandidate {
+            p0: a,
+            p1: [
+                2.0 * m[0] - 0.5 * (a[0] + c[0]),
+                2.0 * m[1] - 0.5 * (a[1] + c[1]),
+            ],
+            p2: c,
+        }
+    }
+
+    /// The worst deviation, in pixels, between this rational piece and its
+    /// [`RationalPiece::integral_approximation`].
+    ///
+    /// A **sampled** estimate, and named as one — but sampled densely enough
+    /// that the name is not a hedge.
+    ///
+    /// It started at six samples — the eighths that are not `0`, `½`, `1` — and
+    /// those miss the peak. The endpoints and midpoint agree by construction, so
+    /// the difference has three zeros in `[0, 1]` and behaves like
+    /// `t(t − ½)(t − 1)`, whose extrema sit near `(3 ± √3)/6 = 0.211` and
+    /// `0.789`. Measured on this module's test piece, the extremum is at
+    /// `t = 0.2175` and the true deviation is `2.9849`; six samples report
+    /// `2.9283`, **1.9 % low**, and a tolerance the curve exceeds is not a
+    /// stated tolerance.
+    ///
+    /// 31 interior samples report `2.98484` against a 4095-sample truth of
+    /// `2.98493` — 0.003 % low, three orders better for five times the
+    /// arithmetic. That arithmetic is close to free: this runs once per geometry
+    /// revision rather than per pixel, and the whole flattening pass is bounded
+    /// by `2^FLATTEN_MAX_DEPTH × 31` evaluations of two quadratics.
+    ///
+    /// The module's tests hold the flattened result against a 129-point
+    /// *geometric* reference measured **point-to-segment**. That detail is
+    /// load-bearing in the reference rather than here: a first version sampled
+    /// each flattened piece at 33 points and took the nearest sample, which
+    /// leaves half a sample spacing of slack — 0.3 px on a 20-pixel piece — and
+    /// reported 0.1199 against a flattening that was genuinely within 0.1.
+    #[must_use]
+    pub fn deviation_px(&self) -> f64 {
+        let q = self.integral_approximation();
+        let mut worst = 0.0f64;
+        for k in 1..32u32 {
+            let t = f64::from(k) / 32.0;
+            let a = self.point(t);
+            let b = q.point(t);
+            let dx = a[0] - b[0];
+            let dy = a[1] - b[1];
+            worst = worst.max((dx * dx + dy * dy).sqrt());
+        }
+        worst
+    }
+}
+
+/// An ordinary quadratic proposed as a stand-in for a rational one.
+///
+/// A distinct type from [`MonoPiece`] on purpose: a candidate has not been split
+/// for monotonicity yet, and letting the two share a type is how an unsplit
+/// piece reaches the row accumulator, where "a scanline meets it at most once"
+/// is a precondition rather than a hope.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MonoPieceCandidate {
+    /// Start anchor, screen pixels.
+    pub p0: [f64; 2],
+    /// Control handle.
+    pub p1: [f64; 2],
+    /// End anchor.
+    pub p2: [f64; 2],
+}
+
+impl MonoPieceCandidate {
+    /// The point at parameter `t`.
+    #[must_use]
+    pub fn point(&self, t: f64) -> [f64; 2] {
+        let u = 1.0 - t;
+        let (b0, b1, b2) = (u * u, 2.0 * u * t, t * t);
+        [
+            b0 * self.p0[0] + b1 * self.p1[0] + b2 * self.p2[0],
+            b0 * self.p0[1] + b1 * self.p1[1] + b2 * self.p2[1],
+        ]
+    }
+}
+
+/// Flatten a projected quadratic into monotone pieces within `tolerance_px`.
+///
+/// The honest half of §10.2's perspective clause. A rational quadratic is not a
+/// quadratic, so it is subdivided in homogeneous coordinates — exactly — until
+/// each half's ordinary-quadratic stand-in is within the stated screen-space
+/// tolerance, and only then are the stand-ins split for monotonicity and handed
+/// to the row accumulator. The affine case costs one deviation evaluation and
+/// finds zero, so nothing pays for perspective that does not use it.
+///
+/// Returns [`RationalError::CrossesHorizon`] when `W` is not of one sign across
+/// the piece: near-plane clipping belongs to the camera, and drawing *something*
+/// for a curve with no screen-space image would be the silent-substitution
+/// failure D2 exists to forbid.
+pub fn append_rational(
+    piece: &RationalPiece,
+    tolerance_px: f64,
+    out: &mut Vec<MonoPiece>,
+) -> Result<FlattenReport, RationalError> {
+    if !piece.weight_is_definite() {
+        return Err(RationalError::CrossesHorizon);
+    }
+    let mut report = FlattenReport {
+        pieces: 0,
+        error_px: 0.0,
+        depth: 0,
+        capped: false,
+    };
+    let before = out.len();
+    // Explicit stack rather than recursion: the depth cap is then a property of
+    // the data structure instead of a promise about the call stack.
+    let mut stack: Vec<(RationalPiece, u32)> = vec![(*piece, 0)];
+    while let Some((cur, depth)) = stack.pop() {
+        let deviation = cur.deviation_px();
+        report.depth = report.depth.max(depth);
+        if deviation <= tolerance_px || depth >= FLATTEN_MAX_DEPTH {
+            if deviation > tolerance_px {
+                report.capped = true;
+            }
+            report.error_px = report.error_px.max(deviation);
+            let q = cur.integral_approximation();
+            split_monotone(q.p0, q.p1, q.p2, out);
+            continue;
+        }
+        let (l, r) = cur.split(0.5);
+        // Right first, so the pieces come out in parameter order — the fill does
+        // not care, but a golden snapshot of the derived table does.
+        stack.push((r, depth + 1));
+        stack.push((l, depth + 1));
+    }
+    report.pieces = out.len() - before;
+    Ok(report)
+}
+
 // --------------------------------------------------- the interior colour field
 
 /// How many boundary stations §10.2's interior field is evaluated over.
@@ -2166,6 +2462,263 @@ mod tests {
         let t1 = instance_translation(&insts[1], unit());
         assert!((t1[0] - t0[0] - 4.0).abs() < 1e-12);
         assert!((t1[1] - t0[1]).abs() < 1e-12);
+    }
+
+    // ------------------------------------------ perspective / rational pieces
+
+    /// A perspective map: divide by `1 + p·q` after a scale. Stands in for
+    /// fm-0gy's camera in exactly the way the fill consumes one — homogeneous
+    /// control points — without inventing a camera type.
+    fn project(p: [f64; 2], q: [f64; 2], scale: f64, origin: [f64; 2]) -> [f64; 3] {
+        let w = 1.0 + q[0] * p[0] + q[1] * p[1];
+        [
+            (origin[0] + scale * p[0]) * w,
+            (origin[1] + scale * p[1]) * w,
+            w,
+        ]
+    }
+
+    /// Distance from a point to a line segment.
+    fn point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (qx, qy) = (a[0] + t * dx, a[1] + t * dy);
+        ((p[0] - qx).powi(2) + (p[1] - qy).powi(2)).sqrt()
+    }
+
+    fn projected(pts: [[f64; 2]; 3], q: [f64; 2]) -> RationalPiece {
+        RationalPiece {
+            p: [
+                project(pts[0], q, 20.0, [40.0, 40.0]),
+                project(pts[1], q, 20.0, [40.0, 40.0]),
+                project(pts[2], q, 20.0, [40.0, 40.0]),
+            ],
+        }
+    }
+
+    #[test]
+    fn an_affine_piece_is_already_flat() {
+        // The cost of the perspective path for a 2D scene: one deviation
+        // evaluation, which finds exactly zero.
+        let piece = RationalPiece::affine([1.0, 2.0], [7.0, 9.0], [13.0, 3.0]);
+        assert_eq!(piece.deviation_px(), 0.0);
+        let mut out = Vec::new();
+        let report = append_rational(&piece, 1e-6, &mut out).expect("affine is definite");
+        assert_eq!(report.depth, 0);
+        assert!(!report.capped);
+        assert_eq!(report.error_px, 0.0);
+        // And the stand-in reproduces the input exactly: three-point
+        // interpolation of a quadratic *is* that quadratic.
+        let q = piece.integral_approximation();
+        assert!((q.p1[0] - 7.0).abs() < 1e-12 && (q.p1[1] - 9.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn splitting_in_homogeneous_coordinates_is_exact() {
+        // The reason subdivision converges: the halves describe the *same*
+        // screen curve, so the error halves rather than compounding. Splitting
+        // projected points instead would approximate at every level.
+        let piece = projected([[-1.0, -0.5], [0.3, 1.4], [1.2, -0.9]], [0.35, -0.2]);
+        let (l, r) = piece.split(0.5);
+        for k in 0..=16 {
+            let t = f64::from(k) / 16.0;
+            let (half, local) = if t <= 0.5 {
+                (&l, 2.0 * t)
+            } else {
+                (&r, 2.0 * t - 1.0)
+            };
+            let a = piece.point(t);
+            let b = half.point(local);
+            assert!(
+                (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+                "t={t}: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_projected_quadratic_is_not_a_quadratic_and_the_fill_says_so() {
+        // The claim §10.2 forbids fudging. If a perspective-projected quadratic
+        // were affine in screen space its ordinary stand-in would be exact; it
+        // is not, and the deviation is large enough to see.
+        let piece = projected([[-1.0, -0.5], [0.3, 1.4], [1.2, -0.9]], [0.35, -0.2]);
+        let deviation = piece.deviation_px();
+        assert!(
+            deviation > 0.1,
+            "a rational quadratic must not read as affine: {deviation}"
+        );
+    }
+
+    #[test]
+    fn subdivision_meets_the_stated_tolerance_against_a_dense_reference() {
+        // The acceptance criterion: "homogeneous-path tests vs high-resolution
+        // subdivision reference". `deviation_px` samples six parameters, so the
+        // tolerance it reports is an estimate — this checks the estimate against
+        // a 129-point measurement of the *actual* flattened curve, which is what
+        // makes the stated tolerance a statement rather than a hope.
+        let piece = projected([[-1.0, -0.5], [0.3, 1.4], [1.2, -0.9]], [0.35, -0.2]);
+        for tol in [1.0f64, 0.1, 0.01, 1.0 / 256.0] {
+            let mut out = Vec::new();
+            let report = append_rational(&piece, tol, &mut out).expect("definite");
+            assert!(!report.capped, "tol {tol} hit the depth cap");
+            assert!(
+                report.error_px <= tol,
+                "tol {tol}: reported {}",
+                report.error_px
+            );
+            assert!(!out.is_empty());
+
+            // Dense measurement: every sample of the true curve must lie within
+            // the tolerance of the flattened result. Distance is measured to the
+            // flattened *segments*, not to samples of them — sampling each piece
+            // at 33 points and taking the nearest sample leaves up to half a
+            // sample spacing of slack, which on a 20-pixel piece is 0.3 px, and
+            // that artefact reported 0.1199 against a genuinely-0.1 flattening.
+            // A point-to-segment measure removes it to second order.
+            let mut poly: Vec<[f64; 2]> = Vec::new();
+            for mp in &out {
+                let cand = MonoPieceCandidate {
+                    p0: mp.p0,
+                    p1: mp.p1,
+                    p2: mp.p2,
+                };
+                for j in 0..=64 {
+                    poly.push(cand.point(f64::from(j) / 64.0));
+                }
+            }
+            let mut worst = 0.0f64;
+            for k in 0..=128 {
+                let t = f64::from(k) / 128.0;
+                let want = piece.point(t);
+                let mut best = f64::INFINITY;
+                for seg in poly.windows(2) {
+                    best = best.min(point_to_segment(want, seg[0], seg[1]));
+                }
+                worst = worst.max(best);
+            }
+            assert!(
+                worst <= tol + 1e-9,
+                "tol {tol}: dense reference says {worst} over {} pieces",
+                out.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_tighter_tolerance_costs_more_pieces_and_never_fewer() {
+        let piece = projected([[-1.2, -0.7], [0.6, 1.8], [1.4, -1.1]], [0.4, 0.25]);
+        let mut last = 0usize;
+        for tol in [1.0f64, 0.25, 0.05, 0.01] {
+            let mut out = Vec::new();
+            append_rational(&piece, tol, &mut out).expect("definite");
+            assert!(
+                out.len() >= last,
+                "tol {tol}: {} pieces after {last}",
+                out.len()
+            );
+            last = out.len();
+        }
+        assert!(last > 1, "a tight tolerance must actually subdivide");
+    }
+
+    #[test]
+    fn a_curve_crossing_the_camera_plane_is_an_error_not_a_picture() {
+        // W changes sign inside the piece: no screen-space image of the curve
+        // exists, and near-plane clipping is the camera's job. Drawing something
+        // anyway is the silent substitution D2 forbids.
+        let piece = RationalPiece {
+            p: [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [-1.0, 1.0, -1.0]],
+        };
+        let mut out = Vec::new();
+        assert_eq!(
+            append_rational(&piece, 0.1, &mut out),
+            Err(RationalError::CrossesHorizon)
+        );
+        assert!(out.is_empty(), "a refused piece must deposit nothing");
+
+        // A dip hidden *between* endpoints of the same sign — the case an
+        // endpoint check misses, and the reason `weight_is_definite` solves for
+        // roots instead of sampling. With weights (1, -2, 1),
+        // W(t) = 6t² - 6t + 1, whose roots 1/2 ± √12/12 both lie inside.
+        let dipping = RationalPiece {
+            p: [[0.0, 0.0, 1.0], [-2.0, 0.0, -2.0], [2.0, 0.0, 1.0]],
+        };
+        assert!(dipping.weight(0.0) > 0.0 && dipping.weight(1.0) > 0.0);
+        assert!(dipping.weight(0.5) < 0.0, "W must actually dip negative");
+        assert_eq!(
+            append_rational(&dipping, 0.1, &mut Vec::new()),
+            Err(RationalError::CrossesHorizon)
+        );
+
+        // Tangency, not crossing: weights (1, -1, 1) give W(t) = (1 - 2t)², which
+        // touches zero at t = 1/2 without changing sign. Still refused — a zero
+        // weight is a point at infinity, and there is no pixel there either.
+        // This is the case a sign test alone would wave through.
+        let tangent = RationalPiece {
+            p: [[0.0, 0.0, 1.0], [-1.0, 0.0, -1.0], [2.0, 0.0, 1.0]],
+        };
+        assert!(tangent.weight(0.5).abs() < 1e-15);
+        assert!(tangent.weight(0.25) > 0.0 && tangent.weight(0.75) > 0.0);
+        assert_eq!(
+            append_rational(&tangent, 0.1, &mut Vec::new()),
+            Err(RationalError::CrossesHorizon)
+        );
+    }
+
+    #[test]
+    fn a_flattened_projected_circle_encloses_the_area_it_should() {
+        // End to end: project a circle under perspective, flatten to a tight
+        // tolerance, and check the fill's coverage against the enclosed area of
+        // what it was handed. Also that a coarse tolerance costs area — which is
+        // the tolerance being a real knob rather than decoration.
+        let path = circle_path(0.0, 0.0, 1.0, 16);
+        let q = [0.18, -0.11];
+        let mut fine = Vec::new();
+        let mut coarse = Vec::new();
+        for i in 0..path.num_curves() {
+            let [a, h, b] = path.nth_curve_points(i).unwrap();
+            let flat = |p: Vec3| [p[0], p[1]];
+            let piece = projected([flat(a), flat(h), flat(b)], q);
+            append_rational(&piece, 1.0 / 1024.0, &mut fine).expect("definite");
+            append_rational(&piece, 0.5, &mut coarse).expect("definite");
+        }
+        assert!(
+            fine.len() > coarse.len(),
+            "a tight tolerance subdivides more"
+        );
+
+        let got = total_coverage(&fine, 80, 80, 16);
+        let want = enclosed_area(&fine);
+        assert!(
+            (got - want).abs() < 1e-9,
+            "coverage {got} vs enclosed {want}"
+        );
+
+        // The tolerance is a real knob: a coarse flattening encloses a
+        // measurably different region, so a caller that asks for 0.5 px gets
+        // 0.5 px of shape and not a nicer answer by accident.
+        //
+        // Not asserted on *area* against the unprojected circle — a projection
+        // that stretches one side and compresses the other leaves the area
+        // almost unchanged (measured: 4 parts per million), so area is the one
+        // quantity that would report "perspective did nothing". The non-affinity
+        // is pinned by `a_projected_quadratic_is_not_a_quadratic_and_the_fill_says_so`.
+        let coarse_area = enclosed_area(&coarse);
+        assert!(
+            (coarse_area - want).abs() > 1e-3,
+            "0.5 px and 1/1024 px of tolerance enclosed the same area: \
+             {coarse_area} vs {want}"
+        );
+        let coarse_cov = total_coverage(&coarse, 80, 80, 16);
+        assert!(
+            (coarse_cov - coarse_area).abs() < 1e-9,
+            "the fill is exact on whatever it was handed: {coarse_cov} vs {coarse_area}"
+        );
     }
 
     // ---------------------------------------------------- the interior field

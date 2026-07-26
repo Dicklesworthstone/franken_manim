@@ -34,7 +34,9 @@ pub mod table;
 
 pub use bin::{Binning, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
-pub use fill::{FillKernel, MonoPiece, MonoTable, RowScratch};
+pub use fill::{
+    FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, RationalPiece, RowScratch,
+};
 pub use hint::Hint;
 pub use plan::{RenderPlan, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};
