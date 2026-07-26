@@ -2191,25 +2191,17 @@ mod tests {
             scale: 135.0,
             origin: [10.0, 20.0],
         };
-        let a = FillKernel::select(&shape, &segs, map, [0.0, 0.0]);
-        let b = FillKernel::select(&shape, &segs, map, [270.0, -135.0]);
-        match (a, b) {
-            (
-                FillKernel::Disc {
-                    center: ca,
-                    radius: ra,
-                },
-                FillKernel::Disc {
-                    center: cb,
-                    radius: rb,
-                },
-            ) => {
-                assert!((ra - rb).abs() < 1e-12, "the radius is the outline's");
-                assert!((cb[0] - ca[0] - 270.0).abs() < 1e-12);
-                assert!((cb[1] - ca[1] + 135.0).abs() < 1e-12);
-                assert!((ca[0] - 10.0).abs() < 1e-12 && (ca[1] - 20.0).abs() < 1e-12);
-            }
-            other => panic!("both should be discs: {other:?}"),
-        }
+        let disc = |k: FillKernel| match k {
+            FillKernel::Disc { center, radius } => Some((center, radius)),
+            _ => None,
+        };
+        let (ca, ra) = disc(FillKernel::select(&shape, &segs, map, [0.0, 0.0]))
+            .expect("a default Dot takes the radial kernel");
+        let (cb, rb) = disc(FillKernel::select(&shape, &segs, map, [270.0, -135.0]))
+            .expect("and so does the second occurrence");
+        assert!((ra - rb).abs() < 1e-12, "the radius is the outline's");
+        assert!((cb[0] - ca[0] - 270.0).abs() < 1e-12);
+        assert!((cb[1] - ca[1] + 135.0).abs() < 1e-12);
+        assert!((ca[0] - 10.0).abs() < 1e-12 && (ca[1] - 20.0).abs() < 1e-12);
     }
 }
