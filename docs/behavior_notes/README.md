@@ -38,7 +38,7 @@ migration guidance users read:
 | BN-03 | True arc length under the original names: constant-speed paths, length-true dashes and tips | [BN-03-true-arc-length.md](BN-03-true-arc-length.md) | W2 | Draft |
 | BN-04 | Colour: linear-light compositing, with manim's gradient formulas kept | [BN-04-color.md](BN-04-color.md) | W1 | Draft |
 | BN-05 | Native typesetting: metrics differ from LaTeX; the quality bar is documented | [BN-05-native-text-typesetting.md](BN-05-native-text-typesetting.md) | W6 | Draft |
-| BN-06 | *Reserved* — the renderer: analytic coverage, round caps, arc-length stroke width | *(unwritten; W5 owns it)* | W5 | Reserved |
+| BN-06 | **The renderer** — a family, see rule 2: analytic coverage, round caps, arc-length stroke width | [the fill: analytic coverage, a defined gradient field, a border that does not grow the shape (fm-5oi)](BN-06-analytic-fill.md) · *strokes unwritten; fm-oac owns them* | W5 | Draft |
 | BN-07 | **Reference bugs fixed** (Appendix C rulings) — a family, see rule 2 | [stroke uniforms (C-2, C-7)](BN-07-stroke-uniform-fixes.md) · [updaters and group addition (C-5, C-6)](BN-07-updater-and-group-fixes.md) | W3 | Draft |
 | BN-08 | The de-TeX'd classes (§11.6): Brace, Matrix delimiters, DecimalNumber, the drawn marks | [BN-08-de-texed-natives.md](BN-08-de-texed-natives.md) | W7 | Draft |
 | BN-09 | One arc-density rule, never coarser than the Reference's | [BN-09-arc-density.md](BN-09-arc-density.md) | W2/W7 | **Final** |

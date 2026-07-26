@@ -34,3 +34,8 @@ pub(crate) fn atan2(y: f64, x: f64) -> f64 {
 pub(crate) fn ln(x: f64) -> f64 {
     fmn_dmath::ln(x)
 }
+
+#[inline]
+pub(crate) fn cbrt(x: f64) -> f64 {
+    fmn_dmath::cbrt(x)
+}

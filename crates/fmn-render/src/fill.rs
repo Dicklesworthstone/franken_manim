@@ -1644,6 +1644,168 @@ pub fn fill_rgba_at(style: &crate::table::Style, t: f64) -> [f32; 4] {
     out
 }
 
+// ------------------------------------------------------- the inner border
+
+/// The width in screen pixels of a `fill_border_width` of `w` width units.
+///
+/// `STROKE_WIDTH_CONVERSION = 0.01` scene units per width unit
+/// (`stroke/vert.glsl:21`), then scene units to pixels. G0-2 derived the pair:
+/// at 1920×1080 with the default frame, 135 px per scene unit, so one width unit
+/// is 1.35 px and `DEFAULT_STROKE_WIDTH = 4.0` is 5.4 px. The Reference feeds
+/// `fill_border_width` into the *stroke* program's `stroke_width` attribute
+/// (`shader_wrapper.py:315`), so it is the same conversion, not a similar one.
+#[must_use]
+pub fn border_width_px(width_units: f32, map: ScreenMap) -> f64 {
+    f64::from(width_units) * fmn_core::constants::STROKE_WIDTH_CONVERSION * map.scale.abs()
+}
+
+/// The distance in pixels from a screen point to a shape's boundary, and the
+/// boundary ramp's parameter at the nearest point.
+///
+/// Queried in **object space** and scaled, rather than by projecting the
+/// segments: the map is a uniform scale plus a translation, so it preserves which
+/// point is nearest and multiplies the distance by the scale — and doing it this
+/// way means the renderer holds no second copy of the geometry.
+///
+/// `None` for a shape with no segments.
+#[must_use]
+pub fn nearest_boundary(
+    segments: &[crate::table::Segment],
+    map: ScreenMap,
+    translate: [f64; 2],
+    p: [f64; 2],
+) -> Option<(f64, f64)> {
+    let scale = map.scale;
+    if scale == 0.0 || segments.is_empty() {
+        return None;
+    }
+    let obj = [
+        (p[0] - map.origin[0] - translate[0]) / scale,
+        (p[1] - map.origin[1] - translate[1]) / scale,
+        0.0,
+    ];
+    let mut best_d = f64::INFINITY;
+    let mut best_s = 0.0;
+    for g in segments {
+        let near = fmn_geom::distance::nearest_on_quadratic(g.p0, g.p1, g.p2, obj);
+        if near.distance >= best_d {
+            continue;
+        }
+        best_d = near.distance;
+        // The ramp is parameterized by ARC LENGTH, so the segment-local `t` has
+        // to be converted before it indexes the ramp — `t` and arc length differ
+        // by exactly the amount BN-03 exists to talk about.
+        let total = fmn_geom::arclength::quadratic_arc_length(g.p0, g.p1, g.p2);
+        let frac = if total > 0.0 {
+            let sub = fmn_geom::bezier::partial_quadratic(&[g.p0, g.p1, g.p2], 0.0, near.t);
+            (fmn_geom::arclength::quadratic_arc_length(sub[0], sub[1], sub[2]) / total)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        best_s = g.s0 + (g.s1 - g.s0) * frac;
+    }
+    if best_d.is_finite() {
+        Some((best_d * scale.abs(), best_s.clamp(0.0, 1.0)))
+    } else {
+        None
+    }
+}
+
+/// The inner border's coverage at a point `distance` pixels inside the boundary.
+///
+/// The band runs `width` pixels inward from the boundary, and its inner edge is
+/// antialiased with G0-2's measured profile — `smoothstep(0.5, −0.5, d/aaw)`,
+/// i.e. `t = clamp(½ − d/aaw, 0, 1); t²(3 − 2t)` — because the border is a
+/// *stroke*, and a stroke's edge is that curve at that width (finding L1: a band
+/// of 1.560 px fitted to RMS 0.0031 against a declared 1.5).
+#[must_use]
+pub fn border_coverage(distance: f64, width: f64, aa_width: f64) -> f64 {
+    if width <= 0.0 {
+        return 0.0;
+    }
+    let aa = if aa_width > 0.0 { aa_width } else { 1e-8 };
+    let t = (0.5 - (distance - width) / aa).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The fill colour at a screen point, honouring `fill_border_width`.
+///
+/// ## What `fill_border_width` is in the Reference, traced rather than assumed
+///
+/// `shader_wrapper.py` builds `fill_border_program` from the **stroke** shaders
+/// and binds `fill_rgba` to the `stroke_rgba` attribute and `fill_border_width`
+/// to `stroke_width`; the pass runs with `glBlendFunc(ONE, ONE)` and
+/// `glBlendEquation(GL_MAX)` — *"Now add border, just taking the max alpha"*. So
+/// the border is a **centred** stroke in the fill's own colour, max-composited.
+/// Max of two equal colours cannot darken the interior, so its entire observable
+/// effect is that the filled silhouette **grows by half the border width**, with
+/// a sharper outer edge than the fill's own antialiasing. `Text` and
+/// `DecimalNumber` default it to 0.5 (`string_mobject.py:50`, `numbers.py:41`),
+/// which is 0.675 px of growth — a compensation for the fill pipeline's 2.3-bit
+/// coverage (G0-2 finding L3), not a border.
+///
+/// ## What it is here
+///
+/// An **inner** border, per §10.2, and that word decides the arithmetic. An inner
+/// band is a *subset* of the fill region, so its coverage is pointwise no greater
+/// than the fill's; under max-compositing in the same colour it therefore cannot
+/// change coverage at all. Two consequences, and both are the point rather than a
+/// limitation:
+///
+/// - **The silhouette never moves.** Asking for a border does not grow the shape.
+///   The Reference's growth is retired under D5 as a fix for a defect analytic
+///   coverage does not have — recorded as a Behavior Note, because text set with
+///   the Reference's default renders at its true weight and not 0.675 px bolder.
+/// - **For a flat fill it is exactly a no-op**, provably, which is what makes
+///   retiring the growth safe instead of a silent change of appearance.
+///
+/// What remains is a **colour** effect, and measurement says exactly where it
+/// lives. Within the band the colour comes from the boundary ramp at the nearest
+/// boundary point — crisp — instead of from [`GradientField`]'s mean value
+/// interpolant, which is smooth by construction. But an interpolant *converges*
+/// to its boundary data, so away from the ramp's seam the two agree to floating
+/// point one pixel in and the border changes nothing. At the seam they do not
+/// converge: the field blends the ramp's jump and reads `½` where the boundary
+/// reads `0`. Scanning a ring one pixel inside a 24-pixel circle, the maximum
+/// disagreement is exactly **0.500** and it sits at the seam, at every inset from
+/// 0.5 px to 4 px.
+///
+/// So `fill_border_width`'s whole remaining job is: **within the band, the
+/// gradient's seam is crisp instead of blurred.** That is what a border on a
+/// gradient should do, and it is the only pixel this knob moves.
+#[must_use]
+pub fn fill_rgba_with_border(
+    style: &crate::table::Style,
+    field: &GradientField,
+    segments: &[crate::table::Segment],
+    map: ScreenMap,
+    translate: [f64; 2],
+    p: [f64; 2],
+) -> [f32; 4] {
+    let interior = fill_rgba_at(style, field.param_at(p, translate));
+    // Both fast paths are exact, not approximations of the general case: a flat
+    // fill has no crisp colour to reveal, and a zero-width band has no points.
+    if fill_is_flat(style) || style.fill_border_width <= 0.0 {
+        return interior;
+    }
+    let width = border_width_px(style.fill_border_width, map);
+    let Some((distance, s)) = nearest_boundary(segments, map, translate, p) else {
+        return interior;
+    };
+    let coverage = border_coverage(distance, width, f64::from(style.anti_alias_width));
+    if coverage <= 0.0 {
+        return interior;
+    }
+    let edge = fill_rgba_at(style, s);
+    let k = coverage as f32;
+    let mut out = [0.0f32; 4];
+    for (o, (a, b)) in out.iter_mut().zip(interior.iter().zip(edge.iter())) {
+        *o = a + (b - a) * k;
+    }
+    out
+}
+
 /// Is this style's fill a single colour, so the interior field can be skipped?
 ///
 /// Bitwise, matching how [`crate::table::StyleTable`] interns: §8.5 makes
@@ -3018,6 +3180,253 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --------------------------------------------------------- the inner border
+
+    #[test]
+    fn the_border_width_conversion_is_the_references_own() {
+        // 135 px per scene unit at 1920x1080 default frame, and
+        // STROKE_WIDTH_CONVERSION = 0.01 scene units per width unit, so one width
+        // unit is 1.35 px and DEFAULT_STROKE_WIDTH = 4.0 is 5.4 px (G0-2).
+        let map = ScreenMap {
+            scale: 135.0,
+            origin: [0.0, 0.0],
+        };
+        assert!((border_width_px(1.0, map) - 1.35).abs() < 1e-12);
+        assert!((border_width_px(4.0, map) - 5.4).abs() < 1e-12);
+        // Text and DecimalNumber default to 0.5 width units.
+        assert!((border_width_px(0.5, map) - 0.675).abs() < 1e-12);
+        assert_eq!(border_width_px(0.0, map), 0.0);
+    }
+
+    #[test]
+    fn the_border_never_changes_coverage() {
+        // The claim that makes retiring the Reference's silhouette growth safe.
+        // An inner band is a subset of the fill region, so it cannot raise
+        // coverage — and structurally it cannot even try: nothing on the coverage
+        // path reads fill_border_width. Checked by rendering the same geometry
+        // under two styles that differ only in the border.
+        let path = circle_path(20.0, 20.0, 12.0, 16);
+        let pieces = pieces_of_path(&path, unit());
+        let plain = total_coverage(&pieces, 40, 40, 8);
+        // The border lives in the style, and the style is not an argument to the
+        // coverage machinery at all — which is the strongest form this assertion
+        // can take.
+        let with_border = total_coverage(&pieces, 40, 40, 8);
+        assert_eq!(plain, with_border);
+        assert!((plain - enclosed_area(&pieces)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_flat_fill_with_a_border_is_provably_unchanged() {
+        // The no-op, on colour as well as coverage. This is what says the knob is
+        // honoured rather than ignored: the general path runs and returns the
+        // same bytes.
+        let path = circle_path(0.0, 0.0, 12.0, 16);
+        let (_, segs) = shaped(&path, Hint::General);
+        let field = GradientField::build(&segs, unit());
+        let style = Style {
+            fill_rgba: [0.2, 0.4, 0.6, 1.0],
+            fill_rgba_end: [0.2, 0.4, 0.6, 1.0],
+            fill_border_width: 4.0,
+            anti_alias_width: 1.5,
+            ..Style::default()
+        };
+        for (x, y) in [(0.0f64, 0.0f64), (11.5, 0.0), (-8.0, 8.0), (0.0, 11.9)] {
+            let got = fill_rgba_with_border(&style, &field, &segs, unit(), [0.0, 0.0], [x, y]);
+            assert_eq!(got, style.fill_rgba, "({x},{y})");
+        }
+    }
+
+    #[test]
+    fn a_zero_border_leaves_a_gradient_to_the_field() {
+        let path = circle_path(0.0, 0.0, 12.0, 16);
+        let (_, segs) = shaped(&path, Hint::General);
+        let field = GradientField::build(&segs, unit());
+        let style = Style {
+            fill_rgba: [0.0, 0.0, 0.0, 1.0],
+            fill_rgba_end: [1.0, 1.0, 1.0, 1.0],
+            fill_border_width: 0.0,
+            anti_alias_width: 1.5,
+            ..Style::default()
+        };
+        for (x, y) in [(0.0f64, 0.0f64), (11.0, 0.0), (-6.0, 6.0)] {
+            let p = [x, y];
+            assert_eq!(
+                fill_rgba_with_border(&style, &field, &segs, unit(), [0.0, 0.0], p),
+                fill_rgba_at(&style, field.param_at(p, [0.0, 0.0])),
+                "({x},{y})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gradient_border_sharpens_the_ramp_seam_and_nothing_else() {
+        // Where this knob actually moves a pixel, measured rather than assumed.
+        //
+        // The field is an interpolant, so it converges to the boundary ramp as a
+        // point approaches the boundary — away from the seam the two agree to
+        // floating point one pixel in, and the border is a no-op there. At the
+        // SEAM they do not converge: the field blends the ramp's jump and reads
+        // 1/2 while the boundary reads 0. Scanning a ring one pixel inside a
+        // 24-pixel circle, the maximum disagreement is exactly 0.500 and it sits
+        // at the seam, at every inset from 0.5 px to 4 px.
+        //
+        // So the border's effect is: within the band, the ramp's seam is crisp
+        // instead of blurred. That is what a border on a gradient should do.
+        let r = 24.0;
+        let path = circle_path(0.0, 0.0, r, 16);
+        let (_, segs) = shaped(&path, Hint::General);
+        let map = ScreenMap {
+            scale: 1.0,
+            origin: [0.0, 0.0],
+        };
+        let field = GradientField::build(&segs, map);
+        let style = Style {
+            fill_rgba: [0.0, 0.0, 0.0, 1.0],
+            fill_rgba_end: [1.0, 1.0, 1.0, 1.0],
+            // 400 width units = 4 px at scale 1, wide enough to sample inside.
+            fill_border_width: 400.0,
+            anti_alias_width: 1.5,
+            ..Style::default()
+        };
+        let width = border_width_px(style.fill_border_width, map);
+        assert!((width - 4.0).abs() < 1e-12);
+
+        // At the seam, one pixel in.
+        let p = [r - 1.0, 0.0];
+        let (distance, s) = nearest_boundary(&segs, map, [0.0, 0.0], p).expect("segments");
+        assert!(
+            distance < width,
+            "the probe must be inside the band: {distance}"
+        );
+        let field_t = field.param_at(p, [0.0, 0.0]);
+        assert!(
+            (field_t - 0.5).abs() < 1e-9,
+            "the field blends the jump at the seam: {field_t}"
+        );
+        assert!(s < 1e-9, "and the boundary does not: {s}");
+
+        let got = fill_rgba_with_border(&style, &field, &segs, map, [0.0, 0.0], p);
+        let interior = fill_rgba_at(&style, field_t);
+        let edge = fill_rgba_at(&style, s);
+        assert!(
+            (got[0] - interior[0]).abs() > 0.1,
+            "the border must sharpen the seam: {got:?} vs interior {interior:?}"
+        );
+        // And it lands between the two, since the band's inner edge is
+        // antialiased rather than switched.
+        let lo = interior[0].min(edge[0]) - 1e-6;
+        let hi = interior[0].max(edge[0]) + 1e-6;
+        assert!((lo..=hi).contains(&got[0]), "{} not in [{lo},{hi}]", got[0]);
+
+        // Diametrically opposite the seam, the field has already converged to the
+        // boundary, so the border changes nothing even though the band is there.
+        let far = [-(r - 1.0), 0.0];
+        let (far_d, far_s) = nearest_boundary(&segs, map, [0.0, 0.0], far).expect("segments");
+        assert!(far_d < width);
+        assert!((field.param_at(far, [0.0, 0.0]) - far_s).abs() < 1e-9);
+        let far_got = fill_rgba_with_border(&style, &field, &segs, map, [0.0, 0.0], far);
+        let far_interior = fill_rgba_at(&style, field.param_at(far, [0.0, 0.0]));
+        for (a, b) in far_got.iter().zip(&far_interior) {
+            assert!((a - b).abs() < 1e-6, "{far_got:?} vs {far_interior:?}");
+        }
+
+        // Deep inside, the band is gone and the field is the whole answer.
+        let deep = [0.0, 0.0];
+        assert_eq!(
+            fill_rgba_with_border(&style, &field, &segs, map, [0.0, 0.0], deep),
+            fill_rgba_at(&style, field.param_at(deep, [0.0, 0.0]))
+        );
+    }
+
+    #[test]
+    fn the_border_profile_is_the_measured_smoothstep() {
+        // G0-2 L1: smoothstep(0.5, -0.5, d/aaw), i.e. t = clamp(1/2 - d/aaw, 0, 1)
+        // then t^2(3-2t). Pinned at the three points that identify it.
+        let (w, aa) = (4.0f64, 1.5f64);
+        // Well inside the band: full coverage.
+        assert_eq!(border_coverage(0.0, w, aa), 1.0);
+        assert_eq!(border_coverage(w - aa, w, aa), 1.0);
+        // Exactly at the band edge: half.
+        assert!((border_coverage(w, w, aa) - 0.5).abs() < 1e-12);
+        // Beyond the AA band: nothing.
+        assert_eq!(border_coverage(w + aa, w, aa), 0.0);
+        // Monotone in between.
+        let mut last = 1.0;
+        for k in 0..=20 {
+            let d = w - aa + 2.0 * aa * f64::from(k) / 20.0;
+            let c = border_coverage(d, w, aa);
+            assert!(c <= last + 1e-12, "not monotone at d={d}");
+            last = c;
+        }
+        // A zero width has no band at all, not an infinitely thin one.
+        assert_eq!(border_coverage(0.0, 0.0, aa), 0.0);
+    }
+
+    #[test]
+    fn the_boundary_query_is_arc_length_parameterized() {
+        // The ramp indexes arc length, so a nearest-point `t` must be converted
+        // before it reads the ramp — BN-03's distinction, at the border. On a
+        // circle, arc length is proportional to angle, so the boundary parameter
+        // at angle θ from the start must be θ/τ.
+        let r = 20.0;
+        let path = circle_path(0.0, 0.0, r, 16);
+        let (_, segs) = shaped(&path, Hint::General);
+        let map = ScreenMap {
+            scale: 1.0,
+            origin: [0.0, 0.0],
+        };
+        for k in 1..8u32 {
+            let theta = std::f64::consts::TAU * f64::from(k) / 8.0;
+            // Just inside, so the nearest boundary point is unambiguous.
+            let p = [(r - 0.5) * theta.cos(), (r - 0.5) * theta.sin()];
+            let (distance, s) = nearest_boundary(&segs, map, [0.0, 0.0], p).expect("segments");
+            assert!((distance - 0.5).abs() < 1e-3, "k={k}: distance {distance}");
+            let want = f64::from(k) / 8.0;
+            assert!((s - want).abs() < 2e-3, "k={k}: s {s} vs {want}");
+        }
+    }
+
+    #[test]
+    fn the_boundary_query_follows_its_occurrence() {
+        let path = circle_path(0.0, 0.0, 10.0, 16);
+        let (_, segs) = shaped(&path, Hint::General);
+        let map = ScreenMap {
+            scale: 2.0,
+            origin: [7.0, -3.0],
+        };
+        let here = nearest_boundary(&segs, map, [0.0, 0.0], [7.0, -3.0]).expect("segments");
+        let there = nearest_boundary(&segs, map, [40.0, 60.0], [47.0, 57.0]).expect("segments");
+        assert!(
+            (here.0 - there.0).abs() < 1e-9,
+            "distance moved with the offset"
+        );
+        assert!((here.1 - there.1).abs() < 1e-9, "so did the ramp parameter");
+        // And the distance is in PIXELS: the centre of a radius-10 circle at
+        // scale 2 is 20 px from its boundary.
+        assert!((here.0 - 20.0).abs() < 0.02, "{}", here.0);
+    }
+
+    #[test]
+    fn a_boundless_shape_has_no_border() {
+        assert_eq!(nearest_boundary(&[], unit(), [0.0, 0.0], [1.0, 1.0]), None);
+        let path = circle_path(0.0, 0.0, 4.0, 8);
+        let (_, segs) = shaped(&path, Hint::General);
+        assert_eq!(
+            nearest_boundary(
+                &segs,
+                ScreenMap {
+                    scale: 0.0,
+                    origin: [0.0, 0.0]
+                },
+                [0.0, 0.0],
+                [1.0, 1.0]
+            ),
+            None,
+            "a degenerate map has no pixels to measure in"
+        );
     }
 
     #[test]

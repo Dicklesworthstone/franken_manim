@@ -21,6 +21,7 @@
 pub mod arclength;
 pub mod bezier;
 pub mod cubic;
+pub mod distance;
 pub mod quadpath;
 pub mod rotation;
 pub mod smoothing;
