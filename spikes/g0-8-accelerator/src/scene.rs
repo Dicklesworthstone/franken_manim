@@ -28,7 +28,8 @@ use crate::ir::{DrawKind, RenderIr, Style, TileGrid};
 use crate::sdf::ANTI_ALIAS_WIDTH_PX;
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
-    BLUE_B, BLUE_D, GREEN_C, GREY_D, MAROON_B, RED_C, TEAL_C, WHITE, YELLOW_C,
+    BLUE, BLUE_B, BLUE_D, BLUE_E, GREEN, GREEN_C, GREY_D, MAROON_B, PURPLE, RED, RED_C, TEAL,
+    TEAL_C, WHITE, YELLOW, YELLOW_C,
 };
 use fmn_geom::quadpath::QuadPath;
 
@@ -404,6 +405,191 @@ pub fn build_fill(width: u32, height: u32, tile: u32) -> RenderIr {
             [w * 0.08, h * 0.9576],
         ]);
         ir.compile_path(&p, flat(WHITE, 1.0), DrawKind::Fill);
+    }
+
+    ir.bin();
+    ir
+}
+
+/// Which G0-2 calibration panel to build ([`calibration`]).
+///
+/// The four the analytic prototype can express. The captured set has two more
+/// — `lighting_3d` and `text_sample` — which need the 3D lighting path and
+/// Scribe respectively; neither exists yet, and rendering a stand-in for them
+/// would produce a side-by-side that compares nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationPanel {
+    /// Fill and stroke colour gradients over opacity compositing.
+    GradientFills,
+    /// A self-intersecting pentagram filled under the nonzero winding rule —
+    /// the panel where the Reference's signed-alpha trick is visible.
+    SelfIntersections,
+    /// Wide zig-zag strokes through a sharp reversal, for the join comparison.
+    JointsAndCaps,
+    /// `GlowDot` falloff at three radii and colours.
+    Glow,
+}
+
+impl CalibrationPanel {
+    /// The capture id this panel is compared against, i.e. the basename of the
+    /// Reference still in `gallery/reference_captures/`.
+    pub fn id(self) -> &'static str {
+        match self {
+            CalibrationPanel::GradientFills => "gradient_fills",
+            CalibrationPanel::SelfIntersections => "self_intersections",
+            CalibrationPanel::JointsAndCaps => "joints_and_caps",
+            CalibrationPanel::Glow => "glow",
+        }
+    }
+
+    /// All four, in capture-inventory order.
+    pub const ALL: [CalibrationPanel; 4] = [
+        CalibrationPanel::GradientFills,
+        CalibrationPanel::SelfIntersections,
+        CalibrationPanel::JointsAndCaps,
+        CalibrationPanel::Glow,
+    ];
+}
+
+/// Build one G0-2 calibration panel (fm-k77), in **capture pixel coordinates**.
+///
+/// The geometry below is not re-derived from the Reference's scene units; it is
+/// the geometry *measured off the captured stills themselves* (bounding boxes,
+/// a least-squares circle fit, the four stroke-band centres). That is the whole
+/// point: the two images have to land on the same pixels before a reviewer can
+/// judge anything but registration. At 1920x1080 the Reference's mapping is
+/// 135 px per scene unit (`FRAME_WIDTH / 1920 = 14.2222/1920`), and stroke
+/// width converts at 1.35 px per width unit (`STROKE_WIDTH_CONVERSION = 0.01`
+/// scene units, times 135) — both are recorded in the G0-2 note.
+pub fn calibration(panel: CalibrationPanel, width: u32, height: u32, tile: u32) -> RenderIr {
+    let mut ir = RenderIr::new(
+        TileGrid {
+            width,
+            height,
+            tile,
+        },
+        background(),
+    );
+    // The measurements are at 1920x1080; scale if asked for another size so the
+    // panel stays resolution-independent like every other scene here.
+    let k = width as f64 / 1920.0;
+    let sx = |x: f64| x * k;
+    let sy = |y: f64| y * k;
+
+    let flat = |c: Srgb, alpha: f64, w: f32| {
+        let mut st = Style::flat(linear(c, alpha), w, ANTI_ALIAS_WIDTH_PX as f32);
+        st.rgba_end = st.rgba;
+        st
+    };
+
+    match panel {
+        CalibrationPanel::GradientFills => {
+            // Square: measured bbox cols 516..930, rows 333..746.
+            let (cx, cy, half) = (sx(723.0), sy(539.5), sx(207.0));
+            let sq = polygon(&[
+                [cx - half, cy - half],
+                [cx + half, cy - half],
+                [cx + half, cy + half],
+                [cx - half, cy + half],
+            ]);
+            // Fill gradient BLUE_E -> YELLOW at opacity 0.8. The Reference runs
+            // it along the outline's point order, which for a Square reads as a
+            // diagonal across the interior (measured: top-left darkest,
+            // bottom-right brightest), so the axis is the diagonal.
+            let mut fill = flat(BLUE_E, 0.8, 0.0);
+            fill.rgba_end = linear(YELLOW, 0.8);
+            fill.gradient_axis = [
+                (cx - half) as f32,
+                (cy - half) as f32,
+                (cx + half) as f32,
+                (cy + half) as f32,
+            ];
+            ir.compile_path(&sq, fill, DrawKind::Fill);
+            // Stroke gradient RED -> GREEN, width 6 units = 8.1 px.
+            let mut stroke = flat(RED, 1.0, (8.1 * k) as f32);
+            stroke.rgba_end = linear(GREEN, 1.0);
+            ir.compile_path(&sq, stroke, DrawKind::Stroke);
+
+            // Circle: least-squares fit of the captured edge gave centre
+            // (539.49, 1195.86) with R = 205.48 px.
+            let (ccx, ccy, r) = (sx(1195.86), sy(539.49), sx(205.48));
+            let circle = QuadPath::arc(0.0, std::f64::consts::TAU, r, [ccx, ccy, 0.0], None);
+            let mut cfill = flat(PURPLE, 0.5, 0.0);
+            cfill.rgba_end = linear(TEAL, 0.5);
+            cfill.gradient_axis = [
+                (ccx - r) as f32,
+                (ccy - r) as f32,
+                (ccx + r) as f32,
+                (ccy + r) as f32,
+            ];
+            ir.compile_path(&circle, cfill, DrawKind::Fill);
+            ir.compile_path(&circle, flat(RED, 1.0, (5.4 * k) as f32), DrawKind::Stroke);
+        }
+
+        CalibrationPanel::SelfIntersections => {
+            // Pentagram, vertices taken edge-to-edge so the outline crosses
+            // itself: the captured bbox (rows 164..913, cols 565..1354) implies
+            // circumradius 414 px about (959.5, 578).
+            let (cx, cy, r) = (sx(959.5), sy(578.0), sx(414.0));
+            let mut pts = Vec::with_capacity(5);
+            for k5 in 0..5 {
+                // pi/2 + k*4pi/5, and screen y grows downward.
+                let a = std::f64::consts::FRAC_PI_2 + k5 as f64 * 4.0 * std::f64::consts::PI / 5.0;
+                pts.push([cx + r * fmn_dmath::cos(a), cy - r * fmn_dmath::sin(a)]);
+            }
+            let star = polygon(&pts);
+            ir.compile_path(&star, flat(BLUE_D, 0.7, 0.0), DrawKind::Fill);
+            ir.compile_path(&star, flat(WHITE, 1.0, (5.4 * k) as f32), DrawKind::Stroke);
+        }
+
+        CalibrationPanel::JointsAndCaps => {
+            // Four identical zig-zags at the captured band centres. Identical
+            // on purpose: the Reference draws four DIFFERENT corners here
+            // (auto/bevel/miter/no_joint), and a true curve-distance stroke has
+            // one corner — the round join the distance field already implies.
+            // Rendering four of the same is the finding, stated visually.
+            let x0 = sx(737.0);
+            let x3 = sx(1254.0);
+            let dx = (x3 - x0) / 3.0;
+            let amp = sy(104.0);
+            for cy_px in [166.0, 415.5, 664.0, 913.0] {
+                let cy = sy(cy_px);
+                let mut p = QuadPath::default();
+                p.start_new_path([x0, cy, 0.0]);
+                p.add_line_to([x0 + dx, cy - amp, 0.0], false).unwrap();
+                p.add_line_to([x0 + 2.0 * dx, cy + amp, 0.0], false)
+                    .unwrap();
+                p.add_line_to([x3, cy, 0.0], false).unwrap();
+                // Stroke width 20 units = 27 px.
+                ir.compile_path(&p, flat(YELLOW, 1.0, (27.0 * k) as f32), DrawKind::Stroke);
+            }
+        }
+
+        CalibrationPanel::Glow => {
+            // GlowDot(LEFT*2, r=1.0, BLUE), (ORIGIN, r=1.5, YELLOW),
+            // (RIGHT*2, r=0.75, RED) at 135 px per scene unit about (960, 540).
+            for (x, r, c) in [
+                (690.0, 135.0, BLUE),
+                (960.0, 202.5, YELLOW),
+                (1230.0, 101.25, RED),
+            ] {
+                // A glow is centred on its path's FIRST ANCHOR, but a path with
+                // no curve compiles to nothing (`compile_path` refuses zero
+                // total arc length), so the anchor needs one real segment to
+                // ride on. It contributes no ink — `DrawKind::Glow` never
+                // strokes — and the slab is grown by `glow_radius + aa_width`
+                // from the path bounds either way.
+                let mut p = QuadPath::default();
+                p.start_new_path([sx(x), sy(540.0), 0.0]);
+                p.add_line_to([sx(x) + 1.0, sy(540.0), 0.0], false).unwrap();
+                let mut st = flat(c, 1.0, 0.0);
+                st.glow_radius = (r * k) as f32;
+                // GlowDot's glow_factor, and DotCloud's wider AA band.
+                st.glow_factor = 2.0;
+                st.aa_width = 2.0;
+                ir.compile_path(&p, st, DrawKind::Glow);
+            }
+        }
     }
 
     ir.bin();
