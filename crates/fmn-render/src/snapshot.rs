@@ -284,7 +284,15 @@ mod tests {
     /// difference, and update this constant in the same commit as the change
     /// that caused it). What must never happen is re-blessing it because it
     /// failed.
-    const FIXTURE_DIGEST: &str = "abd96f772071acf56b70d07fcb74d6d600800e315afc23004d25d167519e4eeb";
+    ///
+    /// **Moved once, 2026-07-25 (fm-tg6).** Compiled outlines became
+    /// shape-local: the circle's bounds went from `[29,-1]..[31,1]` to
+    /// `[-2,-1]..[0,1]`, and its instance offset `[31,0,0]` reconstructs the
+    /// original exactly. That was a *fix* — `shape_digest` had always excluded
+    /// position, so storing absolute points meant every copy of an interned
+    /// outline rendered wherever the first copy happened to be. The golden is
+    /// what surfaced it as a decision rather than a silent difference.
+    const FIXTURE_DIGEST: &str = "0735d11efb8c270abe7384a3f6b377f9502047e28254a82e8dfcf09def9feb37";
 
     #[test]
     fn the_fixture_ir_is_bit_locked() {

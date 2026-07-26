@@ -133,6 +133,65 @@ impl Hint {
         matches!(self, Hint::General)
     }
 
+    /// Shift this hint's geometric payload by `delta`.
+    ///
+    /// Hints carry absolute object-space geometry — a circle's centre, a
+    /// rectangle's centre — while a compiled outline is stored **shape-local**
+    /// so that instancing can place it (see `crate::table::Shape`). The two must
+    /// agree, so a hint travelling with an interned outline is localized the
+    /// same way and a consumer adds the instance's offset back.
+    ///
+    /// Getting this wrong is silent and wrong in the worst way: the hint selects
+    /// a kernel, so a circle kernel handed the *first* instance's centre draws
+    /// every later copy in the wrong place while the general path would have
+    /// been right.
+    #[must_use]
+    pub fn translated(self, delta: [f64; 3]) -> Hint {
+        let shift = |c: [f64; 3]| [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]];
+        match self {
+            Hint::General | Hint::Line | Hint::Polyline { .. } => self,
+            Hint::Arc {
+                center,
+                radius,
+                start_angle,
+                angle,
+            } => Hint::Arc {
+                center: shift(center),
+                radius,
+                start_angle,
+                angle,
+            },
+            Hint::Circle { center, radius } => Hint::Circle {
+                center: shift(center),
+                radius,
+            },
+            Hint::Dot { center, radius } => Hint::Dot {
+                center: shift(center),
+                radius,
+            },
+            Hint::Rect {
+                center,
+                width,
+                height,
+            } => Hint::Rect {
+                center: shift(center),
+                width,
+                height,
+            },
+            Hint::RoundedRect {
+                center,
+                width,
+                height,
+                corner_radius,
+            } => Hint::RoundedRect {
+                center: shift(center),
+                width,
+                height,
+                corner_radius,
+            },
+        }
+    }
+
     /// The hint for `mob`'s current points, as Marionette reports them.
     ///
     /// Returns [`Hint::General`] whenever the shape tag has been demoted, which

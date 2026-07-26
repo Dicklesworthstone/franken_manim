@@ -227,6 +227,14 @@ impl StyleTable {
 /// space points**, not the mobject that produced it, which is exactly what makes
 /// two copies of one glyph — or two `Dot`s, or a hundred arrow tips — collapse
 /// to one compiled path.
+///
+/// **Geometry here is shape-local**: translated so the outline's first anchor
+/// sits at the origin, which is the same normalization [`shape_digest`] hashes
+/// under. That is not tidiness, it is what makes interning *correct*. Store the
+/// points where the first mobject happened to be and every later instance
+/// sharing the outline inherits that position — the interning still dedups, and
+/// the picture is wrong. An instance's placement is [`Instance::offset`], and it
+/// is the only thing that says where the outline goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
     /// The content address of the object-space points.

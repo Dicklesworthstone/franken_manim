@@ -13,6 +13,7 @@
 //! | [`revision`] | the seven independent revision axes and the staleness rule |
 //! | [`hint`] | primitive hints: kernel routing, and the invalidation rule |
 //! | [`table`] | the IR's tables: segments, interned styles, interned shapes and their instances |
+//! | [`bin`] | two-level binning, per-tile command lists, occlusion pruning |
 //! | [`plan`] | the retained plan: lazy synchronization from Marionette |
 //! | [`snapshot`] | the canonical, bit-lockable form of a compiled plan (§16.5) |
 //!
@@ -20,12 +21,14 @@
 //! retained compositor (§10.8) land with their own beads and consume this.
 #![forbid(unsafe_code)]
 
+pub mod bin;
 pub mod hint;
 pub mod plan;
 pub mod revision;
 pub mod snapshot;
 pub mod table;
 
+pub use bin::{Binning, ScreenMap, Tiling, Viewport};
 pub use hint::Hint;
 pub use plan::{RenderPlan, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};

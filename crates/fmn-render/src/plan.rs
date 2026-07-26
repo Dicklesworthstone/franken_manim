@@ -131,15 +131,26 @@ impl RenderPlan {
                     if points.is_empty() {
                         continue;
                     }
+                    // Shape-local, matching the normalization `shape_digest`
+                    // hashes under: the outline is translated so its first
+                    // anchor sits at the origin, and `offset` is what places it
+                    // back. Compiling absolute points would still dedup — and
+                    // would put every later copy of a glyph wherever the first
+                    // one happened to be.
                     let offset = points[0];
+                    let local: Vec<Vec3> = points
+                        .iter()
+                        .map(|p| [p[0] - offset[0], p[1] - offset[1], p[2] - offset[2]])
+                        .collect();
                     let digest = shape_digest(&points);
                     let before = self.shapes.shapes().len();
                     let first_segment = self.segments.len() as u32;
-                    let hint = Hint::of(stage, mob);
+                    let hint =
+                        Hint::of(stage, mob).translated([-offset[0], -offset[1], -offset[2]]);
                     let segments_out = &mut self.segments;
                     let index = self.shapes.intern_shape(digest, || {
-                        let path = QuadPath::from_points(points.clone())
-                            .unwrap_or_else(|_| QuadPath::default());
+                        let path =
+                            QuadPath::from_points(local).unwrap_or_else(|_| QuadPath::default());
                         let (shape, mut segs) = compile_shape(digest, &path, hint, first_segment);
                         segments_out.append(&mut segs);
                         shape
