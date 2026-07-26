@@ -1022,6 +1022,27 @@ impl RowScratch {
         }
     }
 
+    /// Coverage of a command whose tile [`crate::bin`] classified as interior:
+    /// **exactly** `1`, with no evaluation at all.
+    ///
+    /// §10.4's vectorized-span path, and the second half of it is the one that is
+    /// easy to miss. The per-pixel evaluation disappearing is the speed; the
+    /// coverage being *exactly* `1` rather than an accumulation landing within an
+    /// ulp of it is the **correctness precondition for occlusion pruning**
+    /// (G0-8b finding F13). A tile skipped because a later opaque command covers
+    /// it must produce the same bytes as one that drew both, and an accumulated
+    /// 0.99999999999999989 does not.
+    ///
+    /// Written as a fill of the literal `1.0` rather than a clamp of a computed
+    /// value, because a clamp would be a promise about the accumulator instead of
+    /// a property of the span.
+    pub fn interior_row(&mut self, x_lo: u32, x_hi: u32) -> &[f64] {
+        let w = (x_hi.saturating_sub(x_lo)) as usize;
+        self.reserve(w);
+        self.out[..w].fill(1.0);
+        &self.out[..w]
+    }
+
     /// Coverage of one path over one pixel row, at the host width.
     ///
     /// The engine's entry point: [`fill_row`] with the scratch managed and the
@@ -2557,6 +2578,30 @@ mod tests {
         );
         let got = total_coverage(&big, 32, 32, 8);
         assert!((got - 9.0 * 12.0).abs() < 1e-9, "{got}");
+    }
+
+    #[test]
+    fn an_interior_tile_is_exactly_one_and_the_general_path_agrees() {
+        // Both halves of §10.4's interior class. The value must be exactly 1.0 —
+        // bit-exactly, since that is what makes occlusion pruning produce the
+        // same bytes as drawing (G0-8b F13) — and the general path must agree
+        // wherever the classification is true, or the fast path would be a
+        // different picture rather than the same one sooner.
+        let mut scratch = RowScratch::for_tile(16);
+        let row = scratch.interior_row(0, 16).to_vec();
+        assert_eq!(row.len(), 16);
+        for v in &row {
+            assert_eq!(v.to_bits(), 1.0f64.to_bits(), "not bit-exactly one: {v}");
+        }
+        assert_eq!(scratch.interior_row(4, 4).len(), 0);
+
+        // A tile well inside a large disc: the general evaluator must also read
+        // exactly one there, which is what says the classification is sound.
+        let pieces = pieces_of_path(&circle_path(64.0, 64.0, 50.0, 32), unit());
+        let general = scratch.fill_row(&pieces, [0.0, 0.0], 64, 56, 72).to_vec();
+        for (i, v) in general.iter().enumerate() {
+            assert_eq!(*v, 1.0, "column {} of an interior row", 56 + i);
+        }
     }
 
     #[test]
