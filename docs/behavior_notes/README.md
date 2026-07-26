@@ -22,9 +22,10 @@ migration guidance users read:
    C rulings)", and Appendix C carries eleven rulings owned by different
    workstreams, so BN-07 is several notes under one topic rather than one
    document that would have to be rewritten by every workstream that touches it.
-3. **A reserved number stays reserved.** BN-06 belongs to the renderer and is
-   written when Lumen exists (W5). Filling a reserved slot with unrelated
-   content is how registers rot.
+3. **A reserved number stays reserved.** BN-06 was held for the renderer and
+   written when Lumen's stages landed (W5, fm-5oi and fm-oac) — not filled with
+   unrelated content in the meantime, which is how registers rot. There are no
+   reserved numbers outstanding.
 4. **Status vocabulary:** `Draft` → `Final`. A note goes Final when its
    subsystem's gate passes and its migration guidance has been reviewed against
    the real behaviour, not when the code lands.
@@ -38,7 +39,7 @@ migration guidance users read:
 | BN-03 | True arc length under the original names: constant-speed paths, length-true dashes and tips | [BN-03-true-arc-length.md](BN-03-true-arc-length.md) | W2 | Draft |
 | BN-04 | Colour: linear-light compositing, with manim's gradient formulas kept | [BN-04-color.md](BN-04-color.md) | W1 | Draft |
 | BN-05 | Native typesetting: metrics differ from LaTeX; the quality bar is documented | [BN-05-native-text-typesetting.md](BN-05-native-text-typesetting.md) | W6 | Draft |
-| BN-06 | **The renderer** — a family, see rule 2: analytic coverage, round caps, arc-length stroke width | [the fill: analytic coverage, a defined gradient field, a border that does not grow the shape (fm-5oi)](BN-06-analytic-fill.md) · *strokes unwritten; fm-oac owns them* | W5 | Draft |
+| BN-06 | **The renderer** — a family, see rule 2: analytic coverage, round caps, arc-length stroke width | [the fill: analytic coverage, a defined gradient field, a border that does not grow the shape (fm-5oi)](BN-06-analytic-fill.md) · [strokes: curve distance, round caps, joins that mean what they are called (fm-oac)](BN-06-strokes.md) | W5 | Draft |
 | BN-07 | **Reference bugs fixed** (Appendix C rulings) — a family, see rule 2 | [stroke uniforms (C-2, C-7)](BN-07-stroke-uniform-fixes.md) · [updaters and group addition (C-5, C-6)](BN-07-updater-and-group-fixes.md) | W3 | Draft |
 | BN-08 | The de-TeX'd classes (§11.6): Brace, Matrix delimiters, DecimalNumber, the drawn marks | [BN-08-de-texed-natives.md](BN-08-de-texed-natives.md) | W7 | Draft |
 | BN-09 | One arc-density rule, never coarser than the Reference's | [BN-09-arc-density.md](BN-09-arc-density.md) | W2/W7 | **Final** |

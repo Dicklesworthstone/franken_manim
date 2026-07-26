@@ -1669,15 +1669,14 @@ pub fn fill_rgba_at(style: &crate::table::Style, t: f64) -> [f32; 4] {
 
 /// The width in screen pixels of a `fill_border_width` of `w` width units.
 ///
-/// `STROKE_WIDTH_CONVERSION = 0.01` scene units per width unit
-/// (`stroke/vert.glsl:21`), then scene units to pixels. G0-2 derived the pair:
-/// at 1920×1080 with the default frame, 135 px per scene unit, so one width unit
-/// is 1.35 px and `DEFAULT_STROKE_WIDTH = 4.0` is 5.4 px. The Reference feeds
-/// `fill_border_width` into the *stroke* program's `stroke_width` attribute
-/// (`shader_wrapper.py:315`), so it is the same conversion, not a similar one.
+/// Delegates to [`crate::stroke::width_px`] rather than restating the
+/// conversion, because it is not a similar conversion — it is the *same* one. The
+/// Reference feeds `fill_border_width` into the stroke program's `stroke_width`
+/// attribute (`shader_wrapper.py:315`), so a border that converted independently
+/// would be a second definition of one number.
 #[must_use]
 pub fn border_width_px(width_units: f32, map: ScreenMap) -> f64 {
-    f64::from(width_units) * fmn_core::constants::STROKE_WIDTH_CONVERSION * map.scale.abs()
+    crate::stroke::width_px(width_units, map)
 }
 
 /// The distance in pixels from a screen point to a shape's boundary, and the
@@ -1736,18 +1735,16 @@ pub fn nearest_boundary(
 /// The inner border's coverage at a point `distance` pixels inside the boundary.
 ///
 /// The band runs `width` pixels inward from the boundary, and its inner edge is
-/// antialiased with G0-2's measured profile — `smoothstep(0.5, −0.5, d/aaw)`,
-/// i.e. `t = clamp(½ − d/aaw, 0, 1); t²(3 − 2t)` — because the border is a
-/// *stroke*, and a stroke's edge is that curve at that width (finding L1: a band
-/// of 1.560 px fitted to RMS 0.0031 against a declared 1.5).
+/// antialiased with G0-2's measured profile — because the border *is* a stroke,
+/// and a stroke's edge is that curve at that width. The profile itself lives in
+/// [`crate::stroke::aa_coverage`], where it was measured; `distance − width` is
+/// the signed excess it takes.
 #[must_use]
 pub fn border_coverage(distance: f64, width: f64, aa_width: f64) -> f64 {
     if width <= 0.0 {
         return 0.0;
     }
-    let aa = if aa_width > 0.0 { aa_width } else { 1e-8 };
-    let t = (0.5 - (distance - width) / aa).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    crate::stroke::aa_coverage(distance - width, aa_width)
 }
 
 /// The fill colour at a screen point, honouring `fill_border_width`.

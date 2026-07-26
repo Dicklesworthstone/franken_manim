@@ -12,6 +12,7 @@
 //! |---|---|
 //! | [`revision`] | the seven independent revision axes and the staleness rule |
 //! | [`fill`] | §10.2's analytic nonzero-winding coverage, on the curves |
+//! | [`stroke`] | §10.3's true curve-distance strokes, round caps, arc-length ramps |
 //! | [`hint`] | primitive hints: kernel routing, and the invalidation rule |
 //! | [`table`] | the IR's tables: segments, interned styles, interned shapes and their instances |
 //! | [`bin`] | two-level binning, per-tile command lists, occlusion pruning |
@@ -30,6 +31,7 @@ pub mod hint;
 pub mod plan;
 pub mod revision;
 pub mod snapshot;
+pub mod stroke;
 pub mod table;
 
 pub use bin::{Binning, ScreenMap, Tiling, Viewport};
@@ -40,4 +42,5 @@ pub use fill::{
 pub use hint::Hint;
 pub use plan::{RenderPlan, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};
+pub use stroke::{JoinWedge, MITER_LIMIT};
 pub use table::{Instance, Segment, Shape, ShapeTable, Style, StyleTable};
