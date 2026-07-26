@@ -187,7 +187,7 @@ pub fn line_angle(shape: &VMobject) -> f64 {
 /// Reference `Line.get_slope`.
 #[must_use]
 pub fn line_slope(shape: &VMobject) -> f64 {
-    line_angle(shape).tan()
+    fmn_dmath::tan(line_angle(shape))
 }
 
 /// Reference `Line.get_projection`: the projection of a point onto the
@@ -506,7 +506,7 @@ impl Arrow {
             width *= w_ratio;
         }
         let mut tip_width = self.tip_width_ratio * width;
-        let mut tip_length = tip_width / (2.0 * (self.tip_angle / 2.0).tan());
+        let mut tip_length = tip_width / (2.0 * fmn_dmath::tan(self.tip_angle / 2.0));
         let t_ratio = fdiv(
             self.max_tip_length_to_length_ratio,
             fdiv(tip_length, length),
@@ -535,13 +535,13 @@ impl Arrow {
                 0.0,
             )
         } else {
-            let r = length / 2.0 / (self.path_arc / 2.0).sin();
+            let r = length / 2.0 / fmn_dmath::sin(self.path_arc / 2.0);
             let midpoint = scale(add(self.start, self.end), 0.5);
             let center = add(
                 midpoint,
                 scale(
                     space_ops::rotate_vector(scale(vect, 0.5), PI / 2.0, OUT),
-                    1.0 / (self.path_arc / 2.0).tan(),
+                    1.0 / fmn_dmath::tan(self.path_arc / 2.0),
                 ),
             );
             let start = add(
@@ -575,7 +575,7 @@ impl Arrow {
             }
             (base, mirrored)
         } else {
-            let r = length / 2.0 / (path_arc / 2.0).sin();
+            let r = length / 2.0 / fmn_dmath::sin(path_arc / 2.0);
             let arc: Vec<Vec3> = QuadPath::arc(0.0, path_arc, 1.0, ORIGIN, None)
                 .points()
                 .to_vec();
@@ -631,7 +631,11 @@ impl Arrow {
             OUT,
         );
         let center = turned.center_point();
-        let tilted = turned.rotated_about(PI / 2.0 - unit[2].clamp(-1.0, 1.0).acos(), axis, center);
+        let tilted = turned.rotated_about(
+            PI / 2.0 - fmn_dmath::acos(unit[2].clamp(-1.0, 1.0)),
+            axis,
+            center,
+        );
 
         let shifted = tilted
             .clone()

@@ -133,3 +133,22 @@ emulated execution and this sentence.
   G0-6 already demonstrates the shape: its frame digest is locked as a single
   cross-platform constant rather than three per-platform ones, so the property
   fails on whichever machine breaks it instead of waiting for a sweep.
+  **Live since 2026-07-26 (fm-ig3):** `goldens/certified_engine.certified.lock`
+  carries the certified CPU engine's raw-frame corpus under that scope, and
+  `tests/certified_engine.rs` runs PG-5's {1,4,16} thread sweep over it per
+  commit.
+- **C7 and C10 have an implementation** (fm-ig3): `fmn_render::engine::journal`
+  serializes the execution-engine identity — engine, SIMD tier, semantic renderer
+  version — together with the declared certified configuration, through fmn-hash's
+  canonical Writer under §3.2's rules. The tile dimensions are in it deliberately:
+  the analytic fill's per-tile carry is a different *association* of the same sum
+  than a longer row's prefix, so tiling is invariant to floating-point tolerance
+  rather than to bits, and a certified run pins the dimensions instead of resting
+  on an invariance the arithmetic does not owe (ADR-0013). `EngineKind::certifiable`
+  is where "certified requires the certified CPU engine" stops being prose.
+- **ADR-0010's four properties are enforced, not assumed** (fm-ig3):
+  `tests/certified_arithmetic.rs` sweeps every certified crate on every commit for
+  platform transcendentals and for hand-written FMA. It found sixteen live libm
+  call sites when it was written, two of them inside the frame G0-6 itself hashed;
+  closing them needed ADR-0014, which makes fmn-dmath the DAG root so the funnel is
+  reachable from every crate that computes.

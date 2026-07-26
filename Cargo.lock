@@ -84,13 +84,13 @@ dependencies = [
 [[package]]
 name = "fmn-core"
 version = "0.1.0"
+dependencies = [
+ "fmn-dmath",
+]
 
 [[package]]
 name = "fmn-dmath"
 version = "0.1.0"
-dependencies = [
- "fmn-core",
-]
 
 [[package]]
 name = "fmn-frame"
@@ -121,6 +121,7 @@ version = "0.1.0"
 dependencies = [
  "fmn-anim",
  "fmn-core",
+ "fmn-dmath",
  "fmn-geom",
  "fmn-mobject",
  "fmn-tex",
@@ -132,6 +133,7 @@ name = "fmn-mobject"
 version = "0.1.0"
 dependencies = [
  "fmn-core",
+ "fmn-dmath",
  "fmn-geom",
  "fmn-hash",
 ]

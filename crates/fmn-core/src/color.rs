@@ -196,7 +196,7 @@ pub fn srgb_eotf(u: f64) -> f64 {
     if u <= 0.04045 {
         u / 12.92
     } else {
-        ((u + 0.055) / 1.055).powf(2.4)
+        fmn_dmath::pow((u + 0.055) / 1.055, 2.4)
     }
 }
 
@@ -206,7 +206,7 @@ pub fn srgb_oetf(l: f64) -> f64 {
     if l <= 0.003_130_8 {
         12.92 * l
     } else {
-        1.055 * l.powf(1.0 / 2.4) - 0.055
+        1.055 * fmn_dmath::pow(l, 1.0 / 2.4) - 0.055
     }
 }
 
@@ -306,7 +306,7 @@ pub fn srgb_to_oklab(c: Srgb) -> Oklab {
     let l = 0.412_221_470_8 * lin.r + 0.536_332_536_3 * lin.g + 0.051_445_992_9 * lin.b;
     let m = 0.211_903_498_2 * lin.r + 0.680_699_545_1 * lin.g + 0.107_396_956_6 * lin.b;
     let s = 0.088_302_461_9 * lin.r + 0.281_718_837_6 * lin.g + 0.629_978_700_5 * lin.b;
-    let (l_, m_, s_) = (l.cbrt(), m.cbrt(), s.cbrt());
+    let (l_, m_, s_) = (fmn_dmath::cbrt(l), fmn_dmath::cbrt(m), fmn_dmath::cbrt(s));
     Oklab {
         l: 0.210_454_255_3 * l_ + 0.793_617_785_0 * m_ - 0.004_072_046_8 * s_,
         a: 1.977_998_495_1 * l_ - 2.428_592_205_0 * m_ + 0.450_593_709_9 * s_,

@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Marionette"
 
 [dependencies]
+fmn-dmath.workspace = true
 fmn-core.workspace = true
 fmn-geom.workspace = true
 fmn-hash.workspace = true

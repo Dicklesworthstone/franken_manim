@@ -246,7 +246,7 @@ impl From<Brace> for fmn_mobject::Mobject {
 /// and is load-bearing — it is what makes `DOWN` the zero-rotation case and
 /// therefore what every existing scene's brace placement depends on.
 fn brace_angle(direction: Vec3) -> f64 {
-    -direction[0].atan2(direction[1]) + PI
+    -fmn_dmath::atan2(direction[0], direction[1]) + PI
 }
 
 fn rotate_z(p: Vec3, angle: f64) -> Vec3 {
@@ -416,7 +416,7 @@ impl From<BraceLabel> for fmn_mobject::Mobject {
 /// to, whatever the line's own angle.
 #[must_use]
 pub fn line_brace(start: Vec3, end: Vec3, direction: Vec3) -> Brace {
-    let angle = (end[1] - start[1]).atan2(end[0] - start[0]);
+    let angle = fmn_dmath::atan2(end[1] - start[1], end[0] - start[0]);
     let centre = [
         0.5 * (start[0] + end[0]),
         0.5 * (start[1] + end[1]),

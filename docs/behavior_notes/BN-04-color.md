@@ -72,9 +72,24 @@ differences.
 
 ## Evidence
 
+- `crates/fmn-render/src/engine.rs` — the compositor this note was waiting for
+  (fm-ig3). Steps 2 and 3 are literal there: a row accumulator of
+  `fmn_core::color::PremulRgba` under `over`, narrowed once at writeback into a
+  linear-light `Rgba16F` raw frame, with the output transfer function applied
+  after that by `fmn_frame::convert::rgba16f_to_rgba8`.
+- `crates/fmn-render/src/plan.rs::decode_rgba` — **step 1, which had no
+  implementation until the engine needed it.** The record buffer holds
+  sRGB-encoded components because `mobject.data` is API surface; the render IR's
+  `Style` documents linear light; and nothing between them decoded anything. A
+  mid-tone would have composited at its encoded value — visibly wrong, and wrong
+  in the direction that reads as a lighting choice rather than a bug. The decode
+  happens once per interned style row, through `fmn_frame::transfer::srgb_decode`
+  rather than this crate's own `srgb_eotf`, because the former rides fmn-dmath
+  and ADR-0010's first binding property requires it.
 - `crates/fmn-core/tests/parity.rs::color_operations_match_the_reference` —
   418 fixture rows generated from the pinned Reference
-  (`3b1b/manim @ 6199a00d4c1b1127ebe45cb629c3f22538b10e13`).
+  (`3b1b/manim @ 6199a00d4c1b1127ebe45cb629c3f22538b10e13`). They pass unchanged
+  across ADR-0014's routing of `srgb_eotf`/`srgb_oetf`/Oklab onto fmn-dmath.
 - `crates/fmn-core/tests/color_oracles.rs` — decode/encode identity on all
   8-bit code points, premultiply round-trip, source-over algebra
   (opaque-replaces, transparent-identity, associativity).

@@ -83,7 +83,7 @@ impl Stage {
     /// An `ExponentialValueTracker` holding `value` (stored as `ln(value)`,
     /// so lane interpolation is geometric).
     pub fn add_exponential_value_tracker(&mut self, value: f64) -> Mob {
-        self.add_tracker(TrackerKind::Exponential, [value.ln(), 0.0])
+        self.add_tracker(TrackerKind::Exponential, [fmn_dmath::ln(value), 0.0])
     }
 
     /// A `ComplexValueTracker` holding `re + im·i`.
@@ -110,7 +110,7 @@ impl Stage {
             Tracker {
                 kind: TrackerKind::Exponential,
                 lanes,
-            } => Some(lanes[0].exp()),
+            } => Some(fmn_dmath::exp(lanes[0])),
             Tracker {
                 kind: TrackerKind::Complex,
                 ..
@@ -142,7 +142,7 @@ impl Stage {
                 Ok(())
             }
             Some(t) if t.kind == TrackerKind::Exponential => {
-                t.lanes[0] = value.ln();
+                t.lanes[0] = fmn_dmath::ln(value);
                 Ok(())
             }
             _ => Err(StageError::StaleHandle),

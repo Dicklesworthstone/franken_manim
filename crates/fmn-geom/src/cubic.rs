@@ -252,7 +252,11 @@ pub fn segments_for_tolerance(
     let mut n = if deviation <= tolerance {
         1
     } else {
-        let exact = (deviation / tolerance).cbrt();
+        // Through the funnel, not `f64::cbrt`: this number becomes a segment
+        // *count*, so a platform that rounded it differently one ulp either side
+        // of an integer would flatten the same cubic into a different number of
+        // quadratics — a whole-curve divergence, not a last-bit one.
+        let exact = crate::scalar::cbrt(deviation / tolerance);
         if exact >= MAX_SEGMENTS as f64 {
             return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
         }

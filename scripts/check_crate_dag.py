@@ -18,8 +18,13 @@ import sys
 # that appear EARLIER in this dict (strictly-downward edges, cycle-free by
 # construction). Keep in lockstep with COMPREHENSIVE_PLAN §19.
 EXPECTED: dict[str, set[str]] = {
-    "fmn-core": set(),
-    "fmn-dmath": {"fmn-core"},
+    # fmn-dmath is the root, and that is ADR-0014's ruling rather than an
+    # accident: ADR-0010 makes "fmn-dmath owns every transcendental on the
+    # certified path" a binding property, and a crate cannot honour it if the
+    # layering puts it above the funnel. fmn-dmath consumes nothing from
+    # fmn-core, so the edge it used to declare was vestigial.
+    "fmn-dmath": set(),
+    "fmn-core": {"fmn-dmath"},  # dmath: color transfer + rate functions (ADR-0014)
     "fmn-hash": {"fmn-core"},
     "fmn-config": {"fmn-core", "fmn-hash"},
     "fmn-platform": {"fmn-core"},
@@ -27,14 +32,14 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-codec": {"fmn-core", "fmn-frame", "fmn-hash"},
     "fmn-cache": {"fmn-core", "fmn-hash", "fmn-platform"},
     "fmn-geom": {"fmn-core", "fmn-dmath"},
-    "fmn-mobject": {"fmn-core", "fmn-geom", "fmn-hash"},
+    "fmn-mobject": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-hash"},  # dmath: tracker exp/ln (ADR-0014)
     # hash: canonical Timeline serialization — the Studio-scrubbing and
     # WASM-player substrate (§9.4, fm-hfe)
     "fmn-anim": {"fmn-core", "fmn-dmath", "fmn-hash", "fmn-mobject"},
     "fmn-render": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-frame", "fmn-hash", "fmn-cache"},
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},
-    "fmn-library": {"fmn-core", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex"},
+    "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex"},  # dmath: tip/arc trigonometry (ADR-0014)
     "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash"},  # hash: journal serialization + digests (§13.4, fm-y7u)
     "fmn-studio": {"fmn-core", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-render", "fmn-scene"},
     "fmn-output": {"fmn-core", "fmn-hash", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-cache"},

@@ -171,7 +171,7 @@ impl Polygon {
             let vect1 = space_ops::normalize(sub(v2, v1));
             let vect2 = space_ops::normalize(sub(v3, v2));
             let angle = space_ops::angle_between_vectors(vect1, vect2);
-            let cut_off_length = radius * (angle / 2.0).tan();
+            let cut_off_length = radius * fmn_dmath::tan(angle / 2.0);
             let sign = (radius * space_ops::cross2d(vect1, vect2)).signum();
             let start = sub(v2, scale(vect1, cut_off_length));
             let end = add(v2, scale(vect2, cut_off_length));

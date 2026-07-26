@@ -87,7 +87,7 @@ pub fn overshoot(t: f64, pull_factor: f64) -> f64 {
 /// (the Reference's default is `2`).
 #[must_use]
 pub fn wiggle(t: f64, wiggles: f64) -> f64 {
-    there_and_back(t) * (wiggles * std::f64::consts::PI * t).sin()
+    there_and_back(t) * fmn_dmath::sin(wiggles * std::f64::consts::PI * t)
 }
 
 /// Combinator: run `func`'s whole arc inside `[a, b]`, clamping outside
@@ -123,7 +123,7 @@ pub fn lingering(t: f64) -> f64 {
 /// `1 - exp(-t / half_life)` (the Reference's default half-life is `0.1`).
 #[must_use]
 pub fn exponential_decay(t: f64, half_life: f64) -> f64 {
-    1.0 - (-t / half_life).exp()
+    1.0 - fmn_dmath::exp(-t / half_life)
 }
 
 /// Evaluate a 1-D Bézier by the Bernstein sum, mirroring the Reference's
