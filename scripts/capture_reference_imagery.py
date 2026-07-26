@@ -23,6 +23,16 @@ context (a real GPU or EGL/OSMesa headless). Missing pieces fail with a
 named capability error below, never a partial capture.
 
 Usage:  python scripts/capture_reference_imagery.py [--out DIR]
+
+The recipe that worked (recorded for the record, NOT to be maintained — D-16):
+a Mesa/llvmpipe software GL 4.5 core context under a virtual X server, which
+needs no GPU at all. Both the Reference's pyglet shadow window and moderngl's
+default context backend want a display, so Xvfb satisfies each in one step:
+
+    python -m venv refenv
+    refenv/bin/pip install -r scripts/manim_ref/requirements.txt
+    xvfb-run -a -s "-screen 0 1920x1080x24" \
+        refenv/bin/python scripts/capture_reference_imagery.py
 """
 
 import argparse
@@ -61,6 +71,7 @@ def ref_commit() -> str:
         capture_output=True,
         text=True,
         check=True,
+        timeout=30,
     ).stdout.strip()
 
 
@@ -129,7 +140,12 @@ def build_scenes(m):
             label = m.Text(jt, font_size=24)
             label.next_to(zig, m.LEFT, buff=0.3)
             rows.append(m.VGroup(zig, label))
-        s.add(m.VGroup(*rows).arrange(m.DOWN, buff=0.6).center())
+        # Four 2.4-unit rows plus buffs overflow the 8-unit frame height, which
+        # silently clipped `auto` and `no_joint` off-frame — a scene whose whole
+        # purpose is showing EVERY joint type. Fit the stack to the frame.
+        stack = m.VGroup(*rows).arrange(m.DOWN, buff=0.6)
+        stack.set_height(m.FRAME_HEIGHT - 1.0)
+        s.add(stack.center())
 
     def glow(s):
         dots = m.VGroup()  # GlowDots are not VMobjects; use Group if needed
@@ -185,6 +201,53 @@ def gl_identity():
         fail("opengl-context", f"cannot create a standalone GL context: {e}")
 
 
+def check_liveness(rendered) -> None:
+    """Refuse to publish a capture set that did not actually render.
+
+    A GL stack that imports, creates a context, and returns a cleared
+    framebuffer produces a *plausible* capture: correct size, correct
+    format, a valid PNG per scene. The only thing wrong with it is that
+    it is blank — and a blank set will happily flow into the Look Gallery
+    and calibrate G0-2 against nothing. Two checks close that hole:
+
+      1. every frame carries more than one distinct pixel value, and
+      2. no two frames are identical.
+
+    Both are properties of the *calibration set*, not of any particular
+    renderer: these six scenes have deliberately different content, so
+    two matching frames mean the content never reached the framebuffer.
+    """
+    import numpy as np
+
+    arrays = [(sid, np.asarray(img)) for sid, img in rendered]
+
+    blank = [
+        sid
+        for sid, a in arrays
+        if len(np.unique(a.reshape(-1, a.shape[-1]), axis=0)) <= 1
+    ]
+    if blank:
+        fail(
+            "blank-capture",
+            f"{len(blank)} of {len(arrays)} frames are a single flat color "
+            f"({', '.join(blank)}). The GL context is live but nothing was "
+            "drawn into it — the scenes were populated without a capture "
+            "pass, or the Reference's render API has moved.",
+        )
+
+    seen: dict[bytes, str] = {}
+    for sid, a in arrays:
+        key = hashlib.sha256(a.tobytes()).digest()
+        if key in seen:
+            fail(
+                "duplicate-capture",
+                f"'{sid}' is pixel-identical to '{seen[key]}'. The six "
+                "calibration scenes have different content by construction, "
+                "so identical frames mean the capture is not rendering them.",
+            )
+        seen[key] = sid
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=DEFAULT_OUT)
@@ -197,12 +260,26 @@ def main() -> None:
     if ids != CAPTURE_IDS:
         fail("inventory-drift", f"scene ids {ids} != inventory {CAPTURE_IDS}")
 
+    # Render every scene into memory first, then validate, then write: the
+    # capture is all-or-nothing, so nothing reaches disk until the whole set
+    # has passed the liveness checks below.
+    rendered = []
+    for sid, populate in scenes:
+        scene = m.Scene()  # windowless: Scene.get_image() reads the file fbo
+        populate(scene)
+        # THE DRAW. `camera.get_image()` only READS the framebuffer; without
+        # a capture pass into it, every scene yields the same cleared frame.
+        # This is a silent-garbage failure mode — six identical transparent
+        # PNGs that the harness once reported as six successful captures —
+        # so the draw is explicit here and asserted by check_liveness().
+        scene.update_frame(force_draw=True)
+        rendered.append((sid, scene.get_image()))
+
+    check_liveness(rendered)
+
     os.makedirs(args.out, exist_ok=True)
     captures = {}
-    for sid, populate in scenes:
-        scene = m.Scene()
-        populate(scene)
-        image = scene.camera.get_image()
+    for sid, image in rendered:
         path = os.path.join(args.out, f"{sid}.png")
         image.save(path)
         with open(path, "rb") as f:
