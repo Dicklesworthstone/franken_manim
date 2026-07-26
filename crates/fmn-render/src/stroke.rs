@@ -190,6 +190,35 @@ pub fn stroke_excess_px(
     translate: [f64; 2],
     p: [f64; 2],
 ) -> Option<f64> {
+    stroke_nearest(segments, style, map, translate, p).map(|(excess, _)| excess)
+}
+
+/// [`stroke_excess_px`], plus the **arc-length coordinate of the winning
+/// segment's nearest point**.
+///
+/// The coordinate is not a diagnostic: [`stroke_rgba_at`] and
+/// [`half_width_px`] are both functions of it, and §10.3 says width and colour
+/// interpolate by the *same* arc length. Nothing produced it until an engine
+/// needed to shade a pixel, so the ramp existed with no way to evaluate it —
+/// which is why this is the primitive and [`stroke_excess_px`] is the
+/// projection, rather than the loop being written twice and kept in agreement
+/// by hand.
+///
+/// Ties go to the **earliest segment in the shape's own segment order**, which
+/// is a property of the geometry rather than of the sync that compiled it
+/// (ADR-0013): `excess < best` keeps the incumbent, so the winner is
+/// order-determined only where two segments are exactly equidistant, and that
+/// order is the outline's.
+///
+/// `None` for a path with no segments or a degenerate map.
+#[must_use]
+pub fn stroke_nearest(
+    segments: &[Segment],
+    style: &Style,
+    map: ScreenMap,
+    translate: [f64; 2],
+    p: [f64; 2],
+) -> Option<(f64, f64)> {
     let scale = map.scale;
     if scale == 0.0 || segments.is_empty() {
         return None;
@@ -200,6 +229,7 @@ pub fn stroke_excess_px(
         0.0,
     ];
     let mut best = f64::INFINITY;
+    let mut best_s = 0.0;
     for g in segments {
         let near = fmn_geom::distance::nearest_on_quadratic(g.p0, g.p1, g.p2, obj);
         // Arc length at the nearest point, not the parameter: the ramp is
@@ -217,9 +247,41 @@ pub fn stroke_excess_px(
         let excess = near.distance * scale.abs() - half_width_px(style, map, s);
         if excess < best {
             best = excess;
+            best_s = s;
         }
     }
-    Some(best)
+    Some((best, best_s))
+}
+
+/// The stroke's coverage **and** its ramp coordinate at a screen point — the
+/// engine's per-pixel stroke shading call.
+///
+/// [`stroke_coverage_with_joins`] is this with the coordinate dropped. Both
+/// numbers come from one pass over the segments, because computing the coverage
+/// and then re-solving for the colour would evaluate every nearest-point solve
+/// twice and could disagree with itself on a tie.
+#[must_use]
+pub fn stroke_shade(
+    segments: &[Segment],
+    joins: &[JoinWedge],
+    style: &Style,
+    map: ScreenMap,
+    translate: [f64; 2],
+    p: [f64; 2],
+) -> (f64, f64) {
+    if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+        return (0.0, 0.0);
+    }
+    match stroke_nearest(segments, style, map, translate, p) {
+        Some((round, s)) => (
+            aa_coverage(
+                apply_joins(round, joins, style.joint_type, p),
+                f64::from(style.anti_alias_width),
+            ),
+            s,
+        ),
+        None => (0.0, 0.0),
+    }
 }
 
 /// The stroke's coverage at a screen point, in `[0, 1]`.
@@ -511,16 +573,7 @@ pub fn stroke_coverage_with_joins(
     translate: [f64; 2],
     p: [f64; 2],
 ) -> f64 {
-    if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
-        return 0.0;
-    }
-    match stroke_excess_px(segments, style, map, translate, p) {
-        Some(round) => aa_coverage(
-            apply_joins(round, joins, style.joint_type, p),
-            f64::from(style.anti_alias_width),
-        ),
-        None => 0.0,
-    }
+    stroke_shade(segments, joins, style, map, translate, p).0
 }
 
 #[cfg(test)]

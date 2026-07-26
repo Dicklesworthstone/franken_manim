@@ -504,6 +504,25 @@ impl Binning {
 }
 
 /// One instance's conservative screen-space AABB.
+///
+/// Two things beyond placing the hull, and both are load-bearing.
+///
+/// **The per-draw width expansion (§10.3).** "Conservative slabs are the
+/// retained control-polygon hull *plus a per-draw width expansion*, and the
+/// expansion is deliberately not retained — width is a *style* property, so a
+/// retained slab would be invalidated by a restyle." Without it a stroke is
+/// binned to the tiles its *centreline* hull touches, and everything the
+/// half-width and the antialiasing band reach beyond that is simply never
+/// listed: a stroke whose outline ends on a tile boundary loses `w/2 + aa`
+/// pixels of edge, cleanly and silently. It cost nothing until an engine
+/// existed to draw the missing band, which is why this arrives with fm-ig3
+/// rather than with the binner.
+///
+/// **Normalization.** A negative `ScreenMap::scale` — the natural way to spell
+/// a y-flip — maps `bounds.min` above `bounds.max`, and an inverted AABB makes
+/// [`Grid::span`]'s `lo..=hi` loops yield nothing at all, so every instance
+/// vanishes from the frame. Taking componentwise min/max costs two comparisons
+/// and removes a silent-drop.
 fn screen_aabb(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> Option<[f64; 4]> {
     let shape = plan.shapes().shape(inst.shape)?;
     if shape.segment_count == 0 {
@@ -515,7 +534,32 @@ fn screen_aabb(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> Option<[f6
     let b = shape.bounds;
     let lo = map.place(b.min, inst.offset);
     let hi = map.place(b.max, inst.offset);
-    Some([lo[0], lo[1], hi[0], hi[1]])
+    let pad = stroke_expansion(plan, inst, map);
+    Some([
+        lo[0].min(hi[0]) - pad,
+        lo[1].min(hi[1]) - pad,
+        lo[0].max(hi[0]) + pad,
+        lo[1].max(hi[1]) + pad,
+    ])
+}
+
+/// How far beyond its outline a draw's stroke can reach, in screen pixels.
+///
+/// The widest half-width the ramp attains plus the antialiasing band — the same
+/// pad [`crate::stroke::segment_slab`] applies per segment, computed here once
+/// per instance. Zero for a style that strokes nothing, so a pure fill is binned
+/// to exactly its own hull: the analytic fill's coverage *is* its antialiasing,
+/// and it is exactly zero outside the path.
+fn stroke_expansion(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> f64 {
+    let Some(style) = plan.styles().get(inst.style) else {
+        return 0.0;
+    };
+    if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+        return 0.0;
+    }
+    let widest = crate::stroke::width_px(style.stroke_width, map)
+        .max(crate::stroke::width_px(style.stroke_width_end, map));
+    0.5 * widest + f64::from(style.anti_alias_width)
 }
 
 /// Does this instance's shape contain the whole tile?
@@ -723,6 +767,91 @@ mod tests {
             width: 256,
             height: 256,
         }
+    }
+
+    /// A stroked horizontal line whose hull ends exactly on a tile boundary.
+    ///
+    /// Purpose-built for the expansion test: the *centreline* stops at the
+    /// boundary, so a slab that is only the hull lists no tile beyond it while
+    /// the stroke's half-width and AA band plainly reach into the next one.
+    fn stroked_line(x0: f64, y: f64, x1: f64, width: f32) -> Mobject {
+        let pts = [[x0, y, 0.0], [0.5 * (x0 + x1), y, 0.0], [x1, y, 0.0]];
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len());
+        for (i, p) in pts.iter().enumerate() {
+            buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
+            buffer.write(i, "stroke_rgba", &[1.0, 1.0, 1.0, 1.0]);
+            buffer.write(i, "stroke_width", &[width]);
+        }
+        Mobject::from_buffer(buffer)
+    }
+
+    #[test]
+    fn a_stroke_is_binned_to_the_tiles_its_width_reaches() {
+        // §10.3's per-draw width expansion, as a test rather than a sentence.
+        // The line's hull is the single row y = 64, which lands on a tile
+        // boundary; a 400-unit stroke is 4 px wide, so with the AA band the
+        // stroke covers y from about 60.5 to 67.5 and must be listed in the tile
+        // row above the boundary as well as the one below it.
+        //
+        // Without the expansion this test finds one tile row instead of two, and
+        // the engine draws a stroke with its top edge sliced off.
+        let mut stage = Stage::new();
+        let mob = stage.add(stroked_line(40.0, 64.0, 200.0, 400.0));
+        stage.add_to_scene(mob).expect("live");
+        let plan = synced(&stage);
+        let tiling = Tiling {
+            macro_tile: 128,
+            fine_tile: 16,
+        };
+        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default());
+
+        let listed = |x: u32, y: u32| !b.tile(b.tile_of(x, y)).is_empty();
+        assert!(listed(64, 64), "the centreline's own tile row is missing");
+        assert!(
+            listed(64, 63),
+            "the tile row above the boundary is unlisted, so the stroke's upper \
+             half-width and AA band would never be drawn"
+        );
+    }
+
+    #[test]
+    fn a_pure_fill_is_binned_to_exactly_its_own_hull() {
+        // The other half of the expansion rule: the analytic fill's coverage IS
+        // its antialiasing and is exactly zero outside the path, so a fill with
+        // no stroke must not pay for a band it cannot reach into.
+        let stage = scene(&[(64.0, 64.0, 32.0, 32.0, 1.0)]);
+        let plan = synced(&stage);
+        let tiling = Tiling {
+            macro_tile: 128,
+            fine_tile: 16,
+        };
+        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default());
+        // The rect spans x,y in [48, 80]: tiles 3..=5 on each axis and no more.
+        assert!(!b.tile(b.tile_of(48, 48)).is_empty());
+        assert!(
+            b.tile(b.tile_of(32, 64)).is_empty(),
+            "a fill was padded into a tile its coverage cannot reach"
+        );
+    }
+
+    #[test]
+    fn a_negative_scale_still_bins_every_instance() {
+        // A negative `ScreenMap::scale` is the natural spelling of a y-flip, and
+        // it maps `bounds.min` above `bounds.max`. An un-normalized AABB makes
+        // `Grid::span`'s `lo..=hi` loops empty, so every instance silently
+        // vanishes — a blank frame with no error anywhere.
+        let stage = scene(&[(-64.0, -64.0, 40.0, 40.0, 1.0)]);
+        let plan = synced(&stage);
+        let flipped = ScreenMap {
+            scale: -1.0,
+            origin: [0.0, 0.0],
+        };
+        let b = Binning::build(&plan, viewport(), Tiling::default(), flipped);
+        assert!(
+            !b.draws().is_empty(),
+            "a y-flip binned the whole scene out of existence"
+        );
+        assert!(!b.tile(b.tile_of(64, 64)).is_empty());
     }
 
     #[test]

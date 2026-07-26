@@ -11,6 +11,7 @@
 //! | module | what it owns |
 //! |---|---|
 //! | [`revision`] | the seven independent revision axes and the staleness rule |
+//! | [`engine`] | §10.1's certified CPU engine: the frame, the bands, the bits |
 //! | [`fill`] | §10.2's analytic nonzero-winding coverage, on the curves |
 //! | [`stroke`] | §10.3's true curve-distance strokes, round caps, arc-length ramps |
 //! | [`hint`] | primitive hints: kernel routing, and the invalidation rule |
@@ -20,12 +21,13 @@
 //! | [`plan`] | the retained plan: lazy synchronization from Marionette |
 //! | [`snapshot`] | the canonical, bit-lockable form of a compiled plan (§16.5) |
 //!
-//! The engines (§10.1), strokes (§10.3), and the retained compositor (§10.8)
-//! land with their own beads and consume this.
+//! The retained compositor's pixel half (§10.8) lands with its own bead and
+//! consumes this.
 #![forbid(unsafe_code)]
 
 pub mod bin;
 pub mod cache;
+pub mod engine;
 pub mod fill;
 pub mod hint;
 pub mod plan;
@@ -36,6 +38,9 @@ pub mod table;
 
 pub use bin::{Binning, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
+pub use engine::{
+    EngineIdentity, EngineKind, FrameConfig, FrameJob, RENDERER_VERSION, Tier, frame_digest,
+};
 pub use fill::{
     FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, RationalPiece, RowScratch,
 };

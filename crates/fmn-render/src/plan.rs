@@ -247,6 +247,34 @@ impl RenderPlan {
     }
 }
 
+/// Decode one sRGB-encoded colour record into the linear light the IR stores.
+///
+/// **This is BN-04's "render boundary", and it had no implementation.** The
+/// record buffer holds what manim holds — sRGB-encoded components, because
+/// `mobject.data` is API surface — while [`Style`] documents linear light and
+/// every consumer already assumes it: `fill_rgba_at` and `stroke_rgba_at` both
+/// say a ramp "happens where colour interpolation is defined, not in an encoded
+/// space". Between the writer and those readers the decode simply did not exist,
+/// so a mid-tone would have rendered at its encoded value — visibly wrong, and
+/// wrong in the direction that looks like a lighting choice rather than a bug.
+///
+/// Alpha does not decode. It is a coverage fraction, not a light intensity, and
+/// gamma-encoding it is the mistake `fmn_frame::transfer` names on the way out.
+///
+/// The decode routes through [`fmn_frame::transfer::srgb_decode`] rather than
+/// `fmn_core::color::srgb_eotf`: the two compute the same function, but the
+/// former rides `fmn_dmath::pow` and the latter rides `std::powf`, and ADR-0010's
+/// first binding property is that fmn-dmath owns every transcendental on the
+/// certified path. It is decoded **once per interned style row**, not per pixel.
+fn decode_rgba(rgba: [f32; 4]) -> [f32; 4] {
+    [
+        fmn_frame::transfer::srgb_decode(f64::from(rgba[0])) as f32,
+        fmn_frame::transfer::srgb_decode(f64::from(rgba[1])) as f32,
+        fmn_frame::transfer::srgb_decode(f64::from(rgba[2])) as f32,
+        rgba[3],
+    ]
+}
+
 /// Read one renderable's style row out of its record buffer.
 ///
 /// The Reference stores these per point; this reads the ramp's endpoints, which
@@ -276,10 +304,10 @@ fn read_style(stage: &Stage, mob: Mob) -> Style {
             .and_then(|v| v.first().copied())
             .unwrap_or(0.0)
     };
-    row.stroke_rgba = rgba(0, "stroke_rgba");
-    row.stroke_rgba_end = rgba(last, "stroke_rgba");
-    row.fill_rgba = rgba(0, "fill_rgba");
-    row.fill_rgba_end = rgba(last, "fill_rgba");
+    row.stroke_rgba = decode_rgba(rgba(0, "stroke_rgba"));
+    row.stroke_rgba_end = decode_rgba(rgba(last, "stroke_rgba"));
+    row.fill_rgba = decode_rgba(rgba(0, "fill_rgba"));
+    row.fill_rgba_end = decode_rgba(rgba(last, "fill_rgba"));
     row.stroke_width = scalar(0, "stroke_width");
     row.stroke_width_end = scalar(last, "stroke_width");
     row.fill_border_width = scalar(0, "fill_border_width");
