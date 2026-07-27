@@ -273,7 +273,13 @@ pub fn journal(identity: EngineIdentity, config: &FrameConfig, tiling: Tiling) -
     w.put_f64(config.background.g);
     w.put_f64(config.background.b);
     w.put_f64(config.background.a);
-    w.put_u32(PixelFormat::Rgba16F as u32);
+    // The format's **name**, not `as u32`. A discriminant is a property of
+    // fmn-frame's declaration order, so reordering that enum would silently move
+    // every manifest digest ever issued — and a closure digest whose meaning can
+    // change without anyone editing it is worse than no digest. `cache.rs` may
+    // use the discriminant because a tile key lives for one run; a provenance
+    // manifest is durable (§16.7, D-17).
+    w.put_str(RAW_FRAME_FORMAT_NAME);
 
     // C10 — the semantic constants. Measured, not tuned; see each one's own
     // documentation for the measurement that fixed it.
@@ -292,6 +298,34 @@ pub fn journal_digest(identity: EngineIdentity, config: &FrameConfig, tiling: Ti
     fmn_hash::sha256(&journal(identity, config, tiling))
 }
 
+/// Why a frame could not be reduced to its canonical document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameEncodeError {
+    /// The buffer has more than one plane, so a single-plane document would
+    /// describe the luma and silently drop the chroma.
+    MultiPlane {
+        /// The format that was refused.
+        format: PixelFormat,
+    },
+    /// The canonical envelope refused the document (a limit, in practice).
+    Serial(fmn_hash::SerialError),
+}
+
+impl std::fmt::Display for FrameEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MultiPlane { format } => write!(
+                f,
+                "{format:?} has {} planes; a canonical frame document describes one",
+                format.plane_count()
+            ),
+            Self::Serial(e) => write!(f, "canonical frame document: {e:?}"),
+        }
+    }
+}
+
+impl std::error::Error for FrameEncodeError {}
+
 /// The canonical digest of a rendered raw frame.
 ///
 /// Hashes the geometry and the **payload rows only** — never the whole
@@ -304,37 +338,65 @@ pub fn journal_digest(identity: EngineIdentity, config: &FrameConfig, tiling: Ti
 /// # Errors
 /// Propagates the envelope's limit errors for a frame larger than the writer
 /// admits.
-pub fn frame_digest(buffer: &FrameBuffer) -> Result<Digest, fmn_hash::SerialError> {
+pub fn frame_digest(buffer: &FrameBuffer) -> Result<Digest, FrameEncodeError> {
     Ok(fmn_hash::sha256(&encode_frame(buffer)?))
 }
 
 /// The canonical byte document a [`frame_digest`] is taken over — the form the
 /// self-golden rig locks.
 ///
+/// The document is materialized rather than streamed, which puts a ceiling on it:
+/// [`fmn_hash::Limits::DEFAULT`] admits 256 MiB, so `Rgba16F` frames up to about
+/// 4K (66 MB) encode comfortably and 8K (265 MB) does not. That is a deliberate
+/// trade for the versioned envelope — a streamed digest would have no schema and
+/// no float canonicalization — and it is stated here because the failure is a
+/// typed error at an unusual resolution rather than anything a test would meet.
+///
 /// # Errors
-/// Propagates the envelope's limit errors.
-pub fn encode_frame(buffer: &FrameBuffer) -> Result<Vec<u8>, fmn_hash::SerialError> {
+/// [`FrameEncodeError::MultiPlane`] for a planar format;
+/// [`FrameEncodeError::Serial`] for a frame past the envelope's limits.
+pub fn encode_frame(buffer: &FrameBuffer) -> Result<Vec<u8>, FrameEncodeError> {
     let layout = buffer.layout();
+    // Single-plane only, and refused rather than guessed. This walks plane 0, so
+    // handing it an NV12 or P010 buffer would hash the luma and silently drop the
+    // chroma — a document that looks like a frame and is not one. The certified
+    // raw frame is always `Rgba16F`; `Rgba8` is admitted because it is the
+    // canonical-PNG payload and locking that is the obvious next want.
+    let format = layout.format();
+    if format.plane_count() != 1 {
+        return Err(FrameEncodeError::MultiPlane { format });
+    }
     let width = layout.width() as usize;
     let height = layout.height() as usize;
     let stride = layout.stride(0);
-    let row_bytes = width * sample_bytes(layout.format());
+    // The payload width the format itself declares, rather than a table here
+    // that could drift from it.
+    let row_bytes = format.min_row_bytes(layout.width(), 0).unwrap_or(width * 4);
     let mut w = Writer::new(FRAME_SCHEMA);
     w.put_u32(layout.width());
     w.put_u32(layout.height());
-    w.put_u32(layout.format() as u32);
+    w.put_str(format_name(format));
     let plane = buffer.plane(0);
     for y in 0..height {
         w.put_bytes(&plane[y * stride..y * stride + row_bytes]);
     }
-    w.finish()
+    w.finish().map_err(FrameEncodeError::Serial)
 }
 
-/// Payload bytes per pixel for the formats a frame digest accepts.
-fn sample_bytes(format: PixelFormat) -> usize {
+/// The certified raw frame's pixel format, by name.
+///
+/// The engine's output format is a constant of the engine rather than a knob, so
+/// it enters the closure as a fixed name.
+pub const RAW_FRAME_FORMAT_NAME: &str = "rgba16f";
+
+/// A stable name for a pixel format, for documents that outlive a build.
+const fn format_name(format: PixelFormat) -> &'static str {
     match format {
-        PixelFormat::Rgba16F => 8,
-        _ => 4,
+        PixelFormat::Rgba8 => "rgba8",
+        PixelFormat::Bgra8 => "bgra8",
+        PixelFormat::Rgba16F => RAW_FRAME_FORMAT_NAME,
+        PixelFormat::Nv12 => "nv12",
+        PixelFormat::P010 => "p010",
     }
 }
 
@@ -394,7 +456,9 @@ pub struct FrameJob<'a> {
     binning: &'a Binning,
     config: FrameConfig,
     identity: EngineIdentity,
-    draws: Vec<Draw>,
+    /// Index-aligned with `plan.shapes().instances()`; `None` where the
+    /// instance contributes no pass. See [`FrameJob::with_identity`].
+    draws: Vec<Option<Draw>>,
     cols: u32,
 }
 
@@ -432,13 +496,21 @@ impl<'a> FrameJob<'a> {
     ) -> FrameJob<'a> {
         let map = config.map;
         let segments = plan.segments();
-        let mut draws = Vec::with_capacity(plan.shapes().instances().len());
+        let mut draws: Vec<Option<Draw>> = Vec::with_capacity(plan.shapes().instances().len());
 
         for inst in plan.shapes().instances() {
+            // Every instance gets a slot, including the ones that draw nothing.
+            // `Binning`'s command lists hold **instance** indices, so a compacted
+            // draw list would silently pair each command with the wrong shape and
+            // style from the first skipped instance onward. `None` is the slot
+            // for "this instance contributes no pass"; it costs a word and it is
+            // the difference between an index and a coincidence.
             let Some(shape) = plan.shapes().shape(inst.shape) else {
+                draws.push(None);
                 continue;
             };
             let Some(style) = plan.styles().get(inst.style).copied() else {
+                draws.push(None);
                 continue;
             };
             let lo = shape.first_segment as usize;
@@ -450,15 +522,15 @@ impl<'a> FrameJob<'a> {
             let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
                 && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
             if !draws_fill && !draws_stroke {
-                // Not an optimization: an instance with no visible pass
-                // composites as the identity, so dropping it here and drawing it
-                // are the same bytes. Skipping keeps the tile loop's inner test
-                // to `flags` alone.
+                // An instance with no visible pass composites as the identity, so
+                // skipping its work cannot change a byte — but it still holds its
+                // index. Both halves of that sentence matter.
+                draws.push(None);
                 continue;
             }
 
             let flat = fill_is_flat(&style);
-            draws.push(Draw {
+            draws.push(Some(Draw {
                 first_segment: shape.first_segment,
                 segment_count: shape.segment_count,
                 shape: inst.shape,
@@ -480,8 +552,13 @@ impl<'a> FrameJob<'a> {
                 stroke_slab: stroke_slab(segs, &style, map, translate),
                 draws_fill,
                 draws_stroke,
-            });
+            }));
         }
+        debug_assert_eq!(
+            draws.len(),
+            plan.shapes().instances().len(),
+            "the draw list must be index-aligned with the instance list"
+        );
 
         let cols = config
             .viewport
@@ -511,10 +588,14 @@ impl<'a> FrameJob<'a> {
         journal_digest(self.identity, &self.config, self.binning.tiling())
     }
 
-    /// How many instances survived to contribute a pass.
+    /// How many instances contribute a pass.
+    ///
+    /// Not `draws.len()`: that is the instance count, because the draw list is
+    /// index-aligned with the instance list and carries a `None` for every
+    /// instance that draws nothing.
     #[must_use]
     pub fn draw_count(&self) -> usize {
-        self.draws.len()
+        self.draws.iter().flatten().count()
     }
 
     /// Rasterize into a freshly allocated raw frame.
@@ -543,6 +624,20 @@ impl<'a> FrameJob<'a> {
                 expected: "Rgba16F raw frame",
                 got: dst.layout().format(),
             });
+        }
+        // The binning must have been built for this viewport and this tiling.
+        // If it was not, `cols` disagrees with the grid the command lists were
+        // scattered into and every tile index names the wrong tile — a wrong
+        // picture with no error anywhere, which is the failure mode this crate
+        // is least able to afford. Checked here rather than in `new` because
+        // this is where the grid is walked.
+        let rows = self
+            .config
+            .viewport
+            .height
+            .div_ceil(self.binning.tiling().fine_tile.max(1));
+        if self.binning.tile_count() != self.cols as usize * rows as usize {
+            return Err(FrameError::DimensionMismatch);
         }
         if dst.layout().width() != self.config.viewport.width
             || dst.layout().height() != self.config.viewport.height
@@ -632,7 +727,10 @@ impl<'a> FrameJob<'a> {
         let draws = self.binning.tile(tile);
         let flags = self.binning.tile_flags(tile);
         for (k, &d) in draws.iter().enumerate() {
-            let Some(rec) = self.draws.get(d as usize) else {
+            // `d` is an instance index, and `draws` is indexed by instance
+            // index. A `None` is an instance with no pass; an out-of-range index
+            // would be a binning built against a different plan.
+            let Some(Some(rec)) = self.draws.get(d as usize) else {
                 continue;
             };
             let interior = flags.get(k).copied() == Some(CLASS_INTERIOR);
@@ -1054,7 +1152,12 @@ mod tests {
                 for py in (ty * tile)..((ty * tile + tile).min(cfg.viewport.height)) {
                     let mut acc = vec![bg; w];
                     for (d, rec) in job.draws.iter().enumerate() {
-                        let inst = &job.plan.shapes().instances()[instance_of(job, d)];
+                        // The draw list is index-aligned with the instance list,
+                        // so the enumeration index IS the instance index — which
+                        // is exactly the property the engine relies on and this
+                        // reference therefore must not paper over.
+                        let Some(rec) = rec.as_ref() else { continue };
+                        let inst = &job.plan.shapes().instances()[d];
                         let interior = covers_tile(job.plan, inst, cfg.map, rect);
                         let mut fill = |acc: &mut Vec<PremulRgba>| {
                             if !rec.draws_fill {
@@ -1128,19 +1231,35 @@ mod tests {
         buffer
     }
 
-    /// `FrameJob` drops instances with no visible pass, so its draw index is not
-    /// the instance index; recover it by matching the shape and translation.
-    fn instance_of(job: &FrameJob<'_>, draw: usize) -> usize {
-        let rec = &job.draws[draw];
-        job.plan
-            .shapes()
-            .instances()
-            .iter()
-            .position(|i| {
-                i.shape == rec.shape
-                    && crate::fill::instance_translation(i, job.config.map) == rec.translate
-            })
-            .expect("every draw came from an instance")
+    #[test]
+    fn the_draw_list_is_index_aligned_with_the_instance_list() {
+        // Stated as its own assertion because it is a *representation* invariant
+        // the whole tile loop rests on, and because the first version of this
+        // module compacted the list and was wrong for it.
+        let mut stage = Stage::new();
+        let ghost = stage.add(vmob(
+            &ring(40.0, 40.0, 10.0, 8, true),
+            [1.0, 1.0, 1.0, 0.0],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(ghost).expect("live");
+        let solid = stage.add(vmob(
+            &ring(70.0, 40.0, 10.0, 8, true),
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(solid).expect("live");
+
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        assert_eq!(job.draws.len(), plan.shapes().instances().len());
+        assert_eq!(job.draws.len(), 2);
+        assert!(job.draws[0].is_none(), "the ghost must hold its slot");
+        assert!(job.draws[1].is_some());
+        assert_eq!(job.draw_count(), 1, "and must not be counted as a draw");
     }
 
     #[test]
@@ -1173,6 +1292,60 @@ mod tests {
                 one.as_bytes(),
                 many.as_bytes(),
                 "the frame moved at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invisible_instance_does_not_shift_the_ones_behind_it() {
+        // Binning's command lists hold **instance** indices, so anything the
+        // engine indexes with one has to be aligned with the instance list. An
+        // instance with no visible pass — zero fill alpha and zero stroke width,
+        // which `set_opacity(0)` and a bare `Group` both produce — must therefore
+        // still occupy its slot.
+        //
+        // The failure this pins is not subtle: with the draw list compacted, a
+        // scene whose first object is invisible renders its second object's
+        // geometry in its third object's colour, and drops the last one
+        // entirely. Every corpus frame happened to have a visible pass on every
+        // instance, which is exactly why a scene that does not is the test.
+        let build = |with_ghost: bool| {
+            let mut stage = Stage::new();
+            if with_ghost {
+                // Fully transparent fill, zero stroke: composites as the identity.
+                let ghost = stage.add(vmob(
+                    &ring(56.0, 56.0, 30.0, 8, true),
+                    [1.0, 1.0, 1.0, 0.0],
+                    [0.0; 4],
+                    0.0,
+                ));
+                stage.add_to_scene(ghost).expect("live");
+            }
+            for (cx, colour) in [
+                (30.0, [1.0f32, 0.0, 0.0, 1.0]),
+                (60.0, [0.0, 0.0, 1.0, 1.0]),
+                (90.0, [0.0, 1.0, 0.0, 1.0]),
+            ] {
+                let m = stage.add(vmob(&ring(cx, 40.0, 12.0, 8, true), colour, [0.0; 4], 0.0));
+                stage.add_to_scene(m).expect("live");
+            }
+            let cfg = config();
+            let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+            FrameJob::new(&plan, &mono, &binning, cfg)
+                .render(1)
+                .expect("render")
+        };
+        let without = build(false);
+        let with = build(true);
+        // The ghost draws nothing, so adding it cannot change one pixel.
+        assert_frames_equal(&with, &without, "an invisible instance changed the frame");
+        // And the three discs must actually be their own colours, which is what
+        // says the alignment is right rather than uniformly wrong.
+        for (cx, expect) in [(30u32, 0usize), (60, 2), (90, 1)] {
+            let px = read_px(&with, cx, 40);
+            assert!(
+                px[expect] > 0.9,
+                "the disc at x={cx} is not its own colour: {px:?}"
             );
         }
     }
@@ -1254,44 +1427,78 @@ mod tests {
     }
 
     #[test]
-    fn interning_order_does_not_move_a_pixel() {
-        // ADR-0013's pinning, as an experiment rather than an assurance. Two
-        // scenes with identical painter order but different *interning* order —
-        // the shape and style table indices differ — must render the same bytes,
-        // because the engine walks instances in painter order and each shape's
-        // segments in the outline's own order. Neither is a property of the sync.
-        let build = |reversed: bool| {
-            let mut stage = Stage::new();
-            let a = vmob(
-                &ring(30.0, 30.0, 14.0, 8, true),
-                [1.0, 0.0, 0.0, 0.8],
+    fn a_retained_plan_and_a_fresh_one_render_the_same_frame() {
+        // ADR-0013's pinning, as an experiment rather than an assurance.
+        //
+        // The experiment has to make the interned indices actually diverge, and
+        // the obvious way does not: `RenderPlan::sync` walks the draw plan in
+        // painter order and interns as it goes, so on a *fresh* plan the
+        // interning order IS painter order and nothing varies. Indices diverge
+        // when a plan is **retained** and an object is added behind ones already
+        // compiled — the newcomer draws first and interns last. That is also the
+        // normal path, so it is the one worth pinning.
+        let scene = |stage: &mut Stage| {
+            for (cx, colour) in [
+                (34.0, [1.0f32, 0.0, 0.0, 0.8]),
+                (60.0, [0.0, 0.0, 1.0, 0.6]),
+            ] {
+                let h = stage.add(vmob(&ring(cx, 40.0, 15.0, 8, true), colour, [0.0; 4], 0.0));
+                stage.add_to_scene(h).expect("live");
+            }
+        };
+        let newcomer = |stage: &mut Stage| {
+            let h = stage.add(vmob(
+                &ring(46.0, 62.0, 19.0, 8, true),
+                [0.0, 1.0, 0.0, 0.7],
                 [0.0; 4],
                 0.0,
-            );
-            let b = vmob(
-                &ring(50.0, 40.0, 18.0, 8, true),
-                [0.0, 0.0, 1.0, 0.6],
-                [0.0; 4],
-                0.0,
-            );
-            // Creation order decides interning order; z_index decides painter
-            // order. Setting them against each other is the whole experiment.
-            let (first, second) = if reversed { (b, a) } else { (a, b) };
-            let h1 = stage.add(first);
-            let h2 = stage.add(second);
-            stage.set_z_index(h1, if reversed { 1 } else { 0 }, false);
-            stage.set_z_index(h2, if reversed { 0 } else { 1 }, false);
-            stage.add_to_scene(h1).expect("live");
-            stage.add_to_scene(h2).expect("live");
-            let cfg = config();
-            let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-            FrameJob::new(&plan, &mono, &binning, cfg)
+            ));
+            stage.set_z_index(h, -5, false);
+            stage.add_to_scene(h).expect("live");
+        };
+
+        let cfg = config();
+
+        // Retained: two objects compiled, then a third inserted *behind* them.
+        let mut retained_stage = Stage::new();
+        scene(&mut retained_stage);
+        let mut retained = RenderPlan::new();
+        retained.sync(&retained_stage, 0);
+        newcomer(&mut retained_stage);
+        retained.sync(&retained_stage, 0);
+
+        // Fresh: the same final scene, compiled in one pass.
+        let mut fresh_stage = Stage::new();
+        scene(&mut fresh_stage);
+        newcomer(&mut fresh_stage);
+        let mut fresh = RenderPlan::new();
+        fresh.sync(&fresh_stage, 0);
+
+        // The precondition, asserted rather than assumed: the two plans really
+        // do assign different table indices to the same painter position. Without
+        // this the test could pass by comparing a scene with itself.
+        let idx = |p: &RenderPlan| -> Vec<u32> {
+            p.shapes().instances().iter().map(|i| i.shape).collect()
+        };
+        assert_eq!(idx(&retained).len(), 3);
+        assert_ne!(
+            idx(&retained),
+            idx(&fresh),
+            "the interning orders did not diverge, so this proves nothing"
+        );
+
+        let render = |plan: &RenderPlan| {
+            let mono = MonoTable::build(plan, cfg.map);
+            let binning = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map);
+            FrameJob::new(plan, &mono, &binning, cfg)
                 .render(1)
                 .expect("render")
-                .as_bytes()
-                .to_vec()
         };
-        assert_eq!(build(false), build(true));
+        assert_frames_equal(
+            &render(&retained),
+            &render(&fresh),
+            "the interning order reached a pixel",
+        );
     }
 
     #[test]
@@ -1551,6 +1758,29 @@ mod tests {
             FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba16F, 8, 8).expect("layout"));
         assert!(matches!(
             job.render_into(1, &mut wrong_size),
+            Err(FrameError::DimensionMismatch)
+        ));
+
+        // A binning built for a different viewport is the dangerous one: every
+        // tile index would name the wrong tile and the frame would be quietly
+        // wrong rather than loudly absent.
+        let (other_plan, other_mono, mismatched) = derive(
+            &stage,
+            FrameConfig::new(
+                Viewport {
+                    width: 64,
+                    height: 64,
+                },
+                cfg.map,
+                cfg.background,
+            ),
+            default_tiling(),
+        );
+        let _ = (&other_plan, &other_mono);
+        let confused = FrameJob::new(&plan, &mono, &mismatched, cfg);
+        let mut dst = FrameBuffer::new(cfg.layout().expect("layout"));
+        assert!(matches!(
+            confused.render_into(1, &mut dst),
             Err(FrameError::DimensionMismatch)
         ));
     }

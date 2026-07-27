@@ -102,11 +102,12 @@ mean shipping a promise nobody measured.
 
 **Re-measured on the real engine, 2026-07-26 (fm-ig3).** G0-6's evidence was one
 frame from a spike that is not a workspace member. The certified CPU engine's own
-corpus — three frames carrying gradient fills, a winding hole, all four joint
-settings including two miter-limit escapes, round caps at three widths, an
-arc-length taper, both hinted fill routes, an inner border, a backstroke and a
-sub-AA hairline — is locked as **one** `Scope::Certified` lock and passes on all
-three legs:
+corpus — three frames carrying gradient fills, a winding hole, a self-intersecting
+pentagram whose centre fills under the nonzero rule, all four joint settings
+including two miter-limit escapes, round caps at three widths, an arc-length
+taper, both hinted fill routes and the unhinted general path, an inner border, a
+backstroke and a sub-AA hairline — is locked as **one** `Scope::Certified` lock
+and passes on all three legs:
 
 | Platform | libc | Execution | Result |
 |---|---|---|---|

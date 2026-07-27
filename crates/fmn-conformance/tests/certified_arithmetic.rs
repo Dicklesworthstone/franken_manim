@@ -135,37 +135,89 @@ fn certified_roots() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Strip a trailing `//` comment.
+/// Strip a trailing `//` comment, honouring string literals.
 ///
 /// A guard that reads comments flags its own documentation: `fill.rs` explains
 /// why the disc antiderivative uses `atan2` "because `f64::asin` defers to the
 /// platform's libm", and `distance.rs` says the same about `cbrt`. Both
 /// sentences are the *reason this file exists* and neither is a call.
+///
+/// The string-literal handling is not fussiness. A naive `find("//")` truncates
+/// at the first `//` anywhere on the line, so one URL in a string would silently
+/// blind the rest of that line — and a guard's false *negative* is the failure
+/// that matters, because it reads as a pass.
 fn code_of(line: &str) -> &str {
-    match line.find("//") {
-        Some(i) => &line[..i],
-        None => line,
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            _ if escaped => escaped = false,
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'/' if !in_string && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                return &line[..i];
+            }
+            _ => {}
+        }
+        i += 1;
     }
+    line
 }
 
-/// Scan one file's **non-test** region for `needles`.
+/// Scan one file's **non-test** region for `needles`, returning the lines read.
 ///
-/// The region ends at the first `#[cfg(test)]`, which is the house layout: an
-/// inline test module is the last thing in a file. Test code is excluded on
-/// purpose — a test computing an expected value with `f64::sin` is comparing
-/// against the platform, which is exactly what a test should be free to do.
+/// Test code is excluded on purpose: a test computing an expected value with
+/// `f64::sin` is comparing against the platform, which is exactly what a test
+/// should be free to do.
+///
+/// Excluding it correctly took two attempts, and the first one is worth
+/// recording because it failed *silently*. Stopping at the first `#[cfg(test)]`
+/// assumes an inline test module is the last thing in a file — usually true, and
+/// false in `fmn-geom/src/bezier.rs`, whose line 6 is a `#[cfg(test)] use`
+/// bringing in a helper. That single line hid the remaining 173 lines of
+/// production geometry from the sweep, and the sweep reported clean.
+///
+/// So the attribute now skips **the item it introduces** and nothing more: a
+/// `use`/statement form runs to its `;`, and a block form (`mod`, `fn`, `impl`)
+/// runs until its braces balance.
 fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Offence>) -> usize {
     let Ok(text) = std::fs::read_to_string(path) else {
         return 0;
     };
     let mut scanned = 0;
+    let mut skip_depth: Option<i32> = None;
+    let mut skip_started = false;
+
     for (i, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("#[cfg(test)]") {
-            break;
-        }
-        scanned += 1;
         let code = code_of(line);
+
+        // Inside a `#[cfg(test)]` item: consume it, then resume.
+        if let Some(depth) = skip_depth.as_mut() {
+            let opens = code.matches('{').count() as i32;
+            let closes = code.matches('}').count() as i32;
+            if opens > 0 {
+                skip_started = true;
+            }
+            *depth += opens - closes;
+            let ends_block = skip_started && *depth <= 0;
+            let ends_statement = !skip_started && code.trim_end().ends_with(';');
+            if ends_block || ends_statement {
+                skip_depth = None;
+                skip_started = false;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("#[cfg(test)]") {
+            skip_depth = Some(0);
+            skip_started = false;
+            continue;
+        }
+
+        scanned += 1;
         for (needle, name) in needles {
             if code.contains(needle.as_str()) {
                 out.push(Offence {
@@ -226,9 +278,12 @@ fn sweep(needles: &[(String, String)]) -> (Vec<Offence>, usize) {
 /// The floor the sweep must clear before a clean result means anything.
 ///
 /// A scanner that stops finding files reports zero offences and looks like a
-/// pass. The workspace's certified crates are far larger than this; the number
-/// is a tripwire for a broken walk, not a coverage target.
-const MIN_SCANNED_LINES: usize = 20_000;
+/// pass, so a clean sweep is only evidence if the sweep was large. The certified
+/// crates read ~47 000 lines today; the floor sits close enough under that to
+/// catch a walk that lost a crate or a `#[cfg(test)]` skip that swallowed a file,
+/// and far enough under it that ordinary churn never trips it. It is a tripwire,
+/// not a coverage target — raise it when it stops being one.
+const MIN_SCANNED_LINES: usize = 40_000;
 
 #[test]
 fn every_certified_transcendental_routes_through_fmn_dmath() {
@@ -283,6 +338,8 @@ fn the_guard_notices_what_it_claims_to_notice() {
     // answer is known. Every form that appeared in the real sweep is here,
     // including the two that must NOT be flagged.
     let sample = "\
+#[cfg(test)]
+use crate::helper;
 let a = x.sin();
 let b = f64::cos(y);
 let c = z.powf(2.4);
@@ -295,6 +352,11 @@ let i = fmn_dmath::sin(v);
 // this comment mentions .sin() and f64::cbrt and must not count
 /// nor must this doc comment's `.exp()`
 let j = k.to_radians();
+let url = \"https://example.invalid/a\"; let leak = q.tanh();
+#[cfg(test)]
+mod tests {
+    fn helper() { let hidden = z.acos(); }
+}
 ";
     let dir = std::env::temp_dir().join(format!(
         "fmn-guard-selftest-{}-{}",
@@ -310,15 +372,22 @@ let j = k.to_radians();
     let mut names: Vec<&str> = hits.iter().map(|o| o.needle.as_str()).collect();
     names.sort_unstable();
     names.dedup();
-    // `f64::cos(y)` is the path form and contains no `.cos(`, so it is reported
-    // once under its own name rather than twice — which is the distinction that
-    // makes a failure message point at the right line.
+    // Four claims in one comparison:
+    //  * the method and path forms are both caught, and reported under distinct
+    //    names — `f64::cos(y)` contains no `.cos(`, so it appears once, which is
+    //    what makes a failure message point at the right line;
+    //  * comments, `sqrt`, `powi`, `to_radians` and a qualified `fmn_dmath::`
+    //    call are all legal and must not appear;
+    //  * `tanh` IS caught even though a `//`-bearing string literal precedes it
+    //    on the same line — the false-negative class `code_of` now closes;
+    //  * `acos` is NOT caught, because it sits inside the `#[cfg(test)] mod`,
+    //    while everything after the `#[cfg(test)] use` on line 1 still is —
+    //    the coverage hole `bezier.rs` exposed.
     assert_eq!(
         names,
-        ["atan2", "cbrt", "f64::cos", "powf", "sin"],
+        ["atan2", "cbrt", "f64::cos", "powf", "sin", "tanh"],
         "the transcendental needles do not catch what they must, or catch what \
-         they must not: comments, `sqrt`, `powi`, `to_radians`, and a qualified \
-         `fmn_dmath::` call are all legal"
+         they must not"
     );
 
     let mut fma = Vec::new();

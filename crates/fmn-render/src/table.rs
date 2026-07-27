@@ -239,7 +239,8 @@ impl StyleTable {
 pub struct Shape {
     /// The content address of the object-space points.
     pub digest: Digest,
-    /// The segment range this shape owns in the [`SegmentTable`].
+    /// The segment range this shape owns in [`crate::plan::RenderPlan::segments`]
+    /// — §10.8's `SegmentTable`, which is one flat table for the whole scene.
     pub first_segment: u32,
     /// How many segments.
     pub segment_count: u32,
@@ -428,8 +429,35 @@ pub fn compile_shape(
     first_segment: u32,
 ) -> (Shape, Vec<Segment>) {
     let arc_length = ArcLengthTable::for_path(path);
-    let total = arc_length.total();
     let lengths = arc_length.curve_lengths();
+
+    // A subpath break is **a handle sitting on top of the previous anchor**,
+    // which is fmn-geom's convention and the Reference's — not a zero-length
+    // curve. The two coincide only when the next subpath happens to begin where
+    // the last one ended, so testing length finds an annulus whose rings are
+    // concentric and misses every glyph counter. Asking `QuadPath` rather than
+    // re-deriving the predicate also keeps the Reference's 1e-4 disambiguation
+    // tolerance in the one place that owns it.
+    let breaks: std::collections::HashSet<usize> = path
+        .subpath_end_indices()
+        .into_iter()
+        // The last entry is the path's own end, not a break; it is the only one
+        // that can be an odd index, and it never names a curve start.
+        .filter(|&i| i.is_multiple_of(2) && i + 2 < path.points().len())
+        .collect();
+
+    // The ramp normalizes over the length actually drawn. A dropped break has
+    // real length, and leaving it in the denominator would stop every stroke's
+    // width and colour ramp short of its endpoint. Summing the kept curves in
+    // curve order is bit-identical to `ArcLengthTable::total()` for any path
+    // with nothing to drop, which is every single-subpath shape.
+    let mut total = 0.0f64;
+    for i in 0..path.num_curves() {
+        let len = lengths.get(i).copied().unwrap_or(0.0);
+        if len > 0.0 && !breaks.contains(&(2 * i)) {
+            total += len;
+        }
+    }
 
     let mut segments = Vec::with_capacity(path.num_curves());
     let mut subpath_starts: Vec<u32> = Vec::new();
@@ -443,11 +471,16 @@ pub fn compile_shape(
             continue;
         };
         let len = lengths.get(i).copied().unwrap_or(0.0);
-        // A null curve is fmn-geom's subpath break: zero length, and not a
-        // drawn piece of the path. It is dropped from the segment list and
-        // remembered in `subpath_starts`, because §10.2's fill closes subpaths.
-        if len <= 0.0 {
+        if breaks.contains(&(2 * i)) {
+            // Not a drawn piece: dropping it is what keeps a stroked annulus
+            // from growing a radial spoke between its two rings.
             opens_subpath = true;
+            continue;
+        }
+        if len <= 0.0 {
+            // A true null curve (`p0 == p1 == p2`) draws nothing and, per
+            // `subpath_end_indices`' own disambiguation, does not open a
+            // subpath either — a run of them is padding, not a boundary.
             continue;
         }
         if opens_subpath {
@@ -498,6 +531,7 @@ pub fn compile_shape(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_core::constants::TAU;
 
     fn style_with(width: f32) -> Style {
         Style {
@@ -671,6 +705,50 @@ mod tests {
         let a: Vec<Vec3> = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
         let b: Vec<Vec3> = vec![[0.0, -0.0, 0.0], [1.0, -0.0, 0.0], [2.0, -0.0, 0.0]];
         assert_eq!(shape_digest(&a), shape_digest(&b));
+    }
+
+    #[test]
+    fn a_subpath_that_begins_elsewhere_is_still_a_subpath() {
+        // fmn-geom signals a subpath break with **a handle sitting on top of the
+        // previous anchor** (`QuadPath::subpath_end_indices`, and the Reference's
+        // own convention). A break to a *different* location therefore has
+        // nonzero length, so testing for a zero-length curve finds only the
+        // special case where the next subpath happens to start where the last
+        // one ended.
+        //
+        // Two consequences, both visible: an annulus or a glyph counter compiles
+        // as ONE subpath, which §10.2 says makes it "fill as one ring with a
+        // chord through it"; and the break itself survives into the segment list,
+        // so a stroked annulus grows a radial spoke from its outer ring to its
+        // inner one.
+        let outer = QuadPath::arc(0.0, TAU, 1.0, [0.0, 0.0, 0.0], Some(8));
+        let inner = QuadPath::arc(0.0, -TAU, 0.4, [0.0, 0.0, 0.0], Some(8));
+        let mut ring = QuadPath::new();
+        ring.add_subpath(outer.points()).expect("outer");
+        ring.add_subpath(inner.points()).expect("inner");
+
+        // fmn-geom itself sees two subpaths; the compiler must agree with it.
+        assert_eq!(ring.subpaths().len(), 2, "the fixture is not a ring");
+
+        let (shape, segments) = compile_shape(shape_digest(ring.points()), &ring, Hint::General, 0);
+        assert_eq!(
+            shape.subpath_starts.len(),
+            2,
+            "the compiled shape lost a subpath boundary: {:?}",
+            shape.subpath_starts
+        );
+        // And the break is not a drawn piece.
+        assert_eq!(
+            segments.len(),
+            16,
+            "the subpath break survived as a drawn segment"
+        );
+        for s in &segments {
+            assert!(
+                s.p0 != s.p1 || s.p1 == s.p2,
+                "a break curve (handle on the anchor) is in the segment list"
+            );
+        }
     }
 
     #[test]

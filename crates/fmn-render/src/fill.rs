@@ -1928,6 +1928,18 @@ impl FillKernel {
             ]
         };
         let scale = map.scale.abs();
+        // A hinted kernel is a closed form for **one** region, and every hint in
+        // the vocabulary names a single closed curve. A shape with more than one
+        // subpath has a winding rule deciding what is inside it — an annulus is
+        // the obvious case — and no closed form here knows about the second loop,
+        // so a hint would fill the hole solid.
+        //
+        // No constructor tags such a shape today; this is here so that none ever
+        // can. §10.8's rule is that correctness never depends on a hint, and the
+        // way to mean that is to make declining one cost nothing.
+        if shape.subpath_starts.len() > 1 {
+            return FillKernel::General;
+        }
         match shape.hint {
             crate::hint::Hint::Rect {
                 center,
@@ -3604,6 +3616,70 @@ mod tests {
                 radius * px_per_unit
             );
         }
+    }
+
+    #[test]
+    fn a_hint_on_a_multi_subpath_shape_is_declined() {
+        // An annulus is a disc with a counter-wound hole, and the disc kernel
+        // has no idea the hole exists — it would fill it solid. No constructor
+        // tags such a shape today; this is what makes that a property of the
+        // renderer rather than of everyone remembering.
+        // The Reference's default Dot radius, which the budget admits — so the
+        // control below is a kernel that IS taken, and the ring's decline can
+        // only be about its second subpath.
+        let radius = 0.08;
+        let outer = QuadPath::arc(
+            0.0,
+            std::f64::consts::TAU,
+            radius,
+            [0.0, 0.0, 0.0],
+            Some(16),
+        );
+        let inner = QuadPath::arc(
+            0.0,
+            -std::f64::consts::TAU,
+            0.5 * radius,
+            [0.0, 0.0, 0.0],
+            Some(16),
+        );
+        // Built the way `fmn_library::Annulus` builds one: two `add_subpath`
+        // calls on a fresh path, so the null-curve breaks `compile_shape` reads
+        // are where they would really be.
+        let mut ring = QuadPath::new();
+        ring.add_subpath(outer.points()).expect("a valid subpath");
+        ring.add_subpath(inner.points()).expect("a valid subpath");
+
+        let hint = Hint::Circle {
+            center: [0.0, 0.0, 0.0],
+            radius,
+        };
+        let map = ScreenMap {
+            scale: 135.0,
+            origin: [0.0, 0.0],
+        };
+        // The same hint on the same outer circle alone IS admitted, so the
+        // decline is about the second subpath and not about the radius.
+        let (single, single_segs) = shaped(&outer, hint);
+        assert_eq!(single.subpath_starts.len(), 1);
+        assert!(matches!(
+            FillKernel::select(&single, &single_segs, map, [0.0, 0.0]),
+            FillKernel::Disc { .. }
+        ));
+
+        let (shape, segs) = shaped(&ring, hint);
+        assert!(
+            shape.subpath_starts.len() > 1,
+            "the fixture is not a ring: starts={:?} pts={} curves={} segs={}",
+            shape.subpath_starts,
+            ring.points().len(),
+            ring.num_curves(),
+            segs.len()
+        );
+        assert_eq!(
+            FillKernel::select(&shape, &segs, map, [0.0, 0.0]),
+            FillKernel::General,
+            "a hinted kernel would have filled the hole"
+        );
     }
 
     #[test]

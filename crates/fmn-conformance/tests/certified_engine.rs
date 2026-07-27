@@ -28,7 +28,8 @@
 //!   `fmn_render::stroke`; a golden is a rasterized frame, and there was no
 //!   engine to rasterize one, so fm-oac closed by handing the item here.
 //! - **`fills.v1`** — the same for §10.2: flat and gradient fills, a winding
-//!   hole, the hinted disc and rectangle routes, and the inner border.
+//!   hole, the hinted disc and rectangle routes, the **unhinted** general path,
+//!   a self-intersecting pentagram, and the inner border.
 //! - **`composite.v1`** — the frame that stands where G0-6's does. It carries
 //!   what fm-zn9 named — gradient fills, a winding hole, joins, a tapered
 //!   stroke, a sub-AA hairline, alpha compositing throughout — in the engine's
@@ -148,13 +149,15 @@ fn caps_and_joins() -> Stage {
         JointType::Bevel,
         JointType::Miter,
     ];
-    // Three corner severities, given as the arms' half-separation over a fixed
-    // drop of 0.34 — deliberately as offsets rather than angles, so the corpus
-    // needs no trigonometry and therefore cannot smuggle a platform libm into a
-    // certified golden. The resulting miter lengths are 1/sin(θ/2) ≈ 1.41, 3.25
-    // and 17.1 half-widths, which straddles `MITER_LIMIT = √10 ≈ 3.1623`: the
-    // first miters, the other two escape to a bevel. A corpus without that third
-    // column would lock the limit's absence rather than its behaviour.
+    // Three corner severities, given as the arms' half-separation over the
+    // triangle's 0.4 vertical extent — deliberately as offsets rather than
+    // angles, so the corpus needs no trigonometry and therefore cannot smuggle a
+    // platform libm into a certified golden. The apex half-angles are
+    // `atan(dx / 0.4)` = 40.4°, 15.4° and 2.9°, so the miter lengths `1/sin(θ/2)`
+    // are **1.54, 3.77 and 20.02** half-widths. That straddles
+    // `MITER_LIMIT = √10 ≈ 3.1623`: the first miters and the other two escape to
+    // a bevel. A corpus without that third column would lock the limit's absence
+    // rather than its behaviour.
     let severities = [0.34_f64, 0.11, 0.02];
     // The shapes are closed triangles rather than open Vs, which is more
     // coverage and not less: a closed outline has a **wrap join** at the point
@@ -173,7 +176,12 @@ fn caps_and_joins() -> Stage {
                 ])
                 .color(WHITE),
             );
-            stage.set_stroke(m, Some(WHITE), Some(6.0), Some(1.0), None, true);
+            // 14 width units is 8.4 px at this scale, so a miter extension of up
+            // to `MITER_LIMIT` half-widths reaches ~13 px past the corner — a
+            // difference a reviewer can see and a golden can lose. At the 6
+            // this fixture started with, all four settings sat inside the AA
+            // band and the corpus locked a picture the joint could not move.
+            stage.set_stroke(m, Some(WHITE), Some(14.0), Some(1.0), None, true);
             stage.set_fill(m, None, Some(0.0), None, true);
             stage.uniforms_mut(m).expect("live").joint_type = joint;
         }
@@ -243,6 +251,34 @@ fn fills() -> Stage {
     stage.shift(r, [1.15, -0.85, 0.0]);
     stage.set_fill(r, Some(MAROON_C), Some(1.0), Some(0.0), true);
     stage.set_stroke(r, None, Some(0.0), Some(0.0), None, true);
+
+    // A **self-intersecting** fill through the general quadratic machinery.
+    //
+    // Without this the corpus barely exercises §10.2's centrepiece: at 60 px per
+    // unit every `Circle` here is inside `HINT_BUDGET_PX`, so it takes the disc
+    // kernel, and the general path was left to the annuli alone. A pentagram is
+    // the right shape for the gap — its centre pentagon has winding **2**, so it
+    // fills under the nonzero rule and would be a hole under even-odd, which
+    // makes it a discriminator for the rule rather than merely a workout for the
+    // evaluator. §10.2 names "winding-consistent self-intersection behavior"
+    // explicitly, and this is the only fixture that can fail it.
+    //
+    // The vertices are literals rather than a trig loop, for the reason the
+    // cap/join grid gives: a certified golden must not compute its own geometry
+    // with a platform libm.
+    let star = add(
+        &mut stage,
+        Polygon::new([
+            [-1.85, 1.27, 0.0],
+            [-2.173282, 0.275041, 0.0],
+            [-1.326919, 0.889959, 0.0],
+            [-2.373081, 0.889959, 0.0],
+            [-1.526718, 0.275041, 0.0],
+        ])
+        .color(GREEN_B),
+    );
+    stage.set_fill(star, Some(GREEN_B), Some(0.85), Some(0.0), true);
+    stage.set_stroke(star, None, Some(0.0), Some(0.0), None, true);
 
     // A winding hole. It has to be **one** mobject with two counter-wound
     // subpaths — an `Annulus`, which is exactly that — because two overlapping
@@ -498,6 +534,43 @@ fn the_corpus_actually_exercises_what_it_claims() {
         .collect();
     assert_eq!(joints.len(), 4, "not every joint setting is in the corpus");
 
+    // Present in the style table is not the same as visible in the frame. If the
+    // corners were too shallow or the stroke too thin, all four settings would
+    // render inside the antialiasing band and the golden would be locking a
+    // picture no joint setting could move — a fixture that passes forever and
+    // guards nothing. So: force every joint to `Auto` (the round field the
+    // distance function already produces) and require the frame to change.
+    let all_joints = |joint: JointType| {
+        let mut s = caps_and_joins();
+        let mobs: Vec<Mob> = s.roots().to_vec();
+        for m in mobs {
+            if let Some(u) = s.uniforms_mut(m) {
+                u.joint_type = joint;
+            }
+        }
+        definition(&s)
+    };
+    assert_ne!(
+        definition(&caps_and_joins()),
+        all_joints(JointType::Auto),
+        "no joint setting reaches a pixel: the cap/join corpus guards nothing"
+    );
+
+    // ADR-0012's ruling, at the frame level: `Auto` and `NoJoint` both render the
+    // round join the distance field already produces, so `join_wedges` returns
+    // nothing for either and the two must be **byte**-identical — not similar.
+    // `fmn_render::stroke` asserts this per pixel on one corner; here it is the
+    // whole corpus, including the wrap joins of twelve closed outlines.
+    assert_eq!(
+        all_joints(JointType::Auto),
+        all_joints(JointType::NoJoint),
+        "the round settings diverged, so the join machinery is not inert for them"
+    );
+    // And the two real overrides each move the picture, in different ways.
+    assert_ne!(all_joints(JointType::Auto), all_joints(JointType::Bevel));
+    assert_ne!(all_joints(JointType::Auto), all_joints(JointType::Miter));
+    assert_ne!(all_joints(JointType::Bevel), all_joints(JointType::Miter));
+
     let mut plan = RenderPlan::new();
     plan.sync(&fills(), 0);
     assert!(
@@ -521,6 +594,19 @@ fn the_corpus_actually_exercises_what_it_claims() {
         .filter(|s| !s.hint.is_general())
         .count();
     assert!(hinted >= 2, "the hinted fill routes are not exercised");
+    // And the general machinery, which is easy to lose: at this scale every
+    // `Circle` is inside the hint budget, so without a deliberately unhinted
+    // shape the corpus would exercise §10.2's centrepiece almost not at all.
+    let general = plan
+        .shapes()
+        .shapes()
+        .iter()
+        .filter(|s| s.hint.is_general())
+        .count();
+    assert!(
+        general >= 2,
+        "the general quadratic fill is barely exercised: {general} unhinted shapes"
+    );
 
     let mut plan = RenderPlan::new();
     plan.sync(&composite(), 0);

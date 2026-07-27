@@ -408,7 +408,8 @@ impl JoinWedge {
 
 /// The join wedges a path needs for the given joint type.
 ///
-/// Empty for [`JointType::Auto`] and [`JointType::NoJoint`], both of which render
+/// Empty for [`fmn_mobject::JointType::Auto`] and
+/// [`fmn_mobject::JointType::NoJoint`], both of which render
 /// the round join the distance field already produces (ADR-0012). Empty is not a
 /// shortcut: it is what makes the round path bit-identical whether or not the
 /// join machinery exists.

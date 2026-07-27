@@ -33,8 +33,10 @@ of the sync, then a scene reached by a different route — an object added and
 removed, a mobject created earlier, a plan rebuilt rather than retained — could
 present the same picture through a differently-ordered plan and render different
 last bits. That is not a hypothetical: `RenderPlan`'s shape and style tables are
-*interned*, so their indices depend on the order in which outlines were first
-compiled, which is creation order and not draw order.
+*interned* and append-only, so an index records **when an outline was first
+compiled**, not where it draws. On a retained plan — the normal path — an object
+added behind ones already compiled draws first and interns last, so the two
+orders come apart permanently.
 
 ## Decision
 
@@ -62,9 +64,16 @@ instances (painter order) or over a shape's own contiguous slice (outline order)
 
 Two consequences follow and are asserted rather than argued:
 
-- `interning_order_does_not_move_a_pixel` builds one picture two ways — the same
-  painter order, the opposite creation order, so the shape and style indices
-  differ — and requires the frames to be byte-identical.
+- `a_retained_plan_and_a_fresh_one_render_the_same_frame` builds one picture two
+  ways and requires the frames to be byte-identical. The experiment took two
+  attempts and the first one is worth recording, because it proved nothing while
+  looking like it proved something: setting creation order against `z_index` on a
+  *fresh* plan varies neither table, since `RenderPlan::sync` walks the draw plan
+  in painter order and interns as it goes, so interning order **is** painter
+  order. The indices diverge only when a plan is **retained** and an object is
+  inserted behind ones already compiled — the newcomer draws first and interns
+  last. That is also the normal path. The test now asserts the divergence as an
+  explicit precondition before comparing a single pixel.
 - `the_frame_is_identical_at_every_thread_count` and
   `every_locked_frame_is_thread_count_invariant` cover the schedule at {1, 4, 16}.
 
