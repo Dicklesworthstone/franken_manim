@@ -15,12 +15,14 @@
 //!
 //! The one error-bounded cubic→quadratic converter is the ingress for API and
 //! smoothing cubics (fm-6cf); TrueType quadratics pass through losslessly.
-//! Still to land: path booleans (fm-8dx), the SVG document processor (fm-6nm),
-//! and isolines + ear-clip (fm-81u).
+//! [`boolean`] is the permanent certified flatten-and-clip path boolean
+//! (§7.4). Still to land: the SVG document processor (fm-6nm), and isolines +
+//! ear-clip (fm-81u).
 #![forbid(unsafe_code)]
 
 pub mod arclength;
 pub mod bezier;
+pub mod boolean;
 pub mod cubic;
 pub mod distance;
 pub mod quadpath;
@@ -32,6 +34,10 @@ mod scalar;
 mod vec;
 
 pub use arclength::{ArcLengthTable, CachedArcLength};
+pub use boolean::{
+    BooleanError, BooleanLimits, BooleanOperand, BooleanOperation, BooleanOptions, BooleanPhase,
+    BooleanResult, BooleanRoute, BooleanStats, FillRule, path_boolean, path_boolean_flattened,
+};
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
 pub use rotation::{EulerAngles, EulerSeq, Quat};
 pub use space_ops::rotation_matrix;
