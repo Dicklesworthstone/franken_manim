@@ -707,9 +707,11 @@ dependencies = [
 name = "fmn-studio"
 version = "0.1.0"
 dependencies = [
+ "fmn-cache",
  "fmn-codec",
  "fmn-core",
  "fmn-frame",
+ "fmn-hash",
  "fmn-platform",
  "fmn-render",
  "fmn-scene",

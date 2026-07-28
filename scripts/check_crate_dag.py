@@ -41,7 +41,19 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},
     "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex"},  # dmath: tip/arc trigonometry (ADR-0014)
     "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash"},  # hash: journal serialization + digests (§13.4, fm-y7u)
-    "fmn-studio": {"fmn-core", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-render", "fmn-scene"},
+    # hash: canonical supervisor/worker IPC; cache: supervisor-owned
+    # checkpoints and journals survive scene-worker replacement (§13.3,
+    # D-14, fm-39s).
+    "fmn-studio": {
+        "fmn-core",
+        "fmn-hash",
+        "fmn-platform",
+        "fmn-frame",
+        "fmn-codec",
+        "fmn-cache",
+        "fmn-render",
+        "fmn-scene",
+    },
     "fmn-output": {"fmn-core", "fmn-hash", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-cache"},
     "fmn-runtime": {"fmn-core", "fmn-platform"},
     "fmn-cli": {"fmn-core", "fmn-config", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
