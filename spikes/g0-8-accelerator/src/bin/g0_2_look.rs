@@ -14,9 +14,15 @@
 //! that evidence — the part a human reviewer signs off on (R2).
 //!
 //! ```text
-//! cargo run --release --bin g0_2_look [-- <output-dir>]
+//! cargo run --release --bin g0_2_look [-- <output-dir> [--lighting-only]]
 //! ```
 
+use fmn_core::color::Srgb;
+use fmn_frame::{FrameBuffer, PixelFormat};
+use fmn_render::{
+    CameraConfig, CameraFrame, SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDCamera, ThreeDDraw,
+    ThreeDJob, Tiling,
+};
 use fmn_spike_accelerator::cpu::{self, Surface};
 use fmn_spike_accelerator::scene::{self, CalibrationPanel};
 
@@ -28,7 +34,9 @@ const HEIGHT: u32 = 1080;
 const TILE: u32 = 16;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
+    let mut args = std::env::args().skip(1);
+    let dir = args.next().unwrap_or_else(|| ".".into());
+    let lighting_only = args.any(|argument| argument == "--lighting-only");
     let dir = std::path::Path::new(&dir);
     std::fs::create_dir_all(dir)?;
 
@@ -36,24 +44,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {WIDTH}x{HEIGHT}, tile {TILE}, aa_width 1.5 px (VMobject default)");
     println!();
 
-    for panel in CalibrationPanel::ALL {
-        let ir = scene::calibration(panel, WIDTH, HEIGHT, TILE);
-        let surface = cpu::render(&ir);
-        let name = format!("fmn-{}.png", panel.id().replace('_', "-"));
-        write_png(dir, &name, &surface)?;
-        println!(
-            "    {:<20} paths {:>3}  segments {:>5}  styles {:>2}  {}",
-            panel.id(),
-            ir.paths.len(),
-            ir.segments.len(),
-            ir.styles.len(),
-            describe(&surface),
-        );
+    if !lighting_only {
+        for panel in CalibrationPanel::ALL {
+            let ir = scene::calibration(panel, WIDTH, HEIGHT, TILE);
+            let surface = cpu::render(&ir);
+            let name = format!("fmn-{}.png", panel.id().replace('_', "-"));
+            write_png(dir, &name, &surface)?;
+            println!(
+                "    {:<20} paths {:>3}  segments {:>5}  styles {:>2}  {}",
+                panel.id(),
+                ir.paths.len(),
+                ir.segments.len(),
+                ir.styles.len(),
+                describe(&surface),
+            );
+        }
     }
+
+    let lighting = render_lighting_3d()?;
+    write_frame_png(dir, "fmn-lighting-3d.png", &lighting)?;
+    println!(
+        "    {:<20} fixed UV sphere  {}",
+        "lighting_3d",
+        describe_frame(&lighting),
+    );
 
     println!();
     println!("Compare against gallery/reference_captures/<id>.png (same pixel grid).");
     Ok(())
+}
+
+fn render_lighting_3d() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
+    let background = Srgb::from_hex("#333333")?.to_linear(1.0);
+    let mut frame = CameraFrame::default();
+    frame.set_euler_angles(
+        Some(20.0_f64.to_radians()),
+        Some(70.0_f64.to_radians()),
+        Some(0.0),
+    )?;
+    let camera = ThreeDCamera::new(CameraConfig {
+        resolution: (WIDTH, HEIGHT),
+        background,
+        samples: 4,
+        frame,
+        ..CameraConfig::default()
+    })?;
+    let color = Srgb::from_hex("#1C758A")?.to_linear(1.0);
+    let resolution = (101, 51);
+    let mut vertices = Vec::with_capacity((resolution.0 * resolution.1) as usize);
+    for u_index in 0..resolution.0 {
+        let u = std::f64::consts::TAU * f64::from(u_index) / f64::from(resolution.0 - 1);
+        for v_index in 0..resolution.1 {
+            let v = std::f64::consts::PI * f64::from(v_index) / f64::from(resolution.1 - 1);
+            let radial = fmn_dmath::sin(v);
+            let normal = [
+                fmn_dmath::cos(u) * radial,
+                fmn_dmath::sin(u) * radial,
+                -fmn_dmath::cos(v),
+            ];
+            vertices.push(SurfaceVertex::colored(
+                [2.0 * normal[0], 2.0 * normal[1], 2.0 * normal[2]],
+                normal,
+                color,
+            ));
+        }
+    }
+    let mesh = SurfaceMesh::from_uv_grid(vertices, resolution)?;
+    let draw = SurfaceDraw::new(&mesh);
+    let draws = [ThreeDDraw::Surface(draw)];
+    Ok(ThreeDJob::new(&camera, &draws, Tiling::default())?.render(4)?)
 }
 
 /// A one-line liveness summary, so a blank render cannot be reported as a
@@ -81,6 +140,29 @@ fn describe(s: &Surface) -> String {
     )
 }
 
+fn describe_frame(frame: &FrameBuffer) -> String {
+    let rgba = frame_to_srgb8(frame);
+    let bg = &rgba[..4];
+    let moved = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| {
+            pixel
+                .iter()
+                .zip(bg)
+                .take(3)
+                .any(|(component, background)| component.abs_diff(*background) > 1)
+        })
+        .count();
+    let total = u64::from(frame.layout().width()) * u64::from(frame.layout().height());
+    format!(
+        "non-background {:.2}%  sha256 {}",
+        100.0 * moved as f64 / total as f64,
+        fmn_hash::sha256(frame.as_bytes()),
+    )
+}
+
 fn write_png(
     dir: &std::path::Path,
     name: &str,
@@ -96,4 +178,38 @@ fn write_png(
     std::fs::write(&path, bytes)?;
     println!("      wrote {}", path.display());
     Ok(())
+}
+
+fn write_frame_png(
+    dir: &std::path::Path,
+    name: &str,
+    frame: &FrameBuffer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if frame.layout().format() != PixelFormat::Rgba16F {
+        return Err("G0-2 lighting renderer did not return Rgba16F".into());
+    }
+    let path = dir.join(name);
+    let bytes = fmn_codec::png::encode_rgba8(
+        frame.layout().width(),
+        frame.layout().height(),
+        &frame_to_srgb8(frame),
+        fmn_codec::deflate::CompressionLevel::Default,
+    );
+    std::fs::write(&path, bytes)?;
+    println!("      wrote {}", path.display());
+    Ok(())
+}
+
+fn frame_to_srgb8(frame: &FrameBuffer) -> Vec<u8> {
+    let tables = fmn_frame::transfer::tables();
+    let mut rgba = Vec::with_capacity(frame.as_bytes().len() / 2);
+    for pixel in frame.as_bytes().as_chunks::<8>().0 {
+        for component in 0..3 {
+            let bits = u16::from_le_bytes([pixel[component * 2], pixel[component * 2 + 1]]);
+            rgba.push(tables.srgb8_from_f16(bits));
+        }
+        let alpha = u16::from_le_bytes([pixel[6], pixel[7]]);
+        rgba.push(tables.linear8_from_f16(alpha));
+    }
+    rgba
 }

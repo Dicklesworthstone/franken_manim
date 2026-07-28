@@ -31,10 +31,13 @@ use fmn_mobject::{
     Mob, Mobject, PersistError, SceneState, Stage, StageError, UpdaterFn, UpdaterId,
     UpdaterKindTag, UpdaterManifest,
 };
+use fmn_render::{
+    CameraConfig as RenderCameraConfig, CameraError, CameraFrame, THREE_D_CAMERA_SAMPLES,
+    ThreeDCamera,
+};
 
 const DEFAULT_FPS: u32 = 30;
 const DEFAULT_WAIT_TIME: f64 = 1.0;
-const THREE_D_SAMPLES: u8 = 4;
 const THREE_D_THETA_DEGREES: f64 = -30.0;
 const THREE_D_PHI_DEGREES: f64 = 70.0;
 
@@ -203,6 +206,8 @@ pub enum SceneError {
     Stage(StageError),
     /// Choreo lifecycle/clock failure.
     Animation(AnimError),
+    /// Lumen camera construction failure.
+    Camera(CameraError),
     /// Durable-state decode failure.
     Persist(PersistError),
     /// Durable-state encode failure.
@@ -224,6 +229,7 @@ impl fmt::Display for SceneError {
             ),
             Self::Stage(error) => write!(f, "scene stage failed: {error}"),
             Self::Animation(error) => write!(f, "scene animation failed: {error}"),
+            Self::Camera(error) => write!(f, "scene camera failed: {error}"),
             Self::Persist(error) => write!(f, "scene-state decode failed: {error}"),
             Self::Serialize(error) => write!(f, "scene-state encode failed: {error}"),
             Self::Integration(error) => error.fmt(f),
@@ -237,6 +243,7 @@ impl std::error::Error for SceneError {
         match self {
             Self::Stage(error) => Some(error),
             Self::Animation(error) => Some(error),
+            Self::Camera(error) => Some(error),
             Self::Persist(error) => Some(error),
             Self::Serialize(error) => Some(error),
             Self::Integration(error) => Some(error),
@@ -258,6 +265,12 @@ impl From<StageError> for SceneError {
 impl From<AnimError> for SceneError {
     fn from(error: AnimError) -> Self {
         Self::Animation(error)
+    }
+}
+
+impl From<CameraError> for SceneError {
+    fn from(error: CameraError) -> Self {
+        Self::Camera(error)
     }
 }
 
@@ -1321,7 +1334,7 @@ impl ThreeDScene {
             theta,
             phi,
             gamma,
-            samples: THREE_D_SAMPLES,
+            samples: THREE_D_CAMERA_SAMPLES,
             always_depth_test: true,
         })
     }
@@ -1368,6 +1381,55 @@ impl ThreeDScene {
             phi: self.scene.stage.tracker_value(self.phi).unwrap_or(0.0),
             gamma: self.scene.stage.tracker_value(self.gamma).unwrap_or(0.0),
         }
+    }
+
+    /// Materialize the tracker-backed orientation as a Lumen camera frame.
+    ///
+    /// Trackers remain the authoritative snapshotted scene state. The returned
+    /// value is an immutable capture input, so render workers never read the
+    /// live Stage while projecting.
+    pub fn camera_frame(&self) -> Result<CameraFrame, SceneError> {
+        let orientation = self.orientation();
+        let mut frame = CameraFrame::default();
+        frame.set_euler_angles(
+            Some(orientation.theta),
+            Some(orientation.phi),
+            Some(orientation.gamma),
+        )?;
+        Ok(frame)
+    }
+
+    /// Default Lumen capture configuration for this ThreeDScene.
+    ///
+    /// This is the unambiguous path by which ThreeDScene's four-sample default
+    /// feeds ThreeDCamera. Callers may then edit the returned value, including
+    /// setting `samples = 0` to disable edge supersampling explicitly.
+    pub fn three_d_camera_config(&self) -> Result<RenderCameraConfig, SceneError> {
+        Ok(RenderCameraConfig {
+            samples: self.samples,
+            frame: self.camera_frame()?,
+            ..RenderCameraConfig::default()
+        })
+    }
+
+    /// Build a ThreeDCamera from caller capture configuration and current
+    /// tracker-backed orientation.
+    ///
+    /// Resolution, background, field of view, frame shape/center, and movable
+    /// light remain caller-configurable. `samples = 0` remains an explicit
+    /// request; use [`ThreeDScene::three_d_camera_config`] when the scene's kept
+    /// four-sample default is wanted.
+    pub fn three_d_camera(
+        &self,
+        mut config: RenderCameraConfig,
+    ) -> Result<ThreeDCamera, SceneError> {
+        let orientation = self.orientation();
+        config.frame.set_euler_angles(
+            Some(orientation.theta),
+            Some(orientation.phi),
+            Some(orientation.gamma),
+        )?;
+        Ok(ThreeDCamera::new(config)?)
     }
 
     /// Set all three Euler angles.

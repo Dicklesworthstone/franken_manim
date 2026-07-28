@@ -12,6 +12,7 @@ fmn-dmath.workspace = true
 fmn-geom.workspace = true
 fmn-mobject.workspace = true
 fmn-frame.workspace = true
+fmn-codec.workspace = true
 fmn-hash.workspace = true
 fmn-cache.workspace = true
 

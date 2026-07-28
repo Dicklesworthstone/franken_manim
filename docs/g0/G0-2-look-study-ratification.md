@@ -28,9 +28,10 @@ separate so they can disagree:
 Where they agree, the number is settled. Where they disagreed, the disagreement
 was the finding — see L2 and L5.
 
-**The rendered evidence.** `docs/g0/g0-2-renders/` holds the analytic
-prototype's four panels at the capture resolution, in the *same pixel
-coordinates* as the Reference stills, produced by
+**The rendered evidence.** `docs/g0/g0-2-renders/` holds five panels at the
+capture resolution, in the *same pixel coordinates* as the Reference stills:
+four from the analytic prototype and `lighting_3d` from Lumen's integrated 3D
+path. They are produced by
 `cargo run --release --bin g0_2_look` in `spikes/g0-8-accelerator`. The
 Reference stills stay private (§15.3); ours are our own primitives and are
 committed.
@@ -385,15 +386,26 @@ Verdicts in §16.3's vocabulary:
 | `joints_and_caps` | **different-but-fine** (Behavior-Noted) | Four different corners become one round join; no notch at any vertex, and round caps at the ends. L6. |
 | `glow` | **at-least-as-good** | Falloff character matches (L7). Registration is close, not exact — our disc reads slightly larger, since `GlowDot`'s `radius` parameter and the visible extent are not the same quantity. |
 | `gradient_fills` | **open — fm-5oi decides** | The Reference shows a hard **diagonal seam** across the square: its fill gradient is per-vertex around the outline, interpolated across the triangle fan from `base_point`, so the fan edges are Gouraud discontinuities. Ours is smooth — but ours is a *defined stand-in* (a screen-space axis), not §10.2's interior field. The real field is fm-5oi's to build, and this panel is its calibration input, not a settled result. |
+| `lighting_3d` | **at-least-as-good** | The integrated Lumen path uses the exact capture inputs: `Sphere(radius=2)`, the Reference's `(101, 51)` UV grid and parameterization, BLUE_E, and `frame.reorient(20, 70)`. Silhouette, light direction, and retained Gouraud shading coincide closely. Whole-frame normalized RMSE is **0.00212857** and normalized SSIM distortion is **0.000145104**; these are smoke alarms, not gates. |
 
-Two honest limits on this gallery. **It covers four of the six captured
-scenes** — `lighting_3d` and `text_sample` need the 3D lighting path and
-Scribe, neither of which exists; rendering a stand-in for them would compare
-nothing. And **registration is close, not pixel-exact**: our panels are placed
-from bounding boxes measured off the captures, which include stroke extent, so
-shapes can sit a few pixels off. This is an aesthetic comparison, never a
-pixel gate (D-16), and a few pixels of placement does not affect any constant
-decided above.
+The lighting panel is reproduced with:
+
+```bash
+cargo run --release \
+  --manifest-path spikes/g0-8-accelerator/Cargo.toml \
+  --bin g0_2_look -- docs/g0/g0-2-renders --lighting-only
+```
+
+Its Rgba16F framebuffer SHA-256 is
+`b36e4b44bf35c23e78b7ae3fc251c510b2bf0048e8e3b586f4fd14bc278c4f44`.
+
+Two honest limits on this gallery. **It covers five of the six captured
+scenes** — `text_sample` still needs Scribe; rendering a stand-in would compare
+nothing. And **registration is close, not pixel-exact** for the four analytic
+panels: they are placed from bounding boxes measured off the captures, which
+include stroke extent, so shapes can sit a few pixels off. This is an aesthetic
+comparison, never a pixel gate (D-16), and a few pixels of placement does not
+affect any constant decided above.
 
 ---
 

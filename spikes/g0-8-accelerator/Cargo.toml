@@ -33,6 +33,7 @@ fmn-geom = { path = "../../crates/fmn-geom" }
 fmn-hash = { path = "../../crates/fmn-hash" }
 fmn-frame = { path = "../../crates/fmn-frame" }
 fmn-codec = { path = "../../crates/fmn-codec" }
+fmn-render = { path = "../../crates/fmn-render" }
 ft-kernel-metal = { path = "../../../frankentorch/crates/ft-kernel-metal" }
 
 [lints.clippy]

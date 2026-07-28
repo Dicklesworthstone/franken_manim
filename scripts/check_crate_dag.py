@@ -36,7 +36,9 @@ EXPECTED: dict[str, set[str]] = {
     # hash: canonical Timeline serialization — the Studio-scrubbing and
     # WASM-player substrate (§9.4, fm-hfe)
     "fmn-anim": {"fmn-core", "fmn-dmath", "fmn-hash", "fmn-mobject"},
-    "fmn-render": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-frame", "fmn-hash", "fmn-cache"},
+    # codec: §10.6 texture/image decoding. It is a Substrate crate below
+    # Lumen; exotic formats remain an upper-layer ffmpeg capability.
+    "fmn-render": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-frame", "fmn-codec", "fmn-hash", "fmn-cache"},
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},
     "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex"},  # dmath: tip/arc trigonometry (ADR-0014)

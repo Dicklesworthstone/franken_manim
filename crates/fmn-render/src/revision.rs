@@ -32,10 +32,14 @@
 //!   separate transform. That is filed, not faked: **fm-7if**. Everything
 //!   downstream is written against the axis rather than against the point
 //!   revision, so when the channel appears, no consumer changes.
-//! - **`Image` and `Camera` have no producer in the tree yet** — there are no
-//!   image mobjects and no camera type. They are inputs to [`Revisions`] rather
-//!   than derivations from a `Stage`, supplied by whoever owns them (§13's scene
-//!   runtime for the camera, §12's `ImageMobject` for images).
+//! - **`Image` has no Marionette producer yet** — there are no image mobjects,
+//!   so its revision remains an explicit input supplied by §12's
+//!   `ImageMobject`.
+//! - **`Camera` is produced by Lumen, not Marionette.** A [`Stage`] does not own
+//!   the camera, so [`Revisions::read`] deliberately leaves that axis at zero.
+//!   The capture boundary composes it with
+//!   `with_camera(camera.revision())`; [`crate::Camera::revision`] covers frame,
+//!   projection, resolution, sampling, background, and movable-light state.
 //!
 //! ## The counting rule
 //!
@@ -166,8 +170,9 @@ impl Revisions {
     /// Read the five axes a `Stage` can answer for one mobject.
     ///
     /// [`Axis::Image`] and [`Axis::CameraProjection`] are left at their current
-    /// values — they have no producer in Marionette — so the caller composes
-    /// them with [`Revisions::with_image`] and [`Revisions::with_camera`].
+    /// values because neither is owned by Marionette. The capture boundary
+    /// composes them with [`Revisions::with_image`] and
+    /// `with_camera(camera.revision())`.
     /// Returns `None` for a stale or foreign handle, which is not an error: a
     /// deleted mobject has no revisions, and the plan drops it.
     #[must_use]
@@ -562,14 +567,17 @@ mod tests {
     }
 
     #[test]
-    fn image_and_camera_are_supplied_not_derived() {
-        // They have no producer in Marionette, and a plausible zero would be a
+    fn image_is_external_and_camera_uses_the_lumen_revision() {
+        use crate::Camera;
+
+        // Neither producer belongs to Marionette. A plausible zero would be a
         // lie — a camera move that never bumps the axis is a stale frame.
         let (stage, mob) = one_mobject();
         let base = read(&stage, mob);
         assert_eq!(base.image, 0);
         assert_eq!(base.camera, 0);
-        let composed = base.with_image(7).with_camera(11);
+        let mut camera = Camera::default();
+        let composed = base.with_image(7).with_camera(camera.revision());
         assert_eq!(
             composed.diff(&base),
             vec![Axis::Image, Axis::CameraProjection]
@@ -577,6 +585,13 @@ mod tests {
         // And composing them leaves the derived axes exactly alone.
         assert_eq!(composed.geometry, base.geometry);
         assert_eq!(composed.style, base.style);
+
+        camera
+            .frame_mut()
+            .set_center([1.0, 0.0, 0.0])
+            .expect("finite camera center");
+        let moved = base.with_image(7).with_camera(camera.revision());
+        assert_eq!(moved.diff(&composed), vec![Axis::CameraProjection]);
     }
 
     #[test]

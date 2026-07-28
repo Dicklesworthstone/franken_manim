@@ -27,6 +27,7 @@
 
 pub mod bin;
 pub mod cache;
+pub mod camera;
 pub mod engine;
 pub mod fill;
 pub mod hint;
@@ -35,9 +36,15 @@ pub mod revision;
 pub mod snapshot;
 pub mod stroke;
 pub mod table;
+pub mod texture;
+pub mod three_d;
 
 pub use bin::{Binning, BinningError, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
+pub use camera::{
+    CAMERA_FRAME_Z_INDEX, Camera, CameraConfig, CameraError, CameraFrame, ClipPoint, DEFAULT_FOVY,
+    DEFAULT_LIGHT_POSITION, EdgeSampleLimit, THREE_D_CAMERA_SAMPLES, ThreeDCamera,
+};
 pub use engine::{
     AA_COMPLEX_2X_CROSSINGS, AA_COMPLEX_4X_CROSSINGS, AA_STROKE_COMPLEX_MIN_WIDTH_BANDS,
     AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR, AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, AaPolicy,
@@ -53,3 +60,12 @@ pub use plan::{RenderPlan, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};
 pub use stroke::{JoinWedge, MITER_LIMIT};
 pub use table::{Instance, Segment, Shape, ShapeTable, Style, StyleTable};
+pub use texture::{
+    SamplerPolicy, TEXTURE_ORIENTATION, Texture, TextureEncoding, TextureError, TextureLimits,
+    TextureOrientation, TextureSource, TextureWrap,
+};
+pub use three_d::{
+    DARK_SHIFT, GLOW_DOT_FACTOR, SURFACE_SHADING, SurfaceDraw, SurfaceMaterial, SurfaceMesh,
+    SurfaceVertex, TRUE_DOT_AA_WIDTH, TextureMaterial, ThreeDDraw, ThreeDError, ThreeDJob,
+    TrueDotDraw, finalize_color, smoothstep, true_dot_alpha, unit_normal,
+};

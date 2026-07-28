@@ -767,6 +767,22 @@ fn three_d_defaults_depth_and_ambient_rotation_are_snapshotted_stage_state() {
     let actual = scene.orientation();
     assert!((actual.theta - expected.theta).abs() < 1e-15);
     assert!((actual.phi - expected.phi).abs() < 1e-15);
+    let mut camera_config = scene
+        .three_d_camera_config()
+        .expect("scene camera defaults");
+    camera_config.fps = 4;
+    let camera = scene
+        .three_d_camera(camera_config)
+        .expect("tracker-backed camera");
+    assert_eq!(camera.samples(), 4);
+    let camera_angles = camera.frame().euler_angles();
+    assert!((camera_angles[0] - expected.theta).abs() < 1e-12);
+    assert!((camera_angles[1] - expected.phi).abs() < 1e-12);
+    assert!((camera_angles[2] - expected.gamma).abs() < 1e-12);
+    let explicit_zero = scene
+        .three_d_camera(fmn_render::CameraConfig::default())
+        .expect("explicit zero-sample camera");
+    assert_eq!(explicit_zero.samples(), 0);
     assert!(matches!(
         scene.set_orientation(CameraOrientation {
             theta: f64::NAN,

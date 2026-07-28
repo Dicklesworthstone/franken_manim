@@ -660,6 +660,7 @@ name = "fmn-render"
 version = "0.1.0"
 dependencies = [
  "fmn-cache",
+ "fmn-codec",
  "fmn-core",
  "fmn-dmath",
  "fmn-frame",

@@ -42,6 +42,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmn-cache"
+version = "0.1.0"
+dependencies = [
+ "fmn-core",
+ "fmn-hash",
+ "fmn-platform",
+]
+
+[[package]]
 name = "fmn-codec"
 version = "0.1.0"
 dependencies = [
@@ -53,13 +62,13 @@ dependencies = [
 [[package]]
 name = "fmn-core"
 version = "0.1.0"
+dependencies = [
+ "fmn-dmath",
+]
 
 [[package]]
 name = "fmn-dmath"
 version = "0.1.0"
-dependencies = [
- "fmn-core",
-]
 
 [[package]]
 name = "fmn-frame"
@@ -85,6 +94,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmn-mobject"
+version = "0.1.0"
+dependencies = [
+ "fmn-core",
+ "fmn-dmath",
+ "fmn-geom",
+ "fmn-hash",
+]
+
+[[package]]
+name = "fmn-platform"
+version = "0.1.0"
+dependencies = [
+ "fmn-core",
+]
+
+[[package]]
+name = "fmn-render"
+version = "0.1.0"
+dependencies = [
+ "fmn-cache",
+ "fmn-codec",
+ "fmn-core",
+ "fmn-dmath",
+ "fmn-frame",
+ "fmn-geom",
+ "fmn-hash",
+ "fmn-mobject",
+]
+
+[[package]]
 name = "fmn-spike-accelerator"
 version = "0.0.0"
 dependencies = [
@@ -94,6 +134,7 @@ dependencies = [
  "fmn-frame",
  "fmn-geom",
  "fmn-hash",
+ "fmn-render",
  "ft-kernel-metal",
 ]
 
