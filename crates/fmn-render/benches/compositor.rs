@@ -6,8 +6,8 @@ extern crate test;
 use fmn_core::color::LinearRgba;
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
-    Binning, EngineIdentity, EngineKind, FrameConfig, FrameJob, MonoTable, RenderPlan, ScreenMap,
-    Tier, Tiling, Viewport,
+    Binning, EngineIdentity, EngineKind, FrameConfig, FrameJob, MonoPiece, MonoTable, RenderPlan,
+    RowScratch, ScreenMap, Tier, Tiling, Viewport,
 };
 use std::hint::black_box;
 use test::Bencher;
@@ -142,3 +142,40 @@ fn layered_translucent_compositor_fast_compiled_tier(bench: &mut Bencher) {
 fn profile_one_layered_frame() {
     Fixture::new().render(EngineIdentity::certified());
 }
+
+fn benchmark_column_roots(bench: &mut Bencher, width: u32) {
+    let mut pieces = Vec::with_capacity(64);
+    for index in 0_u32..64 {
+        let nudge = f64::from(index % 8) * 0.000_125;
+        let (x0, x2) = if index % 2 == 0 {
+            (0.125 + nudge, f64::from(width) - 0.125 - nudge)
+        } else {
+            (f64::from(width) - 0.125 - nudge, 0.125 + nudge)
+        };
+        pieces.push(MonoPiece {
+            p0: [x0, 0.031_25],
+            p1: [0.5 * (x0 + x2), 0.375 + nudge],
+            p2: [x2, 0.968_75],
+        });
+    }
+    let mut scratch = RowScratch::for_tile(width);
+    bench.iter(|| {
+        black_box(scratch.fill_row(black_box(&pieces), [0.0, 0.0], 0, 0, width));
+    });
+}
+
+macro_rules! column_root_benches {
+    ($name:ident, $width:expr) => {
+        #[bench]
+        fn $name(bench: &mut Bencher) {
+            benchmark_column_roots(bench, $width);
+        }
+    };
+}
+
+column_root_benches!(column_roots_02, 2);
+column_root_benches!(column_roots_04, 4);
+column_root_benches!(column_roots_08, 8);
+column_root_benches!(column_roots_16, 16);
+column_root_benches!(column_roots_32, 32);
+column_root_benches!(column_roots_64, 64);

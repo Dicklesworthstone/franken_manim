@@ -83,6 +83,22 @@
 //! In exact arithmetic the two agree term for term; they differ only in the
 //! association of the sum, which is why both are measured rather than assumed
 //! equal.
+//!
+//! ## SIMD root audit: measured and declined
+//!
+//! fm-4wt.2 prototyped a governed x86-64-v3 `f64x4` batch for four independent
+//! integer-column roots inside one monotone piece. It preserved scalar root bits
+//! and consumed every span in the original order, but two warm width sweeps
+//! rejected it at every size: 2 columns took 4.05–4.14 µs versus 3.61–3.87 µs
+//! scalar; 8 took 10.24–11.31 versus 9.08–9.16; the production 16-pixel tile
+//! took 18.14–18.99 versus 16.24–16.40; and even 64 took 67.26–70.05 versus
+//! 60.01–61.29. Packing, extracting, validating, and then performing the
+//! load-bearing ordered deposits cost more than the batched square roots saved.
+//!
+//! No slower build-tier route is retained. The `column_roots_*` cases in the
+//! existing `compositor` benchmark keep the 2/4/8/16/32/64-column scalar
+//! baseline reproducible so a future SoA layout or wider retained tile can
+//! reopen the decision with evidence rather than folklore.
 
 use crate::bin::ScreenMap;
 use crate::plan::{GeometryIdentity, RenderPlan};
@@ -2616,6 +2632,60 @@ mod tests {
             }
         }
         sum
+    }
+
+    fn adversarial_monotone_pieces() -> Vec<MonoPiece> {
+        let curves = [
+            [[0.125, 0.25], [31.5, 1.0], [63.875, 8.75]],
+            [[63.75, 0.5], [28.0, 4.0], [0.25, 15.875]],
+            [
+                [0.125, 2.0],
+                [31.999_999_999_999, 8.000_000_000_001],
+                [63.875, 14.0],
+            ],
+            [[1.0, 1.0], [60.0, 2.0], [63.0, 31.0]],
+            [[62.75, 31.0], [3.0, 29.0], [0.5, 0.75]],
+            [[16.0, 0.125], [16.0, 14.0], [16.0, 31.875]],
+            [[0.0, 7.0], [32.0, 7.0], [64.0, 7.0]],
+            [[0.0, 0.0], [64.0, 32.0], [0.0, 31.999_999_999_999]],
+            [[64.0, 0.0], [0.0, 32.0], [64.0, 31.999_999_999_999]],
+        ];
+        let mut pieces = Vec::new();
+        for [p0, p1, p2] in curves {
+            split_monotone(p0, p1, p2, &mut pieces);
+        }
+        pieces
+    }
+
+    #[test]
+    fn adversarial_monotone_column_roots_are_ordered_and_reconstruct_targets() {
+        for translate in [[0.0, 0.0], [0.375, -0.625], [-7.75, 3.125]] {
+            for piece in adversarial_monotone_pieces() {
+                let c = Coeffs::<f64>::of(&piece, translate);
+                let x0 = c.x(0.0);
+                let x1 = c.x(1.0);
+                if x0 == x1 {
+                    continue;
+                }
+                let scale = x0.abs().max(x1.abs()).max(1.0);
+                let mut previous = 0.0;
+                for fraction in [0.0, 1e-12, 0.1, 0.3, 0.5, 0.6, 0.9, 1.0] {
+                    let target = x0 + fraction * (x1 - x0);
+                    let t = c.t_at_x(target, 0.0, 1.0);
+                    assert!(
+                        t >= previous && t <= 1.0,
+                        "non-monotone root t={t:?} after {previous:?} for {piece:?}"
+                    );
+                    let reconstructed = c.x(t);
+                    assert!(
+                        (reconstructed - target).abs() <= 256.0 * f64::EPSILON * scale,
+                        "root t={t:?} reconstructs {reconstructed:?}, target {target:?}, \
+                         piece {piece:?}"
+                    );
+                    previous = t;
+                }
+            }
+        }
     }
 
     #[test]
