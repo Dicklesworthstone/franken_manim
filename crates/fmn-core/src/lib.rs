@@ -14,3 +14,18 @@ pub mod constants;
 pub mod rate;
 pub mod rng;
 pub mod types;
+
+/// `render.aa`: the standard-mode coverage quality policy (§10.4, D-21).
+///
+/// This contract knob lives in the shared Substrate rather than in either the
+/// configuration parser or a renderer implementation. `fmn-config` extracts
+/// it from the user's document; Lumen consumes the same type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AaPolicy {
+    /// Adaptive coverage AA (the standard-mode default).
+    Adaptive,
+    /// Forced 2× supersampling for A/B comparisons.
+    Ssaa2x,
+    /// Forced 4× supersampling for A/B comparisons.
+    Ssaa4x,
+}

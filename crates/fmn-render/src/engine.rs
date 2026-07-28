@@ -73,8 +73,9 @@ use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
 };
 use crate::plan::RenderPlan;
-use crate::stroke::{self, JoinWedge, stroke_rgba_at, stroke_shade};
+use crate::stroke::{self, JoinWedge, half_width_px, stroke_rgba_at, stroke_shade};
 use crate::table::{Segment, Style};
+pub use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_hash::{Digest, Schema, Writer};
@@ -83,7 +84,7 @@ use std::sync::{Mutex, PoisonError};
 // --------------------------------------------------------------- the identity
 
 /// The schema family for engine-identity and frame documents.
-pub const ENGINE_SCHEMA: Schema = Schema::new(*b"FMNE", 1, 1, 0);
+pub const ENGINE_SCHEMA: Schema = Schema::new(*b"FMNE", 1, 2, 0);
 
 /// The schema family for a canonical raw-frame document.
 pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
@@ -96,7 +97,41 @@ pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
 /// every pixel. It is deliberately not the crate version: a refactor that cannot
 /// move a bit must not invalidate a manifest, and a one-line change to the AA
 /// profile must.
-pub const RENDERER_VERSION: u32 = 1;
+pub const RENDERER_VERSION: u32 = 2;
+
+/// Boundary-sheet count at which an adaptive cell escalates to 2×2 samples.
+///
+/// G0-2 fixed the criterion — more than one boundary in a cell — and assigned
+/// the numeric threshold to fm-gmr. Two is the first count for which the
+/// ordinary one-edge analytic model is no longer sufficient.
+pub const AA_COMPLEX_2X_CROSSINGS: u8 = 2;
+
+/// Boundary-sheet count at which an adaptive cell escalates from 2×2 to 4×4.
+///
+/// Four independent crossings identify the dense/cusped end of the measured
+/// corpus. The count is deliberately an integer geometric fact, not a
+/// machine- or frame-load-dependent heuristic.
+pub const AA_COMPLEX_4X_CROSSINGS: u8 = 4;
+
+/// Minimum full stroke width, in AA-band widths, that contributes complexity.
+///
+/// G0-2 measured cap/join distinctions below roughly two AA bands as wholly
+/// contained by the analytic smoothstep. Supersampling those strokes buys no
+/// new silhouette information, so they cannot promote an otherwise-simple
+/// cell merely by overlapping.
+pub const AA_STROKE_COMPLEX_MIN_WIDTH_BANDS: f64 = 2.0;
+
+/// Version-1 maximum linear channel error versus forced 4× on the W5 corpus.
+///
+/// The measured adaptive result is `0.219482421875`; the blocking budget leaves
+/// roughly five percent headroom for corpus growth while still catching a
+/// changed edge profile or a missed complex-cell class.
+pub const AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR: f64 = 0.23;
+
+/// Version-1 RMS linear channel error versus forced 4× on the W5 corpus.
+///
+/// The measured adaptive result is `0.008526512734628627`.
+pub const AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR: f64 = 0.009;
 
 /// Which execution engine produced a frame (§10.1, C7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,6 +229,123 @@ impl Default for EngineIdentity {
     }
 }
 
+/// §10.4's aggregate class for one fine tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageClass {
+    /// No visible command reaches the tile.
+    Empty,
+    /// Every visible command is a classified interior fill.
+    FullyCovered,
+    /// An edge reaches the tile, but every cell contains at most one boundary.
+    SimpleEdge,
+    /// At least one cell crosses the adaptive 2× threshold.
+    ComplexEdge,
+}
+
+/// Deterministic instrumentation for one adaptive-AA render.
+///
+/// Counts are accumulated per write-disjoint band and merged after workers
+/// finish, so the report is as thread-count-independent as the frame itself.
+/// `native_cells` includes the native classifier pass for adaptive complex
+/// cells; `ssaa*_cells` records the fused replacement work on top of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AaStats {
+    /// Native output cells written.
+    pub output_cells: u64,
+    /// Native-resolution cell passes, including background/interior fast paths.
+    pub native_cells: u64,
+    /// Cells immediately resolved from 2×2 subcells.
+    pub ssaa2x_cells: u64,
+    /// Cells immediately resolved from 4×4 subcells.
+    pub ssaa4x_cells: u64,
+    /// Fine tiles with no visible command.
+    pub empty_tiles: u64,
+    /// Fine tiles containing only classified interior fills.
+    pub fully_covered_tiles: u64,
+    /// Fine tiles whose edge cells stay below the 2× threshold.
+    pub simple_edge_tiles: u64,
+    /// Fine tiles containing at least one escalated cell.
+    pub complex_edge_tiles: u64,
+}
+
+impl AaStats {
+    /// Native-equivalent cell-sample units.
+    ///
+    /// A native pass counts one, 2×2 counts four and 4×4 counts sixteen.
+    /// Adaptive's native classifier pass remains included for cells it later
+    /// replaces. This intentionally measures coverage-grid work, not
+    /// per-command kernel cost or wall time.
+    #[must_use]
+    pub fn sample_evaluations(&self) -> u64 {
+        self.native_cells
+            .saturating_add(self.ssaa2x_cells.saturating_mul(4))
+            .saturating_add(self.ssaa4x_cells.saturating_mul(16))
+    }
+
+    /// The work a full-frame forced-4× comparison performs.
+    #[must_use]
+    pub fn forced_4x_evaluations(&self) -> u64 {
+        self.output_cells.saturating_mul(16)
+    }
+
+    /// Fraction of coverage/sample work avoided versus full-frame forced 4×.
+    ///
+    /// A pathological frame may return a negative value: adaptive first
+    /// evaluates the native classifier, so escalating every cell to 4× costs
+    /// `17/16` of forced 4×. Reporting that honestly is more useful than
+    /// clamping an instrumentation result into looking successful.
+    #[must_use]
+    pub fn work_reduction_vs_forced_4x(&self) -> f64 {
+        let forced = self.forced_4x_evaluations();
+        if forced == 0 {
+            0.0
+        } else {
+            1.0 - self.sample_evaluations() as f64 / forced as f64
+        }
+    }
+
+    /// Fine tiles represented by the four class counters.
+    #[must_use]
+    pub fn classified_tiles(&self) -> u64 {
+        self.empty_tiles
+            .saturating_add(self.fully_covered_tiles)
+            .saturating_add(self.simple_edge_tiles)
+            .saturating_add(self.complex_edge_tiles)
+    }
+
+    fn merge(&mut self, other: AaStats) {
+        self.output_cells = self.output_cells.saturating_add(other.output_cells);
+        self.native_cells = self.native_cells.saturating_add(other.native_cells);
+        self.ssaa2x_cells = self.ssaa2x_cells.saturating_add(other.ssaa2x_cells);
+        self.ssaa4x_cells = self.ssaa4x_cells.saturating_add(other.ssaa4x_cells);
+        self.empty_tiles = self.empty_tiles.saturating_add(other.empty_tiles);
+        self.fully_covered_tiles = self
+            .fully_covered_tiles
+            .saturating_add(other.fully_covered_tiles);
+        self.simple_edge_tiles = self
+            .simple_edge_tiles
+            .saturating_add(other.simple_edge_tiles);
+        self.complex_edge_tiles = self
+            .complex_edge_tiles
+            .saturating_add(other.complex_edge_tiles);
+    }
+
+    fn count_tile(&mut self, class: CoverageClass) {
+        match class {
+            CoverageClass::Empty => self.empty_tiles = self.empty_tiles.saturating_add(1),
+            CoverageClass::FullyCovered => {
+                self.fully_covered_tiles = self.fully_covered_tiles.saturating_add(1);
+            }
+            CoverageClass::SimpleEdge => {
+                self.simple_edge_tiles = self.simple_edge_tiles.saturating_add(1);
+            }
+            CoverageClass::ComplexEdge => {
+                self.complex_edge_tiles = self.complex_edge_tiles.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// The rest of what a frame's bits depend on: C10's **declared certified
 /// configuration**, plus the semantic constants §10.2/§10.3 fixed by
 /// measurement.
@@ -213,6 +365,9 @@ pub struct FrameConfig {
     /// The background, linear light, straight alpha. Opaque for ordinary
     /// renders; a zero alpha is `--transparent`.
     pub background: LinearRgba,
+    /// Standard-mode coverage policy. Certified jobs always execute the
+    /// canonical analytic path, whatever A/B policy was requested.
+    pub aa: AaPolicy,
 }
 
 impl FrameConfig {
@@ -223,7 +378,15 @@ impl FrameConfig {
             viewport,
             map,
             background,
+            aa: AaPolicy::Adaptive,
         }
+    }
+
+    /// Select the standard-mode adaptive/forced-AA policy.
+    #[must_use]
+    pub fn with_aa_policy(mut self, aa: AaPolicy) -> FrameConfig {
+        self.aa = aa;
+        self
     }
 
     /// The layout of the raw certified frame this config renders into.
@@ -273,6 +436,11 @@ pub fn journal(identity: EngineIdentity, config: &FrameConfig, tiling: Tiling) -
     w.put_f64(config.background.g);
     w.put_f64(config.background.b);
     w.put_f64(config.background.a);
+    w.put_str(match config.aa {
+        AaPolicy::Adaptive => "adaptive",
+        AaPolicy::Ssaa2x => "ssaa2x",
+        AaPolicy::Ssaa4x => "ssaa4x",
+    });
     // The format's **name**, not `as u32`. A discriminant is a property of
     // fmn-frame's declaration order, so reordering that enum would silently move
     // every manifest digest ever issued — and a closure digest whose meaning can
@@ -288,6 +456,9 @@ pub fn journal(identity: EngineIdentity, config: &FrameConfig, tiling: Tiling) -
     w.put_u32(fill::FLATTEN_MAX_DEPTH);
     w.put_f64(stroke::MITER_LIMIT);
     w.put_f64(crate::hint::NEARLY_LINEAR_PX);
+    w.put_u32(u32::from(AA_COMPLEX_2X_CROSSINGS));
+    w.put_u32(u32::from(AA_COMPLEX_4X_CROSSINGS));
+    w.put_f64(AA_STROKE_COMPLEX_MIN_WIDTH_BANDS);
 
     w.finish().expect("the identity document fits any limit")
 }
@@ -497,6 +668,37 @@ pub struct FrameJob<'a> {
     cols: u32,
 }
 
+/// The render path after certified-mode normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderAa {
+    /// The canonical analytic definition; no adaptive classifier executes.
+    Canonical,
+    /// Native analytic classifier plus fused resolve on complex cells.
+    Adaptive,
+    /// Full-frame forced sampling for A/B and debugging.
+    Forced(u32),
+}
+
+/// One fixed subcell in a native output pixel.
+#[derive(Debug, Clone, Copy)]
+struct Subcell {
+    px: u32,
+    py: u32,
+    samples: u32,
+    x: u32,
+    y: u32,
+}
+
+impl Subcell {
+    fn centre(self) -> [f64; 2] {
+        let inverse = 1.0 / f64::from(self.samples);
+        [
+            f64::from(self.px) + (f64::from(self.x) + 0.5) * inverse,
+            f64::from(self.py) + (f64::from(self.y) + 0.5) * inverse,
+        ]
+    }
+}
+
 impl<'a> FrameJob<'a> {
     /// Compile a frame from a synchronized plan, its monotone table and its
     /// binning.
@@ -520,10 +722,12 @@ impl<'a> FrameJob<'a> {
 
     /// [`FrameJob::new`] with an explicit engine identity.
     ///
-    /// The identity does not change what this engine computes — there is one
-    /// arithmetic here — it changes what the frame *claims*. A fast-CPU or annex
-    /// engine reuses this front-end and substitutes its own back-end; recording
-    /// which one ran is §10.5(f).
+    /// The identity selects the certified refusal boundary as well as recording
+    /// what the frame claims: [`EngineKind::CertifiedCpu`] always executes the
+    /// canonical analytic path, while standard-only identities honor
+    /// [`FrameConfig::aa`]. There is still one arithmetic implementation here;
+    /// a fast-CPU or annex engine reuses this front-end and substitutes its own
+    /// back-end. Recording which one ran is §10.5(f).
     ///
     /// # Errors
     /// See [`FrameJob::new`].
@@ -642,6 +846,19 @@ impl<'a> FrameJob<'a> {
         self.identity
     }
 
+    /// The requested policy after applying certified's permanent analytic-path
+    /// refusal.
+    fn render_aa(&self) -> RenderAa {
+        if self.identity.engine.certifiable() {
+            return RenderAa::Canonical;
+        }
+        match self.config.aa {
+            AaPolicy::Adaptive => RenderAa::Adaptive,
+            AaPolicy::Ssaa2x => RenderAa::Forced(2),
+            AaPolicy::Ssaa4x => RenderAa::Forced(4),
+        }
+    }
+
     /// This frame's contribution to the input closure (C7 + C10).
     #[must_use]
     pub fn journal_digest(&self) -> Digest {
@@ -668,6 +885,20 @@ impl<'a> FrameJob<'a> {
         Ok(buffer)
     }
 
+    /// Rasterize a raw frame and return deterministic adaptive-AA work counters.
+    ///
+    /// The image is identical to [`FrameJob::render`] for the same job and
+    /// thread count; instrumentation is integer-only, accumulated outside the
+    /// pixel arithmetic.
+    ///
+    /// # Errors
+    /// See [`FrameJob::render`].
+    pub fn render_with_stats(&self, threads: usize) -> Result<(FrameBuffer, AaStats), FrameError> {
+        let mut buffer = FrameBuffer::new(self.config.layout()?);
+        let stats = self.render_into_profiled(threads, &mut buffer)?;
+        Ok((buffer, stats))
+    }
+
     /// Rasterize into a caller-owned frame — the pooled-buffer path PG-6 measures.
     ///
     /// `threads` is a **scheduling** choice and nothing else: the bytes written
@@ -679,6 +910,15 @@ impl<'a> FrameJob<'a> {
     /// [`FrameError::DimensionMismatch`] unless it matches the configured
     /// viewport.
     pub fn render_into(&self, threads: usize, dst: &mut FrameBuffer) -> Result<(), FrameError> {
+        self.render_into_profiled(threads, dst).map(|_| ())
+    }
+
+    /// Shared render body for ordinary and instrumented entry points.
+    fn render_into_profiled(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+    ) -> Result<AaStats, FrameError> {
         if dst.layout().format() != PixelFormat::Rgba16F {
             return Err(FrameError::FormatMismatch {
                 expected: "Rgba16F raw frame",
@@ -716,11 +956,11 @@ impl<'a> FrameJob<'a> {
         let mut bands: Vec<(usize, &mut [u8])> = plane.chunks_mut(band_bytes).enumerate().collect();
 
         if threads <= 1 {
-            let mut worker = Worker::new(tile);
+            let mut worker = Worker::new(tile, self.cols as usize);
             for (band, bytes) in bands {
                 self.render_band(&mut worker, band, bytes, stride);
             }
-            return Ok(());
+            return Ok(worker.stats);
         }
 
         // Popped from the end, so the queue is a stack; which worker takes which
@@ -728,19 +968,24 @@ impl<'a> FrameJob<'a> {
         // on who computed them.
         bands.reverse();
         let queue = Mutex::new(bands);
+        let stats = Mutex::new(AaStats::default());
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| {
-                    let mut worker = Worker::new(tile);
+                    let mut worker = Worker::new(tile, self.cols as usize);
                     loop {
                         let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
                         let Some((band, bytes)) = next else { break };
                         self.render_band(&mut worker, band, bytes, stride);
                     }
+                    stats
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .merge(worker.stats);
                 });
             }
         });
-        Ok(())
+        Ok(stats.into_inner().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Rasterize one band: `tile` pixel rows spanning the full frame width.
@@ -750,6 +995,16 @@ impl<'a> FrameJob<'a> {
         let height = self.config.viewport.height;
         let y0 = band as u32 * tile;
         let y1 = (y0 + tile).min(height);
+        let aa = self.render_aa();
+
+        for tx in 0..self.cols {
+            let t = band * self.cols as usize + tx as usize;
+            worker.tile_classes[tx as usize] = if t < self.binning.tile_count() {
+                self.initial_tile_class(t)
+            } else {
+                CoverageClass::Empty
+            };
+        }
 
         // The background is written first and unconditionally, so a band with no
         // commands still costs exactly one pass — and so a tile that draws
@@ -765,15 +1020,99 @@ impl<'a> FrameJob<'a> {
                 }
                 let w = (x_hi - x_lo) as usize;
                 worker.acc[..w].fill(bg);
+                worker.edges[..w].fill(0);
+                worker.stats.output_cells = worker.stats.output_cells.saturating_add(w as u64);
 
                 let t = band * self.cols as usize + tx as usize;
                 if t < self.binning.tile_count() {
-                    self.composite_row(worker, t, py, x_lo, x_hi);
+                    match aa {
+                        RenderAa::Forced(samples) => {
+                            for i in 0..w {
+                                worker.acc[i] = self.composite_pixel_supersampled(
+                                    t,
+                                    x_lo + i as u32,
+                                    py,
+                                    samples,
+                                );
+                            }
+                            if samples == 2 {
+                                worker.stats.ssaa2x_cells =
+                                    worker.stats.ssaa2x_cells.saturating_add(w as u64);
+                            } else {
+                                worker.stats.ssaa4x_cells =
+                                    worker.stats.ssaa4x_cells.saturating_add(w as u64);
+                            }
+                        }
+                        RenderAa::Canonical | RenderAa::Adaptive => {
+                            let classify = aa == RenderAa::Adaptive;
+                            self.composite_row(worker, t, py, x_lo, x_hi, classify);
+                            worker.stats.native_cells =
+                                worker.stats.native_cells.saturating_add(w as u64);
+                            if classify {
+                                for i in 0..w {
+                                    let crossings = worker.edges[i];
+                                    let samples = if crossings >= AA_COMPLEX_4X_CROSSINGS {
+                                        4
+                                    } else if crossings >= AA_COMPLEX_2X_CROSSINGS {
+                                        2
+                                    } else {
+                                        continue;
+                                    };
+                                    worker.tile_classes[tx as usize] = CoverageClass::ComplexEdge;
+                                    worker.acc[i] = self.composite_pixel_supersampled(
+                                        t,
+                                        x_lo + i as u32,
+                                        py,
+                                        samples,
+                                    );
+                                    if samples == 2 {
+                                        worker.stats.ssaa2x_cells =
+                                            worker.stats.ssaa2x_cells.saturating_add(1);
+                                    } else {
+                                        worker.stats.ssaa4x_cells =
+                                            worker.stats.ssaa4x_cells.saturating_add(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let base = x_lo as usize * 8;
                 write_row(&worker.acc[..w], &mut row[base..base + w * 8]);
             }
+        }
+
+        for class in worker.tile_classes.iter().take(self.cols as usize) {
+            worker.stats.count_tile(*class);
+        }
+    }
+
+    /// Initial aggregate class from the command flags alone.
+    ///
+    /// Adaptive's per-cell pass can upgrade `SimpleEdge` to `ComplexEdge`; it
+    /// can never downgrade a conservative edge classification to an interior
+    /// promise.
+    fn initial_tile_class(&self, tile: usize) -> CoverageClass {
+        let draws = self.binning.tile(tile);
+        let flags = self.binning.tile_flags(tile);
+        let mut visible = false;
+        let mut edge = false;
+        for (k, &d) in draws.iter().enumerate() {
+            let Some(Some(rec)) = self.draws.get(d as usize) else {
+                continue;
+            };
+            visible = true;
+            if rec.draws_stroke || flags.get(k).copied() != Some(CLASS_INTERIOR) {
+                edge = true;
+            }
+        }
+        if !visible {
+            CoverageClass::Empty
+        } else if edge {
+            CoverageClass::SimpleEdge
+        } else {
+            CoverageClass::FullyCovered
         }
     }
 
@@ -783,7 +1122,15 @@ impl<'a> FrameJob<'a> {
     /// what lets a fill contribute a whole row of coverage from one pass over its
     /// pieces while a stroke still shades per pixel, without either being able to
     /// reorder the composite.
-    fn composite_row(&self, worker: &mut Worker, tile: usize, py: u32, x_lo: u32, x_hi: u32) {
+    fn composite_row(
+        &self,
+        worker: &mut Worker,
+        tile: usize,
+        py: u32,
+        x_lo: u32,
+        x_hi: u32,
+        classify: bool,
+    ) {
         let draws = self.binning.tile(tile);
         let flags = self.binning.tile_flags(tile);
         for (k, &d) in draws.iter().enumerate() {
@@ -797,11 +1144,11 @@ impl<'a> FrameJob<'a> {
             // R-5: within one object the fill draws before the stroke, unless
             // `stroke_behind` swaps them (docs/RENDER_ORDER.md).
             if rec.style.stroke_behind {
-                self.stroke_pass(worker, rec, py, x_lo, x_hi);
-                self.fill_pass(worker, rec, interior, py, x_lo, x_hi);
+                self.stroke_pass(worker, rec, py, x_lo, x_hi, classify);
+                self.fill_pass(worker, rec, interior, py, x_lo..x_hi, classify);
             } else {
-                self.fill_pass(worker, rec, interior, py, x_lo, x_hi);
-                self.stroke_pass(worker, rec, py, x_lo, x_hi);
+                self.fill_pass(worker, rec, interior, py, x_lo..x_hi, classify);
+                self.stroke_pass(worker, rec, py, x_lo, x_hi, classify);
             }
         }
     }
@@ -813,9 +1160,10 @@ impl<'a> FrameJob<'a> {
         rec: &Draw,
         interior: bool,
         py: u32,
-        x_lo: u32,
-        x_hi: u32,
+        x: std::ops::Range<u32>,
+        classify: bool,
     ) {
+        let (x_lo, x_hi) = (x.start, x.end);
         if !rec.draws_fill || row_misses(rec.fill_slab, py) {
             return;
         }
@@ -825,17 +1173,30 @@ impl<'a> FrameJob<'a> {
         // is the order of §10.4's own argument: a classified interior costs
         // nothing, a hinted kernel costs a closed form, and the general machinery
         // is the fallback rather than the toll road.
+        let pieces = self.mono.pieces_of(rec.shape);
+        let mut general_classified = false;
         if interior {
             worker.cov[..w].copy_from_slice(worker.scratch.interior_row(x_lo, x_hi));
         } else if !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
-            let pieces = self.mono.pieces_of(rec.shape);
-            worker.cov[..w].copy_from_slice(worker.scratch.fill_row(
-                pieces,
-                rec.translate,
-                py,
-                x_lo,
-                x_hi,
-            ));
+            if classify {
+                let (coverage, crossings) =
+                    worker
+                        .scratch
+                        .fill_row_classified(pieces, rec.translate, py, x_lo, x_hi);
+                worker.cov[..w].copy_from_slice(coverage);
+                for (edge, count) in worker.edges[..w].iter_mut().zip(crossings) {
+                    *edge = edge.saturating_add(*count);
+                }
+                general_classified = true;
+            } else {
+                worker.cov[..w].copy_from_slice(worker.scratch.fill_row(
+                    pieces,
+                    rec.translate,
+                    py,
+                    x_lo,
+                    x_hi,
+                ));
+            }
         }
 
         let segments = self.segments_of(rec);
@@ -843,6 +1204,19 @@ impl<'a> FrameJob<'a> {
             let coverage = worker.cov[i];
             if coverage <= 0.0 {
                 continue;
+            }
+            if classify && !interior && !general_classified {
+                let crossings =
+                    fill::boundary_crossings_at_cell(pieces, rec.translate, py, x_lo + i as u32);
+                let contribution = if coverage < 1.0 && crossings == 0 {
+                    // A partial cell whose boundary escaped all six interior
+                    // probes contains a sub-probe feature. Conservatively call
+                    // it complex rather than silently missing it.
+                    AA_COMPLEX_2X_CROSSINGS
+                } else {
+                    crossings
+                };
+                worker.edges[i] = worker.edges[i].saturating_add(contribution);
             }
             let rgba = match rec.flat_fill {
                 Some(c) => c,
@@ -864,7 +1238,15 @@ impl<'a> FrameJob<'a> {
     }
 
     /// §10.3's stroke over one row of one tile.
-    fn stroke_pass(&self, worker: &mut Worker, rec: &Draw, py: u32, x_lo: u32, x_hi: u32) {
+    fn stroke_pass(
+        &self,
+        worker: &mut Worker,
+        rec: &Draw,
+        py: u32,
+        x_lo: u32,
+        x_hi: u32,
+        classify: bool,
+    ) {
         if !rec.draws_stroke || row_misses(rec.stroke_slab, py) {
             return;
         }
@@ -883,10 +1265,210 @@ impl<'a> FrameJob<'a> {
                 rec.translate,
                 p,
             );
+            if classify {
+                let centre_is_eligible_edge = coverage > 0.0
+                    && coverage < 1.0
+                    && stroke_contributes_complexity(&rec.style, self.config.map, s);
+                if centre_is_eligible_edge
+                    || self.stroke_has_eligible_subcell_edge(
+                        rec,
+                        segments,
+                        py,
+                        x_lo + i as u32,
+                        coverage,
+                    )
+                {
+                    worker.edges[i] = worker.edges[i].saturating_add(1);
+                }
+            }
             if coverage <= 0.0 {
                 continue;
             }
             worker.acc[i] = source_over(stroke_rgba_at(&rec.style, s), coverage, worker.acc[i]);
+        }
+    }
+
+    /// Does an eligible off-centre stroke edge reach a 2×2 probe point?
+    ///
+    /// The canonical stroke pass shades the centre, which can be fully inside or
+    /// outside while an edge still crosses a corner of the cell. Adaptive
+    /// classification therefore probes the four 2× positions when the centre
+    /// did not already establish an eligible edge. Each draw contributes at
+    /// most one boundary sheet.
+    fn stroke_has_eligible_subcell_edge(
+        &self,
+        rec: &Draw,
+        segments: &[Segment],
+        py: u32,
+        px: u32,
+        centre_coverage: f64,
+    ) -> bool {
+        // For a constant-width stroke, a saturated smoothstep proves that the
+        // silhouette is at least half an AA band from the centre. The furthest
+        // 2× probe is only `sqrt(1/8)` pixels away, so at the default 1.5 px
+        // band no probe can possibly cross the edge. A width ramp does not have
+        // that Lipschitz bound: its silhouette can move between the centre and
+        // a probe, so ramped strokes retain the probes.
+        let aa_band = effective_aa_band(&rec.style);
+        let centre_is_saturated = centre_coverage <= 0.0 || centre_coverage >= 1.0;
+        let constant_width = rec.style.stroke_width == rec.style.stroke_width_end;
+        if constant_width && centre_is_saturated && aa_band > std::f64::consts::FRAC_1_SQRT_2 {
+            return false;
+        }
+        for dy in [0.25, 0.75] {
+            for dx in [0.25, 0.75] {
+                let p = [f64::from(px) + dx, f64::from(py) + dy];
+                let (coverage, s) = stroke_shade(
+                    segments,
+                    &rec.joins,
+                    &rec.style,
+                    self.config.map,
+                    rec.translate,
+                    p,
+                );
+                if !stroke_contributes_complexity(&rec.style, self.config.map, s) {
+                    continue;
+                }
+                let sample_is_edge = coverage > 0.0 && coverage < 1.0;
+                let crosses_from_centre = centre_coverage <= 0.0 && coverage > 0.0
+                    || centre_coverage >= 1.0 && coverage < 1.0;
+                if sample_is_edge || crosses_from_centre {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Recompose one native pixel from a fixed subcell grid and resolve it
+    /// immediately.
+    ///
+    /// Painter order is repeated independently at every sample; averaging
+    /// already-composited samples is what makes overlapping edges correct.
+    /// Only the four `f64` sums below survive the loop, so there is no
+    /// supersampled frame or second resolve pass.
+    fn composite_pixel_supersampled(
+        &self,
+        tile: usize,
+        px: u32,
+        py: u32,
+        samples: u32,
+    ) -> PremulRgba {
+        let samples = samples.max(1);
+        let draws = self.binning.tile(tile);
+        let flags = self.binning.tile_flags(tile);
+        let mut sum = PremulRgba::TRANSPARENT;
+
+        for sample_y in 0..samples {
+            for sample_x in 0..samples {
+                let subcell = Subcell {
+                    px,
+                    py,
+                    samples,
+                    x: sample_x,
+                    y: sample_y,
+                };
+                let mut acc = self.config.background.premultiply();
+                for (k, &d) in draws.iter().enumerate() {
+                    let Some(Some(rec)) = self.draws.get(d as usize) else {
+                        continue;
+                    };
+                    let interior = flags.get(k).copied() == Some(CLASS_INTERIOR);
+                    if rec.style.stroke_behind {
+                        acc = self.stroke_sample(rec, subcell, acc);
+                        acc = self.fill_sample(rec, interior, subcell, acc);
+                    } else {
+                        acc = self.fill_sample(rec, interior, subcell, acc);
+                        acc = self.stroke_sample(rec, subcell, acc);
+                    }
+                }
+                sum.r += acc.r;
+                sum.g += acc.g;
+                sum.b += acc.b;
+                sum.a += acc.a;
+            }
+        }
+
+        let inverse = 1.0 / f64::from(samples * samples);
+        PremulRgba {
+            r: sum.r * inverse,
+            g: sum.g * inverse,
+            b: sum.b * inverse,
+            a: sum.a * inverse,
+        }
+    }
+
+    /// One fill pass at one subcell, preserving the native exact coverage
+    /// kernel (primitive hint or general curve-area integral).
+    fn fill_sample(
+        &self,
+        rec: &Draw,
+        interior: bool,
+        subcell: Subcell,
+        dst: PremulRgba,
+    ) -> PremulRgba {
+        if !rec.draws_fill {
+            return dst;
+        }
+        let coverage = if interior {
+            1.0
+        } else {
+            rec.kernel
+                .coverage_subcell(
+                    subcell.px,
+                    subcell.py,
+                    subcell.samples,
+                    subcell.x,
+                    subcell.y,
+                )
+                .unwrap_or_else(|| {
+                    fill::coverage_at_subcell(
+                        self.mono.pieces_of(rec.shape),
+                        rec.translate,
+                        subcell.py,
+                        subcell.px,
+                        subcell.samples,
+                        subcell.x,
+                        subcell.y,
+                    )
+                })
+        };
+        if coverage <= 0.0 {
+            return dst;
+        }
+        let p = subcell.centre();
+        let rgba = match rec.flat_fill {
+            Some(c) => c,
+            None => fill_rgba_with_border(
+                &rec.style,
+                rec.field.as_ref().expect("a non-flat fill carries a field"),
+                self.segments_of(rec),
+                self.config.map,
+                rec.translate,
+                p,
+            ),
+        };
+        source_over(rgba, coverage, dst)
+    }
+
+    /// One stroke pass at one subcell centre.
+    fn stroke_sample(&self, rec: &Draw, subcell: Subcell, dst: PremulRgba) -> PremulRgba {
+        if !rec.draws_stroke {
+            return dst;
+        }
+        let p = subcell.centre();
+        let (coverage, s) = stroke_shade(
+            self.segments_of(rec),
+            &rec.joins,
+            &rec.style,
+            self.config.map,
+            rec.translate,
+            p,
+        );
+        if coverage <= 0.0 {
+            dst
+        } else {
+            source_over(stroke_rgba_at(&rec.style, s), coverage, dst)
         }
     }
 
@@ -901,6 +1483,22 @@ impl<'a> FrameJob<'a> {
 
 // ------------------------------------------------------------------ the worker
 
+/// Does this stroke carry silhouette detail outside the analytic AA band?
+fn stroke_contributes_complexity(style: &Style, map: ScreenMap, s: f64) -> bool {
+    let aa_band = effective_aa_band(style);
+    let full_width = 2.0 * half_width_px(style, map, s);
+    full_width >= AA_STROKE_COMPLEX_MIN_WIDTH_BANDS * aa_band
+}
+
+/// The same nonzero AA width [`crate::stroke::aa_coverage`] evaluates.
+fn effective_aa_band(style: &Style) -> f64 {
+    if style.anti_alias_width > 0.0 {
+        f64::from(style.anti_alias_width)
+    } else {
+        1e-8
+    }
+}
+
 /// One thread's scratch, allocated once per band-loop rather than per row.
 ///
 /// PG-6 forbids steady-state per-frame heap allocation. A worker's buffers are
@@ -912,16 +1510,25 @@ struct Worker {
     acc: Vec<PremulRgba>,
     /// One draw's coverage over the row.
     cov: Vec<f64>,
+    /// Saturating independent-boundary count for each cell in the row.
+    edges: Vec<u8>,
     /// The fill's own scratch.
     scratch: RowScratch,
+    /// Aggregate class for each fine tile in the current band.
+    tile_classes: Vec<CoverageClass>,
+    /// This worker's integer-only instrumentation.
+    stats: AaStats,
 }
 
 impl Worker {
-    fn new(tile: usize) -> Worker {
+    fn new(tile: usize, cols: usize) -> Worker {
         Worker {
             acc: vec![PremulRgba::TRANSPARENT; tile],
             cov: vec![0.0; tile],
+            edges: vec![0; tile],
             scratch: RowScratch::for_tile(tile as u32),
+            tile_classes: vec![CoverageClass::Empty; cols],
+            stats: AaStats::default(),
         }
     }
 }
@@ -1078,8 +1685,8 @@ mod tests {
     }
 
     /// The engine's corpus scene: overlapping translucent fills, a winding hole,
-    /// an open stroke with round caps, a tapered gradient stroke, and a hairline
-    /// finer than the AA band.
+    /// an open stroke with round caps, a hairline finer than the AA band, and a
+    /// four-boundary dense-stem cell.
     fn corpus() -> (Stage, Vec<Mob>) {
         let mut stage = Stage::new();
         let mut mobs = Vec::new();
@@ -1110,11 +1717,14 @@ mod tests {
             ),
         );
         // An opaque disc with a clockwise hole: the nonzero rule must leave it.
-        let mut annulus = ring(72.0, 32.0, 20.0, 8, true);
-        annulus.extend(ring(72.0, 32.0, 9.0, 8, false));
+        let outer = ring(72.0, 32.0, 20.0, 8, true);
+        let inner = ring(72.0, 32.0, 9.0, 8, false);
+        let mut annulus_path = fmn_geom::quadpath::QuadPath::new();
+        annulus_path.add_subpath(&outer).expect("outer ring");
+        annulus_path.add_subpath(&inner).expect("inner ring");
         add(
             &mut stage,
-            vmob(&annulus, [1.0, 1.0, 0.0, 1.0], [0.0; 4], 0.0),
+            vmob(annulus_path.points(), [1.0, 1.0, 0.0, 1.0], [0.0; 4], 0.0),
         );
         // An open stroked polyline with a sharp corner.
         add(
@@ -1141,6 +1751,22 @@ mod tests {
                 [0.0, 0.5, 1.0, 1.0],
                 40.0,
             ),
+        );
+        // Two subpixel stems in one shape: four independent boundary sheets in
+        // each occupied cell, so the 4× threshold is exercised rather than
+        // merely declared.
+        let left_stem = rect_points(104.1, 52.0, 104.2, 86.0);
+        let right_stem = rect_points(104.5, 52.0, 104.6, 86.0);
+        let mut dense_stems = fmn_geom::quadpath::QuadPath::new();
+        dense_stems
+            .add_subpath(&left_stem)
+            .expect("left dense stem");
+        dense_stems
+            .add_subpath(&right_stem)
+            .expect("right dense stem");
+        add(
+            &mut stage,
+            vmob(dense_stems.points(), [1.0, 0.2, 0.8, 1.0], [0.0; 4], 0.0),
         );
         (stage, mobs)
     }
@@ -1354,6 +1980,230 @@ mod tests {
                 "the frame moved at {threads} threads"
             );
         }
+    }
+
+    #[test]
+    fn certified_bits_ignore_adaptive_and_forced_aa_policies() {
+        // §10.4 is absolute: certified executes the canonical analytic path.
+        // The A/B knob remains journaled, but it cannot move a raw-frame bit.
+        let (stage, _) = corpus();
+        let tiling = default_tiling();
+        let mut definition = None;
+        for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+            let cfg = config().with_aa_policy(aa);
+            let (plan, mono, binning) = derive(&stage, cfg, tiling);
+            let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
+            let (frame, stats) = job.render_with_stats(4).expect("render");
+            assert_eq!(stats.native_cells, stats.output_cells);
+            assert_eq!(stats.ssaa2x_cells, 0);
+            assert_eq!(stats.ssaa4x_cells, 0);
+            match &definition {
+                Some(bytes) => {
+                    assert_eq!(bytes, frame.as_bytes(), "certified bits moved under {aa:?}")
+                }
+                None => definition = Some(frame.as_bytes().to_vec()),
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_classification_is_thread_independent_and_avoids_forced_work() {
+        let (stage, _) = corpus();
+        let tiling = default_tiling();
+        let identity = EngineIdentity {
+            engine: EngineKind::FastCpu,
+            ..EngineIdentity::certified()
+        };
+
+        let adaptive_cfg = config().with_aa_policy(AaPolicy::Adaptive);
+        let (plan, mono, binning) = derive(&stage, adaptive_cfg, tiling);
+        let job = FrameJob::with_identity(&plan, &mono, &binning, adaptive_cfg, identity)
+            .expect("matching frame artifacts");
+        let (one, one_stats) = job.render_with_stats(1).expect("render");
+        let (many, many_stats) = job.render_with_stats(4).expect("render");
+        assert_frames_equal(&one, &many, "adaptive output depends on thread count");
+        assert_eq!(one_stats, many_stats, "adaptive stats depend on workers");
+        assert_eq!(one_stats.classified_tiles(), binning.tile_count() as u64);
+        assert!(
+            one_stats.complex_edge_tiles > 0,
+            "the overlap corpus classified no complex tile: {one_stats:?}"
+        );
+        assert!(
+            one_stats.ssaa2x_cells > 0 && one_stats.ssaa4x_cells > 0,
+            "both adaptive thresholds must be exercised: {one_stats:?}"
+        );
+        assert_eq!(
+            (one_stats.ssaa2x_cells, one_stats.ssaa4x_cells),
+            (29, 34),
+            "the documented W5 work measurement moved"
+        );
+        assert_eq!(
+            one_stats.sample_evaluations(),
+            13_204,
+            "the documented W5 work measurement moved"
+        );
+        assert!(
+            one_stats.work_reduction_vs_forced_4x() > 0.5,
+            "adaptive did not avoid most forced work: {one_stats:?}"
+        );
+
+        let forced_cfg = config().with_aa_policy(AaPolicy::Ssaa4x);
+        let forced_job = FrameJob::with_identity(&plan, &mono, &binning, forced_cfg, identity)
+            .expect("AA policy does not stale geometry");
+        let (_, forced_stats) = forced_job.render_with_stats(4).expect("render");
+        assert_eq!(
+            forced_stats.sample_evaluations(),
+            forced_stats.forced_4x_evaluations()
+        );
+        assert!(
+            one_stats.sample_evaluations() < forced_stats.sample_evaluations(),
+            "{one_stats:?} vs {forced_stats:?}"
+        );
+
+        let forced_2x_cfg = config().with_aa_policy(AaPolicy::Ssaa2x);
+        let forced_2x_job =
+            FrameJob::with_identity(&plan, &mono, &binning, forced_2x_cfg, identity)
+                .expect("AA policy does not stale geometry");
+        let (_, forced_2x_stats) = forced_2x_job.render_with_stats(4).expect("render");
+        assert_eq!(forced_2x_stats.native_cells, 0);
+        assert_eq!(forced_2x_stats.ssaa2x_cells, forced_2x_stats.output_cells);
+        assert_eq!(
+            forced_2x_stats.sample_evaluations(),
+            forced_2x_stats.output_cells * 4
+        );
+    }
+
+    #[test]
+    fn strokes_inside_two_aa_bands_do_not_promote_complex_cells() {
+        let map = ScreenMap {
+            scale: 1.0,
+            origin: [0.0, 0.0],
+        };
+        let style = Style {
+            stroke_width: 299.0,
+            stroke_width_end: 299.0,
+            anti_alias_width: 1.5,
+            ..Style::default()
+        };
+        assert!(!stroke_contributes_complexity(&style, map, 0.5));
+
+        let wide = Style {
+            stroke_width: 301.0,
+            stroke_width_end: 301.0,
+            ..style
+        };
+        assert!(stroke_contributes_complexity(&wide, map, 0.5));
+    }
+
+    #[test]
+    fn only_width_eligible_overlapping_strokes_escalate() {
+        let render_stats = |width| {
+            let mut stage = Stage::new();
+            for colour in [[1.0, 0.2, 0.1, 1.0], [0.1, 0.4, 1.0, 0.8]] {
+                let stroke = vmob(
+                    &[[18.0, 40.0, 0.0], [40.0, 40.0, 0.0], [62.0, 40.0, 0.0]],
+                    [0.0; 4],
+                    colour,
+                    width,
+                );
+                let h = stage.add(stroke);
+                stage.add_to_scene(h).expect("live");
+            }
+            let cfg = config().with_aa_policy(AaPolicy::Adaptive);
+            let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+            let identity = EngineIdentity {
+                engine: EngineKind::FastCpu,
+                ..EngineIdentity::certified()
+            };
+            FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+                .expect("matching frame artifacts")
+                .render_with_stats(1)
+                .expect("render")
+                .1
+        };
+
+        let inside_band = render_stats(299.0);
+        assert_eq!(inside_band.ssaa2x_cells, 0, "{inside_band:?}");
+        assert_eq!(inside_band.ssaa4x_cells, 0, "{inside_band:?}");
+
+        let eligible = render_stats(301.0);
+        assert!(eligible.ssaa2x_cells > 0, "{eligible:?}");
+    }
+
+    #[test]
+    fn the_four_tile_classes_are_observable() {
+        let mut stage = Stage::new();
+        for points in [
+            rect_points(2.25, 2.25, 50.25, 50.25),
+            ring(72.0, 76.0, 17.0, 8, true),
+            ring(84.0, 76.0, 17.0, 8, true),
+        ] {
+            let h = stage.add(vmob(&points, [1.0, 1.0, 1.0, 1.0], [0.0; 4], 0.0));
+            stage.add_to_scene(h).expect("live");
+        }
+        let cfg = config().with_aa_policy(AaPolicy::Adaptive);
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let identity = EngineIdentity {
+            engine: EngineKind::FastCpu,
+            ..EngineIdentity::certified()
+        };
+        let (_, stats) = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+            .expect("matching frame artifacts")
+            .render_with_stats(1)
+            .expect("render");
+        assert_eq!(stats.classified_tiles(), binning.tile_count() as u64);
+        assert!(
+            stats.empty_tiles > 0
+                && stats.fully_covered_tiles > 0
+                && stats.simple_edge_tiles > 0
+                && stats.complex_edge_tiles > 0,
+            "not every §10.4 class was reached: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_quality_stays_inside_the_forced_4x_visual_budget_v1() {
+        let (stage, _) = corpus();
+        let tiling = default_tiling();
+        let identity = EngineIdentity {
+            engine: EngineKind::FastCpu,
+            ..EngineIdentity::certified()
+        };
+        let render = |aa| {
+            let cfg = config().with_aa_policy(aa);
+            let (plan, mono, binning) = derive(&stage, cfg, tiling);
+            FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+                .expect("matching frame artifacts")
+                .render(4)
+                .expect("render")
+        };
+        let adaptive = render(AaPolicy::Adaptive);
+        let forced = render(AaPolicy::Ssaa4x);
+        let mut squared = 0.0;
+        let mut maximum = 0.0f64;
+        let mut channels = 0u64;
+        for y in 0..config().viewport.height {
+            for x in 0..config().viewport.width {
+                for (a, b) in read_px(&adaptive, x, y)
+                    .into_iter()
+                    .zip(read_px(&forced, x, y))
+                {
+                    let error = (a - b).abs();
+                    squared += error * error;
+                    maximum = maximum.max(error);
+                    channels += 1;
+                }
+            }
+        }
+        let rms = (squared / channels as f64).sqrt();
+        assert!(
+            maximum <= AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+            "max={maximum}, budget={AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR}"
+        );
+        assert!(
+            rms <= AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
+            "rms={rms}, budget={AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR}"
+        );
     }
 
     #[test]
@@ -1797,6 +2647,14 @@ mod tests {
         assert_ne!(
             base,
             journal_digest(EngineIdentity::certified(), &recoloured, tiling)
+        );
+
+        // The declared A/B policy is provenance even though certified
+        // normalizes every policy to the same analytic pixel path.
+        let forced = cfg.with_aa_policy(AaPolicy::Ssaa4x);
+        assert_ne!(
+            base,
+            journal_digest(EngineIdentity::certified(), &forced, tiling)
         );
     }
 

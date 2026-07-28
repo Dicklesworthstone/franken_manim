@@ -761,6 +761,21 @@ pub fn accumulate_piece_row<T: Real>(
     cells: &mut [T],
     carry: &mut T,
 ) {
+    accumulate_piece_row_inner(piece, translate, row_y, x_lo, x_hi, cells, carry, None);
+}
+
+/// [`accumulate_piece_row`] plus the native row's boundary-sheet marks.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_piece_row_inner<T: Real>(
+    piece: &MonoPiece,
+    translate: [f64; 2],
+    row_y: u32,
+    x_lo: u32,
+    x_hi: u32,
+    cells: &mut [T],
+    carry: &mut T,
+    mut crossings: Option<&mut [u8]>,
+) {
     let c = Coeffs::<T>::of(piece, translate);
     let row = T::from_u32(row_y);
     let row_end = row + T::ONE;
@@ -769,6 +784,20 @@ pub fn accumulate_piece_row<T: Real>(
     // Monotone in y, so the endpoints are the extremes.
     let y0 = c.y(T::ZERO);
     let y1 = c.y(T::ONE);
+    if y0 == y1 {
+        // A horizontal sheet contributes no signed dy to Green's-theorem area,
+        // but it still matters to adaptive classification. Own it half-open in
+        // y, just as `winding_at` owns shared anchors, so two horizontal sides
+        // of a subpixel-height feature are both counted in their native row
+        // without also appearing in the adjacent row.
+        if y0 >= row
+            && y0 < row_end
+            && let Some(counts) = crossings.as_deref_mut()
+        {
+            mark_boundary_cells(c.x(T::ZERO), c.x(T::ONE), x_lo, x_hi, counts);
+        }
+        return;
+    }
     let band_lo = fmax(fmin(y0, y1), row);
     let band_hi = fmin(fmax(y0, y1), row_end);
     if band_hi <= band_lo {
@@ -784,6 +813,9 @@ pub fn accumulate_piece_row<T: Real>(
 
     let xa = c.x(ta);
     let xb = c.x(tb);
+    if let Some(crossings) = crossings {
+        mark_boundary_cells(xa, xb, x_lo, x_hi, crossings);
+    }
     let increasing = xb >= xa;
     let left = T::from_u32(x_lo);
     let right = T::from_u32(x_hi);
@@ -889,6 +921,33 @@ pub fn accumulate_piece_row<T: Real>(
     }
 }
 
+/// Mark the native cells one monotone boundary sheet reaches in this row.
+///
+/// `xa..xb` are the sheet's x-extrema within the one-pixel y band: the piece is
+/// monotone in x, so every cell interval between them is crossed exactly once.
+/// Endpoint-only touches are conservatively included; a false complex
+/// classification costs samples, while a missed second sheet changes quality.
+fn mark_boundary_cells<T: Real>(xa: T, xb: T, x_lo: u32, x_hi: u32, out: &mut [u8]) {
+    if x_lo >= x_hi || out.is_empty() {
+        return;
+    }
+    let mut first = fmin(xa, xb).floor().to_i64();
+    let mut last = fmax(xa, xb).floor().to_i64();
+    let lo = i64::from(x_lo);
+    let hi = i64::from(x_hi);
+    if last < lo || first >= hi {
+        return;
+    }
+    first = first.max(lo);
+    last = last.min(hi - 1);
+    for cell in first..=last {
+        let index = (cell - lo) as usize;
+        if let Some(count) = out.get_mut(index) {
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
 /// Nonzero-winding coverage of one path over one pixel row of one tile.
 ///
 /// `cells` is scratch of length `x_hi - x_lo + 1`; `out` is `x_hi - x_lo` wide
@@ -907,15 +966,69 @@ pub fn fill_row<T: Real>(
     cells: &mut [T],
     out: &mut [T],
 ) {
+    fill_row_inner(pieces, translate, row_y, x_lo, x_hi, cells, out, None);
+}
+
+/// [`fill_row`] plus a saturating boundary-sheet count per native cell.
+///
+/// Classification is fused with the same piece walk that deposits coverage:
+/// general analytic fills do not walk their geometry a second time merely to
+/// decide whether the result needs subcell compositing.
+pub fn fill_row_classified<T: Real>(
+    pieces: &[MonoPiece],
+    translate: [f64; 2],
+    row_y: u32,
+    x: std::ops::Range<u32>,
+    cells: &mut [T],
+    out: &mut [T],
+    crossings: &mut [u8],
+) {
+    let (x_lo, x_hi) = (x.start, x.end);
+    fill_row_inner(
+        pieces,
+        translate,
+        row_y,
+        x_lo,
+        x_hi,
+        cells,
+        out,
+        Some(crossings),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_row_inner<T: Real>(
+    pieces: &[MonoPiece],
+    translate: [f64; 2],
+    row_y: u32,
+    x_lo: u32,
+    x_hi: u32,
+    cells: &mut [T],
+    out: &mut [T],
+    mut crossings: Option<&mut [u8]>,
+) {
     let w = (x_hi - x_lo) as usize;
     debug_assert_eq!(out.len(), w);
     debug_assert_eq!(cells.len(), w + 1);
     for c in cells.iter_mut() {
         *c = T::ZERO;
     }
+    if let Some(counts) = crossings.as_deref_mut() {
+        debug_assert_eq!(counts.len(), w);
+        counts.fill(0);
+    }
     let mut carry = T::ZERO;
     for piece in pieces {
-        accumulate_piece_row(piece, translate, row_y, x_lo, x_hi, cells, &mut carry);
+        accumulate_piece_row_inner(
+            piece,
+            translate,
+            row_y,
+            x_lo,
+            x_hi,
+            cells,
+            &mut carry,
+            crossings.as_deref_mut(),
+        );
     }
     let mut running = carry;
     for i in 0..w {
@@ -961,6 +1074,145 @@ pub fn coverage_at_cell<T: Real>(
     if a > T::ONE { T::ONE } else { a }
 }
 
+/// Exact fill coverage of one cell in an `samples × samples` subpixel grid.
+///
+/// This is the fused-resolve primitive for §10.4's standard-only adaptive AA.
+/// Scaling the outline and its occurrence translation by `samples` turns the
+/// requested subcell into an ordinary unit cell, so the same analytic integral
+/// as [`coverage_at_cell`] evaluates it. No supersampled canvas exists: callers
+/// composite the returned subcell immediately and average a single native
+/// output pixel.
+///
+/// `samples == 0` and an out-of-range subcell return zero. Coordinate overflow
+/// falls back to the native cell's exact coverage; such a viewport cannot be
+/// materialized as a frame in practice, but the helper remains total for every
+/// `u32` input.
+#[must_use]
+pub fn coverage_at_subcell(
+    pieces: &[MonoPiece],
+    translate: [f64; 2],
+    row_y: u32,
+    cell: u32,
+    samples: u32,
+    sample_x: u32,
+    sample_y: u32,
+) -> f64 {
+    if samples == 0 || sample_x >= samples || sample_y >= samples {
+        return 0.0;
+    }
+    let Some(high_x) = cell
+        .checked_mul(samples)
+        .and_then(|x| x.checked_add(sample_x))
+    else {
+        return coverage_at_cell(pieces, translate, row_y, cell);
+    };
+    let Some(high_y) = row_y
+        .checked_mul(samples)
+        .and_then(|y| y.checked_add(sample_y))
+    else {
+        return coverage_at_cell(pieces, translate, row_y, cell);
+    };
+    if high_x == u32::MAX {
+        return coverage_at_cell(pieces, translate, row_y, cell);
+    }
+
+    let scale = f64::from(samples);
+    let scaled_translate = [translate[0] * scale, translate[1] * scale];
+    let mut acc = 0.0f64;
+    let mut window = [0.0; 2];
+    for piece in pieces {
+        let scaled = MonoPiece {
+            p0: [piece.p0[0] * scale, piece.p0[1] * scale],
+            p1: [piece.p1[0] * scale, piece.p1[1] * scale],
+            p2: [piece.p2[0] * scale, piece.p2[1] * scale],
+        };
+        window.fill(0.0);
+        let mut carry = 0.0;
+        accumulate_piece_row(
+            &scaled,
+            scaled_translate,
+            high_y,
+            high_x,
+            high_x + 1,
+            &mut window,
+            &mut carry,
+        );
+        acc += carry + window[0];
+    }
+    acc.abs().min(1.0)
+}
+
+/// How many independent fill-boundary sheets cross one native pixel cell.
+///
+/// Three horizontal and three vertical interior probes are enough to
+/// distinguish the ordinary one-edge case from the cases G0-2 assigned to
+/// adaptive AA: a subpixel-width feature contributes two crossings, while
+/// cusps, near tangencies and dense self-intersections contribute more. Both
+/// directions are probed because a horizontal edge is invisible to a
+/// horizontal scanline and vice versa.
+///
+/// Shared anchors use half-open endpoint ownership, matching [`winding_at`], so
+/// an ordinary join counts once rather than once per adjacent piece. The count
+/// saturates at `u8::MAX`; the adaptive thresholds are far below that.
+#[must_use]
+pub fn boundary_crossings_at_cell(
+    pieces: &[MonoPiece],
+    translate: [f64; 2],
+    row_y: u32,
+    cell: u32,
+) -> u8 {
+    const PROBES: [f64; 3] = [0.25, 0.5, 0.75];
+    let x0 = f64::from(cell);
+    let x1 = x0 + 1.0;
+    let y0 = f64::from(row_y);
+    let y1 = y0 + 1.0;
+    let mut most = 0u8;
+
+    for offset in PROBES {
+        let y = y0 + offset;
+        let mut count = 0u8;
+        for piece in pieces {
+            let c = Coeffs::<f64>::of(piece, translate);
+            let a = c.y(0.0);
+            let b = c.y(1.0);
+            let lo = a.min(b);
+            let hi = a.max(b);
+            if hi <= lo || y < lo || y >= hi {
+                continue;
+            }
+            let t = c.t_at_y(y, 0.0, 1.0);
+            let x = c.x(t);
+            if x >= x0 && x < x1 {
+                count = count.saturating_add(1);
+            }
+        }
+        most = most.max(count);
+    }
+
+    for offset in PROBES {
+        let x = x0 + offset;
+        let mut count = 0u8;
+        for piece in pieces {
+            let c = Coeffs::<f64>::of(piece, translate);
+            let a = c.x(0.0);
+            let b = c.x(1.0);
+            let lo = a.min(b);
+            let hi = a.max(b);
+            if hi <= lo || x < lo || x >= hi {
+                continue;
+            }
+            let t = c.t_at_x(x, 0.0, 1.0);
+            let y = c.y(t);
+            if y >= y0 && y < y1 {
+                count = count.saturating_add(1);
+            }
+        }
+        most = most.max(count);
+    }
+
+    most
+}
+
 /// The winding number of a filled path at a screen point.
 ///
 /// Not a coverage query — an exact integer, used by the interior colour field to
@@ -1004,6 +1256,7 @@ pub fn winding_at(pieces: &[MonoPiece], translate: [f64; 2], p: [f64; 2]) -> i32
 pub struct RowScratch {
     cells: Vec<f64>,
     out: Vec<f64>,
+    crossings: Vec<u8>,
 }
 
 impl RowScratch {
@@ -1014,6 +1267,7 @@ impl RowScratch {
         RowScratch {
             cells: vec![0.0; w + 1],
             out: vec![0.0; w],
+            crossings: vec![0; w],
         }
     }
 
@@ -1028,6 +1282,9 @@ impl RowScratch {
         }
         if self.cells.len() < width + 1 {
             self.cells.resize(width + 1, 0.0);
+        }
+        if self.crossings.len() < width {
+            self.crossings.resize(width, 0);
         }
     }
 
@@ -1076,6 +1333,29 @@ impl RowScratch {
             &mut self.out[..w],
         );
         &self.out[..w]
+    }
+
+    /// [`RowScratch::fill_row`] with boundary-sheet counts from the same walk.
+    pub fn fill_row_classified(
+        &mut self,
+        pieces: &[MonoPiece],
+        translate: [f64; 2],
+        row_y: u32,
+        x_lo: u32,
+        x_hi: u32,
+    ) -> (&[f64], &[u8]) {
+        let w = (x_hi.saturating_sub(x_lo)) as usize;
+        self.reserve(w);
+        fill_row_classified(
+            pieces,
+            translate,
+            row_y,
+            x_lo..x_hi,
+            &mut self.cells[..w + 1],
+            &mut self.out[..w],
+            &mut self.crossings[..w],
+        );
+        (&self.out[..w], &self.crossings[..w])
     }
 }
 
@@ -2025,13 +2305,44 @@ impl FillKernel {
     pub fn coverage(&self, px: u32, py: u32) -> Option<f64> {
         let (x0, y0) = (f64::from(px), f64::from(py));
         let (x1, y1) = (x0 + 1.0, y0 + 1.0);
+        self.coverage_box([x0, y0, x1, y1])
+    }
+
+    /// Exact coverage of one cell in an `samples × samples` subpixel grid.
+    ///
+    /// Hinted geometry remains hinted during adaptive/forced AA: a true-disc
+    /// kernel must not quietly become the compiled quadratic approximation just
+    /// because a cell escalated. `None` names either the general kernel or an
+    /// invalid grid coordinate, allowing the caller to use
+    /// [`coverage_at_subcell`] for the former and refuse/fallback for the latter.
+    #[must_use]
+    pub fn coverage_subcell(
+        &self,
+        px: u32,
+        py: u32,
+        samples: u32,
+        sample_x: u32,
+        sample_y: u32,
+    ) -> Option<f64> {
+        if samples == 0 || sample_x >= samples || sample_y >= samples {
+            return None;
+        }
+        let inverse = 1.0 / f64::from(samples);
+        let x0 = f64::from(px) + f64::from(sample_x) * inverse;
+        let y0 = f64::from(py) + f64::from(sample_y) * inverse;
+        self.coverage_box([x0, y0, x0 + inverse, y0 + inverse])
+            // The box primitive returns an area in native-pixel units. A
+            // subcell's coverage fraction divides by its own `1/n²` area.
+            .map(|area| area * f64::from(samples) * f64::from(samples))
+    }
+
+    /// Exact intersection area with an arbitrary screen-space box.
+    fn coverage_box(&self, cell: [f64; 4]) -> Option<f64> {
         Some(match *self {
             FillKernel::General => return None,
-            FillKernel::Rect { rect } => box_overlap(rect, [x0, y0, x1, y1]),
-            FillKernel::Disc { center, radius } => disc_box_area(center, radius, [x0, y0, x1, y1]),
-            FillKernel::RoundedRect { rect, radius } => {
-                rounded_rect_box_area(rect, radius, [x0, y0, x1, y1])
-            }
+            FillKernel::Rect { rect } => box_overlap(rect, cell),
+            FillKernel::Disc { center, radius } => disc_box_area(center, radius, cell),
+            FillKernel::RoundedRect { rect, radius } => rounded_rect_box_area(rect, radius, cell),
         })
     }
 
@@ -2315,6 +2626,84 @@ mod tests {
         let want = (17.75 - 2.5) * (12.5 - 3.25);
         let got = total_coverage(&pieces, 24, 16, 8);
         assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+    }
+
+    #[test]
+    fn subcell_coverage_resolves_to_the_native_analytic_area() {
+        let path = circle_path(8.3, 8.1, 5.7, 8);
+        let pieces = pieces_of_path(&path, unit());
+        let native = coverage_at_cell::<f64>(&pieces, [0.0, 0.0], 4, 5);
+        for samples in [2, 4] {
+            let mut resolved = 0.0;
+            for sy in 0..samples {
+                for sx in 0..samples {
+                    resolved += coverage_at_subcell(&pieces, [0.0, 0.0], 4, 5, samples, sx, sy);
+                }
+            }
+            resolved /= f64::from(samples * samples);
+            assert!(
+                (resolved - native).abs() < 1e-12,
+                "{samples}x: {resolved} vs native {native}"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_crossing_counts_separate_simple_thin_and_dense_cells() {
+        let simple = pieces_of_path(
+            &polygon(&[[5.4, 4.0], [10.0, 4.0], [10.0, 8.0], [5.4, 8.0]]),
+            unit(),
+        );
+        assert_eq!(boundary_crossings_at_cell(&simple, [0.0, 0.0], 5, 5), 1);
+        let mut scratch = RowScratch::for_tile(1);
+        let (_, crossings) = scratch.fill_row_classified(&simple, [0.0, 0.0], 5, 5, 6);
+        assert_eq!(crossings, &[1]);
+
+        let thin = pieces_of_path(
+            &polygon(&[[5.2, 4.0], [5.6, 4.0], [5.6, 8.0], [5.2, 8.0]]),
+            unit(),
+        );
+        assert_eq!(boundary_crossings_at_cell(&thin, [0.0, 0.0], 5, 5), 2);
+        let (_, crossings) = scratch.fill_row_classified(&thin, [0.0, 0.0], 5, 5, 6);
+        assert_eq!(crossings, &[2]);
+
+        let horizontal_thin = pieces_of_path(
+            &polygon(&[[4.0, 5.2], [8.0, 5.2], [8.0, 5.6], [4.0, 5.6]]),
+            unit(),
+        );
+        assert_eq!(
+            boundary_crossings_at_cell(&horizontal_thin, [0.0, 0.0], 5, 5),
+            2
+        );
+        let (_, crossings) = scratch.fill_row_classified(&horizontal_thin, [0.0, 0.0], 5, 5, 6);
+        assert_eq!(crossings, &[2]);
+
+        let mut dense = pieces_of_path(
+            &polygon(&[[5.1, 4.0], [5.2, 4.0], [5.2, 8.0], [5.1, 8.0]]),
+            unit(),
+        );
+        dense.extend(pieces_of_path(
+            &polygon(&[[5.5, 4.0], [5.6, 4.0], [5.6, 8.0], [5.5, 8.0]]),
+            unit(),
+        ));
+        assert_eq!(boundary_crossings_at_cell(&dense, [0.0, 0.0], 5, 5), 4);
+        let (_, crossings) = scratch.fill_row_classified(&dense, [0.0, 0.0], 5, 5, 6);
+        assert_eq!(crossings, &[4]);
+
+        let mut horizontal_dense = pieces_of_path(
+            &polygon(&[[4.0, 5.1], [8.0, 5.1], [8.0, 5.2], [4.0, 5.2]]),
+            unit(),
+        );
+        horizontal_dense.extend(pieces_of_path(
+            &polygon(&[[4.0, 5.5], [8.0, 5.5], [8.0, 5.6], [4.0, 5.6]]),
+            unit(),
+        ));
+        assert_eq!(
+            boundary_crossings_at_cell(&horizontal_dense, [0.0, 0.0], 5, 5),
+            4
+        );
+        let (_, crossings) = scratch.fill_row_classified(&horizontal_dense, [0.0, 0.0], 5, 5, 6);
+        assert_eq!(crossings, &[4]);
     }
 
     #[test]
@@ -3843,6 +4232,21 @@ mod tests {
                 assert!(k.row(y, 0, 20, &mut row));
                 for (i, v) in row.iter().enumerate() {
                     assert_eq!(*v, k.coverage(i as u32, y).unwrap(), "{k:?} at ({i},{y})");
+                    for samples in [2, 4] {
+                        let mut resolved = 0.0;
+                        for sy in 0..samples {
+                            for sx in 0..samples {
+                                resolved += k
+                                    .coverage_subcell(i as u32, y, samples, sx, sy)
+                                    .expect("hinted");
+                            }
+                        }
+                        resolved /= f64::from(samples * samples);
+                        assert!(
+                            (resolved - *v).abs() < 1e-10,
+                            "{samples}x {k:?} at ({i},{y}): {resolved} vs {v}"
+                        );
+                    }
                 }
             }
         }
@@ -3852,6 +4256,7 @@ mod tests {
             "the general kernel declines, it does not fill zeros"
         );
         assert_eq!(FillKernel::General.coverage(0, 0), None);
+        assert_eq!(FillKernel::General.coverage_subcell(0, 0, 2, 0, 0), None);
     }
 
     #[test]

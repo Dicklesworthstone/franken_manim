@@ -50,7 +50,7 @@ use fmn_library::{Circle, Dot, Line, Polygon, Rectangle};
 use fmn_mobject::{JointType, Mob, Stage};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{
-    EngineIdentity, FrameConfig, FrameJob, Tier, encode_frame, journal_digest,
+    AaPolicy, EngineIdentity, FrameConfig, FrameJob, Tier, encode_frame, journal_digest,
 };
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
@@ -105,7 +105,12 @@ fn config() -> FrameConfig {
 /// the sweep below already renders the corpus once per registered tier and holds
 /// every one of them to the scalar definition.
 fn render(stage: &Stage, tier: Tier, threads: usize) -> Vec<u8> {
-    let cfg = config();
+    render_with_aa(stage, tier, threads, AaPolicy::Adaptive)
+}
+
+/// [`render`] with an explicit A/B policy.
+fn render_with_aa(stage: &Stage, tier: Tier, threads: usize, aa: AaPolicy) -> Vec<u8> {
+    let cfg = config().with_aa_policy(aa);
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
@@ -468,6 +473,23 @@ fn every_locked_frame_is_thread_count_invariant() {
             assert!(
                 render(&stage, Tier::Scalar, threads) == one,
                 "{name} moved at {threads} threads"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_certified_frame_ignores_adaptive_and_forced_aa_selection() {
+    // §10.4: classification, forced 2× and forced 4× are standard-quality
+    // choices. A certified run executes the canonical analytic path under every
+    // requested A/B policy and therefore produces the same raw-frame document.
+    for (name, stage) in corpus() {
+        let analytic = definition(&stage);
+        for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+            assert_eq!(
+                render_with_aa(&stage, Tier::Scalar, 4, aa),
+                analytic,
+                "{name} moved under certified {aa:?}"
             );
         }
     }

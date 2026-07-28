@@ -17,6 +17,7 @@
 
 use crate::yaml::{self, ParseError, Value, Warning};
 use core::fmt;
+pub use fmn_core::AaPolicy;
 
 /// A configuration failure: parse trouble in one source, or a precise
 /// typed-extraction error naming the key path.
@@ -283,18 +284,6 @@ pub enum Engine {
     Metal,
     /// The CUDA annex.
     Cuda,
-}
-
-/// `render.aa:` — anti-aliasing policy (a quality knob: speed, never
-/// meaning).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AaPolicy {
-    /// Adaptive coverage AA (the default).
-    Adaptive,
-    /// Forced 2× supersampling (A/B comparisons).
-    Ssaa2x,
-    /// Forced 4× supersampling (A/B comparisons).
-    Ssaa4x,
 }
 
 /// `render.threads:` — scheduler freedom, never semantics (D18).

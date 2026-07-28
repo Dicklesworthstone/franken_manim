@@ -39,8 +39,10 @@ pub mod table;
 pub use bin::{Binning, BinningError, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
 pub use engine::{
-    EngineIdentity, EngineKind, FrameConfig, FrameJob, FrameJobError, RENDERER_VERSION, Tier,
-    frame_digest,
+    AA_COMPLEX_2X_CROSSINGS, AA_COMPLEX_4X_CROSSINGS, AA_STROKE_COMPLEX_MIN_WIDTH_BANDS,
+    AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR, AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, AaPolicy,
+    AaStats, CoverageClass, EngineIdentity, EngineKind, FrameConfig, FrameJob, FrameJobError,
+    RENDERER_VERSION, Tier, frame_digest,
 };
 pub use fill::{
     FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, RationalPiece, RowScratch,

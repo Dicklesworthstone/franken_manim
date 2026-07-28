@@ -133,19 +133,37 @@ exact for an ordinary edge and strictly finer than what the Reference produces
 which a tile escalates*, because the Reference has no such concept: it
 supersamples every fill everywhere, unconditionally.
 
-The criterion is fixed here even though the number is not: **a tile escalates
-when analytic coverage stops being exact within a pixel** — that is, when more
-than one boundary crosses a single pixel cell (thin features narrower than a
-pixel, cusps, near-tangential crossings, dense glyph stems). This is a property
-the binner already computes: `analytic_fill::classify` separates interior from
-partial tiles, and the per-piece monotone split makes "how many boundary
-crossings land in this cell" available without a second pass.
+The criterion is fixed here: **a tile escalates when analytic coverage stops
+being exact within a pixel** — that is, when more than one boundary crosses a
+single pixel cell (thin features narrower than a pixel, cusps, near-tangential
+crossings, dense glyph stems). The per-piece monotone split makes "how many
+boundary crossings land in this cell" available during the native analytic
+pass; no geometry walk or supersampled canvas is retained after the cell is
+resolved.
 
-Choosing the numeric threshold requires the adaptive-AA implementation to exist
-so quality and cost can be traded against each other on real tiles. That is
-**fm-gmr**'s, and fm-gmr is hereby the owner of record for the number; this
-note fixes the criterion, the default, and the requirement that the escalated
-path must agree with the analytic path wherever both are exact.
+**fm-gmr's measured thresholds are now binding:** two independent boundary
+crossings select a 2×2 fused resolve; four or more select 4×4. A partial fill
+on the general path records crossings during the monotone-piece coverage walk;
+an admitted primitive hint whose boundary falls between all six interior probes
+is conservatively treated as two crossings. A centre-missed stroke probes the
+four 2× positions. G0-2's join study found that a stroke narrower than roughly
+two AA bands is wholly governed by the analytic smoothstep, so such a stroke
+does not contribute complexity; eligible overlapping strokes escalate when
+their independent contributions reach two. The 2/4 crossing thresholds and
+two-band stroke threshold are geometric facts, not autotuned values, and
+therefore do not depend on machine load or thread count.
+
+On the W5 corpus (12,544 native cells), adaptive classified 29 cells at 2× and
+34 at 4×: 13,204 native-equivalent cell-sample units including the classifier
+pass versus 200,704 for full-frame forced 4×, a **93.42% reduction in
+coverage-grid work** (not a wall-time claim). Against forced 4×, the measured
+linear-channel error is 0.219482421875 maximum and
+0.008526512734628627 RMS; the version-1 blocking budgets are 0.23 and 0.009.
+The escalated fill route keeps the same exact coverage kernel on subcells
+(curve-area integral or admitted primitive hint), so where native and sampled
+coverage are both exact their resolved areas agree.
+`certified` normalizes adaptive, forced 2× and forced 4× requests to the
+canonical analytic path and is byte-identical under all three.
 
 ---
 

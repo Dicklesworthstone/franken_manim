@@ -1,7 +1,7 @@
 # BN-06 — The fill: analytic coverage, a defined gradient field, and a border that does not grow the shape
 
 **Status:** Draft
-**Workstream:** W5 (Lumen) · **Bead:** fm-5oi · **Plan:** §10.2, Appendix B
+**Workstream:** W5 (Lumen) · **Beads:** fm-5oi, fm-gmr · **Plan:** §10.2, §10.4, Appendix B
 **Family:** BN-06 is the renderer's note (register rule 2). This file is its
 **fill** half; the stroke half is [BN-06-strokes.md](BN-06-strokes.md).
 
@@ -9,8 +9,11 @@
 
 FrankenManim's fill computes **nonzero-winding coverage analytically on the
 quadratic curves**. There is no triangulation, no signed-alpha winding trick, no
-supersampled canvas, and no `GL_MAX` composite pass. Three consequences are
-visible in output, and each is deliberate.
+full-frame supersampled canvas, and no `GL_MAX` composite pass. Standard mode
+may selectively recompose a complex native cell at 2×2 or 4×4, resolving it
+immediately without retaining a high-resolution image; certified mode always
+uses the canonical analytic path. Three consequences are visible in output,
+and each is deliberate.
 
 ### 1. Edges are continuously antialiased, not quantized to five levels
 
@@ -23,6 +26,16 @@ finding L3). Its *strokes*, by contrast, use a continuous smoothstep over a
 Our fill's coverage is the exact area of the pixel inside the path, computed from
 the curves' own integrals. Every intermediate value is available, so a filled
 edge is as smooth as a stroked one.
+
+Adaptive AA does not replace the native coverage kernel. A simple-edge cell
+keeps its analytic result. When two or more independent boundaries occupy one
+cell, standard mode evaluates the same kernel over 2×2 subcells (4×4 at four
+crossings): the curve-area integral stays the curve-area integral, and an
+admitted rectangle/disc/rounded-rectangle hint stays that exact primitive.
+Subcells composite in painter order and average directly into the native pixel.
+That selective path corrects overlapping-edge compositing; it does not quantize
+an ordinary fill edge back into box samples. Forced 2×/4× remain available for
+A/B comparisons.
 
 **Migration:** filled shapes with no stroke look cleaner at their edges. Nothing
 to change. If you added a stroke purely to hide fill stair-stepping, you no
@@ -101,8 +114,11 @@ Two things worth stating because they *look* like candidates:
 
 - `crates/fmn-render/src/fill.rs` — the fill, its oracles, and the measurements
   quoted above (exact enclosed area by Green's theorem; subdivision invariance of
-  geometry and of the gradient; the 0.500 seam disagreement; the flat-fill
-  no-op).
+  geometry and of the gradient; exact native/subcell area agreement; boundary
+  crossing classification; the 0.500 seam disagreement; the flat-fill no-op).
+- `crates/fmn-render/src/engine.rs` — adaptive thresholds, tile/cell
+  instrumentation, the G0-2 two-AA-band stroke eligibility rule, fused resolve,
+  certified policy invariance, and the version-1 forced-4× visual budget.
 - [`docs/g0/G0-2-look-study-ratification.md`](../g0/G0-2-look-study-ratification.md)
   — finding L1 (the 1.5 px smoothstep, measured 1.560 px) and finding L3 (the
   Reference's five-level fill coverage).
