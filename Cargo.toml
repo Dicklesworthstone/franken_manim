@@ -64,6 +64,7 @@ fmn-runtime = { path = "crates/fmn-runtime" }
 fmn-cli = { path = "crates/fmn-cli" }
 fmn-conformance = { path = "crates/fmn-conformance" }
 fmn-python = { path = "crates/fmn-python" }
+pyo3 = { version = "=0.26.0", default-features = false, features = ["macros"] }
 
 # Baseline: clippy::all at warn, promoted to errors by scripts/check.sh's
 # `-D warnings`. Crates opt in via [lints] workspace = true.

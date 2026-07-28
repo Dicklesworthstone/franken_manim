@@ -715,6 +715,51 @@ impl RecordView {
         self.len == 0
     }
 
+    /// Record layout pinned by this view's storage generation.
+    ///
+    /// This is the schema source for fmn-python's NumPy dtype descriptor.
+    /// It remains valid after the originating buffer resizes because the
+    /// view owns the schema independently of the buffer's current generation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn schema(&self) -> &RecordSchema {
+        &self.schema
+    }
+
+    /// Whether the foreign view was exported writable.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        self.writable
+    }
+
+    /// Pointer to the first lane in this pinned storage generation.
+    ///
+    /// The pointer is stable for the lifetime of `self`: every resize swaps
+    /// in a new `Storage` rather than reallocating this generation, and the
+    /// view's `Arc` keeps the old allocation alive. Dereferencing it is
+    /// deliberately confined to fmn-python's CPython buffer slot, whose
+    /// single-scene-worker thread rule prevents concurrent Rust access.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn foreign_data_ptr(&self) -> *mut f32 {
+        self.storage
+            .cells
+            .write()
+            .expect("storage lock poisoned")
+            .as_mut_ptr()
+    }
+
+    /// Byte length of the complete interleaved record generation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn foreign_byte_len(&self) -> usize {
+        self.len
+            .checked_mul(self.schema.stride())
+            .and_then(|lanes| lanes.checked_mul(std::mem::size_of::<f32>()))
+            .expect("RecordBuffer allocation already proved its byte length")
+    }
+
     /// Whether this view still aliases `buffer`'s current generation
     /// (false once a resize or restore has swapped generations, V3/V6).
     #[must_use]

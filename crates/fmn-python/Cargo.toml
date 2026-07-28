@@ -6,6 +6,14 @@ license.workspace = true
 repository.workspace = true
 description = "The PyO3 `manimlib` bridge"
 
+[lib]
+name = "manimlib"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true
@@ -13,6 +21,7 @@ fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-library.workspace = true
 fmn-scene.workspace = true
+pyo3.workspace = true
 
 [lints]
 workspace = true
