@@ -7,6 +7,7 @@
 
 use fmn_core::constants::DEG;
 use fmn_core::types::Vec3;
+use fmn_geom::cubic;
 use fmn_geom::{AnchorMode, GeomError, QuadPath};
 
 fn p(x: f64, y: f64) -> Vec3 {
@@ -261,6 +262,99 @@ fn coincident_anchor_handle_nudges() {
 }
 
 #[test]
+fn cubic_api_appends_the_exact_admitted_chain() {
+    let controls = [p(0.0, 0.0), p(-1.0, 2.0), p(3.0, -2.0), p(4.0, 1.0)];
+    let tolerance = 0.005;
+    let expected = cubic::cubic_to_quadratics(
+        controls[0],
+        controls[1],
+        controls[2],
+        controls[3],
+        tolerance,
+    )
+    .unwrap();
+
+    let mut path = QuadPath::new();
+    path.start_new_path(controls[0]);
+    path.add_cubic_bezier_curve_to_with_tolerance(controls[1], controls[2], controls[3], tolerance)
+        .unwrap();
+    assert_eq!(path.points(), expected);
+    assert_eq!(path.subpaths().len(), 1);
+}
+
+#[test]
+fn simple_cubic_compatibility_knob_cannot_lower_fidelity() {
+    let mut canonical = QuadPath::new();
+    canonical.start_new_path(p(0.0, 0.0));
+    canonical
+        .add_cubic_bezier_curve_to(p(1.0, 0.25), p(2.0, 0.5), p(3.0, 1.0))
+        .unwrap();
+
+    let mut requested_simple = QuadPath::new();
+    requested_simple.set_use_simple_quadratic_approx(true);
+    requested_simple.start_new_path(p(0.0, 0.0));
+    requested_simple
+        .add_cubic_bezier_curve_to(p(1.0, 0.25), p(2.0, 0.5), p(3.0, 1.0))
+        .unwrap();
+
+    assert_eq!(requested_simple, canonical);
+}
+
+#[test]
+fn stationary_cubic_start_is_not_a_false_subpath_break() {
+    // Degree elevation of Q(t)=t²: the mathematically exact quadratic handle
+    // equals the first anchor. The converter separates it by a bounded ulp so
+    // `[anchor, handle, next]` cannot be misread as a break marker.
+    let mut path = QuadPath::new();
+    path.start_new_path(p(0.0, 0.0));
+    path.add_cubic_bezier_curve_to(p(0.0, 0.0), p(1.0 / 3.0, 0.0), p(1.0, 0.0))
+        .unwrap();
+    assert_ne!(path.points()[0], path.points()[1]);
+    assert_eq!(path.subpaths().len(), 1);
+    assert_eq!(path.subpath_end_indices(), vec![path.points().len() - 1]);
+}
+
+#[test]
+fn stationary_cubic_end_keeps_a_distinct_final_handle() {
+    // Degree elevation of Q(t)=1-(1-t)² has its exact quadratic handle on the
+    // final anchor. Keep the stored handle distinct so downstream anchor-mode
+    // cleanup cannot rewrite the converter-admitted chain.
+    let mut path = QuadPath::new();
+    path.start_new_path(p(0.0, 0.0));
+    path.add_cubic_bezier_curve_to(p(2.0 / 3.0, 0.0), p(1.0, 0.0), p(1.0, 0.0))
+        .unwrap();
+    let points = path.points();
+    assert_ne!(points[points.len() - 2], points[points.len() - 1]);
+    assert_eq!(path.subpaths().len(), 1);
+}
+
+#[test]
+fn independently_converted_smooth_cubics_keep_their_join() {
+    let mut path = QuadPath::new();
+    path.start_new_path(p(0.0, 0.0));
+    path.add_cubic_bezier_curve_to(p(0.2, 0.8), p(0.7, 1.0), p(1.0, 1.0))
+        .unwrap();
+    path.add_smooth_cubic_curve_to(p(1.8, 0.2), p(2.0, 0.0))
+        .unwrap();
+
+    assert_eq!(path.subpaths().len(), 1);
+    assert!(path.is_smooth(1e-7), "{:?}", path.joint_angles());
+}
+
+#[test]
+fn rejected_cubic_tolerance_leaves_the_path_unchanged() {
+    let mut path = QuadPath::new();
+    path.start_new_path(p(0.0, 0.0));
+    let before = path.clone();
+    assert_eq!(
+        path.add_cubic_bezier_curve_to_with_tolerance(p(0.0, 1.0), p(1.0, 1.0), p(1.0, 0.0), 0.0,)
+            .unwrap_err(),
+        GeomError::InvalidTolerance
+    );
+    assert_eq!(path, before);
+}
+
+#[test]
 fn single_point_subpaths() {
     // Two consecutive start_new_path calls create a singleton subpath.
     let mut path = QuadPath::new();
@@ -324,6 +418,33 @@ fn true_smooth_passes_through_original_anchors() {
     }
     // And the result is smooth at its anchors.
     assert!(path.is_smooth(1.0 * DEG));
+}
+
+#[test]
+fn true_smooth_rotated_plane_stays_finite_and_smooth() {
+    let c = std::f64::consts::FRAC_1_SQRT_2;
+    let anchors = [[0.0, 0.0, 0.0], [1.0, c, c], [2.0, 0.0, 0.0], [3.0, c, c]];
+    let mut path = QuadPath::new();
+    path.set_points_as_corners(&anchors).unwrap();
+    path.change_anchor_mode(AnchorMode::TrueSmooth).unwrap();
+
+    assert!(
+        path.points()
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    );
+    assert_eq!(path.subpaths().len(), 1);
+    assert!(path.is_smooth(1.0 * DEG));
+    for anchor in anchors {
+        assert!(
+            path.anchors()
+                .iter()
+                .any(|candidate| (0..3)
+                    .all(|axis| { (candidate[axis] - anchor[axis]).abs() < 1e-9 })),
+            "anchor {anchor:?} lost by rotated smoothing"
+        );
+    }
 }
 
 #[test]

@@ -162,11 +162,13 @@ pub fn smooth_cubic_handles(anchors: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>), 
 /// shared-anchor layout. Non-flat inputs are rotated to a plane, smoothed,
 /// and rotated back, exactly as the Reference does.
 ///
-/// The per-segment cubic→quadratic step currently uses the two-quad split of
-/// [`cubic::quadratic_approximation_of_cubic`] — the Reference's own fallback
-/// path. fm-6cf swaps in the error-bounded converter (§7.2), which subdivides
-/// adaptively; outputs then gain resolution but keep this exact contract.
-pub fn smooth_quadratic_path(anchors: &[Vec3]) -> Result<Vec<Vec3>, GeomError> {
+/// Every solved cubic routes through the one error-bounded converter (§7.2).
+/// `tolerance` is the global scene-unit ceiling; each source segment also
+/// keeps the predecessor contract `0.1 * chord_length`, whichever is tighter.
+pub fn smooth_quadratic_path(anchors: &[Vec3], tolerance: f64) -> Result<Vec<Vec3>, GeomError> {
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(GeomError::InvalidTolerance);
+    }
     if anchors.len() < 2 {
         return Ok(anchors.to_vec());
     }
@@ -199,8 +201,19 @@ pub fn smooth_quadratic_path(anchors: &[Vec3]) -> Result<Vec<Vec3>, GeomError> {
     // back at the end); z is zero here by construction.
     let mut quads: Vec<Vec3> = vec![[working[0][0], working[0][1], 0.0]];
     for i in 0..working.len() - 1 {
-        let approx =
-            cubic::quadratic_approximation_of_cubic(working[i], h1s[i], h2s[i], working[i + 1]);
+        let chord_tolerance = 0.1 * space_ops::get_norm(vec::sub(working[i + 1], working[i]));
+        let segment_tolerance = if chord_tolerance.is_finite() && chord_tolerance > 0.0 {
+            tolerance.min(chord_tolerance)
+        } else {
+            tolerance
+        };
+        let approx = cubic::cubic_to_quadratics(
+            working[i],
+            h1s[i],
+            h2s[i],
+            working[i + 1],
+            segment_tolerance,
+        )?;
         for p in &approx[1..] {
             quads.push([p[0], p[1], 0.0]);
         }
@@ -404,7 +417,7 @@ mod tests {
             [2.0, 0.0, 0.0],
             [3.0, 1.0, 0.0],
         ];
-        let path = smooth_quadratic_path(&anchors).unwrap();
+        let path = smooth_quadratic_path(&anchors, cubic::DEFAULT_TOLERANCE_SCENE).unwrap();
         assert_eq!(path.len() % 2, 1);
         // Every input anchor appears as an anchor of the output spline.
         for a in anchors {

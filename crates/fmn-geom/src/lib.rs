@@ -13,8 +13,9 @@
 //! semantics — those conventions are stated normatively in
 //! `docs/ROTATION_CONVENTIONS.md`, not inferred from this code.
 //!
-//! Still to land in this crate: the error-bounded cubic→quadratic converter
-//! (fm-6cf), path booleans (fm-8dx), the SVG document processor (fm-6nm),
+//! The one error-bounded cubic→quadratic converter is the ingress for API and
+//! smoothing cubics (fm-6cf); TrueType quadratics pass through losslessly.
+//! Still to land: path booleans (fm-8dx), the SVG document processor (fm-6nm),
 //! and isolines + ear-clip (fm-81u).
 #![forbid(unsafe_code)]
 
@@ -60,16 +61,14 @@ pub enum GeomError {
     SingularSystem,
     /// A conversion tolerance that was not a positive, finite number.
     ///
-    /// The cubic→quadratic converter cannot fail on geometry — every finite
-    /// cubic converts — so this and [`GeomError::ToleranceUnreachable`] are
-    /// its only failure modes, and both are about the *request*.
+    /// This and [`GeomError::ToleranceUnreachable`] are the converter's
+    /// explicit failure modes.
     InvalidTolerance,
     /// Holding the requested tolerance would need more than
     /// [`cubic::MAX_SEGMENTS`] quadratics.
     ///
-    /// The piece count is closed-form, so this is a resource guard against
-    /// sizing an allocation from arithmetic; for any sane tolerance it means
-    /// the control points were not finite. Never a silently coarser curve.
+    /// This is a resource/representation guard against sizing an allocation
+    /// from arithmetic or silently emitting a coarser curve.
     ToleranceUnreachable {
         /// The piece count the tolerance would have required.
         needed: usize,

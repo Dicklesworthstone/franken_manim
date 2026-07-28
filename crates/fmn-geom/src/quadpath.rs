@@ -8,9 +8,9 @@
 //! `tests/` lock it down. Semantics are ported from `VMobject`
 //! (`3b1b/manim` @ `6199a00d`), computed in f64 per §6.1.
 //!
-//! Not here by design: the proportion/length layer (`point_from_proportion`,
-//! `get_arc_length`) is fm-xci — true arc length under the original names —
-//! and the error-bounded cubic→quadratic converter is fm-6cf.
+//! The proportion/length layer (`point_from_proportion`, `get_arc_length`) is
+//! fm-xci — true arc length under the original names. Cubic inputs route
+//! through the one error-bounded converter in [`crate::cubic`] (fm-6cf).
 
 use crate::GeomError;
 use crate::bezier;
@@ -52,9 +52,6 @@ pub struct QuadPath {
     tolerance_for_point_equality: f64,
     /// `VMobject.long_lines`: lines split into two quadratics instead of one.
     long_lines: bool,
-    /// `VMobject.use_simple_quadratic_approx`: single-quad shortcut for
-    /// shallow cubics in `add_cubic_bezier_curve_to`.
-    use_simple_quadratic_approx: bool,
 }
 
 impl Default for QuadPath {
@@ -70,7 +67,6 @@ impl QuadPath {
             points: Vec::new(),
             tolerance_for_point_equality: DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
             long_lines: false,
-            use_simple_quadratic_approx: false,
         }
     }
 
@@ -144,8 +140,14 @@ impl QuadPath {
         self
     }
 
-    pub fn set_use_simple_quadratic_approx(&mut self, value: bool) -> &mut Self {
-        self.use_simple_quadratic_approx = value;
+    /// Accept the Reference's quality-lowering compatibility knob.
+    ///
+    /// FrankenManim always keeps the configured error bound, so this setting
+    /// cannot switch to the Reference's unbounded shallow-cubic shortcut
+    /// (BN-13). The one converter emits one quadratic for effectively
+    /// quadratic input when it can preserve both the guarantee and
+    /// shared-anchor encoding.
+    pub fn set_use_simple_quadratic_approx(&mut self, _value: bool) -> &mut Self {
         self
     }
 
@@ -261,38 +263,36 @@ impl QuadPath {
         Ok(self)
     }
 
-    /// `add_cubic_bezier_curve_to`: reduce the cubic and append it. Note the
-    /// Reference's own caveat: the shallow-angle shortcut assumes points on
-    /// the xy-plane.
+    /// `add_cubic_bezier_curve_to`: reduce the cubic at the G0-2 canonical
+    /// 1080p tolerance and append it.
     pub fn add_cubic_bezier_curve_to(
         &mut self,
         handle1: Vec3,
         handle2: Vec3,
         anchor: Vec3,
     ) -> Result<&mut Self, GeomError> {
+        self.add_cubic_bezier_curve_to_with_tolerance(
+            handle1,
+            handle2,
+            anchor,
+            cubic::DEFAULT_TOLERANCE_SCENE,
+        )
+    }
+
+    /// Reduce and append a cubic under an explicit scene-unit `tolerance`.
+    ///
+    /// This is the configuration seam for importers and non-default render
+    /// scales. The emitted point run is the exact chain whose Bernstein bound
+    /// was admitted by [`cubic::cubic_to_quadratics`].
+    pub fn add_cubic_bezier_curve_to_with_tolerance(
+        &mut self,
+        handle1: Vec3,
+        handle2: Vec3,
+        anchor: Vec3,
+        tolerance: f64,
+    ) -> Result<&mut Self, GeomError> {
         let last = self.last_point().ok_or(GeomError::EmptyPath)?;
-        let v1 = vec::sub(handle1, last);
-        let v2 = vec::sub(anchor, handle2);
-        let angle = space_ops::angle_between_vectors(v1, v2);
-        let mut quad_approx: Vec<Vec3> = if self.use_simple_quadratic_approx && angle < 45.0 * DEG {
-            vec![
-                last,
-                space_ops::find_intersection(last, v1, anchor, vec::scale(v2, -1.0), 1e-5),
-                anchor,
-            ]
-        } else {
-            let approx = cubic::quadratic_approximation_of_cubic(last, handle1, handle2, anchor);
-            let mut approx = approx.to_vec();
-            if self.consider_points_equal(approx[3], approx[4]) {
-                // Avoid degenerate handles (duplicate points).
-                approx[3] = space_ops::midpoint(approx[2], approx[3]);
-            }
-            approx
-        };
-        if self.consider_points_equal(quad_approx[1], last) {
-            // Prevent the subpath from accidentally being marked closed.
-            quad_approx[1] = space_ops::midpoint(quad_approx[1], quad_approx[2]);
-        }
+        let quad_approx = cubic::cubic_to_quadratics(last, handle1, handle2, anchor, tolerance)?;
         self.points.extend_from_slice(&quad_approx[1..]);
         Ok(self)
     }
@@ -826,7 +826,8 @@ impl QuadPath {
                     }
                 }
                 AnchorMode::TrueSmooth => {
-                    new_subpath = smoothing::smooth_quadratic_path(&anchors)?;
+                    new_subpath =
+                        smoothing::smooth_quadratic_path(&anchors, cubic::DEFAULT_TOLERANCE_SCENE)?;
                 }
             }
             // Shift any handle that ended up exactly on top of the previous

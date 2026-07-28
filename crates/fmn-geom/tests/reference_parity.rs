@@ -275,6 +275,30 @@ fn quadpath_op_sequences_match_vmobject() {
             .collect();
 
         let path = build_case(&name);
+        if matches!(
+            name.as_str(),
+            "cubic_curve" | "cubic_simple_approx" | "smooth_cubic_chain"
+        ) {
+            // BN-13: these are retained Reference observations, but their
+            // unbounded interior reduction is deliberately retired. Endpoints
+            // and subpath structure remain API semantics; the adaptive chain
+            // is locked by FrankenManim's own converter goldens.
+            assert_points_close(
+                &[
+                    path.points()[0],
+                    *path.points().last().expect("cubic path is nonempty"),
+                ],
+                &[
+                    expected_points[0],
+                    *expected_points.last().expect("fixture is nonempty"),
+                ],
+                F32_TOL,
+                &name,
+            );
+            assert_eq!(path.subpaths().len(), 1, "{name}: one subpath");
+            assert_eq!(path.is_closed(), expected_closed, "{name}: closure");
+            continue;
+        }
         assert_points_close(path.points(), &expected_points, F32_TOL, &name);
         assert_eq!(
             path.subpath_end_indices(),

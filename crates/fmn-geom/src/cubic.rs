@@ -1,31 +1,54 @@
-//! Cubic→quadratic reduction, single-curve form.
+//! Cubic→quadratic reduction (§7.2, fm-6cf).
 //!
-//! This is the exact port of the Reference's
-//! `get_quadratic_approximation_of_cubic` (`manimlib/utils/bezier.py` @
-//! `6199a00d`): split the cubic at an interior inflection point when one
-//! exists (else at t = ½) and approximate each half with one quadratic whose
-//! handle is the tangent-line intersection. The inflection search uses xy
-//! cross products, so — like the Reference — it assumes the curve has been
-//! brought to the xy-plane.
-//!
-//! It is kept because the Reference's *path-construction* fixtures are locked
-//! to it, and because it is the thing [`cubic_to_quadratics`] — the one
-//! error-bounded converter this crate actually uses (§7.2, fm-6cf) — is
-//! measured against. It is not the converter.
+//! [`quadratic_approximation_of_cubic`] is the exact port of the Reference's
+//! fixed two-quad splitter. It remains only as a measured reference oracle;
+//! production paths all use [`cubic_to_quadratics`].
 //!
 //! # The error-bounded converter
 //!
 //! [`cubic_to_quadratics`] reduces any cubic to a chain of quadratics that
-//! holds a stated tolerance. The tolerance is enforced by a *proven* bound —
-//! never a sampled estimate — and the sizing rests on an identity worth
-//! writing down, because it is exact where the usual treatment is an
-//! inequality.
+//! holds a stated tolerance. Its output is a single quadratic spline, not a
+//! bag of independently fitted pieces. For `n ≥ 2`, let `q_i` be the
+//! off-curve control for piece `i`; the internal shared anchor is
+//! `a_i = (q_(i-1) + q_i) / 2`. Therefore the derivatives on either side are
 //!
-//! Approximate a cubic `(p0, p1, p2, p3)` by the single quadratic sharing its
-//! endpoints whose control point is `q = (3p1 - p0 + 3p2 - p3) / 4`. Degree-
-//! elevate that quadratic back to a cubic and its inner control points are
-//! `(p0 + 2q)/3` and `(p3 + 2q)/3`. Subtracting, the two control-point
-//! differences come out **exactly antisymmetric**:
+//! ```text
+//! Q'_(i-1)(1) = 2(a_i - q_(i-1)) = q_i - q_(i-1)
+//! Q'_i(0)     = 2(q_i - a_i)     = q_i - q_(i-1)
+//! ```
+//!
+//! so every artificial join is C¹ in any dimension. No tangent-line
+//! intersection is needed, which matters in 3D: two endpoint tangent lines
+//! are generally skew.
+//!
+//! Each `q_i` blends the two endpoint-tangent candidates of its uniform
+//! sub-cubic. If `L_i = c0 + 3/2(c1-c0)` and
+//! `R_i = c3 + 3/2(c2-c3)`, then
+//! `q_i = lerp(L_i, R_i, i/(n-1))`. The first and last controls consequently
+//! preserve the original cubic's endpoint derivatives exactly, except that a
+//! stationary handle may receive the one-ulp, bound-checked separation needed
+//! by the shared-anchor path encoding.
+//!
+//! # The proven bound
+//!
+//! A quadratic `(a, q, b)` degree-elevates to the cubic
+//! `(a, (a+2q)/3, (b+2q)/3, b)`. Subtract those four controls from the
+//! corresponding source sub-cubic. The difference curve is itself a cubic
+//! Bézier with those four difference controls, and the Bernstein weights are
+//! non-negative and sum to one. Convexity therefore gives
+//!
+//! ```text
+//! max_t |C(t) - Q(t)| ≤ max_j |d_j|.
+//! ```
+//!
+//! `chain_holds_tolerance` checks that bound for every output piece. It is a
+//! proof over the entire parameter interval, never a sampled estimate.
+//!
+//! # The one-piece identity and subdivision count
+//!
+//! For `n = 1`, use the natural control
+//! `q = (3p1 - p0 + 3p2 - p3) / 4`. Its two degree-elevated control
+//! differences are exactly antisymmetric:
 //!
 //! ```text
 //! d1 = p1 - (p0 + 2q)/3 =  (p3 - p0 + 3p1 - 3p2) / 6
@@ -54,26 +77,19 @@
 //! n = ceil( cbrt( |Δ| / (12√3 · tolerance) ) )
 //! ```
 //!
-//! **The emitted handle is not the natural one, though**, and that costs the
-//! closed form. The natural handle is C⁰ only: a chain of them kinks at every
-//! subdivision join, which `QuadPath::is_smooth` rejects at 1°. The converter
-//! emits [`quadratic_handle`] — the end-tangent intersection, which is G¹ at
-//! every join by construction — and that handle has no antisymmetry, so its
-//! error is governed by the *inequality* `¾·max(|d1|,|d2|)` (cu2qu's bound)
-//! rather than by an identity. `n` therefore starts at the closed form above
-//! and doubles until every piece's bound holds.
-//!
-//! The loop compares f64 values produced in a fixed order from the inputs, so
-//! it is deterministic in the §10.5 sense — the same cubic and tolerance give
-//! the same count everywhere — and it is bounded by [`MAX_SEGMENTS`]. What the
-//! exact identity still buys is a *tight* starting guess and the proof that
-//! the loop terminates: the natural bound falls as `1/n³`, and the accepted
-//! handle is held within a constant factor of it.
+//! This exact count is a tight starting guess. The C¹ spline is then checked
+//! with the convex-hull bound and `n` doubles until it fits. The construction
+//! reproduces every quadratic exactly, so its error depends on the cubic's
+//! constant third derivative and falls as `1/n³`; doubling terminates unless
+//! the resource or f64-representation guard is reached. Fixed arithmetic order
+//! and fixed geometric growth make the output deterministic in the §10.5
+//! sense.
 
 use crate::GeomError;
 use crate::bezier;
 use crate::space_ops;
 use crate::vec;
+use fmn_core::constants::{DEFAULT_PIXEL_WIDTH, FRAME_WIDTH};
 use fmn_core::types::Vec3;
 
 /// The default conversion tolerance, **in output pixels**, fixed by the G0-2
@@ -91,12 +107,18 @@ use fmn_core::types::Vec3;
 /// [`tolerance_for_scale`].
 pub const DEFAULT_TOLERANCE_PX: f64 = 0.1;
 
+/// The default tolerance in scene units at the default 1920-pixel frame
+/// scale fixed by G0-2: `0.1 / 135`.
+pub const DEFAULT_TOLERANCE_SCENE: f64 =
+    tolerance_for_scale(DEFAULT_PIXEL_WIDTH as f64 / FRAME_WIDTH);
+
 /// The largest number of quadratics [`cubic_to_quadratics`] will emit.
 ///
-/// A resource guard, not a quality knob. `n` is closed-form, so a pathological
-/// tolerance (or a non-finite input) would otherwise size an allocation
-/// directly from arithmetic — a decompression-bomb shape, and §16's fuzzing
-/// plane treats those as real. Reaching the cap is an error
+/// A resource guard, not a quality knob. The closed-form lower estimate and
+/// dyadic search would otherwise let a pathological tolerance (or a
+/// non-finite input) size an allocation directly from arithmetic — a
+/// decompression-bomb shape, and §16's fuzzing plane treats those as real.
+/// Reaching the cap is an error
 /// ([`GeomError::ToleranceUnreachable`]) rather than a silently coarser curve.
 pub const MAX_SEGMENTS: usize = 4096;
 
@@ -109,16 +131,16 @@ const DEVIATION_CONSTANT: f64 = 0.048112522432468816;
 /// `px_per_unit` is the Reference's mapping: `FRAME_WIDTH / pixel_width`
 /// inverted, i.e. 135.0 at 1920×1080 with the default frame.
 #[must_use]
-pub fn tolerance_for_scale(px_per_unit: f64) -> f64 {
+pub const fn tolerance_for_scale(px_per_unit: f64) -> f64 {
     DEFAULT_TOLERANCE_PX / px_per_unit
 }
 
 /// The quadratic control point that makes the single-quadratic error
 /// antisymmetric, and therefore exactly computable (module docs).
 ///
-/// Used to *size* the subdivision, not to build it: it is C⁰ only, and a
-/// chain of these has a visible kink at every join. The converter emits
-/// [`quadratic_handle`] instead.
+/// The converter emits it when the source is effectively quadratic and the
+/// resulting piece holds the tolerance. Generic cubics use the C¹ spline
+/// construction from the module docs even under a loose tolerance.
 #[must_use]
 pub fn natural_quadratic_handle(a0: Vec3, h0: Vec3, h1: Vec3, a1: Vec3) -> Vec3 {
     let mut q = [0.0; 3];
@@ -128,84 +150,179 @@ pub fn natural_quadratic_handle(a0: Vec3, h0: Vec3, h1: Vec3, a1: Vec3) -> Vec3 
     q
 }
 
-/// The quadratic control point where the cubic's two end tangents meet — the
-/// handle the converter actually emits.
-///
-/// **This is what keeps the output smooth.** A handle on the end-tangent line
-/// makes the quadratic share the cubic's tangent at both anchors, so two
-/// adjacent pieces meet with their handles collinear through the shared
-/// anchor: G¹ by construction, at every subdivision join. The natural handle
-/// has a smaller *maximum* error but is only C⁰, and a chain of natural
-/// handles fails `QuadPath::is_smooth` at 1° — which is how this was caught.
-///
-/// Falls back to the natural handle whenever the tangent construction is not
-/// actually better — which covers three real cases, not just parallel
-/// tangents:
-///
-/// - **parallel tangents**, where there is no intersection to find;
-/// - **skew tangents**, which is the *general* case in 3D: four control points
-///   need not be coplanar, so a non-planar cubic has end tangents that never
-///   meet. (The Reference sidesteps this by only ever calling its two-quad
-///   split on curves already rotated into the xy-plane.)
-/// - **an intersection far outside the span**, where the handle would bow the
-///   quadratic away from the curve it is meant to approximate.
-///
-/// The choice between them is by deviation bound, with slack: the tangent
-/// handle is taken unless it is more than [`TANGENT_HANDLE_SLACK`] times worse
-/// than the natural one, which is what a skew or parallel pair produces. A
-/// plain "smaller bound wins" rule does not work — the natural handle usually
-/// has the smaller maximum error, so it would win almost everywhere and the
-/// output would be C⁰ again.
-///
-#[must_use]
-pub fn quadratic_handle(a0: Vec3, h0: Vec3, h1: Vec3, a1: Vec3) -> Vec3 {
-    let natural = natural_quadratic_handle(a0, h0, h1, a1);
-    let t0 = vec::sub(h0, a0);
-    let t1 = vec::sub(a1, h1);
-    let q = space_ops::find_intersection(a0, t0, a1, t1, 1e-9);
-    if !q.iter().all(|c| c.is_finite()) {
-        return natural;
+/// A scale-safe Euclidean norm.
+fn scaled_norm(v: Vec3) -> f64 {
+    let scale = v.iter().map(|x| x.abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return 0.0;
     }
-    let p = [a0, h0, h1, a1];
-    if deviation_bound(p, q) <= TANGENT_HANDLE_SLACK * deviation_bound(p, natural) {
-        q
-    } else {
-        natural
+    if !scale.is_finite() {
+        return f64::INFINITY;
+    }
+    let x = v[0] / scale;
+    let y = v[1] / scale;
+    let z = v[2] / scale;
+    scale * (x * x + y * y + z * z).sqrt()
+}
+
+/// A scale-safe norm rounded outward for use in a proof bound.
+///
+/// The epsilon margin covers the fixed sequence of divisions, products,
+/// additions, and the correctly-rounded square root. It affects only
+/// admission of a piece, never its coordinates.
+fn conservative_norm(v: Vec3) -> f64 {
+    scaled_norm(v) * (1.0 + 16.0 * f64::EPSILON)
+}
+
+/// Absolute guard for the fixed affine-arithmetic sequence that derives a
+/// sub-cubic from the original f64 controls.
+fn subdivision_rounding_guard(p: [Vec3; 4]) -> f64 {
+    let coordinate_scale = p
+        .iter()
+        .flat_map(|point| point.iter())
+        .map(|component| component.abs())
+        .fold(0.0, f64::max);
+    coordinate_scale * 64.0 * f64::EPSILON
+}
+
+/// One C¹-spline off-curve control from a uniform source sub-cubic.
+fn spline_control(piece: [Vec3; 4], blend: f64) -> Vec3 {
+    let mut left = [0.0; 3];
+    let mut right = [0.0; 3];
+    for axis in 0..3 {
+        left[axis] = piece[0][axis] + 1.5 * (piece[1][axis] - piece[0][axis]);
+        right[axis] = piece[3][axis] + 1.5 * (piece[2][axis] - piece[3][axis]);
+    }
+    vec::lerp(left, right, blend)
+}
+
+/// Move an off-curve control by the smallest representable amount when it
+/// would otherwise be indistinguishable from an adjacent anchor.
+///
+/// `[anchor, anchor, distinct]` is the shared-anchor encoding's subpath-break
+/// marker, so a stationary cubic endpoint cannot use that exact point run.
+/// The full Bernstein bound is checked after this nudge; if even one ulp is
+/// too large for the requested tolerance, conversion refuses rather than
+/// silently violating it.
+fn nudge_one_ulp(control: &mut Vec3) {
+    for component in control {
+        let upward = component.next_up();
+        if upward.is_finite() && upward != *component {
+            *component = upward;
+            return;
+        }
+        let downward = component.next_down();
+        if downward.is_finite() && downward != *component {
+            *component = downward;
+            return;
+        }
     }
 }
 
-/// How much worse than the natural handle the tangent handle may be before it
-/// is treated as degenerate.
-///
-/// On a well-conditioned planar piece the two are within a small factor; a
-/// skew pair — the *general* case in 3D, where four control points need not be
-/// coplanar and the end tangents never meet — overshoots by orders of
-/// magnitude. Bounding the accepted handle by a constant multiple of the
-/// natural one is also the termination argument for
-/// [`segments_for_tolerance`]: the natural bound falls as `1/n³`, so the
-/// accepted bound does too.
-const TANGENT_HANDLE_SLACK: f64 = 4.0;
-
-/// A **proven upper bound** on the deviation between the cubic `p` and the
-/// quadratic with control point `q` sharing its endpoints.
-///
-/// Degree-elevating the quadratic gives inner control points `(p0+2q)/3` and
-/// `(p3+2q)/3`; two cubics sharing endpoints differ by
-/// `3(1-t)²t·d1 + 3(1-t)t²·d2`, and `max_t 3t(1-t) = 3/4`, so the deviation is
-/// at most `¾·max(|d1|, |d2|)`. This is cu2qu's bound, and unlike
-/// [`max_single_quadratic_deviation`] it really is an inequality — the price
-/// of a handle chosen for smoothness rather than for symmetry.
-#[must_use]
-fn deviation_bound(p: [Vec3; 4], q: Vec3) -> f64 {
-    let mut worst: f64 = 0.0;
-    for (inner, end) in [(p[1], p[0]), (p[2], p[3])] {
-        let mut d = [0.0; 3];
-        for i in 0..3 {
-            d[i] = inner[i] - (end[i] + 2.0 * q[i]) / 3.0;
+/// Build the candidate chain for a fixed uniform piece count.
+fn approximation_for_segments(p: [Vec3; 4], n: usize) -> Vec<Vec3> {
+    let is_constant = p.iter().all(|point| *point == p[0]);
+    if n == 1 {
+        let mut control = natural_quadratic_handle(p[0], p[1], p[2], p[3]);
+        if !is_constant {
+            if control == p[0] {
+                nudge_one_ulp(&mut control);
+            }
+            if control == p[3] {
+                nudge_one_ulp(&mut control);
+            }
         }
-        worst = worst.max(space_ops::get_norm(d));
+        return vec![p[0], control, p[3]];
     }
-    0.75 * worst
+
+    let mut controls: Vec<Vec3> = (0..n)
+        .map(|i| {
+            let piece = subsegment(p, i as f64 / n as f64, (i + 1) as f64 / n as f64);
+            spline_control(piece, i as f64 / (n - 1) as f64)
+        })
+        .collect();
+
+    // Keep every real curve distinct from both adjacent anchors. Besides the
+    // point-run break ambiguity, downstream anchor-mode cleanup treats a
+    // handle on either anchor as degenerate. Moving the later control grows
+    // a representable gap while midpoint anchors retain C1 exactly.
+    if !is_constant {
+        for _ in 0..4 {
+            let mut changed = false;
+            if controls[0] == p[0] {
+                nudge_one_ulp(&mut controls[0]);
+                changed = true;
+            }
+            for i in 1..n {
+                let midpoint = space_ops::midpoint(controls[i - 1], controls[i]);
+                if midpoint == controls[i - 1] || midpoint == controls[i] {
+                    nudge_one_ulp(&mut controls[i]);
+                    changed = true;
+                }
+            }
+            if controls[n - 1] == p[3] {
+                nudge_one_ulp(&mut controls[n - 1]);
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(2 * n + 1);
+    out.push(p[0]);
+    for i in 0..n {
+        out.push(controls[i]);
+        let anchor = if i + 1 == n {
+            p[3]
+        } else {
+            space_ops::midpoint(controls[i], controls[i + 1])
+        };
+        out.push(anchor);
+    }
+    out
+}
+
+/// Whether the candidate's Bernstein convex-hull bound holds on every piece.
+fn chain_holds_tolerance(p: [Vec3; 4], approximation: &[Vec3], n: usize, tolerance: f64) -> bool {
+    let rounding_guard = subdivision_rounding_guard(p);
+    (0..n).all(|i| {
+        let source = subsegment(p, i as f64 / n as f64, (i + 1) as f64 / n as f64);
+        let a = approximation[2 * i];
+        let q = approximation[2 * i + 1];
+        let b = approximation[2 * i + 2];
+        if a != b && (a == q || b == q) {
+            return false;
+        }
+        let mut elevated = [a, [0.0; 3], [0.0; 3], b];
+        for axis in 0..3 {
+            // Weighted form avoids overflowing `a + 2q` when the elevated
+            // control itself is representable.
+            elevated[1][axis] = a[axis] / 3.0 + q[axis] * (2.0 / 3.0);
+            elevated[2][axis] = b[axis] / 3.0 + q[axis] * (2.0 / 3.0);
+        }
+        source.into_iter().zip(elevated).all(|(c, e)| {
+            conservative_norm([c[0] - e[0], c[1] - e[1], c[2] - e[2]]) + rounding_guard <= tolerance
+        })
+    })
+}
+
+fn third_difference(p: [Vec3; 4]) -> Vec3 {
+    let mut delta = [0.0; 3];
+    for axis in 0..3 {
+        delta[axis] = p[3][axis] - 3.0 * p[2][axis] + 3.0 * p[1][axis] - p[0][axis];
+    }
+    delta
+}
+
+/// Whether the controls are quadratic to f64 working precision.
+fn is_effectively_quadratic(p: [Vec3; 4]) -> bool {
+    let span = p
+        .windows(2)
+        .map(|pair| scaled_norm(vec::sub(pair[1], pair[0])))
+        .fold(0.0, f64::max);
+    scaled_norm(third_difference(p)) <= 64.0 * f64::EPSILON * span
 }
 
 /// The **exact** maximum deviation between this cubic and its single-quadratic
@@ -213,26 +330,75 @@ fn deviation_bound(p: [Vec3; 4], q: Vec3) -> f64 {
 /// scalar function times one vector, so its maximum is closed-form.
 #[must_use]
 pub fn max_single_quadratic_deviation(a0: Vec3, h0: Vec3, h1: Vec3, a1: Vec3) -> f64 {
-    // Δ = p3 - 3p2 + 3p1 - p0, the third difference.
-    let mut delta = [0.0; 3];
-    for i in 0..3 {
-        delta[i] = a1[i] - 3.0 * h1[i] + 3.0 * h0[i] - a0[i];
+    scaled_norm(third_difference([a0, h0, h1, a1])) * DEVIATION_CONSTANT
+}
+
+/// Build and validate the candidate retained by the public converter.
+fn approximation_with_tolerance(
+    a0: Vec3,
+    h0: Vec3,
+    h1: Vec3,
+    a1: Vec3,
+    tolerance: f64,
+) -> Result<(usize, Vec<Vec3>), GeomError> {
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(GeomError::InvalidTolerance);
     }
-    space_ops::get_norm(delta) * DEVIATION_CONSTANT
+    let p = [a0, h0, h1, a1];
+    let deviation = max_single_quadratic_deviation(a0, h0, h1, a1);
+    if !deviation.is_finite() {
+        // Non-finite control points. Refuse rather than size an allocation
+        // from a NaN.
+        return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
+    }
+    let mut n = if deviation <= tolerance && is_effectively_quadratic(p) {
+        1
+    } else {
+        // The closed form is a lower estimate for the C¹ candidate. Round it
+        // to a dyadic count so geometric growth always reaches the resource
+        // cap instead of skipping an admissible 4096-piece result.
+        let estimate = if deviation <= tolerance {
+            2
+        } else {
+            // Through the deterministic transcendental funnel, not
+            // `f64::cbrt`: this value becomes a semantic point count.
+            let exact = crate::scalar::cbrt(deviation / tolerance).ceil();
+            if !exact.is_finite() || exact > MAX_SEGMENTS as f64 {
+                return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
+            }
+            (exact as usize).max(2)
+        };
+        let dyadic = estimate.next_power_of_two();
+        if dyadic > MAX_SEGMENTS {
+            return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
+        }
+        dyadic
+    };
+
+    loop {
+        let approximation = approximation_for_segments(p, n);
+        if chain_holds_tolerance(p, &approximation, n, tolerance) {
+            return Ok((n, approximation));
+        }
+        if n == MAX_SEGMENTS {
+            break;
+        }
+        n *= 2;
+    }
+    Err(GeomError::ToleranceUnreachable {
+        needed: MAX_SEGMENTS + 1,
+    })
 }
 
 /// How many uniform pieces this cubic needs to hold `tolerance`.
 ///
-/// The closed form of the module docs sizes the *first guess* — it is the
-/// exact answer for the natural handle, and the natural handle is optimal, so
-/// no smaller count can work for any handle. From there the emitted
-/// tangent-intersection handles are checked piece by piece against
-/// [`deviation_bound`] and the count is raised until every piece holds.
+/// The closed form of the module docs sizes the first guess. The C¹ candidate
+/// is checked piece by piece with the Bernstein convex-hull bound, and the
+/// dyadic count grows through [`MAX_SEGMENTS`] until every piece holds.
 ///
 /// The loop is deterministic: it compares f64 values produced in a fixed
-/// order from the inputs, so the same cubic and tolerance yield the same count
-/// on every machine (§10.5). What it is *not* is unbounded — see
-/// [`MAX_SEGMENTS`].
+/// order from the inputs, so the same cubic and tolerance gives the same
+/// count on every certified build (§10.5).
 pub fn segments_for_tolerance(
     a0: Vec3,
     h0: Vec3,
@@ -240,65 +406,27 @@ pub fn segments_for_tolerance(
     a1: Vec3,
     tolerance: f64,
 ) -> Result<usize, GeomError> {
-    if !tolerance.is_finite() || tolerance <= 0.0 {
-        return Err(GeomError::InvalidTolerance);
-    }
-    let deviation = max_single_quadratic_deviation(a0, h0, h1, a1);
-    if !deviation.is_finite() {
-        // Non-finite control points. Refuse rather than size an allocation
-        // from a NaN.
-        return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
-    }
-    let mut n = if deviation <= tolerance {
-        1
-    } else {
-        // Through the funnel, not `f64::cbrt`: this number becomes a segment
-        // *count*, so a platform that rounded it differently one ulp either side
-        // of an integer would flatten the same cubic into a different number of
-        // quadratics — a whole-curve divergence, not a last-bit one.
-        let exact = crate::scalar::cbrt(deviation / tolerance);
-        if exact >= MAX_SEGMENTS as f64 {
-            return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
-        }
-        (exact.ceil() as usize).max(1)
-    };
-
-    let p = [a0, h0, h1, a1];
-    while n <= MAX_SEGMENTS {
-        if (0..n).all(|i| {
-            let sub = subsegment(p, i as f64 / n as f64, (i + 1) as f64 / n as f64);
-            let q = quadratic_handle(sub[0], sub[1], sub[2], sub[3]);
-            deviation_bound(sub, q) <= tolerance
-        }) {
-            return Ok(n);
-        }
-        // Geometric growth, not `n += 1`: the selected handle's error falls as
-        // 1/n³, so doubling converges in a handful of steps, where stepping by
-        // one can walk thousands of counts on a tight tolerance.
-        n *= 2;
-    }
-    Err(GeomError::ToleranceUnreachable { needed: n })
+    approximation_with_tolerance(a0, h0, h1, a1, tolerance).map(|(n, _)| n)
 }
 
 /// **The one converter** (§7.2): reduce a cubic to a chain of quadratics whose
 /// deviation from it is at most `tolerance`, in shared-anchor layout
 /// `[a0, h, a1, h, a2, …]` (odd length, `2n + 1` points for `n` quadratics).
 ///
-/// Every cubic source in the program routes here — API cubics, SVG path data,
-/// smoothing output. (TrueType glyf outlines are already quadratic and are a
-/// zero-loss passthrough that never reaches this function.) One audited
-/// converter is what makes curve fidelity a property of the system rather than
-/// of the call site.
+/// Every implemented cubic source routes here — API cubics (including the
+/// library's `CubicBezier`) and smoothing output. The future SVG importer is
+/// required to use this same seam. TrueType glyf outlines are already
+/// quadratic and are a zero-loss passthrough that never reaches this function.
+/// One audited converter is what makes curve fidelity a property of the system
+/// rather than of the call site.
 ///
 /// # Failure
 ///
-/// **This cannot fail on geometry.** Every finite cubic converts, and the
-/// degenerate ones — zero length, collinear controls, an exact quadratic —
-/// all take the one-piece path with zero or sub-tolerance error. The only
-/// failures are a caller's `tolerance` that is not positive and finite
-/// ([`GeomError::InvalidTolerance`]), and a request whose piece count would
-/// exceed [`MAX_SEGMENTS`] ([`GeomError::ToleranceUnreachable`]) — which for
-/// any sane tolerance means non-finite input.
+/// Zero-length, collinear, exact-quadratic, inflection, cusp, and spatial
+/// inputs all have defined output. Failure is limited to an invalid tolerance
+/// ([`GeomError::InvalidTolerance`]) or a request/input whose finite,
+/// representable approximation cannot fit below [`MAX_SEGMENTS`]
+/// ([`GeomError::ToleranceUnreachable`]).
 pub fn cubic_to_quadratics(
     a0: Vec3,
     h0: Vec3,
@@ -306,21 +434,7 @@ pub fn cubic_to_quadratics(
     a1: Vec3,
     tolerance: f64,
 ) -> Result<Vec<Vec3>, GeomError> {
-    let n = segments_for_tolerance(a0, h0, h1, a1, tolerance)?;
-    let mut out = Vec::with_capacity(2 * n + 1);
-    out.push(a0);
-    for i in 0..n {
-        let piece = subsegment(
-            [a0, h0, h1, a1],
-            i as f64 / n as f64,
-            (i + 1) as f64 / n as f64,
-        );
-        out.push(quadratic_handle(piece[0], piece[1], piece[2], piece[3]));
-        // The anchor is the sub-cubic's own endpoint, so every anchor in the
-        // chain lies exactly on the original curve.
-        out.push(piece[3]);
-    }
-    Ok(out)
+    approximation_with_tolerance(a0, h0, h1, a1, tolerance).map(|(_, approximation)| approximation)
 }
 
 /// de Casteljau split at `t`, returning `(left, right)` control quadruples.
@@ -343,6 +457,9 @@ fn split(p: [Vec3; 4], t: f64) -> ([Vec3; 4], [Vec3; 4]) {
 
 /// The control points of the cubic restricted to `[t0, t1] ⊆ [0, 1]`.
 fn subsegment(p: [Vec3; 4], t0: f64, t1: f64) -> [Vec3; 4] {
+    if t0 <= 0.0 && t1 >= 1.0 {
+        return p;
+    }
     if t0 <= 0.0 {
         return split(p, t1).0;
     }
@@ -461,7 +578,7 @@ mod tests {
     }
 
     fn dist(a: Vec3, b: Vec3) -> f64 {
-        space_ops::get_norm(vec::sub(a, b))
+        scaled_norm(vec::sub(a, b))
     }
 
     /// The largest parameter-matched deviation between a cubic and its single
@@ -506,14 +623,14 @@ mod tests {
                 assert_eq!(out.len(), 2 * n + 1);
                 let mut worst: f64 = 0.0;
                 for piece in 0..n {
-                    let sub = subsegment(p, piece as f64 / n as f64, (piece + 1) as f64 / n as f64);
                     let a = out[2 * piece];
                     let h = out[2 * piece + 1];
                     let b = out[2 * piece + 2];
                     for k in 0..=400 {
                         let u = k as f64 / 400.0;
+                        let t = (piece as f64 + u) / n as f64;
                         worst = worst.max(dist(
-                            bezier::cubic_point(sub[0], sub[1], sub[2], sub[3], u),
+                            bezier::cubic_point(p[0], p[1], p[2], p[3], t),
                             bezier::quadratic_point(a, h, b, u),
                         ));
                     }
@@ -527,17 +644,46 @@ mod tests {
     }
 
     #[test]
-    fn every_anchor_lies_on_the_original_curve() {
+    fn converted_chain_is_c1_in_three_dimensions() {
         for p in random_cubics(50) {
             let tol = 0.01;
             let out = cubic_to_quadratics(p[0], p[1], p[2], p[3], tol).unwrap();
             let n = (out.len() - 1) / 2;
-            for piece in 0..=n {
-                let t = piece as f64 / n as f64;
-                let on_curve = bezier::cubic_point(p[0], p[1], p[2], p[3], t);
-                assert!(dist(out[2 * piece], on_curve) < 1e-9);
+            assert_eq!(out[0], p[0]);
+            assert_eq!(out[2 * n], p[3]);
+            for piece in 1..n {
+                let anchor = out[2 * piece];
+                let incoming = vec::sub(anchor, out[2 * piece - 1]);
+                let outgoing = vec::sub(out[2 * piece + 1], anchor);
+                let scale = scaled_norm(incoming).max(scaled_norm(outgoing)).max(1.0);
+                assert!(
+                    dist(incoming, outgoing) <= 8.0 * f64::EPSILON * scale,
+                    "piece {piece}/{n}: incoming {incoming:?}, outgoing {outgoing:?}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn generic_loose_tolerance_still_preserves_endpoint_tangents() {
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [4.0, -1.0, 5.0],
+            [7.0, 2.0, -2.0],
+        ];
+        let out = cubic_to_quadratics(p[0], p[1], p[2], p[3], 100.0).unwrap();
+        let n = (out.len() - 1) / 2;
+        assert!(n >= 2, "a generic cubic needs the C1 spline policy");
+
+        let start_cubic = vec::sub(p[1], p[0]);
+        let start_quad = vec::sub(out[1], out[0]);
+        let end_cubic = vec::sub(p[3], p[2]);
+        let end_quad = vec::sub(out[2 * n], out[2 * n - 1]);
+        assert!(scaled_norm(space_ops::cross(start_cubic, start_quad)) < 1e-12);
+        assert!(scaled_norm(space_ops::cross(end_cubic, end_quad)) < 1e-12);
+        assert!(space_ops::dot(start_cubic, start_quad) > 0.0);
+        assert!(space_ops::dot(end_cubic, end_quad) > 0.0);
     }
 
     #[test]
@@ -628,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn the_converter_fails_only_on_the_request() {
+    fn invalid_or_unrepresentable_requests_are_refused() {
         let (a0, h0, h1, a1) = (
             [0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
@@ -653,6 +799,153 @@ mod tests {
             cubic_to_quadratics(a0, [f64::NAN, 0.0, 0.0], h1, a1, 0.1),
             Err(GeomError::ToleranceUnreachable { .. })
         ));
+    }
+
+    #[test]
+    fn subnormal_geometry_cannot_underflow_the_error_bound() {
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1e-200, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let tolerance = 1e-210;
+        assert!(
+            max_single_quadratic_deviation(p[0], p[1], p[2], p[3]) > tolerance,
+            "the scale-safe norm must not collapse the cubic term to zero"
+        );
+        let out = cubic_to_quadratics(p[0], p[1], p[2], p[3], tolerance).unwrap();
+        let n = (out.len() - 1) / 2;
+        let mut worst: f64 = 0.0;
+        for piece in 0..n {
+            for sample in 0..=32 {
+                let u = sample as f64 / 32.0;
+                let t = (piece as f64 + u) / n as f64;
+                worst = worst.max(dist(
+                    bezier::cubic_point(p[0], p[1], p[2], p[3], t),
+                    bezier::quadratic_point(
+                        out[2 * piece],
+                        out[2 * piece + 1],
+                        out[2 * piece + 2],
+                        u,
+                    ),
+                ));
+            }
+        }
+        assert!(worst <= tolerance, "{worst} exceeds {tolerance}");
+    }
+
+    #[test]
+    fn the_dyadic_search_tests_the_segment_cap() {
+        let p = [
+            [-1.0, -1.0, 0.0],
+            [-1.0, 1.6, 0.0],
+            [1.0, 1.6, 0.0],
+            [1.0, -1.0, 0.0],
+        ];
+        // The closed-form estimate rounds to 2048, whose C1 candidate fails;
+        // the 4096-piece candidate fits. A search that jumped past the cap
+        // would incorrectly refuse this request.
+        let tolerance = 3.0e-11;
+        assert_eq!(
+            segments_for_tolerance(p[0], p[1], p[2], p[3], tolerance).unwrap(),
+            MAX_SEGMENTS
+        );
+    }
+
+    fn golden_hash(points: &[Vec3]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in (points.len() as u64).to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for point in points {
+            for component in point {
+                for byte in component.to_bits().to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+
+    #[test]
+    fn converter_fixture_outputs_are_bit_locked() {
+        let fixtures = [
+            (
+                [
+                    [-1.0, -1.0, 0.0],
+                    [-1.0, 1.6, 0.0],
+                    [1.0, 1.6, 0.0],
+                    [1.0, -1.0, 0.0],
+                ],
+                DEFAULT_TOLERANCE_SCENE,
+            ),
+            (
+                [
+                    [0.0, 0.0, 0.0],
+                    [2.0, 3.0, 0.0],
+                    [-2.0, 3.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                ],
+                0.01,
+            ),
+            (
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [1.0 / 3.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                ],
+                DEFAULT_TOLERANCE_SCENE,
+            ),
+            (
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ],
+                0.01,
+            ),
+            (
+                [
+                    [0.0, 0.0, 0.0],
+                    [4.0, 0.0, 0.0],
+                    [-2.0, 0.0, 0.0],
+                    [3.0, 0.0, 0.0],
+                ],
+                0.01,
+            ),
+            (
+                [
+                    [2.0, -3.0, 1.0],
+                    [2.0, -3.0, 1.0],
+                    [2.0, -3.0, 1.0],
+                    [2.0, -3.0, 1.0],
+                ],
+                DEFAULT_TOLERANCE_SCENE,
+            ),
+        ];
+        let actual: Vec<u64> = fixtures
+            .into_iter()
+            .map(|(p, tolerance)| {
+                let points = cubic_to_quadratics(p[0], p[1], p[2], p[3], tolerance).unwrap();
+                golden_hash(&points)
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                4_294_836_761_618_142_727,
+                9_775_589_468_788_572_111,
+                6_965_456_409_420_322_806,
+                9_618_753_173_515_767_359,
+                1_350_664_560_155_362_047,
+                2_491_867_785_928_297_583,
+            ]
+        );
     }
 
     #[test]
@@ -687,11 +980,11 @@ mod tests {
         let out = cubic_to_quadratics(p[0], p[1], p[2], p[3], tol).unwrap();
         let mut worst: f64 = 0.0;
         for piece in 0..n {
-            let sub = subsegment(p, piece as f64 / n as f64, (piece + 1) as f64 / n as f64);
             for k in 0..=500 {
                 let u = k as f64 / 500.0;
+                let t = (piece as f64 + u) / n as f64;
                 worst = worst.max(dist(
-                    bezier::cubic_point(sub[0], sub[1], sub[2], sub[3], u),
+                    bezier::cubic_point(p[0], p[1], p[2], p[3], t),
                     bezier::quadratic_point(
                         out[2 * piece],
                         out[2 * piece + 1],
