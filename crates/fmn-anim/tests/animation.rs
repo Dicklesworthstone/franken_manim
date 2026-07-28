@@ -12,10 +12,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fmn_anim::{
-    AnimConfig, AnimError, AnimState, Animation, MethodAnimation, RateFunc, RationalFrameClock,
-    prepare_animation, sub_alpha, time_spanned_alpha,
+    AnimConfig, AnimError, AnimState, Animation, AnimationGroup, MaintainPositionRelativeTo,
+    MethodAnimation, MoveAlongPath, RateFunc, RationalFrameClock, fade_transform, play_segment,
+    prepare_animation, replacement_transform, sub_alpha, time_spanned_alpha,
 };
 use fmn_core::rate;
+use fmn_core::rng::RngRoot;
 use fmn_mobject::animate::AnimateArgs;
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -240,27 +242,36 @@ fn play_over_clock_samples_is_monotone_and_ends_at_one() {
 }
 
 #[test]
-fn skipped_playback_still_begins_and_finishes_exactly_once() {
+fn skipped_playback_runs_every_interpolation_but_emits_nothing() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);
-    let (mut probe, rows) = Probe::new(
+    let (probe, rows) = Probe::new(
         mob,
         AnimConfig {
             rate_func: RateFunc::linear(),
             ..AnimConfig::default()
         },
     );
-    let clock = RationalFrameClock::new(30).expect("fps");
-    let segment = clock.segment(1.0).expect("segment");
+    let mut clock = RationalFrameClock::new(30).expect("fps");
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(probe)];
+    let mut emitted = 0;
+    play_segment(
+        &mut stage,
+        &mut clock,
+        &RngRoot::from_seed(0),
+        &mut animations,
+        true,
+        &mut |_| emitted += 1,
+    )
+    .expect("skipped play");
 
-    probe.begin(&mut stage).expect("begin");
-    let skip = segment.skip_sample().expect("nonempty segment");
-    probe.interpolate(&mut stage, skip.alpha);
-    probe.finish(&mut stage);
-
-    // Exactly three passes: begin's zero, the one skip step, finish.
+    // Begin's zero + all 30 grid interpolations + finish's final alpha.
     let recorded: Vec<f64> = rows.borrow().iter().map(|&(_, a)| a).collect();
-    assert_eq!(recorded, vec![0.0, 1.0, 1.0]);
+    assert_eq!(recorded.len(), 32);
+    assert_eq!(recorded[0], 0.0);
+    assert_eq!(recorded[1], 1.0 / 30.0);
+    assert_eq!(*recorded.last().expect("finish"), 1.0);
+    assert_eq!(emitted, 0);
 }
 
 #[test]
@@ -606,4 +617,47 @@ fn stale_target_at_begin_is_a_named_error() {
     let mut anim = MethodAnimation::new(built).expect("wraps");
     stage.delete(target).expect("deletes");
     assert_eq!(anim.begin(&mut stage), Err(AnimError::StaleHandle(target)));
+}
+
+#[test]
+fn preflight_inventory_covers_auxiliary_handles_and_nested_compositions() {
+    let mut stage = Stage::new();
+
+    let source = square(&mut stage);
+    let target = square(&mut stage);
+    let transform = replacement_transform(source, target);
+    assert_eq!(
+        transform.all_mobjects(),
+        [source],
+        "the pre-begin interpolation row intentionally excludes the target copy"
+    );
+    assert!(transform.preflight_mobjects().contains(&target));
+
+    let path = square(&mut stage);
+    let moving = MoveAlongPath::new(source, path);
+    assert!(moving.preflight_mobjects().contains(&path));
+
+    let tracked = square(&mut stage);
+    let relative = MaintainPositionRelativeTo::new(&stage, source, tracked);
+    assert!(relative.preflight_mobjects().contains(&tracked));
+
+    let fade_source = square(&mut stage);
+    let fade_target = square(&mut stage);
+    let fade = fade_transform(&mut stage, fade_source, fade_target).expect("fade transform");
+    assert!(fade.preflight_mobjects().contains(&fade_target));
+
+    let nested_source = square(&mut stage);
+    let nested_target = square(&mut stage);
+    let group = AnimationGroup::new(
+        &mut stage,
+        vec![Box::new(replacement_transform(
+            nested_source,
+            nested_target,
+        ))],
+    )
+    .expect("animation group");
+    assert!(
+        group.preflight_mobjects().contains(&nested_target),
+        "composition preflight must recurse into member-only targets"
+    );
 }

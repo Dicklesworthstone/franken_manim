@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::StageError;
 use crate::bbox::BboxCache;
 use crate::mobject::Mobject;
+use crate::persist::{UpdaterIdentity, UpdaterKindTag};
 use crate::record::RecordBuffer;
 use crate::shape::ShapeSlot;
 use crate::uniforms::Uniforms;
@@ -102,8 +103,13 @@ impl UpdaterId {
     /// The raw token — what a durable snapshot records as the updater's
     /// identity (§8.7: callables never serialize; identity + the §13.4
     /// effect model's hashes are the replay vocabulary).
-    pub(crate) fn raw(self) -> u64 {
+    #[must_use]
+    pub fn raw(self) -> u64 {
         self.0
+    }
+
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 
@@ -239,9 +245,36 @@ struct Slot {
 /// A CoW snapshot of the whole stage: begin-states for §9.5's frame-parallel
 /// pure segments, Studio undo, and replay barriers.
 pub struct Snapshot {
+    pub(crate) stage_id: u64,
+    pub(crate) next_updater_id: u64,
     pub(crate) slots: Vec<(u32, Option<SnapshotEntry>)>,
     pub(crate) free: Vec<u32>,
     pub(crate) roots: Vec<Mob>,
+}
+
+impl Snapshot {
+    /// Materialize an independent arena in the same logical handle domain.
+    ///
+    /// A [`Snapshot`] is the immutable serial-front-end boundary carried by a
+    /// `FramePacket`. Lumen/Reel adapters and pure-frame workers need to read
+    /// it without mutating the live scene, so they restore into a physical
+    /// arena that intentionally shares the snapshot's stage id. Handles remain
+    /// meaningful because the two arenas are copies of one logical Stage, not
+    /// unrelated scenes; writes remain isolated by the record buffers' CoW
+    /// discipline.
+    #[must_use]
+    pub fn materialize(&self) -> Stage {
+        let mut stage = Stage {
+            id: self.stage_id,
+            slots: Vec::new(),
+            free: Vec::new(),
+            roots: Vec::new(),
+            time: 0.0,
+            next_updater_id: self.next_updater_id,
+        };
+        stage.restore(self);
+        stage
+    }
 }
 
 pub(crate) struct SnapshotEntry {
@@ -343,10 +376,46 @@ impl Stage {
         self.time
     }
 
+    /// Synchronize the stage's scene-time mirror to Choreo's rational clock.
+    ///
+    /// [`Stage::update`] advances this value before running scene updaters so
+    /// they observe the new time. Choreo remains the source of truth, however:
+    /// a segment boundary and a restored `SceneState` use this method to replace
+    /// any accumulated floating-point roundoff with the clock's single
+    /// `frames / fps` conversion. The caller must provide a finite,
+    /// non-negative clock value.
+    pub fn set_time_from_clock(&mut self, time: f64) {
+        assert!(
+            time.is_finite() && time >= 0.0,
+            "the Stage clock mirror requires finite, non-negative time"
+        );
+        self.time = time;
+    }
+
     /// The process-local stage mint the persistence layer re-binds decoded
     /// handles to (§8.7). Never serialized.
     pub(crate) fn stage_id(&self) -> u64 {
         self.id
+    }
+
+    pub(crate) fn mob_at_slot(&self, index: u32) -> Option<Mob> {
+        let slot = self.slots.get(index as usize)?;
+        slot.entry.as_ref()?;
+        Some(Mob {
+            stage_id: self.id,
+            index,
+            generation: slot.generation,
+        })
+    }
+
+    /// Whether an in-memory snapshot belongs to this logical arena.
+    ///
+    /// Durable decode explicitly rebinds handles to a target Stage; raw CoW
+    /// snapshots do not. Higher-level `Result` APIs use this probe to return a
+    /// typed refusal before [`Stage::restore`] enforces the invariant.
+    #[must_use]
+    pub fn can_restore(&self, snapshot: &Snapshot) -> bool {
+        self.id == snapshot.stage_id
     }
 
     // ------------------------------------------------------------ handles
@@ -440,20 +509,34 @@ impl Stage {
         mob
     }
 
-    /// Add to the scene's draw list — the Reference's `Scene.add`
-    /// (`scene.py:327`) exactly: remove first (so re-adding moves a member
-    /// to the front — which is all `bring_to_front` is), append, then
-    /// **stable-sort by `(z_index, position)`**, so equal z_index keeps
-    /// insertion order (§8.5). Rooting is membership, not ownership.
+    /// Add one mobject to the scene's draw list.
+    ///
+    /// This is the singleton form of [`Stage::add_many_to_scene`].
     ///
     /// # Errors
     /// [`StageError::StaleHandle`] for a dead handle.
     pub fn add_to_scene(&mut self, mob: Mob) -> Result<(), StageError> {
-        if !self.contains(mob) {
+        self.add_many_to_scene(&[mob])
+    }
+
+    /// Add a batch to the scene's draw list — the Reference's `Scene.add`
+    /// (`scene.py:327`) exactly: remove the union of all new families from
+    /// the *existing* list, append the requested roots together, then
+    /// **stable-sort by `(z_index, position)`**, so equal z_index keeps
+    /// insertion order (§8.5). Rooting is membership, not ownership.
+    ///
+    /// The batch boundary is semantic. Two new roots may share a child and
+    /// both remain placements; adding the second root in a later call removes
+    /// that child from the first placement before appending it.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if any requested root is dead.
+    pub fn add_many_to_scene(&mut self, mobs: &[Mob]) -> Result<(), StageError> {
+        if mobs.iter().any(|&mob| !self.contains(mob)) {
             return Err(StageError::StaleHandle);
         }
-        self.remove_from_scene(mob);
-        self.roots.push(mob);
+        self.remove_many_from_scene(mobs);
+        self.roots.extend_from_slice(mobs);
         self.sort_scene_by_z_index();
         Ok(())
     }
@@ -478,11 +561,12 @@ impl Stage {
     }
 
     /// Remove from the draw list — the Reference's `Scene.remove`
-    /// (`scene.py:371` over `recursive_mobject_remove`,
-    /// `utils/family_ops.py:23`): removing a member that lives *inside* a
-    /// rooted family replaces its ancestor in the list with that ancestor's
-    /// **other** children, spliced in place. Removing one element of a
-    /// rooted group therefore leaves the rest on stage, ungrouped, in
+    /// (`scene.py:371` over `extract_mobject_family_members` and
+    /// `recursive_mobject_remove`, `utils/family_ops.py:11,23`): the removal
+    /// set is the complete family of `mob`. Removing a member that lives
+    /// *inside* a rooted family replaces its ancestor in the list with that
+    /// ancestor's **other** children, spliced in place. Removing one element
+    /// of a rooted group therefore leaves the rest on stage, ungrouped, in
     /// order — which is what makes a remover animation on a submobject
     /// behave.
     ///
@@ -490,18 +574,32 @@ impl Stage {
     /// is a draw-list edit, never a deletion. The scene is *not* re-sorted
     /// (see [`Stage::add_to_scene`]).
     pub fn remove_from_scene(&mut self, mob: Mob) {
+        self.remove_many_from_scene(&[mob]);
+    }
+
+    /// Remove the union of several complete families in one recursive pass,
+    /// matching one `Scene.remove(*mobs)` call.
+    pub fn remove_many_from_scene(&mut self, mobs: &[Mob]) {
+        let mut family = Vec::new();
+        for &mob in mobs {
+            for member in self.family(mob) {
+                if !family.contains(&member) {
+                    family.push(member);
+                }
+            }
+        }
         let roots = std::mem::take(&mut self.roots);
-        let (kept, _) = self.recursive_remove(&roots, mob);
+        let (kept, _) = self.recursive_remove(&roots, &family);
         self.roots = kept;
     }
 
     /// `recursive_mobject_remove`, structure for structure: returns the
     /// surviving list and whether anything was removed from it.
-    fn recursive_remove(&self, members: &[Mob], target: Mob) -> (Vec<Mob>, bool) {
+    fn recursive_remove(&self, members: &[Mob], targets: &[Mob]) -> (Vec<Mob>, bool) {
         let mut kept = Vec::with_capacity(members.len());
         let mut found = false;
         for &member in members {
-            if member == target {
+            if targets.contains(&member) {
                 found = true;
                 continue;
             }
@@ -509,7 +607,7 @@ impl Stage {
                 .get(member)
                 .map(|entry| entry.submobjects.clone())
                 .unwrap_or_default();
-            let (sub, found_below) = self.recursive_remove(&children, target);
+            let (sub, found_below) = self.recursive_remove(&children, targets);
             if found_below {
                 kept.extend(sub);
                 found = true;
@@ -531,16 +629,26 @@ impl Stage {
 
     /// The Reference's `bring_to_back` (`scene.py:394`): remove, then
     /// prepend — **without** a z-sort, so the demotion holds until the next
-    /// `add` (see [`Stage::sort_scene_by_z_index`]).
+    /// [`Stage::add_to_scene`] call.
     ///
     /// # Errors
     /// [`StageError::StaleHandle`] for a dead handle.
     pub fn bring_to_back(&mut self, mob: Mob) -> Result<(), StageError> {
-        if !self.contains(mob) {
+        self.bring_many_to_back(&[mob])
+    }
+
+    /// Batch form of the Reference's `bring_to_back`: remove all requested
+    /// families together, then prepend the requested roots in argument order,
+    /// without sorting.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if any requested root is dead.
+    pub fn bring_many_to_back(&mut self, mobs: &[Mob]) -> Result<(), StageError> {
+        if mobs.iter().any(|&mob| !self.contains(mob)) {
             return Err(StageError::StaleHandle);
         }
-        self.remove_from_scene(mob);
-        self.roots.insert(0, mob);
+        self.remove_many_from_scene(mobs);
+        self.roots.splice(0..0, mobs.iter().copied());
         Ok(())
     }
 
@@ -911,7 +1019,7 @@ impl Stage {
     /// [`StageError::NoSavedState`] without a prior [`Stage::save_state`]
     /// (the Reference's "Trying to restore without having saved");
     /// [`StageError::StaleHandle`] if the saved copy was deleted; any
-    /// [`Stage::become`] error.
+    /// [`Stage::become_mobject`] error.
     pub fn restore_mobject(&mut self, mob: Mob) -> Result<(), StageError> {
         let saved = self
             .try_get(mob)?
@@ -1041,9 +1149,15 @@ impl Stage {
         index: Option<usize>,
         call: bool,
     ) -> Result<UpdaterId, StageError> {
+        if !self.contains(mob) {
+            return Err(StageError::StaleHandle);
+        }
         let id = UpdaterId(self.next_updater_id);
-        self.next_updater_id += 1;
-        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        self.next_updater_id = self
+            .next_updater_id
+            .checked_add(1)
+            .ok_or(StageError::UpdaterIdExhausted)?;
+        let entry = self.get_mut(mob).expect("handle was checked above");
         let slot = UpdaterSlot { id, func };
         match index {
             Some(i) => {
@@ -1160,6 +1274,62 @@ impl Stage {
         self.get(mob)
             .map(|e| e.updaters.iter().map(|s| s.id).collect())
             .unwrap_or_default()
+    }
+
+    /// Atomically reinstall updater callables under identities recovered from
+    /// a durable manifest.
+    ///
+    /// Durable snapshots retain updater identity and kind but never executable
+    /// code. A replay owner resolves every callback first, then supplies the
+    /// complete binding set here. All targets and identities are validated
+    /// before any list changes; a mismatch cannot leave a partially rebound
+    /// scene. Bindings for one mobject must appear in execution order.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if a target is not live, or
+    /// [`StageError::UpdaterBindingMismatch`] if an identity was never issued,
+    /// is duplicated on one target, or that target has already acquired
+    /// another updater list.
+    pub fn restore_updater_bindings(
+        &mut self,
+        bindings: Vec<(UpdaterIdentity, UpdaterFn)>,
+    ) -> Result<(), StageError> {
+        let mut targets = Vec::new();
+        let mut identities = Vec::new();
+        for (identity, func) in &bindings {
+            let entry = self.get(identity.mob).ok_or(StageError::StaleHandle)?;
+            if identity.id.0 == 0 || identity.id.0 >= self.next_updater_id {
+                return Err(StageError::UpdaterBindingMismatch);
+            }
+            let kind_matches = matches!(
+                (identity.kind, func),
+                (UpdaterKindTag::NonDt, UpdaterFn::NonDt(_))
+                    | (UpdaterKindTag::Dt, UpdaterFn::Dt(_))
+            );
+            if !kind_matches {
+                return Err(StageError::UpdaterBindingMismatch);
+            }
+            if !targets.contains(&identity.mob) {
+                if !entry.updaters.is_empty() {
+                    return Err(StageError::UpdaterBindingMismatch);
+                }
+                targets.push(identity.mob);
+            }
+            if identities.contains(&(identity.mob, identity.id)) {
+                return Err(StageError::UpdaterBindingMismatch);
+            }
+            identities.push((identity.mob, identity.id));
+        }
+        for (identity, func) in bindings {
+            self.get_mut(identity.mob)
+                .expect("binding targets were prevalidated")
+                .updaters
+                .push(UpdaterSlot {
+                    id: identity.id,
+                    func,
+                });
+        }
+        Ok(())
     }
 
     /// Whether `mob` or anything in its family has updaters.
@@ -1365,6 +1535,20 @@ impl Stage {
         }
     }
 
+    /// Run the scene-updater pass at an exact front-end clock value.
+    ///
+    /// Choreo advances its rational frame clock before step 4, then supplies
+    /// the single `frames / fps` conversion here. This avoids exposing a
+    /// repeatedly accumulated float to updaters while retaining `dt` as their
+    /// per-frame delta. Lower-level callers without a rational clock continue
+    /// to use [`Stage::update`].
+    pub fn update_at_time(&mut self, dt: f64, time: f64) {
+        self.set_time_from_clock(time);
+        for root in self.roots.clone() {
+            self.update_mob(root, dt);
+        }
+    }
+
     // ---------------------------------------------------------- snapshots
 
     /// CoW snapshot of the whole stage: record storages share until someone
@@ -1373,6 +1557,8 @@ impl Stage {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            stage_id: self.id,
+            next_updater_id: self.next_updater_id,
             slots: self
                 .slots
                 .iter()
@@ -1419,6 +1605,12 @@ impl Stage {
     /// (generation discipline); outstanding views detach exactly as under
     /// resize (view-protocol rule V6).
     pub fn restore(&mut self, snapshot: &Snapshot) {
+        assert_eq!(
+            self.id, snapshot.stage_id,
+            "an in-memory snapshot must restore into its logical Stage; \
+             use Snapshot::materialize for an independent copy or durable \
+             decode to rebind handles"
+        );
         self.slots = snapshot
             .slots
             .iter()
@@ -1446,5 +1638,6 @@ impl Stage {
             .collect();
         self.free = snapshot.free.clone();
         self.roots = snapshot.roots.clone();
+        self.next_updater_id = snapshot.next_updater_id;
     }
 }

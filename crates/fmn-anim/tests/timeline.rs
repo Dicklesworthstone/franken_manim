@@ -299,6 +299,7 @@ fn seek_is_repeatable_and_direction_independent() {
     let forward = point_bits(&stage, mob);
     timeline.seek(&mut stage, &rng(), 7).expect("seeks");
     timeline.seek(&mut stage, &rng(), 3).expect("seeks back");
+    assert_eq!(stage.time().to_bits(), (3.0 / f64::from(FPS)).to_bits());
     assert_eq!(
         point_bits(&stage, mob),
         forward,
@@ -357,6 +358,11 @@ fn seek_replays_a_stateful_segment_frame_by_frame() {
     let played = play_through(&mut timeline, &mut stage);
     for frame in 1..=plan.total_frames() {
         let packet = timeline.seek(&mut stage, &rng(), frame).expect("seeks");
+        assert_eq!(
+            stage.time().to_bits(),
+            (frame as f64 / f64::from(FPS)).to_bits(),
+            "stage clock at stateful frame {frame}"
+        );
         assert_eq!(
             frame_bits(&mut stage, &packet),
             played[usize::try_from(frame - 1).expect("index")],

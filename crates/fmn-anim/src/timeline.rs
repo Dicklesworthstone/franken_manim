@@ -4,12 +4,11 @@
 //!
 //! A [`Timeline`] is an authored list of steps. Each step compiles to the
 //! very primitive an imperative scene would have called —
-//! [`play_segment`](crate::frame::play_segment) or
-//! [`wait_segment`](crate::frame::wait_segment) — over the same
+//! [`play_segment`] or [`wait_segment`] — over the same
 //! [`RationalFrameClock`], through the same six-step frame order, producing
 //! the same [`FramePacket`]s and the same [`SegmentReport`]s. There is no
 //! timeline-specific interpolation path anywhere in this module; seek uses
-//! the drivers' partial forms ([`play_segment_upto`],
+//! the drivers' partial forms ([`open_play`] / [`advance_play`] and
 //! [`wait_segment_upto`]) precisely so a sought frame and a played frame are
 //! the same frame by construction, not by agreement.
 //!
@@ -26,7 +25,7 @@
 //! 3. *Seek.* [`Timeline::seek`] reconstructs the state at any frame
 //!    deterministically: **pure segments** (§9.5) rebuild in O(1) from the
 //!    begin-state snapshot plus alpha via
-//!    [`reconstruct_pure_frame`](crate::purity::reconstruct_pure_frame);
+//!    [`reconstruct_pure_frame`];
 //!    **stateful segments** replay forward from the nearest checkpoint,
 //!    because their frames depend on accumulated per-frame state and there
 //!    is no honest shortcut. Checkpoints are CoW arena snapshots taken at
@@ -133,7 +132,7 @@ impl Step {
 
     /// The step's run time in seconds — for a play, the Reference's `np.max`
     /// over the members' `get_run_time` (the same number
-    /// [`play_segment`](crate::frame::play_segment) derives).
+    /// [`play_segment`] derives).
     #[must_use]
     pub fn run_time(&self) -> f64 {
         match self {
@@ -551,7 +550,10 @@ impl Timeline {
             .expect("checkpoint 0 was just ensured");
         stage.restore(&state);
         let mut clock = RationalFrameClock::new(self.fps).map_err(AnimError::Clock)?;
-        clock.advance_frames(plan.segments[index].base_frame);
+        clock
+            .advance_frames(plan.segments[index].base_frame)
+            .map_err(AnimError::Clock)?;
+        stage.set_time_from_clock(clock.now().to_f64());
         let mut discard = |_: FramePacket| {};
         while index < target {
             run_step(&mut self.steps[index], stage, &mut clock, rng, &mut discard)?;

@@ -409,11 +409,38 @@ impl Animation for FadeTransform {
         mobs
     }
 
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        let mut mobs = self.all_mobjects();
+        if !mobs.contains(&self.to_add_on_completion) {
+            mobs.push(self.to_add_on_completion);
+        }
+        mobs
+    }
+
     fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64) {
         let [submob, start, end] = *mobs else {
             return; // rows are triples once begin has run
         };
         interpolate_fields(stage, submob, start, end, sub_alpha, PathFunc::Straight);
+    }
+
+    /// fading.py:132 — remove the temporary pair, restore the original
+    /// source records, and publish the real target unless this transform is a
+    /// remover. The generic Choreo finish path invokes this through the
+    /// animation trait object.
+    fn clean_up_from_scene(&mut self, stage: &mut Stage) {
+        let group = self.state.mobject();
+        let source = stage
+            .get(group)
+            .and_then(|entry| entry.submobjects().first())
+            .copied();
+        stage.remove_from_scene(group);
+        if let Some(source) = source {
+            let _ = stage.restore_mobject(source);
+        }
+        if !self.is_remover() {
+            let _ = stage.add_to_scene(self.to_add_on_completion);
+        }
     }
 }
 

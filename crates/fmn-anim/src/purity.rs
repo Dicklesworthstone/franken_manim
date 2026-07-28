@@ -210,6 +210,10 @@ pub fn reconstruct_pure_frame(
     }
     let mut clock =
         RationalFrameClock::new(sample.time.fps()).expect("sample fps is a live clock's");
-    clock.advance_frames(report.base_frame + sample.frame);
+    clock
+        .advance_frames(report.base_frame)
+        .and_then(|()| clock.advance_frames(sample.frame))
+        .map_err(AnimError::Clock)?;
+    stage.set_time_from_clock(clock.now().to_f64());
     Ok(FramePacket::freeze(stage, &clock, rng, sample))
 }

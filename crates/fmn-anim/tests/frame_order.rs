@@ -133,10 +133,19 @@ fn time_advances_before_scene_updaters_run() {
     // 0.1 s at 30 fps → 4 frames (BN-02 upward rounding), plus the
     // finish-pass dt=0 tick.
     assert_eq!(observed.len(), 5);
-    assert!(
-        (observed[0] - 1.0 / 30.0).abs() < 1e-12,
-        "the first updater tick observes post-advance time, got {}",
-        observed[0]
+    for (index, observed) in observed[..4].iter().enumerate() {
+        let frame = (index + 1) as f64;
+        assert_eq!(
+            observed.to_bits(),
+            (frame / 30.0).to_bits(),
+            "frame {} must expose the rational clock's one conversion",
+            index + 1
+        );
+    }
+    assert_eq!(
+        observed[4].to_bits(),
+        observed[3].to_bits(),
+        "the finish updater pass advances no time"
     );
 }
 
@@ -232,19 +241,22 @@ fn starting_and_target_copies_tick_through_animation_update_mobjects() {
 fn skip_mode_matches_played_final_state_and_emits_nothing() {
     // BN-10: a skipped segment must leave dt-updaters and positions exactly
     // where a played segment does.
-    let run = |skip: bool| -> (f64, f64, f64, usize, i64) {
+    let run = |skip: bool| -> (Vec<u8>, f64, usize, usize, i64) {
         let mut stage = Stage::new();
         let mob = square(&mut stage);
         stage.add_to_scene(mob).expect("rooted");
-        let acc = Rc::new(RefCell::new(0.0f64));
-        let sink = Rc::clone(&acc);
+        let nonlinear = square(&mut stage);
+        stage.shift(nonlinear, [1.0, 0.0, 0.0]);
+        stage.add_to_scene(nonlinear).expect("nonlinear root");
+        let calls = Rc::new(RefCell::new(0usize));
+        let seen_calls = Rc::clone(&calls);
         stage
             .add_dt_updater(
-                mob,
-                move |_stage, me, dt| {
-                    if me == mob {
-                        *sink.borrow_mut() += dt;
-                    }
+                nonlinear,
+                move |stage, me, dt| {
+                    *seen_calls.borrow_mut() += 1;
+                    let x = stage.get_center(me)[0];
+                    stage.shift(me, [dt * (1.0 + x), 0.0, 0.0]);
                 },
                 false,
             )
@@ -261,24 +273,26 @@ fn skip_mode_matches_played_final_state_and_emits_nothing() {
             &mut |_| emitted += 1,
         )
         .expect("plays");
-        let x = stage.get_center(mob)[0];
         (
-            x,
-            *acc.borrow(),
+            stage.snapshot_bytes().expect("canonical arena"),
             stage.time(),
+            *calls.borrow(),
             emitted,
             clock.now().frames(),
         )
     };
 
-    let (x_played, dt_played, time_played, emitted_played, frames_played) = run(false);
-    let (x_skipped, dt_skipped, time_skipped, emitted_skipped, frames_skipped) = run(true);
+    let (played, time_played, calls_played, emitted_played, frames_played) = run(false);
+    let (skipped, time_skipped, calls_skipped, emitted_skipped, frames_skipped) = run(true);
 
-    assert!((x_played - 2.0).abs() < 1e-5);
-    assert_eq!(x_played, x_skipped, "final position identical");
-    assert!(
-        (dt_played - dt_skipped).abs() < 1e-9,
-        "total updater dt identical: played {dt_played} vs skipped {dt_skipped}"
+    assert_eq!(
+        played, skipped,
+        "the complete terminal arena is bit-identical"
+    );
+    assert_eq!(calls_played, 31, "30 frames plus the dt=0 finish pass");
+    assert_eq!(
+        calls_played, calls_skipped,
+        "updater call sequence identical"
     );
     assert!((time_played - time_skipped).abs() < 1e-9);
     assert_eq!(frames_played, frames_skipped, "the clock advances equally");
@@ -460,7 +474,7 @@ fn wait_until_stops_after_the_frame_where_the_condition_turns_true() {
     let mut emitted = 0usize;
     // Condition: scene time reaches 0.2 s — true first at frame 6 (6/30).
     let mut condition = |stage: &Stage| stage.time() >= 0.2 - 1e-12;
-    wait_segment(
+    let report = wait_segment(
         &mut stage,
         &mut clock,
         &rng(),
@@ -473,22 +487,46 @@ fn wait_until_stops_after_the_frame_where_the_condition_turns_true() {
 
     assert_eq!(emitted, 6, "the triggering frame is emitted, then it stops");
     assert_eq!(clock.now().frames(), 6);
+    assert_eq!(report.n_frames, 6, "the journal records realized frames");
 }
 
 #[test]
 fn skipped_wait_advances_time_without_emitting() {
-    let mut stage = Stage::new();
-    let mob = square(&mut stage);
-    stage.add_to_scene(mob).expect("rooted");
-    let mut clock = RationalFrameClock::new(30).expect("fps");
-    let mut emitted = 0usize;
-    wait_segment(&mut stage, &mut clock, &rng(), 1.0, None, true, &mut |_| {
-        emitted += 1
-    })
-    .expect("waits");
-    assert_eq!(emitted, 0);
-    assert_eq!(clock.now().frames(), 30);
-    assert!((stage.time() - 1.0).abs() < 1e-9);
+    let run = |skip: bool| -> (Vec<u8>, usize, i64) {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        stage.shift(mob, [1.0, 0.0, 0.0]);
+        stage.add_to_scene(mob).expect("rooted");
+        stage
+            .add_dt_updater(
+                mob,
+                |stage, me, dt| {
+                    let x = stage.get_center(me)[0];
+                    stage.shift(me, [dt * (1.0 + x), 0.0, 0.0]);
+                },
+                false,
+            )
+            .expect("updater");
+        let mut clock = RationalFrameClock::new(30).expect("fps");
+        let mut emitted = 0usize;
+        wait_segment(&mut stage, &mut clock, &rng(), 1.0, None, skip, &mut |_| {
+            emitted += 1
+        })
+        .expect("waits");
+        (
+            stage.snapshot_bytes().expect("canonical arena"),
+            emitted,
+            clock.now().frames(),
+        )
+    };
+
+    let (played, emitted_played, frames_played) = run(false);
+    let (skipped, emitted_skipped, frames_skipped) = run(true);
+    assert_eq!(played, skipped, "wait skip is state-identical");
+    assert_eq!(emitted_played, 30);
+    assert_eq!(emitted_skipped, 0);
+    assert_eq!(frames_played, 30);
+    assert_eq!(frames_skipped, frames_played);
 }
 
 // ------------------------------------------------- scene membership edges

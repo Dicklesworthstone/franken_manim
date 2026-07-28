@@ -389,6 +389,11 @@ fn pure_segment_reconstructs_bit_identically_at_any_worker_count() {
             assert_eq!(packet.frame_index(), serial[index].frame_index());
             assert_eq!(packet.time(), serial[index].time());
             assert_eq!(
+                stage.time().to_bits(),
+                packet.time().to_f64().to_bits(),
+                "worker Stage time at frame {index}"
+            );
+            assert_eq!(
                 fingerprint(&mut stage, &packet),
                 serial_prints[index],
                 "frame {index} at {workers} workers must be bit-identical"

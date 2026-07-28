@@ -524,6 +524,17 @@ pub trait Animation {
         mobs
     }
 
+    /// Every live mobject the animation may read, copy, or publish.
+    ///
+    /// Unlike [`Animation::all_mobjects`], this inventory is not a zipped
+    /// interpolation row and has no positional contract. Proscenium calls it
+    /// before `begin()` so Scribe can preflight otherwise-unrooted static
+    /// content. Animations with auxiliary handles (for example a Transform
+    /// target or a path) must extend the default inventory.
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        self.all_mobjects()
+    }
+
     /// Interpolate one zipped family row (`mobs` follows
     /// [`Animation::all_mobjects`] order) at pipeline-final `sub_alpha`.
     fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64);

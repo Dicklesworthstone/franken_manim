@@ -31,17 +31,23 @@ preview accelerator, not a state change.
 
 ## The ruling
 
-FrankenManim's `finish_animations` pass runs at `dt = 0` in **both** modes.
-Under skip, the segment's whole duration reaches updaters exactly once
-(the single big step); under playback, frame by frame. Total updater time
-is identical either way, and `sum(dt) = run_time` holds for every segment
-regardless of skip status. The frame order itself (steps 1–6), the
-no-capture/no-emit skip behavior, and the `dt = 0` finish pass are all
+FrankenManim runs the same frame-grid state transitions under playback and
+skip. Skip disables capture and emission; it does **not** collapse N updater
+steps into one large `dt`. The distinction is essential: one large step
+preserves `sum(dt)` but changes any nonlinear integrator, state machine, or
+updater whose result depends on invocation count. Bit-identical terminal
+arena state requires the same ordered calls.
+
+The `finish_animations` pass then runs at `dt = 0` in **both** modes. Total
+updater time and the sequence of updater inputs are identical, while all
+renderer and emitter work remains absent. The frame order itself (steps 1–6),
+the no-capture/no-emit skip behavior, and the `dt = 0` finish pass are all
 kept exactly.
 
 Locked by the update-order corpus:
 `crates/fmn-anim/tests/frame_order.rs::skip_mode_matches_played_final_state_and_emits_nothing`.
 
 **Migration:** scenes that (knowingly or not) relied on skipped segments
-running their dt-updaters at double speed will now see identical state on
-both paths. There is no way to ask for the doubled behavior.
+running their dt-updaters at double speed or as one coarse integration step
+will now see the same terminal state as ordinary playback. There is no way to
+ask for either defective behavior.

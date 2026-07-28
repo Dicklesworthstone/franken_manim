@@ -78,7 +78,7 @@ the key rather than being resolved downstream.
 
 | Operation | Semantics | Citation |
 |---|---|---|
-| `add_to_scene` | remove first, append, then **stable-sort by `(z_index, position)`** | `scene.py:327`, `:338` |
+| `add_many_to_scene` | remove the union of all new families from the old list, append the batch, then **stable-sort by `(z_index, position)`** | `scene.py:327`, `:338` |
 | `bring_to_front` | exactly `add` | `scene.py:389` |
 | `bring_to_back` | remove, then prepend — **no sort** | `scene.py:394` |
 | `remove_from_scene` | recursive ungrouping (below) | `scene.py:371`, `utils/family_ops.py:23` |
@@ -127,10 +127,13 @@ visible. Deduplicating is a **deliberate divergence (D5)**: strictly better,
 and the correct base for §10.8's occlusion pruning, which reasons about
 each drawn object once.
 
-**R-12. A mobject under two separate scene roots is drawn once per root.**
-That is two placements in the scene, not one object drawn twice by accident;
-each carries its own `root` in the plan so the renderer (and the inspector)
-can say which placement it is looking at.
+**R-12. A mobject under two separate roots added in the same `Scene.add`
+call is drawn once per root.** That is two placements in the scene, not one
+object drawn twice by accident; each carries its own `root` in the plan so
+the renderer (and inspector) can say which placement it is looking at. The
+batch boundary matters: adding the second parent later first removes its
+complete family from the old scene list, so the child moves from the earlier
+placement into the new one (`scene.py:333`).
 
 ---
 

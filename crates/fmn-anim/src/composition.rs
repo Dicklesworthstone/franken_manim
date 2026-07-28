@@ -326,6 +326,21 @@ macro_rules! composite_common {
             out
         }
 
+        /// The pre-begin closure is recursive and deliberately broader than
+        /// the interpolation inventory: member targets and other auxiliary
+        /// handles may not join the composition container.
+        fn preflight_mobjects(&self) -> Vec<Mob> {
+            let mut out = vec![self.state.mobject()];
+            for animation in &self.animations {
+                for mob in animation.preflight_mobjects() {
+                    if !out.contains(&mob) {
+                        out.push(mob);
+                    }
+                }
+            }
+            out
+        }
+
         /// Pure only if every member is pure — the conservative rule (R20)
         /// composes by conjunction, and one unclassified member demotes the
         /// whole composition.

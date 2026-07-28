@@ -4,10 +4,16 @@
 //! re-open), the updater honesty clause, versioning and corruption
 //! refusals, and cross-stage decode (handles re-bound to a fresh mint).
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{SerialError, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
-use fmn_mobject::{JointType, Mob, Mobject, PersistError, SceneState, Snapshot, Stage};
+use fmn_mobject::{
+    JointType, Mob, Mobject, PersistError, SceneState, Snapshot, Stage, UpdaterFn, UpdaterKindTag,
+    UpdaterManifest,
+};
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
     let mob = stage.add(Mobject::new());
@@ -113,6 +119,23 @@ fn byte_determinism_twice_and_across_reopen() {
 }
 
 #[test]
+fn oversized_schema_counts_are_typed_refusals_not_truncated_lengths() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new());
+    let too_wide = usize::from(u16::MAX) + 1;
+    stage.get_mut(mob).unwrap().buffer =
+        RecordBuffer::new(RecordSchema::new(&[("too_wide", too_wide)], &[], &[]), 0);
+
+    assert_eq!(
+        stage.snapshot_bytes().expect_err("u16 width must not wrap"),
+        SerialError::SizeLimit {
+            limit: usize::from(u16::MAX),
+            needed: too_wide,
+        }
+    );
+}
+
+#[test]
 fn updater_identities_survive_but_callables_do_not() {
     let mut stage = Stage::new();
     let mob = vmob(&mut stage, &[[0.0; 3]], [1.0; 4]);
@@ -132,10 +155,113 @@ fn updater_identities_survive_but_callables_do_not() {
     // …the restored stage carries no callables…
     stage.restore(&decoded.snapshot);
     assert!(stage.updater_ids(mob).is_empty());
-    let _ = id;
     // …and re-encoding therefore differs (the documented honesty clause).
     let reencoded = stage.snapshot_bytes().unwrap();
     assert_ne!(with_updater, reencoded);
+
+    let identities = decoded.updaters.identities(&stage).unwrap();
+    assert_eq!(identities.len(), 1);
+    assert_eq!(identities[0].mob, mob);
+    assert_eq!(identities[0].id, id);
+    let calls = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&calls);
+    stage
+        .restore_updater_bindings(vec![(
+            identities[0],
+            UpdaterFn::NonDt(Rc::new(RefCell::new(
+                move |_stage: &mut Stage, _mob: Mob| {
+                    seen.set(seen.get() + 1);
+                },
+            ))),
+        )])
+        .unwrap();
+    assert_eq!(stage.updater_ids(mob), [id]);
+    stage.update_mobject(mob, 0.0);
+    assert_eq!(calls.get(), 1);
+    assert_eq!(
+        stage.snapshot_bytes().unwrap(),
+        with_updater,
+        "identity-preserving rebind restores the canonical state"
+    );
+    let next = stage.add_updater(mob, |_, _| {}, false).unwrap();
+    assert_ne!(
+        next, id,
+        "durable restore must not reuse an identity carried by its manifest"
+    );
+}
+
+#[test]
+fn removed_updater_id_cursor_is_part_of_durable_state_and_hashing() {
+    let mut stage = Stage::new();
+    let mob = vmob(&mut stage, &[[0.0; 3]], [1.0; 4]);
+    let before = stage.snapshot_bytes().unwrap();
+    let removed = stage.add_updater(mob, |_, _| {}, false).unwrap();
+    stage.remove_updater(mob, removed);
+    let after = stage.snapshot_bytes().unwrap();
+    assert_ne!(
+        before, after,
+        "identical active records with different future id sequences are different states"
+    );
+
+    let decoded = Snapshot::from_bytes(&after, &stage).unwrap();
+    assert!(decoded.updaters.entries.is_empty());
+    stage.restore(&decoded.snapshot);
+    let next = stage.add_updater(mob, |_, _| {}, false).unwrap();
+    assert_ne!(
+        next, removed,
+        "a barrier must not reuse an updater identity removed before capture"
+    );
+}
+
+#[test]
+fn updater_manifest_refuses_noncanonical_or_ambiguous_identities_before_resolution() {
+    let mut stage = Stage::new();
+    let mob = vmob(&mut stage, &[[0.0; 3]], [1.0; 4]);
+    stage.add_updater(mob, |_, _| {}, false).unwrap();
+    let decoded = Snapshot::from_bytes(&stage.snapshot_bytes().unwrap(), &stage).unwrap();
+    let (slot, ids) = decoded.updaters.entries[0].clone();
+    let id = ids[0].0;
+
+    for (manifest, expected) in [
+        (
+            UpdaterManifest {
+                entries: vec![(slot, vec![(0, UpdaterKindTag::NonDt)])],
+            },
+            "reserved zero identity",
+        ),
+        (
+            UpdaterManifest {
+                entries: vec![(
+                    slot,
+                    vec![(id, UpdaterKindTag::NonDt), (id, UpdaterKindTag::NonDt)],
+                )],
+            },
+            "repeats an identity",
+        ),
+        (
+            UpdaterManifest {
+                entries: vec![
+                    (slot, vec![(id, UpdaterKindTag::NonDt)]),
+                    (slot, vec![(id + 1, UpdaterKindTag::NonDt)]),
+                ],
+            },
+            "not strictly increasing",
+        ),
+        (
+            UpdaterManifest {
+                entries: vec![(slot, Vec::new())],
+            },
+            "empty slot",
+        ),
+    ] {
+        let error = manifest
+            .identities(&stage)
+            .expect_err("malformed manifests must fail before callback resolution");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
 }
 
 #[test]

@@ -35,13 +35,13 @@
 //! when those subsystems land (fm-gw7, fm-5xm) — a subset of the final
 //! abstraction, never a substitute.
 //!
-//! Skip-mode semantics: the whole segment advances in one step (time and
-//! updaters see one big `dt`), nothing is captured or emitted — and the
-//! post-play updater pass runs at `dt = 0` in **both** modes, so a skipped
-//! segment leaves dt-updaters exactly where a played segment does. The
-//! Reference gives that pass `dt = run_time` under skip, double-applying
-//! segment time on top of its own skip step — a defect, corrected and
-//! documented in BN-10.
+//! Skip-mode semantics: the same frame-grid transitions run in the same order,
+//! but capture and emit are disabled. This is what makes the terminal arena
+//! state bit-identical even for nonlinear/stateful updaters; replacing those
+//! transitions with one large `dt` would preserve only total elapsed time.
+//! The post-play updater pass runs at `dt = 0` in **both** modes. The Reference
+//! instead uses one large step and then applies `run_time` a second time — the
+//! defect corrected and documented in BN-10.
 
 use std::rc::Rc;
 
@@ -86,6 +86,26 @@ impl FramePacket {
         }
     }
 
+    /// Freeze the current state outside a sampled animation segment.
+    ///
+    /// `Scene::show`, presenter holds, Studio barriers, and replay
+    /// checkpoints all need the same immutable boundary as an ordinary
+    /// captured frame without inventing a zero-duration animation. A barrier
+    /// packet therefore uses `segment_frame = 0` as an explicit sentinel and
+    /// `alpha = 1`; its global frame index and exact time still come from the
+    /// rational clock.
+    #[must_use]
+    pub fn freeze_barrier(stage: &Stage, clock: &RationalFrameClock, rng: &RngRoot) -> Self {
+        Self {
+            frame_index: clock.now().frames(),
+            segment_frame: 0,
+            alpha: 1.0,
+            time: clock.now(),
+            rng_seed: rng.seed(),
+            state: Rc::new(stage.snapshot()),
+        }
+    }
+
     /// The global frame index (the clock's frame counter at capture) —
     /// also the key every per-frame RNG fork derives from.
     #[must_use]
@@ -93,7 +113,8 @@ impl FramePacket {
         self.frame_index
     }
 
-    /// The 1-based frame number within its segment.
+    /// The 1-based frame number within its segment, or zero for a
+    /// [`FramePacket::freeze_barrier`] packet.
     #[must_use]
     pub fn segment_frame(&self) -> i64 {
         self.segment_frame
@@ -117,6 +138,20 @@ impl FramePacket {
     #[must_use]
     pub fn state(&self) -> &Snapshot {
         &self.state
+    }
+
+    /// Materialize this packet's frozen Stage in an independent physical
+    /// arena, synchronized to the packet's exact capture time.
+    ///
+    /// This is the Scene → Lumen/Reel adapter path: downstream work consumes
+    /// only immutable packet state and never borrows the live scene. The
+    /// materialized arena shares the packet's logical handle domain but its
+    /// record writes are CoW-isolated.
+    #[must_use]
+    pub fn materialize_stage(&self) -> Stage {
+        let mut stage = self.state.materialize();
+        stage.set_time_from_clock(self.time.to_f64());
+        stage
     }
 
     /// The keyed per-frame fork of a named substream (§6.5): a pure
@@ -169,10 +204,9 @@ fn begin_animations(
     Ok(())
 }
 
-/// One sample's stepping plan: playback steps one frame at `1/fps` and
-/// captures; skip steps the whole segment at once and captures nothing
-/// (the Reference's `update_frame` returns before `camera.capture` when
-/// skipping).
+/// One sample's stepping plan. Playback and skip both step one frame at
+/// `1/fps`; skip differs only by disabling capture (the Reference's
+/// `update_frame` returns before `camera.capture` when skipping).
 struct StepPlan {
     sample: FrameSample,
     dt: f64,
@@ -188,7 +222,7 @@ fn frame_step(
     animations: &mut [Box<dyn Animation>],
     plan: &StepPlan,
     emit: &mut dyn FnMut(FramePacket),
-) {
+) -> Result<(), AnimError> {
     // Steps 1–2, per animation, interleaved exactly as the Reference does.
     for animation in animations.iter_mut() {
         animation.update_mobjects(stage, plan.dt);
@@ -196,14 +230,17 @@ fn frame_step(
         animation.interpolate(stage, alpha);
     }
     // Step 3: time advances (the rational clock is the source of truth;
-    // the stage's float mirror advances inside `update`, before updaters).
-    clock.advance_frames(plan.advance);
+    // its one exact-to-f64 conversion replaces the Stage mirror).
+    clock
+        .advance_frames(plan.advance)
+        .map_err(AnimError::Clock)?;
     // Step 4: scene updaters, observing post-interpolation state.
-    stage.update(plan.dt);
+    stage.update_at_time(plan.dt, clock.now().to_f64());
     // Steps 5–6: freeze and emit.
     if plan.capture {
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
     }
+    Ok(())
 }
 
 /// The Reference's `finish_animations`: finish each animation, apply
@@ -364,7 +401,7 @@ pub fn advance_play(
             advance: 1,
             capture: true,
         };
-        frame_step(stage, clock, rng, animations, &plan, emit);
+        frame_step(stage, clock, rng, animations, &plan, emit)?;
         open.stepped += 1;
     }
     match animations.iter().find_map(|a| a.deferred_error()) {
@@ -373,9 +410,9 @@ pub fn advance_play(
     }
 }
 
-/// A `wait()` segment run partway and left open — the wait-side seek
-/// primitive, matching [`play_segment_upto`]. No stop condition: a
-/// declarative timeline has no callbacks to consult.
+/// A `wait()` segment run partway — the wait-side seek primitive, matching
+/// the [`open_play`] / [`advance_play`] pair. No stop condition: a declarative
+/// timeline has no callbacks to consult.
 ///
 /// # Errors
 /// [`AnimError::Clock`] for a non-finite or oversized duration.
@@ -397,8 +434,8 @@ pub fn wait_segment_upto(
         .samples()
         .take(usize::try_from(upto).unwrap_or(usize::MAX))
     {
-        clock.advance_frames(1);
-        stage.update(dt);
+        clock.advance_frames(1).map_err(AnimError::Clock)?;
+        stage.update_at_time(dt, clock.now().to_f64());
         emit(FramePacket::freeze(stage, clock, rng, &sample));
     }
     Ok(SegmentReport {
@@ -413,8 +450,8 @@ pub fn wait_segment_upto(
 
 /// One `play()` segment under the six-step frame order: begin → automatic
 /// purity classification (§9.5) → the per-sample steps over the §9.2
-/// progression (or the single skip step) → finish. Emits one
-/// [`FramePacket`] per sample in frame order (nothing under skip) and
+/// progression → finish. Emits one [`FramePacket`] per sample in frame order
+/// (nothing under skip) and
 /// returns the segment's [`SegmentReport`] — the journal record, carrying
 /// the begin-state snapshot when the segment classified pure.
 ///
@@ -440,15 +477,17 @@ pub fn play_segment(
     let segment = prologue.segment;
     let report = prologue.report(SegmentKind::Play);
     if skip {
-        // The whole segment in one step: one big dt, no capture, no emit.
-        if let Some(sample) = segment.skip_sample() {
+        // State evolution is frame-for-frame identical to playback; only the
+        // expensive capture/emission boundary is suppressed.
+        let dt = clock.dt().to_f64();
+        for sample in segment.samples() {
             let plan = StepPlan {
                 sample,
-                dt: segment.end_time().to_f64(),
-                advance: segment.n_frames(),
+                dt,
+                advance: 1,
                 capture: false,
             };
-            frame_step(stage, clock, rng, animations, &plan, emit);
+            frame_step(stage, clock, rng, animations, &plan, emit)?;
         }
     } else {
         let mut open = OpenSegment {
@@ -501,7 +540,7 @@ pub fn wait_segment(
     let purity = classify_wait(stage, stop_condition.is_some());
     let base_frame = clock.now().frames();
     let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
-    let report = SegmentReport {
+    let mut report = SegmentReport {
         kind: SegmentKind::Wait,
         purity,
         begin_state,
@@ -509,19 +548,12 @@ pub fn wait_segment(
         n_frames: segment.n_frames(),
         run_time: duration,
     };
-    if skip && stop_condition.is_none() {
-        if let Some(sample) = segment.skip_sample() {
-            let dt = segment.end_time().to_f64();
-            clock.advance_frames(sample.frame);
-            stage.update(dt);
-            let _ = sample; // no capture, no emit under skip
-        }
-        return Ok(report);
-    }
     let dt = clock.dt().to_f64();
+    let mut stepped = 0;
     for sample in segment.samples() {
-        clock.advance_frames(1);
-        stage.update(dt);
+        clock.advance_frames(1).map_err(AnimError::Clock)?;
+        stage.update_at_time(dt, clock.now().to_f64());
+        stepped += 1;
         if !skip {
             emit(FramePacket::freeze(stage, clock, rng, &sample));
         }
@@ -531,5 +563,6 @@ pub fn wait_segment(
             break;
         }
     }
+    report.n_frames = stepped;
     Ok(report)
 }

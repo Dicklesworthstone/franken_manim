@@ -15,7 +15,8 @@
 //!   not a whole number of frames still covers its end;
 //! - the final sample may exceed `run_time`; **alpha clamps to [0, 1]**
 //!   (the Reference's `interpolate` clip);
-//! - skipped playback advances the whole segment in one step.
+//! - skipped playback visits the same grid samples while suppressing capture,
+//!   so state evolution is identical rather than merely time-equivalent.
 //!
 //! **PERMANENT REFUSAL (D-18, §10.5):** adaptive or variable frame
 //! sampling is refused forever. The type system encodes it: a
@@ -165,6 +166,10 @@ pub enum ClockError {
     NonFiniteRunTime,
     /// The requested duration exceeds what an i64 frame index can count.
     RunTimeTooLong,
+    /// A clock can only advance, never move to a negative earlier frame.
+    NegativeFrameAdvance,
+    /// The current frame plus an otherwise valid advance exceeds `i64`.
+    FrameCounterOverflow,
 }
 
 impl std::fmt::Display for ClockError {
@@ -173,6 +178,8 @@ impl std::fmt::Display for ClockError {
             Self::ZeroFps => write!(f, "fps must be nonzero"),
             Self::NonFiniteRunTime => write!(f, "run_time must be finite"),
             Self::RunTimeTooLong => write!(f, "run_time exceeds the frame counter's range"),
+            Self::NegativeFrameAdvance => write!(f, "frame advance must be non-negative"),
+            Self::FrameCounterOverflow => write!(f, "frame advance exceeds the counter's range"),
         }
     }
 }
@@ -269,20 +276,6 @@ impl FrameSegment {
             }
         })
     }
-
-    /// Skipped playback: the whole segment in one step (the Reference's
-    /// `[run_time]` progression), still ending on the grid.
-    #[must_use]
-    pub fn skip_sample(&self) -> Option<FrameSample> {
-        if self.n_frames == 0 {
-            return None;
-        }
-        Some(FrameSample {
-            frame: self.n_frames,
-            time: self.end_time(),
-            alpha: 1.0,
-        })
-    }
 }
 
 /// The clock: an i64 frame counter over fps. Time derives; it never
@@ -329,15 +322,31 @@ impl RationalFrameClock {
 
     /// Advance by emitted frames (one per capture; a consumer that stops a
     /// wait early — `wait_until` — simply advances by fewer).
-    pub fn advance_frames(&mut self, n: i64) {
-        self.frames_elapsed += n;
+    ///
+    /// # Errors
+    /// [`ClockError::NegativeFrameAdvance`] for a negative delta, or
+    /// [`ClockError::FrameCounterOverflow`] if the resulting frame cannot be
+    /// represented.
+    pub fn advance_frames(&mut self, n: i64) -> Result<(), ClockError> {
+        if n < 0 {
+            return Err(ClockError::NegativeFrameAdvance);
+        }
+        self.frames_elapsed = self
+            .frames_elapsed
+            .checked_add(n)
+            .ok_or(ClockError::FrameCounterOverflow)?;
+        Ok(())
     }
 
     /// Plan a segment of `run_time` seconds on this clock's grid.
     pub fn segment(&self, run_time: f64) -> Result<FrameSegment, ClockError> {
+        let n_frames = frames_covering(run_time, self.fps)?;
+        self.frames_elapsed
+            .checked_add(n_frames)
+            .ok_or(ClockError::FrameCounterOverflow)?;
         Ok(FrameSegment {
             fps: self.fps,
-            n_frames: frames_covering(run_time, self.fps)?,
+            n_frames,
             run_time,
         })
     }

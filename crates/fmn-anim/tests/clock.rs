@@ -114,7 +114,7 @@ fn coverage_property_over_many_durations() {
 fn drift_free_over_a_million_frames() {
     let mut clock = RationalFrameClock::new(30).unwrap();
     for _ in 0..1_000_000 {
-        clock.advance_frames(1);
+        clock.advance_frames(1).expect("frame");
     }
     // Time derives: exactly the closed form, not an accumulation.
     assert_eq!(clock.now().frames(), 1_000_000);
@@ -140,7 +140,7 @@ fn wait_and_wait_until_interaction() {
     let mut clock = RationalFrameClock::new(30).unwrap();
     let segment = clock.segment(2.0).unwrap();
     for _sample in segment.samples() {
-        clock.advance_frames(1);
+        clock.advance_frames(1).expect("frame");
     }
     assert_eq!(clock.now(), RationalTime::zero(30) + 60);
 
@@ -149,7 +149,7 @@ fn wait_and_wait_until_interaction() {
     let segment = clock.segment(60.0).unwrap();
     let mut emitted = 0;
     for sample in segment.samples() {
-        clock.advance_frames(1);
+        clock.advance_frames(1).expect("frame");
         emitted += 1;
         let condition_met = sample.time.to_f64() >= 0.5;
         if condition_met {
@@ -161,15 +161,14 @@ fn wait_and_wait_until_interaction() {
 }
 
 #[test]
-fn skip_mode_advances_whole_segment() {
+fn terminal_sample_is_the_last_grid_point() {
     let clock = RationalFrameClock::new(30).unwrap();
     let segment = clock.segment(1.5).unwrap();
-    let sample = segment.skip_sample().unwrap();
+    let sample = segment.samples().last().unwrap();
     assert_eq!(sample.frame, 45);
     assert_eq!(sample.alpha, 1.0);
     assert_eq!(sample.time, segment.end_time());
-    // Zero-length segments skip to nothing.
-    assert!(clock.segment(0.0).unwrap().skip_sample().is_none());
+    assert!(clock.segment(0.0).unwrap().samples().next().is_none());
 }
 
 #[test]
@@ -192,6 +191,30 @@ fn degenerate_and_refused_inputs() {
     assert_eq!(clock.segment(1e-9).unwrap().n_frames(), 1);
 }
 
+#[test]
+fn frame_counter_bounds_are_typed_and_atomic() {
+    let mut clock = RationalFrameClock::new(1).expect("fps");
+    assert_eq!(
+        clock.advance_frames(-1),
+        Err(ClockError::NegativeFrameAdvance)
+    );
+    assert_eq!(clock.now().frames(), 0);
+
+    clock
+        .advance_frames(i64::MAX)
+        .expect("the largest representable frame");
+    assert_eq!(
+        clock.advance_frames(1),
+        Err(ClockError::FrameCounterOverflow)
+    );
+    assert_eq!(clock.now().frames(), i64::MAX, "refusal is atomic");
+    assert_eq!(
+        clock.segment(1.0).err(),
+        Some(ClockError::FrameCounterOverflow),
+        "planning also refuses before any animation state can mutate"
+    );
+}
+
 // The no-off-grid property (D-18's permanent refusal, encoded in types):
 // every time value reachable through the public API is a whole number of
 // frames over fps. This test enumerates every constructor path.
@@ -204,7 +227,7 @@ fn no_off_grid_time_is_reachable() {
         clock.segment(0.7).unwrap().end_time(),
         RationalTime::zero(24),
     ];
-    clock.advance_frames(3);
+    clock.advance_frames(3).expect("frames");
     let mut all = times;
     all.push(clock.now());
     all.extend(clock.segment(0.7).unwrap().samples().map(|s| s.time));

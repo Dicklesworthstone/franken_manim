@@ -46,7 +46,7 @@ pub use mobject::Mobject;
 pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{
     DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,
-    SceneState, UpdaterKindTag, UpdaterManifest,
+    SceneState, UpdaterIdentity, UpdaterKindTag, UpdaterManifest,
 };
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
@@ -79,6 +79,12 @@ pub enum StageError {
     /// reached the geometry kernel (alignment reads point runs as
     /// [`fmn_geom::QuadPath`]s).
     Geometry(fmn_geom::GeomError),
+    /// The monotonically assigned updater identity space is exhausted.
+    /// Reuse would make durable replay manifests ambiguous.
+    UpdaterIdExhausted,
+    /// Durable replay attempted to install updater callables against a
+    /// different target/identity set than the decoded manifest named.
+    UpdaterBindingMismatch,
     /// `put_start_and_end_on` on a family with no points, or whose first
     /// and last points coincide — the Reference's "Cannot position
     /// endpoints of closed loop". There is no rotation that separates two
@@ -111,6 +117,12 @@ impl std::fmt::Display for StageError {
             }
             Self::Geometry(err) => {
                 write!(f, "malformed point run in alignment: {err}")
+            }
+            Self::UpdaterIdExhausted => {
+                write!(f, "updater identity space is exhausted")
+            }
+            Self::UpdaterBindingMismatch => {
+                write!(f, "updater binding does not match the decoded manifest")
             }
             Self::DegenerateEndpoints => {
                 write!(f, "cannot position endpoints of a closed or empty path")

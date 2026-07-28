@@ -48,8 +48,9 @@
 //!   drawn **once**: [`Stage::family`] deduplicates, where the Reference's
 //!   `get_family` concatenates and would draw it twice — which double-
 //!   composites transparent content. A mobject under two *separate scene
-//!   roots* is still drawn once per root: that is two placements in the
-//!   scene, not one.
+//!   roots added in one batch* is still drawn once per root: that is two
+//!   placements in the scene, not one. A later singleton parent add moves
+//!   its family out of the old placement first (`scene.py:333`).
 //! - `z_index` on a *child* has no effect on order in either engine — the
 //!   scene sort reads top-level members only — but here that is stated
 //!   rather than discovered. `set_z_index(recurse = true)` still writes the

@@ -169,6 +169,10 @@ impl Animation for MaintainPositionRelativeTo {
         Ok(())
     }
 
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        vec![self.state.mobject(), self.tracked]
+    }
+
     /// update.py:66: shift so the tracked offset holds. Reads the tracked
     /// mobject *live* — which is the point, and why it stays Unclassified.
     fn interpolate(&mut self, stage: &mut Stage, _alpha: f64) {

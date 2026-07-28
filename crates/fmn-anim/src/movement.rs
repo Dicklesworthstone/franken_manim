@@ -308,6 +308,10 @@ impl Animation for MoveAlongPath {
         Ok(())
     }
 
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        vec![self.state.mobject(), self.path]
+    }
+
     /// movement.py:115 with the BN-03 improvement: the rate function
     /// applies to the raw alpha (the Reference's override bypasses lag and
     /// time-span), and the sample point is taken by true arc length.

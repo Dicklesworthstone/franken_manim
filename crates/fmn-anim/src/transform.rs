@@ -483,6 +483,21 @@ impl Animation for Transform {
         unlock_family_data(stage, self.state.mobject());
     }
 
+    /// transform.py:89 — first apply the base remover rule, then replace the
+    /// animated mobject with the original target when requested. Encoding the
+    /// operation on the trait object keeps Choreo's generic finish path from
+    /// needing a concrete-animation downcast.
+    fn clean_up_from_scene(&mut self, stage: &mut Stage) {
+        let mobject = self.state.mobject();
+        if self.is_remover() {
+            stage.remove_from_scene(mobject);
+        }
+        if self.replace_in_scene {
+            stage.remove_from_scene(mobject);
+            let _ = stage.add_to_scene(self.target);
+        }
+    }
+
     /// `(mobject, starting_mobject, target_copy)` — transform.py:111.
     fn all_mobjects(&self) -> Vec<Mob> {
         let mut mobs = vec![self.state.mobject()];
@@ -491,6 +506,14 @@ impl Animation for Transform {
         }
         if let Some(target_copy) = self.target_copy {
             mobs.push(target_copy);
+        }
+        mobs
+    }
+
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        let mut mobs = self.all_mobjects();
+        if !mobs.contains(&self.target) {
+            mobs.push(self.target);
         }
         mobs
     }

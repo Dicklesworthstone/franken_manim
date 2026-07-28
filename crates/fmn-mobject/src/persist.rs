@@ -5,8 +5,8 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1`,
-//!   [`SCENE_STATE_SCHEMA`] `FMNA/2`; the self-golden suites hold `FMNS`):
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.3,
+//!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v1.3; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
 //! - **Deterministic bytes**: canonical field order (schema order for
@@ -26,8 +26,10 @@
 //! when a callback's version hash changed) is the replay journal's job
 //! (fm-y7u), which consumes these identities. A consequence worth knowing:
 //! re-encoding a decoded snapshot of an updater-bearing stage yields
-//! different bytes (the callables are gone); byte-level re-open
-//! determinism holds exactly for callable-free states.
+//! different bytes while the callables are absent; rebinding every manifest
+//! identity through [`Stage::restore_updater_bindings`] restores the original
+//! canonical bytes. Byte-level re-open determinism holds directly for
+//! callable-free states.
 //!
 //! Handles serialize as `(slot index, generation)` — the stage id is a
 //! process-local mint, re-bound at decode against the target stage
@@ -41,18 +43,20 @@ use fmn_core::types::Vec3;
 
 use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::{ShapeSlot, ShapeTag};
-use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn};
+use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.1.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.3.
 ///
 /// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
-/// stream decodes with no tag, which is exactly what `General` means.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 2);
+/// stream decodes with no tag, which is exactly what `General` means. Minor
+/// 1.2 appended `z_index`; minor 1.3 preserves the monotonic updater-id
+/// cursor, including identities removed before the snapshot.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 3);
 
-/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.1 — it
+/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.3 — it
 /// embeds a snapshot, so it moves with [`SNAPSHOT_SCHEMA`].
-pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 2);
+pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 3);
 
 /// Errors from snapshot decode.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +117,72 @@ pub struct UpdaterManifest {
     pub entries: Vec<(u32, Vec<(u64, UpdaterKindTag)>)>,
 }
 
+/// One updater identity resolved from durable slot coordinates into a live
+/// Stage handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdaterIdentity {
+    /// Mobject whose updater list contained this identity.
+    pub mob: Mob,
+    /// Original removal token.
+    pub id: UpdaterId,
+    /// Callable shape the replay registry must provide.
+    pub kind: UpdaterKindTag,
+}
+
+impl UpdaterManifest {
+    /// Resolve durable slot identities against the Stage used for decode.
+    ///
+    /// Results retain arena order and per-mobject updater execution order,
+    /// ready for a replay owner's callback registry. The returned
+    /// [`UpdaterId`] values are the original removal identities, not newly
+    /// allocated substitutes.
+    ///
+    /// # Errors
+    /// [`PersistError::Malformed`] if a manifest names a slot that is not live
+    /// in `stage`, is not in canonical arena order, or carries a reserved or
+    /// duplicate identity.
+    pub fn identities(&self, stage: &Stage) -> Result<Vec<UpdaterIdentity>, PersistError> {
+        let mut identities = Vec::new();
+        let mut previous_slot = None;
+        for (slot, updaters) in &self.entries {
+            if previous_slot.is_some_and(|previous| previous >= *slot) {
+                return Err(PersistError::Malformed(
+                    "updater manifest slots are not strictly increasing",
+                ));
+            }
+            if updaters.is_empty() {
+                return Err(PersistError::Malformed(
+                    "updater manifest contains an empty slot",
+                ));
+            }
+            let mob = stage.mob_at_slot(*slot).ok_or(PersistError::Malformed(
+                "updater manifest target is not live",
+            ))?;
+            let mut seen = Vec::with_capacity(updaters.len());
+            for &(raw, kind) in updaters {
+                if raw == 0 {
+                    return Err(PersistError::Malformed(
+                        "updater manifest carries the reserved zero identity",
+                    ));
+                }
+                if seen.contains(&raw) {
+                    return Err(PersistError::Malformed(
+                        "updater manifest repeats an identity on one mobject",
+                    ));
+                }
+                seen.push(raw);
+                identities.push(UpdaterIdentity {
+                    mob,
+                    id: UpdaterId::from_raw(raw),
+                    kind,
+                });
+            }
+            previous_slot = Some(*slot);
+        }
+        Ok(identities)
+    }
+}
+
 /// What [`Snapshot::from_bytes`] yields: the restorable snapshot (no
 /// callables) plus the updater identities that were attached when the
 /// bytes were written.
@@ -142,23 +212,44 @@ fn put_mob_opt(w: &mut Writer, mob: Option<Mob>) {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) {
+fn count_u16(value: usize) -> Result<u16, SerialError> {
+    u16::try_from(value).map_err(|_| SerialError::SizeLimit {
+        limit: usize::from(u16::MAX),
+        needed: value,
+    })
+}
+
+fn count_u32(value: usize) -> Result<u32, SerialError> {
+    u32::try_from(value).map_err(|_| SerialError::SizeLimit {
+        limit: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+        needed: value,
+    })
+}
+
+fn count_u64(value: usize) -> Result<u64, SerialError> {
+    u64::try_from(value).map_err(|_| SerialError::SizeLimit {
+        limit: usize::try_from(u64::MAX).unwrap_or(usize::MAX),
+        needed: value,
+    })
+}
+
+fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) -> Result<(), SerialError> {
     let schema = buffer.schema();
     let fields = schema.fields();
-    w.put_u16(fields.len() as u16);
+    w.put_u16(count_u16(fields.len())?);
     for field in fields {
-        w.put_str(&field.name).put_u16(field.width as u16);
+        w.put_str(&field.name).put_u16(count_u16(field.width)?);
     }
-    let put_names = |w: &mut Writer, names: &[String]| {
-        w.put_u16(names.len() as u16);
+    let put_names = |w: &mut Writer, names: &[String]| -> Result<(), SerialError> {
+        w.put_u16(count_u16(names.len())?);
         for name in names {
             w.put_str(name);
         }
+        Ok(())
     };
-    put_names(w, schema.aligned_keys());
-    put_names(w, schema.pointlike_keys());
-    w.put_u32(buffer.len() as u32);
+    put_names(w, schema.aligned_keys())?;
+    put_names(w, schema.pointlike_keys())?;
+    w.put_u32(count_u32(buffer.len())?);
     for field in fields {
         if let Some(column) = buffer.read_column(&field.name) {
             for value in column {
@@ -167,10 +258,11 @@ fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) {
         }
     }
     let locked = buffer.locked_keys();
-    w.put_u16(locked.len() as u16);
+    w.put_u16(count_u16(locked.len())?);
     for name in locked {
         w.put_str(name);
     }
+    Ok(())
 }
 
 fn put_uniforms(w: &mut Writer, u: &Uniforms) {
@@ -184,8 +276,12 @@ fn put_uniforms(w: &mut Writer, u: &Uniforms) {
         }
     }
     w.put_f64(u.anti_alias_width);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    w.put_u8(u.joint_type.to_code() as u8);
+    w.put_u8(match u.joint_type {
+        JointType::NoJoint => 0,
+        JointType::Auto => 1,
+        JointType::Bevel => 2,
+        JointType::Miter => 3,
+    });
     w.put_bool(u.flat_stroke)
         .put_bool(u.scale_stroke_with_zoom)
         .put_bool(u.stroke_behind)
@@ -193,19 +289,18 @@ fn put_uniforms(w: &mut Writer, u: &Uniforms) {
         .put_bool(u.use_winding_fill);
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn put_entry(w: &mut Writer, entry: &SnapshotEntry) {
-    put_buffer(w, &entry.buffer);
-    w.put_u32(entry.submobjects.len() as u32);
+fn put_entry(w: &mut Writer, entry: &SnapshotEntry) -> Result<(), SerialError> {
+    put_buffer(w, &entry.buffer)?;
+    w.put_u32(count_u32(entry.submobjects.len())?);
     for &m in &entry.submobjects {
         put_mob(w, m);
     }
-    w.put_u32(entry.parents.len() as u32);
+    w.put_u32(count_u32(entry.parents.len())?);
     for &m in &entry.parents {
         put_mob(w, m);
     }
     // Updaters: identity + kind only — the honesty clause.
-    w.put_u32(entry.updaters.len() as u32);
+    w.put_u32(count_u32(entry.updaters.len())?);
     for slot in &entry.updaters {
         w.put_u64(slot.id.raw());
         w.put_u8(match slot.func {
@@ -231,14 +326,16 @@ fn put_entry(w: &mut Writer, entry: &SnapshotEntry) {
     }
     put_mob_opt(w, entry.target);
     put_mob_opt(w, entry.saved_state);
-    w.put_u64(entry.pins as u64).put_bool(entry.pending_delete);
+    w.put_u64(count_u64(entry.pins)?)
+        .put_bool(entry.pending_delete);
     put_uniforms(w, &entry.uniforms);
-    put_shape(w, &entry.shape);
+    put_shape(w, &entry.shape)?;
     // Minor 1.2 appends the §8.5 scene-sort key. Appended, never
     // interleaved: a 1.1 reader stops at the shape tag and is still
     // correct, and a 1.2 reader of a 1.1 stream defaults it to zero (the
     // Reference's default) — the §6.7 additive-minor rule.
     w.put_i32(entry.z_index);
+    Ok(())
 }
 
 /// The semantic shape tag (§10.8), added in schema minor 1.1.
@@ -248,7 +345,7 @@ fn put_entry(w: &mut Writer, entry: &SnapshotEntry) {
 /// meaning, not just performance. Encoded as a discriminant plus its
 /// payload, followed by the point revision its geometry was true at
 /// (`u64::MAX` standing for "none", which only `General` uses).
-fn put_shape(w: &mut Writer, slot: &ShapeSlot) {
+fn put_shape(w: &mut Writer, slot: &ShapeSlot) -> Result<(), SerialError> {
     let put_point = |w: &mut Writer, p: Vec3| {
         w.put_f64(p[0]).put_f64(p[1]).put_f64(p[2]);
     };
@@ -269,7 +366,7 @@ fn put_shape(w: &mut Writer, slot: &ShapeSlot) {
         }
         ShapeTag::Polyline { vertices, closed } => {
             w.put_u8(2);
-            w.put_u64(vertices as u64).put_bool(closed);
+            w.put_u64(count_u64(vertices)?).put_bool(closed);
         }
         ShapeTag::Arc {
             center,
@@ -312,6 +409,7 @@ fn put_shape(w: &mut Writer, slot: &ShapeSlot) {
         }
     }
     w.put_u64(slot.point_revision.unwrap_or(u64::MAX));
+    Ok(())
 }
 
 fn get_shape(r: &mut Reader<'_>) -> Result<ShapeSlot, PersistError> {
@@ -327,7 +425,8 @@ fn get_shape(r: &mut Reader<'_>) -> Result<ShapeSlot, PersistError> {
             buff: r.get_f64()?,
         },
         2 => ShapeTag::Polyline {
-            vertices: r.get_u64()? as usize,
+            vertices: usize::try_from(r.get_u64()?)
+                .map_err(|_| PersistError::Malformed("polyline vertex count overflows"))?,
             closed: r.get_bool()?,
         },
         3 => ShapeTag::Arc {
@@ -369,31 +468,31 @@ impl Snapshot {
     ///
     /// # Errors
     /// [`SerialError::SizeLimit`] when the state exceeds
-    /// [`Limits::DEFAULT`].
-    #[allow(clippy::cast_possible_truncation)]
+    /// [`Limits::DEFAULT`] or one of the format's fixed-width count fields.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
         let mut w = Writer::new(SNAPSHOT_SCHEMA);
-        w.put_u32(self.slots.len() as u32);
+        w.put_u32(count_u32(self.slots.len())?);
         for (generation, entry) in &self.slots {
             w.put_u32(*generation);
             match entry {
                 Some(e) => {
                     w.put_bool(true);
-                    put_entry(&mut w, e);
+                    put_entry(&mut w, e)?;
                 }
                 None => {
                     w.put_bool(false);
                 }
             }
         }
-        w.put_u32(self.free.len() as u32);
+        w.put_u32(count_u32(self.free.len())?);
         for &index in &self.free {
             w.put_u32(index);
         }
-        w.put_u32(self.roots.len() as u32);
+        w.put_u32(count_u32(self.roots.len())?);
         for &root in &self.roots {
             put_mob(&mut w, root);
         }
+        w.put_u64(self.next_updater_id);
         w.finish()
     }
 
@@ -496,6 +595,16 @@ impl Snapshot {
                 let mut ids = Vec::with_capacity(n_upd.min(65_536));
                 for _ in 0..n_upd {
                     let id = r.get_u64()?;
+                    if id == 0 {
+                        return Err(PersistError::Malformed(
+                            "updater manifest carries the reserved zero identity",
+                        ));
+                    }
+                    if ids.iter().any(|(existing, _)| *existing == id) {
+                        return Err(PersistError::Malformed(
+                            "updater manifest repeats an identity on one mobject",
+                        ));
+                    }
                     let kind = match r.get_u8()? {
                         0 => UpdaterKindTag::NonDt,
                         1 => UpdaterKindTag::Dt,
@@ -592,9 +701,38 @@ impl Snapshot {
         for _ in 0..n_roots {
             roots.push(get_mob(&mut r)?);
         }
+        let max_updater_id = manifest
+            .entries
+            .iter()
+            .flat_map(|(_, updaters)| updaters.iter().map(|(id, _)| *id))
+            .max();
+        // Minor 1.3 made the cursor part of durable state. Deriving from the
+        // active manifest for older streams is the only compatible choice,
+        // but 1.3 also preserves ids of updaters removed before the barrier.
+        let next_updater_id = if r.version().1 >= 3 {
+            let next = r.get_u64()?;
+            if next == 0 || max_updater_id.is_some_and(|id| id >= next) {
+                return Err(PersistError::Malformed(
+                    "updater id cursor does not follow active identities",
+                ));
+            }
+            next
+        } else {
+            max_updater_id
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(PersistError::Malformed("updater id space is exhausted"))?
+                .max(1)
+        };
         r.finish()?;
         Ok(DecodedSnapshot {
-            snapshot: Snapshot { slots, free, roots },
+            snapshot: Snapshot {
+                stage_id,
+                next_updater_id,
+                slots,
+                free,
+                roots,
+            },
             updaters: manifest,
         })
     }

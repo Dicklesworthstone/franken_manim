@@ -20,7 +20,7 @@
 //!   opacity 0, stroke `stroke_width`/`stroke_color`, `behind` matching
 //!   the animated root) revealed over the first half, then cross-faded
 //!   `outline → start` over the second, with the Reference's first-crossing
-//!   `set_data` and the `finish`-time joint-angle refresh. [`write`]
+//!   `set_data` and the `finish`-time joint-angle refresh. [`write()`]
 //!   (creation.py:140) is its parameterization: `run_time`/`lag_ratio`
 //!   derived from the family's with-points count, linear rate, stroke
 //!   color from `get_color()`.

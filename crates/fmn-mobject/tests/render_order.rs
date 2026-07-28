@@ -234,18 +234,38 @@ fn a_diamond_child_draws_once_inside_one_family() {
 
 #[test]
 fn a_child_of_two_roots_draws_once_per_root() {
-    // R-12: two placements in the scene, each reported with its own root.
+    // R-12: roots added in the same Reference Scene.add call are two
+    // placements, each reported with its own root.
     let mut stage = Stage::new();
     let shared = dot(&mut stage);
     let left = group(&mut stage, &[shared]);
     let right = group(&mut stage, &[shared]);
-    stage.add_to_scene(left).expect("root");
-    stage.add_to_scene(right).expect("root");
+    stage
+        .add_many_to_scene(&[left, right])
+        .expect("batch roots");
 
     let plan = stage.draw_plan();
     assert_eq!(plan.sequence(), [shared, shared]);
     let roots: Vec<Mob> = plan.items().iter().map(|item| item.root).collect();
     assert_eq!(roots, [left, right]);
+}
+
+#[test]
+fn a_later_parent_add_removes_its_already_rooted_child() {
+    // scene.py:333 expands the newly added mobject's complete family before
+    // removing it from the existing scene list.
+    let mut stage = Stage::new();
+    let child = dot(&mut stage);
+    stage.add_to_scene(child).expect("child root");
+    let parent = group(&mut stage, &[child]);
+    stage.add_to_scene(parent).expect("parent root");
+
+    assert_eq!(stage.roots(), [parent]);
+    assert_eq!(
+        stage.draw_plan().sequence(),
+        [child],
+        "the child has one placement through its new parent"
+    );
 }
 
 #[test]
