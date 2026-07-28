@@ -1,6 +1,6 @@
 [toolchain]
-# Exact pinned nightly (no "or later") — required for std::simd and safe
-# #[target_feature] (target-feature-1.1), and the date SUITE.lock records.
+# Exact pinned nightly (no "or later") — required for std::simd and the exact
+# build-tier behavior ADR-0016 records; the date is mirrored in SUITE.lock.
 # Matches asupersync's deliberate pin so the FrankenSuite resolves one
 # nightly. Bump deliberately, together with any std-API migration the new
 # nightly requires and a SUITE.lock update.

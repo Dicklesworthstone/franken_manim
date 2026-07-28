@@ -29,7 +29,9 @@
 use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Stage};
 
-use crate::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSignature};
+use crate::animation::{
+    AnimConfig, AnimError, AnimState, Animation, AnimationSignature, interpolate_linear_column,
+};
 
 /// `STRAIGHT_PATH_THRESHOLD` (utils/paths.py): scalar arc angles below
 /// this collapse to the straight path.
@@ -192,10 +194,7 @@ pub fn interpolate_fields(
                 })
                 .collect()
         } else {
-            a.iter()
-                .zip(b.iter())
-                .map(|(&x, &y)| ((1.0 - alpha) * f64::from(x) + alpha * f64::from(y)) as f32)
-                .collect()
+            interpolate_linear_column(&a, &b, alpha)
         };
         if let Some(entry) = stage.get_mut(submob) {
             entry.buffer.write_range(&field, 0, &out);

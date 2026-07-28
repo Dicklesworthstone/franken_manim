@@ -24,7 +24,7 @@
 //! | fmn-dmath owns every certified transcendental | `fmn-geom`'s `scalar` funnel, `fmn-frame`'s `transfer`, and the repo-wide guard `fmn-conformance/tests/certified_arithmetic.rs` |
 //! | No FMA contraction (§10.5d) | the same guard, over every certified crate root |
 //! | Fixed-order reductions (§10.5c) | this module: [`FrameJob`]'s draw order, and ADR-0013 |
-//! | IEEE-754 basic operations only | `f64` throughout; `sqrt` is the only non-arithmetic primitive, and IEEE-754 requires it correctly rounded |
+//! | IEEE-754 basic operations only | certified accumulation is `f64`; `sqrt` is the only non-arithmetic primitive, and IEEE-754 requires it correctly rounded |
 //!
 //! ## Why a band is the unit of parallelism
 //!
@@ -60,13 +60,16 @@
 //! through [`fmn_frame::convert::rgba16f_to_rgba8`], which is bit-exact by
 //! construction because it does no arithmetic at all.
 //!
-//! Compositing runs in `f64` in a row accumulator and is narrowed **once**, at
-//! writeback. The `f64 → f32 → f16` narrowing is a double rounding, and it is
-//! recorded rather than hidden: it is deterministic on every platform (both steps
-//! are IEEE round-to-nearest-even), and reaching a different `f16` than a direct
-//! `f64 → f16` would require the accumulated value to sit within `2⁻²⁴` of an
-//! `f16` midpoint — below the width at which the 8-bit output can express a
-//! difference.
+//! Certified compositing runs in `f64` in a row accumulator and is narrowed
+//! **once**, at writeback. The `f64 → f32 → f16` narrowing is a double rounding,
+//! and it is recorded rather than hidden: it is deterministic on every platform
+//! (both steps are IEEE round-to-nearest-even), and reaching a different `f16`
+//! than a direct `f64 → f16` would require the accumulated value to sit within
+//! `2⁻²⁴` of an `f16` midpoint — below the width at which the 8-bit output can
+//! express a difference. The standard-only fast engine instead accumulates
+//! colour and alpha in `f32`; its error is held to the versioned visual budget
+//! below, while coverage and the ill-conditioned stroke-distance solve stay
+//! `f64`.
 
 use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
 use crate::fill::{
@@ -80,6 +83,38 @@ use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_hash::{Digest, Schema, Writer};
 use std::sync::{Mutex, PoisonError};
+
+// A binary that requires an improvised subset must not journal itself as the
+// portable tier. ADR-0016 supports only the exact SUITE.lock feature sets.
+#[cfg(all(
+    target_arch = "x86_64",
+    any(
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ),
+    not(any(
+        all(
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ),
+        all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        )
+    ))
+))]
+compile_error!(
+    "unsupported partial x86 SIMD tier; use SUITE.lock's portable, x86-64-v3, or x86-64-v4 flags"
+);
 
 // --------------------------------------------------------------- the identity
 
@@ -97,7 +132,7 @@ pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
 /// every pixel. It is deliberately not the crate version: a refactor that cannot
 /// move a bit must not invalidate a manifest, and a one-line change to the AA
 /// profile must.
-pub const RENDERER_VERSION: u32 = 2;
+pub const RENDERER_VERSION: u32 = 3;
 
 /// Boundary-sheet count at which an adaptive cell escalates to 2×2 samples.
 ///
@@ -132,6 +167,28 @@ pub const AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR: f64 = 0.23;
 ///
 /// The measured adaptive result is `0.008526512734628627`.
 pub const AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR: f64 = 0.009;
+
+/// Version-1 maximum linear channel error for fast CPU versus certified.
+///
+/// The locked three-frame corpus measures `0.087890625` at one pentagram edge;
+/// the blocking budget leaves roughly five percent headroom. A controlled
+/// canonical-AA run measures mixed precision alone at `0.00048828125`, so the
+/// larger residual belongs to standard mode's adaptive edge sampling rather
+/// than an f32 distance solve.
+pub const FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR: f64 = 0.092;
+
+/// Version-1 RMS linear channel error for fast CPU versus certified.
+///
+/// The locked corpus measures `0.0004011347492380775`; the blocking budget
+/// leaves roughly five percent headroom.
+pub const FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR: f64 = 0.000_42;
+
+/// Version-1 minimum global sRGB-luma SSIM for fast CPU versus certified.
+///
+/// The locked corpus minimum is `0.9999983928862303`. SSIM is the perceptual
+/// half of §16.3's engine-equivalence budget; max and RMS channel error remain
+/// the local-error tripwires.
+pub const FAST_VISUAL_BUDGET_V1_MIN_SSIM: f64 = 0.999_99;
 
 /// Which execution engine produced a frame (§10.1, C7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -170,18 +227,57 @@ impl EngineKind {
     }
 }
 
-/// The SIMD build tier a CPU engine was compiled for (§17.3, C3).
+/// The scalar definition and the one SIMD build tier this artifact offers
+/// (§17.3, C3).
 ///
-/// Only [`Tier::Scalar`] exists today, and that is the point rather than a
-/// placeholder: **within the certified engine the scalar path is the
-/// definition**, and every tier fm-4wt adds must match it bit-for-bit. The
-/// enumeration exists now so the harness that will check that
-/// (`fmn-conformance/tests/certified_engine.rs`) is written against a real type
-/// rather than retrofitted around the first tier.
+/// A distributed artifact contains exactly two arithmetic routes: [`Tier::Scalar`]
+/// for the certified equivalence oracle, and the tier selected by the
+/// SUITE.lock-governed crate flags. There is no per-call feature detection and
+/// no artifact can claim a tier it was not compiled to execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tier {
     /// Portable scalar: the definition every other tier must reproduce.
     Scalar,
+    /// The baseline artifact with no extra target-feature flags.
+    #[cfg(not(any(
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ),
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
+    )))]
+    Portable,
+    /// The x86-64-v3 artifact (`+avx2,+bmi2,+fma`).
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma",
+        not(target_feature = "avx512f")
+    ))]
+    X86_64V3,
+    /// The x86-64-v4 artifact (the four SUITE.lock AVX-512 features).
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ))]
+    X86_64V4,
+    /// The aarch64 + NEON artifact.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    Aarch64Neon,
 }
 
 impl Tier {
@@ -190,14 +286,132 @@ impl Tier {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Scalar => "scalar",
+            #[cfg(not(any(
+                all(
+                    target_arch = "x86_64",
+                    target_feature = "avx2",
+                    target_feature = "bmi2",
+                    target_feature = "fma",
+                    not(target_feature = "avx512f")
+                ),
+                all(
+                    target_arch = "x86_64",
+                    target_feature = "avx512f",
+                    target_feature = "avx512bw",
+                    target_feature = "avx512dq",
+                    target_feature = "avx512vl"
+                ),
+                all(target_arch = "aarch64", target_feature = "neon")
+            )))]
+            Self::Portable => "portable",
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "bmi2",
+                target_feature = "fma",
+                not(target_feature = "avx512f")
+            ))]
+            Self::X86_64V3 => "x86-64-v3",
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512dq",
+                target_feature = "avx512vl"
+            ))]
+            Self::X86_64V4 => "x86-64-v4",
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            Self::Aarch64Neon => "aarch64-neon",
         }
     }
 
-    /// Every tier this build offers, scalar first.
+    /// Every tier this build offers: the scalar oracle, then the built tier.
     ///
     /// The certified harness sweeps this, so a tier that lands without being
     /// listed here is a tier nothing checks.
-    pub const ALL: &'static [Tier] = &[Tier::Scalar];
+    pub const ALL: &'static [Tier] = &[
+        Tier::Scalar,
+        #[cfg(not(any(
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "bmi2",
+                target_feature = "fma",
+                not(target_feature = "avx512f")
+            ),
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512dq",
+                target_feature = "avx512vl"
+            ),
+            all(target_arch = "aarch64", target_feature = "neon")
+        )))]
+        Tier::Portable,
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ))]
+        Tier::X86_64V3,
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        ))]
+        Tier::X86_64V4,
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        Tier::Aarch64Neon,
+    ];
+
+    /// The SIMD tier selected by this artifact's crate-wide build flags.
+    #[cfg(not(any(
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ),
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
+    )))]
+    pub const COMPILED: Tier = Tier::Portable;
+
+    /// The SIMD tier selected by this x86-64-v3 artifact.
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma",
+        not(target_feature = "avx512f")
+    ))]
+    pub const COMPILED: Tier = Tier::X86_64V3;
+
+    /// The SIMD tier selected by this x86-64-v4 artifact.
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ))]
+    pub const COMPILED: Tier = Tier::X86_64V4;
+
+    /// The SIMD tier selected by this aarch64 + NEON artifact.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    pub const COMPILED: Tier = Tier::Aarch64Neon;
 }
 
 /// C7's "execution-engine and backend identities", as a hashable document.
@@ -221,11 +435,21 @@ impl EngineIdentity {
             renderer_version: RENDERER_VERSION,
         }
     }
+
+    /// This artifact's standard-mode default: fast CPU on its compiled tier.
+    #[must_use]
+    pub const fn fast() -> EngineIdentity {
+        EngineIdentity {
+            engine: EngineKind::FastCpu,
+            tier: Tier::COMPILED,
+            renderer_version: RENDERER_VERSION,
+        }
+    }
 }
 
 impl Default for EngineIdentity {
     fn default() -> Self {
-        Self::certified()
+        Self::fast()
     }
 }
 
@@ -622,6 +846,19 @@ struct Draw {
 /// doing so would return a valid-looking, deterministically wrong frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameJobError {
+    /// The caller supplied an identity for renderer semantics other than the
+    /// code that will execute.
+    RendererVersionMismatch {
+        /// Version named by the requested identity.
+        requested: u32,
+        /// Version implemented by this artifact.
+        compiled: u32,
+    },
+    /// The requested engine has no implementation in this artifact.
+    UnsupportedEngine {
+        /// The engine that was requested.
+        engine: EngineKind,
+    },
     /// The monotone pieces were transformed under another screen mapping.
     MonoMapMismatch,
     /// The monotone table's shape-indexed geometry is stale.
@@ -636,14 +873,33 @@ pub enum FrameJobError {
 
 impl std::fmt::Display for FrameJobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::MonoMapMismatch => "monotone table screen map does not match the frame",
-            Self::MonoPlanMismatch => "monotone table geometry does not match the render plan",
-            Self::BinningMapMismatch => "binning screen map does not match the frame",
-            Self::BinningViewportMismatch => "binning viewport does not match the frame",
-            Self::BinningPlanMismatch => "binning does not match the render plan",
-        };
-        f.write_str(message)
+        match self {
+            Self::RendererVersionMismatch {
+                requested,
+                compiled,
+            } => write!(
+                f,
+                "renderer identity names version {requested}, but this artifact implements {compiled}"
+            ),
+            Self::UnsupportedEngine { engine } => {
+                write!(
+                    f,
+                    "{} has no rendering backend in this artifact",
+                    engine.name()
+                )
+            }
+            Self::MonoMapMismatch => {
+                f.write_str("monotone table screen map does not match the frame")
+            }
+            Self::MonoPlanMismatch => {
+                f.write_str("monotone table geometry does not match the render plan")
+            }
+            Self::BinningMapMismatch => f.write_str("binning screen map does not match the frame"),
+            Self::BinningViewportMismatch => {
+                f.write_str("binning viewport does not match the frame")
+            }
+            Self::BinningPlanMismatch => f.write_str("binning does not match the render plan"),
+        }
     }
 }
 
@@ -725,12 +981,15 @@ impl<'a> FrameJob<'a> {
     /// The identity selects the certified refusal boundary as well as recording
     /// what the frame claims: [`EngineKind::CertifiedCpu`] always executes the
     /// canonical analytic path, while standard-only identities honor
-    /// [`FrameConfig::aa`]. There is still one arithmetic implementation here;
-    /// a fast-CPU or annex engine reuses this front-end and substitutes its own
-    /// back-end. Recording which one ran is §10.5(f).
+    /// [`FrameConfig::aa`]. Every CPU route shares the semantic front-end;
+    /// certified uses the scalar `f64` definition, while fast CPU substitutes
+    /// its budgeted `f32` compositor. Recording which one ran is §10.5(f).
     ///
     /// # Errors
-    /// See [`FrameJob::new`].
+    /// [`FrameJobError::RendererVersionMismatch`] when the requested identity
+    /// does not name this artifact's renderer semantics;
+    /// [`FrameJobError::UnsupportedEngine`] for an annex backend that has not
+    /// landed; otherwise see [`FrameJob::new`].
     pub fn with_identity(
         plan: &'a RenderPlan,
         mono: &'a fill::MonoTable,
@@ -738,6 +997,17 @@ impl<'a> FrameJob<'a> {
         config: FrameConfig,
         identity: EngineIdentity,
     ) -> Result<FrameJob<'a>, FrameJobError> {
+        if identity.renderer_version != RENDERER_VERSION {
+            return Err(FrameJobError::RendererVersionMismatch {
+                requested: identity.renderer_version,
+                compiled: RENDERER_VERSION,
+            });
+        }
+        if matches!(identity.engine, EngineKind::Metal | EngineKind::Cuda) {
+            return Err(FrameJobError::UnsupportedEngine {
+                engine: identity.engine,
+            });
+        }
         if mono.map() != config.map {
             return Err(FrameJobError::MonoMapMismatch);
         }
@@ -919,6 +1189,36 @@ impl<'a> FrameJob<'a> {
         threads: usize,
         dst: &mut FrameBuffer,
     ) -> Result<AaStats, FrameError> {
+        match self.identity.engine {
+            EngineKind::CertifiedCpu => {
+                if self.identity.tier == Tier::Scalar {
+                    self.render_into_profiled_with::<CertifiedScalar>(threads, dst)
+                } else {
+                    self.render_into_profiled_with::<CertifiedBuildTier>(threads, dst)
+                }
+            }
+            EngineKind::FastCpu => {
+                if self.identity.tier == Tier::Scalar {
+                    self.render_into_profiled_with::<FastScalar>(threads, dst)
+                } else {
+                    self.render_into_profiled_with::<FastBuildTier>(threads, dst)
+                }
+            }
+            // Construction rejects annex identities until their back-ends land.
+            // Reaching this arm would otherwise publish CPU bytes under a false
+            // engine identity, so fail closed rather than substitute.
+            EngineKind::Metal | EngineKind::Cuda => {
+                unreachable!("unimplemented annex engines are refused by FrameJob::with_identity")
+            }
+        }
+    }
+
+    /// Monomorphized render body selected once per frame.
+    fn render_into_profiled_with<K: PixelKernel>(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+    ) -> Result<AaStats, FrameError> {
         if dst.layout().format() != PixelFormat::Rgba16F {
             return Err(FrameError::FormatMismatch {
                 expected: "Rgba16F raw frame",
@@ -956,9 +1256,9 @@ impl<'a> FrameJob<'a> {
         let mut bands: Vec<(usize, &mut [u8])> = plane.chunks_mut(band_bytes).enumerate().collect();
 
         if threads <= 1 {
-            let mut worker = Worker::new(tile, self.cols as usize);
+            let mut worker = Worker::<K>::new(tile, self.cols as usize);
             for (band, bytes) in bands {
-                self.render_band(&mut worker, band, bytes, stride);
+                self.render_band::<K>(&mut worker, band, bytes, stride);
             }
             return Ok(worker.stats);
         }
@@ -972,11 +1272,11 @@ impl<'a> FrameJob<'a> {
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| {
-                    let mut worker = Worker::new(tile, self.cols as usize);
+                    let mut worker = Worker::<K>::new(tile, self.cols as usize);
                     loop {
                         let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
                         let Some((band, bytes)) = next else { break };
-                        self.render_band(&mut worker, band, bytes, stride);
+                        self.render_band::<K>(&mut worker, band, bytes, stride);
                     }
                     stats
                         .lock()
@@ -989,7 +1289,13 @@ impl<'a> FrameJob<'a> {
     }
 
     /// Rasterize one band: `tile` pixel rows spanning the full frame width.
-    fn render_band(&self, worker: &mut Worker, band: usize, bytes: &mut [u8], stride: usize) {
+    fn render_band<K: PixelKernel>(
+        &self,
+        worker: &mut Worker<K>,
+        band: usize,
+        bytes: &mut [u8],
+        stride: usize,
+    ) {
         let tile = self.binning.tiling().fine_tile.max(1);
         let width = self.config.viewport.width;
         let height = self.config.viewport.height;
@@ -1009,7 +1315,7 @@ impl<'a> FrameJob<'a> {
         // The background is written first and unconditionally, so a band with no
         // commands still costs exactly one pass — and so a tile that draws
         // nothing is not distinguishable from one that never ran.
-        let bg = self.config.background.premultiply();
+        let bg = K::from_premul(self.config.background.premultiply());
         for py in y0..y1 {
             let row = &mut bytes[(py - y0) as usize * stride..];
             for tx in 0..self.cols {
@@ -1028,7 +1334,7 @@ impl<'a> FrameJob<'a> {
                     match aa {
                         RenderAa::Forced(samples) => {
                             for i in 0..w {
-                                worker.acc[i] = self.composite_pixel_supersampled(
+                                worker.acc[i] = self.composite_pixel_supersampled::<K>(
                                     t,
                                     x_lo + i as u32,
                                     py,
@@ -1045,7 +1351,7 @@ impl<'a> FrameJob<'a> {
                         }
                         RenderAa::Canonical | RenderAa::Adaptive => {
                             let classify = aa == RenderAa::Adaptive;
-                            self.composite_row(worker, t, py, x_lo, x_hi, classify);
+                            self.composite_row::<K>(worker, t, py, x_lo, x_hi, classify);
                             worker.stats.native_cells =
                                 worker.stats.native_cells.saturating_add(w as u64);
                             if classify {
@@ -1059,7 +1365,7 @@ impl<'a> FrameJob<'a> {
                                         continue;
                                     };
                                     worker.tile_classes[tx as usize] = CoverageClass::ComplexEdge;
-                                    worker.acc[i] = self.composite_pixel_supersampled(
+                                    worker.acc[i] = self.composite_pixel_supersampled::<K>(
                                         t,
                                         x_lo + i as u32,
                                         py,
@@ -1079,7 +1385,7 @@ impl<'a> FrameJob<'a> {
                 }
 
                 let base = x_lo as usize * 8;
-                write_row(&worker.acc[..w], &mut row[base..base + w * 8]);
+                K::write_row(&worker.acc[..w], &mut row[base..base + w * 8]);
             }
         }
 
@@ -1122,9 +1428,9 @@ impl<'a> FrameJob<'a> {
     /// what lets a fill contribute a whole row of coverage from one pass over its
     /// pieces while a stroke still shades per pixel, without either being able to
     /// reorder the composite.
-    fn composite_row(
+    fn composite_row<K: PixelKernel>(
         &self,
-        worker: &mut Worker,
+        worker: &mut Worker<K>,
         tile: usize,
         py: u32,
         x_lo: u32,
@@ -1144,19 +1450,19 @@ impl<'a> FrameJob<'a> {
             // R-5: within one object the fill draws before the stroke, unless
             // `stroke_behind` swaps them (docs/RENDER_ORDER.md).
             if rec.style.stroke_behind {
-                self.stroke_pass(worker, rec, py, x_lo, x_hi, classify);
-                self.fill_pass(worker, rec, interior, py, x_lo..x_hi, classify);
+                self.stroke_pass::<K>(worker, rec, py, x_lo, x_hi, classify);
+                self.fill_pass::<K>(worker, rec, interior, py, x_lo..x_hi, classify);
             } else {
-                self.fill_pass(worker, rec, interior, py, x_lo..x_hi, classify);
-                self.stroke_pass(worker, rec, py, x_lo, x_hi, classify);
+                self.fill_pass::<K>(worker, rec, interior, py, x_lo..x_hi, classify);
+                self.stroke_pass::<K>(worker, rec, py, x_lo, x_hi, classify);
             }
         }
     }
 
     /// §10.2's fill over one row of one tile.
-    fn fill_pass(
+    fn fill_pass<K: PixelKernel>(
         &self,
-        worker: &mut Worker,
+        worker: &mut Worker<K>,
         rec: &Draw,
         interior: bool,
         py: u32,
@@ -1218,29 +1524,29 @@ impl<'a> FrameJob<'a> {
                 };
                 worker.edges[i] = worker.edges[i].saturating_add(contribution);
             }
-            let rgba = match rec.flat_fill {
-                Some(c) => c,
-                None => {
-                    let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
-                    let field = rec.field.as_ref().expect("a non-flat fill carries a field");
-                    fill_rgba_with_border(
-                        &rec.style,
-                        field,
-                        segments,
-                        self.config.map,
-                        rec.translate,
-                        p,
-                    )
-                }
-            };
-            worker.acc[i] = source_over(rgba, coverage, worker.acc[i]);
+            if rec.flat_fill.is_none() {
+                let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
+                let field = rec.field.as_ref().expect("a non-flat fill carries a field");
+                let rgba = fill_rgba_with_border(
+                    &rec.style,
+                    field,
+                    segments,
+                    self.config.map,
+                    rec.translate,
+                    p,
+                );
+                worker.acc[i] = K::source_over(rgba, coverage, worker.acc[i]);
+            }
+        }
+        if let Some(rgba) = rec.flat_fill {
+            K::source_over_span(rgba, &worker.cov[..w], &mut worker.acc[..w]);
         }
     }
 
     /// §10.3's stroke over one row of one tile.
-    fn stroke_pass(
+    fn stroke_pass<K: PixelKernel>(
         &self,
-        worker: &mut Worker,
+        worker: &mut Worker<K>,
         rec: &Draw,
         py: u32,
         x_lo: u32,
@@ -1284,7 +1590,7 @@ impl<'a> FrameJob<'a> {
             if coverage <= 0.0 {
                 continue;
             }
-            worker.acc[i] = source_over(stroke_rgba_at(&rec.style, s), coverage, worker.acc[i]);
+            worker.acc[i] = K::source_over(stroke_rgba_at(&rec.style, s), coverage, worker.acc[i]);
         }
     }
 
@@ -1347,13 +1653,13 @@ impl<'a> FrameJob<'a> {
     /// already-composited samples is what makes overlapping edges correct.
     /// Only the four `f64` sums below survive the loop, so there is no
     /// supersampled frame or second resolve pass.
-    fn composite_pixel_supersampled(
+    fn composite_pixel_supersampled<K: PixelKernel>(
         &self,
         tile: usize,
         px: u32,
         py: u32,
         samples: u32,
-    ) -> PremulRgba {
+    ) -> K::Pixel {
         let samples = samples.max(1);
         let draws = self.binning.tile(tile);
         let flags = self.binning.tile_flags(tile);
@@ -1368,20 +1674,21 @@ impl<'a> FrameJob<'a> {
                     x: sample_x,
                     y: sample_y,
                 };
-                let mut acc = self.config.background.premultiply();
+                let mut acc = K::from_premul(self.config.background.premultiply());
                 for (k, &d) in draws.iter().enumerate() {
                     let Some(Some(rec)) = self.draws.get(d as usize) else {
                         continue;
                     };
                     let interior = flags.get(k).copied() == Some(CLASS_INTERIOR);
                     if rec.style.stroke_behind {
-                        acc = self.stroke_sample(rec, subcell, acc);
-                        acc = self.fill_sample(rec, interior, subcell, acc);
+                        acc = self.stroke_sample::<K>(rec, subcell, acc);
+                        acc = self.fill_sample::<K>(rec, interior, subcell, acc);
                     } else {
-                        acc = self.fill_sample(rec, interior, subcell, acc);
-                        acc = self.stroke_sample(rec, subcell, acc);
+                        acc = self.fill_sample::<K>(rec, interior, subcell, acc);
+                        acc = self.stroke_sample::<K>(rec, subcell, acc);
                     }
                 }
+                let acc = K::to_premul(acc);
                 sum.r += acc.r;
                 sum.g += acc.g;
                 sum.b += acc.b;
@@ -1390,23 +1697,23 @@ impl<'a> FrameJob<'a> {
         }
 
         let inverse = 1.0 / f64::from(samples * samples);
-        PremulRgba {
+        K::from_premul(PremulRgba {
             r: sum.r * inverse,
             g: sum.g * inverse,
             b: sum.b * inverse,
             a: sum.a * inverse,
-        }
+        })
     }
 
     /// One fill pass at one subcell, preserving the native exact coverage
     /// kernel (primitive hint or general curve-area integral).
-    fn fill_sample(
+    fn fill_sample<K: PixelKernel>(
         &self,
         rec: &Draw,
         interior: bool,
         subcell: Subcell,
-        dst: PremulRgba,
-    ) -> PremulRgba {
+        dst: K::Pixel,
+    ) -> K::Pixel {
         if !rec.draws_fill {
             return dst;
         }
@@ -1448,11 +1755,16 @@ impl<'a> FrameJob<'a> {
                 p,
             ),
         };
-        source_over(rgba, coverage, dst)
+        K::source_over(rgba, coverage, dst)
     }
 
     /// One stroke pass at one subcell centre.
-    fn stroke_sample(&self, rec: &Draw, subcell: Subcell, dst: PremulRgba) -> PremulRgba {
+    fn stroke_sample<K: PixelKernel>(
+        &self,
+        rec: &Draw,
+        subcell: Subcell,
+        dst: K::Pixel,
+    ) -> K::Pixel {
         if !rec.draws_stroke {
             return dst;
         }
@@ -1468,7 +1780,7 @@ impl<'a> FrameJob<'a> {
         if coverage <= 0.0 {
             dst
         } else {
-            source_over(stroke_rgba_at(&rec.style, s), coverage, dst)
+            K::source_over(stroke_rgba_at(&rec.style, s), coverage, dst)
         }
     }
 
@@ -1504,10 +1816,9 @@ fn effective_aa_band(style: &Style) -> f64 {
 /// PG-6 forbids steady-state per-frame heap allocation. A worker's buffers are
 /// sized for the widest tile the frame can present and then reused for every
 /// band it takes.
-#[derive(Debug)]
-struct Worker {
+struct Worker<K: PixelKernel> {
     /// The row accumulator, premultiplied linear light.
-    acc: Vec<PremulRgba>,
+    acc: Vec<K::Pixel>,
     /// One draw's coverage over the row.
     cov: Vec<f64>,
     /// Saturating independent-boundary count for each cell in the row.
@@ -1518,22 +1829,188 @@ struct Worker {
     tile_classes: Vec<CoverageClass>,
     /// This worker's integer-only instrumentation.
     stats: AaStats,
+    marker: std::marker::PhantomData<K>,
 }
 
-impl Worker {
-    fn new(tile: usize, cols: usize) -> Worker {
+impl<K: PixelKernel> Worker<K> {
+    fn new(tile: usize, cols: usize) -> Worker<K> {
         Worker {
-            acc: vec![PremulRgba::TRANSPARENT; tile],
+            acc: vec![K::from_premul(PremulRgba::TRANSPARENT); tile],
             cov: vec![0.0; tile],
             edges: vec![0; tile],
             scratch: RowScratch::for_tile(tile as u32),
             tile_classes: vec![CoverageClass::Empty; cols],
             stats: AaStats::default(),
+            marker: std::marker::PhantomData,
         }
     }
 }
 
 // ------------------------------------------------------------------ the pieces
+
+/// One compositing arithmetic policy.
+///
+/// The type is selected once in [`FrameJob::render_into_profiled`], so the hot
+/// pixel loop contains neither runtime feature detection nor a function-pointer
+/// dispatch. Every implementation is elementwise across RGBA: there is no
+/// horizontal reduction whose association could depend on lane width.
+trait PixelKernel {
+    type Pixel: Copy + Send;
+
+    fn from_premul(pixel: PremulRgba) -> Self::Pixel;
+    fn to_premul(pixel: Self::Pixel) -> PremulRgba;
+    fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel;
+    fn write_row(acc: &[Self::Pixel], out: &mut [u8]);
+
+    #[inline]
+    fn source_over_span(rgba: [f32; 4], coverage: &[f64], dst: &mut [Self::Pixel]) {
+        for (&coverage, dst) in coverage.iter().zip(dst) {
+            if coverage <= 0.0 {
+                continue;
+            }
+            *dst = Self::source_over(rgba, coverage, *dst);
+        }
+    }
+}
+
+/// The certified scalar definition.
+struct CertifiedScalar;
+
+impl PixelKernel for CertifiedScalar {
+    type Pixel = PremulRgba;
+
+    #[inline]
+    fn from_premul(pixel: PremulRgba) -> Self::Pixel {
+        pixel
+    }
+
+    #[inline]
+    fn to_premul(pixel: Self::Pixel) -> PremulRgba {
+        pixel
+    }
+
+    #[inline]
+    fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel {
+        source_over(rgba, coverage, dst)
+    }
+
+    #[inline]
+    fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
+        write_row(acc, out);
+    }
+}
+
+/// Certified build-tier route.
+///
+/// The measured AoS compositor did not amortize gather/scatter, so it keeps the
+/// faster scalar expression. Other hot kernels in the artifact still use
+/// `std::simd`; build-tier selection must never force a slower implementation.
+struct CertifiedBuildTier;
+
+impl PixelKernel for CertifiedBuildTier {
+    type Pixel = PremulRgba;
+
+    #[inline]
+    fn from_premul(pixel: PremulRgba) -> Self::Pixel {
+        pixel
+    }
+
+    #[inline]
+    fn to_premul(pixel: Self::Pixel) -> PremulRgba {
+        pixel
+    }
+
+    #[inline]
+    fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel {
+        source_over(rgba, coverage, dst)
+    }
+
+    #[inline]
+    fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
+        write_row(acc, out);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PremulRgba32 {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+/// Standard-mode scalar mixed precision: f32 colour and blend arithmetic.
+struct FastScalar;
+
+impl PixelKernel for FastScalar {
+    type Pixel = PremulRgba32;
+
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn from_premul(pixel: PremulRgba) -> Self::Pixel {
+        PremulRgba32 {
+            r: pixel.r as f32,
+            g: pixel.g as f32,
+            b: pixel.b as f32,
+            a: pixel.a as f32,
+        }
+    }
+
+    #[inline]
+    fn to_premul(pixel: Self::Pixel) -> PremulRgba {
+        PremulRgba {
+            r: f64::from(pixel.r),
+            g: f64::from(pixel.g),
+            b: f64::from(pixel.b),
+            a: f64::from(pixel.a),
+        }
+    }
+
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel {
+        let alpha = rgba[3] * coverage as f32;
+        let inverse = 1.0 - alpha;
+        PremulRgba32 {
+            r: rgba[0] * alpha + inverse * dst.r,
+            g: rgba[1] * alpha + inverse * dst.g,
+            b: rgba[2] * alpha + inverse * dst.b,
+            a: alpha + inverse * dst.a,
+        }
+    }
+
+    #[inline]
+    fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
+        write_row_f32(acc, out);
+    }
+}
+
+/// Standard-mode build-tier route.
+struct FastBuildTier;
+
+impl PixelKernel for FastBuildTier {
+    type Pixel = PremulRgba32;
+
+    #[inline]
+    fn from_premul(pixel: PremulRgba) -> Self::Pixel {
+        FastScalar::from_premul(pixel)
+    }
+
+    #[inline]
+    fn to_premul(pixel: Self::Pixel) -> PremulRgba {
+        FastScalar::to_premul(pixel)
+    }
+
+    #[inline]
+    fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel {
+        FastScalar::source_over(rgba, coverage, dst)
+    }
+
+    #[inline]
+    fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
+        FastScalar::write_row(acc, out);
+    }
+}
 
 /// Porter–Duff source-over of a straight-alpha linear colour at a coverage.
 ///
@@ -1558,6 +2035,21 @@ fn write_row(acc: &[PremulRgba], out: &mut [u8]) {
         let lin = px.unpremultiply();
         for (k, v) in [lin.r, lin.g, lin.b, lin.a].into_iter().enumerate() {
             let bits = fmn_frame::half::f16_from_f32(v as f32);
+            dst[k * 2..k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+        }
+    }
+}
+
+/// Standard-mode writeback from the f32 premultiplied accumulator.
+fn write_row_f32(acc: &[PremulRgba32], out: &mut [u8]) {
+    for (px, dst) in acc.iter().zip(out.as_chunks_mut::<8>().0) {
+        let rgba = if px.a == 0.0 {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            [px.r / px.a, px.g / px.a, px.b / px.a, px.a]
+        };
+        for (k, value) in rgba.into_iter().enumerate() {
+            let bits = fmn_frame::half::f16_from_f32(value);
             dst[k * 2..k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
         }
     }
@@ -2179,23 +2671,7 @@ mod tests {
         };
         let adaptive = render(AaPolicy::Adaptive);
         let forced = render(AaPolicy::Ssaa4x);
-        let mut squared = 0.0;
-        let mut maximum = 0.0f64;
-        let mut channels = 0u64;
-        for y in 0..config().viewport.height {
-            for x in 0..config().viewport.width {
-                for (a, b) in read_px(&adaptive, x, y)
-                    .into_iter()
-                    .zip(read_px(&forced, x, y))
-                {
-                    let error = (a - b).abs();
-                    squared += error * error;
-                    maximum = maximum.max(error);
-                    channels += 1;
-                }
-            }
-        }
-        let rms = (squared / channels as f64).sqrt();
+        let (maximum, rms) = visual_error(&adaptive, &forced);
         assert!(
             maximum <= AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
             "max={maximum}, budget={AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR}"
@@ -2203,6 +2679,31 @@ mod tests {
         assert!(
             rms <= AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
             "rms={rms}, budget={AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR}"
+        );
+    }
+
+    #[test]
+    fn fast_cpu_stays_inside_the_certified_visual_budget_v1() {
+        let (stage, _) = corpus();
+        let cfg = config().with_aa_policy(AaPolicy::Adaptive);
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let certified =
+            FrameJob::with_identity(&plan, &mono, &binning, cfg, EngineIdentity::certified())
+                .expect("matching certified artifacts")
+                .render(4)
+                .expect("certified render");
+        let fast = FrameJob::with_identity(&plan, &mono, &binning, cfg, EngineIdentity::fast())
+            .expect("matching fast artifacts")
+            .render(4)
+            .expect("fast render");
+        let (maximum, rms) = visual_error(&fast, &certified);
+        assert!(
+            maximum <= FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+            "max={maximum}, budget={FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR}"
+        );
+        assert!(
+            rms <= FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
+            "rms={rms}, budget={FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR}"
         );
     }
 
@@ -2599,7 +3100,7 @@ mod tests {
                 .as_chunks::<8>()
                 .0
                 .iter()
-                .all(|px| *px == expect)
+                .all(|px| px.eq(&expect))
         );
     }
 
@@ -2607,6 +3108,8 @@ mod tests {
     fn the_identity_journal_separates_what_it_must() {
         let cfg = config();
         let tiling = default_tiling();
+        assert_eq!(EngineIdentity::default(), EngineIdentity::fast());
+        assert_eq!(EngineIdentity::fast().tier, Tier::COMPILED);
         let base = journal_digest(EngineIdentity::certified(), &cfg, tiling);
         assert_eq!(
             base,
@@ -2623,6 +3126,16 @@ mod tests {
         assert_ne!(base, journal_digest(annex, &cfg, tiling));
         assert!(!annex.engine.certifiable());
         assert!(EngineKind::CertifiedCpu.certifiable());
+
+        let built_tier = EngineIdentity {
+            tier: Tier::COMPILED,
+            ..EngineIdentity::certified()
+        };
+        assert_ne!(
+            base,
+            journal_digest(built_tier, &cfg, tiling),
+            "the build tier is part of C3/C7 provenance"
+        );
 
         // C10's declared configuration: the tile dimensions are in the closure
         // because the fill's per-tile carry is association-dependent.
@@ -2659,11 +3172,44 @@ mod tests {
     }
 
     #[test]
-    fn the_scalar_tier_is_the_only_one_and_is_listed() {
+    fn a_job_refuses_an_identity_it_cannot_truthfully_execute() {
+        let (stage, _) = corpus();
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+
+        let requested = RENDERER_VERSION.wrapping_add(1);
+        let stale = EngineIdentity {
+            renderer_version: requested,
+            ..EngineIdentity::certified()
+        };
+        assert!(matches!(
+            FrameJob::with_identity(&plan, &mono, &binning, cfg, stale),
+            Err(FrameJobError::RendererVersionMismatch {
+                requested: got,
+                compiled: RENDERER_VERSION,
+            }) if got == requested
+        ));
+
+        for engine in [EngineKind::Metal, EngineKind::Cuda] {
+            let annex = EngineIdentity {
+                engine,
+                ..EngineIdentity::certified()
+            };
+            assert!(matches!(
+                FrameJob::with_identity(&plan, &mono, &binning, cfg, annex),
+                Err(FrameJobError::UnsupportedEngine { engine: got }) if got == engine
+            ));
+        }
+    }
+
+    #[test]
+    fn the_scalar_oracle_and_compiled_tier_are_both_listed() {
         // The harness in fmn-conformance sweeps `Tier::ALL`; a tier that lands
         // without being listed is a tier nothing checks.
-        assert_eq!(Tier::ALL, &[Tier::Scalar]);
+        assert_eq!(Tier::ALL, &[Tier::Scalar, Tier::COMPILED]);
         assert_eq!(Tier::ALL[0].name(), "scalar");
+        assert_ne!(Tier::COMPILED, Tier::Scalar);
+        assert_ne!(Tier::COMPILED.name(), "scalar");
     }
 
     #[test]
@@ -2869,7 +3415,7 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let base = y as usize * stride + x as usize * 8;
-                if a.plane(0)[base..base + 8] != b.plane(0)[base..base + 8] {
+                if !a.plane(0)[base..base + 8].eq(&b.plane(0)[base..base + 8]) {
                     differing += 1;
                     first.get_or_insert((x, y));
                 }
@@ -2889,6 +3435,25 @@ mod tests {
                 read_px(b, x, y),
             );
         }
+    }
+
+    /// Maximum and RMS linear-channel error over two equally laid-out frames.
+    fn visual_error(a: &FrameBuffer, b: &FrameBuffer) -> (f64, f64) {
+        assert_eq!(a.layout(), b.layout(), "visual comparison layouts differ");
+        let mut squared = 0.0;
+        let mut maximum = 0.0f64;
+        let mut channels = 0u64;
+        for y in 0..a.layout().height() {
+            for x in 0..a.layout().width() {
+                for (a, b) in read_px(a, x, y).into_iter().zip(read_px(b, x, y)) {
+                    let error = (a - b).abs();
+                    squared += error * error;
+                    maximum = maximum.max(error);
+                    channels += 1;
+                }
+            }
+        }
+        (maximum, (squared / channels as f64).sqrt())
     }
 
     /// Decode one pixel back to linear-light straight alpha.

@@ -24,6 +24,25 @@
 //! serialization, and seek that lands on the same frame a play-through
 //! produced) compiling to those very primitives rather than a second
 //! engine.
+#![cfg_attr(
+    any(
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma"
+        ),
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
+    ),
+    feature(portable_simd)
+)]
 #![forbid(unsafe_code)]
 
 pub mod animation;

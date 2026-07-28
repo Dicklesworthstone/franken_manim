@@ -45,12 +45,15 @@
 use fmn_conformance::golden::{GoldenStore, Scope};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, GREEN_B, MAROON_C, RED_C, TEAL_B, WHITE, YELLOW_C};
+use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_library::style::VStyle;
 use fmn_library::{Circle, Dot, Line, Polygon, Rectangle};
 use fmn_mobject::{JointType, Mob, Stage};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{
-    AaPolicy, EngineIdentity, FrameConfig, FrameJob, Tier, encode_frame, journal_digest,
+    AaPolicy, EngineIdentity, FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+    FAST_VISUAL_BUDGET_V1_MIN_SSIM, FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, FrameConfig, FrameJob,
+    Tier, encode_frame, journal_digest,
 };
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
@@ -110,25 +113,165 @@ fn render(stage: &Stage, tier: Tier, threads: usize) -> Vec<u8> {
 
 /// [`render`] with an explicit A/B policy.
 fn render_with_aa(stage: &Stage, tier: Tier, threads: usize, aa: AaPolicy) -> Vec<u8> {
+    let identity = EngineIdentity {
+        tier,
+        ..EngineIdentity::certified()
+    };
+    let frame = render_frame(stage, identity, threads, aa);
+    encode_frame(&frame).expect("the frame encodes into its canonical document")
+}
+
+/// Render a raw frame through one explicitly journaled engine identity.
+fn render_frame(
+    stage: &Stage,
+    identity: EngineIdentity,
+    threads: usize,
+    aa: AaPolicy,
+) -> FrameBuffer {
     let cfg = config().with_aa_policy(aa);
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
     let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
     binning.prune_occluded(&plan).expect("matching plan");
-    let identity = EngineIdentity {
-        tier,
-        ..EngineIdentity::certified()
-    };
     let job = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
         .expect("matching frame artifacts");
-    let frame = job.render(threads).expect("the engine renders the frame");
-    encode_frame(&frame).expect("the frame encodes into its canonical document")
+    job.render(threads).expect("the engine renders the frame")
 }
 
 /// The scalar definition of a scene's frame, single-threaded.
 fn definition(stage: &Stage) -> Vec<u8> {
     render(stage, Tier::Scalar, 1)
+}
+
+/// Linear-channel and perceptual divergence between two raw frames.
+#[derive(Debug, Clone, Copy)]
+struct Divergence {
+    maximum: f64,
+    maximum_at: (u32, u32, usize),
+    reference_at_maximum: f64,
+    candidate_at_maximum: f64,
+    rms: f64,
+    ssim: f64,
+}
+
+/// Compare raw linear-light frames under §16.3's two-part engine budget.
+fn divergence(reference: &FrameBuffer, candidate: &FrameBuffer) -> Divergence {
+    assert_eq!(
+        reference.layout(),
+        candidate.layout(),
+        "engine-equivalence layouts differ"
+    );
+    let mut maximum = 0.0f64;
+    let mut maximum_at = (0, 0, 0);
+    let mut reference_at_maximum = 0.0;
+    let mut candidate_at_maximum = 0.0;
+    let mut squared = 0.0;
+    let mut channels = 0u64;
+    for y in 0..reference.layout().height() {
+        for x in 0..reference.layout().width() {
+            for (channel, (a, b)) in read_pixel(reference, x, y)
+                .into_iter()
+                .zip(read_pixel(candidate, x, y))
+                .enumerate()
+            {
+                let error = (a - b).abs();
+                if error > maximum {
+                    maximum = error;
+                    maximum_at = (x, y, channel);
+                    reference_at_maximum = a;
+                    candidate_at_maximum = b;
+                }
+                squared += error * error;
+                channels += 1;
+            }
+        }
+    }
+    assert!(channels > 0, "a frame comparison must contain channels");
+    Divergence {
+        maximum,
+        maximum_at,
+        reference_at_maximum,
+        candidate_at_maximum,
+        rms: (squared / channels as f64).sqrt(),
+        ssim: ssim_luma(reference, candidate),
+    }
+}
+
+/// Decode one `Rgba16F` pixel into exact `f64` values.
+fn read_pixel(frame: &FrameBuffer, x: u32, y: u32) -> [f64; 4] {
+    let base = y as usize * frame.layout().stride(0) + x as usize * 8;
+    let pixel = &frame.plane(0)[base..base + 8];
+    let mut decoded = [0.0; 4];
+    for (channel, value) in decoded.iter_mut().enumerate() {
+        *value = fmn_frame::half::f16_to_f64(u16::from_le_bytes([
+            pixel[channel * 2],
+            pixel[channel * 2 + 1],
+        ]));
+    }
+    decoded
+}
+
+/// Global SSIM over the canonical sRGB8 Rec. 709 luma plane.
+///
+/// The spike deliberately selected the global form as a stable smoke alarm
+/// rather than shipping an unreviewed windowed metric. The production
+/// engine-equivalence lane keeps that exact ruling and pairs it with the hard
+/// linear-channel bounds above.
+fn ssim_luma(reference: &FrameBuffer, candidate: &FrameBuffer) -> f64 {
+    let luma = |frame: &FrameBuffer| {
+        let layout = FrameLayout::tight(
+            PixelFormat::Rgba8,
+            frame.layout().width(),
+            frame.layout().height(),
+        )
+        .expect("the comparison layout is valid");
+        let mut encoded = FrameBuffer::new(layout);
+        fmn_frame::convert::rgba16f_to_rgba8(frame, &mut encoded)
+            .expect("the raw frame converts canonically");
+        let mut values =
+            Vec::with_capacity(frame.layout().width() as usize * frame.layout().height() as usize);
+        let width_bytes = frame.layout().width() as usize * 4;
+        for y in 0..frame.layout().height() as usize {
+            let row = &encoded.plane(0)
+                [y * encoded.layout().stride(0)..y * encoded.layout().stride(0) + width_bytes];
+            values.extend(row.as_chunks::<4>().0.iter().map(|pixel| {
+                0.2126 * f64::from(pixel[0])
+                    + 0.7152 * f64::from(pixel[1])
+                    + 0.0722 * f64::from(pixel[2])
+            }));
+        }
+        values
+    };
+    let reference = luma(reference);
+    let candidate = luma(candidate);
+    assert_eq!(
+        reference.len(),
+        candidate.len(),
+        "SSIM planes differ in length"
+    );
+    assert!(!reference.is_empty(), "SSIM requires at least one pixel");
+    let count = reference.len() as f64;
+    let reference_mean = reference.iter().sum::<f64>() / count;
+    let candidate_mean = candidate.iter().sum::<f64>() / count;
+    let mut reference_variance = 0.0;
+    let mut candidate_variance = 0.0;
+    let mut covariance = 0.0;
+    for (&reference, &candidate) in reference.iter().zip(&candidate) {
+        reference_variance += (reference - reference_mean) * (reference - reference_mean);
+        candidate_variance += (candidate - candidate_mean) * (candidate - candidate_mean);
+        covariance += (reference - reference_mean) * (candidate - candidate_mean);
+    }
+    let divisor = (count - 1.0).max(1.0);
+    reference_variance /= divisor;
+    candidate_variance /= divisor;
+    covariance /= divisor;
+
+    let c1 = (0.01 * 255.0f64).powi(2);
+    let c2 = (0.03 * 255.0f64).powi(2);
+    ((2.0 * reference_mean * candidate_mean + c1) * (2.0 * covariance + c2))
+        / ((reference_mean * reference_mean + candidate_mean * candidate_mean + c1)
+            * (reference_variance + candidate_variance + c2))
 }
 
 fn add(stage: &mut Stage, m: impl Into<fmn_mobject::Mobject>) -> Mob {
@@ -500,13 +643,11 @@ fn every_tier_reproduces_the_scalar_definition() {
     // §10.5: "within the certified engine the scalar path is the definition and
     // every SIMD tier must match it bit-for-bit."
     //
-    // Today `Tier::ALL` holds one entry, so this sweep compares scalar with
-    // itself — and saying so plainly is better than implying a coverage that
-    // does not exist. What the harness buys is that fm-4wt's first tier is
-    // checked by construction: it lands in `Tier::ALL`, this sweep renders the
-    // whole corpus through it, and a tier whose arithmetic diverges fails here
-    // rather than in a Look Gallery review. ADR-0010 names the SIMD tiers as the
-    // remaining risk; this is the tripwire it asked for.
+    // `Tier::ALL` contains the scalar oracle and exactly the tier selected by
+    // this artifact's SUITE.lock-governed crate flags. This renders the whole
+    // corpus through both; a tier whose arithmetic diverges fails here rather
+    // than in a Look Gallery review. ADR-0010 names lane width as the remaining
+    // risk; this is the tripwire it asked for.
     assert_eq!(
         Tier::ALL.first(),
         Some(&Tier::Scalar),
@@ -520,6 +661,61 @@ fn every_tier_reproduces_the_scalar_definition() {
                 "{name} differs between the scalar definition and the {} tier",
                 tier.name()
             );
+        }
+    }
+}
+
+#[test]
+fn every_fast_tier_stays_inside_the_certified_corpus_budget() {
+    // §10.1 and §16.3: the fast engine shares Lumen's semantics but not its
+    // arithmetic width. Every artifact therefore runs both its scalar and
+    // compiled fast routes against the certified reference, under the
+    // versioned max/RMS bounds and the perceptual SSIM smoke alarm.
+    //
+    // Thread count is not part of an engine identity. Holding each fast route
+    // byte-exact at {1,4,16} proves that scheduling cannot silently spend more
+    // of the visual budget.
+    for (name, stage) in corpus() {
+        let certified = render_frame(&stage, EngineIdentity::certified(), 1, AaPolicy::Adaptive);
+        for &tier in Tier::ALL {
+            let identity = EngineIdentity {
+                tier,
+                ..EngineIdentity::fast()
+            };
+            let one = render_frame(&stage, identity, 1, AaPolicy::Adaptive);
+            let measured = divergence(&certified, &one);
+            assert!(
+                measured.maximum <= FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+                "{name} {} max={} at {:?} (certified {}, fast {}) exceeds {}",
+                tier.name(),
+                measured.maximum,
+                measured.maximum_at,
+                measured.reference_at_maximum,
+                measured.candidate_at_maximum,
+                FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR
+            );
+            assert!(
+                measured.rms <= FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
+                "{name} {} rms={} exceeds {}",
+                tier.name(),
+                measured.rms,
+                FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR
+            );
+            assert!(
+                measured.ssim >= FAST_VISUAL_BUDGET_V1_MIN_SSIM,
+                "{name} {} ssim={} is below {}",
+                tier.name(),
+                measured.ssim,
+                FAST_VISUAL_BUDGET_V1_MIN_SSIM
+            );
+            for threads in [4usize, 16] {
+                let parallel = render_frame(&stage, identity, threads, AaPolicy::Adaptive);
+                assert!(
+                    parallel.as_bytes() == one.as_bytes(),
+                    "{name} {} fast output moved at {threads} threads",
+                    tier.name()
+                );
+            }
         }
     }
 }

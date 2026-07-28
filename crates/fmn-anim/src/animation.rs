@@ -59,6 +59,88 @@ pub const DEFAULT_ANIMATION_RUN_TIME: f64 = 1.0;
 /// The Reference's `DEFAULT_ANIMATION_LAG_RATIO`.
 pub const DEFAULT_ANIMATION_LAG_RATIO: f64 = 0.0;
 
+/// Linear interpolation of one contiguous f32 record column.
+///
+/// Record precision is f32 API surface, but the interpolation itself is f64
+/// (§6.1). Four independent values share one `f64x4`; there is no horizontal
+/// reduction and therefore no lane-width-dependent association.
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma"
+    ),
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ),
+    all(target_arch = "aarch64", target_feature = "neon")
+))]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec<f32> {
+    use std::simd::f64x4;
+
+    debug_assert_eq!(a.len(), b.len());
+    let common = a.len().min(b.len());
+    let (a_chunks, a_tail) = a[..common].as_chunks::<4>();
+    let (b_chunks, b_tail) = b[..common].as_chunks::<4>();
+    let mut out = Vec::with_capacity(common);
+    let left = f64x4::splat(1.0 - alpha);
+    let right = f64x4::splat(alpha);
+    for (a, b) in a_chunks.iter().zip(b_chunks) {
+        let a = f64x4::from_array([
+            f64::from(a[0]),
+            f64::from(a[1]),
+            f64::from(a[2]),
+            f64::from(a[3]),
+        ]);
+        let b = f64x4::from_array([
+            f64::from(b[0]),
+            f64::from(b[1]),
+            f64::from(b[2]),
+            f64::from(b[3]),
+        ]);
+        out.extend((left * a + right * b).to_array().map(|value| value as f32));
+    }
+    out.extend(
+        a_tail
+            .iter()
+            .zip(b_tail)
+            .map(|(&a, &b)| ((1.0 - alpha) * f64::from(a) + alpha * f64::from(b)) as f32),
+    );
+    out
+}
+
+/// Portable-build fallback for a kernel whose explicit SIMD route only pays
+/// back its conversion cost at the governed ISA tiers.
+#[cfg(not(any(
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma"
+    ),
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ),
+    all(target_arch = "aarch64", target_feature = "neon")
+)))]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec<f32> {
+    a.iter()
+        .zip(b)
+        .map(|(&a, &b)| ((1.0 - alpha) * f64::from(a) + alpha * f64::from(b)) as f32)
+        .collect()
+}
+
 // ---------------------------------------------------------------- RateFunc
 
 /// A rate function as composable data: the named catalog entries
@@ -860,15 +942,7 @@ impl Animation for MethodAnimation {
             if from.len() != to.len() {
                 continue;
             }
-            let lerped: Vec<f32> = from
-                .iter()
-                .zip(&to)
-                .map(|(&a, &b)| {
-                    let a = f64::from(a);
-                    let b = f64::from(b);
-                    ((1.0 - sub_alpha) * a + sub_alpha * b) as f32
-                })
-                .collect();
+            let lerped = interpolate_linear_column(&from, &to, sub_alpha);
             if let Some(entry) = stage.get_mut(submob) {
                 entry.buffer.write_range(&field, 0, &lerped);
             }
@@ -922,4 +996,56 @@ pub fn prepare_animation(
     stage: &mut Stage,
 ) -> Result<Box<dyn Animation>, AnimError> {
     input.into_animation(stage)
+}
+
+#[cfg(test)]
+mod simd_tests {
+    use super::interpolate_linear_column;
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn linear_field_simd_is_the_scalar_f64_definition_lane_for_lane() {
+        let a = [
+            -0.0,
+            0.0,
+            1.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::EPSILON,
+            12_345.5,
+            -98_765.25,
+            f32::MAX,
+            -f32::MAX,
+        ];
+        let b = [
+            9.0,
+            -7.0,
+            -3.0,
+            5.0,
+            f32::EPSILON,
+            -f32::EPSILON,
+            f32::MIN_POSITIVE,
+            -54_321.25,
+            87_654.5,
+            -f32::MAX,
+            f32::MAX,
+        ];
+        for alpha in [-0.25, 0.0, 0.314_159_265_358_979_3, 1.0, 1.5] {
+            let simd = interpolate_linear_column(&a, &b, alpha);
+            let scalar: Vec<f32> = a
+                .iter()
+                .zip(b)
+                .map(|(&a, b)| ((1.0 - alpha) * f64::from(a) + alpha * f64::from(b)) as f32)
+                .collect();
+            assert_eq!(
+                simd.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                scalar
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "alpha={alpha}"
+            );
+        }
+    }
 }
