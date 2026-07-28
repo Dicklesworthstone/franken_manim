@@ -19,8 +19,12 @@ use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_core::types::Vec3;
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 
-use crate::bin::Tiling;
+use crate::bin::{ScreenMap, Tiling};
 use crate::camera::{Camera, EdgeSampleLimit};
+use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
+use crate::plan::RenderPlan;
+use crate::stroke::{aa_coverage, stroke_rgba_at};
+use crate::table::{Segment, Style};
 use crate::texture::{SamplerPolicy, Texture};
 
 /// Surface's kept `(reflectiveness, gloss, shadow)` defaults.
@@ -257,6 +261,21 @@ pub enum ThreeDError {
     InvalidRadius,
     /// Dot anti-alias width was negative.
     InvalidAntiAliasWidth,
+    /// A retained-vector command named no instance in its plan.
+    InvalidVectorInstance,
+    /// Camera clipping left a horizon crossing for the rational fill.
+    UnclippedHorizon,
+    /// Perspective subdivision hit its declared depth cap.
+    PerspectiveToleranceExceeded,
+    /// A non-planar fill opted into depth testing, for which no single
+    /// fragment-depth surface exists.
+    NonPlanarVectorDepth,
+    /// A non-planar fill requested an interior color field, whose geometry
+    /// cannot be represented in one object-space plane.
+    NonPlanarVectorGradient,
+    /// A non-planar fill requested point/normal lighting, whose interior has
+    /// no single object-space surface.
+    NonPlanarVectorShading,
 }
 
 impl std::fmt::Display for ThreeDError {
@@ -273,6 +292,24 @@ impl std::fmt::Display for ThreeDError {
             Self::InvalidRadius => f.write_str("true-dot radius must be positive"),
             Self::InvalidAntiAliasWidth => {
                 f.write_str("true-dot anti-alias width must be non-negative")
+            }
+            Self::InvalidVectorInstance => {
+                f.write_str("retained vector draw names no render-plan instance")
+            }
+            Self::UnclippedHorizon => {
+                f.write_str("camera clipping left a vector curve crossing the horizon")
+            }
+            Self::PerspectiveToleranceExceeded => {
+                f.write_str("perspective vector subdivision exceeded its declared depth cap")
+            }
+            Self::NonPlanarVectorDepth => {
+                f.write_str("depth-tested vector fills must lie in one world-space plane")
+            }
+            Self::NonPlanarVectorGradient => {
+                f.write_str("gradient vector fills must lie in one world-space plane")
+            }
+            Self::NonPlanarVectorShading => {
+                f.write_str("shaded vector fills must lie in one world-space plane")
             }
         }
     }
@@ -504,6 +541,31 @@ pub struct TrueDotDraw {
     pub depth_test: bool,
 }
 
+/// One retained vector instance inserted into the shared 3D painter sequence.
+///
+/// Geometry and style remain owned by [`RenderPlan`]. Construction carries only
+/// the painter-sequence instance index; [`ThreeDJob`] derives camera-clipped
+/// rational fill and true-distance stroke data for the captured camera.
+#[derive(Debug, Clone, Copy)]
+pub struct VectorDraw<'a> {
+    plan: &'a RenderPlan,
+    instance: u32,
+}
+
+impl<'a> VectorDraw<'a> {
+    /// Refer to one painter-ordered retained instance.
+    #[must_use]
+    pub const fn new(plan: &'a RenderPlan, instance: u32) -> Self {
+        Self { plan, instance }
+    }
+
+    /// Retained instance index.
+    #[must_use]
+    pub const fn instance(self) -> u32 {
+        self.instance
+    }
+}
+
 impl TrueDotDraw {
     /// An unlit, hard-interior true dot.
     #[must_use]
@@ -534,6 +596,8 @@ impl TrueDotDraw {
 /// One command in the 3D painter sequence.
 #[derive(Debug, Clone, Copy)]
 pub enum ThreeDDraw<'a> {
+    /// Analytic fill/stroke from the retained vector IR.
+    Vector(VectorDraw<'a>),
     /// Indexed surface/image triangles.
     Surface(SurfaceDraw<'a>),
     /// Camera-facing radial dot.
@@ -614,6 +678,42 @@ struct RasterTriangle {
     bounds: [f64; 4],
 }
 
+const PERSPECTIVE_VECTOR_TOLERANCE_PX: f64 = 1.0 / 256.0;
+
+#[derive(Debug, Clone)]
+struct ProjectedCurvePiece {
+    screen: Segment,
+    world: [Vec3; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CurvePosition {
+    world: [Vec3; 3],
+    t: f64,
+    s: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PlanarGradientField {
+    field: GradientField,
+    origin: Vec3,
+    u: Vec3,
+    v: Vec3,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledVector {
+    fill: Vec<MonoPiece>,
+    curves: Vec<ProjectedCurvePiece>,
+    joins: Vec<crate::stroke::JoinWedge>,
+    field: Option<PlanarGradientField>,
+    style: Style,
+    normal: Vec3,
+    fill_plane: Option<[f64; 4]>,
+    draws_fill: bool,
+    draws_stroke: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Shader<'a> {
     Gouraud,
@@ -638,10 +738,18 @@ enum Shader<'a> {
 
 #[derive(Debug, Clone)]
 struct CompiledDraw<'a> {
-    triangles: Vec<RasterTriangle>,
-    shader: Shader<'a>,
+    primitive: CompiledPrimitive<'a>,
     depth_test: bool,
     bounds: Option<[f64; 4]>,
+}
+
+#[derive(Debug, Clone)]
+enum CompiledPrimitive<'a> {
+    Triangles {
+        triangles: Vec<RasterTriangle>,
+        shader: Shader<'a>,
+    },
+    Vector(Box<CompiledVector>),
 }
 
 /// Camera-bound, clipped, tiled 3D frame.
@@ -651,6 +759,7 @@ pub struct ThreeDJob<'a> {
     draws: Vec<CompiledDraw<'a>>,
     tiling: Tiling,
     sample_grid: u32,
+    camera_revision: u64,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -663,6 +772,7 @@ impl<'a> ThreeDJob<'a> {
         let mut compiled = Vec::with_capacity(draws.len());
         for draw in draws {
             compiled.push(match *draw {
+                ThreeDDraw::Vector(vector) => compile_vector(camera, vector)?,
                 ThreeDDraw::Surface(surface) => compile_surface(camera, surface)?,
                 ThreeDDraw::TrueDot(dot) => compile_dot(camera, dot)?,
             });
@@ -677,6 +787,7 @@ impl<'a> ThreeDJob<'a> {
             draws: compiled,
             tiling,
             sample_grid,
+            camera_revision: camera.revision(),
         })
     }
 
@@ -690,6 +801,12 @@ impl<'a> ThreeDJob<'a> {
     #[must_use]
     pub const fn tiling(&self) -> Tiling {
         self.tiling
+    }
+
+    /// Camera revision that owns every projected/vector/triangle derivation.
+    #[must_use]
+    pub const fn camera_revision(&self) -> u64 {
+        self.camera_revision
     }
 
     /// Raw-frame layout.
@@ -790,8 +907,21 @@ impl<'a> ThreeDJob<'a> {
                 if !bounds_intersect(draw.bounds, rectangle) {
                     continue;
                 }
-                for triangle in &draw.triangles {
-                    scratch.mark_triangle_boundary(triangle, rectangle, width, height);
+                match &draw.primitive {
+                    CompiledPrimitive::Triangles { triangles, .. } => {
+                        for triangle in triangles {
+                            scratch.mark_triangle_boundary(triangle, rectangle, width, height);
+                        }
+                    }
+                    CompiledPrimitive::Vector(vector) => {
+                        scratch.mark_vector_boundaries(
+                            self.camera,
+                            vector,
+                            rectangle,
+                            width,
+                            height,
+                        );
+                    }
                 }
             }
         }
@@ -800,8 +930,29 @@ impl<'a> ThreeDJob<'a> {
             if !bounds_intersect(draw.bounds, rectangle) {
                 continue;
             }
-            for triangle in &draw.triangles {
-                scratch.raster_triangle(triangle, draw, rectangle, width, height);
+            match &draw.primitive {
+                CompiledPrimitive::Triangles { triangles, shader } => {
+                    for triangle in triangles {
+                        scratch.raster_triangle(
+                            triangle,
+                            *shader,
+                            draw.depth_test,
+                            rectangle,
+                            width,
+                            height,
+                        );
+                    }
+                }
+                CompiledPrimitive::Vector(vector) => {
+                    scratch.raster_vector(
+                        self.camera,
+                        vector,
+                        draw.depth_test,
+                        rectangle,
+                        width,
+                        height,
+                    );
+                }
             }
         }
 
@@ -814,6 +965,427 @@ impl<'a> ThreeDJob<'a> {
             }
         }
     }
+}
+
+fn compile_vector<'a>(
+    camera: &'a Camera,
+    draw: VectorDraw<'a>,
+) -> Result<CompiledDraw<'a>, ThreeDError> {
+    let instance = draw
+        .plan
+        .shapes()
+        .instances()
+        .get(draw.instance as usize)
+        .ok_or(ThreeDError::InvalidVectorInstance)?;
+    let shape = draw
+        .plan
+        .shapes()
+        .shape(instance.shape)
+        .ok_or(ThreeDError::InvalidVectorInstance)?;
+    let style = draw
+        .plan
+        .styles()
+        .get(instance.style)
+        .copied()
+        .ok_or(ThreeDError::InvalidVectorInstance)?;
+    if !style.is_fixed_in_frame.is_finite()
+        || !finite3(style.shading)
+        || style
+            .clip_planes
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+    {
+        return Err(ThreeDError::NonFinite);
+    }
+
+    let all = draw.plan.segments();
+    let lo = (shape.first_segment as usize).min(all.len());
+    let hi = (lo + shape.segment_count as usize).min(all.len());
+    let source = &all[lo..hi];
+    // A path normal is object-space geometry. Derive it before applying the
+    // instance offset so two translated instances cannot acquire different
+    // floating-point normals through cancellation of large coordinates.
+    let normal = shape_unit_normal(source, &shape.subpath_starts);
+    let world_segments: Vec<Segment> = source
+        .iter()
+        .map(|segment| Segment {
+            p0: add(segment.p0, instance.offset),
+            p1: add(segment.p1, instance.offset),
+            p2: add(segment.p2, instance.offset),
+            s0: segment.s0,
+            s1: segment.s1,
+        })
+        .collect();
+
+    let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
+    let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
+        && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
+    let mut fill_pieces = Vec::new();
+    let mut curves = Vec::new();
+    let mut curve_starts = Vec::new();
+    let starts = &shape.subpath_starts;
+    for (subpath, &start) in starts.iter().enumerate() {
+        let end = starts
+            .get(subpath + 1)
+            .copied()
+            .unwrap_or(world_segments.len() as u32)
+            .min(world_segments.len() as u32);
+        let subpath = &world_segments[start as usize..end as usize];
+        if draws_fill {
+            let controls: Vec<[Vec3; 3]> = subpath
+                .iter()
+                .map(|segment| [segment.p0, segment.p1, segment.p2])
+                .collect();
+            for clipped in camera
+                .project_fill_contour(&controls, style.is_fixed_in_frame, style.clip_planes)
+                .map_err(|_| ThreeDError::NonFinite)?
+            {
+                let rational = RationalPiece {
+                    p: clipped.screen_controls(camera.pixel_shape()),
+                };
+                let report = fill::append_rational(
+                    &rational,
+                    PERSPECTIVE_VECTOR_TOLERANCE_PX,
+                    &mut fill_pieces,
+                )
+                .map_err(|_| ThreeDError::UnclippedHorizon)?;
+                if report.capped {
+                    return Err(ThreeDError::PerspectiveToleranceExceeded);
+                }
+            }
+        }
+
+        let mut run_last_world: Option<Vec3> = None;
+        for segment in subpath {
+            let projected = camera
+                .project_quadratic(
+                    [segment.p0, segment.p1, segment.p2],
+                    style.is_fixed_in_frame,
+                    // User planes clip the stroke *surface* below. Keeping the
+                    // full camera-visible centerline here matters at oblique
+                    // cuts: distance to a centerline point just outside the
+                    // plane can still define a legal fragment just inside it.
+                    [[0.0; 4]; 4],
+                )
+                .map_err(|_| ThreeDError::NonFinite)?;
+            for clipped in projected {
+                let rational = RationalPiece {
+                    p: clipped.screen_controls(camera.pixel_shape()),
+                };
+                let starts_run =
+                    run_last_world.is_none_or(|point| !points_close(point, clipped.world[0]));
+                if starts_run {
+                    curve_starts.push(curves.len() as u32);
+                }
+                let s0 = segment_s_at(segment, clipped.source_t[0]);
+                let s1 = segment_s_at(segment, clipped.source_t[1]);
+                append_projected_curves(rational, clipped.world, s0, s1, 0, &mut curves)?;
+                run_last_world = Some(clipped.world[2]);
+            }
+        }
+    }
+
+    let screen_segments: Vec<Segment> = curves.iter().map(|piece| piece.screen).collect();
+    let mut joins = crate::stroke::join_wedges(
+        &screen_segments,
+        &curve_starts,
+        &style,
+        unit_screen_map(),
+        [0.0; 2],
+    );
+    for join in &mut joins {
+        if let Some(curve) = curves.iter().min_by(|a, b| {
+            let distance = |piece: &ProjectedCurvePiece| {
+                let dx = piece.screen.p2[0] - join.anchor[0];
+                let dy = piece.screen.p2[1] - join.anchor[1];
+                dx * dx + dy * dy
+            };
+            distance(a).total_cmp(&distance(b))
+        }) {
+            join.half_width = projected_width_toward(
+                camera,
+                &style,
+                normal,
+                CurvePosition {
+                    world: curve.world,
+                    t: 1.0,
+                    s: curve.screen.s1,
+                },
+                [
+                    join.anchor[0] + join.bisector[0],
+                    join.anchor[1] + join.bisector[1],
+                ],
+                None,
+            );
+        }
+    }
+    let planar = vector_is_planar(&world_segments, normal);
+    let fill_plane = if planar {
+        world_segments
+            .first()
+            .map(|segment| [normal[0], normal[1], normal[2], -dot(normal, segment.p0)])
+    } else {
+        None
+    };
+    if style.depth_test && draws_fill && !planar {
+        return Err(ThreeDError::NonPlanarVectorDepth);
+    }
+    if draws_fill && !fill::fill_is_flat(&style) && !planar {
+        return Err(ThreeDError::NonPlanarVectorGradient);
+    }
+    if draws_fill && style.shading != [0.0; 3] && !planar {
+        return Err(ThreeDError::NonPlanarVectorShading);
+    }
+    let field = if draws_fill && !fill::fill_is_flat(&style) {
+        fill_plane.and_then(|plane| PlanarGradientField::build(&world_segments, plane))
+    } else {
+        None
+    };
+    let bounds = vector_bounds(camera, &style, normal, &fill_pieces, &curves);
+    Ok(CompiledDraw {
+        primitive: CompiledPrimitive::Vector(Box::new(CompiledVector {
+            fill: fill_pieces,
+            curves,
+            joins,
+            field,
+            style,
+            normal,
+            fill_plane,
+            draws_fill,
+            draws_stroke,
+        })),
+        depth_test: style.depth_test,
+        bounds,
+    })
+}
+
+fn unit_screen_map() -> ScreenMap {
+    ScreenMap {
+        scale: 1.0,
+        origin: [0.0; 2],
+    }
+}
+
+fn points_close(a: Vec3, b: Vec3) -> bool {
+    let scale = a
+        .iter()
+        .chain(&b)
+        .fold(1.0f64, |largest, value| largest.max(value.abs()));
+    sub(a, b)
+        .iter()
+        .all(|value| value.abs() <= 128.0 * f64::EPSILON * scale)
+}
+
+fn segment_s_at(segment: &Segment, t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    let total = fmn_geom::arclength::quadratic_arc_length(segment.p0, segment.p1, segment.p2);
+    if total <= 0.0 {
+        return segment.s0;
+    }
+    let partial =
+        fmn_geom::bezier::partial_quadratic(&[segment.p0, segment.p1, segment.p2], 0.0, t);
+    let fraction =
+        fmn_geom::arclength::quadratic_arc_length(partial[0], partial[1], partial[2]) / total;
+    segment.s0 + (segment.s1 - segment.s0) * fraction.clamp(0.0, 1.0)
+}
+
+fn append_projected_curves(
+    rational: RationalPiece,
+    world: [Vec3; 3],
+    s0: f64,
+    s1: f64,
+    depth: u32,
+    output: &mut Vec<ProjectedCurvePiece>,
+) -> Result<(), ThreeDError> {
+    let error = rational.deviation_px();
+    if error <= PERSPECTIVE_VECTOR_TOLERANCE_PX {
+        let curve = rational.integral_approximation();
+        output.push(ProjectedCurvePiece {
+            screen: Segment {
+                p0: [curve.p0[0], curve.p0[1], 0.0],
+                p1: [curve.p1[0], curve.p1[1], 0.0],
+                p2: [curve.p2[0], curve.p2[1], 0.0],
+                s0,
+                s1,
+            },
+            world,
+        });
+        return Ok(());
+    }
+    if depth >= fill::FLATTEN_MAX_DEPTH {
+        return Err(ThreeDError::PerspectiveToleranceExceeded);
+    }
+    let (rational_left, rational_right) = rational.split(0.5);
+    let (world_left, world_right) = split_world_quadratic(world, 0.5);
+    let left_length =
+        fmn_geom::arclength::quadratic_arc_length(world_left[0], world_left[1], world_left[2]);
+    let right_length =
+        fmn_geom::arclength::quadratic_arc_length(world_right[0], world_right[1], world_right[2]);
+    let fraction = if left_length + right_length > 0.0 {
+        left_length / (left_length + right_length)
+    } else {
+        0.5
+    };
+    let middle = s0 + (s1 - s0) * fraction;
+    append_projected_curves(rational_left, world_left, s0, middle, depth + 1, output)?;
+    append_projected_curves(rational_right, world_right, middle, s1, depth + 1, output)
+}
+
+fn split_world_quadratic(world: [Vec3; 3], t: f64) -> ([Vec3; 3], [Vec3; 3]) {
+    let lerp = |a: Vec3, b: Vec3| add(a, mul(sub(b, a), t));
+    let q0 = lerp(world[0], world[1]);
+    let q1 = lerp(world[1], world[2]);
+    let r = lerp(q0, q1);
+    ([world[0], q0, r], [r, q1, world[2]])
+}
+
+fn shape_unit_normal(segments: &[Segment], subpath_starts: &[u32]) -> Vec3 {
+    let mut area = [0.0; 3];
+    for (subpath, &start) in subpath_starts.iter().enumerate() {
+        let end = subpath_starts
+            .get(subpath + 1)
+            .copied()
+            .unwrap_or(segments.len() as u32);
+        let lo = (start as usize).min(segments.len());
+        let hi = (end as usize).min(segments.len());
+        if lo >= hi {
+            continue;
+        }
+        let mut anchors: Vec<Vec3> = segments[lo..hi].iter().map(|segment| segment.p0).collect();
+        anchors.push(segments[hi - 1].p2);
+        for index in 0..anchors.len() {
+            let p0 = anchors[index];
+            let p1 = anchors[(index + 1) % anchors.len()];
+            area[0] += 0.5 * (p0[1] + p1[1]) * (p1[2] - p0[2]);
+            area[1] += 0.5 * (p0[2] + p1[2]) * (p1[0] - p0[0]);
+            area[2] += 0.5 * (p0[0] + p1[0]) * (p1[1] - p0[1]);
+        }
+    }
+    normalize(area).unwrap_or_else(|| {
+        segments.first().map_or([0.0, 0.0, 1.0], |segment| {
+            unit_normal(segment.p0, segment.p1, segment.p2)
+        })
+    })
+}
+
+fn vector_is_planar(segments: &[Segment], normal: Vec3) -> bool {
+    let Some(origin) = segments.first().map(|segment| segment.p0) else {
+        return true;
+    };
+    let scale = segments
+        .iter()
+        .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
+        .flat_map(|point| sub(point, origin))
+        .fold(1.0f64, |largest, value| largest.max(value.abs()));
+    let tolerance = 1e-10 * scale;
+    segments
+        .iter()
+        .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
+        .all(|point| dot(normal, sub(point, origin)).abs() <= tolerance)
+}
+
+impl PlanarGradientField {
+    fn build(segments: &[Segment], plane: [f64; 4]) -> Option<Self> {
+        let normal = [plane[0], plane[1], plane[2]];
+        let absolute = [normal[0].abs(), normal[1].abs(), normal[2].abs()];
+        let reference = if absolute[0] <= absolute[1] && absolute[0] <= absolute[2] {
+            [1.0, 0.0, 0.0]
+        } else if absolute[1] <= absolute[2] {
+            [0.0, 1.0, 0.0]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        let u = normalize(cross(reference, normal))?;
+        let v = normalize(cross(normal, u))?;
+        let origin = mul(normal, -plane[3]);
+        let coordinates = |point: Vec3| {
+            let relative = sub(point, origin);
+            [dot(relative, u), dot(relative, v), 0.0]
+        };
+        let planar_segments: Vec<Segment> = segments
+            .iter()
+            .map(|segment| Segment {
+                p0: coordinates(segment.p0),
+                p1: coordinates(segment.p1),
+                p2: coordinates(segment.p2),
+                s0: segment.s0,
+                s1: segment.s1,
+            })
+            .collect();
+        Some(Self {
+            field: GradientField::build(&planar_segments, unit_screen_map()),
+            origin,
+            u,
+            v,
+        })
+    }
+
+    fn param_at(&self, world: Vec3) -> f64 {
+        let relative = sub(world, self.origin);
+        self.field
+            .param_at([dot(relative, self.u), dot(relative, self.v)], [0.0; 2])
+    }
+}
+
+fn vector_bounds(
+    camera: &Camera,
+    style: &Style,
+    normal: Vec3,
+    fill: &[MonoPiece],
+    curves: &[ProjectedCurvePiece],
+) -> Option<[f64; 4]> {
+    let mut bounds = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for piece in fill {
+        for point in [piece.p0, piece.p1, piece.p2] {
+            bounds[0] = bounds[0].min(point[0]);
+            bounds[1] = bounds[1].min(point[1]);
+            bounds[2] = bounds[2].max(point[0]);
+            bounds[3] = bounds[3].max(point[1]);
+        }
+    }
+    let mut stroke_pad = 0.0f64;
+    for curve in curves {
+        for point in [curve.screen.p0, curve.screen.p1, curve.screen.p2] {
+            bounds[0] = bounds[0].min(point[0]);
+            bounds[1] = bounds[1].min(point[1]);
+            bounds[2] = bounds[2].max(point[0]);
+            bounds[3] = bounds[3].max(point[1]);
+        }
+        for t in [0.0, 0.5, 1.0] {
+            let s = curve.screen.s0 + (curve.screen.s1 - curve.screen.s0) * t;
+            let widths = projected_half_widths(camera, style, normal, curve.world, t, s);
+            stroke_pad = stroke_pad.max(widths[0]).max(widths[1]);
+        }
+    }
+    let visible_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
+        && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
+    if visible_stroke {
+        // Perspective width is directional and may peak between the retained
+        // curve samples. Until the camera table carries an analytic slab for
+        // that rational offset field, the viewport is the only fail-closed
+        // bound: a sampled maximum is an optimization that can clip a legal
+        // stroke. Tile-local distance tests still reject untouched pixels.
+        bounds[0] = bounds[0].min(0.0);
+        bounds[1] = bounds[1].min(0.0);
+        bounds[2] = bounds[2].max(f64::from(camera.pixel_width()));
+        bounds[3] = bounds[3].max(f64::from(camera.pixel_height()));
+    }
+    if !bounds[0].is_finite() {
+        return None;
+    }
+    let pad = stroke_pad + f64::from(style.anti_alias_width);
+    Some([
+        bounds[0] - pad,
+        bounds[1] - pad,
+        bounds[2] + pad,
+        bounds[3] + pad,
+    ])
 }
 
 fn compile_surface<'a>(
@@ -885,8 +1457,7 @@ fn compile_surface<'a>(
     };
     Ok(CompiledDraw {
         bounds: union_bounds(&triangles),
-        triangles,
-        shader,
+        primitive: CompiledPrimitive::Triangles { triangles, shader },
         depth_test: draw.depth_test,
     })
 }
@@ -959,17 +1530,19 @@ fn compile_dot<'a>(camera: &'a Camera, draw: TrueDotDraw) -> Result<CompiledDraw
     }
     Ok(CompiledDraw {
         bounds: union_bounds(&triangles),
-        triangles,
-        shader: Shader::Dot {
-            center: draw.center,
-            radius: draw.radius,
-            color: draw.color,
-            glow_factor: draw.glow_factor,
-            shading: draw.shading,
-            to_camera,
-            scaled_aa_width: draw.anti_alias_width * camera.pixel_size() / draw.radius,
-            light_position: camera.light_source_position(),
-            camera_position: camera.location(),
+        primitive: CompiledPrimitive::Triangles {
+            triangles,
+            shader: Shader::Dot {
+                center: draw.center,
+                radius: draw.radius,
+                color: draw.color,
+                glow_factor: draw.glow_factor,
+                shading: draw.shading,
+                to_camera,
+                scaled_aa_width: draw.anti_alias_width * camera.pixel_size() / draw.radius,
+                light_position: camera.light_source_position(),
+                camera_position: camera.location(),
+            },
         },
         depth_test: draw.depth_test,
     })
@@ -1239,6 +1812,504 @@ fn perspective_attributes(
     Some((attributes, 0.5 * (ndc_z + 1.0)))
 }
 
+fn bezier_point(control: [Vec3; 3], t: f64) -> Vec3 {
+    let u = 1.0 - t;
+    std::array::from_fn(|axis| {
+        u * u * control[0][axis] + 2.0 * u * t * control[1][axis] + t * t * control[2][axis]
+    })
+}
+
+fn bezier_tangent(control: [Vec3; 3], t: f64) -> Vec3 {
+    add(
+        mul(sub(control[1], control[0]), 2.0 * (1.0 - t)),
+        mul(sub(control[2], control[1]), 2.0 * t),
+    )
+}
+
+fn projected_half_widths(
+    camera: &Camera,
+    style: &Style,
+    flat_normal: Vec3,
+    world: [Vec3; 3],
+    t: f64,
+    s: f64,
+) -> [f64; 2] {
+    let s = s.clamp(0.0, 1.0) as f32;
+    let width = style.stroke_width + (style.stroke_width_end - style.stroke_width) * s;
+    projected_half_widths_for(camera, style, flat_normal, world, t, f64::from(width))
+}
+
+fn stroke_frame(
+    camera: &Camera,
+    style: &Style,
+    flat_normal: Vec3,
+    world: [Vec3; 3],
+    t: f64,
+) -> Option<(Vec3, Vec3, Vec3)> {
+    let point = bezier_point(world, t);
+    let tangent = bezier_tangent(world, t);
+    let flat = style.flat_stroke || style.is_fixed_in_frame != 0.0;
+    let construction_normal = if flat {
+        flat_normal
+    } else {
+        normalize(sub(camera.location(), point)).unwrap_or([0.0, 0.0, 1.0])
+    };
+    let tangent = if flat {
+        tangent
+    } else {
+        sub(
+            tangent,
+            mul(construction_normal, dot(tangent, construction_normal)),
+        )
+    };
+    let step = normalize(cross(construction_normal, tangent))?;
+    let plane_normal = normalize(cross(tangent, step)).unwrap_or(construction_normal);
+    Some((point, step, plane_normal))
+}
+
+fn stroke_half_world(camera: &Camera, style: &Style, width_units: f64) -> f64 {
+    // Pinned Reference stroke/vert.glsl:
+    // 0.01 * width * mix(frame_scale, 1, scale_stroke_with_zoom).
+    let zoom = if style.scale_stroke_with_zoom {
+        1.0
+    } else {
+        camera.frame().scale()
+    };
+    0.5 * width_units * fmn_core::constants::STROKE_WIDTH_CONVERSION * zoom
+}
+
+fn projected_half_widths_for(
+    camera: &Camera,
+    style: &Style,
+    flat_normal: Vec3,
+    world: [Vec3; 3],
+    t: f64,
+    width_units: f64,
+) -> [f64; 2] {
+    if width_units <= 0.0 {
+        return [0.0; 2];
+    }
+    let Some((point, step, _)) = stroke_frame(camera, style, flat_normal, world, t) else {
+        return [0.0; 2];
+    };
+    let half_world = stroke_half_world(camera, style, width_units);
+    let Some(center) = camera
+        .project(point, style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape())
+    else {
+        return [0.0; 2];
+    };
+    let plus = camera
+        .project(add(point, mul(step, half_world)), style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape());
+    let minus = camera
+        .project(sub(point, mul(step, half_world)), style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape());
+    [
+        plus.map_or(0.0, |pixel| {
+            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+        }),
+        minus.map_or(0.0, |pixel| {
+            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+        }),
+    ]
+}
+
+fn projected_width_toward(
+    camera: &Camera,
+    style: &Style,
+    flat_normal: Vec3,
+    position: CurvePosition,
+    point: [f64; 2],
+    width_units: Option<f64>,
+) -> f64 {
+    let width_units = width_units.unwrap_or_else(|| {
+        let s = position.s.clamp(0.0, 1.0) as f32;
+        f64::from(style.stroke_width + (style.stroke_width_end - style.stroke_width) * s)
+    });
+    if width_units <= 0.0 {
+        return 0.0;
+    }
+    let Some((world, step, _)) =
+        stroke_frame(camera, style, flat_normal, position.world, position.t)
+    else {
+        return 0.0;
+    };
+    let Some(center) = camera
+        .project(world, style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape())
+    else {
+        return 0.0;
+    };
+    let half_world = stroke_half_world(camera, style, width_units);
+    let plus = camera
+        .project(add(world, mul(step, half_world)), style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape());
+    let minus = camera
+        .project(sub(world, mul(step, half_world)), style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape());
+    let widths = [
+        plus.map_or(0.0, |pixel| {
+            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+        }),
+        minus.map_or(0.0, |pixel| {
+            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+        }),
+    ];
+    let query = [point[0] - center[0], point[1] - center[1]];
+    let plus_direction = plus
+        .map(|pixel| [pixel[0] - center[0], pixel[1] - center[1]])
+        .or_else(|| minus.map(|pixel| [center[0] - pixel[0], center[1] - pixel[1]]));
+    if plus_direction
+        .is_some_and(|direction| query[0] * direction[0] + query[1] * direction[1] >= 0.0)
+    {
+        widths[0]
+    } else {
+        widths[1]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorNearest {
+    distance: f64,
+    s: f64,
+    t: f64,
+    curve: usize,
+    world: Vec3,
+    depth: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorFragment {
+    source: LinearRgba,
+    depth: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorSample {
+    fill: Option<VectorFragment>,
+    stroke: Option<VectorFragment>,
+    stroke_behind: bool,
+}
+
+fn nearest_on_vector_curve(
+    camera: &Camera,
+    vector: &CompiledVector,
+    curve: usize,
+    point: [f64; 2],
+) -> VectorNearest {
+    let curve_piece = &vector.curves[curve];
+    let near = fmn_geom::distance::nearest_on_quadratic(
+        curve_piece.screen.p0,
+        curve_piece.screen.p1,
+        curve_piece.screen.p2,
+        [point[0], point[1], 0.0],
+    );
+    let total = fmn_geom::arclength::quadratic_arc_length(
+        curve_piece.world[0],
+        curve_piece.world[1],
+        curve_piece.world[2],
+    );
+    let fraction = if total > 0.0 {
+        let partial = fmn_geom::bezier::partial_quadratic(&curve_piece.world, 0.0, near.t);
+        (fmn_geom::arclength::quadratic_arc_length(partial[0], partial[1], partial[2]) / total)
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let s = curve_piece.screen.s0 + (curve_piece.screen.s1 - curve_piece.screen.s0) * fraction;
+    let world = bezier_point(curve_piece.world, near.t);
+    let depth = camera
+        .project(world, vector.style.is_fixed_in_frame)
+        .pixel(camera.pixel_shape())
+        .map_or(1.0, |pixel| pixel[2]);
+    VectorNearest {
+        distance: near.distance,
+        s,
+        t: near.t,
+        curve,
+        world,
+        depth,
+    }
+}
+
+fn vector_nearest(
+    camera: &Camera,
+    vector: &CompiledVector,
+    point: [f64; 2],
+) -> Option<VectorNearest> {
+    let mut best: Option<VectorNearest> = None;
+    for curve in 0..vector.curves.len() {
+        let nearest = nearest_on_vector_curve(camera, vector, curve, point);
+        if best.is_some_and(|current| nearest.distance >= current.distance) {
+            continue;
+        }
+        best = Some(nearest);
+    }
+    best
+}
+
+fn vector_stroke_sample(
+    camera: &Camera,
+    vector: &CompiledVector,
+    point: [f64; 2],
+) -> Option<(f64, f64, Vec3, f64)> {
+    if !vector.draws_stroke {
+        return None;
+    }
+    let mut best: Option<(f64, VectorNearest)> = None;
+    for curve_index in 0..vector.curves.len() {
+        let nearest = nearest_on_vector_curve(camera, vector, curve_index, point);
+        let curve = &vector.curves[curve_index];
+        let half_width = projected_width_toward(
+            camera,
+            &vector.style,
+            vector.normal,
+            CurvePosition {
+                world: curve.world,
+                t: nearest.t,
+                s: nearest.s,
+            },
+            point,
+            None,
+        );
+        let excess = nearest.distance - half_width;
+        if best.is_none_or(|(current, _)| excess < current) {
+            best = Some((excess, nearest));
+        }
+    }
+    let (round_excess, nearest) = best?;
+    let curve = &vector.curves[nearest.curve];
+    let excess =
+        crate::stroke::apply_joins(round_excess, &vector.joins, vector.style.joint_type, point);
+    let coverage = aa_coverage(excess, f64::from(vector.style.anti_alias_width));
+    let fragment_world = stroke_frame(camera, &vector.style, vector.normal, curve.world, nearest.t)
+        .and_then(|(_, _, plane_normal)| {
+            let plane = [
+                plane_normal[0],
+                plane_normal[1],
+                plane_normal[2],
+                -dot(plane_normal, nearest.world),
+            ];
+            world_on_vector_plane(camera, point, vector.style.is_fixed_in_frame, plane)
+        })
+        .unwrap_or(nearest.world);
+    let projected = camera.project(fragment_world, vector.style.is_fixed_in_frame);
+    if !projected.inside_clip_volume()
+        || vector.style.clip_planes.iter().any(|plane| {
+            projected
+                .user_clip_distance(*plane)
+                .is_some_and(|distance| distance < 0.0)
+        })
+    {
+        return None;
+    }
+    let depth = projected
+        .pixel(camera.pixel_shape())
+        .map_or(nearest.depth, |pixel| pixel[2]);
+    Some((coverage, nearest.s, fragment_world, depth))
+}
+
+fn solve_three_by_three(mut matrix: [[f64; 4]; 3]) -> Option<Vec3> {
+    for pivot in 0..3 {
+        let row = (pivot..3)
+            .max_by(|&a, &b| matrix[a][pivot].abs().total_cmp(&matrix[b][pivot].abs()))?;
+        matrix.swap(pivot, row);
+        let divisor = matrix[pivot][pivot];
+        if divisor.abs() <= 1e-14 || !divisor.is_finite() {
+            return None;
+        }
+        for value in &mut matrix[pivot][pivot..] {
+            *value /= divisor;
+        }
+        let pivot_row = matrix[pivot];
+        for (target, row) in matrix.iter_mut().enumerate() {
+            if target == pivot {
+                continue;
+            }
+            let factor = row[pivot];
+            for (value, pivot_value) in row[pivot..].iter_mut().zip(&pivot_row[pivot..]) {
+                *value -= factor * pivot_value;
+            }
+        }
+    }
+    Some([matrix[0][3], matrix[1][3], matrix[2][3]])
+}
+
+fn world_on_vector_plane(
+    camera: &Camera,
+    pixel: [f64; 2],
+    fixed: f64,
+    plane: [f64; 4],
+) -> Option<Vec3> {
+    let ndc_x = 2.0 * pixel[0] / f64::from(camera.pixel_width()) - 1.0;
+    let ndc_y = 1.0 - 2.0 * pixel[1] / f64::from(camera.pixel_height());
+    let origin = camera.project([0.0; 3], fixed).clip;
+    let columns: [[f64; 4]; 3] = std::array::from_fn(|axis| {
+        let mut basis = [0.0; 3];
+        basis[axis] = 1.0;
+        let projected = camera.project(basis, fixed).clip;
+        std::array::from_fn(|component| projected[component] - origin[component])
+    });
+    solve_three_by_three([
+        [
+            columns[0][0] - ndc_x * columns[0][3],
+            columns[1][0] - ndc_x * columns[1][3],
+            columns[2][0] - ndc_x * columns[2][3],
+            -(origin[0] - ndc_x * origin[3]),
+        ],
+        [
+            columns[0][1] - ndc_y * columns[0][3],
+            columns[1][1] - ndc_y * columns[1][3],
+            columns[2][1] - ndc_y * columns[2][3],
+            -(origin[1] - ndc_y * origin[3]),
+        ],
+        [plane[0], plane[1], plane[2], -plane[3]],
+    ])
+}
+
+fn rgba_from_array(value: [f32; 4]) -> LinearRgba {
+    LinearRgba {
+        r: f64::from(value[0]),
+        g: f64::from(value[1]),
+        b: f64::from(value[2]),
+        a: f64::from(value[3]),
+    }
+}
+
+fn shade_vector(
+    camera: &Camera,
+    vector: &CompiledVector,
+    pixel: [u32; 2],
+    samples: u32,
+    sample: [u32; 2],
+) -> Option<VectorSample> {
+    let point = [
+        f64::from(pixel[0]) + (f64::from(sample[0]) + 0.5) / f64::from(samples),
+        f64::from(pixel[1]) + (f64::from(sample[1]) + 0.5) / f64::from(samples),
+    ];
+    let fill_coverage = if vector.draws_fill {
+        fill::coverage_at_subcell(
+            &vector.fill,
+            [0.0; 2],
+            pixel[1],
+            pixel[0],
+            samples,
+            sample[0],
+            sample[1],
+        )
+    } else {
+        0.0
+    };
+    let stroke = vector_stroke_sample(camera, vector, point);
+    let mut fill_source = None;
+    let mut fill_depth = None;
+    if fill_coverage > 0.0 {
+        let fill_world = vector.fill_plane.and_then(|plane| {
+            world_on_vector_plane(camera, point, vector.style.is_fixed_in_frame, plane)
+        });
+        let parameter = vector
+            .field
+            .as_ref()
+            .zip(fill_world)
+            .map_or(0.0, |(field, world)| field.param_at(world));
+        let mut color = rgba_from_array(fill::fill_rgba_at(&vector.style, parameter));
+        if !fill::fill_is_flat(&vector.style)
+            && vector.style.fill_border_width > 0.0
+            && let Some(nearest) = vector_nearest(camera, vector, point)
+        {
+            let curve = &vector.curves[nearest.curve];
+            // `border_width_px` is the whole inward band, whereas the stroke
+            // construction helper accepts a full centred-stroke width and
+            // returns its half-width. Doubling here preserves the same unit
+            // conversion without growing the fill silhouette.
+            let width = projected_width_toward(
+                camera,
+                &vector.style,
+                vector.normal,
+                CurvePosition {
+                    world: curve.world,
+                    t: nearest.t,
+                    s: nearest.s,
+                },
+                point,
+                Some(2.0 * f64::from(vector.style.fill_border_width)),
+            );
+            let border = fill::border_coverage(
+                nearest.distance,
+                width,
+                f64::from(vector.style.anti_alias_width),
+            );
+            if border > 0.0 {
+                let edge = rgba_from_array(fill::fill_rgba_at(&vector.style, nearest.s));
+                color = mix_color(color, edge, border);
+            }
+        }
+        if let Some(plane) = vector.fill_plane
+            && let Some(world) = fill_world
+        {
+            if vector.style.shading != [0.0; 3] {
+                color = finalize_color(
+                    color,
+                    world,
+                    [plane[0], plane[1], plane[2]],
+                    vector.style.shading,
+                    camera.light_source_position(),
+                    camera.location(),
+                );
+            }
+            fill_depth = camera
+                .project(world, vector.style.is_fixed_in_frame)
+                .pixel(camera.pixel_shape())
+                .map(|projected| projected[2]);
+        }
+        color.a *= fill_coverage;
+        fill_source = Some(VectorFragment {
+            source: color,
+            depth: fill_depth.unwrap_or(1.0) as f32,
+        });
+    }
+    let stroke_source = stroke.and_then(|(coverage, s, world, depth)| {
+        if coverage <= 0.0 {
+            return None;
+        }
+        let mut color = rgba_from_array(stroke_rgba_at(&vector.style, s));
+        if vector.style.shading != [0.0; 3] {
+            color = finalize_color(
+                color,
+                world,
+                vector.normal,
+                vector.style.shading,
+                camera.light_source_position(),
+                camera.location(),
+            );
+        }
+        color.a *= coverage;
+        Some(VectorFragment {
+            source: color,
+            depth: depth as f32,
+        })
+    });
+    if fill_source.is_none() && stroke_source.is_none() {
+        return None;
+    }
+    Some(VectorSample {
+        fill: fill_source,
+        stroke: stroke_source,
+        stroke_behind: vector.style.stroke_behind,
+    })
+}
+
+fn source_over_premul(source: PremulRgba, destination: PremulRgba) -> PremulRgba {
+    let remaining = 1.0 - source.a;
+    PremulRgba {
+        r: source.r + destination.r * remaining,
+        g: source.g + destination.g * remaining,
+        b: source.b + destination.b * remaining,
+        a: source.a + destination.a * remaining,
+    }
+}
+
 struct TileScratch {
     tile: usize,
     sample_grid: u32,
@@ -1304,10 +2375,61 @@ impl TileScratch {
         }
     }
 
+    fn mark_vector_boundaries(
+        &mut self,
+        camera: &Camera,
+        vector: &CompiledVector,
+        rectangle: [u32; 4],
+        width: usize,
+        height: usize,
+    ) {
+        let [x0, y0, x1, y1] = rectangle;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let fill = if vector.draws_fill {
+                    fill::coverage_at_cell::<f64>(&vector.fill, [0.0; 2], y, x)
+                } else {
+                    0.0
+                };
+                let fill_edge = vector.draws_fill
+                    && fill::boundary_crossings_at_cell(&vector.fill, [0.0; 2], y, x) > 0;
+                let center =
+                    vector_stroke_sample(camera, vector, [f64::from(x) + 0.5, f64::from(y) + 0.5])
+                        .map_or(0.0, |sample| sample.0);
+                let mut stroke_min = center;
+                let mut stroke_max = center;
+                for sample_y in 0..self.sample_grid {
+                    for sample_x in 0..self.sample_grid {
+                        let dy = (f64::from(sample_y) + 0.5) / f64::from(self.sample_grid);
+                        let dx = (f64::from(sample_x) + 0.5) / f64::from(self.sample_grid);
+                        let coverage = vector_stroke_sample(
+                            camera,
+                            vector,
+                            [f64::from(x) + dx, f64::from(y) + dy],
+                        )
+                        .map_or(0.0, |sample| sample.0);
+                        stroke_min = stroke_min.min(coverage);
+                        stroke_max = stroke_max.max(coverage);
+                    }
+                }
+                let stroke_edge =
+                    stroke_max > 0.0 && (stroke_min < 1.0 || stroke_max - stroke_min > 1e-12);
+                if (fill > 0.0 && fill < 1.0) || fill_edge || stroke_edge {
+                    let local_x = (x - x0) as usize;
+                    let local_y = (y - y0) as usize;
+                    if local_x < width && local_y < height {
+                        self.boundary[local_y * width + local_x] = true;
+                    }
+                }
+            }
+        }
+    }
+
     fn raster_triangle(
         &mut self,
         triangle: &RasterTriangle,
-        draw: &CompiledDraw<'_>,
+        shader: Shader<'_>,
+        depth_test: bool,
         rectangle: [u32; 4],
         width: usize,
         height: usize,
@@ -1350,15 +2472,84 @@ impl TileScratch {
                         };
                         let slot = pixel * self.samples_per_pixel + sample;
                         let depth = depth as f32;
-                        if draw.depth_test && depth >= self.depth[slot] {
+                        if depth_test && depth >= self.depth[slot] {
                             continue;
                         }
-                        let Some(source) = shade(draw.shader, attributes) else {
+                        let Some(source) = shade(shader, attributes) else {
                             continue;
                         };
                         self.color[slot] = source_over(source, self.color[slot]);
-                        if draw.depth_test {
+                        if depth_test {
                             self.depth[slot] = depth;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn raster_vector(
+        &mut self,
+        camera: &Camera,
+        vector: &CompiledVector,
+        depth_test: bool,
+        rectangle: [u32; 4],
+        width: usize,
+        height: usize,
+    ) {
+        let [x0, y0, x1, y1] = rectangle;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let local_x = (x - x0) as usize;
+                let local_y = (y - y0) as usize;
+                if local_x >= width || local_y >= height {
+                    continue;
+                }
+                let pixel = local_y * width + local_x;
+                let samples = if self.boundary[pixel] {
+                    self.sample_grid
+                } else {
+                    1
+                };
+                for sample_y in 0..samples {
+                    for sample_x in 0..samples {
+                        let Some(vector_sample) =
+                            shade_vector(camera, vector, [x, y], samples, [sample_x, sample_y])
+                        else {
+                            continue;
+                        };
+                        let sample = if samples == 1 {
+                            0
+                        } else {
+                            (sample_y * self.sample_grid + sample_x) as usize
+                        };
+                        let slot = pixel * self.samples_per_pixel + sample;
+                        let fragments = if vector_sample.stroke_behind {
+                            [vector_sample.stroke, vector_sample.fill]
+                        } else {
+                            [vector_sample.fill, vector_sample.stroke]
+                        };
+                        if !depth_test {
+                            // Preserve the certified association used before
+                            // fill/stroke acquired distinct depth values:
+                            // assemble this vector command over transparent,
+                            // then composite the command once into the painter
+                            // sequence. Source-over is associative over the
+                            // reals, but changing the f64 grouping can move f16
+                            // output bits for no semantic gain.
+                            let mut source = PremulRgba::TRANSPARENT;
+                            for fragment in fragments.into_iter().flatten() {
+                                source = source_over(fragment.source, source);
+                            }
+                            self.color[slot] = source_over_premul(source, self.color[slot]);
+                            continue;
+                        }
+                        for fragment in fragments.into_iter().flatten() {
+                            if fragment.depth >= self.depth[slot] {
+                                continue;
+                            }
+                            self.color[slot] = source_over(fragment.source, self.color[slot]);
+                            self.depth[slot] = fragment.depth;
                         }
                     }
                 }
@@ -1514,6 +2705,7 @@ mod tests {
     use fmn_core::color::Srgb;
     use fmn_frame::half::f16_to_f64;
     use fmn_hash::sha256;
+    use fmn_mobject::{JointType, Mobject, RecordBuffer, RecordSchema, Stage, Uniforms};
 
     fn color(hex: &str, alpha: f64) -> LinearRgba {
         Srgb::from_hex(hex).expect("hex").to_linear(alpha)
@@ -1552,6 +2744,94 @@ mod tests {
         std::array::from_fn(|index| {
             f16_to_f64(u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]))
         })
+    }
+
+    fn compiled_vector<'a>(job: &'a ThreeDJob<'_>) -> &'a CompiledVector {
+        job.draws
+            .first()
+            .and_then(|draw| match &draw.primitive {
+                CompiledPrimitive::Vector(vector) => Some(vector.as_ref()),
+                CompiledPrimitive::Triangles { .. } => None,
+            })
+            .expect("fixture must compile as a retained vector")
+    }
+
+    fn path_points(corners: &[Vec3], closed: bool) -> Vec<Vec3> {
+        let mut points = vec![corners[0]];
+        let end = corners.len() + usize::from(closed);
+        for index in 1..end {
+            let next = corners[index % corners.len()];
+            let previous = points[points.len() - 1];
+            points.push([
+                0.5 * (previous[0] + next[0]),
+                0.5 * (previous[1] + next[1]),
+                0.5 * (previous[2] + next[2]),
+            ]);
+            points.push(next);
+        }
+        points
+    }
+
+    fn vector_plan(
+        points: &[Vec3],
+        fill: [f32; 4],
+        stroke: [f32; 4],
+        stroke_width: f32,
+        camera_revision: u64,
+        configure: impl FnOnce(&mut Uniforms),
+    ) -> RenderPlan {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        for (index, point) in points.iter().enumerate() {
+            buffer.write(
+                index,
+                "point",
+                &[point[0] as f32, point[1] as f32, point[2] as f32],
+            );
+            buffer.write(index, "fill_rgba", &fill);
+            buffer.write(index, "stroke_rgba", &stroke);
+            buffer.write(index, "stroke_width", &[stroke_width]);
+            buffer.write(index, "fill_border_width", &[0.0]);
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        configure(stage.uniforms_mut(mob).expect("live mobject"));
+        stage.add_to_scene(mob).expect("rooted");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera_revision);
+        plan
+    }
+
+    fn gradient_vector_plan(
+        points: &[Vec3],
+        fill_start: [f32; 4],
+        fill_end: [f32; 4],
+        camera_revision: u64,
+        configure: impl FnOnce(&mut Uniforms),
+    ) -> RenderPlan {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        for (index, point) in points.iter().enumerate() {
+            buffer.write(
+                index,
+                "point",
+                &[point[0] as f32, point[1] as f32, point[2] as f32],
+            );
+            let fill = if index + 1 == points.len() {
+                fill_end
+            } else {
+                fill_start
+            };
+            buffer.write(index, "fill_rgba", &fill);
+            buffer.write(index, "stroke_rgba", &[0.0; 4]);
+            buffer.write(index, "stroke_width", &[0.0]);
+            buffer.write(index, "fill_border_width", &[0.0]);
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        configure(stage.uniforms_mut(mob).expect("live mobject"));
+        stage.add_to_scene(mob).expect("rooted");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera_revision);
+        plan
     }
 
     #[test]
@@ -1666,6 +2946,479 @@ mod tests {
     }
 
     #[test]
+    fn tilted_flat_and_camera_facing_strokes_have_distinct_projected_widths() {
+        let camera = camera();
+        // The curve lies in the x-z plane and is almost x-tangent at its
+        // midpoint. Its in-plane width direction is therefore almost pure
+        // depth (strongly foreshortened), while the billboard direction is y.
+        let world = [[-2.0, 0.0, -0.1], [0.0, 0.0, 1.0], [2.0, 0.0, 0.1]];
+        let base = Style {
+            stroke_width: 24.0,
+            stroke_width_end: 24.0,
+            ..Style::default()
+        };
+        let normal = unit_normal(world[0], world[1], world[2]);
+        let billboard = projected_half_widths(&camera, &base, normal, world, 0.5, 0.5);
+        let flat = projected_half_widths(
+            &camera,
+            &Style {
+                flat_stroke: true,
+                ..base
+            },
+            normal,
+            world,
+            0.5,
+            0.5,
+        );
+        let billboard_mean = 0.5 * (billboard[0] + billboard[1]);
+        let flat_mean = 0.5 * (flat[0] + flat[1]);
+        assert!(
+            (billboard_mean - flat_mean).abs() > 0.1,
+            "tilted world-plane width must foreshorten: billboard={billboard:?}, flat={flat:?}"
+        );
+    }
+
+    #[test]
+    fn perspective_stroke_minimizes_signed_excess_before_choosing_a_curve() {
+        let camera = camera();
+        let origin = camera
+            .project([0.0; 3], 1.0)
+            .pixel(camera.pixel_shape())
+            .expect("fixed origin");
+        let x_basis = camera
+            .project([1.0, 0.0, 0.0], 1.0)
+            .pixel(camera.pixel_shape())
+            .expect("fixed x basis");
+        let y_basis = camera
+            .project([0.0, 1.0, 0.0], 1.0)
+            .pixel(camera.pixel_shape())
+            .expect("fixed y basis");
+        let world_at = |pixel: [f64; 2]| {
+            [
+                (pixel[0] - origin[0]) / (x_basis[0] - origin[0]),
+                (pixel[1] - origin[1]) / (y_basis[1] - origin[1]),
+                0.0,
+            ]
+        };
+        let curve_at = |y: f64, s: f64| {
+            let world = [world_at([4.0, y]), world_at([16.0, y]), world_at([28.0, y])];
+            ProjectedCurvePiece {
+                screen: Segment {
+                    p0: [4.0, y, 0.0],
+                    p1: [16.0, y, 0.0],
+                    p2: [28.0, y, 0.0],
+                    s0: s,
+                    s1: s,
+                },
+                world,
+            }
+        };
+        let vector = CompiledVector {
+            fill: Vec::new(),
+            curves: vec![curve_at(10.5, 0.0), curve_at(11.5, 1.0)],
+            joins: Vec::new(),
+            field: None,
+            style: Style {
+                stroke_width: 1.0,
+                stroke_width_end: 400.0,
+                anti_alias_width: 0.01,
+                is_fixed_in_frame: 1.0,
+                flat_stroke: true,
+                scale_stroke_with_zoom: true,
+                ..Style::default()
+            },
+            normal: [0.0, 0.0, 1.0],
+            fill_plane: None,
+            draws_fill: false,
+            draws_stroke: true,
+        };
+        let query = [16.0, 10.5];
+        assert_eq!(
+            vector_nearest(&camera, &vector, query)
+                .expect("two curves")
+                .s,
+            0.0,
+            "the narrow curve is geometrically nearest"
+        );
+        let (coverage, s, _, _) =
+            vector_stroke_sample(&camera, &vector, query).expect("wide tube covers query");
+        assert!(
+            s > 0.99,
+            "the farther wide curve must win distance-minus-width: s={s}"
+        );
+        assert!(coverage > 0.99);
+    }
+
+    #[test]
+    fn flat_straight_edges_use_the_whole_paths_unit_normal_and_fragment_depth() {
+        let camera = camera();
+        // z = x/2 + y/4. Every individual edge is straight, so deriving a
+        // normal from one quadratic would choose an unrelated z-axis fallback;
+        // the VMobject normal is the oriented area normal of the whole path.
+        let tilted = path_points(
+            &[
+                [-2.0, -2.0, -1.5],
+                [2.0, -2.0, 0.5],
+                [2.0, 2.0, 1.5],
+                [-2.0, 2.0, -0.5],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &tilted,
+            [0.0; 4],
+            [1.0; 4],
+            100.0,
+            camera.revision(),
+            |uniforms| {
+                uniforms.flat_stroke = true;
+                uniforms.depth_test = true;
+            },
+        );
+        let job = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .expect("tilted flat-stroke job");
+        let vector = compiled_vector(&job);
+        let expected = normalize([-8.0, -4.0, 16.0]).expect("nonzero plane normal");
+        assert!(
+            dot(vector.normal, expected) > 1.0 - 1e-12,
+            "flat construction must use the path area normal: {:?}",
+            vector.normal
+        );
+        let curve = &vector.curves[0];
+        let per_curve_fallback = unit_normal(curve.world[0], curve.world[1], curve.world[2]);
+        assert!(
+            dot(vector.normal, per_curve_fallback) < 0.999,
+            "fixture must distinguish the path normal from a straight-edge fallback"
+        );
+
+        let (center_world, step, _) =
+            stroke_frame(&camera, &vector.style, vector.normal, curve.world, 0.5)
+                .expect("nondegenerate stroke frame");
+        let width = f64::from(
+            vector.style.stroke_width
+                + (vector.style.stroke_width_end - vector.style.stroke_width) * 0.5,
+        );
+        let query_world = add(
+            center_world,
+            mul(step, 0.5 * stroke_half_world(&camera, &vector.style, width)),
+        );
+        let query = camera
+            .project(query_world, vector.style.is_fixed_in_frame)
+            .pixel(camera.pixel_shape())
+            .expect("offset stroke point is visible");
+        let (coverage, _, sampled_world, sampled_depth) =
+            vector_stroke_sample(&camera, vector, [query[0], query[1]])
+                .expect("query lies inside the stroke");
+        assert!(coverage > 0.5);
+        let round_trip = camera
+            .project(sampled_world, vector.style.is_fixed_in_frame)
+            .pixel(camera.pixel_shape())
+            .expect("sampled stroke fragment is visible");
+        assert!((round_trip[0] - query[0]).abs() < 1e-10);
+        assert!((round_trip[1] - query[1]).abs() < 1e-10);
+        let center_depth = camera
+            .project(center_world, vector.style.is_fixed_in_frame)
+            .pixel(camera.pixel_shape())
+            .expect("curve center is visible")[2];
+        assert!(
+            (sampled_depth - center_depth).abs() > 1e-6,
+            "flat stroke depth must come from the offset fragment, not its curve center"
+        );
+    }
+
+    #[test]
+    fn vector_planarity_is_invariant_under_large_translation() {
+        let translated = Segment {
+            p0: [1.0e9, -1.0e9, 1.0e9],
+            p1: [1.0e9 + 1.0, -1.0e9, 1.0e9],
+            p2: [1.0e9 + 2.0, -1.0e9, 1.0e9 + 1.0e-5],
+            s0: 0.0,
+            s1: 1.0,
+        };
+        assert!(
+            !vector_is_planar(&[translated], [0.0, 0.0, 1.0]),
+            "world-space translation must not enlarge the local planarity tolerance"
+        );
+    }
+
+    #[test]
+    fn fill_and_stroke_depth_partition_as_distinct_fragments() {
+        let camera = camera();
+        let tilted = path_points(
+            &[
+                [-2.0, -2.0, -1.5],
+                [2.0, -2.0, 0.5],
+                [2.0, 2.0, 1.5],
+                [-2.0, 2.0, -0.5],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &tilted,
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            200.0,
+            camera.revision(),
+            |uniforms| uniforms.depth_test = true,
+        );
+        let job = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .expect("tilted fill-and-stroke job");
+        let vector = compiled_vector(&job);
+        let (pixel, sample) = (0..camera.pixel_height())
+            .flat_map(|y| (0..camera.pixel_width()).map(move |x| [x, y]))
+            .find_map(|pixel| {
+                let sample = shade_vector(&camera, vector, pixel, 1, [0, 0])?;
+                let (fill, stroke) = (sample.fill?, sample.stroke?);
+                ((fill.depth - stroke.depth).abs() > 1e-6).then_some((pixel, sample))
+            })
+            .expect("fixture must overlap fill and stroke at distinct depths");
+        let fill = sample.fill.expect("candidate has fill");
+        let stroke = sample.stroke.expect("candidate has stroke");
+        let threshold = 0.5 * (fill.depth + stroke.depth);
+        let nearer = if fill.depth < stroke.depth {
+            fill
+        } else {
+            stroke
+        };
+
+        let background = color("#000000", 1.0);
+        let mut scratch = TileScratch::new(1, 1);
+        scratch.clear(1, 1, background);
+        scratch.depth[0] = threshold;
+        scratch.raster_vector(
+            &camera,
+            vector,
+            true,
+            [pixel[0], pixel[1], pixel[0] + 1, pixel[1] + 1],
+            1,
+            1,
+        );
+        assert_eq!(
+            scratch.color[0],
+            source_over(nearer.source, background.premultiply()),
+            "the farther internal pass must not hitchhike on the nearer pass's depth"
+        );
+    }
+
+    #[test]
+    fn four_by_four_vector_classifier_probes_the_raster_sample_lattice() {
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (32, 24),
+            samples: 4,
+            background: color("#000000", 1.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .expect("four-by-four camera");
+        let screen_y_at = |world_y| {
+            camera
+                .project([0.0, world_y, 0.0], 1.0)
+                .pixel(camera.pixel_shape())
+                .expect("fixed-frame point is visible")[1]
+        };
+        let screen_zero = screen_y_at(0.0);
+        let screen_one = screen_y_at(1.0);
+        let target_y = 10.125;
+        let world_y = (target_y - screen_zero) / (screen_one - screen_zero);
+        let line = path_points(&[[-5.0, world_y, 0.0], [5.0, world_y, 0.0]], false);
+        let plan = vector_plan(
+            &line,
+            [0.0; 4],
+            [1.0; 4],
+            1.0,
+            camera.revision(),
+            |uniforms| {
+                uniforms.is_fixed_in_frame = 1.0;
+                uniforms.flat_stroke = true;
+                uniforms.scale_stroke_with_zoom = true;
+                uniforms.anti_alias_width = 0.001;
+            },
+        );
+        let job = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .expect("thin fixed-frame stroke");
+        let vector = compiled_vector(&job);
+        let coverage_at = |dx, dy| {
+            vector_stroke_sample(&camera, vector, [16.0 + dx, 10.0 + dy])
+                .map_or(0.0, |sample| sample.0)
+        };
+        assert_eq!(coverage_at(0.5, 0.5), 0.0);
+        assert!(
+            (0..3).all(|y| (0..3).all(|x| {
+                coverage_at((f64::from(x) + 0.5) / 3.0, (f64::from(y) + 0.5) / 3.0) == 0.0
+            })),
+            "the former fixed three-by-three classifier must miss this edge"
+        );
+        assert!(
+            (0..4).any(|y| (0..4).any(|x| {
+                coverage_at((f64::from(x) + 0.5) / 4.0, (f64::from(y) + 0.5) / 4.0) > 0.0
+            })),
+            "the actual four-by-four raster lattice must observe this edge"
+        );
+
+        let mut scratch = TileScratch::new(1, 4);
+        scratch.mark_vector_boundaries(&camera, vector, [16, 10, 17, 11], 1, 1);
+        assert!(
+            scratch.boundary[0],
+            "the classifier must promote every pixel whose real sample lattice sees an edge"
+        );
+    }
+
+    #[test]
+    fn perspective_vectors_keep_bevel_and_miter_joint_overrides() {
+        let camera = camera();
+        let corner = path_points(
+            &[[-2.5, -1.5, -0.5], [0.0, 0.0, 0.5], [2.0, -2.0, 1.0]],
+            false,
+        );
+        let plan_for = |joint_type| {
+            vector_plan(
+                &corner,
+                [0.0; 4],
+                [1.0; 4],
+                400.0,
+                camera.revision(),
+                |uniforms| uniforms.joint_type = joint_type,
+            )
+        };
+        let bevel_plan = plan_for(JointType::Bevel);
+        let miter_plan = plan_for(JointType::Miter);
+        let bevel = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&bevel_plan, 0))],
+            Tiling::default(),
+        )
+        .expect("bevel job")
+        .render(1)
+        .expect("bevel frame");
+        let miter = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&miter_plan, 0))],
+            Tiling::default(),
+        )
+        .expect("miter job")
+        .render(1)
+        .expect("miter frame");
+        assert_ne!(
+            sha256(bevel.as_bytes()),
+            sha256(miter.as_bytes()),
+            "perspective compilation must retain the joint override"
+        );
+    }
+
+    #[test]
+    fn retained_vectors_surfaces_and_true_dots_share_one_painter_sequence() {
+        let camera = camera();
+        let square = path_points(
+            &[
+                [-3.0, -3.0, 0.0],
+                [3.0, -3.0, 0.0],
+                [3.0, 3.0, 0.0],
+                [-3.0, 3.0, 0.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &square,
+            [0.0, 1.0, 0.0, 0.5],
+            [0.0; 4],
+            0.0,
+            camera.revision(),
+            |_| {},
+        );
+        let surface = full_triangle(-1.0, color("#FF0000", 1.0));
+        let mut surface_draw = SurfaceDraw::new(&surface);
+        surface_draw.shading = [0.0; 3];
+        surface_draw.depth_test = false;
+        let dot = TrueDotDraw::new([0.0, 0.0, 1.0], 3.0, color("#0000FF", 0.5));
+
+        let ordered = [
+            ThreeDDraw::Surface(surface_draw),
+            ThreeDDraw::Vector(VectorDraw::new(&plan, 0)),
+            ThreeDDraw::TrueDot(dot),
+        ];
+        let reordered = [
+            ThreeDDraw::Vector(VectorDraw::new(&plan, 0)),
+            ThreeDDraw::Surface(surface_draw),
+            ThreeDDraw::TrueDot(dot),
+        ];
+        let a = ThreeDJob::new(&camera, &ordered, Tiling::default())
+            .expect("mixed job")
+            .render(1)
+            .expect("frame");
+        let b = ThreeDJob::new(&camera, &reordered, Tiling::default())
+            .expect("mixed job")
+            .render(1)
+            .expect("frame");
+        let a = pixel(&a, 16, 12);
+        let b = pixel(&b, 16, 12);
+        assert!(
+            a[1] > b[1] + 0.15,
+            "vector must remain above the first surface"
+        );
+        assert!(a[0] + 0.15 < b[0], "later surface must cover the vector");
+        assert!(
+            a[2] > 0.4 && b[2] > 0.4,
+            "the final true dot stays above both: ordered={a:?}, reordered={b:?}"
+        );
+    }
+
+    #[test]
+    fn vector_depth_is_per_fragment_and_never_reorders_a_later_overlay() {
+        let camera = camera();
+        let square = path_points(
+            &[
+                [-3.0, -3.0, 2.0],
+                [3.0, -3.0, 2.0],
+                [3.0, 3.0, 2.0],
+                [-3.0, 3.0, 2.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &square,
+            [0.0, 0.0, 1.0, 1.0],
+            [0.0; 4],
+            0.0,
+            camera.revision(),
+            |uniforms| uniforms.depth_test = true,
+        );
+        let far = full_triangle(-2.0, color("#FF0000", 1.0));
+        let mut far_draw = SurfaceDraw::new(&far);
+        far_draw.shading = [0.0; 3];
+        let overlay = TrueDotDraw::new([0.0, 0.0, 0.0], 3.0, color("#00FF00", 0.5));
+        let draws = [
+            ThreeDDraw::Vector(VectorDraw::new(&plan, 0)),
+            ThreeDDraw::Surface(far_draw),
+            ThreeDDraw::TrueDot(overlay),
+        ];
+        let frame = ThreeDJob::new(&camera, &draws, Tiling::default())
+            .expect("mixed depth job")
+            .render(1)
+            .expect("frame");
+        let center = pixel(&frame, 16, 12);
+        assert!(
+            center[0] < 0.05,
+            "far red surface must fail the vector depth"
+        );
+        assert!(
+            center[1] > 0.4,
+            "non-depth overlay still composites later: {center:?}"
+        );
+        assert!(center[2] > 0.4, "near vector remains visible");
+    }
+
+    #[test]
     fn user_clip_plane_cuts_in_world_space() {
         let camera = camera();
         let mesh = full_triangle(0.0, color("#FFFFFF", 1.0));
@@ -1680,6 +3433,194 @@ mod tests {
             .expect("frame");
         assert!(pixel(&frame, 24, 12)[0] > 0.9);
         assert!(pixel(&frame, 8, 12)[0] < 0.01);
+    }
+
+    #[test]
+    fn closed_fill_clipping_preserves_viewport_and_user_plane_corners() {
+        let camera = camera();
+        // Every original edge lies outside the viewport. Independent
+        // per-curve clipping would therefore discard the whole path even
+        // though its interior covers every pixel.
+        let enclosing = path_points(
+            &[
+                [-20.0, -20.0, 0.0],
+                [20.0, -20.0, 0.0],
+                [20.0, 20.0, 0.0],
+                [-20.0, 20.0, 0.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &enclosing,
+            [1.0; 4],
+            [0.0; 4],
+            0.0,
+            camera.revision(),
+            |uniforms| {
+                uniforms.clip_planes[0] = [1.0, 0.0, 0.0, 0.0];
+                uniforms.clip_planes[1] = [0.0, 1.0, 0.0, 0.0];
+            },
+        );
+        let frame = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .expect("clipped fill job")
+        .render(1)
+        .expect("frame");
+
+        assert!(
+            pixel(&frame, 24, 6)[0] > 0.99,
+            "the positive x/y clip quadrant must remain filled"
+        );
+        assert!(
+            pixel(&frame, 8, 6)[0] < 0.01,
+            "the x user plane must remove the left quadrant"
+        );
+        assert!(
+            pixel(&frame, 24, 18)[0] < 0.01,
+            "the y user plane must remove the lower quadrant"
+        );
+    }
+
+    #[test]
+    fn user_plane_clips_the_stroke_surface_not_only_its_centerline() {
+        let camera = camera();
+        let line = path_points(&[[-3.0, 0.0, 0.0], [3.0, 0.0, 0.0]], false);
+        let plan = vector_plan(
+            &line,
+            [0.0; 4],
+            [1.0; 4],
+            400.0,
+            camera.revision(),
+            |uniforms| uniforms.clip_planes[0] = [1.0, 0.0, 0.0, 0.0],
+        );
+        let frame = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .expect("clipped stroke job")
+        .render(1)
+        .expect("frame");
+        assert!(
+            pixel(&frame, 15, 12)[0] < 0.01,
+            "the thick round cap must not bleed across x=0"
+        );
+        assert!(
+            pixel(&frame, 17, 12)[0] > 0.9,
+            "the retained side of the clipped stroke remains visible"
+        );
+    }
+
+    #[test]
+    fn clipping_does_not_reparameterize_a_planar_gradient() {
+        let camera = camera();
+        let tilted = path_points(
+            &[
+                [-5.0, -3.0, -0.5],
+                [5.0, -3.0, 0.5],
+                [5.0, 3.0, 0.5],
+                [-5.0, 3.0, -0.5],
+            ],
+            true,
+        );
+        let plain = gradient_vector_plan(
+            &tilted,
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            camera.revision(),
+            |_| {},
+        );
+        let clipped = gradient_vector_plan(
+            &tilted,
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            camera.revision(),
+            |uniforms| uniforms.clip_planes[0] = [1.0, 0.0, 0.0, 0.0],
+        );
+        let render = |plan: &RenderPlan| {
+            ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(plan, 0))],
+                Tiling::default(),
+            )
+            .expect("gradient job")
+            .render(1)
+            .expect("gradient frame")
+        };
+        let plain = pixel(&render(&plain), 22, 12);
+        let clipped = pixel(&render(&clipped), 22, 12);
+        assert!(
+            plain[0] > 0.01 && plain[2] > 0.01,
+            "fixture must exercise an interior ramp value: {plain:?}"
+        );
+        assert_eq!(
+            clipped, plain,
+            "a visibility plane cannot rewrite the object's color field"
+        );
+    }
+
+    #[test]
+    fn nonplanar_gradient_fill_is_a_named_refusal() {
+        let camera = camera();
+        let twisted = path_points(
+            &[
+                [-2.0, -2.0, 0.0],
+                [2.0, -2.0, 0.0],
+                [2.0, 2.0, 1.0],
+                [-2.0, 2.0, 0.0],
+            ],
+            true,
+        );
+        let plan = gradient_vector_plan(
+            &twisted,
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            camera.revision(),
+            |_| {},
+        );
+        assert_eq!(
+            ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+                Tiling::default(),
+            )
+            .expect_err("a nonplanar MVC field has no silent 2D substitute"),
+            ThreeDError::NonPlanarVectorGradient
+        );
+    }
+
+    #[test]
+    fn nonplanar_shaded_fill_is_a_named_refusal() {
+        let camera = camera();
+        let twisted = path_points(
+            &[
+                [-2.0, -2.0, 0.0],
+                [2.0, -2.0, 0.0],
+                [2.0, 2.0, 1.0],
+                [-2.0, 2.0, 0.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &twisted,
+            [1.0; 4],
+            [0.0; 4],
+            0.0,
+            camera.revision(),
+            |uniforms| uniforms.shading = [0.3, 0.2, 0.1],
+        );
+        assert_eq!(
+            ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+                Tiling::default(),
+            )
+            .expect_err("a nonplanar fill has no silent lighting surface"),
+            ThreeDError::NonPlanarVectorShading
+        );
     }
 
     #[test]
@@ -1903,5 +3844,79 @@ mod tests {
         assert_ne!(sha256(first.as_bytes()), sha256(moved_one.as_bytes()));
         assert_eq!(moved_one.as_bytes(), moved_four.as_bytes());
         assert_eq!(moved_one.as_bytes(), moved_sixteen.as_bytes());
+    }
+
+    #[test]
+    fn mixed_vector_camera_derivation_is_revisioned_bit_locked_and_thread_independent() {
+        let mut camera = camera();
+        let square = path_points(
+            &[
+                [-2.5, -2.0, 0.5],
+                [2.5, -2.0, 0.5],
+                [2.5, 2.0, 0.5],
+                [-2.5, 2.0, 0.5],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &square,
+            [0.0, 0.5, 1.0, 0.7],
+            [1.0, 1.0, 1.0, 1.0],
+            8.0,
+            camera.revision(),
+            |uniforms| {
+                uniforms.flat_stroke = true;
+                uniforms.scale_stroke_with_zoom = true;
+            },
+        );
+        let original_segments = plan.segments().to_vec();
+        let surface = full_triangle(-1.5, color("#301050", 1.0));
+        let mut surface_draw = SurfaceDraw::new(&surface);
+        surface_draw.shading = [0.0; 3];
+        surface_draw.depth_test = false;
+        let draws = [
+            ThreeDDraw::Surface(surface_draw),
+            ThreeDDraw::Vector(VectorDraw::new(&plan, 0)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow(
+                [0.0, 0.0, 1.0],
+                0.8,
+                color("#FF8030", 0.8),
+            )),
+        ];
+        let before = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("job");
+        assert_eq!(before.camera_revision(), camera.revision());
+        let one = before.render(1).expect("frame");
+        let four = before.render(4).expect("frame");
+        let sixteen = before.render(16).expect("frame");
+        assert_eq!(one.as_bytes(), four.as_bytes());
+        assert_eq!(one.as_bytes(), sixteen.as_bytes());
+        // Adjudicated 2026-07-28 (fm-diu): perspective strokes now minimize
+        // `distance - half_width` per curve before choosing the winning color,
+        // width and depth. The previous digest is restored if that law is
+        // reverted, and
+        // `perspective_stroke_minimizes_signed_excess_before_choosing_a_curve`
+        // independently proves why nearest-curve-first is the wrong image.
+        assert_eq!(
+            sha256(one.as_bytes()).to_hex(),
+            "e13a704147fec87adc9c70bab4a3ef82725175a60790eda2d7d340b75ec0982f",
+            "mixed vector/3D self-golden"
+        );
+
+        let old_revision = camera.revision();
+        camera
+            .frame_mut()
+            .set_center([0.75, 0.0, 0.0])
+            .expect("camera move");
+        let moved = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("moved job");
+        assert!(moved.camera_revision() > old_revision);
+        assert_eq!(
+            plan.segments(),
+            original_segments,
+            "camera invalidation must not mutate object-space geometry"
+        );
+        assert_ne!(
+            sha256(one.as_bytes()),
+            sha256(moved.render(1).expect("moved frame").as_bytes())
+        );
     }
 }

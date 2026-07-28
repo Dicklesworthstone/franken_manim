@@ -712,6 +712,141 @@ impl Camera {
             clip: [mixed[0], mixed[1], -0.1 * mixed[2], 1.0 - mixed[2]],
         }
     }
+
+    /// Project and exactly clip one world-space quadratic before perspective
+    /// division.
+    ///
+    /// User planes are evaluated in world space, then the six camera-volume
+    /// halfspaces in homogeneous clip space. Every distance is itself a
+    /// quadratic in the curve parameter, so its real roots split the curve
+    /// exactly with de Casteljau. The returned spans retain matching world and
+    /// clip controls plus their range in the source segment; fill, stroke and
+    /// depth therefore consume one camera derivation without rebuilding the
+    /// authoritative object-space [`crate::table::Segment`].
+    pub fn project_quadratic(
+        &self,
+        world: [Vec3; 3],
+        is_fixed_in_frame: f64,
+        user_planes: [[f64; 4]; 4],
+    ) -> Result<Vec<ClippedQuadratic>, CameraError> {
+        if !is_fixed_in_frame.is_finite()
+            || world.iter().any(|point| !finite3(*point))
+            || user_planes
+                .iter()
+                .flatten()
+                .any(|component| !component.is_finite())
+        {
+            return Err(CameraError::NonFinite);
+        }
+        let clip = world.map(|point| self.project(point, is_fixed_in_frame).clip);
+        let mut pieces = vec![ClippedQuadratic {
+            world,
+            clip,
+            source_t: [0.0, 1.0],
+        }];
+        for plane in user_planes {
+            if plane[..3].iter().all(|component| *component == 0.0) {
+                continue;
+            }
+            pieces = clip_quadratics(pieces, |piece| {
+                piece.world.map(|point| {
+                    point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
+                })
+            });
+        }
+        for plane in 0..6 {
+            pieces = clip_quadratics(pieces, |piece| {
+                piece.clip.map(|point| {
+                    let [x, y, z, w] = point;
+                    match plane {
+                        0 => x + w,
+                        1 => w - x,
+                        2 => y + w,
+                        3 => w - y,
+                        4 => z + w,
+                        _ => w - z,
+                    }
+                })
+            });
+        }
+        Ok(pieces)
+    }
+
+    /// Project and clip one closed fill contour before perspective division.
+    ///
+    /// Unlike [`Camera::project_quadratic`], this clips the contour as a
+    /// *region boundary*. After each halfspace, exits are joined to the next
+    /// entry along that halfspace before the following plane is applied. This
+    /// is the curved Sutherland-Hodgman construction: a contour which encloses
+    /// the whole viewport remains a viewport-sized contour even when none of
+    /// its original curves is visible, and intersections at clip-volume
+    /// corners follow both boundary planes instead of an interior chord.
+    ///
+    /// The generated boundary pieces belong to the fill only. Stroke
+    /// compilation continues to use [`Camera::project_quadratic`] so clipping
+    /// never invents a stroked edge.
+    pub(crate) fn project_fill_contour(
+        &self,
+        world: &[[Vec3; 3]],
+        is_fixed_in_frame: f64,
+        user_planes: [[f64; 4]; 4],
+    ) -> Result<Vec<ClippedFillQuadratic>, CameraError> {
+        if !is_fixed_in_frame.is_finite()
+            || world.iter().flatten().any(|point| !finite3(*point))
+            || user_planes
+                .iter()
+                .flatten()
+                .any(|component| !component.is_finite())
+        {
+            return Err(CameraError::NonFinite);
+        }
+        let Some(first) = world.first() else {
+            return Ok(Vec::new());
+        };
+        let mut contour: Vec<ClippedFillQuadratic> = world
+            .iter()
+            .map(|control| ClippedFillQuadratic {
+                world: *control,
+                clip: control.map(|point| self.project(point, is_fixed_in_frame).clip),
+            })
+            .collect();
+        let start = first[0];
+        let end = world.last().map_or(first[2], |last| last[2]);
+        if !point3_close(end, start) {
+            contour.push(fill_boundary_line(
+                end,
+                self.project(end, is_fixed_in_frame).clip,
+                start,
+                self.project(start, is_fixed_in_frame).clip,
+            ));
+        }
+        for plane in user_planes {
+            if plane[..3].iter().all(|component| *component == 0.0) {
+                continue;
+            }
+            contour = clip_fill_contour(contour, |piece| {
+                piece.world.map(|point| {
+                    point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
+                })
+            });
+        }
+        for plane in 0..6 {
+            contour = clip_fill_contour(contour, |piece| {
+                piece.clip.map(|point| {
+                    let [x, y, z, w] = point;
+                    match plane {
+                        0 => x + w,
+                        1 => w - x,
+                        2 => y + w,
+                        3 => w - y,
+                        4 => z + w,
+                        _ => w - z,
+                    }
+                })
+            });
+        }
+        Ok(contour)
+    }
 }
 
 /// ThreeDCamera is Camera with the Reference's four-sample constructor default.
@@ -776,6 +911,309 @@ pub struct ClipPoint {
     pub world: Vec3,
     /// `(x, y, z, w)` after the kept projection constants.
     pub clip: [f64; 4],
+}
+
+/// One exact visible span of a camera-projected quadratic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClippedQuadratic {
+    /// World-space Bézier controls after exact clipping.
+    pub world: [Vec3; 3],
+    /// Homogeneous `(x, y, z, w)` controls under [`Camera::project`].
+    pub clip: [[f64; 4]; 3],
+    /// Parameter range in the source object-space segment.
+    pub source_t: [f64; 2],
+}
+
+impl ClippedQuadratic {
+    /// Homogeneous output-pixel controls `(X, Y, W)` for
+    /// [`crate::fill::RationalPiece`].
+    #[must_use]
+    pub fn screen_controls(self, resolution: (u32, u32)) -> [[f64; 3]; 3] {
+        screen_controls(self.clip, resolution)
+    }
+}
+
+/// One curve of a closed fill contour after region clipping.
+///
+/// This is crate-private because synthetic clip-boundary pieces intentionally
+/// have no source-segment parameter range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ClippedFillQuadratic {
+    pub(crate) world: [Vec3; 3],
+    pub(crate) clip: [[f64; 4]; 3],
+}
+
+impl ClippedFillQuadratic {
+    /// Homogeneous output-pixel controls `(X, Y, W)`.
+    pub(crate) fn screen_controls(self, resolution: (u32, u32)) -> [[f64; 3]; 3] {
+        screen_controls(self.clip, resolution)
+    }
+}
+
+fn clip_quadratics(
+    input: Vec<ClippedQuadratic>,
+    distances: impl Fn(&ClippedQuadratic) -> [f64; 3],
+) -> Vec<ClippedQuadratic> {
+    let mut output = Vec::new();
+    for piece in input {
+        let distance = distances(&piece);
+        let mut cuts = vec![0.0, 1.0];
+        cuts.extend(roots_in_unit_interval(distance));
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() <= 64.0 * f64::EPSILON);
+        let scale = distance
+            .iter()
+            .fold(1.0f64, |largest, value| largest.max(value.abs()));
+        let tolerance = 64.0 * f64::EPSILON * scale;
+        for pair in cuts.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b - a <= 64.0 * f64::EPSILON {
+                continue;
+            }
+            let midpoint = 0.5 * (a + b);
+            if bernstein_scalar(distance, midpoint) >= -tolerance {
+                output.push(quadratic_span(piece, a, b));
+            }
+        }
+    }
+    output
+}
+
+fn clip_fill_contour(
+    input: Vec<ClippedFillQuadratic>,
+    distances: impl Fn(&ClippedFillQuadratic) -> [f64; 3],
+) -> Vec<ClippedFillQuadratic> {
+    let mut visible = Vec::new();
+    for piece in input {
+        let distance = distances(&piece);
+        let mut cuts = vec![0.0, 1.0];
+        cuts.extend(roots_in_unit_interval(distance));
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() <= 64.0 * f64::EPSILON);
+        let scale = distance
+            .iter()
+            .fold(1.0f64, |largest, value| largest.max(value.abs()));
+        let tolerance = 64.0 * f64::EPSILON * scale;
+        for pair in cuts.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b - a <= 64.0 * f64::EPSILON {
+                continue;
+            }
+            let midpoint = 0.5 * (a + b);
+            if bernstein_scalar(distance, midpoint) >= -tolerance {
+                visible.push(fill_quadratic_span(piece, a, b));
+            }
+        }
+    }
+    if visible.is_empty() {
+        return visible;
+    }
+
+    let mut closed = Vec::with_capacity(visible.len().saturating_mul(2));
+    for index in 0..visible.len() {
+        let current = visible[index];
+        let next = visible[(index + 1) % visible.len()];
+        closed.push(current);
+        if !point4_close(current.clip[2], next.clip[0]) {
+            closed.push(fill_boundary_line(
+                current.world[2],
+                current.clip[2],
+                next.world[0],
+                next.clip[0],
+            ));
+        }
+    }
+    closed
+}
+
+fn fill_boundary_line(
+    world_start: Vec3,
+    clip_start: [f64; 4],
+    world_end: Vec3,
+    clip_end: [f64; 4],
+) -> ClippedFillQuadratic {
+    ClippedFillQuadratic {
+        world: [world_start, midpoint3(world_start, world_end), world_end],
+        clip: [clip_start, midpoint4(clip_start, clip_end), clip_end],
+    }
+}
+
+fn point3_close(a: Vec3, b: Vec3) -> bool {
+    let scale = a
+        .iter()
+        .chain(&b)
+        .fold(1.0f64, |largest, value| largest.max(value.abs()));
+    a.iter()
+        .zip(b)
+        .all(|(left, right)| (left - right).abs() <= 128.0 * f64::EPSILON * scale)
+}
+
+fn point4_close(a: [f64; 4], b: [f64; 4]) -> bool {
+    let scale = a
+        .iter()
+        .chain(&b)
+        .fold(1.0f64, |largest, value| largest.max(value.abs()));
+    a.iter()
+        .zip(b)
+        .all(|(left, right)| (left - right).abs() <= 128.0 * f64::EPSILON * scale)
+}
+
+fn midpoint3(a: Vec3, b: Vec3) -> Vec3 {
+    std::array::from_fn(|axis| 0.5 * (a[axis] + b[axis]))
+}
+
+fn midpoint4(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    std::array::from_fn(|axis| 0.5 * (a[axis] + b[axis]))
+}
+
+fn bernstein_scalar(control: [f64; 3], t: f64) -> f64 {
+    let u = 1.0 - t;
+    u * u * control[0] + 2.0 * u * t * control[1] + t * t * control[2]
+}
+
+fn roots_in_unit_interval(control: [f64; 3]) -> Vec<f64> {
+    let [p0, p1, p2] = control;
+    let a = p0 - 2.0 * p1 + p2;
+    let b = 2.0 * (p1 - p0);
+    let c = p0;
+    let scale = a.abs().max(b.abs()).max(c.abs()).max(1.0);
+    let tolerance = 64.0 * f64::EPSILON * scale;
+    let mut roots = Vec::with_capacity(2);
+    if a.abs() <= tolerance {
+        if b.abs() > tolerance {
+            let root = -c / b;
+            if root > 0.0 && root < 1.0 {
+                roots.push(root);
+            }
+        }
+        return roots;
+    }
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < -tolerance * scale {
+        return roots;
+    }
+    let root_discriminant = discriminant.max(0.0).sqrt();
+    let q = -0.5
+        * if b >= 0.0 {
+            b + root_discriminant
+        } else {
+            b - root_discriminant
+        };
+    if q == 0.0 {
+        let root = -b / (2.0 * a);
+        if root > 0.0 && root < 1.0 {
+            roots.push(root);
+        }
+        return roots;
+    }
+    for root in [q / a, c / q] {
+        if root > 0.0 && root < 1.0 {
+            roots.push(root);
+        }
+    }
+    roots.sort_by(f64::total_cmp);
+    roots.dedup_by(|a, b| (*a - *b).abs() <= 64.0 * f64::EPSILON);
+    roots
+}
+
+fn quadratic_span(piece: ClippedQuadratic, a: f64, b: f64) -> ClippedQuadratic {
+    if a == 0.0 && b == 1.0 {
+        return piece;
+    }
+    let left = if b < 1.0 {
+        split_quadratic(piece, b).0
+    } else {
+        piece
+    };
+    if a == 0.0 {
+        return left;
+    }
+    split_quadratic(left, a / b).1
+}
+
+fn fill_quadratic_span(piece: ClippedFillQuadratic, a: f64, b: f64) -> ClippedFillQuadratic {
+    if a == 0.0 && b == 1.0 {
+        return piece;
+    }
+    let left = if b < 1.0 {
+        split_fill_quadratic(piece, b).0
+    } else {
+        piece
+    };
+    if a == 0.0 {
+        return left;
+    }
+    split_fill_quadratic(left, a / b).1
+}
+
+fn split_fill_quadratic(
+    piece: ClippedFillQuadratic,
+    t: f64,
+) -> (ClippedFillQuadratic, ClippedFillQuadratic) {
+    let (world_left, world_right) = split3(piece.world, t);
+    let (clip_left, clip_right) = split4(piece.clip, t);
+    (
+        ClippedFillQuadratic {
+            world: world_left,
+            clip: clip_left,
+        },
+        ClippedFillQuadratic {
+            world: world_right,
+            clip: clip_right,
+        },
+    )
+}
+
+fn split_quadratic(piece: ClippedQuadratic, t: f64) -> (ClippedQuadratic, ClippedQuadratic) {
+    let (world_left, world_right) = split3(piece.world, t);
+    let (clip_left, clip_right) = split4(piece.clip, t);
+    let middle = piece.source_t[0] + (piece.source_t[1] - piece.source_t[0]) * t;
+    (
+        ClippedQuadratic {
+            world: world_left,
+            clip: clip_left,
+            source_t: [piece.source_t[0], middle],
+        },
+        ClippedQuadratic {
+            world: world_right,
+            clip: clip_right,
+            source_t: [middle, piece.source_t[1]],
+        },
+    )
+}
+
+fn split3(control: [Vec3; 3], t: f64) -> ([Vec3; 3], [Vec3; 3]) {
+    let lerp = |a: Vec3, b: Vec3| {
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
+    let q0 = lerp(control[0], control[1]);
+    let q1 = lerp(control[1], control[2]);
+    let r = lerp(q0, q1);
+    ([control[0], q0, r], [r, q1, control[2]])
+}
+
+fn split4(control: [[f64; 4]; 3], t: f64) -> ([[f64; 4]; 3], [[f64; 4]; 3]) {
+    let lerp = |a: [f64; 4], b: [f64; 4]| {
+        std::array::from_fn(|index| a[index] + (b[index] - a[index]) * t)
+    };
+    let q0 = lerp(control[0], control[1]);
+    let q1 = lerp(control[1], control[2]);
+    let r = lerp(q0, q1);
+    ([control[0], q0, r], [r, q1, control[2]])
+}
+
+fn screen_controls(clip: [[f64; 4]; 3], resolution: (u32, u32)) -> [[f64; 3]; 3] {
+    let width = 0.5 * f64::from(resolution.0);
+    let height = 0.5 * f64::from(resolution.1);
+    clip.map(|[x, y, _z, w]| {
+        // x_px = width * (x / w + 1)
+        // y_px = height * (1 - y / w)
+        [width * (x + w), height * (w - y), w]
+    })
 }
 
 impl ClipPoint {
@@ -978,6 +1416,111 @@ mod tests {
             [0.0; 4],
             [0.0; 4],
         ]));
+    }
+
+    fn curve_point(control: [Vec3; 3], t: f64) -> Vec3 {
+        let u = 1.0 - t;
+        std::array::from_fn(|axis| {
+            u * u * control[0][axis] + 2.0 * u * t * control[1][axis] + t * t * control[2][axis]
+        })
+    }
+
+    #[test]
+    fn quadratic_user_clipping_is_exact_and_keeps_source_parameters() {
+        let camera = Camera::default();
+        let world = [[-2.0, 0.0, 0.0], [0.0, 0.5, 0.0], [2.0, 0.0, 0.0]];
+        let pieces = camera
+            .project_quadratic(
+                world,
+                0.0,
+                [[1.0, 0.0, 0.0, 0.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+            )
+            .expect("finite curve");
+        assert_eq!(pieces.len(), 1);
+        assert!(close(pieces[0].source_t[0], 0.5));
+        assert_eq!(pieces[0].source_t[1], 1.0);
+        assert!(close(pieces[0].world[0][0], 0.0));
+
+        // Dense evaluation is only an oracle here; clipping itself solved the
+        // quadratic root and split de Casteljau exactly.
+        for sample in 0..=256 {
+            let t = f64::from(sample) / 256.0;
+            let source = curve_point(world, t);
+            let retained = pieces
+                .iter()
+                .any(|piece| t >= piece.source_t[0] && t <= piece.source_t[1]);
+            assert_eq!(retained, source[0] >= -1e-13, "t={t}");
+        }
+    }
+
+    #[test]
+    fn camera_near_plane_clips_before_the_perspective_divide() {
+        let camera = Camera::default();
+        let world = [[0.0, 0.0, 0.0], [0.0, 0.0, 8.0], [0.0, 0.0, 16.0]];
+        let pieces = camera
+            .project_quadratic(world, 0.0, [[0.0; 4]; 4])
+            .expect("finite curve");
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].source_t[0], 0.0);
+        assert!(pieces[0].source_t[1] > 0.0 && pieces[0].source_t[1] < 1.0);
+        for control in pieces[0].clip {
+            let [x, y, z, w] = control;
+            // A Bézier whose distance controls are nonnegative stays inside
+            // every convex homogeneous halfspace.
+            assert!(x + w >= -1e-12);
+            assert!(w - x >= -1e-12);
+            assert!(y + w >= -1e-12);
+            assert!(w - y >= -1e-12);
+            assert!(z + w >= -1e-12);
+            assert!(w - z >= -1e-12);
+        }
+        let screen = pieces[0].screen_controls(camera.pixel_shape());
+        assert!(screen.iter().all(|point| point[2] > 0.0));
+    }
+
+    #[test]
+    fn user_plane_tangency_does_not_invent_a_visible_interval() {
+        let camera = Camera::default();
+        // x(t) = -(t - 1/2)^2 touches x=0 once and is otherwise outside.
+        let world = [[-0.25, 0.0, 0.0], [0.25, 0.5, 0.0], [-0.25, 1.0, 0.0]];
+        let pieces = camera
+            .project_quadratic(
+                world,
+                0.0,
+                [[1.0, 0.0, 0.0, 0.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+            )
+            .expect("finite curve");
+        assert!(
+            pieces.is_empty(),
+            "a zero-measure touch is not a curve span"
+        );
+    }
+
+    #[test]
+    fn homogeneous_screen_controls_match_dense_camera_projection() {
+        let camera = Camera::new(CameraConfig {
+            resolution: (320, 180),
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let world = [[-1.0, -0.5, 0.0], [0.25, 1.0, 2.0], [1.5, -0.25, 3.0]];
+        let piece = camera
+            .project_quadratic(world, 0.0, [[0.0; 4]; 4])
+            .expect("finite curve")[0];
+        let screen = piece.screen_controls(camera.pixel_shape());
+        for sample in 0..=128 {
+            let t = f64::from(sample) / 128.0;
+            let projected = camera
+                .project(curve_point(world, t), 0.0)
+                .pixel(camera.pixel_shape())
+                .expect("positive weight");
+            let u = 1.0 - t;
+            let h: [f64; 3] = std::array::from_fn(|axis| {
+                u * u * screen[0][axis] + 2.0 * u * t * screen[1][axis] + t * t * screen[2][axis]
+            });
+            assert!((h[0] / h[2] - projected[0]).abs() <= 2e-11);
+            assert!((h[1] / h[2] - projected[1]).abs() <= 2e-11);
+        }
     }
 
     #[test]

@@ -460,7 +460,17 @@ impl RenderPlan {
                     hash.f32(style.fill_border_width);
                     hash.f32(style.anti_alias_width);
                     hash.f64(style.joint_type.to_code());
+                    hash.f64(style.is_fixed_in_frame);
+                    for component in style.shading {
+                        hash.f64(component);
+                    }
+                    for component in style.clip_planes.iter().flatten() {
+                        hash.f64(*component);
+                    }
+                    hash.bool(style.flat_stroke);
+                    hash.bool(style.scale_stroke_with_zoom);
                     hash.bool(style.stroke_behind);
+                    hash.bool(style.depth_test);
                 }
                 None => hash.bool(false),
             }

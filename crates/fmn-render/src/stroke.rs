@@ -43,18 +43,17 @@
 //! numeric code draws which corner, and why the Reference's *names* cannot be
 //! trusted — is ADR-0012.
 //!
-//! ## `flat_stroke`, and what it is waiting for
+//! ## `flat_stroke` and camera-facing construction
 //!
-//! §10.3 asks for `flat_stroke` and camera-facing construction "both supported",
-//! and under the [`ScreenMap`] that exists they are the **same construction**:
-//! the map is a uniform scale plus a translation, so a width measured in the
-//! object plane and a width measured in screen pixels differ by exactly that
-//! scale, and the excess above is already the screen-space one. The two diverge
-//! only once geometry leaves the view plane — a flat stroke on a rotated shape
-//! foreshortens, a camera-facing one does not — and that needs §10.4's camera,
-//! which is fm-0gy's. So the uniform is read and honoured trivially today rather
-//! than half-implemented against a projection nobody has written; the divergence
-//! is recorded on that bead.
+//! This module owns the affine distance kernel. Under its [`ScreenMap`], a width
+//! measured in the object plane and one measured in screen pixels differ only
+//! by the uniform scale, so both constructions intentionally collapse to the
+//! same expression here. Perspective vectors take the camera-bound route in
+//! [`crate::three_d::ThreeDJob`]: it derives separate flat and billboard
+//! half-widths from world-space curve controls, then feeds the resulting
+//! screen-space widths back into this distance kernel.
+//! [`crate::engine::FrameJob`] rejects camera-dependent style fields so they
+//! cannot silently render through the affine route.
 //!
 //! ## What the slabs are, and why there is no slab table
 //!

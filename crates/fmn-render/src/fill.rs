@@ -1374,10 +1374,11 @@ impl RowScratch {
 /// `Y`, `W` all ordinary quadratics in `t`. No new curve family appears; a
 /// weight per control point is the whole of the difference.
 ///
-/// This type is deliberately *not* a camera. §10.4's camera, its projection
-/// conventions and `is_fixed_in_frame` belong to fm-0gy, and [`crate::bin`]
-/// already declined to invent a `Projection` for the same reason. What the fill
-/// needs is the output of one, and this is that output's shape.
+/// This type is deliberately *not* a camera.
+/// [`crate::camera::Camera`] supplies these controls only after homogeneous
+/// clipping, and [`crate::three_d::ThreeDJob`] turns every retained or synthetic
+/// contour-boundary curve into integral pieces. The fill needs the output of
+/// that camera derivation, and this is its shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RationalPiece {
     /// Homogeneous control points `(x·w, y·w, w)`, screen pixels.

@@ -75,13 +75,12 @@ pub struct Segment {
 /// **Per-path constants only.** The Reference stores `stroke_rgba`,
 /// `stroke_width`, `fill_rgba` and `fill_border_width` *per point*, which is how
 /// a gradient along a path is expressed, and this row carries the two endpoints
-/// of that ramp rather than the ramp. That is a deliberate subset, not a
-/// substitute: §10.2's interior colour field (arc-length boundary interpolation
-/// with mean-value coordinates) is fm-5oi's to design and §10.3's stroke ramp is
-/// fm-oac's, and inventing either here would pre-empt a decision with something
-/// nobody reviewed. What this table owes them is the *interning*, the dedup
-/// index, and the per-stage derivation — all of which are structural and none of
-/// which change when the ramp arrives.
+/// of that ramp rather than materializing per-sample colors. The analytic fill
+/// field and true-distance stroke kernels consume these endpoints with their
+/// shared arc-length parameterization. This table owns the *interning*, dedup
+/// index, and per-stage derivation; camera projection remains a derived
+/// [`crate::three_d::ThreeDJob`] concern and never rewrites this object-space
+/// row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// Stroke colour at arc-length 0, linear light, straight alpha.
@@ -102,8 +101,21 @@ pub struct Style {
     pub anti_alias_width: f32,
     /// Stroke joint style.
     pub joint_type: JointType,
+    /// Float mix between the world camera and fixed-frame projection.
+    pub is_fixed_in_frame: f64,
+    /// `(reflectiveness, gloss, shadow)` for vector-compatible shading.
+    pub shading: Vec3,
+    /// Four world-space user clip planes.
+    pub clip_planes: [[f64; 4]; 4],
+    /// Construct the stroke in the path's world plane rather than billboarded
+    /// toward the camera.
+    pub flat_stroke: bool,
+    /// Keep stroke width in world units while the camera frame zooms.
+    pub scale_stroke_with_zoom: bool,
     /// Whether the stroke draws behind the fill (§8.5 batch key).
     pub stroke_behind: bool,
+    /// Opt in to the painter-sequence's per-fragment depth test/write.
+    pub depth_test: bool,
 }
 
 impl Style {
@@ -112,8 +124,8 @@ impl Style {
     /// Bitwise, matching `BatchKey`. The array width is asserted by
     /// construction: adding a field without widening it fails every test here
     /// rather than silently merging two distinct styles.
-    fn bits(&self) -> [u32; 22] {
-        let mut b = [0u32; 22];
+    fn bits(&self) -> [u64; 45] {
+        let mut b = [0u64; 45];
         let scalars = [
             self.stroke_width,
             self.stroke_width_end,
@@ -129,16 +141,20 @@ impl Style {
             .chain(scalars.iter())
             .enumerate()
         {
-            b[i] = v.to_bits();
+            b[i] = u64::from(v.to_bits());
         }
-        // `to_code` is an `f64`, and `as u32` on its bit pattern would take the
-        // *low* 32 bits — which are all zero for every small integer an `f64`
-        // can hold, so all four joint types would have interned as one. Folding
-        // the halves keeps the whole pattern in the key and survives a code that
-        // stops being an integer.
-        let joint = self.joint_type.to_code().to_bits();
-        b[20] = ((joint >> 32) ^ (joint & 0xffff_ffff)) as u32;
-        b[21] = u32::from(self.stroke_behind);
+        b[20] = self.joint_type.to_code().to_bits();
+        b[21] = u64::from(self.stroke_behind);
+        b[22] = self.is_fixed_in_frame.to_bits();
+        for (slot, value) in b[23..26].iter_mut().zip(self.shading) {
+            *slot = value.to_bits();
+        }
+        for (slot, value) in b[26..42].iter_mut().zip(self.clip_planes.iter().flatten()) {
+            *slot = value.to_bits();
+        }
+        b[42] = u64::from(self.flat_stroke);
+        b[43] = u64::from(self.scale_stroke_with_zoom);
+        b[44] = u64::from(self.depth_test);
         b
     }
 
@@ -147,7 +163,13 @@ impl Style {
     pub fn with_uniforms(mut self, u: &Uniforms) -> Style {
         self.anti_alias_width = u.anti_alias_width as f32;
         self.joint_type = u.joint_type;
+        self.is_fixed_in_frame = u.is_fixed_in_frame;
+        self.shading = u.shading;
+        self.clip_planes = u.clip_planes;
+        self.flat_stroke = u.flat_stroke;
+        self.scale_stroke_with_zoom = u.scale_stroke_with_zoom;
         self.stroke_behind = u.stroke_behind;
+        self.depth_test = u.depth_test;
         self
     }
 }
@@ -165,7 +187,13 @@ impl Default for Style {
             fill_border_width: 0.0,
             anti_alias_width: u.anti_alias_width as f32,
             joint_type: u.joint_type,
+            is_fixed_in_frame: u.is_fixed_in_frame,
+            shading: u.shading,
+            clip_planes: u.clip_planes,
+            flat_stroke: u.flat_stroke,
+            scale_stroke_with_zoom: u.scale_stroke_with_zoom,
             stroke_behind: u.stroke_behind,
+            depth_test: u.depth_test,
         }
     }
 }
@@ -174,7 +202,7 @@ impl Default for Style {
 #[derive(Debug, Clone, Default)]
 pub struct StyleTable {
     rows: Vec<Style>,
-    index: HashMap<[u32; 22], u32>,
+    index: HashMap<[u64; 45], u32>,
 }
 
 impl StyleTable {
@@ -615,7 +643,31 @@ mod tests {
                 ..base
             },
             Style {
+                is_fixed_in_frame: 0.5,
+                ..base
+            },
+            Style {
+                shading: [0.1, 0.2, 0.3],
+                ..base
+            },
+            Style {
+                clip_planes: [[1.0, 0.0, 0.0, -1.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+                ..base
+            },
+            Style {
+                flat_stroke: true,
+                ..base
+            },
+            Style {
+                scale_stroke_with_zoom: true,
+                ..base
+            },
+            Style {
                 stroke_behind: true,
+                ..base
+            },
+            Style {
+                depth_test: true,
                 ..base
             },
         ];
@@ -635,15 +687,30 @@ mod tests {
     #[test]
     fn uniforms_reach_the_style_row() {
         let u = Uniforms {
+            is_fixed_in_frame: 0.25,
+            shading: [0.1, 0.2, 0.3],
+            clip_planes: [[1.0, 0.0, 0.0, -2.0], [0.0; 4], [0.0; 4], [0.0; 4]],
             anti_alias_width: 2.5,
             joint_type: JointType::Bevel,
+            flat_stroke: true,
+            scale_stroke_with_zoom: true,
             stroke_behind: true,
+            depth_test: true,
             ..Uniforms::default()
         };
         let s = Style::default().with_uniforms(&u);
+        assert_eq!(s.is_fixed_in_frame, 0.25);
+        assert_eq!(s.shading, [0.1, 0.2, 0.3]);
+        assert_eq!(
+            s.clip_planes,
+            [[1.0, 0.0, 0.0, -2.0], [0.0; 4], [0.0; 4], [0.0; 4]]
+        );
         assert_eq!(s.anti_alias_width, 2.5);
         assert_eq!(s.joint_type, JointType::Bevel);
+        assert!(s.flat_stroke);
+        assert!(s.scale_stroke_with_zoom);
         assert!(s.stroke_behind);
+        assert!(s.depth_test);
     }
 
     #[test]

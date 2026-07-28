@@ -869,6 +869,13 @@ pub enum FrameJobError {
     BinningViewportMismatch,
     /// The tile command indices name a different painter-ordered plan.
     BinningPlanMismatch,
+    /// The affine-only frame job received vector semantics that require
+    /// [`crate::three_d::ThreeDJob`]'s captured camera and shared painter
+    /// sequence.
+    CameraProjectionRequired {
+        /// Painter-sequence instance that requires the camera route.
+        instance: u32,
+    },
 }
 
 impl std::fmt::Display for FrameJobError {
@@ -899,6 +906,10 @@ impl std::fmt::Display for FrameJobError {
                 f.write_str("binning viewport does not match the frame")
             }
             Self::BinningPlanMismatch => f.write_str("binning does not match the render plan"),
+            Self::CameraProjectionRequired { instance } => write!(
+                f,
+                "retained instance {instance} requires camera projection; render it through ThreeDJob"
+            ),
         }
     }
 }
@@ -1028,7 +1039,7 @@ impl<'a> FrameJob<'a> {
         let segments = plan.segments();
         let mut draws: Vec<Option<Draw>> = Vec::with_capacity(plan.shapes().instances().len());
 
-        for inst in plan.shapes().instances() {
+        for (instance_index, inst) in plan.shapes().instances().iter().enumerate() {
             // Every instance gets a slot, including the ones that draw nothing.
             // `Binning`'s command lists hold **instance** indices, so a compacted
             // draw list would silently pair each command with the wrong shape and
@@ -1046,6 +1057,25 @@ impl<'a> FrameJob<'a> {
             let lo = shape.first_segment as usize;
             let hi = lo + shape.segment_count as usize;
             let segs = &segments[lo.min(segments.len())..hi.min(segments.len())];
+            let camera_uniform = style.is_fixed_in_frame != 0.0
+                || style.shading != [0.0; 3]
+                || style
+                    .clip_planes
+                    .iter()
+                    .flatten()
+                    .any(|component| *component != 0.0)
+                || style.scale_stroke_with_zoom
+                || style.depth_test;
+            let leaves_view_plane = segs.iter().any(|segment| {
+                [segment.p0, segment.p1, segment.p2]
+                    .iter()
+                    .any(|point| point[2] != 0.0)
+            }) || inst.offset[2] != 0.0;
+            if camera_uniform || leaves_view_plane {
+                return Err(FrameJobError::CameraProjectionRequired {
+                    instance: instance_index as u32,
+                });
+            }
             let translate = fill::instance_translation(inst, map);
 
             let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
@@ -3200,6 +3230,18 @@ mod tests {
                 Err(FrameJobError::UnsupportedEngine { engine: got }) if got == engine
             ));
         }
+    }
+
+    #[test]
+    fn affine_job_refuses_camera_and_depth_vector_semantics() {
+        let (mut stage, mobs) = corpus();
+        stage.uniforms_mut(mobs[0]).expect("live").depth_test = true;
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        assert!(matches!(
+            FrameJob::new(&plan, &mono, &binning, cfg),
+            Err(FrameJobError::CameraProjectionRequired { instance: 0 })
+        ));
     }
 
     #[test]

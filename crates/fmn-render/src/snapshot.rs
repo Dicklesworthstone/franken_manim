@@ -44,7 +44,7 @@ use fmn_hash::{Digest, Schema, Writer};
 /// Bumping the minor version is how a *compatible* IR extension announces
 /// itself; the major version is for a reshape. Either way the digest moves, and
 /// the golden it moves is adjudicated rather than re-blessed.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 0);
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 1);
 
 /// Serialize a plan canonically.
 ///
@@ -102,7 +102,17 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
             w.put_f64(f64::from(v));
         }
         w.put_f64(st.joint_type.to_code());
+        w.put_f64(st.is_fixed_in_frame);
+        for component in st.shading {
+            w.put_f64(component);
+        }
+        for component in st.clip_planes.iter().flatten() {
+            w.put_f64(*component);
+        }
+        w.put_bool(st.flat_stroke);
+        w.put_bool(st.scale_stroke_with_zoom);
         w.put_bool(st.stroke_behind);
+        w.put_bool(st.depth_test);
     }
 
     let instances = plan.shapes().instances();
@@ -162,15 +172,24 @@ pub fn describe(plan: &RenderPlan) -> String {
     for (i, st) in plan.styles().rows().iter().enumerate() {
         let _ = writeln!(
             out,
-            "  style {i}: stroke {:?}->{:?} w {:.4}->{:.4} fill {:?} aa {:.4} joint {:?} behind {}",
+            "  style {i}: stroke {:?}->{:?} w {:.4}->{:.4} fill {:?}->{:?} border {:.4} aa {:.4} \
+             joint {:?} fixed {:.4} shading {:?} clip {:?} flat {} zoom {} behind {} depth {}",
             st.stroke_rgba,
             st.stroke_rgba_end,
             st.stroke_width,
             st.stroke_width_end,
             st.fill_rgba,
+            st.fill_rgba_end,
+            st.fill_border_width,
             st.anti_alias_width,
             st.joint_type,
+            st.is_fixed_in_frame,
+            st.shading,
+            st.clip_planes,
+            st.flat_stroke,
+            st.scale_stroke_with_zoom,
             st.stroke_behind,
+            st.depth_test,
         );
     }
     for inst in plan.shapes().instances() {
@@ -201,7 +220,7 @@ pub fn hint_names_are_distinct(hints: &[Hint]) -> bool {
 mod tests {
     use super::*;
     use crate::plan::RenderPlan;
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage};
+    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage, Uniforms};
 
     /// The fixture scene the golden below pins.
     ///
@@ -292,7 +311,14 @@ mod tests {
     /// position, so storing absolute points meant every copy of an interned
     /// outline rendered wherever the first copy happened to be. The golden is
     /// what surfaced it as a decision rather than a silent difference.
-    const FIXTURE_DIGEST: &str = "0735d11efb8c270abe7384a3f6b377f9502047e28254a82e8dfcf09def9feb37";
+    ///
+    /// **Moved again, 2026-07-28 (fm-diu).** Snapshot schema 1.1 adds the
+    /// camera, clip, shading, stroke-construction and depth fields that were
+    /// already part of Marionette's batch key but had been dropped from
+    /// Lumen's retained style row. The dump above adjudicates the fixture's
+    /// default values; dedicated sensitivity tests move the digest when one
+    /// changes.
+    const FIXTURE_DIGEST: &str = "bbf8e9c59a7a6ea6e7cbbc904b4bccbe98c0cbdc719e82b75d18f6524ab53e66";
 
     #[test]
     fn the_fixture_ir_is_bit_locked() {
@@ -362,6 +388,78 @@ mod tests {
         let mut plan2 = RenderPlan::new();
         plan2.sync(&stage2, 0);
         assert_ne!(digest(&plan2).expect("encodes"), before);
+    }
+
+    #[test]
+    fn the_snapshot_moves_when_each_render_uniform_moves() {
+        let stage = fixture();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let before = digest(&plan).expect("encodes");
+
+        let cases = [
+            (
+                "fixed",
+                Uniforms {
+                    is_fixed_in_frame: 0.5,
+                    ..Uniforms::default()
+                },
+            ),
+            (
+                "shading",
+                Uniforms {
+                    shading: [0.1, 0.2, 0.3],
+                    ..Uniforms::default()
+                },
+            ),
+            (
+                "clip",
+                Uniforms {
+                    clip_planes: [[1.0, 0.0, 0.0, -1.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+                    ..Uniforms::default()
+                },
+            ),
+            (
+                "flat",
+                Uniforms {
+                    flat_stroke: true,
+                    ..Uniforms::default()
+                },
+            ),
+            (
+                "zoom",
+                Uniforms {
+                    scale_stroke_with_zoom: true,
+                    ..Uniforms::default()
+                },
+            ),
+            (
+                "behind",
+                Uniforms {
+                    stroke_behind: true,
+                    ..Uniforms::default()
+                },
+            ),
+            (
+                "depth",
+                Uniforms {
+                    depth_test: true,
+                    ..Uniforms::default()
+                },
+            ),
+        ];
+        for (name, uniforms) in cases {
+            let mut changed = fixture();
+            let mob = changed.draw_plan().items()[0].mob;
+            *changed.uniforms_mut(mob).expect("live") = uniforms;
+            let mut changed_plan = RenderPlan::new();
+            changed_plan.sync(&changed, 0);
+            assert_ne!(
+                digest(&changed_plan).expect("encodes"),
+                before,
+                "{name} must participate in the snapshot"
+            );
+        }
     }
 
     #[test]

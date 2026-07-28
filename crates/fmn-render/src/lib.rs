@@ -42,8 +42,9 @@ pub mod three_d;
 pub use bin::{Binning, BinningError, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
 pub use camera::{
-    CAMERA_FRAME_Z_INDEX, Camera, CameraConfig, CameraError, CameraFrame, ClipPoint, DEFAULT_FOVY,
-    DEFAULT_LIGHT_POSITION, EdgeSampleLimit, THREE_D_CAMERA_SAMPLES, ThreeDCamera,
+    CAMERA_FRAME_Z_INDEX, Camera, CameraConfig, CameraError, CameraFrame, ClipPoint,
+    ClippedQuadratic, DEFAULT_FOVY, DEFAULT_LIGHT_POSITION, EdgeSampleLimit,
+    THREE_D_CAMERA_SAMPLES, ThreeDCamera,
 };
 pub use engine::{
     AA_COMPLEX_2X_CROSSINGS, AA_COMPLEX_4X_CROSSINGS, AA_STROKE_COMPLEX_MIN_WIDTH_BANDS,
@@ -67,5 +68,5 @@ pub use texture::{
 pub use three_d::{
     DARK_SHIFT, GLOW_DOT_FACTOR, SURFACE_SHADING, SurfaceDraw, SurfaceMaterial, SurfaceMesh,
     SurfaceVertex, TRUE_DOT_AA_WIDTH, TextureMaterial, ThreeDDraw, ThreeDError, ThreeDJob,
-    TrueDotDraw, finalize_color, smoothstep, true_dot_alpha, unit_normal,
+    TrueDotDraw, VectorDraw, finalize_color, smoothstep, true_dot_alpha, unit_normal,
 };
