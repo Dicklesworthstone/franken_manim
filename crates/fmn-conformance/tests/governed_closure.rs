@@ -174,6 +174,7 @@ fn git_dependencies_ride_their_suite_lock_pins() {
     let cargo_lock = repo_file("Cargo.lock");
     // (git-dep package name, owning repo in SUITE.lock)
     let git_deps = [
+        ("asupersync", "asupersync"),
         ("fmd-font", "franken_markdown"),
         ("fmd-math", "franken_markdown"),
     ];
