@@ -397,11 +397,19 @@ mod tests {
         // §8.2's exported NumPy view can mutate points without any Stage method
         // being called.
         let (mut stage, mob) = staged_circle();
-        {
-            let entry = stage.get_mut(mob).expect("live");
-            let view = entry.buffer.export_view(true);
-            assert!(view.write(0, "point", &[5.0, 0.0, 0.0]), "the view writes");
-        }
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("point field");
+        assert_eq!(
+            Hint::of(&stage, mob),
+            Hint::General,
+            "a zero-copy writer need not call RecordView::write"
+        );
+        assert!(view.write(0, "point", &[5.0, 0.0, 0.0]), "the view writes");
+        drop(view);
         assert_eq!(Hint::of(&stage, mob), Hint::General);
     }
 

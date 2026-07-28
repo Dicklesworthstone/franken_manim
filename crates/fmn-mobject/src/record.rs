@@ -19,8 +19,10 @@
 //! - V2 views pin their generation;
 //! - V3 live views alias the current generation, resize/restore detaches
 //!   them with NumPy-natural semantics;
-//! - V4 every write bumps revision counters — render state is dirty by
-//!   comparison, never by eager notification;
+//! - V4 every engine-mediated write bumps revision counters — render state is
+//!   dirty by comparison, never by eager notification; because a foreign
+//!   zero-copy writer cannot make that callback, writable-view lifetime forces
+//!   refresh and detaching one conservatively bumps every field it exposed;
 //! - V5 a generation is never simultaneously snapshot-shared and
 //!   view-aliased (writers/view-exporters unshare; snapshots eagerly copy
 //!   viewed buffers);
@@ -306,6 +308,17 @@ impl RecordBuffer {
             .is_some_and(|i| self.storage.writable_field_views[i].load(Ordering::Acquire) > 0)
     }
 
+    /// Whether a writable view can mutate `field` without an engine-mediated
+    /// write callback.
+    ///
+    /// A whole-buffer view affects every field; a field-scoped view affects
+    /// only its declared field. Render consumers use this predicate rather than
+    /// weakening field-scoped invalidation into object-wide invalidation.
+    #[must_use]
+    pub fn writable_view_affects(&self, field: &str) -> bool {
+        self.has_writable_whole_view() || self.field_has_writable_view(field)
+    }
+
     fn shared_beyond_views(&self) -> bool {
         // Snapshot clones hold Arcs but never register as views; any strong
         // count beyond ourselves + live views is snapshot sharing.
@@ -430,8 +443,14 @@ impl RecordBuffer {
     /// range written since the last take. Feeds §10.8's dirty bounds.
     pub fn take_dirty_span(&mut self, field: &str) -> Option<(usize, usize)> {
         let index = self.schema.index_of(field)?;
+        let forced = self.writable_view_affects(field) && self.len > 0;
         let mut spans = self.storage.dirty_spans.lock().expect("span lock poisoned");
-        spans[index].take().map(|s| (s.min, s.max))
+        let written = spans[index].take().map(|s| (s.min, s.max));
+        if forced {
+            Some((0, self.len - 1))
+        } else {
+            written
+        }
     }
 
     // ------------------------------------------------------------ locking
@@ -720,38 +739,70 @@ impl RecordView {
         Some(cells[start..start + width].to_vec())
     }
 
-    /// Write through the view: visible to the engine while attached, and it
-    /// marks render state dirty via the revisions (V4). Read-only views and
-    /// out-of-scope fields return `false`.
-    pub fn write(&self, index: usize, field: &str, values: &[f32]) -> bool {
+    fn write_cells(&self, index: usize, field: &str, values: &[f32]) -> Option<usize> {
         if !self.writable {
-            return false;
+            return None;
         }
-        let Some(field_index) = self.schema.index_of(field) else {
-            return false;
-        };
+        let field_index = self.schema.index_of(field)?;
         if !self.allows(field_index) {
-            return false;
+            return None;
         }
         let off = self.schema.offset(field).expect("field exists");
         let width = self.schema.field_width(field).expect("field exists");
         if index >= self.len || values.len() != width {
+            return None;
+        }
+        let mut cells = self.storage.cells.write().expect("storage lock poisoned");
+        let start = index * self.schema.stride() + off;
+        cells[start..start + width].copy_from_slice(values);
+        Some(field_index)
+    }
+
+    /// Write through the view: visible to the engine while attached, and it
+    /// marks render state dirty via the revisions (V4). Read-only views and
+    /// out-of-scope fields return `false`.
+    pub fn write(&self, index: usize, field: &str, values: &[f32]) -> bool {
+        let Some(field_index) = self.write_cells(index, field, values) else {
             return false;
-        }
-        {
-            let mut cells = self.storage.cells.write().expect("storage lock poisoned");
-            let start = index * self.schema.stride() + off;
-            cells[start..start + width].copy_from_slice(values);
-        }
+        };
         self.storage.mark_written(field_index, index, index);
         true
+    }
+
+    /// Model a write performed directly through foreign zero-copy memory.
+    ///
+    /// A NumPy assignment cannot call back into [`RecordView::write`], so it
+    /// changes the aliased cells without advancing a revision. This bridge and
+    /// conformance hook has those exact semantics: consumers must refresh from
+    /// the writable-view lifetime flag, and [`Drop`] advances every exposed
+    /// field once the foreign writer detaches. Engine-mediated callers should
+    /// use [`RecordView::write`] instead.
+    #[doc(hidden)]
+    pub fn write_foreign(&self, index: usize, field: &str, values: &[f32]) -> bool {
+        self.write_cells(index, field, values).is_some()
     }
 }
 
 impl Drop for RecordView {
     fn drop(&mut self) {
-        self.storage.views.fetch_sub(1, Ordering::AcqRel);
         if self.writable {
+            // A real zero-copy consumer (NumPy is the compatibility contract)
+            // writes the exposed cells directly and cannot call
+            // `RecordView::write`, so revision counters cannot be the only
+            // invalidation channel. While the view is live, observers refresh
+            // through `writable_view_affects`; on detach, conservatively bump
+            // every exposed field so a write after the final observation cannot
+            // disappear when the lifetime flag clears.
+            if self.len > 0 {
+                match self.field {
+                    Some(index) => self.storage.mark_written(index, 0, self.len - 1),
+                    None => {
+                        for index in 0..self.schema.fields().len() {
+                            self.storage.mark_written(index, 0, self.len - 1);
+                        }
+                    }
+                }
+            }
             match self.field {
                 Some(index) => {
                     self.storage.writable_field_views[index].fetch_sub(1, Ordering::AcqRel);
@@ -763,6 +814,7 @@ impl Drop for RecordView {
                 }
             }
         }
+        self.storage.views.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -811,7 +863,7 @@ impl MirrorSet {
         let revision = buffer.field_revision(field)?;
         let width = buffer.schema().field_width(field)?;
         let storage = buffer.storage_id();
-        let forced = buffer.has_writable_whole_view() || buffer.field_has_writable_view(field);
+        let forced = buffer.writable_view_affects(field);
         let stale = match self.fields.get(field) {
             Some(mirror) => {
                 mirror.seen_revision != revision

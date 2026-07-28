@@ -164,6 +164,12 @@ impl Stage {
         if slot.tag.is_general() {
             return None;
         }
+        // A foreign zero-copy writer can mutate the point cells without
+        // calling a Stage or RecordView method, so the stamped revision alone
+        // cannot prove the tag's payload while writable storage is exposed.
+        if entry.buffer.writable_view_affects("point") {
+            return None;
+        }
         let current = entry.buffer.field_revision("point")?;
         (slot.point_revision == Some(current)).then_some(slot.tag)
     }
@@ -277,6 +283,50 @@ mod tests {
         view.write(0, "point", &[3.0, 3.0, 3.0]);
         drop(view);
         assert_eq!(stage.primitive_hint(mob), None);
+    }
+
+    #[test]
+    fn a_field_scoped_point_view_demotes_before_any_write() {
+        let tag = ShapeTag::Dot {
+            center: [0.0; 3],
+            radius: 0.08,
+        };
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_points(&square_points()));
+        stage.set_shape(mob, tag);
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("point field");
+
+        assert_eq!(
+            stage.primitive_hint(mob),
+            None,
+            "the view may write outside an engine callback at any time"
+        );
+        drop(view);
+    }
+
+    #[test]
+    fn a_field_scoped_nonpoint_view_does_not_demote_geometry() {
+        let tag = ShapeTag::Dot {
+            center: [0.0; 3],
+            radius: 0.08,
+        };
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_points(&square_points()));
+        stage.set_shape(mob, tag);
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("rgba", true)
+            .expect("rgba field");
+
+        assert_eq!(stage.primitive_hint(mob), Some(tag));
+        drop(view);
     }
 
     #[test]

@@ -592,7 +592,11 @@ impl<'a> FrameJob<'a> {
                 shape: inst.shape,
                 translate,
                 style,
-                kernel: FillKernel::select(shape, segs, map, translate),
+                kernel: if inst.hint_unsafe {
+                    FillKernel::General
+                } else {
+                    FillKernel::select(shape, segs, map, translate)
+                },
                 joins: stroke::join_wedges(segs, &shape.subpath_starts, &style, map, translate),
                 field: if draws_fill && !flat {
                     Some(GradientField::build(segs, map))
@@ -1014,7 +1018,7 @@ mod tests {
     use super::*;
     use crate::bin::covers_tile;
     use crate::fill::MonoTable;
-    use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
+    use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage};
 
     /// A vmobject with a filled and/or stroked style written across its records.
     ///
@@ -1892,6 +1896,102 @@ mod tests {
             FrameJob::new(&plan, &mono, &binning, cfg),
             Err(FrameJobError::BinningPlanMismatch)
         ));
+    }
+
+    #[test]
+    fn a_foreign_style_view_write_changes_the_frame_without_a_revision_callback() {
+        let (mut stage, mobs) = corpus();
+        let cfg = config();
+        let render = |stage: &Stage| {
+            let (plan, mono, binning) = derive(stage, cfg, default_tiling());
+            FrameJob::new(&plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts")
+                .render(1)
+                .expect("render")
+        };
+        let before = render(&stage);
+
+        let revision = stage
+            .get(mobs[0])
+            .expect("live")
+            .buffer
+            .field_revision("fill_rgba");
+        let view = stage
+            .get_mut(mobs[0])
+            .expect("live")
+            .buffer
+            .export_field_view("fill_rgba", true)
+            .expect("fill field");
+        for record in 0..view.len() {
+            assert!(view.write_foreign(record, "fill_rgba", &[0.0, 0.0, 1.0, 0.7]));
+        }
+        assert_eq!(
+            stage
+                .get(mobs[0])
+                .expect("live")
+                .buffer
+                .field_revision("fill_rgba"),
+            revision,
+            "the foreign writer must not accidentally exercise revision invalidation"
+        );
+        let after = render(&stage);
+        assert_ne!(
+            before.as_bytes(),
+            after.as_bytes(),
+            "an untracked live style edit must reach the current frame"
+        );
+        drop(view);
+    }
+
+    #[test]
+    fn a_writable_point_view_forces_the_general_fill_kernel() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(
+            &rect_points(20.0, 20.0, 60.0, 60.0),
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.set_shape(
+            mob,
+            ShapeTag::Rect {
+                center: [40.0, 40.0, 0.0],
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+        stage.add_to_scene(mob).expect("live");
+        let cfg = config();
+
+        let (mut plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        {
+            let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
+            assert!(matches!(
+                job.draws[0].as_ref().expect("visible").kernel,
+                FillKernel::Rect { .. }
+            ));
+        }
+
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("point field");
+        plan.sync(&stage, 0);
+        assert!(plan.shapes().instances()[0].hint_unsafe);
+        assert!(matches!(
+            FrameJob::new(&plan, &mono, &binning, cfg),
+            Err(FrameJobError::BinningPlanMismatch)
+        ));
+        let viewed_binning = Binning::build(&plan, cfg.viewport, default_tiling(), cfg.map);
+        let viewed =
+            FrameJob::new(&plan, &mono, &viewed_binning, cfg).expect("matching viewed artifacts");
+        assert_eq!(
+            viewed.draws[0].as_ref().expect("visible").kernel,
+            FillKernel::General
+        );
+        drop(view);
     }
 
     /// Assert two frames are byte-identical, reporting the **first differing

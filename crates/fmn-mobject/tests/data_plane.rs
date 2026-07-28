@@ -64,6 +64,8 @@ fn field_scoped_views_and_dirty() {
     assert!(buffer.field_has_writable_view("point"));
     assert!(!buffer.field_has_writable_view("fill_rgba"));
     assert!(!buffer.has_writable_whole_view());
+    assert!(buffer.writable_view_affects("point"));
+    assert!(!buffer.writable_view_affects("fill_rgba"));
     drop(point_view);
     assert!(!buffer.field_has_writable_view("point"));
 
@@ -73,6 +75,54 @@ fn field_scoped_views_and_dirty() {
     buffer.write(1, "fill_rgba", &[0.5; 4]);
     assert_eq!(buffer.field_revision("point").unwrap(), point_rev);
     assert!(buffer.field_revision("fill_rgba").unwrap() > fill_rev);
+}
+
+#[test]
+fn writable_view_detach_conservatively_revises_exactly_its_scope() {
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 2);
+    let point_before = buffer.field_revision("point").unwrap();
+    let fill_before = buffer.field_revision("fill_rgba").unwrap();
+
+    // Do not call `RecordView::write`: this models a foreign zero-copy writer,
+    // which can mutate the exported cells without an engine callback. Merely
+    // exposing writable storage must close the final invalidation window when
+    // the view detaches.
+    let point_view = buffer.export_field_view("point", true).unwrap();
+    assert!(point_view.write_foreign(0, "point", &[3.0, 4.0, 5.0]));
+    assert_eq!(
+        buffer.field_revision("point"),
+        Some(point_before),
+        "a foreign write cannot advance the engine's revision"
+    );
+    assert_eq!(buffer.read(0, "point"), Some(vec![3.0, 4.0, 5.0]));
+    assert_eq!(buffer.take_dirty_span("point"), Some((0, 1)));
+    assert_eq!(
+        buffer.take_dirty_span("point"),
+        Some((0, 1)),
+        "foreign writes remain possible after a span is taken"
+    );
+    assert_eq!(buffer.take_dirty_span("fill_rgba"), None);
+    drop(point_view);
+    assert!(buffer.field_revision("point").unwrap() > point_before);
+    assert_eq!(buffer.field_revision("fill_rgba").unwrap(), fill_before);
+    assert_eq!(buffer.take_dirty_span("point"), Some((0, 1)));
+    assert_eq!(buffer.take_dirty_span("fill_rgba"), None);
+
+    let revisions: Vec<u64> = buffer
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| buffer.field_revision(&field.name).unwrap())
+        .collect();
+    let whole_view = buffer.export_view(true);
+    drop(whole_view);
+    for (field, before) in buffer.schema().fields().iter().zip(revisions) {
+        assert!(
+            buffer.field_revision(&field.name).unwrap() > before,
+            "whole-buffer detach missed {}",
+            field.name
+        );
+    }
 }
 
 #[test]

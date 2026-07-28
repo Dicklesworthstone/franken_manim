@@ -799,7 +799,8 @@ impl Stage {
             // so the tag is re-stamped against the new buffer rather than
             // arriving stale-by-accident.
             let hint_was_live = entry.shape.point_revision.is_some()
-                && entry.shape.point_revision == entry.buffer.field_revision("point");
+                && entry.shape.point_revision == entry.buffer.field_revision("point")
+                && !entry.buffer.writable_view_affects("point");
             let shape = ShapeSlot {
                 tag: entry.shape.tag,
                 point_revision: hint_was_live
@@ -996,7 +997,8 @@ impl Stage {
         let entry = self.try_get(mob)?;
         let children = entry.submobjects.clone();
         let hint_was_live = entry.shape.point_revision.is_some()
-            && entry.shape.point_revision == entry.buffer.field_revision("point");
+            && entry.shape.point_revision == entry.buffer.field_revision("point")
+            && !entry.buffer.writable_view_affects("point");
         let mut copied = Entry::from_data(entry.buffer.deep_clone());
         copied.shape = ShapeSlot {
             tag: entry.shape.tag,
@@ -1377,21 +1379,33 @@ impl Stage {
                 .map(|slot| {
                     (
                         slot.generation,
-                        slot.entry.as_ref().map(|entry| SnapshotEntry {
-                            buffer: entry.buffer.snapshot_clone(),
-                            submobjects: entry.submobjects.clone(),
-                            parents: entry.parents.clone(),
-                            updaters: entry.updaters.clone(),
-                            updating_suspended: entry.updating_suspended,
-                            is_animating: entry.is_animating,
-                            tracker: entry.tracker,
-                            target: entry.target,
-                            saved_state: entry.saved_state,
-                            pins: entry.pins,
-                            pending_delete: entry.pending_delete,
-                            uniforms: entry.uniforms,
-                            z_index: entry.z_index,
-                            shape: entry.shape,
+                        slot.entry.as_ref().map(|entry| {
+                            let buffer = entry.buffer.snapshot_clone();
+                            let hint_was_live = entry.shape.point_revision.is_some()
+                                && entry.shape.point_revision
+                                    == entry.buffer.field_revision("point")
+                                && !entry.buffer.writable_view_affects("point");
+                            SnapshotEntry {
+                                shape: ShapeSlot {
+                                    tag: entry.shape.tag,
+                                    point_revision: hint_was_live
+                                        .then(|| buffer.field_revision("point"))
+                                        .flatten(),
+                                },
+                                buffer,
+                                submobjects: entry.submobjects.clone(),
+                                parents: entry.parents.clone(),
+                                updaters: entry.updaters.clone(),
+                                updating_suspended: entry.updating_suspended,
+                                is_animating: entry.is_animating,
+                                tracker: entry.tracker,
+                                target: entry.target,
+                                saved_state: entry.saved_state,
+                                pins: entry.pins,
+                                pending_delete: entry.pending_delete,
+                                uniforms: entry.uniforms,
+                                z_index: entry.z_index,
+                            }
                         }),
                     )
                 })

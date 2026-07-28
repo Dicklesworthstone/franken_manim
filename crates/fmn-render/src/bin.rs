@@ -633,6 +633,12 @@ pub fn covers_tile(plan: &RenderPlan, inst: &Instance, map: ScreenMap, rect: [f6
         rect[2] + MARGIN,
         rect[3] + MARGIN,
     ];
+    // A writable point view can change the outline without an engine callback.
+    // The retained row may still carry a hint interned before that view existed,
+    // so only the general predicate is admissible for its lifetime.
+    if inst.hint_unsafe {
+        return covers_convex(plan, shape, map, inst.offset, grown);
+    }
     match shape.hint {
         Hint::Rect {
             center,

@@ -150,6 +150,13 @@ impl Stage {
         acc.finish()
     }
 
+    fn bbox_has_writable_point_view(&self, mob: Mob) -> bool {
+        self.family(mob).into_iter().any(|member| {
+            self.get(member)
+                .is_some_and(|entry| entry.buffer.writable_view_affects("point"))
+        })
+    }
+
     /// The bounding box of `mob`'s whole family (§8.4). Lazily recomputed; see
     /// the module docs for the invalidation model.
     #[must_use]
@@ -158,9 +165,12 @@ impl Stage {
         let Some(e) = self.get(mob) else {
             return BoundingBox::ZERO;
         };
-        let cached = {
-            let c = e.bbox_cell().borrow();
-            (c.signature == Some(sig)).then_some(c.value)
+        let forced = self.bbox_has_writable_point_view(mob);
+        let cached = if forced {
+            None
+        } else {
+            let cache = e.bbox_cell().borrow();
+            (cache.signature == Some(sig)).then_some(cache.value)
         };
         if let Some(v) = cached {
             return v;

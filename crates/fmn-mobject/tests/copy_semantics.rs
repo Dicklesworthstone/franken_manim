@@ -11,7 +11,7 @@
 //! typed refusals) are covered by the direct tests at the bottom.
 
 use fmn_mobject::record::RecordSchema;
-use fmn_mobject::{Mob, Mobject, RecordBuffer, Stage, StageError};
+use fmn_mobject::{Mob, Mobject, RecordBuffer, ShapeTag, Stage, StageError};
 
 // ------------------------------------------------------------ fixture rig
 
@@ -490,6 +490,57 @@ fn views_stay_on_the_original() {
         stage.get(copy).unwrap().buffer.read(0, "point"),
         Some(vec![1.0, 2.0, 3.0])
     );
+}
+
+#[test]
+fn copies_do_not_resurrect_a_hint_while_points_are_writably_viewed() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[
+        [-1.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ]));
+    let tag = ShapeTag::Rect {
+        center: [0.0; 3],
+        width: 2.0,
+        height: 2.0,
+    };
+    stage.set_shape(mob, tag);
+    let view = stage
+        .get_mut(mob)
+        .expect("live")
+        .buffer
+        .export_field_view("point", true)
+        .expect("point field");
+    assert_eq!(stage.primitive_hint(mob), None);
+
+    let copy = stage.copy_family(mob).expect("copy");
+    assert_eq!(stage.shape(copy), tag, "durable class identity travels");
+    assert_eq!(
+        stage.primitive_hint(copy),
+        None,
+        "a copied buffer must not re-stamp an untrusted payload"
+    );
+
+    let mut target = Stage::new();
+    let transferred = stage.copy_into(mob, &mut target).expect("cross-stage copy");
+    assert_eq!(target.shape(transferred), tag);
+    assert_eq!(target.primitive_hint(transferred), None);
+
+    let snapshot = stage.snapshot();
+    stage.restore(&snapshot);
+    assert!(
+        !view.is_attached_to(&stage.get(mob).expect("restored").buffer),
+        "snapshot restore detaches the original view generation"
+    );
+    assert_eq!(
+        stage.primitive_hint(mob),
+        None,
+        "snapshot restore must not re-stamp an untrusted payload"
+    );
+    drop(view);
 }
 
 /// `become_mobject` detaches outstanding views exactly as under resize (V6)

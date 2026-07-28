@@ -303,6 +303,12 @@ pub struct Instance {
     /// foldable into `revisions`: it *poisons* the tile key instead, and the
     /// difference is that a poisoned tile can never hit however many frames pass.
     pub volatile: bool,
+    /// Whether writable point storage makes the compiled primitive hint unsafe.
+    ///
+    /// This is narrower than [`Instance::volatile`]: a field-scoped colour view
+    /// poisons cached pixels but cannot invalidate a geometry hint. Binning and
+    /// the frame compiler use this bit to take their general, fail-closed paths.
+    pub hint_unsafe: bool,
 }
 
 /// Interned outlines and their occurrences.
@@ -681,6 +687,7 @@ mod tests {
                 order: i as u32,
                 revisions: 0,
                 volatile: false,
+                hint_unsafe: false,
             });
         }
         assert_eq!(compiles, 1, "the outline must compile once");

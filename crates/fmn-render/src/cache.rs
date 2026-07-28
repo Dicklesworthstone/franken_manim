@@ -670,6 +670,30 @@ mod tests {
     }
 
     #[test]
+    fn field_scoped_geometry_and_style_views_poison_their_tiles() {
+        for field in ["point", "fill_rgba"] {
+            let (mut stage, mobs) = scene();
+            let mut c = Compositor::new();
+            c.frame(&stage, 0, output());
+            let (clean, _) = c.frame(&stage, 0, output());
+            assert!(clean.hits > 0);
+
+            let view = stage
+                .get_mut(mobs[0])
+                .expect("live")
+                .buffer
+                .export_field_view(field, true)
+                .expect("render field");
+            let (poisoned, _) = c.frame(&stage, 0, output());
+            assert!(
+                poisoned.poisoned > 0,
+                "writable {field} view left stale tiles reusable"
+            );
+            drop(view);
+        }
+    }
+
+    #[test]
     fn a_poisoned_tile_is_never_stored() {
         // The stronger half of poisoning: not merely "does not hit", but leaves
         // nothing behind that a later frame could hit.

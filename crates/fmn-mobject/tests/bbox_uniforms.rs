@@ -47,6 +47,47 @@ fn point_write_channel_invalidates_exactly_once() {
 }
 
 #[test]
+fn writable_point_views_force_boxes_but_unrelated_views_do_not() {
+    let mut stage = Stage::new();
+    let m = leaf(&mut stage, &[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
+    let _ = stage.get_bounding_box(m);
+    let baseline = stage.bbox_materializations(m);
+
+    let point_view = stage
+        .get_mut(m)
+        .expect("live")
+        .buffer
+        .export_field_view("point", true)
+        .expect("point field");
+    let _ = stage.get_bounding_box(m);
+    let _ = stage.get_bounding_box(m);
+    assert_eq!(
+        stage.bbox_materializations(m),
+        baseline + 2,
+        "each observation must refresh while foreign point writes are possible"
+    );
+    drop(point_view);
+
+    // Detach bumps the point revision once, after which normal laziness resumes.
+    let _ = stage.get_bounding_box(m);
+    let settled = stage.bbox_materializations(m);
+    let rgba_view = stage
+        .get_mut(m)
+        .expect("live")
+        .buffer
+        .export_field_view("rgba", true)
+        .expect("rgba field");
+    let _ = stage.get_bounding_box(m);
+    let _ = stage.get_bounding_box(m);
+    assert_eq!(
+        stage.bbox_materializations(m),
+        settled,
+        "a nonpoint field cannot move a bounding box"
+    );
+    drop(rgba_view);
+}
+
+#[test]
 fn positional_op_invalidates() {
     let mut stage = Stage::new();
     let m = leaf(&mut stage, &[[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]);

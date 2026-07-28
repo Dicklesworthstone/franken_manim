@@ -31,7 +31,7 @@ use crate::table::{Instance, Segment, ShapeTable, Style, StyleTable, compile_sha
 use fmn_core::types::Vec3;
 use fmn_geom::quadpath::QuadPath;
 use fmn_hash::{Digest, Sha256};
-use fmn_mobject::{Mob, Stage};
+use fmn_mobject::{Mob, RecordBuffer, Stage};
 use std::collections::HashMap;
 
 /// The axes a compiled outline depends on.
@@ -44,6 +44,26 @@ pub const SHAPE_AXES: [Axis; 3] = [Axis::Topology, Axis::Geometry, Axis::Transfo
 
 /// The axes a style row depends on.
 pub const STYLE_AXES: [Axis; 1] = [Axis::Style];
+
+/// Record fields the compiled outline actually observes today.
+///
+/// Keep this consumption list exact: a field-scoped view of user metadata must
+/// not turn into object-wide recompilation merely because both share a record.
+const SHAPE_VIEW_FIELDS: [&str; 1] = ["point"];
+
+/// Record fields [`read_style`] observes.
+const STYLE_VIEW_FIELDS: [&str; 4] = [
+    "stroke_rgba",
+    "stroke_width",
+    "fill_rgba",
+    "fill_border_width",
+];
+
+fn writable_view_affects_any(buffer: &RecordBuffer, fields: &[&str]) -> bool {
+    fields
+        .iter()
+        .any(|field| buffer.writable_view_affects(field))
+}
 
 /// What one [`RenderPlan::sync`] did, and — more usefully — did not do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -215,10 +235,16 @@ impl RenderPlan {
             seen.push(mob);
 
             let previous = self.retained.get(&mob).cloned();
+            let (hint_unsafe, style_unsafe) = stage.get(mob).map_or((false, false), |entry| {
+                (
+                    writable_view_affects_any(&entry.buffer, &SHAPE_VIEW_FIELDS),
+                    writable_view_affects_any(&entry.buffer, &STYLE_VIEW_FIELDS),
+                )
+            });
 
             // --- geometry: the expensive half, and the one that must be skipped.
             let (shape, offset) = match &previous {
-                Some(r) if !r.shape_dep.is_stale(&now) => {
+                Some(r) if !hint_unsafe && !r.shape_dep.is_stale(&now) => {
                     stats.shapes_reused += 1;
                     (r.shape, r.offset)
                 }
@@ -267,7 +293,7 @@ impl RenderPlan {
             // --- style: the cheap half, gated on its own axis so a moved point
             // does not re-intern a colour.
             let style = match &previous {
-                Some(r) if !r.style_dep.is_stale(&now) => r.style,
+                Some(r) if !style_unsafe && !r.style_dep.is_stale(&now) => r.style,
                 _ => {
                     stats.styles_rebuilt += 1;
                     let row = read_style(stage, mob);
@@ -279,9 +305,7 @@ impl RenderPlan {
             // view can mutate points with no Stage method called and therefore
             // no revision bumped, so it cannot be folded into `revisions` — it
             // has to be a separate flag that poisons any cache downstream.
-            let volatile = stage
-                .get(mob)
-                .is_some_and(|e| e.buffer.has_writable_whole_view());
+            let volatile = hint_unsafe || style_unsafe;
 
             self.shapes.push_instance(Instance {
                 shape,
@@ -291,6 +315,7 @@ impl RenderPlan {
                 order: order as u32,
                 revisions: now.fold(),
                 volatile,
+                hint_unsafe,
             });
 
             self.retained.insert(
@@ -443,6 +468,10 @@ impl RenderPlan {
                 hash.f64(component);
             }
             hash.u32(instance.order);
+            // A point view disables hint-derived tile classification. Binning
+            // built on the other side of this transition is therefore stale
+            // even when the point bytes themselves have not moved.
+            hash.bool(instance.hint_unsafe);
         }
 
         PlanIdentity(hash.finish())
@@ -634,6 +663,118 @@ mod tests {
         assert_eq!(second.shapes_shared, 0);
         assert_eq!(second.shapes_reused, 3);
         assert_eq!(second.styles_rebuilt, 0);
+    }
+
+    #[test]
+    fn writable_views_refresh_exactly_the_render_fields_they_expose() {
+        let (mut stage, mobs) = staged(1);
+        let mob = mobs[0];
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+
+        let point_view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("point field");
+        for _ in 0..2 {
+            let stats = plan.sync(&stage, 0);
+            assert_eq!(stats.shapes_reused, 0);
+            assert_eq!(
+                stats.shapes_shared, 1,
+                "unchanged bytes may re-intern, but must be observed"
+            );
+            assert_eq!(stats.styles_rebuilt, 0);
+            let instance = plan.shapes().instances()[0];
+            assert!(instance.volatile);
+            assert!(instance.hint_unsafe);
+        }
+        drop(point_view);
+
+        // Detaching the writable point view conservatively advances its field
+        // revision, so the final state is observed once more before ordinary
+        // reuse resumes.
+        let detached = plan.sync(&stage, 0);
+        assert_eq!(detached.shapes_reused, 0);
+        assert_eq!(detached.shapes_shared, 1);
+        assert!(!plan.shapes().instances()[0].hint_unsafe);
+        assert_eq!(plan.sync(&stage, 0).shapes_reused, 1);
+
+        let style_view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("fill_rgba", true)
+            .expect("fill field");
+        for _ in 0..2 {
+            let stats = plan.sync(&stage, 0);
+            assert_eq!(stats.shapes_reused, 1);
+            assert_eq!(stats.styles_rebuilt, 1);
+            let instance = plan.shapes().instances()[0];
+            assert!(instance.volatile);
+            assert!(
+                !instance.hint_unsafe,
+                "a colour view cannot invalidate geometry"
+            );
+        }
+        drop(style_view);
+
+        let whole_view = stage.get_mut(mob).expect("live").buffer.export_view(true);
+        let stats = plan.sync(&stage, 0);
+        assert_eq!(stats.shapes_reused, 0);
+        assert_eq!(stats.shapes_shared, 1);
+        assert_eq!(stats.styles_rebuilt, 1);
+        assert!(plan.shapes().instances()[0].hint_unsafe);
+        drop(whole_view);
+    }
+
+    #[test]
+    fn a_writable_custom_field_view_does_not_invalidate_render_state() {
+        let schema = RecordSchema::new(
+            &[
+                ("point", 3),
+                ("stroke_rgba", 4),
+                ("stroke_width", 1),
+                ("joint_angle", 1),
+                ("fill_rgba", 4),
+                ("base_normal", 3),
+                ("fill_border_width", 1),
+                ("user_metadata", 1),
+            ],
+            &["point"],
+            &["point"],
+        );
+        let points = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.5, 0.0],
+            [2.0, 1.0, 0.0],
+        ];
+        let mut buffer = RecordBuffer::new(schema, points.len());
+        for (i, point) in points.iter().enumerate() {
+            buffer.write(i, "point", point);
+            buffer.write(i, "stroke_rgba", &[1.0; 4]);
+            buffer.write(i, "stroke_width", &[2.0]);
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        stage.add_to_scene(mob).expect("live");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+
+        let metadata_view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("user_metadata", true)
+            .expect("custom field");
+        let stats = plan.sync(&stage, 0);
+        assert_eq!(stats.shapes_reused, 1);
+        assert_eq!(stats.styles_rebuilt, 0);
+        assert!(!plan.shapes().instances()[0].volatile);
+        drop(metadata_view);
     }
 
     #[test]
