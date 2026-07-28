@@ -554,6 +554,7 @@ dependencies = [
  "fmd-math",
  "fmn-anim",
  "fmn-core",
+ "fmn-frame",
  "fmn-geom",
  "fmn-hash",
  "fmn-library",

@@ -21,9 +21,10 @@ fmn-output.workspace = true
 fmd-math.workspace = true
 
 [dev-dependencies]
-# Gauntlet-only integration proof for fm-3df. These remain outside the shipped
-# §19 edge set: the conformance library itself does not acquire a scheduler or
-# platform dependency.
+# Gauntlet-only integration proofs for fm-3df/fm-hv4. These remain outside the
+# shipped §19 edge set: the conformance library itself does not acquire frame,
+# scheduler, or platform dependencies.
+fmn-frame.workspace = true
 fmn-platform.workspace = true
 fmn-runtime.workspace = true
 

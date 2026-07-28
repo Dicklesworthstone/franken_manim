@@ -9,13 +9,20 @@
 //! artifact verification, and atomic publication. ffmpeg is optional —
 //! its absence is a capability error naming the native alternative.
 //!
-//! Still to land in this crate: the ordered asynchronous emitter
-//! (fm-hv4) and the sound mixer (fm-0m7).
+//! [`emitter`] is the bounded, preallocated, frame-index-ordered handoff
+//! between Lumen/runtime workers and every sink. Still to land in this
+//! crate: the sound mixer (fm-0m7).
 #![forbid(unsafe_code)]
 
+pub mod emitter;
 pub mod ffmpeg;
 pub mod negotiate;
 
+pub use emitter::{
+    EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport, EmitterStats,
+    FrameReservation, FrameSink, OrderedEmitter, SinkBinding, SinkFailure, SinkMode, SinkReport,
+    SinkWrite,
+};
 pub use ffmpeg::{
     Boundary, BoundaryError, BoundaryReport, EncoderCapabilities, FfmpegTool, HARDWARE_ENCODERS,
     JobLimits, NATIVE_ALTERNATIVE, Provenance,
