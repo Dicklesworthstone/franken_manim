@@ -8,6 +8,9 @@
 
 use crate::plan::{ExecutionPlan, TeamPlan};
 use fmn_platform::clock::{Clock, StdClock};
+use fmn_platform::profile::{
+    ProfileCounter, ProfileLane, ProfilePath, ProfilePhase, ProfileRecorder,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -214,6 +217,8 @@ pub struct PipelineStats {
     pub convert: StageUtilization,
     /// Ordered emission.
     pub emit: StageUtilization,
+    /// Drained effect-model barriers.
+    pub barrier: StageUtilization,
     /// Successful frames per render team.
     pub render_team_frames: Vec<u64>,
     /// Callback wall time per render team.
@@ -337,6 +342,8 @@ pub struct FramePipeline<'a, S: PipelineStages> {
     stages: &'a S,
     cancellation: CancellationToken,
     clock: Arc<dyn Clock>,
+    profile: ProfileRecorder,
+    profile_path: ProfilePath,
 }
 
 impl<S: PipelineStages> fmt::Debug for FramePipeline<'_, S> {
@@ -344,6 +351,8 @@ impl<S: PipelineStages> fmt::Debug for FramePipeline<'_, S> {
         f.debug_struct("FramePipeline")
             .field("plan", self.plan)
             .field("cancellation", &self.cancellation)
+            .field("profile", &self.profile)
+            .field("profile_path", &self.profile_path)
             .finish_non_exhaustive()
     }
 }
@@ -357,6 +366,8 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
             stages,
             cancellation: CancellationToken::new(),
             clock: Arc::new(StdClock::new()),
+            profile: ProfileRecorder::disabled(),
+            profile_path: ProfilePath::scene(0),
         }
     }
 
@@ -372,6 +383,8 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
             stages,
             cancellation,
             clock: Arc::new(StdClock::new()),
+            profile: ProfileRecorder::disabled(),
+            profile_path: ProfilePath::scene(0),
         }
     }
 
@@ -391,7 +404,39 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
             stages,
             cancellation,
             clock,
+            profile: ProfileRecorder::disabled(),
+            profile_path: ProfilePath::scene(0),
         }
+    }
+
+    /// Construct a pipeline with explicit clock and profiling capabilities.
+    ///
+    /// The recorder is disabled by default in every other constructor. A
+    /// profiled composition root hands the same clock to this pipeline and to
+    /// any nested subsystem spans, producing one comparable monotonic epoch.
+    #[must_use]
+    pub fn with_clock_and_profile(
+        plan: &'a ExecutionPlan,
+        stages: &'a S,
+        cancellation: CancellationToken,
+        clock: Arc<dyn Clock>,
+        profile: ProfileRecorder,
+    ) -> Self {
+        Self {
+            plan,
+            stages,
+            cancellation,
+            clock,
+            profile,
+            profile_path: ProfilePath::scene(0),
+        }
+    }
+
+    /// Set the scene/play prefix inherited by every frame and phase record.
+    #[must_use]
+    pub const fn with_profile_path(mut self, path: ProfilePath) -> Self {
+        self.profile_path = path;
+        self
     }
 
     /// A clone of this run's stop handle.
@@ -422,7 +467,11 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
     {
         let clock = Arc::clone(&self.clock);
         let start = clock.monotonic();
-        let counters = Arc::new(Counters::new(self.plan.render_teams.len()));
+        let counters = Arc::new(Counters::new(
+            self.plan.render_teams.len(),
+            self.profile.clone(),
+            self.profile_path,
+        ));
         let slots = Arc::new(SlotTracker::new(self.plan.frames_in_flight.max(1)));
         let cancellation = self.cancellation.clone();
 
@@ -538,10 +587,8 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
 
                 let scene_start = clock.monotonic();
                 let event = catch_unwind(AssertUnwindSafe(|| events.next()));
-                add_duration(
-                    &counters.scene_ns,
-                    elapsed_since(clock.as_ref(), scene_start),
-                );
+                let scene_elapsed = elapsed_since(clock.as_ref(), scene_start);
+                add_duration(&counters.scene_ns, scene_elapsed);
                 let event = match event {
                     Ok(event) => event,
                     Err(_) => {
@@ -558,6 +605,19 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
                 let Some(event) = event else {
                     break;
                 };
+                let path = match &event {
+                    PipelineEvent::Frame { sequence, .. } => {
+                        counters.profile_path.with_frame(*sequence)
+                    }
+                    PipelineEvent::Barrier(_) => counters.profile_path,
+                };
+                counters.profile.record_span(
+                    path,
+                    ProfilePhase::SceneUpdate,
+                    ProfileLane::caller(),
+                    scene_start,
+                    scene_elapsed,
+                );
                 counters.scene_jobs.fetch_add(1, Ordering::Relaxed);
 
                 match event {
@@ -626,7 +686,19 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
                             outstanding_slots: slots.outstanding(),
                         };
                         debug_assert_eq!(context.outstanding_slots, 0);
-                        match catch_unwind(AssertUnwindSafe(|| barrier(payload, context))) {
+                        let barrier_start = clock.monotonic();
+                        let barrier_result =
+                            catch_unwind(AssertUnwindSafe(|| barrier(payload, context)));
+                        let barrier_elapsed = elapsed_since(clock.as_ref(), barrier_start);
+                        add_duration(&counters.barrier_ns, barrier_elapsed);
+                        counters.profile.record_span(
+                            counters.profile_path,
+                            ProfilePhase::Barrier,
+                            ProfileLane::caller(),
+                            barrier_start,
+                            barrier_elapsed,
+                        );
+                        match barrier_result {
                             Ok(Ok(())) => {
                                 counters.barriers.fetch_add(1, Ordering::Relaxed);
                             }
@@ -744,7 +816,15 @@ fn prepare_worker<S: PipelineStages>(
         } = work;
         let started = clock.monotonic();
         let result = catch_unwind(AssertUnwindSafe(|| stages.prepare(value, scene_team)));
-        add_duration(&counters.prepare_ns, elapsed_since(clock.as_ref(), started));
+        let elapsed = elapsed_since(clock.as_ref(), started);
+        add_duration(&counters.prepare_ns, elapsed);
+        counters.profile.record_span(
+            counters.profile_path.with_frame(sequence),
+            ProfilePhase::Prepare,
+            ProfileLane::prepare(),
+            started,
+            elapsed,
+        );
         match result {
             Ok(Ok(prepared)) => {
                 counters.prepared.fetch_add(1, Ordering::Relaxed);
@@ -862,6 +942,13 @@ fn render_worker<S: PipelineStages>(
         let result = catch_unwind(AssertUnwindSafe(|| stages.rasterize(value, team)));
         let elapsed = elapsed_since(clock.as_ref(), started);
         add_duration(&counters.raster_ns, elapsed);
+        counters.profile.record_span(
+            counters.profile_path.with_frame(sequence),
+            ProfilePhase::Raster,
+            ProfileLane::render(u16::try_from(team_index).unwrap_or(u16::MAX)),
+            started,
+            elapsed,
+        );
         if let Some(team_ns) = counters.render_team_ns.get(team_index) {
             add_duration(team_ns, elapsed);
         }
@@ -929,7 +1016,15 @@ fn output_worker<S: PipelineStages>(
         } = work;
         let started = clock.monotonic();
         let result = catch_unwind(AssertUnwindSafe(|| stages.convert(value, output_team)));
-        add_duration(&counters.convert_ns, elapsed_since(clock.as_ref(), started));
+        let elapsed = elapsed_since(clock.as_ref(), started);
+        add_duration(&counters.convert_ns, elapsed);
+        counters.profile.record_span(
+            counters.profile_path.with_frame(sequence),
+            ProfilePhase::ColorConversion,
+            ProfileLane::output(),
+            started,
+            elapsed,
+        );
         match result {
             Ok(Ok(output)) => {
                 counters.converted.fetch_add(1, Ordering::Relaxed);
@@ -1229,7 +1324,15 @@ impl<O, E> Coordinator<O, E> {
             let Work { value, permit, .. } = work;
             let started = clock.monotonic();
             let result = catch_unwind(AssertUnwindSafe(|| emit(sequence, value)));
-            add_duration(&counters.emit_ns, elapsed_since(clock, started));
+            let elapsed = elapsed_since(clock, started);
+            add_duration(&counters.emit_ns, elapsed);
+            counters.profile.record_span(
+                counters.profile_path.with_frame(sequence),
+                ProfilePhase::Emit,
+                ProfileLane::caller(),
+                started,
+                elapsed,
+            );
             drop(permit);
             self.outstanding.remove(&sequence);
             match result {
@@ -1343,13 +1446,16 @@ struct Counters {
     raster_ns: AtomicU64,
     convert_ns: AtomicU64,
     emit_ns: AtomicU64,
+    barrier_ns: AtomicU64,
     first_output_ns: AtomicU64,
     render_team_frames: Vec<AtomicU64>,
     render_team_ns: Vec<AtomicU64>,
+    profile: ProfileRecorder,
+    profile_path: ProfilePath,
 }
 
 impl Counters {
-    fn new(render_teams: usize) -> Self {
+    fn new(render_teams: usize, profile: ProfileRecorder, profile_path: ProfilePath) -> Self {
         Self {
             submitted: AtomicU64::new(0),
             prepared: AtomicU64::new(0),
@@ -1364,9 +1470,12 @@ impl Counters {
             raster_ns: AtomicU64::new(0),
             convert_ns: AtomicU64::new(0),
             emit_ns: AtomicU64::new(0),
+            barrier_ns: AtomicU64::new(0),
             first_output_ns: AtomicU64::new(0),
             render_team_frames: (0..render_teams).map(|_| AtomicU64::new(0)).collect(),
             render_team_ns: (0..render_teams).map(|_| AtomicU64::new(0)).collect(),
+            profile,
+            profile_path,
         }
     }
 
@@ -1377,7 +1486,7 @@ impl Counters {
         plan: &ExecutionPlan,
     ) -> PipelineStats {
         let first = self.first_output_ns.load(Ordering::Relaxed);
-        PipelineStats {
+        let stats = PipelineStats {
             elapsed,
             first_output_latency: (first != 0).then(|| Duration::from_nanos(first)),
             submitted: self.submitted.load(Ordering::Relaxed),
@@ -1392,7 +1501,10 @@ impl Counters {
             scene: StageUtilization {
                 jobs: self.scene_jobs.load(Ordering::Relaxed),
                 busy: Duration::from_nanos(self.scene_ns.load(Ordering::Relaxed)),
-                workers: plan.scene_team.threads(),
+                // `events.next()` runs on exactly one caller thread. The
+                // advisory scene team may help work *inside* a callback, but
+                // using its width here understated the measured occupancy.
+                workers: 1,
             },
             prepare: StageUtilization {
                 jobs: self.prepared.load(Ordering::Relaxed),
@@ -1414,6 +1526,11 @@ impl Counters {
                 busy: Duration::from_nanos(self.emit_ns.load(Ordering::Relaxed)),
                 workers: 1,
             },
+            barrier: StageUtilization {
+                jobs: self.barriers.load(Ordering::Relaxed),
+                busy: Duration::from_nanos(self.barrier_ns.load(Ordering::Relaxed)),
+                workers: 1,
+            },
             render_team_frames: self
                 .render_team_frames
                 .iter()
@@ -1424,6 +1541,37 @@ impl Counters {
                 .iter()
                 .map(|counter| Duration::from_nanos(counter.load(Ordering::Relaxed)))
                 .collect(),
+        };
+        self.record_profile_counters(&stats);
+        stats
+    }
+
+    fn record_profile_counters(&self, stats: &PipelineStats) {
+        let path = self.profile_path;
+        let caller = ProfileLane::caller();
+        for (counter, value) in [
+            (ProfileCounter::SubmittedFrames, stats.submitted),
+            (ProfileCounter::EmittedFrames, stats.emitted),
+            (ProfileCounter::BackpressureWaits, stats.backpressure_waits),
+            (
+                ProfileCounter::MaxInFlight,
+                u64::try_from(stats.max_in_flight).unwrap_or(u64::MAX),
+            ),
+        ] {
+            self.profile.record_counter(path, counter, caller, value);
+        }
+
+        let capacity = duration_nanos(stats.elapsed);
+        for (index, busy) in stats.render_team_busy.iter().copied().enumerate() {
+            let lane = ProfileLane::render(u16::try_from(index).unwrap_or(u16::MAX));
+            self.profile.record_counter(
+                path,
+                ProfileCounter::RenderTeamBusyNs,
+                lane,
+                duration_nanos(busy),
+            );
+            self.profile
+                .record_counter(path, ProfileCounter::RenderTeamCapacityNs, lane, capacity);
         }
     }
 }
@@ -1894,23 +2042,65 @@ mod tests {
             clock: Arc::clone(&clock),
         };
         let clock_capability: Arc<dyn Clock> = clock;
-        let pipeline =
-            FramePipeline::with_clock(&plan, &stages, CancellationToken::new(), clock_capability);
+        let profile = ProfileRecorder::enabled();
+        let pipeline = FramePipeline::with_clock_and_profile(
+            &plan,
+            &stages,
+            CancellationToken::new(),
+            clock_capability,
+            profile.clone(),
+        )
+        .with_profile_path(ProfilePath::scene(7).with_play(2));
         let stats = pipeline
             .run(
-                [PipelineEvent::<_, ()>::frame(0, ())],
+                [
+                    PipelineEvent::<_, ()>::frame(0, ()),
+                    PipelineEvent::barrier(()),
+                ],
                 |_, ()| {
                     stages.clock.advance(Duration::from_millis(4));
                     Ok(())
                 },
-                |(), _| Ok(()),
+                |(), _| {
+                    stages.clock.advance(Duration::from_millis(5));
+                    Ok(())
+                },
             )
             .expect("pipeline");
         assert_eq!(stats.prepare.busy, Duration::from_millis(1));
         assert_eq!(stats.raster.busy, Duration::from_millis(2));
         assert_eq!(stats.convert.busy, Duration::from_millis(3));
         assert_eq!(stats.emit.busy, Duration::from_millis(4));
+        assert_eq!(stats.barrier.busy, Duration::from_millis(5));
+        assert_eq!(stats.barrier.jobs, 1);
         assert_eq!(stats.first_output_latency, Some(Duration::from_millis(10)));
-        assert_eq!(stats.elapsed, Duration::from_millis(10));
+        assert_eq!(stats.elapsed, Duration::from_millis(15));
+        assert_eq!(stats.scene.workers, 1);
+
+        let snapshot = profile.snapshot();
+        let phases = snapshot
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                fmn_platform::profile::ProfileRecord::Span(span) => Some(span.phase),
+                fmn_platform::profile::ProfileRecord::Counter(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(phases.contains(&ProfilePhase::SceneUpdate));
+        assert!(phases.contains(&ProfilePhase::Prepare));
+        assert!(phases.contains(&ProfilePhase::Raster));
+        assert!(phases.contains(&ProfilePhase::ColorConversion));
+        assert!(phases.contains(&ProfilePhase::Emit));
+        assert!(phases.contains(&ProfilePhase::Barrier));
+        assert!(
+            snapshot
+                .to_ndjson()
+                .contains("\"schema\":\"fmn-profile/1\"")
+        );
+        assert!(
+            snapshot
+                .to_folded()
+                .contains("scene:7;play:2;frame:0;phase:raster")
+        );
     }
 }

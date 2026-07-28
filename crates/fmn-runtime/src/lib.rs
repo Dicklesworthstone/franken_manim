@@ -17,6 +17,11 @@
 mod pipeline;
 mod plan;
 
+pub use fmn_platform::profile::{
+    PROFILE_SCHEMA, ProfileCounter, ProfileCounterRecord, ProfileLane, ProfileLaneRole,
+    ProfilePath, ProfilePhase, ProfileRecord, ProfileRecorder, ProfileSnapshot, ProfileSpan,
+    ProfileSpanRecord,
+};
 pub use pipeline::{
     BarrierContext, CancellationToken, FramePipeline, PipelineError, PipelineEvent,
     PipelineFailure, PipelineStage, PipelineStages, PipelineStats, StageUtilization,

@@ -89,17 +89,26 @@ impl CompletionGate {
     }
 
     fn complete(&self, sequence: u64, cancellation: &CancellationToken) {
-        self.started
-            .lock()
-            .expect("completion ledger is not poisoned")
-            .insert(sequence);
+        {
+            self.started
+                .lock()
+                .expect("completion ledger is not poisoned")
+                .insert(sequence);
+        }
+        self.changed.notify_all();
         let mut next = self.next.lock().expect("completion gate is not poisoned");
         while !cancellation.is_cancelled()
-            && self
-                .order
-                .get(*next)
-                .copied()
-                .is_some_and(|turn| turn != sequence)
+            && (self
+                .started
+                .lock()
+                .expect("completion ledger is not poisoned")
+                .len()
+                < self.order.len()
+                || self
+                    .order
+                    .get(*next)
+                    .copied()
+                    .is_some_and(|turn| turn != sequence))
         {
             next = self
                 .changed

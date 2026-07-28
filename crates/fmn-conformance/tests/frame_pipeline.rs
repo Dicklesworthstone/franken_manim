@@ -10,15 +10,20 @@ use fmn_core::constants::{BLUE_C, GREEN_B, RED_C, WHITE, YELLOW_C};
 use fmn_library::style::VStyle;
 use fmn_library::{Circle, Rectangle};
 use fmn_mobject::{Mob, Stage};
+use fmn_platform::clock::{Clock, StdClock};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{FrameConfig, FrameJob, encode_frame};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
 use fmn_runtime::{
-    AutotuneCache, AutotuneProfile, ExecutionPlan, FramePipeline, OutputPixelFormat, PipelineEvent,
-    PipelineStages, PlanRequest, RenderIntent, SurfaceSpec, TeamPlan, TopologyFingerprint,
+    AutotuneCache, AutotuneProfile, CancellationToken, ExecutionPlan, FramePipeline,
+    OutputPixelFormat, PipelineEvent, PipelineStages, PlanRequest, ProfilePath, ProfilePhase,
+    ProfileRecord, ProfileRecorder, RenderIntent, SurfaceSpec, TeamPlan, TopologyFingerprint,
 };
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
@@ -38,9 +43,28 @@ struct PreparedFrame {
     config: FrameConfig,
 }
 
-#[derive(Debug)]
 struct LumenStages {
     tiling: Tiling,
+    profile: ProfileRecorder,
+    clock: Arc<dyn Clock>,
+    profile_path: ProfilePath,
+}
+
+#[derive(Default)]
+struct DisabledProfileClock {
+    reads: AtomicUsize,
+}
+
+impl Clock for DisabledProfileClock {
+    fn monotonic(&self) -> std::time::Duration {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        std::time::Duration::ZERO
+    }
+
+    fn wall(&self) -> std::time::SystemTime {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        std::time::SystemTime::UNIX_EPOCH
+    }
 }
 
 impl PipelineStages for LumenStages {
@@ -55,7 +79,14 @@ impl PipelineStages for LumenStages {
         frame: Self::Frame,
         _scene_team: &TeamPlan,
     ) -> Result<Self::Prepared, Self::Error> {
-        Ok(prepare(frame, self.tiling))
+        let profile_path = self.profile_path.with_frame(frame.sequence);
+        Ok(prepare_profiled(
+            frame,
+            self.tiling,
+            &self.profile,
+            self.clock.as_ref(),
+            profile_path,
+        ))
     }
 
     fn rasterize(
@@ -107,6 +138,25 @@ fn frame_config() -> FrameConfig {
 }
 
 fn prepare(spec: FrameSpec, tiling: Tiling) -> PreparedFrame {
+    let clock = DisabledProfileClock::default();
+    let prepared = prepare_profiled(
+        spec,
+        tiling,
+        &ProfileRecorder::disabled(),
+        &clock,
+        ProfilePath::scene(0).with_frame(spec.sequence),
+    );
+    assert_eq!(clock.reads.load(Ordering::Relaxed), 0);
+    prepared
+}
+
+fn prepare_profiled(
+    spec: FrameSpec,
+    tiling: Tiling,
+    profile: &ProfileRecorder,
+    clock: &dyn Clock,
+    profile_path: ProfilePath,
+) -> PreparedFrame {
     let mut stage = Stage::new();
     let phase = spec.sequence as f64 / FRAME_COUNT as f64;
     let color = match spec.sequence % 4 {
@@ -140,13 +190,39 @@ fn prepare(spec: FrameSpec, tiling: Tiling) -> PreparedFrame {
     stage.set_stroke(rectangle, Some(color), Some(1.5), Some(1.0), None, true);
 
     let config = frame_config();
-    let mut plan = RenderPlan::new();
-    plan.sync(&stage, spec.sequence);
-    let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, tiling, config.map);
-    binning
-        .prune_occluded(&plan)
-        .expect("binning belongs to this render plan");
+    let plan = {
+        let _span = profile.span(
+            clock,
+            profile_path,
+            ProfilePhase::RenderIrSync,
+            fmn_runtime::ProfileLane::prepare(),
+        );
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, spec.sequence);
+        plan
+    };
+    let mono = {
+        let _span = profile.span(
+            clock,
+            profile_path,
+            ProfilePhase::GeometryCompile,
+            fmn_runtime::ProfileLane::prepare(),
+        );
+        MonoTable::build(&plan, config.map)
+    };
+    let binning = {
+        let _span = profile.span(
+            clock,
+            profile_path,
+            ProfilePhase::Binning,
+            fmn_runtime::ProfileLane::prepare(),
+        );
+        let mut binning = Binning::build(&plan, config.viewport, tiling, config.map);
+        binning
+            .prune_occluded(&plan)
+            .expect("binning belongs to this render plan");
+        binning
+    };
     PreparedFrame {
         plan,
         mono,
@@ -212,8 +288,6 @@ fn lumen_bytes_are_queue_depth_and_team_schedule_independent() {
         .copied()
         .map(|spec| (spec.sequence, scalar_definition(spec, tiling)))
         .collect();
-    let stages = LumenStages { tiling };
-
     for depth in 1..=6 {
         let plan = plan(depth);
         assert_eq!(plan.frames_in_flight, depth);
@@ -224,16 +298,32 @@ fn lumen_bytes_are_queue_depth_and_team_schedule_independent() {
             .copied()
             .map(|spec| PipelineEvent::<_, ()>::frame(spec.sequence, spec));
         let mut actual = Vec::new();
-        let stats = FramePipeline::new(&plan, &stages)
-            .run(
-                events,
-                |sequence, bytes| {
-                    actual.push((sequence, bytes));
-                    Ok(())
-                },
-                |(), _| Ok(()),
-            )
-            .expect("real Lumen pipeline completes");
+        let profile = ProfileRecorder::enabled();
+        let clock: Arc<dyn Clock> = Arc::new(StdClock::new());
+        let profile_path = ProfilePath::scene(1).with_play(depth as u64);
+        let stages = LumenStages {
+            tiling,
+            profile: profile.clone(),
+            clock: Arc::clone(&clock),
+            profile_path,
+        };
+        let stats = FramePipeline::with_clock_and_profile(
+            &plan,
+            &stages,
+            CancellationToken::new(),
+            clock,
+            profile.clone(),
+        )
+        .with_profile_path(profile_path)
+        .run(
+            events,
+            |sequence, bytes| {
+                actual.push((sequence, bytes));
+                Ok(())
+            },
+            |(), _| Ok(()),
+        )
+        .expect("real Lumen pipeline completes");
 
         assert_eq!(actual, expected, "queue depth {depth}");
         assert_eq!(stats.submitted, FRAME_COUNT);
@@ -241,5 +331,29 @@ fn lumen_bytes_are_queue_depth_and_team_schedule_independent() {
         assert_eq!(stats.outstanding_slots, 0);
         assert!(stats.max_in_flight <= depth);
         assert_eq!(stats.render_team_frames.iter().sum::<u64>(), FRAME_COUNT);
+
+        let phases = profile
+            .snapshot()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                ProfileRecord::Span(span) => Some(span.phase),
+                ProfileRecord::Counter(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            phases,
+            BTreeSet::from([
+                ProfilePhase::SceneUpdate,
+                ProfilePhase::GeometryCompile,
+                ProfilePhase::RenderIrSync,
+                ProfilePhase::Binning,
+                ProfilePhase::Prepare,
+                ProfilePhase::Raster,
+                ProfilePhase::ColorConversion,
+                ProfilePhase::Emit,
+            ]),
+            "the real Lumen path emits every coarse pipeline phase"
+        );
     }
 }

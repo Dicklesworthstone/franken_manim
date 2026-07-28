@@ -49,4 +49,5 @@ pub mod clock;
 pub mod fetch;
 pub mod fs;
 pub mod process;
+pub mod profile;
 pub mod topology;
