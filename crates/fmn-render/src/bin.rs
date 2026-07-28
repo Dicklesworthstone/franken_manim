@@ -53,7 +53,7 @@
 //! mechanism, and they ship together.
 
 use crate::hint::Hint;
-use crate::plan::RenderPlan;
+use crate::plan::{PlanIdentity, RenderPlan};
 use crate::table::{Instance, Shape};
 use fmn_core::types::Vec3;
 
@@ -219,11 +219,31 @@ impl PruneReport {
     }
 }
 
+/// A binning operation was paired with a different synchronized plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinningError {
+    /// The painter-ordered plan no longer matches the one whose command lists
+    /// this binning stores.
+    PlanMismatch,
+}
+
+impl std::fmt::Display for BinningError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PlanMismatch => f.write_str("binning was derived from a different render plan"),
+        }
+    }
+}
+
+impl std::error::Error for BinningError {}
+
 /// Per-fine-tile command lists in CSR form, with §10.4's class per command.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Binning {
     tiling: Tiling,
     viewport: Viewport,
+    map: ScreenMap,
+    plan: PlanIdentity,
     fine: Grid,
     /// `fine.count() + 1` entries; tile `i` owns `draws[offsets[i]..offsets[i+1]]`.
     offsets: Vec<u32>,
@@ -388,6 +408,8 @@ impl Binning {
         Binning {
             tiling,
             viewport,
+            map,
+            plan: plan.identity(),
             fine,
             offsets,
             draws,
@@ -401,6 +423,25 @@ impl Binning {
     #[must_use]
     pub fn tiling(&self) -> Tiling {
         self.tiling
+    }
+
+    /// The exact viewport this binning covered.
+    #[must_use]
+    pub(crate) fn viewport(&self) -> Viewport {
+        self.viewport
+    }
+
+    /// The exact object-to-screen mapping used to classify and scatter draws.
+    #[must_use]
+    pub(crate) fn map(&self) -> ScreenMap {
+        self.map
+    }
+
+    /// Whether every command index and class word still names the same
+    /// painter-ordered draw.
+    #[must_use]
+    pub(crate) fn matches_plan(&self, plan: &RenderPlan) -> bool {
+        self.plan == plan.identity()
     }
 
     /// Fine tiles in the grid.
@@ -464,7 +505,15 @@ impl Binning {
     /// both ramp ends plus the [`CLASS_INTERIOR`] classification that makes the
     /// covering command's coverage exactly `1`. Anything failing a clause is
     /// simply drawn.
-    pub fn prune_occluded(&mut self, plan: &RenderPlan) -> PruneReport {
+    ///
+    /// # Errors
+    /// [`BinningError::PlanMismatch`] if `plan` is not the synchronized plan
+    /// from which these command lists were built. The binning is left unchanged
+    /// on error.
+    pub fn prune_occluded(&mut self, plan: &RenderPlan) -> Result<PruneReport, BinningError> {
+        if !self.matches_plan(plan) {
+            return Err(BinningError::PlanMismatch);
+        }
         let instances = plan.shapes().instances();
         let mut report = PruneReport {
             before: self.draws.len(),
@@ -499,7 +548,7 @@ impl Binning {
         self.offsets = offsets;
         self.draws = draws;
         self.flags = flags;
-        report
+        Ok(report)
     }
 }
 
@@ -1062,7 +1111,7 @@ mod tests {
         let plan = synced(&stage);
         let before = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
         let mut after = before.clone();
-        let report = after.prune_occluded(&plan);
+        let report = after.prune_occluded(&plan).expect("matching plan");
 
         assert!(report.removed_fraction() > 0.0, "{report:?}");
         for y in (0..256).step_by(3) {
@@ -1099,8 +1148,31 @@ mod tests {
         ]);
         let plan = synced(&stage);
         let mut b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
-        let report = b.prune_occluded(&plan);
+        let report = b.prune_occluded(&plan).expect("matching plan");
         assert_eq!(report.before, report.after, "{report:?}");
+    }
+
+    #[test]
+    fn pruning_refuses_a_stale_plan_without_mutating_the_binning() {
+        let source = scene(&[(40.0, 40.0, 60.0, 60.0, 1.0)]);
+        let source_plan = synced(&source);
+        let mut binning = Binning::build(
+            &source_plan,
+            viewport(),
+            Tiling::default(),
+            ScreenMap::default(),
+        );
+        let before = binning.clone();
+
+        // Same table and instance cardinalities, different placement. Index-only
+        // validation would accept this and prune using the wrong rectangle.
+        let current = scene(&[(200.0, 200.0, 60.0, 60.0, 1.0)]);
+        let current_plan = synced(&current);
+        assert_eq!(
+            binning.prune_occluded(&current_plan),
+            Err(BinningError::PlanMismatch)
+        );
+        assert_eq!(binning, before, "a failed prune must be transactional");
     }
 
     #[test]
@@ -1115,7 +1187,7 @@ mod tests {
         let plan = synced(&stage);
         let before = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
         let mut after = before.clone();
-        after.prune_occluded(&plan);
+        after.prune_occluded(&plan).expect("matching plan");
 
         // The lone rectangle at (40,40) is instance 0 and nothing covers it.
         let lone = before.tile_of(40, 40);
@@ -1138,7 +1210,7 @@ mod tests {
         ]);
         let plan = synced(&stage);
         let mut b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
-        b.prune_occluded(&plan);
+        b.prune_occluded(&plan).expect("matching plan");
         let centre = b.tile_of(128, 128);
         assert_eq!(b.tile(centre), &[1], "only the cover survives, and it does");
     }
@@ -1161,7 +1233,9 @@ mod tests {
             ScreenMap::default(),
             1,
         );
-        reference.prune_occluded(&plan);
+        reference
+            .prune_occluded(&plan)
+            .expect("matching reference plan");
         for partitions in [2, 3, 8, 32] {
             let mut other = Binning::build_partitioned(
                 &plan,
@@ -1170,7 +1244,7 @@ mod tests {
                 ScreenMap::default(),
                 partitions,
             );
-            other.prune_occluded(&plan);
+            other.prune_occluded(&plan).expect("matching plan");
             assert_eq!(other.offsets(), reference.offsets());
             assert_eq!(other.draws(), reference.draws());
             assert_eq!(other.flags(), reference.flags());

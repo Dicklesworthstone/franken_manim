@@ -443,6 +443,41 @@ struct Draw {
     draws_stroke: bool,
 }
 
+/// A frame was assembled from derived artifacts that do not share one input
+/// closure.
+///
+/// Each variant names the stale axis directly so callers can rebuild only the
+/// artifact whose key moved. No mismatch is recoverable by rendering anyway:
+/// doing so would return a valid-looking, deterministically wrong frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameJobError {
+    /// The monotone pieces were transformed under another screen mapping.
+    MonoMapMismatch,
+    /// The monotone table's shape-indexed geometry is stale.
+    MonoPlanMismatch,
+    /// The tile command lists were scattered under another screen mapping.
+    BinningMapMismatch,
+    /// The tile command lists cover a different exact viewport.
+    BinningViewportMismatch,
+    /// The tile command indices name a different painter-ordered plan.
+    BinningPlanMismatch,
+}
+
+impl std::fmt::Display for FrameJobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::MonoMapMismatch => "monotone table screen map does not match the frame",
+            Self::MonoPlanMismatch => "monotone table geometry does not match the render plan",
+            Self::BinningMapMismatch => "binning screen map does not match the frame",
+            Self::BinningViewportMismatch => "binning viewport does not match the frame",
+            Self::BinningPlanMismatch => "binning does not match the render plan",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for FrameJobError {}
+
 /// A frame, compiled and ready to rasterize.
 ///
 /// Borrows the retained plan, its derived monotone table and its binning;
@@ -466,17 +501,20 @@ impl<'a> FrameJob<'a> {
     /// Compile a frame from a synchronized plan, its monotone table and its
     /// binning.
     ///
-    /// `mono` must have been built under the same [`ScreenMap`] as `config`, and
-    /// `binning` over the same plan — all three are derived from one sync and
-    /// carrying them separately is what lets a retained plan skip rebuilding the
-    /// ones whose axes did not move.
-    #[must_use]
+    /// All inputs are checked against collision-resistant content identities and
+    /// exact map/viewport values. Carrying them separately is what lets a
+    /// retained plan skip rebuilding the ones whose axes did not move; checking
+    /// their keys is what makes that reuse safe.
+    ///
+    /// # Errors
+    /// [`FrameJobError`] names the first derived artifact whose plan, map, or
+    /// viewport does not match.
     pub fn new(
         plan: &'a RenderPlan,
         mono: &'a fill::MonoTable,
         binning: &'a Binning,
         config: FrameConfig,
-    ) -> FrameJob<'a> {
+    ) -> Result<FrameJob<'a>, FrameJobError> {
         Self::with_identity(plan, mono, binning, config, EngineIdentity::certified())
     }
 
@@ -486,14 +524,32 @@ impl<'a> FrameJob<'a> {
     /// arithmetic here — it changes what the frame *claims*. A fast-CPU or annex
     /// engine reuses this front-end and substitutes its own back-end; recording
     /// which one ran is §10.5(f).
-    #[must_use]
+    ///
+    /// # Errors
+    /// See [`FrameJob::new`].
     pub fn with_identity(
         plan: &'a RenderPlan,
         mono: &'a fill::MonoTable,
         binning: &'a Binning,
         config: FrameConfig,
         identity: EngineIdentity,
-    ) -> FrameJob<'a> {
+    ) -> Result<FrameJob<'a>, FrameJobError> {
+        if mono.map() != config.map {
+            return Err(FrameJobError::MonoMapMismatch);
+        }
+        if !mono.matches_plan(plan) {
+            return Err(FrameJobError::MonoPlanMismatch);
+        }
+        if binning.map() != config.map {
+            return Err(FrameJobError::BinningMapMismatch);
+        }
+        if binning.viewport() != config.viewport {
+            return Err(FrameJobError::BinningViewportMismatch);
+        }
+        if !binning.matches_plan(plan) {
+            return Err(FrameJobError::BinningPlanMismatch);
+        }
+
         let map = config.map;
         let segments = plan.segments();
         let mut draws: Vec<Option<Draw>> = Vec::with_capacity(plan.shapes().instances().len());
@@ -565,7 +621,7 @@ impl<'a> FrameJob<'a> {
             .width
             .div_ceil(binning.tiling().fine_tile.max(1));
 
-        FrameJob {
+        Ok(FrameJob {
             plan,
             mono,
             binning,
@@ -573,7 +629,7 @@ impl<'a> FrameJob<'a> {
             identity,
             draws,
             cols,
-        }
+        })
     }
 
     /// The engine identity this frame will claim.
@@ -1254,7 +1310,7 @@ mod tests {
 
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
         assert_eq!(job.draws.len(), plan.shapes().instances().len());
         assert_eq!(job.draws.len(), 2);
         assert!(job.draws[0].is_none(), "the ghost must hold its slot");
@@ -1271,7 +1327,7 @@ mod tests {
         let (stage, _) = corpus();
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
         let fast = job.render(1).expect("render");
         let reference = render_reference(&job);
         assert_frames_equal(&fast, &reference, "an optimization changed the picture");
@@ -1284,7 +1340,7 @@ mod tests {
         let (stage, _) = corpus();
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
         let one = job.render(1).expect("render");
         for threads in [2usize, 4, 16] {
             let many = job.render(threads).expect("render");
@@ -1332,6 +1388,7 @@ mod tests {
             let cfg = config();
             let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
             FrameJob::new(&plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts")
                 .render(1)
                 .expect("render")
         };
@@ -1375,10 +1432,12 @@ mod tests {
         let cfg = config();
         let (plan, mono, mut binning) = derive(&stage, cfg, default_tiling());
         let unpruned = FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("matching frame artifacts")
             .render(1)
             .expect("render");
-        let report = binning.prune_occluded(&plan);
+        let report = binning.prune_occluded(&plan).expect("matching plan");
         let pruned = FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("matching frame artifacts")
             .render(1)
             .expect("render");
         assert!(report.before > report.after, "nothing was pruned to test");
@@ -1398,6 +1457,7 @@ mod tests {
         let reference = {
             let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
             FrameJob::new(&plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts")
                 .render(1)
                 .expect("render")
         };
@@ -1408,6 +1468,7 @@ mod tests {
             };
             let (plan, mono, binning) = derive(&stage, cfg, tiling);
             let got = FrameJob::new(&plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts")
                 .render(1)
                 .expect("render");
             let differing = reference
@@ -1491,6 +1552,7 @@ mod tests {
             let mono = MonoTable::build(plan, cfg.map);
             let binning = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map);
             FrameJob::new(plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts")
                 .render(1)
                 .expect("render")
         };
@@ -1514,6 +1576,7 @@ mod tests {
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
         let frame = FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("matching frame artifacts")
             .render(1)
             .expect("render");
         // Dead centre: the second disc, drawn last and opaque, wins outright.
@@ -1529,6 +1592,7 @@ mod tests {
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
         let frame = FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("matching frame artifacts")
             .render(1)
             .expect("render");
         let px = read_px(&frame, 108, 4);
@@ -1557,6 +1621,7 @@ mod tests {
             let cfg = config();
             let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
             let frame = FrameJob::new(&plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts")
                 .render(1)
                 .expect("render");
             read_px(&frame, 40, 22)
@@ -1580,7 +1645,7 @@ mod tests {
         let (stage, _) = corpus();
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
         let fresh = job.render(1).expect("render");
         let mut dirty = FrameBuffer::new(cfg.layout().expect("layout"));
         dirty.as_bytes_mut().fill(0xa5);
@@ -1596,7 +1661,7 @@ mod tests {
         let (stage, _) = corpus();
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
         let tight = job.render(1).expect("render");
 
         let padded_layout = FrameLayout::with_row_alignment(
@@ -1636,6 +1701,7 @@ mod tests {
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
         let raw = FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("matching frame artifacts")
             .render(1)
             .expect("render");
         let mut rgba8 = FrameBuffer::new(
@@ -1661,7 +1727,7 @@ mod tests {
         let stage = Stage::new();
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
         assert_eq!(job.draw_count(), 0);
         let frame = job.render(4).expect("render");
         let expect = {
@@ -1743,7 +1809,7 @@ mod tests {
         let (stage, _) = corpus();
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
-        let job = FrameJob::new(&plan, &mono, &binning, cfg);
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
 
         let mut wrong_format = FrameBuffer::new(
             FrameLayout::tight(PixelFormat::Rgba8, cfg.viewport.width, cfg.viewport.height)
@@ -1760,28 +1826,71 @@ mod tests {
             job.render_into(1, &mut wrong_size),
             Err(FrameError::DimensionMismatch)
         ));
+    }
 
-        // A binning built for a different viewport is the dangerous one: every
-        // tile index would name the wrong tile and the frame would be quietly
-        // wrong rather than loudly absent.
-        let (other_plan, other_mono, mismatched) = derive(
-            &stage,
-            FrameConfig::new(
-                Viewport {
-                    width: 64,
-                    height: 64,
-                },
-                cfg.map,
-                cfg.background,
-            ),
-            default_tiling(),
-        );
-        let _ = (&other_plan, &other_mono);
-        let confused = FrameJob::new(&plan, &mono, &mismatched, cfg);
-        let mut dst = FrameBuffer::new(cfg.layout().expect("layout"));
+    #[test]
+    fn stale_derived_artifacts_are_refused_before_rasterization() {
+        let (mut stage, mobs) = corpus();
+        let cfg = config();
+        let (mut plan, mono, binning) = derive(&stage, cfg, default_tiling());
+
+        // Mono pieces contain both scale and origin, so either part of the map
+        // moving makes the table stale even when geometry is unchanged.
+        let moved_map = ScreenMap {
+            origin: [cfg.map.origin[0] + 1.0, cfg.map.origin[1]],
+            ..cfg.map
+        };
+        let moved_mono = MonoTable::build(&plan, moved_map);
         assert!(matches!(
-            confused.render_into(1, &mut dst),
-            Err(FrameError::DimensionMismatch)
+            FrameJob::new(&plan, &moved_mono, &binning, cfg),
+            Err(FrameJobError::MonoMapMismatch)
+        ));
+
+        // A different geometry table can have the same number of shapes and
+        // still make every shape index name someone else's monotone pieces.
+        let mut other_stage = Stage::new();
+        let other = other_stage.add(vmob(
+            &rect_points(8.0, 8.0, 80.0, 80.0),
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0; 4],
+            0.0,
+        ));
+        other_stage.add_to_scene(other).expect("live");
+        let (other_plan, _, other_binning) = derive(&other_stage, cfg, default_tiling());
+        assert!(matches!(
+            FrameJob::new(&other_plan, &mono, &other_binning, cfg),
+            Err(FrameJobError::MonoPlanMismatch)
+        ));
+
+        // Binning consumes the map independently for AABBs and interior flags.
+        let moved_binning = Binning::build(&plan, cfg.viewport, default_tiling(), moved_map);
+        assert!(matches!(
+            FrameJob::new(&plan, &mono, &moved_binning, cfg),
+            Err(FrameJobError::BinningMapMismatch)
+        ));
+
+        // Grid cardinality is not viewport identity: both widths occupy seven
+        // 16-pixel columns, but the final tile clips at a different pixel.
+        let near_viewport = Viewport {
+            width: cfg.viewport.width - 1,
+            height: cfg.viewport.height,
+        };
+        let near_binning = Binning::build(&plan, near_viewport, default_tiling(), cfg.map);
+        assert_eq!(near_binning.tile_count(), binning.tile_count());
+        assert!(matches!(
+            FrameJob::new(&plan, &mono, &near_binning, cfg),
+            Err(FrameJobError::BinningViewportMismatch)
+        ));
+
+        // Re-syncing can reorder the painter list while every table length and
+        // grid dimension remains unchanged. The old command indices must not be
+        // reinterpreted under the new order.
+        stage.set_z_index(mobs[0], 100, false);
+        stage.add_to_scene(mobs[0]).expect("live");
+        plan.sync(&stage, 0);
+        assert!(matches!(
+            FrameJob::new(&plan, &mono, &binning, cfg),
+            Err(FrameJobError::BinningPlanMismatch)
         ));
     }
 

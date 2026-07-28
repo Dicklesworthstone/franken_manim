@@ -110,12 +110,13 @@ fn render(stage: &Stage, tier: Tier, threads: usize) -> Vec<u8> {
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
     let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
-    binning.prune_occluded(&plan);
+    binning.prune_occluded(&plan).expect("matching plan");
     let identity = EngineIdentity {
         tier,
         ..EngineIdentity::certified()
     };
-    let job = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity);
+    let job = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+        .expect("matching frame artifacts");
     let frame = job.render(threads).expect("the engine renders the frame");
     encode_frame(&frame).expect("the frame encodes into its canonical document")
 }
@@ -664,7 +665,7 @@ fn the_engine_identity_reaches_the_input_closure() {
     plan.sync(&stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
     let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
-    let job = FrameJob::new(&plan, &mono, &binning, cfg);
+    let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
     assert_eq!(job.journal_digest(), certified);
     assert_eq!(job.identity(), EngineIdentity::certified());
 }

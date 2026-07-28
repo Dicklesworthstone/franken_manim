@@ -36,10 +36,11 @@ pub mod snapshot;
 pub mod stroke;
 pub mod table;
 
-pub use bin::{Binning, ScreenMap, Tiling, Viewport};
+pub use bin::{Binning, BinningError, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
 pub use engine::{
-    EngineIdentity, EngineKind, FrameConfig, FrameJob, RENDERER_VERSION, Tier, frame_digest,
+    EngineIdentity, EngineKind, FrameConfig, FrameJob, FrameJobError, RENDERER_VERSION, Tier,
+    frame_digest,
 };
 pub use fill::{
     FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, RationalPiece, RowScratch,

@@ -104,10 +104,12 @@ pub struct TileKey {
 impl TileKey {
     /// Build the key for one fine tile, or `None` if the tile is uncacheable.
     ///
-    /// `None` means poisoned, and today the only source is §8.2's writable live
-    /// view. It is deliberately not an error and deliberately not a key that
-    /// happens never to match: a caller that sees `None` knows not to *store*
-    /// the result either, which a never-matching key would not tell it.
+    /// `None` means poisoned. A §8.2 writable live view is the ordinary source;
+    /// stale binning or an output transform different from the one that produced
+    /// it is also refused, because caching a wrong command list would make the
+    /// wrong pixels persist. It is deliberately not a key that happens never to
+    /// match: a caller that sees `None` knows not to *store* the result either,
+    /// which a never-matching key would not tell it.
     #[must_use]
     pub fn build(
         binning: &Binning,
@@ -116,6 +118,12 @@ impl TileKey {
         camera: u64,
         output: OutputTransform,
     ) -> Option<TileKey> {
+        if !binning.matches_plan(plan)
+            || binning.viewport() != output.viewport
+            || binning.map() != output.map
+        {
+            return None;
+        }
         let draws = binning.tile(tile);
         let flags = binning.tile_flags(tile);
         let instances = plan.shapes().instances();
@@ -763,6 +771,38 @@ mod tests {
         let b = TileKey::build(&binning, &plan, tile, 9, output()).expect("cacheable");
         assert_eq!(a.diff(&b), vec!["camera"]);
         assert!(a.diff(&a).is_empty());
+    }
+
+    #[test]
+    fn stale_binning_is_never_admitted_to_the_tile_cache() {
+        let (mut stage, mobs) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let tile = binning.tile_of(40, 40);
+        assert!(TileKey::build(&binning, &plan, tile, 0, output()).is_some());
+
+        let mut moved = output();
+        moved.map.origin[0] += 1.0;
+        assert!(
+            TileKey::build(&binning, &plan, tile, 0, moved).is_none(),
+            "a key must not bless commands scattered under another map"
+        );
+
+        let mut clipped = output();
+        clipped.viewport.width -= 1;
+        assert!(
+            TileKey::build(&binning, &plan, tile, 0, clipped).is_none(),
+            "same-grid viewport changes still move the output closure"
+        );
+
+        stage.set_z_index(mobs[0], 10, false);
+        stage.add_to_scene(mobs[0]).expect("live");
+        plan.sync(&stage, 0);
+        assert!(
+            TileKey::build(&binning, &plan, tile, 0, output()).is_none(),
+            "stale command indices must never become reusable cache keys"
+        );
     }
 
     #[test]

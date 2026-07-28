@@ -30,6 +30,7 @@ use crate::revision::{Axis, Dependency, Revisions};
 use crate::table::{Instance, Segment, ShapeTable, Style, StyleTable, compile_shape, shape_digest};
 use fmn_core::types::Vec3;
 use fmn_geom::quadpath::QuadPath;
+use fmn_hash::{Digest, Sha256};
 use fmn_mobject::{Mob, Stage};
 use std::collections::HashMap;
 
@@ -75,13 +76,110 @@ struct Retained {
 }
 
 /// The compiled, backend-neutral render IR for a scene, retained across frames.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RenderPlan {
     segments: Vec<Segment>,
     styles: StyleTable,
     shapes: ShapeTable,
     retained: HashMap<Mob, Retained>,
     stats: SyncStats,
+    geometry_key: GeometryIdentity,
+    plan_key: PlanIdentity,
+}
+
+/// Collision-resistant identity of the compiled geometry tables.
+///
+/// This is deliberately separate from [`PlanIdentity`]: a recolour or painter
+/// reorder does not invalidate geometry-only artifacts such as
+/// [`crate::fill::MonoTable`]. The zero value is reserved for an unbuilt
+/// artifact and is never emitted by the SHA-256 construction below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct GeometryIdentity(Digest);
+
+impl Default for GeometryIdentity {
+    fn default() -> Self {
+        Self(Digest::from_bytes([0; 32]))
+    }
+}
+
+/// Collision-resistant identity of every pixel-deciding row in a render plan.
+///
+/// Unlike an allocation address or a local generation counter, a content
+/// identity lets independently compiled but identical plans share derived
+/// artifacts safely, while reordered or stale instance lists cannot alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PlanIdentity(Digest);
+
+impl Default for PlanIdentity {
+    fn default() -> Self {
+        Self(Digest::from_bytes([0; 32]))
+    }
+}
+
+impl Default for RenderPlan {
+    fn default() -> Self {
+        let mut plan = Self {
+            segments: Vec::new(),
+            styles: StyleTable::default(),
+            shapes: ShapeTable::default(),
+            retained: HashMap::new(),
+            stats: SyncStats::default(),
+            geometry_key: GeometryIdentity::default(),
+            plan_key: PlanIdentity::default(),
+        };
+        plan.refresh_identities();
+        plan
+    }
+}
+
+/// Allocation-free canonical input to the in-tree SHA-256 implementation.
+///
+/// These identities are process-local guards rather than durable documents, so
+/// they do not ride the size-limited serialization envelope. They preserve
+/// exact float bits (matching `StyleTable`'s equality) and domain-separate every
+/// sequence, giving the same collision resistance as the content-addressed
+/// cache without making large scenes fail merely because an integrity check was
+/// requested.
+struct IdentityHasher(Sha256);
+
+impl IdentityHasher {
+    fn new(domain: &[u8]) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        Self(hash)
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.0.update(value);
+    }
+
+    fn bool(&mut self, value: bool) {
+        self.bytes(&[u8::from(value)]);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.bytes(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.bytes(&value.to_le_bytes());
+    }
+
+    fn f32(&mut self, value: f32) {
+        self.u32(value.to_bits());
+    }
+
+    fn f64(&mut self, value: f64) {
+        self.u64(value.to_bits());
+    }
+
+    fn digest(&mut self, value: Digest) {
+        self.bytes(value.as_bytes());
+    }
+
+    fn finish(self) -> Digest {
+        self.0.finalize()
+    }
 }
 
 impl RenderPlan {
@@ -217,6 +315,14 @@ impl RenderPlan {
         stats.dropped = before - self.retained.len();
 
         self.stats = stats;
+        // Shape tables are append-only, so their identity can stay cached when
+        // every outline was reused or interned onto an existing row. The
+        // painter plan is rebuilt every sync and is hashed once alongside that
+        // O(instances) work.
+        if stats.shapes_compiled > 0 {
+            self.geometry_key = self.compute_geometry_identity();
+        }
+        self.plan_key = self.compute_identity(self.geometry_key);
         stats
     }
 
@@ -244,6 +350,164 @@ impl RenderPlan {
     #[must_use]
     pub fn stats(&self) -> SyncStats {
         self.stats
+    }
+
+    /// Identity of the shape-indexed geometry consumed by derived fill tables.
+    pub(crate) fn geometry_identity(&self) -> GeometryIdentity {
+        self.geometry_key
+    }
+
+    /// Identity of geometry, styles, and the painter-ordered instance list.
+    pub(crate) fn identity(&self) -> PlanIdentity {
+        self.plan_key
+    }
+
+    /// Refresh both cached identities once after a synchronization.
+    fn refresh_identities(&mut self) {
+        let geometry = self.compute_geometry_identity();
+        let plan = self.compute_identity(geometry);
+        self.geometry_key = geometry;
+        self.plan_key = plan;
+    }
+
+    fn compute_geometry_identity(&self) -> GeometryIdentity {
+        let mut hash = IdentityHasher::new(b"fmn-render/geometry-identity/v1");
+
+        hash.u64(self.segments.len() as u64);
+        for segment in &self.segments {
+            for point in [segment.p0, segment.p1, segment.p2] {
+                for component in point {
+                    hash.f64(component);
+                }
+            }
+            hash.f64(segment.s0);
+            hash.f64(segment.s1);
+        }
+
+        let shapes = self.shapes.shapes();
+        hash.u64(shapes.len() as u64);
+        for shape in shapes {
+            hash.digest(shape.digest);
+            hash.u32(shape.first_segment);
+            hash.u32(shape.segment_count);
+            for point in [shape.bounds.min, shape.bounds.mid, shape.bounds.max] {
+                for component in point {
+                    hash.f64(component);
+                }
+            }
+            hash_hint(&mut hash, shape.hint);
+            hash.u64(shape.arc_length.curve_lengths().len() as u64);
+            for &length in shape.arc_length.curve_lengths() {
+                hash.f64(length);
+            }
+            hash.u64(shape.subpath_starts.len() as u64);
+            for &start in &shape.subpath_starts {
+                hash.u32(start);
+            }
+        }
+
+        GeometryIdentity(hash.finish())
+    }
+
+    fn compute_identity(&self, geometry: GeometryIdentity) -> PlanIdentity {
+        let mut hash = IdentityHasher::new(b"fmn-render/plan-identity/v1");
+        hash.digest(geometry.0);
+
+        let instances = self.shapes.instances();
+        hash.u64(instances.len() as u64);
+        for instance in instances {
+            hash.u32(instance.shape);
+            hash.u32(instance.style);
+            match self.styles.get(instance.style) {
+                Some(style) => {
+                    hash.bool(true);
+                    for &component in style
+                        .stroke_rgba
+                        .iter()
+                        .chain(style.stroke_rgba_end.iter())
+                        .chain(style.fill_rgba.iter())
+                        .chain(style.fill_rgba_end.iter())
+                    {
+                        hash.f32(component);
+                    }
+                    hash.f32(style.stroke_width);
+                    hash.f32(style.stroke_width_end);
+                    hash.f32(style.fill_border_width);
+                    hash.f32(style.anti_alias_width);
+                    hash.f64(style.joint_type.to_code());
+                    hash.bool(style.stroke_behind);
+                }
+                None => hash.bool(false),
+            }
+            for component in instance.offset {
+                hash.f64(component);
+            }
+            hash.u32(instance.order);
+        }
+
+        PlanIdentity(hash.finish())
+    }
+}
+
+/// Feed a primitive hint's full payload, not merely its diagnostic name.
+///
+/// The parameters participate in specialized fill and containment kernels, so
+/// hashing only the enum discriminant would let two differently placed circles
+/// or rectangles share a binning that was built for the other one.
+fn hash_hint(hash: &mut IdentityHasher, hint: Hint) {
+    fn point(hash: &mut IdentityHasher, tag: u8, center: [f64; 3]) {
+        hash.bytes(&[tag]);
+        for component in center {
+            hash.f64(component);
+        }
+    }
+
+    match hint {
+        Hint::General => hash.bytes(&[0]),
+        Hint::Line => hash.bytes(&[1]),
+        Hint::Polyline { closed } => {
+            hash.bytes(&[2]);
+            hash.bool(closed);
+        }
+        Hint::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        } => {
+            point(hash, 3, center);
+            hash.f64(radius);
+            hash.f64(start_angle);
+            hash.f64(angle);
+        }
+        Hint::Circle { center, radius } => {
+            point(hash, 4, center);
+            hash.f64(radius);
+        }
+        Hint::Dot { center, radius } => {
+            point(hash, 5, center);
+            hash.f64(radius);
+        }
+        Hint::Rect {
+            center,
+            width,
+            height,
+        } => {
+            point(hash, 6, center);
+            hash.f64(width);
+            hash.f64(height);
+        }
+        Hint::RoundedRect {
+            center,
+            width,
+            height,
+            corner_radius,
+        } => {
+            point(hash, 7, center);
+            hash.f64(width);
+            hash.f64(height);
+            hash.f64(corner_radius);
+        }
     }
 }
 

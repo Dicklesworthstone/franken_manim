@@ -85,7 +85,7 @@
 //! equal.
 
 use crate::bin::ScreenMap;
-use crate::plan::RenderPlan;
+use crate::plan::{GeometryIdentity, RenderPlan};
 use crate::table::Instance;
 
 // ----------------------------------------------------------------- arithmetic
@@ -303,13 +303,15 @@ const SPLIT_EPS: f64 = 1e-9;
 /// span unless it is recomputed, while a nearest-point search over more, shorter
 /// pieces is strictly more work for the same answer. So the fill gets its own
 /// derived table — keyed, like every other derived artifact in §10.8, by the
-/// **geometry** revision and the screen scale alone: a colour change must not
-/// rebuild it, and a pan must not either.
+/// compiled **geometry** identity and the exact [`ScreenMap`]. A colour or
+/// painter-order change must not rebuild it. A pan does, because this
+/// representation stores the map origin directly in every piece.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MonoTable {
     pieces: Vec<MonoPiece>,
     ranges: Vec<(u32, u32)>,
     map: ScreenMap,
+    geometry: GeometryIdentity,
 }
 
 impl MonoTable {
@@ -359,6 +361,7 @@ impl MonoTable {
             pieces,
             ranges,
             map,
+            geometry: plan.geometry_identity(),
         }
     }
 
@@ -403,6 +406,12 @@ impl MonoTable {
     #[must_use]
     pub fn map(&self) -> ScreenMap {
         self.map
+    }
+
+    /// Whether this table was built from the plan's current shape-indexed
+    /// geometry.
+    pub(crate) fn matches_plan(&self, plan: &RenderPlan) -> bool {
+        self.geometry == plan.geometry_identity()
     }
 }
 
