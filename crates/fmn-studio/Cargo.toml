@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "The Studio"
 
+[features]
+default = []
+metal = ["fmn-render/metal"]
+
 [dependencies]
 fmn-core.workspace = true
 fmn-hash.workspace = true
@@ -15,6 +19,13 @@ fmn-codec.workspace = true
 fmn-cache.workspace = true
 fmn-render.workspace = true
 fmn-scene.workspace = true
+
+[dev-dependencies]
+fmn-anim.workspace = true
+fmn-mobject.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "=1.1.4", features = ["pty"] }
 
 [lints]
 workspace = true

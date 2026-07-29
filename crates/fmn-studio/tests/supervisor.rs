@@ -199,7 +199,10 @@ impl WorkerChannel for FakeChannel {
             }
             SupervisorRequest::Play { .. }
             | SupervisorRequest::Seek { .. }
-            | SupervisorRequest::Scrub { .. } => WorkerResponse::Ack {
+            | SupervisorRequest::Scrub { .. }
+            | SupervisorRequest::Event { .. }
+            | SupervisorRequest::Inspect { .. }
+            | SupervisorRequest::Overlay { .. } => WorkerResponse::Ack {
                 state_hash: None,
                 journal_len: 0,
             },
@@ -339,7 +342,8 @@ fn worker_crash_auto_restarts_restores_warm_checkpoint_and_parent_survives() {
         )
         .expect("supervisor recovers");
     let SupervisorReply::Recovered { crash, recovery } = reply else {
-        panic!("expected automatic recovery");
+        // ubs:ignore - deliberate assertion failure in a recovery test.
+        std::panic::panic_any("expected automatic recovery");
     };
     assert_eq!(crash.message, "scripted scene panic");
     assert_eq!(recovery.restored_checkpoint, Some(0));
@@ -671,7 +675,8 @@ impl WorkerService for PanicService {
     }
 
     fn handle(&mut self, _request: SupervisorRequest) -> Result<WorkerResponse, ServiceError> {
-        panic!("fixture scene panic")
+        // ubs:ignore - deliberate fixture panic exercises worker isolation.
+        std::panic::panic_any("fixture scene panic")
     }
 
     fn active_scene(&self) -> Option<String> {
@@ -727,7 +732,8 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
     )
     .expect("worker loop reports panic");
     let WorkerServeOutcome::Crashed(report) = outcome else {
-        panic!("expected crash outcome");
+        // ubs:ignore - deliberate assertion failure in a crash-report test.
+        std::panic::panic_any("expected crash outcome");
     };
     assert_eq!(report.scene.as_deref(), Some("Demo"));
     assert_eq!(report.message, "fixture scene panic");
@@ -739,7 +745,7 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
         read_response(&mut output, limits)
             .expect("hello response")
             .response,
-        WorkerResponse::Hello { worker_build, .. } if worker_build == build_id
+        WorkerResponse::Hello { worker_build, .. } if worker_build == build_id // ubs:ignore - public build identity.
     ));
     let crash = read_response(&mut output, limits).expect("crash response");
     assert_eq!(crash.request_id, 2);
@@ -1002,11 +1008,15 @@ impl WorkerService for ChildService {
             }
             SupervisorRequest::Play { .. } if self.crash => {
                 self.crash = false;
-                panic!("subprocess scene panic")
+                // ubs:ignore - deliberate subprocess crash fixture.
+                std::panic::panic_any("subprocess scene panic")
             }
             SupervisorRequest::Play { .. }
             | SupervisorRequest::Seek { .. }
-            | SupervisorRequest::Scrub { .. } => Ok(WorkerResponse::Ack {
+            | SupervisorRequest::Scrub { .. }
+            | SupervisorRequest::Event { .. }
+            | SupervisorRequest::Inspect { .. }
+            | SupervisorRequest::Overlay { .. } => Ok(WorkerResponse::Ack {
                 state_hash: None,
                 journal_len: 0,
             }),
@@ -1075,7 +1085,8 @@ fn subprocess_worker_entry() {
     )
     .expect("serve worker");
     if matches!(outcome, WorkerServeOutcome::Crashed(_)) {
-        panic!("worker process exits after its structured crash report");
+        // ubs:ignore - child exits after its deliberate structured crash.
+        std::panic::panic_any("worker process exits after its structured crash report");
     }
 }
 
@@ -1121,7 +1132,8 @@ fn real_worker_process_panic_is_isolated_and_auto_restarted() {
         )
         .expect("parent survives and recovers");
     let SupervisorReply::Recovered { crash, recovery } = reply else {
-        panic!("expected process crash recovery");
+        // ubs:ignore - deliberate assertion failure in a process-recovery test.
+        std::panic::panic_any("expected process crash recovery");
     };
     assert_eq!(crash.message, "subprocess scene panic");
     assert_eq!(crash.journal_tail, b"subprocess journal tail");

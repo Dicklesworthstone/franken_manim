@@ -6,12 +6,15 @@
 use std::io::Cursor;
 
 use fmn_hash::{Schema, Writer, sha256};
-use fmn_scene::{CommandKind, CommandRecord, EffectClass, Entry, Journal};
+use fmn_scene::{
+    CommandKind, CommandRecord, EffectClass, Entry, EventPayload, Journal, Key, Modifiers,
+};
 use fmn_studio::{
-    CURRENT_VERSION, Checkpoint, CrashReport, FrameEncoding, FramePayload, FrameStream,
-    FramingError, JournalReplay, ProtocolError, ProtocolLimits, ProtocolVersion, REQUEST_SCHEMA,
-    RequestEnvelope, ResponseEnvelope, SupervisorRequest, TransportCapabilities, WorkerErrorCode,
-    WorkerResponse, read_request, read_response, write_request, write_response,
+    CURRENT_VERSION, Checkpoint, CrashReport, DebugLayerSet, FrameEncoding, FramePayload,
+    FrameStream, FramingError, JournalReplay, ProtocolError, ProtocolLimits, ProtocolVersion,
+    REQUEST_SCHEMA, RequestEnvelope, ResponseEnvelope, StudioDataKind, SupervisorRequest,
+    TransportCapabilities, WorkerErrorCode, WorkerResponse, read_request, read_response,
+    write_request, write_response,
 };
 
 fn command(label: &str) -> CommandRecord {
@@ -90,6 +93,20 @@ fn every_request_variant_round_trips_canonically() {
         },
         SupervisorRequest::RestoreCheckpoint(checkpoint()),
         SupervisorRequest::ReplayJournal(replay),
+        SupervisorRequest::Event {
+            scene: "Demo".to_owned(),
+            event: EventPayload::KeyPress {
+                key: Key::Character('k'),
+                modifiers: Modifiers::CONTROL | Modifiers::SHIFT,
+            },
+        },
+        SupervisorRequest::Inspect {
+            scene: "Demo".to_owned(),
+        },
+        SupervisorRequest::Overlay {
+            scene: "Demo".to_owned(),
+            layers: DebugLayerSet::TILES | DebugLayerSet::DEPTH,
+        },
         SupervisorRequest::Shutdown,
     ];
     for (index, variant) in variants.into_iter().enumerate() {
@@ -107,6 +124,7 @@ fn every_response_variant_round_trips_canonically() {
     let rgba = vec![0, 1, 2, 3, 4, 5, 6, 7];
     let png = b"\x89PNG\r\n\x1a\nfixture".to_vec();
     let journal = journal().to_bytes().unwrap();
+    let inspection = br#"{"scene":"Demo","nodes":[]}"#.to_vec();
     let variants = vec![
         WorkerResponse::Hello {
             version: CURRENT_VERSION,
@@ -177,6 +195,12 @@ fn every_response_variant_round_trips_canonically() {
         WorkerResponse::Error {
             code: WorkerErrorCode::ReplayFailed,
             message: "replay refused".to_owned(),
+        },
+        WorkerResponse::StudioData {
+            scene: "Demo".to_owned(),
+            kind: StudioDataKind::Inspection,
+            digest: sha256(&inspection),
+            bytes: inspection,
         },
         WorkerResponse::Bye,
     ];
@@ -270,8 +294,54 @@ fn malformed_semantics_fail_before_crossing_the_pipe() {
         Err(ProtocolError::Malformed("replay range exceeds journal"))
     ));
 
+    assert!(matches!(
+        request(
+            3,
+            SupervisorRequest::Event {
+                scene: "Demo".to_owned(),
+                event: EventPayload::MouseMotion {
+                    point: [f64::INFINITY, 0.0, 0.0],
+                    delta: [0.0, 0.0, 0.0],
+                    modifiers: Modifiers::NONE,
+                },
+            }
+        )
+        .to_bytes(limits),
+        Err(ProtocolError::Malformed("invalid input event"))
+    ));
+
+    let bytes = br#"{"nodes":[]}"#.to_vec();
+    assert!(matches!(
+        response(
+            4,
+            WorkerResponse::StudioData {
+                scene: "Demo".to_owned(),
+                kind: StudioDataKind::Inspection,
+                digest: sha256(b"different"),
+                bytes,
+            }
+        )
+        .to_bytes(limits),
+        Err(ProtocolError::Malformed("Studio data digest"))
+    ));
+
+    let malformed_json = b"{]".to_vec();
+    assert!(matches!(
+        response(
+            5,
+            WorkerResponse::StudioData {
+                scene: "Demo".to_owned(),
+                kind: StudioDataKind::Inspection,
+                digest: sha256(&malformed_json),
+                bytes: malformed_json,
+            }
+        )
+        .to_bytes(limits),
+        Err(ProtocolError::Malformed("Studio data is not valid JSON"))
+    ));
+
     let mut writer = Writer::new(REQUEST_SCHEMA);
-    writer.put_u64(3);
+    writer.put_u64(6);
     writer.put_u8(99);
     assert!(matches!(
         RequestEnvelope::from_bytes(&writer.finish().unwrap(), limits),

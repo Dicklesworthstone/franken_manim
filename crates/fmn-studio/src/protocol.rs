@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{Read, Write};
 
 use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer, sha256};
-use fmn_scene::{CommandKind, CommandRecord, Journal};
+use fmn_scene::{CommandKind, CommandRecord, EventPayload, Journal, Key, Modifiers, MouseButton};
 
 /// Canonical request envelope schema.
 pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 0);
@@ -19,7 +19,7 @@ pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 0);
 pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 0);
 
 /// The live protocol version advertised during the mandatory handshake.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 
 /// A live-protocol version.
 ///
@@ -71,6 +71,8 @@ pub struct ProtocolLimits {
     pub max_scenes: usize,
     /// Maximum state hashes in one replay response.
     pub max_replay_hashes: usize,
+    /// Maximum inspector or debug-overlay document returned by a worker.
+    pub max_studio_data_bytes: usize,
 }
 
 impl ProtocolLimits {
@@ -93,6 +95,7 @@ impl Default for ProtocolLimits {
             max_crash_tail_bytes: 1024 * 1024,
             max_scenes: 4096,
             max_replay_hashes: 1_000_000,
+            max_studio_data_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -340,7 +343,8 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    fn validate(&self, limits: ProtocolLimits) -> Result<(), ProtocolError> {
+    /// Recheck dimensions, budgets, and inline content integrity.
+    pub fn validate(&self, limits: ProtocolLimits) -> Result<(), ProtocolError> {
         require_scene(&self.scene)?;
         if self.width == 0 || self.height == 0 {
             return Err(ProtocolError::Malformed("zero-sized frame"));
@@ -349,6 +353,7 @@ impl FrameStream {
         limit_payload("frame", payload_len, limits.max_frame_bytes)?;
         match &self.payload {
             FramePayload::Pipe { bytes, digest } => {
+                // ubs:ignore - public content-integrity digest, not an authentication secret.
                 if sha256(bytes) != *digest {
                     return Err(ProtocolError::Malformed("inline frame digest"));
                 }
@@ -470,8 +475,64 @@ impl CrashReport {
     }
 }
 
+/// Requested render-debug layers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DebugLayerSet(u8);
+
+impl DebugLayerSet {
+    /// No overlays.
+    pub const NONE: Self = Self(0);
+    /// Raster tile boundaries.
+    pub const TILES: Self = Self(1 << 0);
+    /// Mobject control points and cages.
+    pub const CONTROL_POINTS: Self = Self(1 << 1);
+    /// Mobject bounding boxes.
+    pub const BOUNDING_BOXES: Self = Self(1 << 2);
+    /// Path winding direction.
+    pub const WINDING: Self = Self(1 << 3);
+    /// Depth and z-order diagnostics.
+    pub const DEPTH: Self = Self(1 << 4);
+    /// Every defined layer.
+    pub const ALL: Self = Self(
+        Self::TILES.0
+            | Self::CONTROL_POINTS.0
+            | Self::BOUNDING_BOXES.0
+            | Self::WINDING.0
+            | Self::DEPTH.0,
+    );
+
+    /// Construct after rejecting unknown bits.
+    pub fn from_bits(bits: u8) -> Result<Self, ProtocolError> {
+        if bits & !Self::ALL.0 != 0 {
+            Err(ProtocolError::Malformed("debug layer bits"))
+        } else {
+            Ok(Self(bits))
+        }
+    }
+
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether every bit in `other` is enabled.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for DebugLayerSet {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
 /// One supervisor request.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SupervisorRequest {
     /// Mandatory first request.
     Hello {
@@ -509,6 +570,25 @@ pub enum SupervisorRequest {
     RestoreCheckpoint(Checkpoint),
     /// Re-execute a verified journal suffix.
     ReplayJournal(JournalReplay),
+    /// Submit one validated host event to the isolated scene worker.
+    Event {
+        /// Scene identity.
+        scene: String,
+        /// Platform-neutral event payload.
+        event: EventPayload,
+    },
+    /// Capture a bounded mobject-inspector document.
+    Inspect {
+        /// Scene identity.
+        scene: String,
+    },
+    /// Capture bounded debug-overlay geometry.
+    Overlay {
+        /// Scene identity.
+        scene: String,
+        /// Requested diagnostic layers.
+        layers: DebugLayerSet,
+    },
     /// Graceful worker shutdown.
     Shutdown,
 }
@@ -538,6 +618,17 @@ impl SupervisorRequest {
             }
             Self::RestoreCheckpoint(checkpoint) => checkpoint.validate(limits)?,
             Self::ReplayJournal(replay) => replay.validate(limits)?,
+            Self::Event { scene, event } => {
+                require_scene(scene)?;
+                event
+                    .validate()
+                    .map_err(|_| ProtocolError::Malformed("invalid input event"))?;
+            }
+            Self::Inspect { scene } => require_scene(scene)?,
+            Self::Overlay { scene, layers } => {
+                require_scene(scene)?;
+                DebugLayerSet::from_bits(layers.bits())?;
+            }
         }
         Ok(())
     }
@@ -581,6 +672,32 @@ impl WorkerErrorCode {
             5 => Ok(Self::VersionSkew),
             6 => Ok(Self::ExecutionFailed),
             _ => Err(ProtocolError::Malformed("worker error code")),
+        }
+    }
+}
+
+/// Worker-produced Studio document class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioDataKind {
+    /// Mobject family, record, uniform, and source-span inspection.
+    Inspection,
+    /// Render-debug overlay geometry.
+    Overlay,
+}
+
+impl StudioDataKind {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Inspection => 0,
+            Self::Overlay => 1,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self, ProtocolError> {
+        match code {
+            0 => Ok(Self::Inspection),
+            1 => Ok(Self::Overlay),
+            _ => Err(ProtocolError::Malformed("Studio data kind")),
         }
     }
 }
@@ -635,6 +752,17 @@ pub enum WorkerResponse {
         /// Human diagnostic.
         message: String,
     },
+    /// Bounded UTF-8 JSON produced inside the isolated scene worker.
+    StudioData {
+        /// Scene identity.
+        scene: String,
+        /// Document class.
+        kind: StudioDataKind,
+        /// UTF-8 JSON bytes.
+        bytes: Vec<u8>,
+        /// Digest of `bytes`, checked on receipt.
+        digest: Digest,
+    },
     /// Graceful shutdown acknowledged.
     Bye,
 }
@@ -670,13 +798,31 @@ impl WorkerResponse {
                     return Err(ProtocolError::Malformed("empty worker error"));
                 }
             }
+            Self::StudioData {
+                scene,
+                bytes,
+                digest,
+                ..
+            } => {
+                require_scene(scene)?;
+                limit_payload("Studio data", bytes.len(), limits.max_studio_data_bytes)?;
+                // ubs:ignore - public content-integrity digest, not an authentication secret.
+                if sha256(bytes) != *digest {
+                    return Err(ProtocolError::Malformed("Studio data digest"));
+                }
+                std::str::from_utf8(bytes)
+                    .map_err(|_| ProtocolError::Malformed("Studio data is not UTF-8"))?;
+                if !valid_json_container(bytes) {
+                    return Err(ProtocolError::Malformed("Studio data is not valid JSON"));
+                }
+            }
         }
         Ok(())
     }
 }
 
 /// A request plus its monotonically increasing correlation id.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RequestEnvelope {
     /// Correlation id.
     pub request_id: u64,
@@ -884,6 +1030,20 @@ fn put_request(writer: &mut Writer, request: &SupervisorRequest) {
         SupervisorRequest::Shutdown => {
             writer.put_u8(7);
         }
+        SupervisorRequest::Event { scene, event } => {
+            writer.put_u8(8);
+            writer.put_str(scene);
+            put_event(writer, event);
+        }
+        SupervisorRequest::Inspect { scene } => {
+            writer.put_u8(9);
+            writer.put_str(scene);
+        }
+        SupervisorRequest::Overlay { scene, layers } => {
+            writer.put_u8(10);
+            writer.put_str(scene);
+            writer.put_u8(layers.bits());
+        }
     }
 }
 
@@ -917,6 +1077,17 @@ fn get_request(
             reader, limits,
         )?)),
         7 => Ok(SupervisorRequest::Shutdown),
+        8 => Ok(SupervisorRequest::Event {
+            scene: reader.get_str()?.to_owned(),
+            event: get_event(reader)?,
+        }),
+        9 => Ok(SupervisorRequest::Inspect {
+            scene: reader.get_str()?.to_owned(),
+        }),
+        10 => Ok(SupervisorRequest::Overlay {
+            scene: reader.get_str()?.to_owned(),
+            layers: DebugLayerSet::from_bits(reader.get_u8()?)?,
+        }),
         _ => Err(ProtocolError::Malformed("supervisor request tag")),
     }
 }
@@ -989,6 +1160,18 @@ fn put_response(writer: &mut Writer, response: &WorkerResponse) -> Result<(), Pr
         WorkerResponse::Bye => {
             writer.put_u8(9);
         }
+        WorkerResponse::StudioData {
+            scene,
+            kind,
+            bytes,
+            digest,
+        } => {
+            writer.put_u8(10);
+            writer.put_str(scene);
+            writer.put_u8(kind.code());
+            writer.put_digest(digest);
+            writer.put_bytes(bytes);
+        }
     }
     Ok(())
 }
@@ -1044,6 +1227,12 @@ fn get_response(
             message: reader.get_str()?.to_owned(),
         }),
         9 => Ok(WorkerResponse::Bye),
+        10 => Ok(WorkerResponse::StudioData {
+            scene: reader.get_str()?.to_owned(),
+            kind: StudioDataKind::from_code(reader.get_u8()?)?,
+            digest: reader.get_digest()?,
+            bytes: bounded_bytes(reader, "Studio data", limits.max_studio_data_bytes)?,
+        }),
         _ => Err(ProtocolError::Malformed("worker response tag")),
     }
 }
@@ -1096,6 +1285,378 @@ fn command_kind_from_code(code: u8) -> Result<CommandKind, ProtocolError> {
         5 => Ok(CommandKind::Sound),
         6 => Ok(CommandKind::Custom),
         _ => Err(ProtocolError::Malformed("command kind")),
+    }
+}
+
+fn put_event(writer: &mut Writer, event: &EventPayload) {
+    match event {
+        EventPayload::MouseMotion {
+            point,
+            delta,
+            modifiers,
+        } => {
+            writer.put_u8(0);
+            put_vec3(writer, *point);
+            put_vec3(writer, *delta);
+            writer.put_u8(modifiers.bits());
+        }
+        EventPayload::MousePress {
+            point,
+            button,
+            modifiers,
+        } => {
+            writer.put_u8(1);
+            put_vec3(writer, *point);
+            put_mouse_button(writer, *button);
+            writer.put_u8(modifiers.bits());
+        }
+        EventPayload::MouseRelease {
+            point,
+            button,
+            modifiers,
+        } => {
+            writer.put_u8(2);
+            put_vec3(writer, *point);
+            put_mouse_button(writer, *button);
+            writer.put_u8(modifiers.bits());
+        }
+        EventPayload::MouseDrag {
+            point,
+            delta,
+            button,
+            modifiers,
+        } => {
+            writer.put_u8(3);
+            put_vec3(writer, *point);
+            put_vec3(writer, *delta);
+            put_mouse_button(writer, *button);
+            writer.put_u8(modifiers.bits());
+        }
+        EventPayload::MouseScroll {
+            point,
+            offset,
+            modifiers,
+        } => {
+            writer.put_u8(4);
+            put_vec3(writer, *point);
+            writer.put_f64(offset[0]);
+            writer.put_f64(offset[1]);
+            writer.put_u8(modifiers.bits());
+        }
+        EventPayload::KeyPress { key, modifiers } => {
+            writer.put_u8(5);
+            put_key(writer, *key);
+            writer.put_u8(modifiers.bits());
+        }
+        EventPayload::KeyRelease { key, modifiers } => {
+            writer.put_u8(6);
+            put_key(writer, *key);
+            writer.put_u8(modifiers.bits());
+        }
+    }
+}
+
+fn get_event(reader: &mut Reader<'_>) -> Result<EventPayload, ProtocolError> {
+    let event = match reader.get_u8()? {
+        0 => EventPayload::MouseMotion {
+            point: get_vec3(reader)?,
+            delta: get_vec3(reader)?,
+            modifiers: get_modifiers(reader)?,
+        },
+        1 => EventPayload::MousePress {
+            point: get_vec3(reader)?,
+            button: get_mouse_button(reader)?,
+            modifiers: get_modifiers(reader)?,
+        },
+        2 => EventPayload::MouseRelease {
+            point: get_vec3(reader)?,
+            button: get_mouse_button(reader)?,
+            modifiers: get_modifiers(reader)?,
+        },
+        3 => EventPayload::MouseDrag {
+            point: get_vec3(reader)?,
+            delta: get_vec3(reader)?,
+            button: get_mouse_button(reader)?,
+            modifiers: get_modifiers(reader)?,
+        },
+        4 => EventPayload::MouseScroll {
+            point: get_vec3(reader)?,
+            offset: [reader.get_f64()?, reader.get_f64()?],
+            modifiers: get_modifiers(reader)?,
+        },
+        5 => EventPayload::KeyPress {
+            key: get_key(reader)?,
+            modifiers: get_modifiers(reader)?,
+        },
+        6 => EventPayload::KeyRelease {
+            key: get_key(reader)?,
+            modifiers: get_modifiers(reader)?,
+        },
+        _ => return Err(ProtocolError::Malformed("input event tag")),
+    };
+    event
+        .validate()
+        .map_err(|_| ProtocolError::Malformed("invalid input event"))?;
+    Ok(event)
+}
+
+fn put_vec3(writer: &mut Writer, vector: [f64; 3]) {
+    for value in vector {
+        writer.put_f64(value);
+    }
+}
+
+fn get_vec3(reader: &mut Reader<'_>) -> Result<[f64; 3], ProtocolError> {
+    Ok([reader.get_f64()?, reader.get_f64()?, reader.get_f64()?])
+}
+
+fn put_mouse_button(writer: &mut Writer, button: MouseButton) {
+    match button {
+        MouseButton::Left => writer.put_u8(0).put_u16(0),
+        MouseButton::Middle => writer.put_u8(1).put_u16(0),
+        MouseButton::Right => writer.put_u8(2).put_u16(0),
+        MouseButton::Other(value) => writer.put_u8(3).put_u16(value),
+    };
+}
+
+fn get_mouse_button(reader: &mut Reader<'_>) -> Result<MouseButton, ProtocolError> {
+    let tag = reader.get_u8()?;
+    let value = reader.get_u16()?;
+    match (tag, value) {
+        (0, 0) => Ok(MouseButton::Left),
+        (1, 0) => Ok(MouseButton::Middle),
+        (2, 0) => Ok(MouseButton::Right),
+        (3, value) => Ok(MouseButton::Other(value)),
+        _ => Err(ProtocolError::Malformed("mouse button")),
+    }
+}
+
+fn put_key(writer: &mut Writer, key: Key) {
+    match key {
+        Key::Character(character) => writer.put_u8(0).put_u32(u32::from(character)),
+        Key::Backspace => writer.put_u8(1).put_u32(0),
+        Key::ArrowLeft => writer.put_u8(2).put_u32(0),
+        Key::ArrowUp => writer.put_u8(3).put_u32(0),
+        Key::ArrowRight => writer.put_u8(4).put_u32(0),
+        Key::ArrowDown => writer.put_u8(5).put_u32(0),
+        Key::Escape => writer.put_u8(6).put_u32(0),
+        Key::Enter => writer.put_u8(7).put_u32(0),
+        Key::Tab => writer.put_u8(8).put_u32(0),
+        Key::Other(value) => writer.put_u8(9).put_u32(value),
+    };
+}
+
+fn get_key(reader: &mut Reader<'_>) -> Result<Key, ProtocolError> {
+    let tag = reader.get_u8()?;
+    let value = reader.get_u32()?;
+    match (tag, value) {
+        (0, value) => char::from_u32(value)
+            .map(Key::Character)
+            .ok_or(ProtocolError::Malformed("key character")),
+        (1, 0) => Ok(Key::Backspace),
+        (2, 0) => Ok(Key::ArrowLeft),
+        (3, 0) => Ok(Key::ArrowUp),
+        (4, 0) => Ok(Key::ArrowRight),
+        (5, 0) => Ok(Key::ArrowDown),
+        (6, 0) => Ok(Key::Escape),
+        (7, 0) => Ok(Key::Enter),
+        (8, 0) => Ok(Key::Tab),
+        (9, value) => Ok(Key::Other(value)),
+        _ => Err(ProtocolError::Malformed("key")),
+    }
+}
+
+fn get_modifiers(reader: &mut Reader<'_>) -> Result<Modifiers, ProtocolError> {
+    Modifiers::from_bits(reader.get_u8()?).map_err(|_| ProtocolError::Malformed("modifier bits"))
+}
+
+const MAX_STUDIO_JSON_DEPTH: usize = 128;
+
+fn valid_json_container(bytes: &[u8]) -> bool {
+    let mut parser = JsonParser { bytes, index: 0 };
+    parser.skip_whitespace();
+    if !matches!(parser.peek(), Some(b'{' | b'[')) || !parser.value(0) {
+        return false;
+    }
+    parser.skip_whitespace();
+    parser.index == bytes.len()
+}
+
+struct JsonParser<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl JsonParser<'_> {
+    fn value(&mut self, depth: usize) -> bool {
+        if depth > MAX_STUDIO_JSON_DEPTH {
+            return false;
+        }
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'{') => self.object(depth),
+            Some(b'[') => self.array(depth),
+            Some(b'"') => self.string(),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            Some(b't') => self.literal(b"true"),
+            Some(b'f') => self.literal(b"false"),
+            Some(b'n') => self.literal(b"null"),
+            _ => false,
+        }
+    }
+
+    fn object(&mut self, depth: usize) -> bool {
+        self.index += 1;
+        self.skip_whitespace();
+        if self.consume(b'}') {
+            return true;
+        }
+        loop {
+            if !self.string() {
+                return false;
+            }
+            self.skip_whitespace();
+            if !self.consume(b':') || !self.value(depth + 1) {
+                return false;
+            }
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                return true;
+            }
+            if !self.consume(b',') {
+                return false;
+            }
+            self.skip_whitespace();
+        }
+    }
+
+    fn array(&mut self, depth: usize) -> bool {
+        self.index += 1;
+        self.skip_whitespace();
+        if self.consume(b']') {
+            return true;
+        }
+        loop {
+            if !self.value(depth + 1) {
+                return false;
+            }
+            self.skip_whitespace();
+            if self.consume(b']') {
+                return true;
+            }
+            if !self.consume(b',') {
+                return false;
+            }
+        }
+    }
+
+    fn string(&mut self) -> bool {
+        if !self.consume(b'"') {
+            return false;
+        }
+        while let Some(byte) = self.peek() {
+            self.index += 1;
+            match byte {
+                b'"' => return true,
+                0x00..=0x1f => return false,
+                b'\\' => {
+                    let Some(escape) = self.peek() else {
+                        return false;
+                    };
+                    self.index += 1;
+                    match escape {
+                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {}
+                        b'u' => {
+                            for _ in 0..4 {
+                                let Some(digit) = self.peek() else {
+                                    return false;
+                                };
+                                if !digit.is_ascii_hexdigit() {
+                                    return false;
+                                }
+                                self.index += 1;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn number(&mut self) -> bool {
+        self.consume(b'-');
+        match self.peek() {
+            Some(b'0') => {
+                self.index += 1;
+                if matches!(self.peek(), Some(b'0'..=b'9')) {
+                    return false;
+                }
+            }
+            Some(b'1'..=b'9') => {
+                self.index += 1;
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.index += 1;
+                }
+            }
+            _ => return false,
+        }
+        if self.consume(b'.') {
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return false;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.index += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.index += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.index += 1;
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return false;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.index += 1;
+            }
+        }
+        true
+    }
+
+    fn literal(&mut self, literal: &[u8]) -> bool {
+        let Some(candidate) = self
+            .bytes
+            .get(self.index..self.index.saturating_add(literal.len()))
+        else {
+            return false;
+        };
+        if candidate != literal {
+            return false;
+        }
+        self.index += literal.len();
+        true
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.index += 1;
+        }
+    }
+
+    fn consume(&mut self, byte: u8) -> bool {
+        if self.peek() == Some(byte) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.index).copied()
     }
 }
 

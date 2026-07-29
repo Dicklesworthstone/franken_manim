@@ -17,6 +17,17 @@ pub mod interactive;
 pub mod journal;
 pub mod runtime;
 
+/// Lower-layer scene types exposed through Proscenium for Studio adapters.
+///
+/// `fmn-studio` is above `fmn-scene` in the governed crate DAG. Keeping this
+/// narrow facade here lets Studio inspect and scrub the state that Scene
+/// already owns without adding undeclared direct edges to Marionette or
+/// Choreo.
+pub mod studio_bridge {
+    pub use fmn_anim::{AnimError, FramePacket, Timeline};
+    pub use fmn_mobject::{Mob, Stage, Uniforms};
+}
+
 pub use events::{
     DispatchState, EventDispatcher, EventError, EventInbox, EventListener, EventListenerId,
     EventPayload, EventPropagation, EventTarget, EventType, InputEvent, Key, Modifiers,

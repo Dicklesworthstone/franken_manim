@@ -745,14 +745,17 @@ dependencies = [
 name = "fmn-studio"
 version = "0.1.0"
 dependencies = [
+ "fmn-anim",
  "fmn-cache",
  "fmn-codec",
  "fmn-core",
  "fmn-frame",
  "fmn-hash",
+ "fmn-mobject",
  "fmn-platform",
  "fmn-render",
  "fmn-scene",
+ "rustix",
 ]
 
 [[package]]
