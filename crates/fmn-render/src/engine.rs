@@ -70,6 +70,31 @@
 //! colour and alpha in `f32`; its error is held to the versioned visual budget
 //! below, while coverage and the ill-conditioned stroke-distance solve stay
 //! `f64`.
+//!
+//! ## Point-transform SIMD audit: eliminate first, vectorize declined
+//!
+//! fm-4wt.1 measured the complete frame-job transform path at 8, 64, and 1,024
+//! quadratic segments before retaining a kernel. The portable 1,024-segment
+//! controls took 115.89 µs for translation, 193.51 µs for uniform scale, and
+//! 380.20 µs for a general affine map. Uniform scale was needlessly rerunning
+//! the transcendental-heavy arc-length quadrature even though it cannot change
+//! normalized spans. [`crate::table::retains_normalized_arc_length`] now admits
+//! only structurally proven signed-axis similarities; the same uniform-scale
+//! case fell to 140.71–141.89 µs (26.7–27.3% faster), while translation and the
+//! general-affine control stayed effectively unchanged. The governed v3
+//! artifact measured 129.09 µs after the change. On a loaded aarch64+NEON host,
+//! the raw uniform-scale result moved from 65.68 µs to 53.76–57.27 µs; its
+//! same-run general-affine control was 77.75–80.62 µs.
+//!
+//! A separate no-horizontal-reduction `std::simd` prototype then batched the
+//! remaining array-of-structs matrix pass. At 1,024 segments, x86-64-v3 `f64x4`
+//! took 4.74–4.81 µs versus 4.69–4.70 µs scalar. NEON `f64x2` sometimes won the
+//! isolated kernel (2.91–3.22 µs versus 3.35–4.14 µs), but saved at most 1.23
+//! µs against a 65.70 µs complete affine job and carried substantial host
+//! variance. No slower or immaterial SIMD route is retained. The
+//! `point_transform_{translation,uniform_scale,general_affine}_*` cases in the
+//! existing `compositor` benchmark keep the exact production boundary
+//! reproducible for a future structure-of-arrays layout.
 
 use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
 use crate::fill::{
@@ -79,7 +104,7 @@ use crate::plan::RenderPlan;
 #[cfg(test)]
 use crate::stroke::stroke_shade;
 use crate::stroke::{self, JoinWedge, half_width_px, stroke_rgba_at};
-use crate::table::{Segment, Style, reparameterize_arc_length};
+use crate::table::{Segment, Style, reparameterize_arc_length, retains_normalized_arc_length};
 pub use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
@@ -1085,10 +1110,13 @@ impl<'a> FrameJob<'a> {
                         s1: segment.s1,
                     })
                     .collect::<Vec<_>>();
-                // Translation cannot change length. Keep it out of the
-                // quadrature so a large world origin cannot perturb normalized
-                // spans through cancellation, then place the coefficients.
-                reparameterize_arc_length(&mut transformed);
+                // Exact signed-axis similarities preserve normalized spans;
+                // general affine maps take the scalar arc-length oracle.
+                // Translation stays out of either route so a large world
+                // origin cannot perturb normalized spans through cancellation.
+                if !retains_normalized_arc_length(inst.placement) {
+                    reparameterize_arc_length(&mut transformed);
+                }
                 let translation = inst.placement.translation();
                 for segment in &mut transformed {
                     for point in [&mut segment.p0, &mut segment.p1, &mut segment.p2] {
@@ -2584,6 +2612,63 @@ mod tests {
             &baked_frame,
             "affine placement diverged from the same world-space geometry",
         );
+    }
+
+    #[test]
+    fn uniform_scale_keeps_the_retained_normalized_arc_length_bits() {
+        let mut stage = Stage::new();
+        let points = [
+            [12.0, 18.0, 0.0],
+            [18.0, 2.0, 0.0],
+            [42.0, 20.0, 0.0],
+            [43.0, 20.5, 0.0],
+            [48.0, 26.0, 0.0],
+        ];
+        let mob = stage.add(vmob(
+            &points,
+            [0.2, 0.7, 0.9, 0.8],
+            [1.0, 0.3, 0.1, 1.0],
+            240.0,
+        ));
+        let last = points.len() - 1;
+        let entry = stage.get_mut(mob).expect("live");
+        entry.buffer.write(last, "fill_rgba", &[0.9, 0.2, 0.4, 0.8]);
+        entry
+            .buffer
+            .write(last, "stroke_rgba", &[0.1, 0.8, 0.3, 1.0]);
+        entry.buffer.write(last, "stroke_width", &[480.0]);
+        stage.add_to_scene(mob).expect("live");
+        stage.apply_affine(
+            mob,
+            Placement::new(
+                [[1.125, 0.0, 0.0], [0.0, 1.125, 0.0], [0.0, 0.0, 1.125]],
+                [7.0, -3.0, 0.0],
+            ),
+        );
+
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
+        let instance = &plan.shapes().instances()[0];
+        let shape = plan.shapes().shape(instance.shape).expect("instance shape");
+        let lo = shape.first_segment as usize;
+        let hi = lo + shape.segment_count as usize;
+        let retained = &plan.segments()[lo..hi];
+        let transformed = job.draws[0]
+            .as_ref()
+            .expect("visible draw")
+            .transformed_segments
+            .as_deref()
+            .expect("uniform scale still transforms coefficients");
+
+        assert_eq!(transformed.len(), retained.len());
+        for (index, (actual, expected)) in transformed.iter().zip(retained).enumerate() {
+            assert_eq!(
+                [actual.s0.to_bits(), actual.s1.to_bits()],
+                [expected.s0.to_bits(), expected.s1.to_bits()],
+                "segment {index} did not retain its normalized arc-length span"
+            );
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 extern crate test;
 
 use fmn_core::color::LinearRgba;
-use fmn_mobject::{JointType, Mobject, RecordBuffer, RecordSchema, Stage};
+use fmn_mobject::{JointType, Mobject, Placement, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
     Binning, EngineIdentity, EngineKind, FrameConfig, FrameJob, MonoPiece, MonoTable, RenderPlan,
     RowScratch, ScreenMap, Tier, Tiling, Viewport,
@@ -94,6 +94,10 @@ struct StrokeFixture {
 
 impl StrokeFixture {
     fn new(segment_count: usize) -> Self {
+        Self::with_placement(segment_count, Placement::IDENTITY)
+    }
+
+    fn with_placement(segment_count: usize, placement: Placement) -> Self {
         let mut stage = Stage::new();
         let mob = stage.add(stroked_chain(segment_count));
         stage.add_to_scene(mob).expect("live benchmark stroke");
@@ -101,6 +105,7 @@ impl StrokeFixture {
             .uniforms_mut(mob)
             .expect("live benchmark stroke")
             .joint_type = JointType::Miter;
+        stage.apply_affine(mob, placement);
 
         let config = FrameConfig::new(
             Viewport {
@@ -136,15 +141,13 @@ impl StrokeFixture {
     }
 
     fn render(&self) {
-        let job = FrameJob::with_identity(
-            &self.plan,
-            &self.mono,
-            &self.binning,
-            self.config,
-            EngineIdentity::certified(),
-        )
-        .expect("coherent benchmark stroke artifacts");
+        let job = self.compile(EngineIdentity::certified());
         black_box(job.render(1).expect("benchmark stroke render"));
+    }
+
+    fn compile(&self, identity: EngineIdentity) -> FrameJob<'_> {
+        FrameJob::with_identity(&self.plan, &self.mono, &self.binning, self.config, identity)
+            .expect("coherent benchmark stroke artifacts")
     }
 }
 
@@ -301,3 +304,68 @@ macro_rules! stroke_sdf_benches {
 stroke_sdf_benches!(stroke_sdf_chain_08, 8);
 stroke_sdf_benches!(stroke_sdf_chain_32, 32);
 stroke_sdf_benches!(stroke_sdf_chain_64, 64);
+
+fn benchmark_point_transform(bench: &mut Bencher, segment_count: usize, placement: Placement) {
+    let fixture = StrokeFixture::with_placement(segment_count, placement);
+    bench.bytes = u64::try_from(segment_count * 3 * 3 * size_of::<f64>())
+        .expect("benchmark byte count fits u64");
+    bench.iter(|| {
+        black_box(fixture.compile(EngineIdentity::certified()));
+    });
+}
+
+macro_rules! point_transform_benches {
+    ($translation:ident, $uniform_scale:ident, $general_affine:ident, $segment_count:expr) => {
+        #[bench]
+        fn $translation(bench: &mut Bencher) {
+            benchmark_point_transform(
+                bench,
+                $segment_count,
+                Placement::from_translation([17.0, -31.0, 0.0]),
+            );
+        }
+
+        #[bench]
+        fn $uniform_scale(bench: &mut Bencher) {
+            benchmark_point_transform(
+                bench,
+                $segment_count,
+                Placement::new(
+                    [[1.125, 0.0, 0.0], [0.0, 1.125, 0.0], [0.0, 0.0, 1.125]],
+                    [17.0, -31.0, 0.0],
+                ),
+            );
+        }
+
+        #[bench]
+        fn $general_affine(bench: &mut Bencher) {
+            benchmark_point_transform(
+                bench,
+                $segment_count,
+                Placement::new(
+                    [[1.125, 0.25, 0.0], [-0.375, 0.875, 0.0], [0.0, 0.0, 1.0]],
+                    [17.0, -31.0, 0.0],
+                ),
+            );
+        }
+    };
+}
+
+point_transform_benches!(
+    point_transform_translation_0008,
+    point_transform_uniform_scale_0008,
+    point_transform_general_affine_0008,
+    8
+);
+point_transform_benches!(
+    point_transform_translation_0064,
+    point_transform_uniform_scale_0064,
+    point_transform_general_affine_0064,
+    64
+);
+point_transform_benches!(
+    point_transform_translation_1024,
+    point_transform_uniform_scale_1024,
+    point_transform_general_affine_1024,
+    1_024
+);

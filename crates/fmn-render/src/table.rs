@@ -55,11 +55,11 @@ use std::collections::HashMap;
 /// interpolates stroke width and colour by arc length, and §7.3's arc-length
 /// layer is transcendental-dense and branchy — the wrong shape for a per-pixel
 /// kernel and the right shape for the host (G0-8 finding F3). The span is a
-/// function of object-space geometry alone, so it survives a restyle and any
-/// translation. A non-translation placement derives transformed segments once
-/// per frame and reparameterizes their spans: non-uniform scale and shear
-/// change relative arc lengths even though the retained coefficients remain
-/// reusable.
+/// function of object-space geometry alone, so it survives a restyle,
+/// translation, and a structurally proven similarity. A general affine
+/// placement derives transformed segments once per frame and reparameterizes
+/// their spans: non-uniform scale and shear change relative arc lengths even
+/// though the retained coefficients remain reusable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
     /// Start anchor.
@@ -104,6 +104,46 @@ pub(crate) fn reparameterize_arc_length(segments: &mut [Segment]) {
         accumulated += length;
         segment.s1 = accumulated / total;
     }
+}
+
+/// Whether a placement is an exactly recognizable similarity whose normalized
+/// arc-length spans can keep borrowing the object-space values.
+///
+/// This is deliberately narrower than a numerical `AᵀA = s²I` test. A
+/// floating-point tolerance could admit a slightly anisotropic stretch, while
+/// exact Gram products could still misclassify after rounding. We therefore
+/// accept only a finite non-zero signed permutation with one equal-magnitude
+/// coefficient in every row and column. That covers uniform scale, reflection,
+/// and exact axis permutations; dense rotations conservatively reparameterize
+/// until placement provenance can prove their construction.
+pub(crate) fn retains_normalized_arc_length(placement: Placement) -> bool {
+    let mut used_columns = [false; 3];
+    let mut scale_bits = None;
+
+    for row in placement.linear() {
+        let mut occupied_column = None;
+        for (column, coefficient) in row.into_iter().enumerate() {
+            if coefficient == 0.0 {
+                continue;
+            }
+            if !coefficient.is_finite() || occupied_column.is_some() || used_columns[column] {
+                return false;
+            }
+            let magnitude = coefficient.abs();
+            match scale_bits {
+                None => scale_bits = Some(magnitude.to_bits()),
+                Some(expected) if expected == magnitude.to_bits() => {}
+                Some(_) => return false,
+            }
+            occupied_column = Some(column);
+        }
+        let Some(column) = occupied_column else {
+            return false;
+        };
+        used_columns[column] = true;
+    }
+
+    scale_bits.is_some()
 }
 
 /// The style a compiled path draws under.
@@ -612,6 +652,60 @@ mod tests {
         p.add_line_to([1.0, 1.0, 0.0], false).unwrap();
         p.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         p
+    }
+
+    #[test]
+    fn normalized_arc_length_similarity_admission_is_exact_and_conservative() {
+        let admitted = [
+            Placement::IDENTITY,
+            Placement::from_translation([17.0, -31.0, 5.0]),
+            Placement::new(
+                [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]],
+                [0.0; 3],
+            ),
+            Placement::new(
+                [[0.0, -2.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, -2.0]],
+                [1.0, 2.0, 3.0],
+            ),
+        ];
+        for placement in admitted {
+            assert!(
+                retains_normalized_arc_length(placement),
+                "exact signed-axis similarity was rejected: {placement:?}"
+            );
+        }
+
+        let rejected = [
+            Placement::new([[0.0; 3]; 3], [0.0; 3]),
+            Placement::new(
+                [[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 2.0]],
+                [0.0; 3],
+            ),
+            Placement::new(
+                [[1.0, 0.25, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                [0.0; 3],
+            ),
+            // This 3-4-5 matrix is mathematically a dense rotation. Without
+            // construction provenance it intentionally takes the oracle path.
+            Placement::new(
+                [[0.8, -0.6, 0.0], [0.6, 0.8, 0.0], [0.0, 0.0, 1.0]],
+                [0.0; 3],
+            ),
+            Placement::new(
+                [
+                    [f64::INFINITY, 0.0, 0.0],
+                    [0.0, f64::INFINITY, 0.0],
+                    [0.0, 0.0, f64::INFINITY],
+                ],
+                [0.0; 3],
+            ),
+        ];
+        for placement in rejected {
+            assert!(
+                !retains_normalized_arc_length(placement),
+                "non-proven similarity was admitted: {placement:?}"
+            );
+        }
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::camera::{Camera, EdgeSampleLimit};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
 use crate::plan::RenderPlan;
 use crate::stroke::{aa_coverage, stroke_rgba_at};
-use crate::table::{Segment, Style, reparameterize_arc_length};
+use crate::table::{Segment, Style, reparameterize_arc_length, retains_normalized_arc_length};
 use crate::texture::{SamplerPolicy, Texture};
 
 /// Surface's kept `(reflectiveness, gloss, shadow)` defaults.
@@ -1017,7 +1017,12 @@ fn compile_vector<'a>(
             s1: segment.s1,
         })
         .collect();
-    reparameterize_arc_length(&mut linear_segments);
+    // Preserve retained spans only for structurally proven similarities. A
+    // general affine map changes relative curve lengths and must take the
+    // scalar arc-length oracle before gradients and stroke ramps consume them.
+    if !retains_normalized_arc_length(instance.placement) {
+        reparameterize_arc_length(&mut linear_segments);
+    }
     let normal = shape_unit_normal(&linear_segments, &shape.subpath_starts);
     let translation = instance.placement.translation();
     let world_segments: Vec<Segment> = linear_segments
