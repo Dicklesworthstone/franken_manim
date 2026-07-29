@@ -100,6 +100,7 @@ use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
 use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
 };
+use crate::hint::Hint;
 use crate::plan::RenderPlan;
 #[cfg(test)]
 use crate::stroke::stroke_shade;
@@ -159,7 +160,7 @@ pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
 /// every pixel. It is deliberately not the crate version: a refactor that cannot
 /// move a bit must not invalidate a manifest, and a one-line change to the AA
 /// profile must.
-pub const RENDERER_VERSION: u32 = 4;
+pub const RENDERER_VERSION: u32 = 5;
 
 /// Boundary-sheet count at which an adaptive cell escalates to 2×2 samples.
 ///
@@ -468,6 +469,20 @@ impl EngineIdentity {
     pub const fn fast() -> EngineIdentity {
         EngineIdentity {
             engine: EngineKind::FastCpu,
+            tier: Tier::COMPILED,
+            renderer_version: RENDERER_VERSION,
+        }
+    }
+
+    /// This artifact's standard-only Metal-annex identity.
+    ///
+    /// The host build tier remains part of C7 because it prepares the derived
+    /// device layout. The backend's device, math mode, and pipeline identity
+    /// are journaled by the Metal renderer itself.
+    #[must_use]
+    pub const fn metal() -> EngineIdentity {
+        EngineIdentity {
+            engine: EngineKind::Metal,
             tier: Tier::COMPILED,
             renderer_version: RENDERER_VERSION,
         }
@@ -835,40 +850,47 @@ const fn format_name(format: PixelFormat) -> &'static str {
 /// [`FrameJob::render_into`] hand bands to threads with no synchronization
 /// beyond the queue that assigns them.
 #[derive(Debug, Clone)]
-struct Draw {
+pub(crate) struct Draw {
     /// Index into [`RenderPlan::segments`] of this shape's first segment.
-    first_segment: u32,
+    pub(crate) first_segment: u32,
     /// How many segments the shape has.
-    segment_count: u32,
+    pub(crate) segment_count: u32,
     /// The shape index, for [`crate::fill::MonoTable::pieces_of`].
-    shape: u32,
+    pub(crate) shape: u32,
     /// The instance's screen translation.
-    translate: [f64; 2],
+    pub(crate) translate: [f64; 2],
     /// Frame-local world-space segments for a non-translation affine
     /// placement. Pure translations keep borrowing the retained object-space
     /// table and pay only [`Draw::translate`].
-    transformed_segments: Option<Vec<Segment>>,
+    pub(crate) transformed_segments: Option<Vec<Segment>>,
     /// Doubly-monotone pieces derived from [`Draw::transformed_segments`].
-    transformed_pieces: Option<Vec<fill::MonoPiece>>,
+    pub(crate) transformed_pieces: Option<Vec<fill::MonoPiece>>,
+    /// The still-valid semantic hint proves every segment is a monotone line.
+    ///
+    /// This is stronger than inferring straightness from RecordBuffer `f32`
+    /// coordinates after they have been widened to `f64`: the latter retains
+    /// small quantization bends in paths constructed as lines.
+    #[cfg(feature = "metal")]
+    pub(crate) straight_segments: bool,
     /// The interned style, copied so the tile loop indexes no table.
-    style: Style,
+    pub(crate) style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
-    kernel: FillKernel,
+    pub(crate) kernel: FillKernel,
     /// The joint overrides; empty for the round settings (ADR-0012).
-    joins: Vec<JoinWedge>,
+    pub(crate) joins: Vec<JoinWedge>,
     /// Per-segment slabs and arc lengths derived for this styled occurrence.
-    stroke: Option<stroke::PreparedStroke>,
+    pub(crate) stroke: Option<stroke::PreparedStroke>,
     /// The interior colour field — `None` when the fill is flat, which is the
     /// overwhelming majority and the case that must not pay for the field.
-    field: Option<GradientField>,
+    pub(crate) field: Option<GradientField>,
     /// The one fill colour, when the fill is flat.
-    flat_fill: Option<[f32; 4]>,
+    pub(crate) flat_fill: Option<[f32; 4]>,
     /// Screen AABB of the outline hull: rows outside it have zero fill coverage.
-    fill_slab: [f64; 4],
+    pub(crate) fill_slab: [f64; 4],
     /// Does this instance contribute a fill pass at all?
-    draws_fill: bool,
+    pub(crate) draws_fill: bool,
     /// Does it contribute a stroke pass?
-    draws_stroke: bool,
+    pub(crate) draws_stroke: bool,
 }
 
 /// A frame was assembled from derived artifacts that do not share one input
@@ -1041,15 +1063,40 @@ impl<'a> FrameJob<'a> {
         config: FrameConfig,
         identity: EngineIdentity,
     ) -> Result<FrameJob<'a>, FrameJobError> {
+        if matches!(identity.engine, EngineKind::Metal | EngineKind::Cuda) {
+            return Err(FrameJobError::UnsupportedEngine {
+                engine: identity.engine,
+            });
+        }
+        Self::prepare(plan, mono, binning, config, identity)
+    }
+
+    /// Prepare the shared semantic front-end for the Metal-specific executor.
+    ///
+    /// Kept crate-private so a caller cannot construct a Metal-identified job
+    /// and then accidentally ask the CPU-only [`FrameJob::render`] entry point
+    /// to execute it. The public Metal renderer is the only truthful executor.
+    #[cfg(feature = "metal")]
+    pub(crate) fn for_metal(
+        plan: &'a RenderPlan,
+        mono: &'a fill::MonoTable,
+        binning: &'a Binning,
+        config: FrameConfig,
+    ) -> Result<FrameJob<'a>, FrameJobError> {
+        Self::prepare(plan, mono, binning, config, EngineIdentity::metal())
+    }
+
+    fn prepare(
+        plan: &'a RenderPlan,
+        mono: &'a fill::MonoTable,
+        binning: &'a Binning,
+        config: FrameConfig,
+        identity: EngineIdentity,
+    ) -> Result<FrameJob<'a>, FrameJobError> {
         if identity.renderer_version != RENDERER_VERSION {
             return Err(FrameJobError::RendererVersionMismatch {
                 requested: identity.renderer_version,
                 compiled: RENDERER_VERSION,
-            });
-        }
-        if matches!(identity.engine, EngineKind::Metal | EngineKind::Cuda) {
-            return Err(FrameJobError::UnsupportedEngine {
-                engine: identity.engine,
             });
         }
         if mono.map() != config.map {
@@ -1164,6 +1211,8 @@ impl<'a> FrameJob<'a> {
             }
 
             let flat = fill_is_flat(&style);
+            let straight_segments =
+                !inst.hint_unsafe && matches!(shape.hint, Hint::Line | Hint::Polyline { .. });
             let kernel = if inst.hint_unsafe || !inst.placement.is_translation() {
                 FillKernel::General
             } else {
@@ -1176,8 +1225,15 @@ impl<'a> FrameJob<'a> {
                 map,
                 translate,
             );
-            let stroke = draws_stroke
-                .then(|| stroke::PreparedStroke::new(effective_segments, &style, map, translate));
+            let stroke = draws_stroke.then(|| {
+                stroke::PreparedStroke::new(
+                    effective_segments,
+                    &style,
+                    map,
+                    translate,
+                    straight_segments,
+                )
+            });
             let field = if draws_fill && !flat {
                 Some(GradientField::build(effective_segments, map))
             } else {
@@ -1191,6 +1247,8 @@ impl<'a> FrameJob<'a> {
                 translate,
                 transformed_segments,
                 transformed_pieces,
+                #[cfg(feature = "metal")]
+                straight_segments,
                 style,
                 kernel,
                 joins,
@@ -1263,6 +1321,21 @@ impl<'a> FrameJob<'a> {
         self.draws.iter().flatten().count()
     }
 
+    #[cfg(feature = "metal")]
+    pub(crate) fn prepared_draws(&self) -> &[Option<Draw>] {
+        &self.draws
+    }
+
+    #[cfg(feature = "metal")]
+    pub(crate) fn frame_config(&self) -> FrameConfig {
+        self.config
+    }
+
+    #[cfg(feature = "metal")]
+    pub(crate) fn frame_binning(&self) -> &Binning {
+        self.binning
+    }
+
     /// Rasterize into a freshly allocated raw frame.
     ///
     /// # Errors
@@ -1322,11 +1395,11 @@ impl<'a> FrameJob<'a> {
                     self.render_into_profiled_with::<FastBuildTier>(threads, dst)
                 }
             }
-            // Construction rejects annex identities until their back-ends land.
-            // Reaching this arm would otherwise publish CPU bytes under a false
-            // engine identity, so fail closed rather than substitute.
+            // Annex jobs are executable only through their backend-specific,
+            // stateful renderer. Reaching this arm would publish CPU bytes
+            // under a false engine identity, so fail closed.
             EngineKind::Metal | EngineKind::Cuda => {
-                unreachable!("unimplemented annex engines are refused by FrameJob::with_identity")
+                unreachable!("annex jobs must use their backend-specific renderer")
             }
         }
     }
@@ -1910,7 +1983,7 @@ impl<'a> FrameJob<'a> {
     }
 
     /// This draw's slice of the plan's one flat segment table.
-    fn segments_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [Segment] {
+    pub(crate) fn segments_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [Segment] {
         if let Some(segments) = rec.transformed_segments.as_deref() {
             return segments;
         }
@@ -1922,7 +1995,7 @@ impl<'a> FrameJob<'a> {
 
     /// This draw's fill pieces, transformed once per frame when its placement
     /// has a non-identity linear part.
-    fn pieces_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [fill::MonoPiece] {
+    pub(crate) fn pieces_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [fill::MonoPiece] {
         rec.transformed_pieces
             .as_deref()
             .unwrap_or_else(|| self.mono.pieces_of(rec.shape))

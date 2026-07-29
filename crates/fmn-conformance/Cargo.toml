@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "The Gauntlet"
 
+[features]
+metal = ["fmn-render/metal"]
+
 [dependencies]
 fmn-core.workspace = true
 fmn-hash.workspace = true

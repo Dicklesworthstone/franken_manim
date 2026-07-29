@@ -208,6 +208,7 @@ pub fn max_stroke_reach_px(style: &Style, map: ScreenMap) -> f64 {
 struct PreparedSegment {
     slab: [f64; 4],
     total_arc_length: f64,
+    line: bool,
 }
 
 /// Per-draw stroke data whose inputs are fixed before a tile is touched.
@@ -230,6 +231,7 @@ impl PreparedStroke {
         style: &Style,
         map: ScreenMap,
         translate: [f64; 2],
+        straight_segments: bool,
     ) -> Self {
         let mut prepared = Vec::with_capacity(segments.len());
         let mut slab = [
@@ -249,6 +251,7 @@ impl PreparedStroke {
                 total_arc_length: fmn_geom::arclength::quadratic_arc_length(
                     segment.p0, segment.p1, segment.p2,
                 ),
+                line: straight_segments,
             });
         }
         Self {
@@ -291,8 +294,11 @@ impl PreparedStroke {
                 continue;
             }
             admitted = true;
-            let (excess, s) =
-                segment_excess_and_s(segment, prepared.total_arc_length, style, map, obj);
+            let (excess, s) = if prepared.line {
+                line_segment_excess_and_s(segment, style, map, obj)
+            } else {
+                segment_excess_and_s(segment, prepared.total_arc_length, style, map, obj)
+            };
             if excess < best {
                 best = excess;
                 best_s = s;
@@ -325,6 +331,77 @@ impl PreparedStroke {
             None => (0.0, 0.0),
         }
     }
+}
+
+/// Maximum screen-space Hausdorff error admitted by the line fast path.
+///
+/// One quarter of a milli-pixel is far below the raw half-float surface's
+/// useful spatial resolution, while remaining explicit and invariant under
+/// scene scale. Semantic `Line`/`Polyline` hints bypass the numeric test because
+/// they are the authoritative construction identity; writable point mutation
+/// invalidates that hint before the frame job is built.
+#[cfg(any(feature = "metal", test))]
+pub(crate) const LINE_APPROXIMATION_MAX_ERROR_PX: f64 = 1.0 / 4096.0;
+
+/// Whether a segment may use capsule distance without a visible geometry move.
+#[cfg(any(feature = "metal", test))]
+pub(crate) fn line_approximation_admitted(
+    segment: &Segment,
+    map: ScreenMap,
+    semantic_line: bool,
+) -> bool {
+    if semantic_line {
+        return true;
+    }
+    let chord = [segment.p2[0] - segment.p0[0], segment.p2[1] - segment.p0[1]];
+    let handle = [segment.p1[0] - segment.p0[0], segment.p1[1] - segment.p0[1]];
+    let chord_squared = chord[0] * chord[0] + chord[1] * chord[1];
+    if chord_squared == 0.0 {
+        return handle[0] == 0.0 && handle[1] == 0.0;
+    }
+    let projection = (handle[0] * chord[0] + handle[1] * chord[1]) / chord_squared;
+    if !(0.0..=1.0).contains(&projection) {
+        return false;
+    }
+    let twice_area = (chord[0] * handle[1] - chord[1] * handle[0]).abs();
+    let maximum_object_error = 0.5 * twice_area / chord_squared.sqrt();
+    maximum_object_error * map.scale.abs() <= LINE_APPROXIMATION_MAX_ERROR_PX
+}
+
+fn line_segment_excess_and_s(
+    segment: &Segment,
+    style: &Style,
+    map: ScreenMap,
+    object_point: fmn_core::types::Vec3,
+) -> (f64, f64) {
+    let chord = [
+        segment.p2[0] - segment.p0[0],
+        segment.p2[1] - segment.p0[1],
+        segment.p2[2] - segment.p0[2],
+    ];
+    let delta = [
+        object_point[0] - segment.p0[0],
+        object_point[1] - segment.p0[1],
+        object_point[2] - segment.p0[2],
+    ];
+    let denominator = dot3(chord, chord);
+    let t = if denominator > 0.0 {
+        (dot3(delta, chord) / denominator).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let nearest_delta = [
+        delta[0] - chord[0] * t,
+        delta[1] - chord[1] * t,
+        delta[2] - chord[2] * t,
+    ];
+    let s = segment.s0 + (segment.s1 - segment.s0) * t;
+    let distance = dot3(nearest_delta, nearest_delta).sqrt();
+    (distance * map.scale.abs() - half_width_px(style, map, s), s)
+}
+
+fn dot3(a: fmn_core::types::Vec3, b: fmn_core::types::Vec3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// The stroke's **signed excess** at a screen point, in pixels: negative inside
@@ -792,6 +869,74 @@ mod tests {
     }
 
     #[test]
+    fn the_line_route_is_bounded_and_rejects_curves_and_overshoots() {
+        let segment = |p0, p1, p2| Segment {
+            p0,
+            p1,
+            p2,
+            s0: 0.0,
+            s1: 1.0,
+        };
+        let map = ScreenMap {
+            scale: 60.0,
+            origin: [0.0, 0.0],
+        };
+        let quantized_line = segment(
+            [0.0, 0.0, 0.0],
+            [0.009_999_990_463_256_836, 0.199_999_928_474_426_27, 0.0],
+            [0.019_999_980_926_513_672, 0.399_999_976_158_142_1, 0.0],
+        );
+        assert!(line_approximation_admitted(&quantized_line, map, false));
+        assert!(
+            line_approximation_admitted(
+                &segment([0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0],),
+                map,
+                true,
+            ),
+            "a valid semantic line hint is authoritative"
+        );
+        assert!(!line_approximation_admitted(
+            &segment([0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0],),
+            map,
+            false,
+        ));
+        assert!(!line_approximation_admitted(
+            &segment([0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 0.0, 0.0],),
+            map,
+            false,
+        ));
+    }
+
+    #[test]
+    fn a_quantized_polyline_uses_capsule_distance() {
+        let segments = [
+            Segment {
+                p0: [0.0, 0.0, 0.0],
+                p1: [0.009_999_990_463_256_836, 0.199_999_928_474_426_27, 0.0],
+                p2: [0.019_999_980_926_513_672, 0.399_999_976_158_142_1, 0.0],
+                s0: 0.0,
+                s1: 0.5,
+            },
+            Segment {
+                p0: [0.019_999_980_926_513_672, 0.399_999_976_158_142_1, 0.0],
+                p1: [0.029_999_971_389_770_508, 0.199_999_928_474_426_27, 0.0],
+                p2: [0.040_000_021_457_672_12, 0.0, 0.0],
+                s0: 0.5,
+                s1: 0.95,
+            },
+        ];
+        let map = ScreenMap {
+            scale: 60.0,
+            origin: [160.0, 90.0],
+        };
+        let style = flat_stroke_style(14.0);
+        let translate = [40.8, -84.0];
+        let prepared = PreparedStroke::new(&segments, &style, map, translate, true);
+        let (coverage, _) = prepared.shade(&segments, &[], &style, map, translate, [206.5, 10.5]);
+        assert!(coverage > 0.99, "{coverage}");
+    }
+
+    #[test]
     fn the_width_conversion_is_the_references_own() {
         let map = ScreenMap {
             scale: 135.0,
@@ -1176,7 +1321,7 @@ mod tests {
                     ..flat_stroke_style(300.0)
                 };
                 let joins = join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
-                let prepared = PreparedStroke::new(&segments, &style, map, translate);
+                let prepared = PreparedStroke::new(&segments, &style, map, translate, false);
                 for y in -80..80 {
                     for x in -80..120 {
                         let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
@@ -1237,7 +1382,7 @@ mod tests {
             0.0
         );
         assert_eq!(
-            PreparedStroke::new(&[], &style, map, [0.0, 0.0]).shade(
+            PreparedStroke::new(&[], &style, map, [0.0, 0.0], false).shade(
                 &[],
                 &[],
                 &style,
@@ -1259,7 +1404,7 @@ mod tests {
             None
         );
         assert_eq!(
-            PreparedStroke::new(&segs, &style, degenerate_map, [0.0, 0.0]).shade(
+            PreparedStroke::new(&segs, &style, degenerate_map, [0.0, 0.0], false).shade(
                 &segs,
                 &[],
                 &style,
@@ -1287,7 +1432,7 @@ mod tests {
         cusp.add_quadratic_bezier_curve_to([20.0, 0.0, 0.0], [0.0, 0.0, 0.0], true)
             .unwrap();
         let cusp_segs = segs_of(&cusp);
-        let prepared_cusp = PreparedStroke::new(&cusp_segs, &style, map, [0.0, 0.0]);
+        let prepared_cusp = PreparedStroke::new(&cusp_segs, &style, map, [0.0, 0.0], false);
         for x in 0..12 {
             let point = [f64::from(x), 0.5];
             let c = stroke_coverage(&cusp_segs, &style, map, [0.0, 0.0], point);

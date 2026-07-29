@@ -56,6 +56,11 @@ use fmn_render::engine::{
     Tier, encode_frame, journal_digest,
 };
 use fmn_render::fill::{FillKernel, MonoTable, instance_translation};
+#[cfg(feature = "metal")]
+use fmn_render::metal::{
+    METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR, METAL_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+    METAL_VISUAL_BUDGET_V1_MIN_SSIM, METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, MetalRenderer,
+};
 use fmn_render::plan::RenderPlan;
 use std::path::PathBuf;
 
@@ -565,6 +570,176 @@ fn corpus() -> Vec<(&'static str, Stage)> {
 }
 
 // ---------------------------------------------------------------- the gates
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_annex_stays_inside_budget_and_reuses_its_surfaces() {
+    if !MetalRenderer::is_available() {
+        return;
+    }
+    let mut renderer =
+        MetalRenderer::new().expect("an available Metal device must compile the production shader");
+
+    for (name, stage) in corpus() {
+        let certified = render_frame(&stage, EngineIdentity::certified(), 1, AaPolicy::Adaptive);
+        let cfg = config();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let mono = MonoTable::build(&plan, cfg.map);
+        let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+        binning.prune_occluded(&plan).expect("matching plan");
+
+        let (first, first_report) = renderer
+            .render_raw(&plan, &mono, &binning, cfg)
+            .expect("Metal renders the conformance frame");
+        let (second, second_report) = renderer
+            .render_raw(&plan, &mono, &binning, cfg)
+            .expect("Metal repeats the conformance frame");
+        let measured = divergence(&certified, &first);
+
+        assert_eq!(first_report.identity, EngineIdentity::metal());
+        assert_eq!(first_report.output_format, PixelFormat::Rgba16F);
+        assert_eq!(
+            first_report.threads_per_threadgroup,
+            usize::try_from(TILING.fine_tile * TILING.fine_tile)
+                .expect("the declared tile size fits usize")
+        );
+        assert!(first_report.max_threads_per_threadgroup >= first_report.threads_per_threadgroup);
+        assert!(first_report.upload_bytes > 0);
+        assert_eq!(first_report.readback_bytes, first.as_bytes().len());
+        assert!(first_report.frames_per_second().is_some());
+        assert!(second_report.raw_surface_reused);
+        assert_eq!(
+            first_report.backend_digest(),
+            second_report.backend_digest()
+        );
+        assert_eq!(
+            first.as_bytes(),
+            second.as_bytes(),
+            "{name} Metal output changed between identical dispatches"
+        );
+        assert!(
+            measured.maximum <= METAL_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+            "{name} Metal max={} at {:?} (certified {}, Metal {}) exceeds {}",
+            measured.maximum,
+            measured.maximum_at,
+            measured.reference_at_maximum,
+            measured.candidate_at_maximum,
+            METAL_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR
+        );
+        assert!(
+            measured.rms <= METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
+            "{name} Metal rms={} exceeds {}",
+            measured.rms,
+            METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR
+        );
+        assert!(
+            measured.ssim >= METAL_VISUAL_BUDGET_V1_MIN_SSIM,
+            "{name} Metal ssim={} is below {}",
+            measured.ssim,
+            METAL_VISUAL_BUDGET_V1_MIN_SSIM
+        );
+
+        if name == "composite.v1" {
+            let mut expected = FrameBuffer::new(
+                FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT)
+                    .expect("RGBA8 comparison layout"),
+            );
+            fmn_frame::convert::rgba16f_to_rgba8(&first, &mut expected)
+                .expect("canonical transfer");
+            let (gpu_first, gpu_first_report) = renderer
+                .render_rgba8(&plan, &mono, &binning, cfg)
+                .expect("Metal transfers the preview surface");
+            let (gpu_second, gpu_second_report) = renderer
+                .render_rgba8(&plan, &mono, &binning, cfg)
+                .expect("Metal repeats the preview transfer");
+            assert_eq!(gpu_first_report.output_format, PixelFormat::Rgba8);
+            assert!(gpu_second_report.raw_surface_reused);
+            assert!(gpu_second_report.output_surface_reused);
+            assert_eq!(gpu_first.as_bytes(), gpu_second.as_bytes());
+            assert!(
+                maximum_rgba8_code_error(&expected, &gpu_first)
+                    <= METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR
+            );
+        }
+    }
+}
+
+#[cfg(feature = "metal")]
+fn maximum_rgba8_code_error(reference: &FrameBuffer, candidate: &FrameBuffer) -> u8 {
+    assert_eq!(reference.layout(), candidate.layout());
+    reference
+        .as_bytes()
+        .iter()
+        .zip(candidate.as_bytes())
+        .map(|(&a, &b)| a.abs_diff(b))
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "PG-A runs explicitly on the pinned Apple profile"]
+fn metal_annex_pg_a_reports_the_empty_floor_beside_the_corpus() {
+    if !MetalRenderer::is_available() {
+        return;
+    }
+    const MEASURED_FRAMES: usize = 33;
+    let mut renderer =
+        MetalRenderer::new().expect("an available Metal device must compile the production shader");
+
+    for (case, stage) in [("empty", Stage::new()), ("composite", composite())] {
+        let cfg = config();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let mono = MonoTable::build(&plan, cfg.map);
+        let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+        binning.prune_occluded(&plan).expect("matching plan");
+
+        renderer
+            .render_rgba8(&plan, &mono, &binning, cfg)
+            .expect("PG-A warmup frame");
+        let mut elapsed = Vec::with_capacity(MEASURED_FRAMES);
+        let mut last = None;
+        for _ in 0..MEASURED_FRAMES {
+            let (_, report) = renderer
+                .render_rgba8(&plan, &mono, &binning, cfg)
+                .expect("PG-A measured frame");
+            assert!(report.raw_surface_reused);
+            assert!(report.output_surface_reused);
+            elapsed.push(report.elapsed);
+            last = Some(report);
+        }
+        elapsed.sort_unstable();
+        let median = elapsed[MEASURED_FRAMES / 2];
+        let report = last.expect("the measurement count is nonzero");
+        let fps = 1.0 / median.as_secs_f64();
+        assert!(fps.is_finite() && fps > 0.0);
+        assert!(report.upload_bytes > 0);
+        assert_eq!(
+            report.readback_bytes,
+            FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT)
+                .expect("PG-A output layout")
+                .total_bytes()
+        );
+
+        println!(
+            "{{\"schema\":\"fmn.pg_a.v1\",\"case\":\"{case}\",\"device\":{:?},\
+             \"unified_memory\":{},\"frames\":{MEASURED_FRAMES},\"median_ns\":{},\
+             \"fps\":{fps},\"upload_bytes\":{},\"readback_bytes\":{},\
+             \"threads_per_threadgroup\":{},\"max_threads_per_threadgroup\":{},\
+             \"thread_execution_width\":{}}}",
+            report.device,
+            report.unified_memory,
+            median.as_nanos(),
+            report.upload_bytes,
+            report.readback_bytes,
+            report.threads_per_threadgroup,
+            report.max_threads_per_threadgroup,
+            report.thread_execution_width,
+        );
+    }
+}
 
 #[test]
 fn the_corpus_is_bit_locked_across_the_certified_matrix() {

@@ -31,6 +31,8 @@ pub mod camera;
 pub mod engine;
 pub mod fill;
 pub mod hint;
+#[cfg(feature = "metal")]
+pub mod metal;
 pub mod plan;
 pub mod revision;
 pub mod snapshot;

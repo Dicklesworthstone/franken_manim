@@ -1859,6 +1859,16 @@ impl GradientField {
         self.points.len()
     }
 
+    /// Shape-local screen-space stations for backend-specific derived layouts.
+    ///
+    /// The retained field remains the authority; annex backends copy these
+    /// values into their own flat device representation rather than inventing a
+    /// second station-placement rule.
+    #[cfg(feature = "metal")]
+    pub(crate) fn stations(&self) -> (&[[f64; 2]], &[f64]) {
+        (&self.points, &self.params)
+    }
+
     /// The field's value at a screen point: mean value coordinates over the
     /// stations, applied to their arc-length parameters.
     ///
