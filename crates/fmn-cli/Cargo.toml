@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "The `fmn` binary"
 
+[[bin]]
+name = "fmn"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true
@@ -17,7 +22,7 @@ fmn-output.workspace = true
 fmn-library.workspace = true
 
 [features]
-batch = []
+batch = ["cli"]
 cli = []
 
 [lints]

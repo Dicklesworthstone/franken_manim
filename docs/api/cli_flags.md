@@ -62,7 +62,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--threads` | global | `threads` | improved | store | — | Bound render-team CPU threads |
 | `--ffmpeg` | global | `ffmpeg` | improved | store | — | Absolute path to the optional ffmpeg executable |
 | `--cache-dir` | global | `cache_dir` | improved | store | — | Explicit FrankenManim content-store root |
-| `--format` | render | `format` | improved | store | auto | Select auto, png, png-sequence, gif, y4m, wav, or video output |
+| `--format` | render | `format` | improved | store | auto | Select auto, png, png_sequence, gif, y4m, wav, or video output |
 | `--math-pack` | render | `math_pack` | improved | store | default | Select an fmd-math preamble pack |
 | `--budget-ms` | batch | `budget_ms` | improved | store | — | Wall-clock budget for the batch |
 | `--max-scenes` | batch | `max_scenes` | improved | store | — | Bound simultaneously active scene jobs |
@@ -110,15 +110,22 @@ These rules are emitted into the parser artifact and executed after token collec
 | `finder-writes` | implies | `finder`, `write_file` | — | --finder implies durable output |
 | `gif-writes` | implies | `gif`, `write_file` | — | --gif implies durable output |
 | `transparent-writes` | implies | `transparent`, `write_file` | — | --transparent implies durable output |
+| `format-writes` | implies | `format`, `write_file` | — | --format implies durable output |
+| `certified-writes` | implies | `reproducible`, `write_file` | — | --reproducible implies durable canonical output |
 | `codec-writes` | implies | `vcodec`, `write_file` | — | --vcodec implies durable output |
 | `pixel-format-writes` | implies | `pix_fmt`, `write_file` | — | --pix_fmt implies durable output |
 | `subdivide-writes` | implies | `subdivide`, `write_file` | — | --subdivide implies durable output |
 | `filename-writes` | implies | `file_name`, `write_file` | — | --file_name implies durable output |
 | `video-directory-writes` | implies | `video_dir`, `write_file` | — | --video_dir implies durable output |
+| `gif-vs-non-gif-format` | conflicts | `gif`, `format=auto,png,png_sequence,y4m,wav,video` | usage | --gif conflicts with a non-GIF --format |
+| `native-format-vs-codec` | conflicts | `format=png,png_sequence,gif,y4m,wav`, `vcodec` | usage | --vcodec applies only to ffmpeg video output |
+| `native-format-vs-pixel-format` | conflicts | `format=png,png_sequence,gif,y4m,wav`, `pix_fmt` | usage | --pix_fmt applies only to ffmpeg video output |
+| `transparent-vs-opaque-pixel-format` | conflicts | `transparent`, `pix_fmt=yuv420p,yuv422p,yuv444p,nv12,p010,p010le,rgb24,bgr24` | usage | --transparent requires an alpha-capable output pixel format |
+| `transparent-vs-opaque-native-format` | conflicts | `transparent`, `format=y4m,wav` | usage | --transparent is incompatible with y4m and WAV outputs |
 | `skip-vs-subdivide` | conflicts | `skip_animations`, `subdivide` | usage | --skip_animations cannot produce per-animation subdivisions |
 | `write-all-vs-selection` | conflicts | `write_all`, `scene_names` | usage | --write_all cannot accompany explicit scene names |
 | `embed-vs-certified` | conflicts | `embed`, `reproducible` | usage | interactive embed points are outside certified execution |
 | `reload-vs-certified` | conflicts | `autoreload`, `reproducible` | usage | a changing source tree is outside one certified input closure |
-| `clear-cache-only` | exclusive | `clear_cache` | usage | --clear-cache is a standalone lifecycle action |
-| `version-only` | exclusive | `version` | usage | --version is a standalone query |
-| `help-only` | exclusive | `help` | usage | --help is a standalone query for the selected command |
+| `clear-cache-only` | exclusive | `clear_cache`, `robot`, `quiet`, `config_file`, `cache_dir`, `log_level` | usage | --clear-cache is a standalone lifecycle action |
+| `version-only` | exclusive | `version`, `robot` | usage | --version is a standalone query |
+| `help-only` | exclusive | `help`, `robot` | usage | --help is a standalone query for the selected command |

@@ -1,5 +1,2904 @@
-//! The `fmn` binary: manim's flag surface, progress reporting, doctor, and batch renders (§13.6).
+//! The `fmn` binary: manim's flag surface, progress reporting, doctor, and
+//! batch renders (§13.6).
 //!
-//! Skeleton crate stood up by W1 (fm-bsz). Subsystem contracts land with
-//! their owning workstreams; see COMPREHENSIVE_PLAN §19 for the crate map.
+//! The parser is data-driven by [`FLAG_SPECS`] and [`INTERACTION_SPECS`],
+//! generated from the one API schema. Runtime code never reads repository TSV
+//! files and does not carry a second flag inventory.
 #![forbid(unsafe_code)]
+
+mod generated;
+
+pub use generated::{
+    CommandScope, EXIT_CODE_SPECS, ExitCodeSpec, FLAG_SPECS, FlagAction, FlagArity, FlagSource,
+    FlagSpec, FlagStatus, INTERACTION_SPECS, InteractionKind, InteractionSpec, SUBCOMMAND_SPECS,
+    SubcommandSpec,
+};
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
+use std::fmt::{self, Write as _};
+use std::path::{Path, PathBuf};
+
+use fmn_platform::fs::FileSystem;
+
+/// Version of every `fmn` robot-mode record emitted by this crate.
+pub const ROBOT_SCHEMA_VERSION: u32 = 1;
+
+/// A stable CLI failure carrying its schema-owned process status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliError {
+    exit_name: &'static str,
+    message: String,
+    rule: Option<&'static str>,
+}
+
+impl CliError {
+    fn new(exit_name: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            exit_name,
+            message: message.into(),
+            rule: None,
+        }
+    }
+
+    fn interaction(rule: &'static str, exit_name: &'static str, message: &'static str) -> Self {
+        Self {
+            exit_name,
+            message: message.to_owned(),
+            rule: Some(rule),
+        }
+    }
+
+    /// Stable exit-code identity from the generated schema.
+    #[must_use]
+    pub const fn exit_name(&self) -> &'static str {
+        self.exit_name
+    }
+
+    /// Numeric process status.
+    #[must_use]
+    pub fn code(&self) -> u8 {
+        exit_code(self.exit_name)
+    }
+
+    /// Human-readable detail without terminal decoration.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Interaction rule identity, when validation failed on a generated rule.
+    #[must_use]
+    pub const fn rule(&self) -> Option<&'static str> {
+        self.rule
+    }
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(rule) = self.rule {
+            write!(f, "{rule}: {}", self.message)
+        } else {
+            f.write_str(&self.message)
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
+
+/// A validated `-n START` or `-n START,END` play range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationRange {
+    /// First play index to render.
+    pub start: u64,
+    /// Exclusive final play index, when bounded.
+    pub end: Option<u64>,
+}
+
+/// Quality preset or exact output dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionChoice {
+    /// Configured `-l` preset.
+    Low,
+    /// Configured `-m` preset.
+    Medium,
+    /// Configured `--hd` preset.
+    High,
+    /// Configured `--uhd` preset.
+    Uhd,
+    /// Exact `-r WIDTHxHEIGHT` override.
+    Exact(u32, u32),
+}
+
+/// Output format selected by `--format` and the kept GIF flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Derive the sink from the other output flags.
+    Auto,
+    /// One canonical PNG.
+    Png,
+    /// A canonical PNG sequence.
+    PngSequence,
+    /// Native GIF.
+    Gif,
+    /// Native y4m.
+    Y4m,
+    /// Native WAV.
+    Wav,
+    /// Video through the optional ffmpeg boundary.
+    Video,
+}
+
+impl OutputFormat {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "auto" => Self::Auto,
+            "png" => Self::Png,
+            "png_sequence" => Self::PngSequence,
+            "gif" => Self::Gif,
+            "y4m" => Self::Y4m,
+            "wav" => Self::Wav,
+            "video" => Self::Video,
+            _ => return None,
+        })
+    }
+}
+
+/// Options shared by every command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonOptions {
+    /// Versioned NDJSON mode.
+    pub robot: bool,
+    /// Suppress human-only progress and decoration.
+    pub quiet: bool,
+    /// Select certified rendering.
+    pub reproducible: bool,
+    /// Optional user config file.
+    pub config_file: Option<PathBuf>,
+    /// Explicit cache root.
+    pub cache_dir: Option<PathBuf>,
+    /// Explicit absolute ffmpeg path.
+    pub ffmpeg: Option<PathBuf>,
+    /// Optional render-team thread cap.
+    pub threads: Option<usize>,
+    /// Optional Reference log-level spelling.
+    pub log_level: Option<String>,
+}
+
+/// Semantic render request after parsing and interaction application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderCommand {
+    /// Shared command options.
+    pub common: CommonOptions,
+    /// Optional scene source path.
+    pub file: Option<PathBuf>,
+    /// Explicit scene names, in command-line order.
+    pub scene_names: Vec<String>,
+    /// Select every discovered scene.
+    pub write_all: bool,
+    /// Durable output requested or implied.
+    pub write_file: bool,
+    /// Capture final state rather than animation frames.
+    pub skip_animations: bool,
+    /// Quality preset or explicit resolution.
+    pub resolution: Option<ResolutionChoice>,
+    /// Explicit FPS.
+    pub fps: Option<u32>,
+    /// Play range.
+    pub animation_range: Option<AnimationRange>,
+    /// Presenter-controlled waits.
+    pub presenter_mode: bool,
+    /// Full-screen interactive presentation.
+    pub full_screen: bool,
+    /// Transparent output negotiation.
+    pub transparent: bool,
+    /// Output subdivision.
+    pub subdivide: bool,
+    /// Count-only pass before the real run.
+    pub prerun: bool,
+    /// Worker reload mode.
+    pub autoreload: bool,
+    /// Python/Studio breakpoint line.
+    pub embed_line: Option<u64>,
+    /// Background color expression.
+    pub background: Option<String>,
+    /// Output stem.
+    pub file_name: Option<String>,
+    /// Output directory.
+    pub video_dir: Option<PathBuf>,
+    /// ffmpeg encoder.
+    pub vcodec: Option<String>,
+    /// ffmpeg pixel format.
+    pub pix_fmt: Option<String>,
+    /// Output format.
+    pub format: OutputFormat,
+    /// Explicit fmd-math preamble pack; absent preserves user configuration.
+    pub math_pack: Option<String>,
+    /// Open the completed artifact through a host capability.
+    pub open: bool,
+    /// Reveal the completed artifact through a host capability.
+    pub finder: bool,
+    /// Per-animation progress.
+    pub show_animation_progress: bool,
+    /// Leave completed progress bars.
+    pub leave_progress_bars: bool,
+}
+
+impl RenderCommand {
+    /// Translate front-door flags into Proscenium's semantic runtime config.
+    #[must_use]
+    pub fn runtime_config(&self, config: &fmn_config::Config) -> fmn_scene::RuntimeConfig {
+        let mut runtime = fmn_scene::RuntimeConfig::from_config(config);
+        runtime.windowed =
+            !self.write_file || self.presenter_mode || self.full_screen || self.autoreload;
+        runtime.skip_animations = self.skip_animations;
+        runtime.start_at_play = self.animation_range.map(|range| range.start);
+        runtime.end_at_play = self.animation_range.and_then(|range| range.end);
+        runtime.presenter_mode = self.presenter_mode;
+        runtime
+    }
+}
+
+/// `fmn doctor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCommand {
+    /// Shared command options.
+    pub common: CommonOptions,
+    /// Make missing ffmpeg an exit-4 requirement rather than a reported
+    /// optional absence.
+    pub require_ffmpeg: bool,
+}
+
+/// `fmn batch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchCommand {
+    /// Render options applied to each selected scene.
+    pub render: RenderCommand,
+    /// Wall-clock budget.
+    pub budget_ms: Option<u64>,
+    /// Bound simultaneously active scene jobs.
+    pub max_scenes: Option<usize>,
+    /// Cancel remaining jobs after the first failure.
+    pub fail_fast: bool,
+    /// Per-scene manifest directory.
+    pub manifest_dir: Option<PathBuf>,
+}
+
+/// Studio preview transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCodec {
+    /// Permanent zero-ffmpeg multipart PNG floor.
+    Png,
+    /// Optional MJPEG route through Reel's ffmpeg boundary.
+    Mjpeg,
+}
+
+/// `fmn studio`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudioCommand {
+    /// Scene/preview options.
+    pub render: RenderCommand,
+    /// Loopback bind address.
+    pub bind: std::net::IpAddr,
+    /// TCP port; zero requests an ephemeral port.
+    pub port: u16,
+    /// Suppress browser launch.
+    pub no_browser: bool,
+    /// Attach a terminal client.
+    pub tui: bool,
+    /// Maximum frame distance between replay checkpoints.
+    pub checkpoint_frames: u64,
+    /// Preview transport.
+    pub preview_codec: PreviewCodec,
+}
+
+/// Provenance of the topology used for `fmn doctor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopologySource {
+    /// Linux sysfs/procfs introspection succeeded.
+    LinuxSysfs,
+    /// A flat topology was derived from `available_parallelism`.
+    Fallback {
+        /// Why full introspection was unavailable.
+        reason: String,
+    },
+}
+
+/// Optional ffmpeg capability state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfmpegReport {
+    /// The configured path was resolved and probed.
+    Available {
+        /// Canonical caller-supplied absolute path.
+        path: PathBuf,
+        /// Executable SHA-256.
+        sha256: String,
+        /// First `ffmpeg -version` line.
+        version: String,
+        /// Recognized hardware encoders, in stable order.
+        hardware_encoders: Vec<String>,
+        /// Encoder-inventory probe failure, without discarding the valid
+        /// executable identity and version probe.
+        hardware_encoder_probe_error: Option<String>,
+    },
+    /// Optional capability unavailable or deliberately not resolved.
+    Unavailable {
+        /// Configured path or name.
+        attempted: PathBuf,
+        /// Stable, actionable explanation.
+        reason: String,
+        /// Native no-ffmpeg floor.
+        alternative: String,
+    },
+}
+
+impl FfmpegReport {
+    /// Whether a probed ffmpeg is available.
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+}
+
+/// Read-only cache observation. Doctor never opens or stamps a store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheReport {
+    /// A configured root was inspected without mutation.
+    Configured {
+        /// Configured path.
+        root: PathBuf,
+        /// Whether it currently exists.
+        exists: bool,
+        /// Number of direct entries, when readable.
+        direct_entries: Option<usize>,
+        /// Read-only inspection failure, when any.
+        warning: Option<String>,
+    },
+    /// Empty config awaits a platform-default resolver.
+    Unresolved {
+        /// Why no path was guessed.
+        reason: String,
+    },
+}
+
+/// Font inventory state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontReport {
+    /// Configured default family.
+    pub selected: String,
+    /// Bundled family names verified by the host integration.
+    pub bundled: Vec<String>,
+    /// User family names verified by the host integration.
+    pub user: Vec<String>,
+    /// Whether the inventory is complete.
+    pub complete: bool,
+    /// Truthful reason for a partial inventory.
+    pub detail: Option<String>,
+}
+
+/// Certified-platform contract reported by doctor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificationReport {
+    /// Stable `os-arch` identity.
+    pub platform: String,
+    /// Whether Revision 4 certifies this target.
+    pub supported: bool,
+    /// Contract note, including pending targets.
+    pub detail: String,
+}
+
+/// Stable subset of the derived [`fmn_runtime::ExecutionPlan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionPlanReport {
+    /// `standard` or `certified`.
+    pub determinism: &'static str,
+    /// Selected execution engine.
+    pub engine: &'static str,
+    /// Global frame-slot bound.
+    pub frames_in_flight: usize,
+    /// Scene/update threads.
+    pub scene_threads: usize,
+    /// Render-team count.
+    pub render_teams: usize,
+    /// Threads across all render teams.
+    pub render_threads: usize,
+    /// Output threads.
+    pub output_threads: usize,
+    /// Fine tile edge.
+    pub fine_tile: u32,
+    /// Macrotile edge.
+    pub macro_tile: u32,
+    /// Estimated in-flight bytes.
+    pub estimated_in_flight_bytes: usize,
+    /// Negotiated planning pixel format.
+    pub output_format: &'static str,
+    /// Tuning source.
+    pub tuning_source: &'static str,
+}
+
+/// Complete, versioned `fmn doctor` snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorSnapshot {
+    /// Topology provenance.
+    pub topology_source: TopologySource,
+    /// Logical CPU count.
+    pub logical_cores: u32,
+    /// Physical CPU count.
+    pub physical_cores: u32,
+    /// Hardware-supported SIMD tier.
+    pub hardware_supported_tier: String,
+    /// Tier compiled into this binary.
+    pub active_compiled_tier: &'static str,
+    /// Derived execution plan.
+    pub plan: ExecutionPlanReport,
+    /// Optional ffmpeg report.
+    pub ffmpeg: FfmpegReport,
+    /// Read-only cache state.
+    pub cache: CacheReport,
+    /// Fonts.
+    pub fonts: FontReport,
+    /// Available fmd-math packs.
+    pub math_packs: Vec<String>,
+    /// Certified-platform support.
+    pub certification: CertificationReport,
+}
+
+/// Fully parsed command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Invocation {
+    /// Render or preview.
+    Render(RenderCommand),
+    /// Capability report.
+    Doctor(DoctorCommand),
+    /// Multi-scene farm.
+    Batch(BatchCommand),
+    /// Live Studio.
+    Studio(StudioCommand),
+    /// Schema-generated help for the selected command.
+    Help {
+        /// Selected command.
+        command: CommandScope,
+        /// Robot-mode response.
+        robot: bool,
+    },
+    /// Version report.
+    Version {
+        /// Robot-mode response.
+        robot: bool,
+    },
+    /// Defined cache lifecycle action. Dispatch remains fail-closed until the
+    /// cache crate proves root ownership.
+    ClearCache {
+        /// Shared configuration and robot flags.
+        common: CommonOptions,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+struct Collected {
+    values: BTreeMap<&'static str, Vec<String>>,
+    explicit: BTreeSet<&'static str>,
+    implied: BTreeSet<&'static str>,
+}
+
+impl Collected {
+    fn set_switch(&mut self, binding: &'static str, implied: bool) {
+        self.values.insert(binding, vec!["true".to_owned()]);
+        if implied {
+            self.implied.insert(binding);
+        } else {
+            self.explicit.insert(binding);
+        }
+    }
+
+    fn set_value(&mut self, binding: &'static str, value: String) {
+        self.values.insert(binding, vec![value]);
+        self.explicit.insert(binding);
+    }
+
+    fn extend_values(&mut self, binding: &'static str, values: impl IntoIterator<Item = String>) {
+        let destination = self.values.entry(binding).or_default();
+        destination.extend(values);
+        if !destination.is_empty() {
+            self.explicit.insert(binding);
+        }
+    }
+
+    fn present(&self, binding: &str) -> bool {
+        self.explicit.contains(binding) || self.implied.contains(binding)
+    }
+
+    fn bool(&self, binding: &str) -> bool {
+        self.values
+            .get(binding)
+            .and_then(|values| values.last())
+            .map_or_else(
+                || {
+                    spec_by_binding(binding)
+                        .and_then(|spec| spec.default)
+                        .is_some_and(parse_bool)
+                },
+                |value| parse_bool(value),
+            )
+    }
+
+    fn value(&self, binding: &str) -> Option<&str> {
+        self.values
+            .get(binding)
+            .and_then(|values| values.last())
+            .map(String::as_str)
+            .or_else(|| spec_by_binding(binding).and_then(|spec| spec.default))
+    }
+
+    fn explicit_value(&self, binding: &str) -> Option<&str> {
+        self.values
+            .get(binding)
+            .and_then(|values| values.last())
+            .map(String::as_str)
+    }
+
+    fn many(&self, binding: &str) -> Vec<String> {
+        self.values.get(binding).cloned().unwrap_or_default()
+    }
+}
+
+fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
+    Some(match binding {
+        "clear_cache" | "config_file" | "help" | "robot" | "reproducible" | "ffmpeg"
+        | "cache_dir" | "threads" | "log_level" | "quiet" | "version" => CommandScope::Global,
+        "autoreload"
+        | "file_name"
+        | "finder"
+        | "fps"
+        | "hd"
+        | "leave_progress_bars"
+        | "pix_fmt"
+        | "prerun"
+        | "show_animation_progress"
+        | "subdivide"
+        | "uhd"
+        | "vcodec"
+        | "video_dir"
+        | "write_all"
+        | "background"
+        | "embed"
+        | "full_screen"
+        | "gif"
+        | "low_quality"
+        | "medium_quality"
+        | "animation_range"
+        | "open"
+        | "presenter_mode"
+        | "resolution"
+        | "skip_animations"
+        | "transparent"
+        | "write_file"
+        | "file"
+        | "scene_names"
+        | "format"
+        | "math_pack" => CommandScope::Render,
+        "require_ffmpeg" => CommandScope::Doctor,
+        "budget_ms" | "max_scenes" | "fail_fast" | "manifest_dir" => CommandScope::Batch,
+        "bind" | "port" | "no_browser" | "tui" | "checkpoint_frames" | "preview_codec" => {
+            CommandScope::Studio
+        }
+        _ => return None,
+    })
+}
+
+fn value_type_supported(value_type: &str) -> bool {
+    matches!(
+        value_type,
+        "int"
+            | "usize"
+            | "u64"
+            | "u16"
+            | "ip"
+            | "output_format"
+            | "preview_codec"
+            | "path"
+            | "pack"
+    )
+}
+
+fn validate_generated_contract() -> Result<(), CliError> {
+    for spec in FLAG_SPECS {
+        let Some(consumer_scope) = typed_consumer_scope(spec.binding) else {
+            return Err(internal(format!(
+                "generated binding `{}` has no typed consumer",
+                spec.binding
+            )));
+        };
+        if consumer_scope != spec.command {
+            return Err(internal(format!(
+                "generated binding `{}` is declared for `{}` but its typed consumer belongs to `{}`",
+                spec.binding,
+                scope_name(spec.command),
+                scope_name(consumer_scope),
+            )));
+        }
+        if let Some(value_type) = spec.value_type
+            && !value_type_supported(value_type)
+        {
+            return Err(internal(format!(
+                "generated value type `{value_type}` has no validator"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse command-line tokens after the executable name.
+///
+/// Both long `--flag=value` and attached short values such as `-n3,6` are
+/// accepted. Short switches may be grouped when every member is a switch.
+/// A separated value beginning with `-` is treated as a missing value so an
+/// unknown-option typo cannot be swallowed; spell such strings with `=`.
+///
+/// # Errors
+///
+/// [`CliError`] with the schema-owned `usage` identity.
+pub fn parse_args<I, S>(args: I) -> Result<Invocation, CliError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    validate_generated_contract()?;
+    let tokens: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut scope = CommandScope::Render;
+    let mut command_seen = false;
+    let mut positionals = Vec::new();
+    let mut collected = Collected::default();
+    let mut index = 0usize;
+    let mut options_enabled = true;
+
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if options_enabled && token == "--" {
+            options_enabled = false;
+            index += 1;
+            continue;
+        }
+        if options_enabled && token.starts_with('-') && token != "-" {
+            let consumed = collect_option(&tokens, index, &mut collected)?;
+            index += consumed;
+            continue;
+        }
+        if options_enabled
+            && !command_seen
+            && positionals.is_empty()
+            && let Some(command) = command_named(token)
+        {
+            scope = command;
+            command_seen = true;
+            index += 1;
+            continue;
+        }
+        positionals.push(token.clone());
+        index += 1;
+    }
+
+    assign_positionals(scope, positionals, &mut collected)?;
+    validate_scope(scope, &collected)?;
+    apply_interactions(&mut collected, command_seen)?;
+    validate_value_types(&collected)?;
+    build_invocation(scope, collected, command_seen)
+}
+
+fn collect_option(
+    tokens: &[String],
+    index: usize,
+    collected: &mut Collected,
+) -> Result<usize, CliError> {
+    let token = &tokens[index];
+    let (alias, attached) = token
+        .split_once('=')
+        .map_or((token.as_str(), None), |(alias, value)| {
+            (alias, Some(value))
+        });
+    if let Some(spec) = spec_by_alias(alias) {
+        return collect_spec(tokens, index, spec, attached, collected);
+    }
+
+    if token.starts_with('-') && !token.starts_with("--") && token.len() > 2 {
+        for (offset, ch) in token[1..].char_indices() {
+            let alias = format!("-{ch}");
+            let Some(spec) = spec_by_alias(&alias) else {
+                return Err(usage(format!("unknown option `{alias}` in `{token}`")));
+            };
+            if spec.action == FlagAction::SetTrue {
+                collected.set_switch(spec.binding, false);
+                continue;
+            }
+            let value_offset = 1 + offset + ch.len_utf8();
+            let attached = token.get(value_offset..).filter(|value| !value.is_empty());
+            return collect_spec(tokens, index, spec, attached, collected);
+        }
+        return Ok(1);
+    }
+
+    Err(usage(format!("unknown option `{token}`")))
+}
+
+fn collect_spec(
+    tokens: &[String],
+    index: usize,
+    spec: &'static FlagSpec,
+    attached: Option<&str>,
+    collected: &mut Collected,
+) -> Result<usize, CliError> {
+    if spec.status == FlagStatus::Excluded {
+        return Err(usage(format!(
+            "option `{}` is excluded from FrankenManim",
+            spec.options.first().copied().unwrap_or(spec.binding)
+        )));
+    }
+    match spec.action {
+        FlagAction::SetTrue => {
+            if attached.is_some() {
+                return Err(usage(format!(
+                    "switch `{}` does not take a value",
+                    spec.options.first().copied().unwrap_or(spec.binding)
+                )));
+            }
+            collected.set_switch(spec.binding, false);
+            Ok(1)
+        }
+        FlagAction::Store => {
+            if let Some(value) = attached {
+                collected.set_value(spec.binding, value.to_owned());
+                return Ok(1);
+            }
+            let Some(value) = tokens.get(index + 1) else {
+                return Err(usage(format!(
+                    "option `{}` requires a value",
+                    spec.options.first().copied().unwrap_or(spec.binding)
+                )));
+            };
+            if value.starts_with('-') && value != "-" {
+                return Err(usage(format!(
+                    "option `{}` requires a value before `{value}`",
+                    spec.options.first().copied().unwrap_or(spec.binding)
+                )));
+            }
+            collected.set_value(spec.binding, value.clone());
+            Ok(2)
+        }
+    }
+}
+
+fn assign_positionals(
+    scope: CommandScope,
+    positionals: Vec<String>,
+    collected: &mut Collected,
+) -> Result<(), CliError> {
+    match scope {
+        CommandScope::Render | CommandScope::Batch | CommandScope::Studio => {
+            let mut positionals = positionals.into_iter();
+            if let Some(file) = positionals.next() {
+                collected.set_value("file", file);
+            }
+            collected.extend_values("scene_names", positionals);
+            Ok(())
+        }
+        CommandScope::Doctor | CommandScope::Global => {
+            if positionals.is_empty() {
+                Ok(())
+            } else {
+                Err(usage(format!(
+                    "`{}` does not accept positional arguments",
+                    scope_name(scope)
+                )))
+            }
+        }
+    }
+}
+
+fn validate_scope(scope: CommandScope, collected: &Collected) -> Result<(), CliError> {
+    for binding in &collected.explicit {
+        let Some(spec) = spec_by_binding(binding) else {
+            return Err(internal(format!(
+                "generated binding `{binding}` has no flag specification"
+            )));
+        };
+        if scope_accepts(scope, spec.command) {
+            continue;
+        }
+        return Err(usage(format!(
+            "option `{}` belongs to `{}`, not `{}`",
+            spec.options.first().copied().unwrap_or(spec.binding),
+            scope_name(spec.command),
+            scope_name(scope)
+        )));
+    }
+    Ok(())
+}
+
+fn scope_accepts(selected: CommandScope, declared: CommandScope) -> bool {
+    declared == CommandScope::Global
+        || selected == declared
+        || matches!(selected, CommandScope::Batch | CommandScope::Studio)
+            && declared == CommandScope::Render
+}
+
+fn apply_interactions(collected: &mut Collected, command_seen: bool) -> Result<(), CliError> {
+    for _ in 0..INTERACTION_SPECS.len() {
+        let mut changed = false;
+        for rule in INTERACTION_SPECS
+            .iter()
+            .filter(|rule| rule.kind == InteractionKind::Implies)
+        {
+            if interaction_operand_present(collected, rule.operands[0])
+                && !collected.present(rule.operands[1])
+            {
+                collected.set_switch(rule.operands[1], true);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for rule in INTERACTION_SPECS
+        .iter()
+        .filter(|rule| rule.kind != InteractionKind::Implies)
+    {
+        let violation = match rule.kind {
+            InteractionKind::AtMostOne => {
+                rule.operands
+                    .iter()
+                    .filter(|operand| interaction_operand_present(collected, operand))
+                    .count()
+                    > 1
+            }
+            InteractionKind::Conflicts => {
+                interaction_operand_present(collected, rule.operands[0])
+                    && interaction_operand_present(collected, rule.operands[1])
+            }
+            InteractionKind::RequiresAny => {
+                interaction_operand_present(collected, rule.operands[0])
+                    && !rule.operands[1..]
+                        .iter()
+                        .any(|operand| interaction_operand_present(collected, operand))
+            }
+            InteractionKind::Exclusive => {
+                collected.present(rule.operands[0])
+                    && (collected.explicit.iter().any(|binding| {
+                        *binding != rule.operands[0] && !rule.operands[1..].contains(binding)
+                    }) || command_seen && matches!(rule.operands[0], "version" | "clear_cache"))
+            }
+            InteractionKind::Implies => false,
+        };
+        if violation {
+            return Err(CliError::interaction(
+                rule.id,
+                rule.exit_code.unwrap_or("internal"),
+                rule.message,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn interaction_operand_present(collected: &Collected, operand: &str) -> bool {
+    let Some((binding, selected_values)) = operand.split_once('=') else {
+        return collected.present(operand);
+    };
+    collected
+        .explicit_value(binding)
+        .is_some_and(|value| selected_values.split(',').any(|selected| value == selected))
+}
+
+fn validate_value_types(collected: &Collected) -> Result<(), CliError> {
+    for (binding, values) in &collected.values {
+        let Some(spec) = spec_by_binding(binding) else {
+            return Err(internal(format!(
+                "generated binding `{binding}` has no flag specification"
+            )));
+        };
+        let Some(value_type) = spec.value_type else {
+            continue;
+        };
+        for value in values {
+            let valid = match value_type {
+                "int" => value.parse::<i64>().is_ok(),
+                "usize" => value.parse::<usize>().is_ok_and(|value| value > 0),
+                "u64" => value.parse::<u64>().is_ok(),
+                "u16" => value.parse::<u16>().is_ok(),
+                "ip" => value.parse::<std::net::IpAddr>().is_ok(),
+                "output_format" => OutputFormat::parse(value).is_some(),
+                "preview_codec" => matches!(value.as_str(), "png" | "mjpeg"),
+                "path" | "pack" => !value.is_empty(),
+                _ => {
+                    return Err(internal(format!(
+                        "generated value type `{value_type}` has no validator"
+                    )));
+                }
+            };
+            if !valid {
+                return Err(usage(format!(
+                    "invalid {value_type} value {value:?} for `{}`",
+                    spec.options.first().copied().unwrap_or(spec.binding)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_invocation(
+    scope: CommandScope,
+    values: Collected,
+    command_seen: bool,
+) -> Result<Invocation, CliError> {
+    let common = common_options(&values)?;
+    if values.bool("help") {
+        return Ok(Invocation::Help {
+            command: if command_seen {
+                scope
+            } else {
+                CommandScope::Global
+            },
+            robot: common.robot,
+        });
+    }
+    if values.bool("version") {
+        return Ok(Invocation::Version {
+            robot: common.robot,
+        });
+    }
+    if values.bool("clear_cache") {
+        return Ok(Invocation::ClearCache { common });
+    }
+
+    match scope {
+        CommandScope::Render => build_render(values, common).map(Invocation::Render),
+        CommandScope::Doctor => Ok(Invocation::Doctor(DoctorCommand {
+            common,
+            require_ffmpeg: values.bool("require_ffmpeg"),
+        })),
+        CommandScope::Batch => {
+            let render = build_render(values.clone(), common)?;
+            Ok(Invocation::Batch(BatchCommand {
+                render,
+                budget_ms: parse_optional(&values, "budget_ms")?,
+                max_scenes: parse_optional(&values, "max_scenes")?,
+                fail_fast: values.bool("fail_fast"),
+                manifest_dir: values.explicit_value("manifest_dir").map(PathBuf::from),
+            }))
+        }
+        CommandScope::Studio => {
+            let render = build_render(values.clone(), common)?;
+            let bind = values
+                .value("bind")
+                .unwrap_or("127.0.0.1")
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| usage("invalid Studio bind address"))?;
+            if !bind.is_loopback() {
+                return Err(usage(
+                    "Studio is loopback-only; --bind must be a loopback address",
+                ));
+            }
+            let preview_codec = match values.value("preview_codec").unwrap_or("png") {
+                "png" => PreviewCodec::Png,
+                "mjpeg" => PreviewCodec::Mjpeg,
+                _ => return Err(usage("preview codec must be `png` or `mjpeg`")),
+            };
+            let checkpoint_frames = parse_value(&values, "checkpoint_frames", "120")?;
+            if checkpoint_frames == 0 {
+                return Err(usage("--checkpoint-frames must be greater than zero"));
+            }
+            Ok(Invocation::Studio(StudioCommand {
+                render,
+                bind,
+                port: parse_value(&values, "port", "0")?,
+                no_browser: values.bool("no_browser"),
+                tui: values.bool("tui"),
+                checkpoint_frames,
+                preview_codec,
+            }))
+        }
+        CommandScope::Global => Err(internal("global scope cannot be dispatched")),
+    }
+}
+
+fn common_options(values: &Collected) -> Result<CommonOptions, CliError> {
+    Ok(CommonOptions {
+        robot: values.bool("robot"),
+        quiet: values.bool("quiet"),
+        reproducible: values.bool("reproducible"),
+        config_file: values.explicit_value("config_file").map(PathBuf::from),
+        cache_dir: values.explicit_value("cache_dir").map(PathBuf::from),
+        ffmpeg: values.explicit_value("ffmpeg").map(PathBuf::from),
+        threads: parse_optional(values, "threads")?,
+        log_level: values.explicit_value("log_level").map(str::to_owned),
+    })
+}
+
+fn build_render(values: Collected, common: CommonOptions) -> Result<RenderCommand, CliError> {
+    let gif = values.bool("gif");
+    let format = if gif {
+        OutputFormat::Gif
+    } else {
+        OutputFormat::parse(values.value("format").unwrap_or("auto"))
+            .ok_or_else(|| usage("unknown output format"))?
+    };
+
+    Ok(RenderCommand {
+        common,
+        file: values.explicit_value("file").map(PathBuf::from),
+        scene_names: values.many("scene_names"),
+        write_all: values.bool("write_all"),
+        write_file: values.bool("write_file"),
+        skip_animations: values.bool("skip_animations"),
+        resolution: parse_resolution_selection(&values)?,
+        fps: parse_optional_positive(&values, "fps")?,
+        animation_range: values
+            .explicit_value("animation_range")
+            .map(parse_animation_range)
+            .transpose()?,
+        presenter_mode: values.bool("presenter_mode"),
+        full_screen: values.bool("full_screen"),
+        transparent: values.bool("transparent"),
+        subdivide: values.bool("subdivide"),
+        prerun: values.bool("prerun"),
+        autoreload: values.bool("autoreload"),
+        embed_line: parse_optional(&values, "embed")?,
+        background: values.explicit_value("background").map(str::to_owned),
+        file_name: values.explicit_value("file_name").map(str::to_owned),
+        video_dir: values.explicit_value("video_dir").map(PathBuf::from),
+        vcodec: values.explicit_value("vcodec").map(str::to_owned),
+        pix_fmt: values.explicit_value("pix_fmt").map(str::to_owned),
+        format,
+        math_pack: values.explicit_value("math_pack").map(str::to_owned),
+        open: values.bool("open"),
+        finder: values.bool("finder"),
+        show_animation_progress: values.bool("show_animation_progress"),
+        leave_progress_bars: values.bool("leave_progress_bars"),
+    })
+}
+
+fn parse_resolution_selection(values: &Collected) -> Result<Option<ResolutionChoice>, CliError> {
+    if values.bool("low_quality") {
+        return Ok(Some(ResolutionChoice::Low));
+    }
+    if values.bool("medium_quality") {
+        return Ok(Some(ResolutionChoice::Medium));
+    }
+    if values.bool("hd") {
+        return Ok(Some(ResolutionChoice::High));
+    }
+    if values.bool("uhd") {
+        return Ok(Some(ResolutionChoice::Uhd));
+    }
+    values
+        .explicit_value("resolution")
+        .map(|value| {
+            parse_resolution(value).map(|(width, height)| ResolutionChoice::Exact(width, height))
+        })
+        .transpose()
+}
+
+fn parse_resolution(value: &str) -> Result<(u32, u32), CliError> {
+    let Some((width, height)) = value.split_once('x').or_else(|| value.split_once('X')) else {
+        return Err(usage("resolution must be WIDTHxHEIGHT"));
+    };
+    let width = width
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| usage("resolution width must be a positive integer"))?;
+    let height = height
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| usage("resolution height must be a positive integer"))?;
+    Ok((width, height))
+}
+
+fn parse_animation_range(value: &str) -> Result<AnimationRange, CliError> {
+    let mut parts = value.split(',');
+    let start = parts
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .ok_or_else(|| usage("animation range must be START or START,END"))?;
+    let end = parts
+        .next()
+        .map(|part| {
+            part.parse::<u64>()
+                .map_err(|_| usage("animation range must be START or START,END"))
+        })
+        .transpose()?;
+    if parts.next().is_some() {
+        return Err(usage("animation range must be START or START,END"));
+    }
+    if end.is_some_and(|end| end < start) {
+        return Err(usage("animation range END must not precede START"));
+    }
+    Ok(AnimationRange { start, end })
+}
+
+fn parse_optional<T>(values: &Collected, binding: &str) -> Result<Option<T>, CliError>
+where
+    T: std::str::FromStr,
+{
+    values
+        .explicit_value(binding)
+        .map(|value| {
+            value
+                .parse::<T>()
+                .map_err(|_| usage(format!("invalid value {value:?} for `{binding}`")))
+        })
+        .transpose()
+}
+
+fn parse_optional_positive<T>(values: &Collected, binding: &str) -> Result<Option<T>, CliError>
+where
+    T: std::str::FromStr + PartialEq + From<u8>,
+{
+    let value = parse_optional::<T>(values, binding)?;
+    if value.as_ref().is_some_and(|value| *value == T::from(0)) {
+        return Err(usage(format!("`{binding}` must be greater than zero")));
+    }
+    Ok(value)
+}
+
+fn parse_value<T>(values: &Collected, binding: &str, default: &str) -> Result<T, CliError>
+where
+    T: std::str::FromStr,
+{
+    values
+        .value(binding)
+        .unwrap_or(default)
+        .parse::<T>()
+        .map_err(|_| usage(format!("invalid value for `{binding}`")))
+}
+
+fn command_named(name: &str) -> Option<CommandScope> {
+    SUBCOMMAND_SPECS.iter().find_map(|subcommand| {
+        (scope_name(subcommand.command) == name).then_some(subcommand.command)
+    })
+}
+
+fn spec_by_alias(alias: &str) -> Option<&'static FlagSpec> {
+    FLAG_SPECS.iter().find(|spec| spec.options.contains(&alias))
+}
+
+fn spec_by_binding(binding: &str) -> Option<&'static FlagSpec> {
+    FLAG_SPECS.iter().find(|spec| spec.binding == binding)
+}
+
+const fn scope_name(scope: CommandScope) -> &'static str {
+    match scope {
+        CommandScope::Global => "global",
+        CommandScope::Render => "render",
+        CommandScope::Doctor => "doctor",
+        CommandScope::Batch => "batch",
+        CommandScope::Studio => "studio",
+    }
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(value, "true" | "True" | "TRUE" | "1")
+}
+
+fn exit_code(name: &str) -> u8 {
+    EXIT_CODE_SPECS
+        .iter()
+        .find(|exit| exit.name == name)
+        .map_or(70, |exit| exit.code)
+}
+
+/// Schema-owned status used when the executable cannot publish its response.
+#[must_use]
+pub fn internal_exit_code() -> u8 {
+    exit_code("internal")
+}
+
+fn usage(message: impl Into<String>) -> CliError {
+    CliError::new("usage", message)
+}
+
+fn internal(message: impl Into<String>) -> CliError {
+    CliError::new("internal", message)
+}
+
+/// Resolve a render command through the one config precedence chain.
+///
+/// The file is read through the supplied filesystem capability. Quality
+/// presets are resolved from the user-layer values before the CLI overlay, so
+/// a custom `resolution_options` table remains authoritative.
+///
+/// # Errors
+///
+/// [`CliError`] with the stable `config` identity.
+pub fn resolve_render_config(
+    fs: &dyn FileSystem,
+    command: &RenderCommand,
+) -> Result<fmn_config::Config, CliError> {
+    let user_text = read_user_config(fs, command.common.config_file.as_deref())?;
+    let layers = config_layers(&user_text);
+    let base = fmn_config::Config::resolve(&layers, None)
+        .map_err(|error| CliError::new("config", error.to_string()))?
+        .config;
+
+    let mut pairs = common_overlay(&command.common)?;
+    if let Some(fps) = command.fps {
+        pairs.push(("camera.fps", fmn_config::Value::Int(i64::from(fps))));
+    }
+    let resolution = match command.resolution {
+        Some(ResolutionChoice::Low) => Some(base.resolution_options.low),
+        Some(ResolutionChoice::Medium) => Some(base.resolution_options.med),
+        Some(ResolutionChoice::High) => Some(base.resolution_options.high),
+        Some(ResolutionChoice::Uhd) => Some(base.resolution_options.uhd),
+        Some(ResolutionChoice::Exact(width, height)) => Some((width, height)),
+        None => None,
+    };
+    if let Some((width, height)) = resolution {
+        pairs.push((
+            "camera.resolution",
+            fmn_config::Value::Str(format!("({width}, {height})")),
+        ));
+    }
+    if let Some(background) = &command.background {
+        pairs.push((
+            "camera.background_color",
+            fmn_config::Value::Str(background.clone()),
+        ));
+    }
+    if command.transparent {
+        pairs.push(("camera.background_opacity", fmn_config::Value::Float(0.0)));
+    }
+    if command.full_screen {
+        pairs.push(("window.full_screen", fmn_config::Value::Bool(true)));
+    }
+    if command.show_animation_progress {
+        pairs.push((
+            "scene.show_animation_progress",
+            fmn_config::Value::Bool(true),
+        ));
+    }
+    if command.leave_progress_bars {
+        pairs.push(("scene.leave_progress_bars", fmn_config::Value::Bool(true)));
+    }
+    if command.autoreload {
+        pairs.push(("embed.autoreload", fmn_config::Value::Bool(true)));
+    }
+    if let Some(vcodec) = &command.vcodec {
+        pairs.push((
+            "file_writer.video_codec",
+            fmn_config::Value::Str(vcodec.clone()),
+        ));
+    }
+    if let Some(pix_fmt) = &command.pix_fmt {
+        pairs.push((
+            "file_writer.pixel_format",
+            fmn_config::Value::Str(pix_fmt.clone()),
+        ));
+    }
+    if let Some(math_pack) = &command.math_pack {
+        pairs.push(("tex.template", fmn_config::Value::Str(math_pack.clone())));
+    }
+
+    let resolved = fmn_config::Config::resolve(&layers, Some(fmn_config::config::overlay(pairs)))
+        .map_err(|error| CliError::new("config", error.to_string()))?;
+    fmn_config::PackRegistry::builtin()
+        .resolve_template(&resolved.config.tex.template)
+        .map_err(|error| CliError::new("config", error.to_string()))?;
+    Ok(resolved.config)
+}
+
+/// Resolve doctor/common configuration through the same precedence chain.
+///
+/// # Errors
+///
+/// [`CliError`] with the stable `config` identity.
+pub fn resolve_common_config(
+    fs: &dyn FileSystem,
+    common: &CommonOptions,
+) -> Result<fmn_config::Config, CliError> {
+    let user_text = read_user_config(fs, common.config_file.as_deref())?;
+    let layers = config_layers(&user_text);
+    fmn_config::Config::resolve(
+        &layers,
+        Some(fmn_config::config::overlay(common_overlay(common)?)),
+    )
+    .map(|resolved| resolved.config)
+    .map_err(|error| CliError::new("config", error.to_string()))
+}
+
+fn read_user_config(fs: &dyn FileSystem, path: Option<&Path>) -> Result<Option<String>, CliError> {
+    path.map(|path| {
+        fs.read_to_string(path).map_err(|error| {
+            CliError::new(
+                "config",
+                format!("could not read config {}: {error}", path.display()),
+            )
+        })
+    })
+    .transpose()
+}
+
+fn config_layers(text: &Option<String>) -> Vec<fmn_config::config::Layer<'_>> {
+    text.as_deref()
+        .map(|text| {
+            vec![fmn_config::config::Layer {
+                name: "user config",
+                text,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn common_overlay(
+    common: &CommonOptions,
+) -> Result<Vec<(&'static str, fmn_config::Value)>, CliError> {
+    let mut pairs = Vec::new();
+    if common.reproducible {
+        pairs.push((
+            "determinism.mode",
+            fmn_config::Value::Str("certified".to_owned()),
+        ));
+        pairs.push(("render.engine", fmn_config::Value::Str("cpu".to_owned())));
+    }
+    if let Some(threads) = common.threads {
+        let threads = i64::try_from(threads)
+            .map_err(|_| CliError::new("config", "thread count exceeds i64"))?;
+        pairs.push(("render.threads", fmn_config::Value::Int(threads)));
+    }
+    if let Some(ffmpeg) = &common.ffmpeg {
+        pairs.push((
+            "file_writer.ffmpeg_bin",
+            fmn_config::Value::Str(ffmpeg.to_string_lossy().into_owned()),
+        ));
+    }
+    if let Some(cache_dir) = &common.cache_dir {
+        pairs.push((
+            "directories.cache",
+            fmn_config::Value::Str(cache_dir.to_string_lossy().into_owned()),
+        ));
+    }
+    if let Some(level) = &common.log_level {
+        pairs.push(("log_level", fmn_config::Value::Str(level.clone())));
+    }
+    Ok(pairs)
+}
+
+/// Collect a truthful doctor snapshot. Optional capabilities are represented
+/// as unavailable records; only configuration or plan derivation failures
+/// abort collection.
+///
+/// The ffmpeg path must already be absolute. Resolving a bare executable name
+/// through ambient `PATH` would bypass the capability/input-closure doctrine,
+/// so it remains an explicit unavailable state until the platform layer owns
+/// an audited executable locator.
+///
+/// # Errors
+///
+/// [`CliError`] with `config`, `capability`, or `internal` identity.
+pub fn collect_doctor_snapshot(
+    fs: &dyn FileSystem,
+    runner: &dyn fmn_platform::process::ProcessRunner,
+    command: &DoctorCommand,
+) -> Result<DoctorSnapshot, CliError> {
+    let config = resolve_common_config(fs, &command.common)?;
+    let logical = std::thread::available_parallelism()
+        .ok()
+        .and_then(|count| u32::try_from(count.get()).ok())
+        .unwrap_or(1);
+    let (topology, topology_source) = if cfg!(target_os = "linux") {
+        match fmn_platform::topology::HardwareTopology::detect_linux(fs) {
+            Ok(topology) => (topology, TopologySource::LinuxSysfs),
+            Err(error) => (
+                fmn_platform::topology::HardwareTopology::fallback(logical),
+                TopologySource::Fallback {
+                    reason: format!("Linux topology introspection failed: {error}"),
+                },
+            ),
+        }
+    } else {
+        (
+            fmn_platform::topology::HardwareTopology::fallback(logical),
+            TopologySource::Fallback {
+                reason: format!(
+                    "{} topology introspection is not implemented",
+                    std::env::consts::OS
+                ),
+            },
+        )
+    };
+
+    let output_format = planning_output_format(&config.file_writer.pixel_format);
+    let surface =
+        fmn_runtime::SurfaceSpec::lumen(config.camera.resolution.0, config.camera.resolution.1);
+    let mut request = match config.determinism.mode {
+        fmn_config::config::DeterminismMode::Certified => fmn_runtime::PlanRequest::certified(
+            fmn_runtime::RenderIntent::Offline,
+            surface,
+            output_format,
+        ),
+        fmn_config::config::DeterminismMode::Standard => fmn_runtime::PlanRequest::standard(
+            fmn_runtime::RenderIntent::Offline,
+            surface,
+            output_format,
+        ),
+    };
+    let engine = match (config.determinism.mode, config.render.engine) {
+        (fmn_config::config::DeterminismMode::Certified, fmn_config::config::Engine::Cpu) => {
+            fmn_runtime::ExecutionEngine::CertifiedCpu
+        }
+        (
+            fmn_config::config::DeterminismMode::Certified,
+            fmn_config::config::Engine::Metal | fmn_config::config::Engine::Cuda,
+        ) => {
+            return Err(CliError::new(
+                "config",
+                "certified determinism requires render.engine=cpu",
+            ));
+        }
+        (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Cpu) => {
+            fmn_runtime::ExecutionEngine::FastCpu
+        }
+        (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Metal) => {
+            return Err(CliError::new(
+                "capability",
+                "render.engine=metal is unavailable: this CLI has no verified compiled Metal backend",
+            ));
+        }
+        (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Cuda) => {
+            return Err(CliError::new(
+                "capability",
+                "render.engine=cuda is unavailable: this CLI has no verified compiled CUDA backend",
+            ));
+        }
+    };
+    request = request.with_engine(engine);
+    if let fmn_config::config::ThreadPolicy::Fixed(threads) = config.render.threads {
+        let threads = usize::try_from(threads)
+            .map_err(|_| CliError::new("config", "thread count does not fit this target"))?;
+        request = request.with_max_cpu_threads(threads);
+    }
+    let plan = fmn_runtime::ExecutionPlan::derive(request, &topology, None)
+        .map_err(execution_plan_error)?;
+    let plan = ExecutionPlanReport {
+        determinism: match plan.determinism {
+            fmn_runtime::Determinism::Standard => "standard",
+            fmn_runtime::Determinism::Certified => "certified",
+        },
+        engine: match plan.engine {
+            fmn_runtime::ExecutionEngine::CertifiedCpu => "certified-cpu",
+            fmn_runtime::ExecutionEngine::FastCpu => "fast-cpu",
+            fmn_runtime::ExecutionEngine::Metal => "metal",
+            fmn_runtime::ExecutionEngine::Cuda => "cuda",
+        },
+        frames_in_flight: plan.frames_in_flight,
+        scene_threads: plan.scene_team.threads(),
+        render_teams: plan.render_teams.len(),
+        render_threads: plan
+            .render_teams
+            .iter()
+            .map(fmn_runtime::TeamPlan::threads)
+            .sum(),
+        output_threads: plan.output_team.threads(),
+        fine_tile: plan.fine_tile,
+        macro_tile: plan.macro_tile,
+        estimated_in_flight_bytes: plan.estimated_in_flight_bytes,
+        output_format: plan.output_format.name(),
+        tuning_source: match plan.tuning_source {
+            fmn_runtime::TuningSource::CertifiedProfile => "certified-profile",
+            fmn_runtime::TuningSource::StandardBaseline => "standard-baseline",
+            fmn_runtime::TuningSource::StandardAutotuneCache => "standard-autotune-cache",
+        },
+    };
+
+    let ffmpeg_path = PathBuf::from(&config.file_writer.ffmpeg_bin);
+    let ffmpeg = probe_ffmpeg(runner, &ffmpeg_path);
+    let cache = inspect_cache(fs, &config.directories.cache);
+    let math_packs = fmn_config::PackRegistry::builtin()
+        .names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+    Ok(DoctorSnapshot {
+        topology_source,
+        logical_cores: topology.logical_cores(),
+        physical_cores: topology.physical_cores,
+        hardware_supported_tier: topology.simd_tier.name().to_owned(),
+        active_compiled_tier: active_compiled_tier(),
+        plan,
+        ffmpeg,
+        cache,
+        fonts: FontReport {
+            selected: config.text.font,
+            bundled: Vec::new(),
+            user: Vec::new(),
+            complete: false,
+            detail: Some(
+                "font-source inventory is not yet exposed through a capability; selected family only"
+                    .to_owned(),
+            ),
+        },
+        math_packs,
+        certification: certification_report(),
+    })
+}
+
+fn execution_plan_error(error: fmn_runtime::PlanError) -> CliError {
+    let exit_name = match error {
+        fmn_runtime::PlanError::ZeroLimit(_)
+        | fmn_runtime::PlanError::InvalidSurface
+        | fmn_runtime::PlanError::OddSubsampledDimensions
+        | fmn_runtime::PlanError::EngineNotCertifiable
+        | fmn_runtime::PlanError::SizeOverflow => "config",
+        fmn_runtime::PlanError::EmptyTopology
+        | fmn_runtime::PlanError::InvalidProcessorGroups
+        | fmn_runtime::PlanError::InvalidAutotune => "internal",
+    };
+    CliError::new(exit_name, format!("ExecutionPlan: {error}"))
+}
+
+fn planning_output_format(pixel_format: &str) -> fmn_runtime::OutputPixelFormat {
+    match pixel_format {
+        "bgra" | "bgra8" => fmn_runtime::OutputPixelFormat::Bgra8,
+        "nv12" => fmn_runtime::OutputPixelFormat::Nv12,
+        "p010" | "p010le" => fmn_runtime::OutputPixelFormat::P010,
+        _ => fmn_runtime::OutputPixelFormat::Rgba8,
+    }
+}
+
+fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) -> FfmpegReport {
+    if !path.is_absolute() {
+        return FfmpegReport::Unavailable {
+            attempted: path.to_path_buf(),
+            reason: "configured ffmpeg name is relative; an audited absolute-path locator is not yet available"
+                .to_owned(),
+            alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
+        };
+    }
+    let tool = match fmn_output::FfmpegTool::resolve(path, runner) {
+        Ok(tool) => tool,
+        Err(error) => {
+            return FfmpegReport::Unavailable {
+                attempted: path.to_path_buf(),
+                reason: error.to_string(),
+                alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
+            };
+        }
+    };
+    let (hardware_encoders, hardware_encoder_probe_error) =
+        match fmn_output::EncoderCapabilities::probe(&tool, runner) {
+            Ok(encoders) => (encoders.hardware(), None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+    FfmpegReport::Available {
+        path: tool.path,
+        sha256: tool.sha256_hex,
+        version: tool.version,
+        hardware_encoders,
+        hardware_encoder_probe_error,
+    }
+}
+
+fn inspect_cache(fs: &dyn FileSystem, configured: &str) -> CacheReport {
+    if configured.is_empty() {
+        return CacheReport::Unresolved {
+            reason: "cache root is empty and the platform-default resolver is not yet available"
+                .to_owned(),
+        };
+    }
+    let root = PathBuf::from(configured);
+    if !fs.exists(&root) {
+        return CacheReport::Configured {
+            root,
+            exists: false,
+            direct_entries: Some(0),
+            warning: None,
+        };
+    }
+    match fs.list_dir(&root) {
+        Ok(entries) => CacheReport::Configured {
+            root,
+            exists: true,
+            direct_entries: Some(entries.len()),
+            warning: None,
+        },
+        Err(error) => CacheReport::Configured {
+            root,
+            exists: true,
+            direct_entries: None,
+            warning: Some(error.to_string()),
+        },
+    }
+}
+
+const fn active_compiled_tier() -> &'static str {
+    if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    )) {
+        "x86-64-v4"
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma"
+    )) {
+        "x86-64-v3"
+    } else if cfg!(all(target_arch = "aarch64", target_feature = "neon")) {
+        "aarch64+neon"
+    } else {
+        "portable"
+    }
+}
+
+fn certification_report() -> CertificationReport {
+    let platform = platform_name(std::env::consts::OS, std::env::consts::ARCH);
+    let (supported, detail) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64" | "aarch64") => (
+            true,
+            "Revision 4 certified platform; full closure enforcement remains owned by G4b",
+        ),
+        ("macos", "aarch64") => (
+            true,
+            "Revision 4 certified platform; full closure enforcement remains owned by G4b",
+        ),
+        ("windows", "x86_64") => (
+            false,
+            "windows-x86_64 is pending its declared certification decision",
+        ),
+        _ => (false, "target is outside the Revision 4 certified matrix"),
+    };
+    CertificationReport {
+        platform,
+        supported,
+        detail: detail.to_owned(),
+    }
+}
+
+fn platform_name(os: &str, arch: &str) -> String {
+    let arch = match arch {
+        "x86_64" => "x86-64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+impl DoctorSnapshot {
+    /// Stable line-oriented robot report. Every line is an independent JSON
+    /// object carrying the schema name and version.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        let mut out = String::new();
+        let (source, source_detail) = match &self.topology_source {
+            TopologySource::LinuxSysfs => ("linux-sysfs", None),
+            TopologySource::Fallback { reason } => ("fallback", Some(reason.as_str())),
+        };
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"topology\",\
+             \"source\":{},\"source_detail\":{},\"logical_cores\":{},\
+             \"physical_cores\":{},\"hardware_supported_tier\":{},\
+             \"active_compiled_tier\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(source),
+            json_option(source_detail),
+            self.logical_cores,
+            self.physical_cores,
+            json_string(&self.hardware_supported_tier),
+            json_string(self.active_compiled_tier),
+        );
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"execution_plan\",\
+             \"determinism\":{},\"engine\":{},\"frames_in_flight\":{},\
+             \"scene_threads\":{},\"render_teams\":{},\"render_threads\":{},\
+             \"output_threads\":{},\"fine_tile\":{},\"macro_tile\":{},\
+             \"estimated_in_flight_bytes\":{},\"output_format\":{},\
+             \"tuning_source\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(self.plan.determinism),
+            json_string(self.plan.engine),
+            self.plan.frames_in_flight,
+            self.plan.scene_threads,
+            self.plan.render_teams,
+            self.plan.render_threads,
+            self.plan.output_threads,
+            self.plan.fine_tile,
+            self.plan.macro_tile,
+            self.plan.estimated_in_flight_bytes,
+            json_string(self.plan.output_format),
+            json_string(self.plan.tuning_source),
+        );
+        match &self.ffmpeg {
+            FfmpegReport::Available {
+                path,
+                sha256,
+                version,
+                hardware_encoders,
+                hardware_encoder_probe_error,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"ffmpeg\",\
+                     \"available\":true,\"path\":{},\"sha256\":{},\"ffmpeg_version\":{},\
+                     \"hardware_encoders\":{},\"hardware_encoder_probe_error\":{}}}",
+                    ROBOT_SCHEMA_VERSION,
+                    json_string(&path.to_string_lossy()),
+                    json_string(sha256),
+                    json_string(version),
+                    json_array(hardware_encoders),
+                    json_option(hardware_encoder_probe_error.as_deref()),
+                );
+            }
+            FfmpegReport::Unavailable {
+                attempted,
+                reason,
+                alternative,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"ffmpeg\",\
+                     \"available\":false,\"attempted\":{},\"reason\":{},\
+                     \"alternative\":{}}}",
+                    ROBOT_SCHEMA_VERSION,
+                    json_string(&attempted.to_string_lossy()),
+                    json_string(reason),
+                    json_string(alternative),
+                );
+            }
+        }
+        match &self.cache {
+            CacheReport::Configured {
+                root,
+                exists,
+                direct_entries,
+                warning,
+            } => {
+                let entries = direct_entries.map_or_else(|| "null".to_owned(), |n| n.to_string());
+                let _ = writeln!(
+                    out,
+                    "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"cache\",\
+                     \"resolved\":true,\"root\":{},\"exists\":{},\
+                     \"direct_entries\":{},\"warning\":{}}}",
+                    ROBOT_SCHEMA_VERSION,
+                    json_string(&root.to_string_lossy()),
+                    exists,
+                    entries,
+                    json_option(warning.as_deref()),
+                );
+            }
+            CacheReport::Unresolved { reason } => {
+                let _ = writeln!(
+                    out,
+                    "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"cache\",\
+                     \"resolved\":false,\"reason\":{}}}",
+                    ROBOT_SCHEMA_VERSION,
+                    json_string(reason),
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"fonts\",\
+             \"selected\":{},\"bundled\":{},\"user\":{},\"complete\":{},\"detail\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(&self.fonts.selected),
+            json_array(&self.fonts.bundled),
+            json_array(&self.fonts.user),
+            self.fonts.complete,
+            json_option(self.fonts.detail.as_deref()),
+        );
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"math_packs\",\
+             \"packs\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_array(&self.math_packs),
+        );
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"certification\",\
+             \"platform\":{},\"supported\":{},\"detail\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(&self.certification.platform),
+            self.certification.supported,
+            json_string(&self.certification.detail),
+        );
+        out
+    }
+
+    /// Human report. This presentation is never used in robot mode.
+    #[must_use]
+    pub fn to_human(&self) -> String {
+        let mut out = String::from("FrankenManim doctor\n");
+        match &self.topology_source {
+            TopologySource::LinuxSysfs => out.push_str("topology: linux sysfs (best available)\n"),
+            TopologySource::Fallback { reason } => {
+                let _ = writeln!(out, "topology: fallback ({reason})");
+            }
+        }
+        let _ = writeln!(
+            out,
+            "cores: {} logical / {} physical",
+            self.logical_cores, self.physical_cores
+        );
+        let _ = writeln!(
+            out,
+            "SIMD: hardware {} / active build {}",
+            self.hardware_supported_tier, self.active_compiled_tier
+        );
+        let _ = writeln!(
+            out,
+            "plan: {} {}, {} frame slots, {} render teams / {} render threads",
+            self.plan.determinism,
+            self.plan.engine,
+            self.plan.frames_in_flight,
+            self.plan.render_teams,
+            self.plan.render_threads
+        );
+        match &self.ffmpeg {
+            FfmpegReport::Available {
+                path,
+                sha256,
+                version,
+                hardware_encoders,
+                hardware_encoder_probe_error,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "ffmpeg: {} ({version}, sha256 {sha256})",
+                    path.display()
+                );
+                let _ = writeln!(
+                    out,
+                    "hardware encoders: {}",
+                    if hardware_encoders.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        hardware_encoders.join(", ")
+                    }
+                );
+                if let Some(error) = hardware_encoder_probe_error {
+                    let _ = writeln!(out, "hardware encoder probe warning: {error}");
+                }
+            }
+            FfmpegReport::Unavailable {
+                attempted,
+                reason,
+                alternative,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "ffmpeg: unavailable at {} ({reason})",
+                    attempted.display()
+                );
+                let _ = writeln!(out, "alternative: {alternative}");
+            }
+        }
+        match &self.cache {
+            CacheReport::Configured {
+                root,
+                exists,
+                direct_entries,
+                warning,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "cache: {} (exists {exists}, direct entries {})",
+                    root.display(),
+                    direct_entries.map_or_else(|| "unknown".to_owned(), |n| n.to_string())
+                );
+                if let Some(warning) = warning {
+                    let _ = writeln!(out, "cache warning: {warning}");
+                }
+            }
+            CacheReport::Unresolved { reason } => {
+                let _ = writeln!(out, "cache: unresolved ({reason})");
+            }
+        }
+        let _ = writeln!(
+            out,
+            "fonts: selected {}; inventory {}",
+            self.fonts.selected,
+            if self.fonts.complete {
+                "complete"
+            } else {
+                "partial"
+            }
+        );
+        let _ = writeln!(out, "math packs: {}", self.math_packs.join(", "));
+        let _ = writeln!(
+            out,
+            "certification: {} — {}",
+            if self.certification.supported {
+                "supported target"
+            } else {
+                "unsupported/pending target"
+            },
+            self.certification.detail
+        );
+        out
+    }
+}
+
+/// Captured process output used by the binary and integration tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOutput {
+    /// Numeric schema-owned exit code.
+    pub code: u8,
+    /// Bytes for stdout.
+    pub stdout: String,
+    /// Bytes for stderr.
+    pub stderr: String,
+}
+
+impl RunOutput {
+    fn success(stdout: String) -> Self {
+        Self {
+            code: exit_code("success"),
+            stdout,
+            stderr: String::new(),
+        }
+    }
+}
+
+/// Parse and dispatch with explicit host capabilities.
+#[must_use]
+pub fn run_with_capabilities<I, S>(
+    args: I,
+    fs: &dyn FileSystem,
+    runner: &dyn fmn_platform::process::ProcessRunner,
+) -> RunOutput
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let requested_robot = args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--robot");
+    let invocation = match parse_args(args) {
+        Ok(invocation) => invocation,
+        Err(error) => return error_output(requested_robot, &error),
+    };
+    match invocation {
+        Invocation::Help { command, robot } => RunOutput::success(if robot {
+            robot_help(command)
+        } else {
+            human_help(command)
+        }),
+        Invocation::Version { robot } => RunOutput::success(if robot {
+            format!(
+                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"version\",\
+                 \"program\":\"fmn\",\"program_version\":{}}}\n",
+                ROBOT_SCHEMA_VERSION,
+                json_string(env!("CARGO_PKG_VERSION"))
+            )
+        } else {
+            format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
+        }),
+        Invocation::Doctor(command) => match collect_doctor_snapshot(fs, runner, &command) {
+            Ok(snapshot) => {
+                let stdout = if command.common.robot {
+                    snapshot.to_ndjson()
+                } else {
+                    snapshot.to_human()
+                };
+                if command.require_ffmpeg && !snapshot.ffmpeg.is_available() {
+                    let error = CliError::new(
+                        "capability",
+                        "ffmpeg was required but is unavailable; native PNG-sequence, GIF, and y4m outputs remain available",
+                    );
+                    let mut output = error_output(command.common.robot, &error);
+                    if command.common.robot {
+                        output.stdout = format!("{stdout}{}", output.stdout);
+                    } else {
+                        output.stdout = stdout;
+                    }
+                    output
+                } else {
+                    RunOutput::success(stdout)
+                }
+            }
+            Err(error) => error_output(command.common.robot, &error),
+        },
+        Invocation::ClearCache { common } => error_output(
+            common.robot,
+            &CliError::new(
+                "capability",
+                "--clear-cache is refused until the cache store proves root ownership and rejects dangerous/symlinked roots",
+            ),
+        ),
+        Invocation::Render(command) => error_output(
+            command.common.robot,
+            &CliError::new(
+                "capability",
+                "render composition is unavailable: no production scene-source/SceneSink adapter is registered",
+            ),
+        ),
+        Invocation::Batch(command) => {
+            let message = if cfg!(feature = "batch") {
+                "batch composition is unavailable: no cancellable production scene service is registered"
+            } else {
+                "batch support is disabled in this binary; rebuild with the `batch` feature"
+            };
+            error_output(
+                command.render.common.robot,
+                &CliError::new("capability", message),
+            )
+        }
+        Invocation::Studio(command) => error_output(
+            command.render.common.robot,
+            &CliError::new(
+                "capability",
+                "Studio composition is unavailable: no concrete WorkerService or audited host-entropy capability is registered",
+            ),
+        ),
+    }
+}
+
+/// Dispatch against production filesystem/process capabilities.
+#[must_use]
+pub fn run<I, S>(args: I) -> RunOutput
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    run_with_capabilities(
+        args,
+        &fmn_platform::fs::StdFs,
+        &fmn_platform::process::StdProcessRunner,
+    )
+}
+
+/// Dispatch operating-system arguments without panicking on non-UTF-8 input.
+///
+/// The versioned CLI grammar is UTF-8. An argument outside that grammar is a
+/// stable usage error; it is never lossily rewritten into a different path.
+#[must_use]
+pub fn run_os<I, S>(args: I) -> RunOutput
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let requested_robot = args
+        .iter()
+        .take_while(|arg| arg.as_os_str() != OsStr::new("--"))
+        .any(|arg| arg == OsStr::new("--robot"));
+    let mut utf8 = Vec::with_capacity(args.len());
+    for arg in args {
+        let Ok(arg) = arg.into_string() else {
+            return error_output(
+                requested_robot,
+                &usage("command-line arguments must be valid UTF-8"),
+            );
+        };
+        utf8.push(arg);
+    }
+    run(utf8)
+}
+
+fn error_output(robot: bool, error: &CliError) -> RunOutput {
+    if robot {
+        RunOutput {
+            code: error.code(),
+            stdout: format!(
+                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"error\",\
+                 \"exit_code\":{},\"exit_name\":{},\"rule\":{},\"message\":{}}}\n",
+                ROBOT_SCHEMA_VERSION,
+                error.code(),
+                json_string(error.exit_name()),
+                json_option(error.rule()),
+                json_string(error.message()),
+            ),
+            stderr: String::new(),
+        }
+    } else {
+        RunOutput {
+            code: error.code(),
+            stdout: String::new(),
+            stderr: format!("fmn: {error}\n"),
+        }
+    }
+}
+
+fn human_help(command: CommandScope) -> String {
+    let mut out = String::new();
+    let _ = match command {
+        CommandScope::Doctor => writeln!(out, "Usage: fmn doctor [OPTIONS]"),
+        CommandScope::Render | CommandScope::Batch | CommandScope::Studio => writeln!(
+            out,
+            "Usage: fmn {} [OPTIONS] [FILE] [SCENE ...]",
+            scope_name(command)
+        ),
+        CommandScope::Global => writeln!(out, "Usage: fmn [OPTIONS] [FILE] [SCENE ...]"),
+    };
+    out.push_str("\nCommands:\n");
+    for subcommand in SUBCOMMAND_SPECS {
+        let _ = writeln!(
+            out,
+            "  {:<10} {}",
+            scope_name(subcommand.command),
+            subcommand.help
+        );
+    }
+    out.push_str("\nOptions:\n");
+    for spec in FLAG_SPECS
+        .iter()
+        .filter(|spec| help_scope_accepts(command, spec.command))
+        .filter(|spec| spec.options.iter().any(|option| option.starts_with('-')))
+    {
+        let _ = writeln!(out, "  {:<34} {}", spec.options.join(", "), spec.help);
+    }
+    out
+}
+
+fn robot_help(command: CommandScope) -> String {
+    let mut out = String::new();
+    for subcommand in SUBCOMMAND_SPECS {
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"subcommand\",\
+             \"name\":{},\"status\":{},\"help\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(scope_name(subcommand.command)),
+            json_string(flag_status_name(subcommand.status)),
+            json_string(subcommand.help),
+        );
+    }
+    for spec in FLAG_SPECS
+        .iter()
+        .filter(|spec| help_scope_accepts(command, spec.command))
+    {
+        let options: Vec<String> = spec
+            .options
+            .iter()
+            .map(|option| (*option).to_owned())
+            .collect();
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"flag\",\
+             \"command\":{},\"options\":{},\"binding\":{},\"action\":{},\
+             \"arity\":{},\"status\":{},\"source\":{},\"help\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(scope_name(spec.command)),
+            json_array(&options),
+            json_string(spec.binding),
+            json_string(match spec.action {
+                FlagAction::SetTrue => "store_true",
+                FlagAction::Store => "store",
+            }),
+            json_string(match spec.arity {
+                FlagArity::None => "none",
+                FlagArity::One => "one",
+                FlagArity::Optional => "optional",
+                FlagArity::Many => "many",
+            }),
+            json_string(flag_status_name(spec.status)),
+            json_string(match spec.source {
+                FlagSource::Reference => "reference",
+                FlagSource::Native => "native",
+            }),
+            json_string(spec.help),
+        );
+    }
+    for exit in EXIT_CODE_SPECS {
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"exit_code\",\
+             \"code\":{},\"name\":{},\"meaning\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            exit.code,
+            json_string(exit.name),
+            json_string(exit.meaning),
+        );
+    }
+    for interaction in INTERACTION_SPECS {
+        let operands: Vec<String> = interaction
+            .operands
+            .iter()
+            .map(|operand| (*operand).to_owned())
+            .collect();
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"interaction\",\
+             \"id\":{},\"interaction\":{},\"operands\":{},\"exit_name\":{},\
+             \"message\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(interaction.id),
+            json_string(interaction_kind_name(interaction.kind)),
+            json_array(&operands),
+            json_option(interaction.exit_code),
+            json_string(interaction.message),
+        );
+    }
+    out
+}
+
+fn help_scope_accepts(selected: CommandScope, declared: CommandScope) -> bool {
+    if selected == CommandScope::Global {
+        matches!(declared, CommandScope::Global | CommandScope::Render)
+    } else {
+        scope_accepts(selected, declared)
+    }
+}
+
+const fn interaction_kind_name(kind: InteractionKind) -> &'static str {
+    match kind {
+        InteractionKind::AtMostOne => "at_most_one",
+        InteractionKind::Conflicts => "conflicts",
+        InteractionKind::RequiresAny => "requires_any",
+        InteractionKind::Implies => "implies",
+        InteractionKind::Exclusive => "exclusive",
+    }
+}
+
+const fn flag_status_name(status: FlagStatus) -> &'static str {
+    match status {
+        FlagStatus::Same => "same",
+        FlagStatus::Improved => "improved",
+        FlagStatus::Tiered => "tiered",
+        FlagStatus::Excluded => "excluded",
+        FlagStatus::Unreviewed => "unreviewed",
+    }
+}
+
+fn json_option(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".to_owned(), json_string)
+}
+
+fn json_array(values: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(value));
+    }
+    out.push(']');
+    out
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len().saturating_add(2));
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{1f}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
+    use fmn_platform::fs::VirtualFs;
+
+    fn render(invocation: Invocation) -> RenderCommand {
+        match invocation {
+            Invocation::Render(command) => command,
+            other => panic!("expected render command, got {other:?}"),
+        }
+    }
+
+    fn sample_value(spec: &FlagSpec) -> &'static str {
+        match spec.binding {
+            "fps" => "60",
+            "log_level" => "INFO",
+            "resolution" => "640x360",
+            "animation_range" => "1,3",
+            "embed" => "42",
+            "background" => "#112233",
+            "vcodec" => "libx264",
+            "pix_fmt" => "rgba",
+            "format" => "png",
+            "preview_codec" => "png",
+            "bind" => "127.0.0.1",
+            "port" => "0",
+            "math_pack" => "default",
+            "threads" | "max_scenes" => "2",
+            "budget_ms" | "checkpoint_frames" => "100",
+            "ffmpeg" => "/usr/bin/ffmpeg",
+            "cache_dir" => "/tmp/fmn-cache",
+            "config_file" => "/tmp/fmn.yml",
+            "file_name" => "out",
+            "video_dir" | "manifest_dir" => "/tmp/out",
+            _ => "value",
+        }
+    }
+
+    fn isolated_args(spec: &FlagSpec, alias: &str) -> Vec<String> {
+        if spec.binding == "file" {
+            return vec!["scene.py".to_owned()];
+        }
+        if spec.binding == "scene_names" {
+            return vec!["scene.py".to_owned(), "Demo".to_owned()];
+        }
+        let mut args = match spec.command {
+            CommandScope::Doctor => vec!["doctor".to_owned()],
+            CommandScope::Batch => vec!["batch".to_owned()],
+            CommandScope::Studio => vec!["studio".to_owned()],
+            CommandScope::Global | CommandScope::Render => Vec::new(),
+        };
+        args.push(alias.to_owned());
+        if spec.action == FlagAction::Store {
+            args.push(sample_value(spec).to_owned());
+        }
+        args
+    }
+
+    #[test]
+    fn every_generated_binding_and_value_type_has_a_typed_consumer() {
+        validate_generated_contract().expect("generated CLI contract must be fully consumed");
+        for spec in FLAG_SPECS {
+            assert_eq!(typed_consumer_scope(spec.binding), Some(spec.command));
+            assert!(spec.value_type.is_none_or(value_type_supported));
+        }
+    }
+
+    #[test]
+    fn every_generated_alias_reaches_the_parser() {
+        for spec in FLAG_SPECS {
+            for alias in spec.options {
+                let args = isolated_args(spec, alias);
+                if let Err(error) = parse_args(args.clone()) {
+                    panic!(
+                        "generated alias {alias:?} ({}) did not parse from {args:?}: {error}",
+                        spec.binding
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attached_short_values_and_grouped_switches_are_kept() {
+        let command = render(parse_args(["-n3,6", "-aq", "scene.py"]).expect("valid command"));
+        assert_eq!(
+            command.animation_range,
+            Some(AnimationRange {
+                start: 3,
+                end: Some(6)
+            })
+        );
+        assert!(command.write_all);
+        assert!(command.common.quiet);
+    }
+
+    #[test]
+    fn missing_store_value_does_not_swallow_the_next_option() {
+        for args in [["--fps", "--hd"], ["--fps", "-q"], ["--fps", "-aq"]] {
+            let error = parse_args(args).expect_err("next option cannot become an FPS value");
+            assert_eq!(error.exit_name(), "usage");
+            assert!(error.message().contains("requires a value"));
+        }
+        for args in [
+            &["--fps", "--robot"][..],
+            &["--fps", "--hd=true"],
+            &["--file_name", "--typo", "scene.py"],
+        ] {
+            let error = parse_args(args.iter().copied())
+                .expect_err("dash-prefixed separated values require `--flag=value`");
+            assert_eq!(error.exit_name(), "usage");
+            assert!(error.message().contains("requires a value"));
+        }
+
+        let error = parse_args(["--fps"]).expect_err("missing final value");
+        assert_eq!(error.exit_name(), "usage");
+        assert!(error.message().contains("requires a value"));
+
+        let error = parse_args(["--fps", "-1"]).expect_err("negative separated value");
+        assert_eq!(error.exit_name(), "usage");
+        assert!(error.message().contains("requires a value"));
+        let error = parse_args(["--fps=-1"]).expect_err("attached negative reaches validation");
+        assert_eq!(error.exit_name(), "usage");
+        assert!(error.message().contains("invalid value"));
+
+        let command =
+            render(parse_args(["--file_name=-draft"]).expect("attached dash-prefixed string"));
+        assert_eq!(command.file_name.as_deref(), Some("-draft"));
+    }
+
+    #[test]
+    fn generated_implications_request_durable_output() {
+        let cases: &[&[&str]] = &[
+            &["--open"],
+            &["--finder"],
+            &["--gif"],
+            &["--transparent"],
+            &["--format", "png"],
+            &["--reproducible"],
+            &["--vcodec", "libx264"],
+            &["--pix_fmt", "rgba"],
+            &["--subdivide"],
+            &["--file_name", "out"],
+            &["--video_dir", "/tmp/out"],
+        ];
+        for args in cases {
+            let command = render(parse_args(args.iter().copied()).expect("valid implication"));
+            assert!(command.write_file, "{args:?} did not imply --write_file");
+        }
+    }
+
+    #[test]
+    fn generated_failing_interactions_return_usage_and_rule_identity() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["-l", "-m"], "quality-exclusive"),
+            (&["-s", "--subdivide"], "skip-vs-subdivide"),
+            (&["-a", "scene.py", "Demo"], "write-all-vs-selection"),
+            (&["-e", "4", "--reproducible"], "embed-vs-certified"),
+            (&["--autoreload", "--reproducible"], "reload-vs-certified"),
+            (&["--clear-cache", "-l"], "clear-cache-only"),
+            (&["--version", "-l"], "version-only"),
+            (&["--version", "doctor"], "version-only"),
+            (&["doctor", "--version"], "version-only"),
+            (&["--version", "--quiet"], "version-only"),
+            (&["--clear-cache", "batch"], "clear-cache-only"),
+            (&["--clear-cache", "--threads", "2"], "clear-cache-only"),
+            (&["--help", "-l"], "help-only"),
+            (&["--help", "--quiet"], "help-only"),
+        ];
+        for (args, rule) in cases {
+            let error = parse_args(args.iter().copied()).expect_err("interaction must fail");
+            assert_eq!(error.code(), 2, "{args:?}");
+            assert_eq!(error.rule(), Some(*rule), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn help_may_select_a_subcommand_while_standalone_queries_may_not() {
+        assert!(matches!(
+            parse_args(["doctor", "--help"]).expect("subcommand help"),
+            Invocation::Help {
+                command: CommandScope::Doctor,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_args(["--help", "batch"]).expect("help before subcommand"),
+            Invocation::Help {
+                command: CommandScope::Batch,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_args([
+                "--clear-cache",
+                "--robot",
+                "--quiet",
+                "--config_file",
+                "/cfg/fmn.yml",
+                "--cache-dir",
+                "/cache",
+                "--log-level",
+                "INFO",
+            ])
+            .expect("clear-cache consumes its declared modifiers"),
+            Invocation::ClearCache { .. }
+        ));
+    }
+
+    #[test]
+    fn ranges_resolutions_and_output_constraints_fail_closed() {
+        for range in ["", "a", "1,2,3", "3,2"] {
+            let error = parse_args(["-n", range]).expect_err("malformed animation range must fail");
+            assert_eq!(error.exit_name(), "usage");
+        }
+        for resolution in ["", "640", "0x480", "640x0", "axb"] {
+            let error = parse_args(["-r", resolution]).expect_err("malformed resolution must fail");
+            assert_eq!(error.exit_name(), "usage");
+        }
+        for (args, rule) in [
+            (&["--gif", "--format", "video"][..], "gif-vs-non-gif-format"),
+            (
+                &["--format", "png", "--vcodec", "libx264"],
+                "native-format-vs-codec",
+            ),
+            (
+                &["--format", "png", "--pix_fmt", "rgba"],
+                "native-format-vs-pixel-format",
+            ),
+            (
+                &["-t", "--pix_fmt", "yuv420p"],
+                "transparent-vs-opaque-pixel-format",
+            ),
+            (
+                &["-t", "--format", "y4m"],
+                "transparent-vs-opaque-native-format",
+            ),
+        ] {
+            let error =
+                parse_args(args.iter().copied()).expect_err("output constraint must fail closed");
+            assert_eq!(error.rule(), Some(rule), "{args:?}");
+        }
+        let gif = render(parse_args(["--gif", "--format", "gif"]).expect("matching GIF aliases"));
+        assert_eq!(gif.format, OutputFormat::Gif);
+        let png_sequence =
+            render(parse_args(["--format", "png_sequence"]).expect("documented format spelling"));
+        assert_eq!(png_sequence.format, OutputFormat::PngSequence);
+        let error =
+            parse_args(["--format", "png-sequence"]).expect_err("undocumented spelling must fail");
+        assert_eq!(error.exit_name(), "usage");
+    }
+
+    #[test]
+    fn command_scopes_and_loopback_security_are_enforced() {
+        let error = parse_args(["doctor", "--fps", "60"]).expect_err("wrong command flag");
+        assert_eq!(error.exit_name(), "usage");
+        let error = parse_args(["doctor", "scene.py"]).expect_err("doctor positional");
+        assert_eq!(error.exit_name(), "usage");
+        let error =
+            parse_args(["studio", "--bind", "0.0.0.0"]).expect_err("non-loopback Studio bind");
+        assert!(error.message().contains("loopback-only"));
+        let error = parse_args(["studio", "--checkpoint-frames", "0"])
+            .expect_err("zero checkpoint density");
+        assert!(error.message().contains("greater than zero"));
+
+        assert!(matches!(
+            parse_args(["--robot", "doctor"]).expect("global before command"),
+            Invocation::Doctor(DoctorCommand {
+                common: CommonOptions { robot: true, .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn config_precedence_keeps_user_presets_but_cli_wins_values() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/cfg/fmn.yml",
+            b"camera:\n  fps: 24\nresolution_options:\n  low: (320, 180)\ntex:\n  template: basic\n"
+                .to_vec(),
+        );
+        let command = render(
+            parse_args([
+                "--config_file",
+                "/cfg/fmn.yml",
+                "-l",
+                "--fps",
+                "60",
+                "--threads",
+                "3",
+                "--reproducible",
+            ])
+            .expect("valid command"),
+        );
+        let config = resolve_render_config(&fs, &command).expect("valid config");
+        assert_eq!(config.camera.fps, 60);
+        assert_eq!(config.camera.resolution, (320, 180));
+        assert_eq!(config.determinism.mode, DeterminismMode::Certified);
+        assert_eq!(config.render.engine, Engine::Cpu);
+        assert_eq!(config.render.threads, ThreadPolicy::Fixed(3));
+        assert_eq!(config.tex.template, "basic");
+    }
+
+    #[test]
+    fn exact_resolution_is_not_reinterpreted_as_a_custom_preset() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/cfg/fmn.yml",
+            b"resolution_options:\n  low: (320, 180)\n".to_vec(),
+        );
+        let command = render(
+            parse_args(["--config_file", "/cfg/fmn.yml", "-r", "854x480"]).expect("valid command"),
+        );
+        assert_eq!(command.resolution, Some(ResolutionChoice::Exact(854, 480)));
+        let config = resolve_render_config(&fs, &command).expect("valid config");
+        assert_eq!(config.camera.resolution, (854, 480));
+    }
+
+    #[test]
+    fn runtime_mapping_preserves_range_skip_and_presenter_semantics() {
+        let fs = VirtualFs::new();
+        let command = render(
+            parse_args(["-w", "-s", "-p", "-n", "2,5", "--fps", "48"]).expect("valid command"),
+        );
+        let config = resolve_render_config(&fs, &command).expect("valid config");
+        let runtime = command.runtime_config(&config);
+        assert_eq!(runtime.fps, 48);
+        assert!(runtime.windowed);
+        assert!(runtime.skip_animations);
+        assert!(runtime.presenter_mode);
+        assert_eq!(runtime.start_at_play, Some(2));
+        assert_eq!(runtime.end_at_play, Some(5));
+    }
+
+    #[test]
+    fn unknown_math_pack_is_a_config_error() {
+        let fs = VirtualFs::new();
+        let command =
+            render(parse_args(["--math-pack", "not-a-pack"]).expect("parser accepts names"));
+        let error = resolve_render_config(&fs, &command).expect_err("pack must be resolved");
+        assert_eq!(error.exit_name(), "config");
+    }
+
+    fn synthetic_doctor() -> DoctorSnapshot {
+        DoctorSnapshot {
+            topology_source: TopologySource::Fallback {
+                reason: "fixture fallback".to_owned(),
+            },
+            logical_cores: 8,
+            physical_cores: 4,
+            hardware_supported_tier: "x86-64-v4".to_owned(),
+            active_compiled_tier: "portable",
+            plan: ExecutionPlanReport {
+                determinism: "certified",
+                engine: "certified-cpu",
+                frames_in_flight: 2,
+                scene_threads: 1,
+                render_teams: 2,
+                render_threads: 4,
+                output_threads: 1,
+                fine_tile: 16,
+                macro_tile: 128,
+                estimated_in_flight_bytes: 4096,
+                output_format: "rgba8",
+                tuning_source: "certified-profile",
+            },
+            ffmpeg: FfmpegReport::Available {
+                path: PathBuf::from("/opt/ffmpeg"),
+                sha256: "abc123".to_owned(),
+                version: "ffmpeg \"7\"".to_owned(),
+                hardware_encoders: vec!["h264_nvenc".to_owned()],
+                hardware_encoder_probe_error: Some("encoder inventory timed out".to_owned()),
+            },
+            cache: CacheReport::Configured {
+                root: PathBuf::from("/cache"),
+                exists: true,
+                direct_entries: Some(3),
+                warning: None,
+            },
+            fonts: FontReport {
+                selected: "Computer Modern".to_owned(),
+                bundled: vec!["Computer Modern".to_owned()],
+                user: vec!["Fixture Sans".to_owned()],
+                complete: true,
+                detail: None,
+            },
+            math_packs: vec!["default".to_owned(), "minimal".to_owned()],
+            certification: CertificationReport {
+                platform: "linux-x86_64".to_owned(),
+                supported: true,
+                detail: "fixture certified".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn doctor_robot_output_is_a_bit_locked_ndjson_schema() {
+        let expected = concat!(
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"execution_plan\",\"determinism\":\"certified\",\"engine\":\"certified-cpu\",\"frames_in_flight\":2,\"scene_threads\":1,\"render_teams\":2,\"render_threads\":4,\"output_threads\":1,\"fine_tile\":16,\"macro_tile\":128,\"estimated_in_flight_bytes\":4096,\"output_format\":\"rgba8\",\"tuning_source\":\"certified-profile\"}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":\"encoder inventory timed out\"}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"warning\":null}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"fonts\",\"selected\":\"Computer Modern\",\"bundled\":[\"Computer Modern\"],\"user\":[\"Fixture Sans\"],\"complete\":true,\"detail\":null}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"math_packs\",\"packs\":[\"default\",\"minimal\"]}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"certification\",\"platform\":\"linux-x86_64\",\"supported\":true,\"detail\":\"fixture certified\"}\n",
+        );
+        assert_eq!(synthetic_doctor().to_ndjson(), expected);
+        for line in expected.lines() {
+            assert!(line.starts_with("{\"schema\":\"fmn.doctor\",\"version\":1,"));
+            assert!(line.ends_with('}'));
+        }
+    }
+
+    #[test]
+    fn production_doctor_reports_degraded_capabilities_without_guessing() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let output = run_with_capabilities(["doctor", "--robot"], &fs, &runner);
+        assert_eq!(output.code, 0);
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.lines().count(), 7);
+        assert!(output.stdout.contains("\"kind\":\"topology\""));
+        assert!(output.stdout.contains("\"source\":\"fallback\""));
+        assert!(
+            output
+                .stdout
+                .contains("\"kind\":\"ffmpeg\",\"available\":false")
+        );
+        assert!(
+            output
+                .stdout
+                .contains("\"kind\":\"cache\",\"resolved\":false")
+        );
+        assert!(output.stdout.contains("\"kind\":\"fonts\""));
+        assert!(output.stdout.contains("\"complete\":false"));
+    }
+
+    #[test]
+    fn doctor_refuses_unverified_annexes_and_rejects_certified_annexes() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        fs.insert("/cfg/metal.yml", b"render:\n  engine: metal\n".to_vec());
+        let output = run_with_capabilities(
+            ["doctor", "--robot", "--config_file", "/cfg/metal.yml"],
+            &fs,
+            &runner,
+        );
+        assert_eq!(output.code, 4);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("\"exit_name\":\"capability\""));
+        assert!(output.stdout.contains("no verified compiled Metal backend"));
+
+        fs.insert(
+            "/cfg/invalid.yml",
+            b"determinism:\n  mode: certified\nrender:\n  engine: metal\n".to_vec(),
+        );
+        let output = run_with_capabilities(
+            ["doctor", "--robot", "--config_file", "/cfg/invalid.yml"],
+            &fs,
+            &runner,
+        );
+        assert_eq!(output.code, 3);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("\"exit_name\":\"config\""));
+        assert!(output.stdout.contains("requires render.engine=cpu"));
+        assert_eq!(platform_name("linux", "x86_64"), "linux-x86-64");
+        assert_eq!(platform_name("macos", "aarch64"), "macos-aarch64");
+    }
+
+    #[test]
+    fn user_caused_execution_plan_failures_are_config_errors() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        fs.insert(
+            "/cfg/odd-nv12.yml",
+            b"camera:\n  resolution: (1919, 1080)\nfile_writer:\n  pixel_format: nv12\n".to_vec(),
+        );
+        let output = run_with_capabilities(
+            ["doctor", "--robot", "--config_file", "/cfg/odd-nv12.yml"],
+            &fs,
+            &runner,
+        );
+        assert_eq!(output.code, 3);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("\"exit_name\":\"config\""));
+        assert!(output.stdout.contains("requires even frame dimensions"));
+    }
+
+    #[test]
+    fn required_ffmpeg_returns_capability_after_the_robot_report() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let output = run_with_capabilities(["doctor", "--robot", "--require-ffmpeg"], &fs, &runner);
+        assert_eq!(output.code, 4);
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.lines().count(), 8);
+        assert!(output.stdout.lines().last().is_some_and(|line| {
+            line.contains("\"kind\":\"error\"") && line.contains("\"exit_name\":\"capability\"")
+        }));
+    }
+
+    #[test]
+    fn batch_dispatch_reports_the_compiled_feature_state() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let output = run_with_capabilities(["batch", "--robot"], &fs, &runner);
+        assert_eq!(output.code, 4);
+        assert!(output.stderr.is_empty());
+        if cfg!(feature = "batch") {
+            assert!(
+                output
+                    .stdout
+                    .contains("no cancellable production scene service")
+            );
+        } else {
+            assert!(output.stdout.contains("disabled in this binary"));
+        }
+    }
+
+    #[test]
+    fn robot_errors_never_mix_human_stderr_or_decoration() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let output = run_with_capabilities(["--robot", "-l", "-m"], &fs, &runner);
+        assert_eq!(output.code, 2);
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.lines().count(), 1);
+        assert!(output.stdout.starts_with("{\"schema\":\"fmn.cli\""));
+        assert!(output.stdout.contains("\"rule\":\"quality-exclusive\""));
+
+        let output = run_with_capabilities(["doctor", "--", "--robot"], &fs, &runner);
+        assert_eq!(output.code, 2);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.starts_with("fmn: "));
+    }
+
+    #[test]
+    fn help_and_version_dispatch_with_command_specific_streams() {
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+
+        let help = run_with_capabilities(["--help"], &fs, &runner);
+        assert_eq!(help.code, 0);
+        assert!(help.stderr.is_empty());
+        assert!(
+            help.stdout
+                .starts_with("Usage: fmn [OPTIONS] [FILE] [SCENE ...]\n")
+        );
+        assert!(help.stdout.contains("--format"));
+
+        let explicit_render_help = run_with_capabilities(["render", "--help"], &fs, &runner);
+        assert_eq!(explicit_render_help.code, 0);
+        assert!(
+            explicit_render_help
+                .stdout
+                .starts_with("Usage: fmn render [OPTIONS] [FILE] [SCENE ...]\n")
+        );
+
+        let help = run_with_capabilities(["doctor", "--help"], &fs, &runner);
+        assert_eq!(help.code, 0);
+        assert!(help.stderr.is_empty());
+        assert!(help.stdout.starts_with("Usage: fmn doctor [OPTIONS]\n"));
+        assert!(
+            !help
+                .stdout
+                .lines()
+                .next()
+                .is_some_and(|line| { line.contains("[FILE]") || line.contains("[SCENE") })
+        );
+
+        let version = run_with_capabilities(["--robot", "--version"], &fs, &runner);
+        assert_eq!(version.code, 0);
+        assert!(version.stderr.is_empty());
+        assert_eq!(
+            version.stdout,
+            concat!(
+                "{\"schema\":\"fmn.cli\",\"version\":1,\"kind\":\"version\",",
+                "\"program\":\"fmn\",\"program_version\":\"0.1.0\"}\n"
+            )
+        );
+
+        let robot_help = run_with_capabilities(["doctor", "--robot", "--help"], &fs, &runner);
+        assert_eq!(robot_help.code, 0);
+        assert!(robot_help.stderr.is_empty());
+        assert!(robot_help.stdout.contains("\"kind\":\"exit_code\""));
+        assert!(robot_help.stdout.contains("\"kind\":\"interaction\""));
+        assert!(
+            robot_help
+                .stdout
+                .lines()
+                .all(|line| line.starts_with("{\"schema\":\"fmn.cli\",\"version\":1,"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_os_arguments_fail_without_lossy_path_rewriting() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let invalid = OsString::from_vec(vec![0xff]);
+        let output = run_os([invalid.clone()]);
+        assert_eq!(output.code, 2);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("must be valid UTF-8"));
+
+        let output = run_os([OsString::from("--robot"), invalid]);
+        assert_eq!(output.code, 2);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("\"exit_name\":\"usage\""));
+    }
+}

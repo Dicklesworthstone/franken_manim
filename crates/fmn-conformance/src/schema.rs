@@ -1058,6 +1058,27 @@ impl Schema {
                     ),
                 });
             }
+            if let Some(ty) = flag.ty.as_deref()
+                && !matches!(
+                    ty,
+                    "int"
+                        | "usize"
+                        | "u64"
+                        | "u16"
+                        | "ip"
+                        | "output_format"
+                        | "preview_codec"
+                        | "path"
+                        | "pack"
+                )
+            {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "native flag `{}` has unsupported value type `{ty}`",
+                        flag.options
+                    ),
+                });
+            }
             if !bindings.insert(flag.binding.as_str()) {
                 return Err(SchemaError::CliContract {
                     detail: format!("flag binding `{}` is duplicated", flag.binding),
@@ -1126,10 +1147,27 @@ impl Schema {
                 });
             }
             for operand in &interaction.operands {
-                if !bindings.contains(operand.as_str()) {
+                let (binding, selected_values) = operand
+                    .split_once('=')
+                    .map_or((operand.as_str(), None), |(binding, values)| {
+                        (binding, Some(values))
+                    });
+                if !bindings.contains(binding) {
                     return Err(SchemaError::CliContract {
                         detail: format!(
-                            "interaction `{}` names unknown binding `{operand}`",
+                            "interaction `{}` names unknown binding `{binding}`",
+                            interaction.id
+                        ),
+                    });
+                }
+                if selected_values.is_some_and(|values| {
+                    values.is_empty()
+                        || values.contains('=')
+                        || values.split(',').any(str::is_empty)
+                }) {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "interaction `{}` has an invalid value selector `{operand}`",
                             interaction.id
                         ),
                     });
@@ -1162,15 +1200,30 @@ impl Schema {
                         ),
                     });
                 }
-                FlagInteractionKind::Exclusive if interaction.operands.len() != 1 => {
-                    return Err(SchemaError::CliContract {
-                        detail: format!(
-                            "interaction `{}` needs exactly one operand",
-                            interaction.id
-                        ),
-                    });
-                }
                 _ => {}
+            }
+            if interaction.kind == FlagInteractionKind::Implies
+                && interaction.operands[1].contains('=')
+            {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "interaction `{}` cannot imply a value selector",
+                        interaction.id
+                    ),
+                });
+            }
+            if interaction.kind == FlagInteractionKind::Exclusive
+                && interaction
+                    .operands
+                    .iter()
+                    .any(|operand| operand.contains('='))
+            {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "interaction `{}` cannot use value selectors",
+                        interaction.id
+                    ),
+                });
             }
             if let Some(exit_code) = interaction.exit_code.as_deref()
                 && !exit_names.contains(exit_code)
@@ -1745,12 +1798,25 @@ pub fn generate_cli_rs(schema: &Schema) -> String {
 
     out.push_str("pub const INTERACTION_SPECS: &[InteractionSpec] = &[\n");
     for interaction in &schema.flag_interactions {
-        let operands = interaction
+        let inline_operands = interaction
             .operands
             .iter()
             .map(|operand| format!("{operand:?}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let inline_line = format!("        operands: &[{inline_operands}],\n");
+        // rustfmt's default `array_width` is 60. Emit the same shape so the
+        // generated artifact remains stable after the mandatory fmt gate.
+        let operands = if inline_operands.chars().count() <= 60 {
+            inline_line
+        } else {
+            let values = interaction
+                .operands
+                .iter()
+                .map(|operand| format!("            {operand:?},\n"))
+                .collect::<String>();
+            format!("        operands: &[\n{values}        ],\n")
+        };
         let exit = interaction
             .exit_code
             .as_ref()
@@ -1758,7 +1824,7 @@ pub fn generate_cli_rs(schema: &Schema) -> String {
         let _ = writeln!(
             out,
             "    InteractionSpec {{\n        id: {:?},\n        kind: \
-             InteractionKind::{},\n        operands: &[{}],\n        exit_code: {},\n        \
+             InteractionKind::{},\n{}        exit_code: {},\n        \
              message: {:?},\n    }},",
             interaction.id,
             interaction_variant(interaction.kind),
@@ -2086,6 +2152,42 @@ mod tests {
         let err = Schema::parse(EXTRACT, &unknown_exit).unwrap_err(); // ubs:ignore — negative parser test
         assert!(matches!(err, SchemaError::CliContract { .. }), "got {err}");
         assert!(err.to_string().contains("unknown exit code"), "got {err}");
+
+        let allowed_modifier = OVERLAY.replace(
+            "[flag_interaction]\n",
+            "[flag_interaction]\nquery\texclusive\twrite|help\tusage\tquery only\n",
+        );
+        Schema::parse(EXTRACT, &allowed_modifier)
+            .expect("exclusive rules may name consumed modifiers after the action");
+
+        let selected_value = OVERLAY.replace(
+            "[flag_interaction]\n",
+            "[flag_interaction]\nselected\tconflicts\twrite=movie,frame|help\tusage\tselected values\n",
+        );
+        Schema::parse(EXTRACT, &selected_value)
+            .expect("conflict operands may select declared binding values");
+
+        let bad_selector = OVERLAY.replace(
+            "[flag_interaction]\n",
+            "[flag_interaction]\nbad\tconflicts\twrite=|help\tusage\tbad selector\n",
+        );
+        let err = Schema::parse(EXTRACT, &bad_selector).unwrap_err();
+        assert!(matches!(err, SchemaError::CliContract { .. }), "got {err}");
+        assert!(err.to_string().contains("value selector"), "got {err}");
+    }
+
+    #[test]
+    fn native_flag_value_types_are_fail_closed() {
+        let unknown_type = OVERLAY.replace(
+            "-h,--help\tstore_true\t-\tFalse\t-\tglobal",
+            "-h,--help\tstore_true\t-\tFalse\tmystery\tglobal",
+        );
+        let err = Schema::parse(EXTRACT, &unknown_type).unwrap_err();
+        assert!(matches!(err, SchemaError::CliContract { .. }), "got {err}");
+        assert!(
+            err.to_string().contains("unsupported value type"),
+            "got {err}"
+        );
     }
 
     #[test]

@@ -11,8 +11,14 @@ cargo fmt --check
 echo "==> cargo check --all-targets"
 cargo check --all-targets
 
+echo "==> cargo check -p fmn-cli --features batch --all-targets"
+cargo check -p fmn-cli --features batch --all-targets
+
 echo "==> cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
+
+echo "==> cargo clippy -p fmn-cli --features batch --all-targets -- -D warnings"
+cargo clippy -p fmn-cli --features batch --all-targets -- -D warnings
 
 if [[ "${FMN_SIMD_TIER_GATE:-0}" == "1" ]]; then
     # The weekly x86-64-v4 artifact runs under user-mode emulation. Compile and
@@ -26,6 +32,8 @@ if [[ "${FMN_SIMD_TIER_GATE:-0}" == "1" ]]; then
 else
     echo "==> cargo test"
     cargo test
+    echo "==> cargo test -p fmn-cli --features batch --all-targets"
+    cargo test -p fmn-cli --features batch --all-targets
 fi
 
 echo "==> crate-DAG check (workspace graph vs plan §19)"
