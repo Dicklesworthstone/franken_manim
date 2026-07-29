@@ -19,6 +19,10 @@
 //! - **Atomic writes.** Every entry and every index lands via the capability's
 //!   `write_atomic` (write-temp + rename): a reader sees the old bytes, the
 //!   new bytes, or absence — never a torn intermediate, even under `kill -9`.
+//!   Before any cache read, write, listing, or lifecycle removal, every
+//!   component from the owned root down is classified without following its
+//!   leaf; links, Windows reparse points, devices, and wrong-kind nodes fail
+//!   closed. Missing write directories are created one exact leaf at a time.
 //! - **Checksums verified on read.** Entries ride fmn-hash's serial envelope,
 //!   whose trailing SHA-256 covers the whole document; the envelope also
 //!   records the address it was stored under, and blob entries additionally
@@ -56,14 +60,16 @@
 //! see misses and concurrent writers recreate what they need at the original
 //! `ns` path.
 //!
-//! The clear authorization protects against dangerous configuration, static
-//! symlinks, copied markers, and races among cooperating FrankenManim
-//! processes. Portable safe `std` does not provide handle-relative rename and
-//! recursive removal on every supported platform, so it cannot promise
-//! immunity from a hostile same-user process replacing path components
-//! between validation and rename. The implementation revalidates immediately
-//! before that linearization point and keeps the deletion boundary to `ns`;
-//! stronger stable-identity/generation binding is tracked separately.
+//! Root authorization and ordinary traversal protect against dangerous
+//! configuration, static symlinks/reparse points, copied markers, and races
+//! among cooperating FrankenManim processes. Portable safe `std` does not
+//! provide the same handle-relative read/write/rename/remove primitives on
+//! every supported platform, so a hostile same-user process can still replace
+//! an owned-root ancestor or a checked component between classification and
+//! the following path-based operation. Checks are performed immediately before
+//! each operation, recursive deletion is required not to follow link-like
+//! children, and clear keeps its deletion boundary to `ns`; stronger stable
+//! root identity and generation binding are tracked separately.
 //!
 //! LRU bookkeeping uses a logical sequence counter — never wall time — so
 //! eviction order is reproducible in the deterministic lab; the only clock

@@ -17,8 +17,11 @@
 //! Every path component below `<root>` is either a fixed literal, a validated
 //! namespace name (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes), a `v<u32>`
 //! version directory, or digest hex — arbitrary key bytes never reach a path,
-//! so no key can escape the root (the traversal-protection contract, fuzzed
-//! in the crate's tests).
+//! so no key can escape the root. Every actual traversal also classifies its
+//! components without following the leaf, rejects link-like and wrong-kind
+//! nodes, and creates missing directories one exact leaf at a time (the
+//! traversal-protection contract, fuzzed and exercised against host symlink
+//! sentinels in the crate's tests).
 //!
 //! # Concurrency model
 //!
@@ -35,7 +38,7 @@ use crate::entry::{self, EntryKind};
 use crate::key::CacheKey;
 use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer, sha256};
 use fmn_platform::clock::Clock;
-use fmn_platform::fs::{FileSystem, FsError};
+use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -85,6 +88,317 @@ fn root_refused(root: &Path, reason: impl Into<String>) -> CacheError {
     }
 }
 
+fn managed_node_refused(path: &Path, expected: &str, found: FsNodeKind) -> CacheError {
+    CacheError::Storage(FsError::Io {
+        path: path.to_path_buf(),
+        err: io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "cache traversal refused {found:?}; expected {expected} without following links"
+            ),
+        ),
+    })
+}
+
+fn managed_path_refused(path: &Path, reason: impl Into<String>) -> CacheError {
+    CacheError::Storage(FsError::Io {
+        path: path.to_path_buf(),
+        err: io::Error::new(io::ErrorKind::PermissionDenied, reason.into()),
+    })
+}
+
+fn managed_not_found(path: &Path) -> CacheError {
+    CacheError::Storage(FsError::NotFound {
+        path: path.to_path_buf(),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum DirectoryMode {
+    Existing,
+    Create,
+    ExistingPrefix,
+}
+
+/// Validate a directory path at or below `root` one component at a time.
+///
+/// The root itself is already canonical and owned when this is used by a
+/// live store. `Create` claims each missing component with exact-leaf
+/// creation; it never delegates a missing chain to `create_dir_all`.
+fn ensure_managed_directory(
+    fs: &dyn FileSystem,
+    root: &Path,
+    directory: &Path,
+    mode: DirectoryMode,
+) -> Result<(), CacheError> {
+    if !root.is_absolute() || !directory.starts_with(root) {
+        return Err(managed_path_refused(
+            directory,
+            format!(
+                "managed cache path is not below owned root {}",
+                root.display()
+            ),
+        ));
+    }
+    if directory
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(managed_path_refused(
+            directory,
+            "managed cache paths may not contain parent-directory components",
+        ));
+    }
+    match fs.node_kind_no_follow(root)? {
+        Some(FsNodeKind::Directory) => {}
+        Some(kind) => return Err(managed_node_refused(root, "owned root directory", kind)),
+        None => return Err(managed_not_found(directory)),
+    }
+
+    let relative = directory.strip_prefix(root).map_err(|_| {
+        managed_path_refused(directory, "managed cache path escaped its owned root")
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(managed_path_refused(
+                directory,
+                "managed cache path contains a non-normal component",
+            ));
+        };
+        current.push(component);
+        match fs.node_kind_no_follow(&current)? {
+            Some(FsNodeKind::Directory) => {}
+            Some(kind) => {
+                return Err(managed_node_refused(&current, "real directory", kind));
+            }
+            None => match mode {
+                DirectoryMode::Existing => return Err(managed_not_found(directory)),
+                DirectoryMode::ExistingPrefix => return Ok(()),
+                DirectoryMode::Create => {
+                    let _created = fs.create_dir(&current)?;
+                    match fs.node_kind_no_follow(&current)? {
+                        Some(FsNodeKind::Directory) => {}
+                        Some(kind) => {
+                            return Err(managed_node_refused(&current, "real directory", kind));
+                        }
+                        None => return Err(managed_not_found(&current)),
+                    }
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheError> {
+    let mut ancestors: Vec<&Path> = root.ancestors().collect();
+    ancestors.reverse();
+    for directory in ancestors {
+        if directory.as_os_str().is_empty() {
+            continue;
+        }
+        match fs.node_kind_no_follow(directory)? {
+            Some(FsNodeKind::Directory) => {}
+            Some(kind) => {
+                return Err(root_refused(
+                    root,
+                    format!(
+                        "capability root component {} is {kind:?}, not a real directory",
+                        directory.display()
+                    ),
+                ));
+            }
+            None => {
+                let _created = fs.create_dir(directory)?;
+                match fs.node_kind_no_follow(directory)? {
+                    Some(FsNodeKind::Directory) => {}
+                    Some(kind) => {
+                        return Err(root_refused(
+                            root,
+                            format!(
+                                "capability root component {} became {kind:?}",
+                                directory.display()
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(root_refused(
+                            root,
+                            format!(
+                                "capability root component {} remained absent",
+                                directory.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn managed_leaf_kind(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+    parent_mode: DirectoryMode,
+) -> Result<Option<FsNodeKind>, CacheError> {
+    if path == root
+        || !path.starts_with(root)
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || !matches!(
+            path.components().next_back(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(managed_path_refused(
+            path,
+            "managed cache file is not a normal leaf below its owned root",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        managed_path_refused(path, "managed cache file must have a parent directory")
+    })?;
+    ensure_managed_directory(fs, root, parent, parent_mode)?;
+    fs.node_kind_no_follow(path).map_err(CacheError::Storage)
+}
+
+fn read_managed_file(fs: &dyn FileSystem, root: &Path, path: &Path) -> Result<Vec<u8>, CacheError> {
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
+        Some(FsNodeKind::RegularFile) => fs.read(path).map_err(CacheError::Storage),
+        Some(kind) => Err(managed_node_refused(path, "regular file", kind)),
+        None => Err(managed_not_found(path)),
+    }
+}
+
+fn write_managed_file(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), CacheError> {
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Create)? {
+        Some(FsNodeKind::RegularFile) | None => {
+            fs.write_atomic(path, bytes).map_err(CacheError::Storage)
+        }
+        Some(kind) => Err(managed_node_refused(
+            path,
+            "regular file or absent leaf",
+            kind,
+        )),
+    }
+}
+
+fn create_managed_file(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<bool, CacheError> {
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Create)? {
+        Some(FsNodeKind::RegularFile) | None => {
+            fs.create_new(path, bytes).map_err(CacheError::Storage)
+        }
+        Some(kind) => Err(managed_node_refused(
+            path,
+            "regular file or absent leaf",
+            kind,
+        )),
+    }
+}
+
+fn remove_managed_file(fs: &dyn FileSystem, root: &Path, path: &Path) -> Result<(), CacheError> {
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
+        Some(FsNodeKind::RegularFile) => fs.remove_file(path).map_err(CacheError::Storage),
+        Some(kind) => Err(managed_node_refused(path, "regular file", kind)),
+        None => Err(managed_not_found(path)),
+    }
+}
+
+#[derive(Debug)]
+struct ManagedDirEntry {
+    path: PathBuf,
+    is_directory: bool,
+}
+
+fn list_managed_directory(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+) -> Result<Vec<ManagedDirEntry>, CacheError> {
+    ensure_managed_directory(fs, root, path, DirectoryMode::Existing)?;
+    let children = fs.list_dir(path)?;
+    let mut checked = Vec::with_capacity(children.len());
+    for child in children {
+        if child.parent() != Some(path) {
+            return Err(managed_path_refused(
+                &child,
+                format!(
+                    "filesystem listing returned a path outside direct parent {}",
+                    path.display()
+                ),
+            ));
+        }
+        match fs.node_kind_no_follow(&child)? {
+            Some(FsNodeKind::RegularFile) => checked.push(ManagedDirEntry {
+                path: child,
+                is_directory: false,
+            }),
+            Some(FsNodeKind::Directory) => checked.push(ManagedDirEntry {
+                path: child,
+                is_directory: true,
+            }),
+            Some(kind) => {
+                return Err(managed_node_refused(
+                    &child,
+                    "regular file or real directory",
+                    kind,
+                ));
+            }
+            // Cooperating writers and evictors may remove an entry between
+            // enumeration and classification.
+            None => {}
+        }
+    }
+    Ok(checked)
+}
+
+fn remove_managed_directory_all(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+) -> Result<(), CacheError> {
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
+        Some(FsNodeKind::Directory) => {}
+        Some(kind) => return Err(managed_node_refused(path, "real directory", kind)),
+        None => return Err(managed_not_found(path)),
+    }
+
+    // Preflight every descendant without following it. `remove_dir_all` is
+    // required by the capability contract not to follow link-like children,
+    // but this explicit walk also rejects every static reparse point and
+    // wrong-kind node before a cache purge delegates the recursive removal.
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for child in list_managed_directory(fs, root, &directory)? {
+            if child.is_directory {
+                pending.push(child.path);
+            }
+        }
+    }
+
+    // The preflight can be long; classify the deletion leaf again immediately
+    // before the path-based operation.
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
+        Some(FsNodeKind::Directory) => fs.remove_dir_all(path).map_err(CacheError::Storage),
+        Some(kind) => Err(managed_node_refused(path, "real directory", kind)),
+        None => Err(managed_not_found(path)),
+    }
+}
+
 fn owner_stamp(root: &Path) -> Vec<u8> {
     let digest = sha256(root.as_os_str().as_encoded_bytes());
     format!("{OWNER_PREFIX}{}\n", digest.to_hex()).into_bytes()
@@ -97,7 +411,7 @@ fn verify_stamp(
     root: &Path,
     label: &str,
 ) -> Result<(), CacheError> {
-    let found = fs.read(path)?;
+    let found = read_managed_file(fs, root, path)?;
     if found == expected {
         Ok(())
     } else {
@@ -128,9 +442,23 @@ fn ensure_owned_root(
     if !root.is_absolute() {
         return Err(root_refused(root, "the store root must be absolute"));
     }
+    let root_existed = match fs.node_kind_no_follow(root)? {
+        Some(FsNodeKind::Directory) => true,
+        Some(kind) => {
+            return Err(root_refused(
+                root,
+                format!("store root is {kind:?}, not a real directory"),
+            ));
+        }
+        None if matches!(state, RootOpenState::CapabilityManaged) => {
+            ensure_capability_root(fs, root)?;
+            false
+        }
+        None => return Err(root_refused(root, "store root disappeared while opening")),
+    };
     let owner_path = root.join(OWNER_FILE);
     let expected_owner = owner_stamp(root);
-    match fs.read(&owner_path) {
+    match read_managed_file(fs, root, &owner_path) {
         Ok(found) => {
             if found != expected_owner {
                 return Err(root_refused(
@@ -139,7 +467,7 @@ fn ensure_owned_root(
                 ));
             }
         }
-        Err(FsError::NotFound { .. }) => {
+        Err(CacheError::Storage(FsError::NotFound { .. })) => {
             match state {
                 RootOpenState::Existing => {
                     return Err(root_refused(
@@ -148,35 +476,39 @@ fn ensure_owned_root(
                     ));
                 }
                 RootOpenState::CreatedHostLeaf => {}
-                RootOpenState::CapabilityManaged => match fs.list_dir(root) {
-                    Ok(_) => {
+                RootOpenState::CapabilityManaged => {
+                    if root_existed {
                         return Err(root_refused(
                             root,
                             "an existing directory has no ownership marker",
                         ));
                     }
-                    Err(FsError::NotFound { .. }) => {}
-                    Err(err) => return Err(err.into()),
-                },
+                }
             }
-            if !fs.create_new(&owner_path, &expected_owner)? {
+            if !create_managed_file(fs, root, &owner_path, &expected_owner)? {
                 // Another claimant won. Its complete published bytes, not our
                 // intent, decide whether this is the same owned root.
                 verify_stamp(fs, &owner_path, &expected_owner, root, "ownership marker")?;
             }
         }
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(err),
     }
 
     let format_path = root.join(FORMAT_FILE);
     let expected_format = format!("{FORMAT_STAMP}\n");
-    match fs.read_to_string(&format_path) {
+    match read_managed_file(fs, root, &format_path).and_then(|bytes| {
+        String::from_utf8(bytes).map_err(|_| {
+            CacheError::Storage(FsError::NotUtf8 {
+                path: format_path.clone(),
+            })
+        })
+    }) {
         Ok(found) if found.trim_end() == FORMAT_STAMP => Ok(()),
         Ok(found) => Err(CacheError::FormatUnsupported {
             found: found.trim_end().to_owned(),
         }),
-        Err(FsError::NotFound { .. }) => {
-            if !fs.create_new(&format_path, expected_format.as_bytes())? {
+        Err(CacheError::Storage(FsError::NotFound { .. })) => {
+            if !create_managed_file(fs, root, &format_path, expected_format.as_bytes())? {
                 verify_stamp(
                     fs,
                     &format_path,
@@ -187,16 +519,14 @@ fn ensure_owned_root(
             }
             Ok(())
         }
-        Err(err) => Err(err.into()),
+        Err(err) => Err(err),
     }
 }
 
 fn validate_existing_host_store_root(root: &Path, cwd: &Path) -> Result<PathBuf, CacheError> {
     reject_symlink_components(root)?;
     let canonical_root = fs::canonicalize(root).map_err(|err| host_io(root, err))?;
-    let metadata =
-        fs::symlink_metadata(&canonical_root).map_err(|err| host_io(&canonical_root, err))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    if host_node_kind_no_follow(&canonical_root)? != Some(FsNodeKind::Directory) {
         return Err(root_refused(root, "root is not a real directory"));
     }
     reject_protected_host_root(&canonical_root, root, cwd)?;
@@ -217,22 +547,21 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
         ));
     }
     let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
-    match fs::symlink_metadata(root) {
-        Ok(_) => validate_existing_host_store_root(root, &cwd)
+    match host_node_kind_no_follow(root)? {
+        Some(_) => validate_existing_host_store_root(root, &cwd)
             .map(|root| (root, RootOpenState::Existing)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+        None => {
             let parent = root.parent().ok_or_else(|| {
                 root_refused(root, "a store root must have an existing parent directory")
             })?;
-            match fs::symlink_metadata(parent) {
-                Ok(_) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            match host_node_kind_no_follow(parent)? {
+                Some(_) => {}
+                None => {
                     return Err(root_refused(
                         root,
                         "a store root's immediate parent must already exist",
                     ));
                 }
-                Err(err) => return Err(host_io(parent, err)),
             }
             reject_symlink_components(parent)?;
             let canonical_parent = match fs::canonicalize(parent) {
@@ -245,9 +574,7 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
                 }
                 Err(err) => return Err(host_io(parent, err)),
             };
-            let metadata = fs::symlink_metadata(&canonical_parent)
-                .map_err(|err| host_io(&canonical_parent, err))?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            if host_node_kind_no_follow(&canonical_parent)? != Some(FsNodeKind::Directory) {
                 return Err(root_refused(
                     root,
                     "a store root's parent is not a real directory",
@@ -267,7 +594,6 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
                 Err(err) => Err(host_io(&canonical_root, err)),
             }
         }
-        Err(err) => Err(host_io(root, err)),
     }
 }
 
@@ -312,16 +638,15 @@ impl CacheClearAuthorization {
     pub fn authorize(root: impl AsRef<Path>) -> Result<Self, CacheError> {
         let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
         let configured_root = absolute_without_parent_components(root.as_ref(), &cwd)?;
-        let state = match fs::symlink_metadata(&configured_root) {
-            Ok(_) => {
+        let state = match host_node_kind_no_follow(&configured_root)? {
+            Some(_) => {
                 let (canonical_root, owner) = validate_host_owned_root(&configured_root, &cwd)?;
                 ClearState::Owned {
                     canonical_root,
                     owner,
                 }
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => ClearState::Absent,
-            Err(err) => return Err(host_io(&configured_root, err)),
+            None => ClearState::Absent,
         };
         Ok(Self {
             configured_root,
@@ -459,9 +784,7 @@ fn validate_host_owned_root(
     reject_symlink_components(configured_root)?;
     let canonical_root =
         fs::canonicalize(configured_root).map_err(|err| host_io(configured_root, err))?;
-    let metadata =
-        fs::symlink_metadata(&canonical_root).map_err(|err| host_io(&canonical_root, err))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    if host_node_kind_no_follow(&canonical_root)? != Some(FsNodeKind::Directory) {
         return Err(root_refused(
             configured_root,
             "root is not a real directory",
@@ -528,29 +851,26 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
     let mut ancestors: Vec<&Path> = path.ancestors().collect();
     ancestors.reverse();
     for component in ancestors {
-        let metadata = fs::symlink_metadata(component).map_err(|err| host_io(component, err))?;
-        if metadata.file_type().is_symlink() {
-            return Err(root_refused(
-                path,
-                "root contains a symlinked path component",
-            ));
+        match host_node_kind_no_follow(component)? {
+            Some(FsNodeKind::Link) => {
+                return Err(root_refused(
+                    path,
+                    "root contains a symlinked path component or reparse point",
+                ));
+            }
+            Some(_) => {}
+            None => return Err(managed_not_found(component)),
         }
     }
     Ok(())
 }
 
 fn reject_symlink_leaf(path: &Path, root: &Path, label: &str) -> Result<(), CacheError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(root_refused(root, format!("{label} is absent")));
-        }
-        Err(err) => return Err(host_io(path, err)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(root_refused(root, format!("{label} is not a regular file")));
+    match host_node_kind_no_follow(path)? {
+        Some(FsNodeKind::RegularFile) => Ok(()),
+        Some(_) => Err(root_refused(root, format!("{label} is not a regular file"))),
+        None => Err(root_refused(root, format!("{label} is absent"))),
     }
-    Ok(())
 }
 
 fn host_home() -> Option<PathBuf> {
@@ -576,6 +896,12 @@ fn host_io(path: &Path, err: io::Error) -> CacheError {
         }
     };
     CacheError::Storage(err)
+}
+
+fn host_node_kind_no_follow(path: &Path) -> Result<Option<FsNodeKind>, CacheError> {
+    fmn_platform::fs::StdFs
+        .node_kind_no_follow(path)
+        .map_err(CacheError::Storage)
 }
 
 /// Config-visible store knobs (surfaced through fmn-config once fm-3gl's
@@ -719,6 +1045,41 @@ struct StoreInner {
     pins: Mutex<HashMap<PathBuf, Arc<PinSet>>>,
 }
 
+impl StoreInner {
+    fn validate_existing_directory_prefix(&self, path: &Path) -> Result<(), CacheError> {
+        ensure_managed_directory(
+            self.fs.as_ref(),
+            &self.root,
+            path,
+            DirectoryMode::ExistingPrefix,
+        )
+    }
+
+    fn read_file(&self, path: &Path) -> Result<Vec<u8>, CacheError> {
+        read_managed_file(self.fs.as_ref(), &self.root, path)
+    }
+
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+        write_managed_file(self.fs.as_ref(), &self.root, path, bytes)
+    }
+
+    fn create_file(&self, path: &Path, bytes: &[u8]) -> Result<bool, CacheError> {
+        create_managed_file(self.fs.as_ref(), &self.root, path, bytes)
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), CacheError> {
+        remove_managed_file(self.fs.as_ref(), &self.root, path)
+    }
+
+    fn list_directory(&self, path: &Path) -> Result<Vec<ManagedDirEntry>, CacheError> {
+        list_managed_directory(self.fs.as_ref(), &self.root, path)
+    }
+
+    fn remove_directory_all(&self, path: &Path) -> Result<(), CacheError> {
+        remove_managed_directory_all(self.fs.as_ref(), &self.root, path)
+    }
+}
+
 /// The persistent content-addressed store. Cheap to clone conceptually — open
 /// namespaces via [`Store::namespace`]; the store itself is just the root,
 /// the capabilities, and the config.
@@ -792,7 +1153,8 @@ impl Store {
     /// best-effort on open.
     ///
     /// # Errors
-    /// [`CacheError::InvalidNamespace`].
+    /// [`CacheError::InvalidNamespace`], or [`CacheError::Storage`] when an
+    /// existing namespace component is link-like or has the wrong node kind.
     pub fn namespace(
         &self,
         name: &str,
@@ -806,6 +1168,7 @@ impl Store {
             .join("ns")
             .join(name)
             .join(format!("v{version}"));
+        self.inner.validate_existing_directory_prefix(&dir)?;
         let pins = {
             let mut registry = self.inner.pins.lock().unwrap_or_else(lock_poisoned);
             Arc::clone(registry.entry(dir.clone()).or_default())
@@ -899,10 +1262,6 @@ impl Namespace {
         self.version
     }
 
-    fn fs(&self) -> &dyn FileSystem {
-        self.inner.fs.as_ref()
-    }
-
     /// The object path for an address: `objects/<hh>/<hex…>`, derived from
     /// digest hex only — the traversal protection.
     fn object_path(&self, digest: &Digest) -> PathBuf {
@@ -983,14 +1342,14 @@ impl Namespace {
 
     fn get_at(&self, digest: &Digest, kind: EntryKind) -> Result<Option<Vec<u8>>, CacheError> {
         let path = self.object_path(digest);
-        let bytes = match self.fs().read(&path) {
+        let bytes = match self.inner.read_file(&path) {
             Ok(bytes) => bytes,
-            Err(FsError::NotFound { .. }) => {
+            Err(CacheError::Storage(FsError::NotFound { .. })) => {
                 // A ghost (evicted elsewhere): drop any bookkeeping.
                 self.forget(digest);
                 return Ok(None);
             }
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         };
         match entry::decode(&bytes, kind, digest, self.inner.entry_limits) {
             Ok(payload) => {
@@ -1000,7 +1359,7 @@ impl Namespace {
             Err(_corrupt) => {
                 // Evicted, never trusted, never fatal: the next lookup is a
                 // clean miss and the consumer recomputes.
-                let _ = self.fs().remove_file(&path);
+                let _ = self.inner.remove_file(&path);
                 self.forget(digest);
                 Ok(None)
             }
@@ -1016,7 +1375,7 @@ impl Namespace {
         }
         let doc = entry::encode(kind, digest, payload, self.inner.entry_limits)?;
         let size = doc.len() as u64;
-        self.fs().write_atomic(&self.object_path(digest), &doc)?;
+        self.inner.write_file(&self.object_path(digest), &doc)?;
         self.touch(digest, size);
         // Durable bookkeeping rides the (cold) write path; read bumps stay
         // in memory until some flush point.
@@ -1078,7 +1437,7 @@ impl Namespace {
     }
 
     fn read_index_file(&self) -> Option<AccessLog> {
-        let bytes = self.fs().read(&self.index_path).ok()?;
+        let bytes = self.inner.read_file(&self.index_path).ok()?;
         let mut r =
             Reader::open(&bytes, INDEX_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict).ok()?;
         let next_seq = r.get_u64().ok()?;
@@ -1129,7 +1488,7 @@ impl Namespace {
             w.put_u64(e.last_seq);
         }
         let doc = w.finish()?;
-        self.fs().write_atomic(&self.index_path, &doc)?;
+        self.inner.write_file(&self.index_path, &doc)?;
         Ok(())
     }
 
@@ -1142,23 +1501,41 @@ impl Namespace {
     fn scan(&self) -> Result<(BTreeSet<Digest>, Vec<PathBuf>), CacheError> {
         let mut digests = BTreeSet::new();
         let mut unrecognized = Vec::new();
-        let shards = match self.fs().list_dir(&self.objects_dir) {
+        let shards = match self.inner.list_directory(&self.objects_dir) {
             Ok(shards) => shards,
-            Err(FsError::NotFound { .. }) => return Ok((digests, unrecognized)),
-            Err(err) => return Err(err.into()),
+            Err(CacheError::Storage(FsError::NotFound { .. })) => {
+                return Ok((digests, unrecognized));
+            }
+            Err(err) => return Err(err),
         };
         for shard in shards {
-            let Some(shard_name) = shard.file_name().map(|n| n.to_string_lossy().into_owned())
+            if !shard.is_directory {
+                unrecognized.push(shard.path);
+                continue;
+            }
+            let Some(shard_name) = shard
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
             else {
                 continue;
             };
-            let files = match self.fs().list_dir(&shard) {
+            if shard_name.len() != 2 || !shard_name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            let files = match self.inner.list_directory(&shard.path) {
                 Ok(files) => files,
-                Err(FsError::NotFound { .. }) => continue,
-                Err(err) => return Err(err.into()),
+                Err(CacheError::Storage(FsError::NotFound { .. })) => continue,
+                Err(err) => return Err(err),
             };
             for file in files {
-                let Some(file_name) = file.file_name().map(|n| n.to_string_lossy().into_owned())
+                if file.is_directory {
+                    continue;
+                }
+                let Some(file_name) = file
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
                 else {
                     continue;
                 };
@@ -1166,7 +1543,7 @@ impl Namespace {
                     Ok(digest) => {
                         digests.insert(digest);
                     }
-                    Err(_) => unrecognized.push(file),
+                    Err(_) => unrecognized.push(file.path),
                 }
             }
         }
@@ -1186,8 +1563,8 @@ impl Namespace {
             total += match log.entries.get(digest) {
                 Some(e) => e.size,
                 None => self
-                    .fs()
-                    .read(&self.object_path(digest))
+                    .inner
+                    .read_file(&self.object_path(digest))
                     .map(|b| b.len() as u64)
                     .unwrap_or(0),
             };
@@ -1223,7 +1600,7 @@ impl Namespace {
             ..EvictReport::default()
         };
         for path in unrecognized {
-            if self.fs().remove_file(&path).is_ok() {
+            if self.inner.remove_file(&path).is_ok() {
                 report.swept_unrecognized += 1;
             }
         }
@@ -1236,8 +1613,8 @@ impl Namespace {
         for digest in &on_disk {
             log.entries.entry(*digest).or_insert_with(|| IndexEntry {
                 size: self
-                    .fs()
-                    .read(&self.object_path(digest))
+                    .inner
+                    .read_file(&self.object_path(digest))
                     .map(|b| b.len() as u64)
                     .unwrap_or(0),
                 last_seq: 0,
@@ -1261,14 +1638,14 @@ impl Namespace {
                     report.skipped_pinned += 1;
                     continue;
                 }
-                match self.fs().remove_file(&self.object_path(&digest)) {
-                    Ok(()) | Err(FsError::NotFound { .. }) => {
+                match self.inner.remove_file(&self.object_path(&digest)) {
+                    Ok(()) | Err(CacheError::Storage(FsError::NotFound { .. })) => {
                         log.entries.remove(&digest);
                         total = total.saturating_sub(size);
                         report.evicted += 1;
                         report.evicted_bytes += size;
                     }
-                    Err(err) => return Err(err.into()),
+                    Err(err) => return Err(err),
                 }
             }
         }
@@ -1290,15 +1667,22 @@ impl Namespace {
             Some(parent) => parent.to_path_buf(),
             None => return Ok(0),
         };
-        let children = match self.fs().list_dir(&parent) {
+        let children = match self.inner.list_directory(&parent) {
             Ok(children) => children,
-            Err(FsError::NotFound { .. }) => return Ok(0),
-            Err(err) => return Err(err.into()),
+            Err(CacheError::Storage(FsError::NotFound { .. })) => return Ok(0),
+            Err(err) => return Err(err),
         };
         let keep = format!("v{}", self.version);
         let mut purged = 0;
         for child in children {
-            let Some(name) = child.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            if !child.is_directory {
+                continue;
+            }
+            let Some(name) = child
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+            else {
                 continue;
             };
             if name == keep {
@@ -1307,9 +1691,12 @@ impl Namespace {
             // Only `v<u32>` directories are ours to reclaim.
             if let Some(rest) = name.strip_prefix('v')
                 && rest.parse::<u32>().is_ok()
-                && self.fs().remove_dir_all(&child).is_ok()
             {
-                purged += 1;
+                match self.inner.remove_directory_all(&child.path) {
+                    Ok(()) => purged += 1,
+                    Err(CacheError::Storage(FsError::NotFound { .. })) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(purged)
@@ -1351,13 +1738,13 @@ impl Namespace {
     /// unparseable one is broken and re-contended once.
     fn acquire_maintenance_lock(&self) -> Result<bool, CacheError> {
         let token = self.lock_token()?;
-        if self.fs().create_new(&self.lock_path, &token)? {
+        if self.inner.create_file(&self.lock_path, &token)? {
             *self.held_lock.lock().unwrap_or_else(lock_poisoned) = Some(token);
             return Ok(true);
         }
         // Occupied: fresh means skip; stale or garbage means break and
         // re-contend (create_new arbitrates the re-contention race).
-        let breakable = match self.fs().read(&self.lock_path) {
+        let breakable = match self.inner.read_file(&self.lock_path) {
             Ok(existing) => match Self::lock_acquired_nanos(&existing) {
                 Some(acquired) => {
                     let age = self.now_wall_nanos().saturating_sub(acquired);
@@ -1369,14 +1756,14 @@ impl Namespace {
             },
             // Vanished between create_new and read: the holder released;
             // re-contend.
-            Err(FsError::NotFound { .. }) => true,
-            Err(err) => return Err(err.into()),
+            Err(CacheError::Storage(FsError::NotFound { .. })) => true,
+            Err(err) => return Err(err),
         };
         if !breakable {
             return Ok(false);
         }
-        let _ = self.fs().remove_file(&self.lock_path);
-        if self.fs().create_new(&self.lock_path, &token)? {
+        let _ = self.inner.remove_file(&self.lock_path);
+        if self.inner.create_file(&self.lock_path, &token)? {
             *self.held_lock.lock().unwrap_or_else(lock_poisoned) = Some(token);
             return Ok(true);
         }
@@ -1389,11 +1776,11 @@ impl Namespace {
         let mut held = self.held_lock.lock().unwrap_or_else(lock_poisoned);
         if let Some(token) = held.take()
             && self
-                .fs()
-                .read(&self.lock_path)
+                .inner
+                .read_file(&self.lock_path)
                 .is_ok_and(|cur| cur == token)
         {
-            let _ = self.fs().remove_file(&self.lock_path);
+            let _ = self.inner.remove_file(&self.lock_path);
         }
     }
 }

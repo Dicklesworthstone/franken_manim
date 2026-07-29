@@ -49,6 +49,21 @@ fn key(i: usize) -> CacheKey {
         .expect("key")
 }
 
+fn object_path(
+    root: &std::path::Path,
+    namespace: &str,
+    version: u32,
+    cache_key: &CacheKey,
+) -> PathBuf {
+    let hex = cache_key.digest().to_hex();
+    root.join("ns")
+        .join(namespace)
+        .join(format!("v{version}"))
+        .join("objects")
+        .join(&hex[..2])
+        .join(&hex[2..])
+}
+
 /// The deterministic payload for key `i`: any cross-key contamination shows
 /// up as a value mismatch even before checksums fire.
 fn payload(i: usize) -> Vec<u8> {
@@ -473,6 +488,247 @@ fn clear_authorization_refuses_a_symlinked_root() {
         }
         other => panic!("expected Store::open symlink-ancestor refusal, got {other:?}"),
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn store_reopen_refuses_a_linked_ownership_marker() {
+    let root = scratch("linked_owner_marker");
+    drop(open(&root));
+    let owner = root.join("STORE_OWNER");
+    let parked = root.join("STORE_OWNER.real");
+    std::fs::rename(&owner, &parked).expect("park real owner marker");
+    let victim = root.join("important.txt");
+    std::fs::copy(&parked, &victim).expect("prepare matching external bytes");
+    std::os::unix::fs::symlink(&victim, &owner).expect("link owner marker");
+
+    assert!(
+        matches!(open_result(&root), Err(CacheError::Storage(_))),
+        "opening must classify the marker rather than follow it"
+    );
+    assert_eq!(
+        std::fs::read(&victim).expect("victim survives"),
+        std::fs::read(&parked).expect("parked marker")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn get_refuses_a_symlinked_shard_before_corruption_cleanup() {
+    let root = scratch("get_symlinked_shard");
+    let store = open(&root);
+    let namespace = store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("namespace");
+    let cache_key = key(31);
+    namespace
+        .put(&cache_key, &payload(31))
+        .expect("seed object path");
+    let object = object_path(&root, "shared", 1, &cache_key);
+    let shard = object.parent().expect("shard").to_path_buf();
+    std::fs::rename(&shard, shard.with_extension("parked")).expect("park real shard");
+
+    let victim = scratch("get_symlinked_shard_victim");
+    std::fs::create_dir(&victim).expect("create victim directory");
+    let sentinel = victim.join(object.file_name().expect("object name"));
+    std::fs::write(&sentinel, b"not a cache envelope").expect("write corrupt-looking sentinel");
+    std::os::unix::fs::symlink(&victim, &shard).expect("replace shard with link");
+
+    assert!(
+        matches!(namespace.get(&cache_key), Err(CacheError::Storage(_))),
+        "get must fail before reading or corrupt-cleaning through the link"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel survives"),
+        b"not a cache envelope"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn get_refuses_a_linked_object_leaf_before_corruption_cleanup() {
+    let root = scratch("get_linked_object");
+    let store = open(&root);
+    let namespace = store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("namespace");
+    let cache_key = key(34);
+    namespace
+        .put(&cache_key, &payload(34))
+        .expect("seed object");
+    let object = object_path(&root, "shared", 1, &cache_key);
+    std::fs::rename(&object, object.with_extension("parked")).expect("park real object");
+    let victim = root.join("important.txt");
+    std::fs::write(&victim, b"not a cache envelope").expect("write corrupt-looking sentinel");
+    std::os::unix::fs::symlink(&victim, &object).expect("replace object with link");
+
+    assert!(
+        matches!(namespace.get(&cache_key), Err(CacheError::Storage(_))),
+        "get must reject the linked leaf before corrupt-entry cleanup"
+    );
+    assert_eq!(
+        std::fs::read(&victim).expect("sentinel survives"),
+        b"not a cache envelope"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn put_refuses_a_symlinked_objects_ancestor() {
+    let root = scratch("put_symlinked_objects");
+    let store = open(&root);
+    let namespace = store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("namespace");
+    let cache_key = key(32);
+    let object = object_path(&root, "shared", 1, &cache_key);
+    let objects = root.join("ns/shared/v1/objects");
+    std::fs::create_dir_all(objects.parent().expect("version directory"))
+        .expect("create version directory");
+
+    let victim = scratch("put_symlinked_objects_victim");
+    let victim_shard = victim.join(
+        object
+            .parent()
+            .expect("shard")
+            .file_name()
+            .expect("shard name"),
+    );
+    std::fs::create_dir_all(&victim_shard).expect("create victim shard");
+    let sentinel = victim_shard.join(object.file_name().expect("object name"));
+    std::fs::write(&sentinel, b"keep").expect("write target sentinel");
+    std::os::unix::fs::symlink(&victim, &objects).expect("link objects ancestor");
+
+    assert!(
+        matches!(
+            namespace.put(&cache_key, &payload(32)),
+            Err(CacheError::Storage(_))
+        ),
+        "put must fail before publishing through the link"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel survives"),
+        b"keep"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn eviction_refuses_a_symlinked_shard_without_enumerating_its_target() {
+    let root = scratch("evict_symlinked_shard");
+    let store = open(&root);
+    let namespace = store
+        .namespace(
+            "shared",
+            1,
+            NamespacePolicy {
+                ceiling_bytes: Some(0),
+            },
+        )
+        .expect("namespace");
+    let cache_key = key(33);
+    namespace
+        .put(&cache_key, &payload(33))
+        .expect("seed object path");
+    let object = object_path(&root, "shared", 1, &cache_key);
+    let shard = object.parent().expect("shard").to_path_buf();
+    std::fs::rename(&shard, shard.with_extension("parked")).expect("park real shard");
+
+    let victim = scratch("evict_symlinked_shard_victim");
+    std::fs::create_dir(&victim).expect("create victim directory");
+    let sentinel = victim.join(object.file_name().expect("object name"));
+    std::fs::write(&sentinel, b"keep").expect("write target sentinel");
+    std::os::unix::fs::symlink(&victim, &shard).expect("replace shard with link");
+
+    assert!(
+        matches!(namespace.evict_to_ceiling(), Err(CacheError::Storage(_))),
+        "eviction must fail before listing the linked shard"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel survives"),
+        b"keep"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_open_refuses_a_symlinked_name_ancestor() {
+    let root = scratch("namespace_name_symlink");
+    let store = open(&root);
+    std::fs::create_dir(root.join("ns")).expect("create namespace parent");
+    let victim = scratch("namespace_name_symlink_victim");
+    std::fs::create_dir(&victim).expect("create victim directory");
+    let sentinel = victim.join("important.txt");
+    std::fs::write(&sentinel, b"keep").expect("write sentinel");
+    std::os::unix::fs::symlink(&victim, root.join("ns/shared")).expect("link namespace name");
+
+    assert!(
+        matches!(
+            store.namespace("shared", 1, NamespacePolicy::default()),
+            Err(CacheError::Storage(_))
+        ),
+        "namespace construction must reject an existing linked component"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel survives"),
+        b"keep"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_version_purge_refuses_a_linked_version() {
+    let root = scratch("purge_symlinked_version");
+    let store = open(&root);
+    std::fs::create_dir_all(root.join("ns/shared")).expect("create namespace parent");
+    let victim = scratch("purge_symlinked_version_victim");
+    std::fs::create_dir(&victim).expect("create victim directory");
+    let sentinel = victim.join("important.txt");
+    std::fs::write(&sentinel, b"keep").expect("write sentinel");
+    std::os::unix::fs::symlink(&victim, root.join("ns/shared/v1")).expect("link stale version");
+
+    let current = store
+        .namespace("shared", 2, NamespacePolicy::default())
+        .expect("current version remains usable");
+    assert!(
+        matches!(current.purge_stale_versions(), Err(CacheError::Storage(_))),
+        "purge must reject the linked stale version"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel survives"),
+        b"keep"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_version_purge_preflights_linked_descendants() {
+    let root = scratch("purge_linked_descendant");
+    let store = open(&root);
+    let stale_objects = root.join("ns/shared/v1/objects");
+    std::fs::create_dir_all(&stale_objects).expect("create real stale version");
+    let victim = scratch("purge_linked_descendant_victim");
+    std::fs::create_dir(&victim).expect("create victim directory");
+    let sentinel = victim.join("important.txt");
+    std::fs::write(&sentinel, b"keep").expect("write sentinel");
+    std::os::unix::fs::symlink(&victim, stale_objects.join("linked"))
+        .expect("link stale descendant");
+
+    let current = store
+        .namespace("shared", 2, NamespacePolicy::default())
+        .expect("current version remains usable");
+    assert!(
+        matches!(current.purge_stale_versions(), Err(CacheError::Storage(_))),
+        "purge must preflight descendants before recursive removal"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel survives"),
+        b"keep"
+    );
+    assert!(
+        root.join("ns/shared/v1").is_dir(),
+        "a refused purge leaves the stale tree intact"
+    );
 }
 
 #[test]

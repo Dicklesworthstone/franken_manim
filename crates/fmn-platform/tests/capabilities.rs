@@ -5,7 +5,7 @@
 //! spawning, the cleared-environment allowlist, timeout kill, output-cap
 //! kill, and stdin plumbing — all against coreutils, Unix-only (`cfg`).
 
-use fmn_platform::fs::{FileSystem, StdFs};
+use fmn_platform::fs::{FileSystem, FsNodeKind, StdFs};
 use fmn_platform::process::{ProcessOutcome, ProcessRunner, ProcessSpec, ScriptedRunner};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,6 +26,10 @@ fn std_fs_atomic_write_round_trips_and_lists_sorted() {
     assert_eq!(fs.read(&deep).expect("read"), b"payload");
     fs.write_atomic(&deep, b"replaced").expect("atomic replace");
     assert_eq!(fs.read_to_string(&deep).expect("read"), "replaced");
+    assert_eq!(
+        fs.node_kind_no_follow(&deep).expect("classify"),
+        Some(FsNodeKind::RegularFile)
+    );
     fs.write_atomic(&dir.join("a/z.txt"), b"z").expect("write");
     fs.write_atomic(&dir.join("a/a.txt"), b"a").expect("write");
     let listed = fs.list_dir(&dir.join("a")).expect("list");
@@ -36,6 +40,11 @@ fn std_fs_atomic_write_round_trips_and_lists_sorted() {
     assert_eq!(names, vec!["a.txt", "b", "z.txt"], "sorted listing");
     assert!(fs.exists(&deep));
     assert!(!fs.exists(&dir.join("missing")));
+    assert_eq!(
+        fs.node_kind_no_follow(&dir.join("missing"))
+            .expect("classify absence"),
+        None
+    );
 }
 
 #[test]
@@ -45,6 +54,18 @@ fn std_fs_create_new_and_removal_lifecycle() {
     // CARGO_TARGET_TMPDIR persists across runs; start from a clean slate so
     // create_new's create-if-absent assertions are re-runnable.
     let _ = fs.remove_dir_all(&dir);
+    std::fs::create_dir(&dir).expect("create lifecycle root");
+
+    let empty = dir.join("empty");
+    assert!(fs.create_dir(&empty).expect("create exact directory"));
+    assert!(
+        !fs.create_dir(&empty)
+            .expect("existing exact directory is stable")
+    );
+    assert_eq!(
+        fs.node_kind_no_follow(&empty).expect("classify directory"),
+        Some(FsNodeKind::Directory)
+    );
 
     // create_new: create-if-absent with full contents, atomically visible.
     let lock = dir.join("locks/maintenance.lock");
@@ -80,6 +101,31 @@ fn std_fs_create_new_and_removal_lifecycle() {
     fs.remove_dir_all(&dir.join("ns/a")).expect("purge");
     assert!(!fs.exists(&dir.join("ns/a")));
     assert_eq!(fs.read(&dir.join("ns/b/objects/y")).unwrap(), b"y");
+}
+
+#[cfg(unix)]
+#[test]
+fn std_fs_classifies_links_without_following_them() {
+    let dir = scratch("stdfs_no_follow_kind");
+    let _ = StdFs.remove_dir_all(&dir);
+    std::fs::create_dir(&dir).expect("create root");
+    let target = dir.join("target");
+    std::fs::write(&target, b"target").expect("write target");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("create link");
+
+    assert_eq!(
+        StdFs.node_kind_no_follow(&link).expect("classify link"),
+        Some(FsNodeKind::Link)
+    );
+    assert!(
+        StdFs.create_dir(&link).is_err(),
+        "exact directory creation must not accept a link winner"
+    );
+    assert_eq!(
+        StdFs.node_kind_no_follow(&target).expect("classify target"),
+        Some(FsNodeKind::RegularFile)
+    );
 }
 
 fn spec(program: &str, argv: &[&str]) -> ProcessSpec {

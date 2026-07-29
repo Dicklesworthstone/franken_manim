@@ -2,7 +2,7 @@
 //! through [`FileSystem`], so the input closure can record it and the
 //! deterministic lab can virtualize it (see the crate-level doctrine).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -84,6 +84,23 @@ pub enum FsError {
     },
 }
 
+/// The kind of node found by [`FileSystem::node_kind_no_follow`].
+///
+/// `Link` includes symbolic links and, on Windows, every reparse point. A
+/// caller that is establishing a traversal boundary must reject `Link` and
+/// `Other` rather than asking a later path-based operation to interpret them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsNodeKind {
+    /// A regular file.
+    RegularFile,
+    /// A real directory.
+    Directory,
+    /// A symbolic link or other platform link-like node.
+    Link,
+    /// A device, socket, FIFO, or another non-file/non-directory node.
+    Other,
+}
+
 impl fmt::Display for FsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -116,6 +133,32 @@ pub trait FileSystem: Send + Sync {
     fn grants_host_destructive_lifecycle(&self) -> bool {
         false
     }
+
+    /// Classify the node at `path` without following the final component.
+    ///
+    /// Intermediate path components are still interpreted by the host path
+    /// resolver. Consumers enforcing a no-follow traversal boundary must
+    /// inspect each component in order, immediately before the operation it
+    /// guards.
+    ///
+    /// `Ok(None)` means the node is absent. On Windows, every reparse point
+    /// is classified as [`FsNodeKind::Link`], not only symbolic links.
+    ///
+    /// # Errors
+    /// [`FsError::Io`] for failures other than absence.
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError>;
+
+    /// Create exactly the directory named by `path`, without creating parent
+    /// directories. Returns `Ok(true)` when this call created it and
+    /// `Ok(false)` when a real directory already existed.
+    ///
+    /// An existing link or any other node kind is an error. Callers that need
+    /// a directory chain must walk it one exact leaf at a time, classifying
+    /// each winner with [`FileSystem::node_kind_no_follow`].
+    ///
+    /// # Errors
+    /// [`FsError::NotFound`] if the parent is absent, or [`FsError::Io`].
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError>;
 
     /// Read the full contents of a file.
     ///
@@ -155,6 +198,9 @@ pub trait FileSystem: Send + Sync {
     /// as [`remove_file`](Self::remove_file): defined lifecycle operations
     /// only (namespace-version purges, `--clear-cache`).
     ///
+    /// Implementations must remove link-like children as nodes and must never
+    /// recurse through their targets.
+    ///
     /// # Errors
     /// [`FsError::NotFound`] if the path does not exist, [`FsError::Io`]
     /// otherwise.
@@ -188,6 +234,40 @@ pub struct StdFs;
 impl FileSystem for StdFs {
     fn grants_host_destructive_lifecycle(&self) -> bool {
         true
+    }
+
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(metadata_node_kind(&metadata))),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(io_error(path, err)),
+        }
+    }
+
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+        match std::fs::create_dir(path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                match self.node_kind_no_follow(path)? {
+                    Some(FsNodeKind::Directory) => Ok(false),
+                    Some(kind) => Err(io_error(
+                        path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            format!("expected a directory, found {kind:?}"),
+                        ),
+                    )),
+                    None => Err(io_error(
+                        path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "directory disappeared after create collision",
+                        ),
+                    )),
+                }
+            }
+            Err(err) => Err(io_error(path, err)),
+        }
     }
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
@@ -245,6 +325,32 @@ impl FileSystem for StdFs {
     }
 }
 
+fn metadata_node_kind(metadata: &std::fs::Metadata) -> FsNodeKind {
+    if metadata_is_link_like(metadata) {
+        FsNodeKind::Link
+    } else if metadata.is_file() {
+        FsNodeKind::RegularFile
+    } else if metadata.is_dir() {
+        FsNodeKind::Directory
+    } else {
+        FsNodeKind::Other
+    }
+}
+
+#[cfg(windows)]
+fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 fn io_error(path: &Path, err: std::io::Error) -> FsError {
     if err.kind() == std::io::ErrorKind::NotFound {
         FsError::NotFound {
@@ -258,13 +364,20 @@ fn io_error(path: &Path, err: std::io::Error) -> FsError {
     }
 }
 
-/// The in-memory test double: a `path → bytes` map with implicit
-/// directories. Deterministic by construction (BTreeMap ordering); shared
-/// mutability behind an `RwLock` so a populated instance can be handed to
+/// The in-memory test double: a `path → bytes` regular-file map plus explicit
+/// directories. Deterministic by construction (`BTreeMap`/`BTreeSet`
+/// ordering); shared mutability behind one `RwLock` so compound filesystem
+/// operations remain atomic and a populated instance can be handed to
 /// consumers as `&dyn FileSystem`.
 #[derive(Debug, Default)]
+struct VirtualFsState {
+    files: BTreeMap<PathBuf, Vec<u8>>,
+    directories: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug, Default)]
 pub struct VirtualFs {
-    files: RwLock<BTreeMap<PathBuf, Vec<u8>>>,
+    state: RwLock<VirtualFsState>,
 }
 
 impl VirtualFs {
@@ -275,11 +388,29 @@ impl VirtualFs {
     }
 
     /// Insert (or replace) a file.
+    ///
+    /// The latest fixture insertion wins while preserving a hierarchy the
+    /// host filesystem could represent: file ancestors become directories,
+    /// and descendants of a path that becomes a file are discarded.
     pub fn insert(&self, path: impl Into<PathBuf>, bytes: impl Into<Vec<u8>>) {
-        self.files
+        let path = path.into();
+        let mut state = self
+            .state
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(path.into(), bytes.into());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .files
+            .retain(|candidate, _| !candidate.starts_with(&path));
+        state
+            .directories
+            .retain(|candidate| !candidate.starts_with(&path));
+        if let Some(parent) = nonempty_parent(&path) {
+            for ancestor in parent.ancestors() {
+                state.files.remove(ancestor);
+            }
+        }
+        insert_parent_directories(&mut state, &path);
+        state.files.insert(path, bytes.into());
     }
 
     /// Load a `path<TAB>contents` manifest (one file per line, `\n` in
@@ -296,94 +427,295 @@ impl VirtualFs {
         }
     }
 
-    fn with_files<T>(&self, f: impl FnOnce(&BTreeMap<PathBuf, Vec<u8>>) -> T) -> T {
+    fn with_state<T>(&self, f: impl FnOnce(&VirtualFsState) -> T) -> T {
         f(&self
-            .files
+            .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 }
 
 impl FileSystem for VirtualFs {
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+        self.with_state(|state| {
+            if let Some(kind) = virtual_node_kind(state, path) {
+                return Ok(Some(kind));
+            }
+            if let Some(blocker) = virtual_file_ancestor(state, path) {
+                return Err(io_error(
+                    &blocker,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "a parent component is a file",
+                    ),
+                ));
+            }
+            Ok(None)
+        })
+    }
+
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if virtual_node_kind(&state, path) == Some(FsNodeKind::Directory) {
+            return Ok(false);
+        }
+        if state.files.contains_key(path) {
+            return Err(io_error(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "a file already occupies the directory path",
+                ),
+            ));
+        }
+        if let Some(blocker) = virtual_file_ancestor(&state, path) {
+            return Err(io_error(
+                &blocker,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "a parent component is a file",
+                ),
+            ));
+        }
+        if let Some(parent) = nonempty_parent(path)
+            && virtual_node_kind(&state, parent) != Some(FsNodeKind::Directory)
+        {
+            return Err(FsError::NotFound {
+                path: parent.to_path_buf(),
+            });
+        }
+        state.directories.insert(path.to_path_buf());
+        Ok(true)
+    }
+
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
-        self.with_files(|files| {
-            files.get(path).cloned().ok_or(FsError::NotFound {
-                path: path.to_path_buf(),
-            })
+        self.with_state(|state| {
+            if let Some(blocker) = virtual_file_ancestor(state, path) {
+                return Err(io_error(
+                    &blocker,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "a parent component is a file",
+                    ),
+                ));
+            }
+            if let Some(bytes) = state.files.get(path) {
+                Ok(bytes.clone())
+            } else if virtual_node_kind(state, path) == Some(FsNodeKind::Directory) {
+                Err(io_error(
+                    path,
+                    std::io::Error::new(std::io::ErrorKind::IsADirectory, "path is a directory"),
+                ))
+            } else {
+                Err(FsError::NotFound {
+                    path: path.to_path_buf(),
+                })
+            }
         })
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
-        self.insert(path.to_path_buf(), bytes.to_vec());
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if virtual_node_kind(&state, path) == Some(FsNodeKind::Directory) {
+            return Err(io_error(
+                path,
+                std::io::Error::new(std::io::ErrorKind::IsADirectory, "path is a directory"),
+            ));
+        }
+        if let Some(blocker) = virtual_file_ancestor(&state, path) {
+            return Err(io_error(
+                &blocker,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "a parent component is a file",
+                ),
+            ));
+        }
+        insert_parent_directories(&mut state, path);
+        state.files.insert(path.to_path_buf(), bytes.to_vec());
         Ok(())
     }
 
     fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
         let mut files = self
-            .files
+            .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // One write-lock hold makes check-and-insert atomic, matching the
         // host implementation's create-if-absent guarantee.
-        if files.contains_key(path) {
+        if virtual_node_kind(&files, path).is_some() {
             return Ok(false);
         }
-        files.insert(path.to_path_buf(), bytes.to_vec());
+        if let Some(blocker) = virtual_file_ancestor(&files, path) {
+            return Err(io_error(
+                &blocker,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "a parent component is a file",
+                ),
+            ));
+        }
+        insert_parent_directories(&mut files, path);
+        files.files.insert(path.to_path_buf(), bytes.to_vec());
         Ok(true)
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
-        let mut files = self
-            .files
+        let mut state = self
+            .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        files.remove(path).map(|_| ()).ok_or(FsError::NotFound {
-            path: path.to_path_buf(),
-        })
+        if let Some(blocker) = virtual_file_ancestor(&state, path) {
+            return Err(io_error(
+                &blocker,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "a parent component is a file",
+                ),
+            ));
+        }
+        if state.files.remove(path).is_some() {
+            Ok(())
+        } else if virtual_node_kind(&state, path) == Some(FsNodeKind::Directory) {
+            Err(io_error(
+                path,
+                std::io::Error::new(std::io::ErrorKind::IsADirectory, "path is a directory"),
+            ))
+        } else {
+            Err(FsError::NotFound {
+                path: path.to_path_buf(),
+            })
+        }
     }
 
     fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
-        let mut files = self
-            .files
+        let mut state = self
+            .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = files.len();
-        files.retain(|k, _| !k.starts_with(path));
-        if files.len() == before {
-            return Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            });
+        if let Some(blocker) = virtual_file_ancestor(&state, path) {
+            return Err(io_error(
+                &blocker,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "a parent component is a file",
+                ),
+            ));
         }
-        Ok(())
-    }
-
-    fn exists(&self, path: &Path) -> bool {
-        self.with_files(|files| {
-            files.contains_key(path) || files.keys().any(|k| k.starts_with(path))
-        })
-    }
-
-    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
-        self.with_files(|files| {
-            let mut out: Vec<PathBuf> = Vec::new();
-            for key in files.keys() {
-                if let Ok(rest) = key.strip_prefix(path)
-                    && let Some(first) = rest.components().next()
-                {
-                    let child = path.join(first);
-                    if out.last() != Some(&child) {
-                        out.push(child);
-                    }
-                }
+        match virtual_node_kind(&state, path) {
+            Some(FsNodeKind::Directory) => {}
+            Some(_) => {
+                return Err(io_error(
+                    path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "path is not a directory",
+                    ),
+                ));
             }
-            let exists = files.contains_key(path) || files.keys().any(|key| key.starts_with(path));
-            if out.is_empty() && !exists {
+            None => {
                 return Err(FsError::NotFound {
                     path: path.to_path_buf(),
                 });
             }
-            Ok(out)
+        }
+        state
+            .files
+            .retain(|candidate, _| !candidate.starts_with(path));
+        state
+            .directories
+            .retain(|candidate| !candidate.starts_with(path));
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.with_state(|state| virtual_node_kind(state, path).is_some())
+    }
+
+    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+        self.with_state(|state| {
+            if let Some(blocker) = virtual_file_ancestor(state, path) {
+                return Err(io_error(
+                    &blocker,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "a parent component is a file",
+                    ),
+                ));
+            }
+            match virtual_node_kind(state, path) {
+                Some(FsNodeKind::Directory) => {}
+                Some(_) => {
+                    return Err(io_error(
+                        path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "path is not a directory",
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(FsError::NotFound {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+            let mut out = BTreeSet::new();
+            for candidate in state.files.keys().chain(state.directories.iter()) {
+                if candidate == path {
+                    continue;
+                }
+                if let Ok(rest) = candidate.strip_prefix(path)
+                    && let Some(first) = rest.components().next()
+                {
+                    out.insert(path.join(first));
+                }
+            }
+            Ok(out.into_iter().collect())
         })
+    }
+}
+
+fn nonempty_parent(path: &Path) -> Option<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+}
+
+fn is_virtual_root(path: &Path) -> bool {
+    path.has_root() && path.parent().is_none()
+}
+
+fn virtual_node_kind(state: &VirtualFsState, path: &Path) -> Option<FsNodeKind> {
+    if state.files.contains_key(path) {
+        Some(FsNodeKind::RegularFile)
+    } else if is_virtual_root(path) || state.directories.contains(path) {
+        Some(FsNodeKind::Directory)
+    } else {
+        None
+    }
+}
+
+fn virtual_file_ancestor(state: &VirtualFsState, path: &Path) -> Option<PathBuf> {
+    nonempty_parent(path)?
+        .ancestors()
+        .find(|ancestor| state.files.contains_key(*ancestor))
+        .map(Path::to_path_buf)
+}
+
+fn insert_parent_directories(state: &mut VirtualFsState, path: &Path) {
+    let Some(parent) = nonempty_parent(path) else {
+        return;
+    };
+    for ancestor in parent.ancestors() {
+        if !ancestor.as_os_str().is_empty() && !is_virtual_root(ancestor) {
+            state.directories.insert(ancestor.to_path_buf());
+        }
     }
 }
 
@@ -422,6 +754,115 @@ mod tests {
         assert!(!fs.create_new(Path::new("/lock"), b"b").unwrap());
         // The losing create mutated nothing.
         assert_eq!(fs.read(Path::new("/lock")).unwrap(), b"a");
+    }
+
+    #[test]
+    fn virtual_fs_exact_directory_creation_and_node_kinds() {
+        let fs = VirtualFs::new();
+        assert!(fs.create_dir(Path::new("/empty")).unwrap());
+        assert!(!fs.create_dir(Path::new("/empty")).unwrap());
+        assert_eq!(
+            fs.node_kind_no_follow(Path::new("/empty")).unwrap(),
+            Some(FsNodeKind::Directory)
+        );
+        assert_eq!(
+            fs.list_dir(Path::new("/empty")).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert!(matches!(
+            fs.read(Path::new("/empty")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::IsADirectory
+        ));
+        assert!(matches!(
+            fs.remove_file(Path::new("/empty")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::IsADirectory
+        ));
+
+        fs.insert("/empty/file", b"bytes".to_vec());
+        assert_eq!(
+            fs.node_kind_no_follow(Path::new("/empty/file")).unwrap(),
+            Some(FsNodeKind::RegularFile)
+        );
+        assert!(matches!(
+            fs.list_dir(Path::new("/empty/file")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            fs.remove_dir_all(Path::new("/empty/file")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert_eq!(fs.node_kind_no_follow(Path::new("/absent")).unwrap(), None);
+    }
+
+    #[test]
+    fn virtual_fs_fixture_insertion_preserves_a_host_representable_tree() {
+        let fs = VirtualFs::new();
+        fs.insert("/tree", b"former file".to_vec());
+        fs.insert("/tree/leaf", b"leaf".to_vec());
+        assert_eq!(
+            fs.node_kind_no_follow(Path::new("/tree")).unwrap(),
+            Some(FsNodeKind::Directory)
+        );
+        assert_eq!(fs.read(Path::new("/tree/leaf")).unwrap(), b"leaf");
+
+        fs.insert("/tree", b"replacement file".to_vec());
+        assert_eq!(fs.read(Path::new("/tree")).unwrap(), b"replacement file");
+        assert!(matches!(
+            fs.node_kind_no_follow(Path::new("/tree/leaf")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+    }
+
+    #[test]
+    fn virtual_fs_never_creates_through_a_file_ancestor() {
+        let fs = VirtualFs::new();
+        fs.insert("/parent", b"file".to_vec());
+        assert!(matches!(
+            fs.node_kind_no_follow(Path::new("/parent/child")),
+            Err(FsError::Io { path, err })
+                if path == Path::new("/parent")
+                    && err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            fs.create_dir(Path::new("/parent/child")),
+            Err(FsError::Io { path, err })
+                if path == Path::new("/parent")
+                    && err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            fs.write_atomic(Path::new("/parent/child"), b"bytes"),
+            Err(FsError::Io { .. })
+        ));
+        assert!(matches!(
+            fs.create_new(Path::new("/parent/lock"), b"bytes"),
+            Err(FsError::Io { .. })
+        ));
+        assert!(matches!(
+            fs.read(Path::new("/parent/child")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            fs.remove_file(Path::new("/parent/child")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            fs.list_dir(Path::new("/parent/child")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            fs.remove_dir_all(Path::new("/parent/child")),
+            Err(FsError::Io { err, .. })
+                if err.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert_eq!(fs.read(Path::new("/parent")).unwrap(), b"file");
     }
 
     #[test]

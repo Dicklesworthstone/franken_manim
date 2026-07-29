@@ -12,7 +12,7 @@ use fmn_cache::{
 };
 use fmn_hash::sha256;
 use fmn_platform::clock::{Clock, FakeClock};
-use fmn_platform::fs::{FileSystem, FsError, VirtualFs};
+use fmn_platform::fs::{FileSystem, FsError, FsNodeKind, VirtualFs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,7 +52,7 @@ fn key(material: &str) -> CacheKey {
 
 /// Every file under the store root, for structural assertions.
 fn files_under(fs: &VirtualFs, root: &Path) -> Vec<PathBuf> {
-    // VirtualFs is a flat map with implicit directories; walk it via list_dir.
+    // Walk the deterministic virtual hierarchy through the public capability.
     fn walk(fs: &VirtualFs, dir: &Path, out: &mut Vec<PathBuf>) {
         if let Ok(children) = fs.list_dir(dir) {
             for child in children {
@@ -187,6 +187,15 @@ impl ReadOnlyFs {
 }
 
 impl FileSystem for ReadOnlyFs {
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+        self.inner.node_kind_no_follow(path)
+    }
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+        if self.frozen.load(Ordering::Relaxed) {
+            return Err(Self::deny(path));
+        }
+        self.inner.create_dir(path)
+    }
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         self.inner.read(path)
     }
@@ -257,6 +266,12 @@ struct CrashingFs {
 }
 
 impl FileSystem for CrashingFs {
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+        self.inner.node_kind_no_follow(path)
+    }
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+        self.inner.create_dir(path)
+    }
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         self.inner.read(path)
     }
