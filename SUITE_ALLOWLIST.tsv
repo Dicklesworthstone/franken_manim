@@ -78,7 +78,7 @@ fmn-spike-accelerator	0.0.0	path	-	-	MIT+rider	no	no	no	no	forbid	dev	G0-8 spike
 # consume. Target-side packages are class=ffi; proc-macro-only packages are
 # class=build.
 bitflags	2.13.1	crates-io	b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da	-	MIT/Apache-2.0	yes	no	no	no	forbid	ffi	fm-xsz Metal FFI closure through the pinned ft-kernel-metal gateway	fm	with-ft-pin
-block	0.1.6	crates-io	0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a	-	MIT	no	no	objc	no	expansion	ffi	fm-xsz Objective-C block FFI through metal 0.33; pinned nightly accepts its uninhabited-class static with a future-incompat warning, which must be cleared before any toolchain bump	fm	with-ft-pin
+block	0.1.6	git+rust-block@SUITE.lock	-	-	MIT	no	no	objc	no	expansion	ffi	fm-xsz.2 reviewed Objective-C block FFI patch through metal 0.33; exact fork revision removes the uninhabited extern-static model without changing the Blocks ABI	fm	suite-lock-ritual
 core-foundation	0.10.1	crates-io	b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6	-	MIT/Apache-2.0	yes	no	CoreFoundation	no	expansion	ffi	fm-xsz Metal CoreFoundation closure through the pinned ft gateway	fm	with-ft-pin
 core-foundation-sys	0.8.7	crates-io	773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b	-	MIT/Apache-2.0	yes	no	CoreFoundation	no	expansion	ffi	fm-xsz Metal CoreFoundation FFI through the pinned ft gateway	fm	with-ft-pin
 core-graphics-types	0.2.0	crates-io	3d44a101f213f6c4cdc1853d4b78aef6db6bdfa3468798cc1d9912f4735013eb	-	MIT/Apache-2.0	yes	no	CoreGraphics	no	expansion	ffi	fm-xsz Metal CoreGraphics closure through the pinned ft gateway	fm	with-ft-pin

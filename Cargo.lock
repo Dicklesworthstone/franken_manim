@@ -151,8 +151,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 [[package]]
 name = "block"
 version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
+source = "git+https://github.com/Dicklesworthstone/rust-block?rev=b39ae859d1ee8e8cb5eef6a516471f1578d26b96#b39ae859d1ee8e8cb5eef6a516471f1578d26b96"
 
 [[package]]
 name = "block-buffer"
@@ -844,7 +843,7 @@ dependencies = [
 [[package]]
 name = "ft-kernel-metal"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/frankentorch?rev=752d988b04448199d0fdbf645c3361109e3f1805#752d988b04448199d0fdbf645c3361109e3f1805"
+source = "git+https://github.com/Dicklesworthstone/frankentorch?rev=523aaf827faf538aa541126ee222fcd7af348410#523aaf827faf538aa541126ee222fcd7af348410"
 dependencies = [
  "core-graphics-types",
  "foreign-types",

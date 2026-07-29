@@ -42,7 +42,7 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb", default-features = false }
 fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8", features = ["bundled-faces"] }
 fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8" }
-ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "752d988b04448199d0fdbf645c3361109e3f1805" }
+ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "523aaf827faf538aa541126ee222fcd7af348410" }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
 fmn-hash = { path = "crates/fmn-hash" }
@@ -66,6 +66,11 @@ fmn-cli = { path = "crates/fmn-cli" }
 fmn-conformance = { path = "crates/fmn-conformance" }
 fmn-python = { path = "crates/fmn-python" }
 pyo3 = { version = "=0.26.0", default-features = false, features = ["macros"] }
+
+[patch.crates-io]
+# Patches do not propagate through git dependencies, so mirror
+# frankentorch's exact reviewed fix for metal 0.33's block dependency here.
+block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "b39ae859d1ee8e8cb5eef6a516471f1578d26b96" }
 
 # Baseline: clippy::all at warn, promoted to errors by scripts/check.sh's
 # `-D warnings`. Crates opt in via [lints] workspace = true.

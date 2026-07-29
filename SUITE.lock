@@ -2,9 +2,9 @@
 #
 # Everything FrankenManim builds against is pinned HERE: the exact rustc
 # nightly (never "or later"), the exact commit of every FrankenSuite
-# foundation repo, and the certified target-feature sets per SIMD build
-# tier. CI builds only from this lock. The companion per-package
-# allowlist is SUITE_ALLOWLIST.tsv; the enforcement is
+# foundation repo, every governed transitive source patch, and the certified
+# target-feature sets per SIMD build tier. CI builds only from this lock. The
+# companion per-package allowlist is SUITE_ALLOWLIST.tsv; the enforcement is
 # crates/fmn-conformance/tests/governed_closure.rs, which fails on any
 # package in the workspace's Cargo.lock that this pair does not admit.
 #
@@ -28,8 +28,12 @@ frankenscipy	5b1441b13a0997901ad2f9835c30072f87ca93b2	fsci-* workspace; solves/q
 franken_markdown	4e5066c62818dfce75ccd940a7a54f600e1fe6a8	workspace since fm-ydw: fmd-font (unchanged d7cda47) and fmd-math (core fm-wgl + placement fm-hk9 + span maps fm-70s + extensions fm-kg9: drawn delimiters, environments, stretchy accents, macros/packs) consumed as git deps at this rev
 franken_networkx	9d710b1c33e99412c94de7fa4de2f7ce4954110f	enhanced-tier Graph mobjects; never blocks core gates
 frankenpandas	da85cf65df48965e027b2f5aa21b7d0ce6a7e29c	enhanced-tier Data mobjects; never blocks core gates
-frankentorch	752d988b04448199d0fdbf645c3361109e3f1805	the only GPU gateway; includes checked Metal compute and native CAMetalLayer presentation consumed by the standard-only Accelerator Annex
+frankentorch	523aaf827faf538aa541126ee222fcd7af348410	the only GPU gateway; includes checked Metal compute, native CAMetalLayer presentation, and the governed block-runtime patch consumed by the standard-only Accelerator Annex
 asupersync	e464a484cb65c1a55be0d9c925e6e9c20318edcb	batch farms + scheduler lab; never in the frame loop
+
+[patches]
+# repo	commit	notes
+rust-block	b39ae859d1ee8e8cb5eef6a516471f1578d26b96	reviewed block 0.1.6 fork; models the external Objective-C class symbol by raw address without an uninhabited extern static
 
 [reference]
 # The design oracle — never a build input.

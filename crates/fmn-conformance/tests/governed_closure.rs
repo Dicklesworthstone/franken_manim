@@ -177,6 +177,8 @@ fn git_dependencies_ride_their_suite_lock_pins() {
         ("asupersync", "asupersync"),
         ("fmd-font", "franken_markdown"),
         ("fmd-math", "franken_markdown"),
+        ("ft-kernel-metal", "frankentorch"),
+        ("block", "rust-block"),
     ];
     for (pkg, repo) in git_deps {
         let pin = pin_for(repo);
