@@ -13,6 +13,8 @@
 //! - [`deflate`] — deterministic DEFLATE/zlib compression with
 //!   byte-aligned segment boundaries, the interlock W8CODEC2's
 //!   deterministic parallel PNG encode composes over.
+#![feature(portable_simd)]
+#![cfg_attr(test, feature(test))]
 #![forbid(unsafe_code)]
 
 pub mod checksum;

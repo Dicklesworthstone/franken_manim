@@ -38,6 +38,9 @@
 use crate::checksum::crc32;
 use crate::deflate::{CompressionLevel, zlib_compress};
 use crate::inflate::{InflateError, zlib_decompress};
+use std::simd::cmp::SimdPartialOrd;
+use std::simd::num::{SimdInt, SimdUint};
+use std::simd::{Select, Simd, Swizzle};
 
 /// Typed refusals of the PNG decoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,11 +298,7 @@ impl Ihdr {
 fn unfilter_row(filter: u8, row: &mut [u8], prev: &[u8], bpp: usize) -> Result<(), PngError> {
     match filter {
         0 => {}
-        1 => {
-            for i in bpp..row.len() {
-                row[i] = row[i].wrapping_add(row[i - bpp]);
-            }
-        }
+        1 => unfilter_sub(row, bpp),
         2 => {
             if !prev.is_empty() {
                 for (byte, &up) in row.iter_mut().zip(prev) {
@@ -308,44 +307,247 @@ fn unfilter_row(filter: u8, row: &mut [u8], prev: &[u8], bpp: usize) -> Result<(
             }
         }
         3 => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { u16::from(row[i - bpp]) } else { 0 };
-                let up = if prev.is_empty() {
-                    0
-                } else {
-                    u16::from(prev[i])
-                };
-                row[i] = row[i].wrapping_add(((left + up) / 2) as u8);
+            // Average's reconstructed-left dependency is nonlinear. A
+            // four-channel std::simd trial regressed both throughput and
+            // latency, so keep the boundary-split scalar recurrence.
+            let left_free = bpp.min(row.len());
+            if prev.is_empty() {
+                for i in left_free..row.len() {
+                    row[i] = row[i].wrapping_add(row[i - bpp] / 2);
+                }
+            } else {
+                for (byte, &up) in row[..left_free].iter_mut().zip(&prev[..left_free]) {
+                    *byte = byte.wrapping_add(up / 2);
+                }
+                for i in left_free..row.len() {
+                    let average = (u16::from(row[i - bpp]) + u16::from(prev[i])) / 2;
+                    row[i] = row[i].wrapping_add(average as u8);
+                }
             }
         }
         4 => {
-            for i in 0..row.len() {
-                let a = if i >= bpp { i32::from(row[i - bpp]) } else { 0 };
-                let b = if prev.is_empty() {
-                    0
-                } else {
-                    i32::from(prev[i])
-                };
-                let c = if i >= bpp && !prev.is_empty() {
-                    i32::from(prev[i - bpp])
-                } else {
-                    0
-                };
-                let p = a + b - c;
-                let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
-                let predictor = if pa <= pb && pa <= pc {
-                    a
-                } else if pb <= pc {
-                    b
-                } else {
-                    c
-                };
-                row[i] = row[i].wrapping_add(predictor as u8);
+            if prev.is_empty() {
+                unfilter_sub(row, bpp);
+            } else {
+                // RGB8's padded fourth lane pays off only once AVX2 is
+                // selected for the whole artifact; the portable tier keeps
+                // the scalar recurrence.
+                #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+                if bpp == 3 {
+                    unfilter_paeth_3(row, prev);
+                    return Ok(());
+                }
+                match bpp {
+                    4 => unfilter_paeth_4(row, prev),
+                    6 => unfilter_paeth_6(row, prev),
+                    8 => unfilter_paeth_8(row, prev),
+                    _ => {
+                        let left_free = bpp.min(row.len());
+                        for (byte, &up) in row[..left_free].iter_mut().zip(&prev[..left_free]) {
+                            *byte = byte.wrapping_add(up);
+                        }
+                        for i in left_free..row.len() {
+                            let predictor = paeth_predictor(row[i - bpp], prev[i], prev[i - bpp]);
+                            row[i] = row[i].wrapping_add(predictor);
+                        }
+                    }
+                }
             }
         }
         t => return Err(PngError::BadFilter(t)),
     }
     Ok(())
+}
+
+// Sub is a bpp-strided inclusive prefix sum modulo 256. Sixteen bytes
+// keep every supported power-of-two bpp aligned at chunk boundaries;
+// the repeated terminal channels are the exact carry into the next
+// Hillis-Steele scan. RGB8/RGB16 (bpp 3/6) retain the scalar recurrence.
+type U8x16 = Simd<u8, 16>;
+type U8x4 = Simd<u8, 4>;
+type U8x8 = Simd<u8, 8>;
+
+struct RepeatTail1;
+impl Swizzle<16> for RepeatTail1 {
+    const INDEX: [usize; 16] = [15; 16];
+}
+
+struct RepeatTail2;
+impl Swizzle<16> for RepeatTail2 {
+    const INDEX: [usize; 16] = [
+        14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15,
+    ];
+}
+
+struct RepeatTail4;
+impl Swizzle<16> for RepeatTail4 {
+    const INDEX: [usize; 16] = [
+        12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15,
+    ];
+}
+
+struct RepeatTail8;
+impl Swizzle<16> for RepeatTail8 {
+    const INDEX: [usize; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15];
+}
+
+macro_rules! sub_unfilter_kernel {
+    ($name:ident, $bpp:literal, $repeat:ident, $($shift:literal),+) => {
+        fn $name(row: &mut [u8]) {
+            let complete = row.len() / 16 * 16;
+            let mut carry = U8x16::splat(0);
+            for chunk in row[..complete].as_chunks_mut::<16>().0 {
+                let mut values = U8x16::from_array(*chunk);
+                $(
+                    values += values.shift_elements_right::<$shift>(0);
+                )+
+                values += carry;
+                carry = $repeat::swizzle(values);
+                *chunk = values.to_array();
+            }
+            for i in complete.max($bpp)..row.len() {
+                row[i] = row[i].wrapping_add(row[i - $bpp]);
+            }
+        }
+    };
+}
+
+sub_unfilter_kernel!(unfilter_sub_1, 1, RepeatTail1, 1, 2, 4, 8);
+sub_unfilter_kernel!(unfilter_sub_2, 2, RepeatTail2, 2, 4, 8);
+sub_unfilter_kernel!(unfilter_sub_4, 4, RepeatTail4, 4, 8);
+sub_unfilter_kernel!(unfilter_sub_8, 8, RepeatTail8, 8);
+
+fn unfilter_sub(row: &mut [u8], bpp: usize) {
+    match bpp {
+        1 => unfilter_sub_1(row),
+        2 => unfilter_sub_2(row),
+        4 => unfilter_sub_4(row),
+        8 => unfilter_sub_8(row),
+        _ => {
+            for i in bpp..row.len() {
+                row[i] = row[i].wrapping_add(row[i - bpp]);
+            }
+        }
+    }
+}
+
+macro_rules! paeth_unfilter_kernel {
+    ($name:ident, $vector:ident, $predictor:ident, $bpp:literal) => {
+        fn $name(row: &mut [u8], prev: &[u8]) {
+            const BPP: usize = $bpp;
+            let left_free = BPP.min(row.len());
+            for (byte, &up) in row[..left_free].iter_mut().zip(&prev[..left_free]) {
+                *byte = byte.wrapping_add(up);
+            }
+
+            let mut i = left_free;
+            while i + BPP <= row.len() {
+                let filtered = $vector::from_slice(&row[i..]);
+                let left = $vector::from_slice(&row[i - BPP..]);
+                let up = $vector::from_slice(&prev[i..]);
+                let upper_left = $vector::from_slice(&prev[i - BPP..]);
+                let predictor = $predictor(left, up, upper_left);
+                (filtered + predictor).copy_to_slice(&mut row[i..i + BPP]);
+                i += BPP;
+            }
+            for at in i..row.len() {
+                let predictor = paeth_predictor(row[at - BPP], prev[at], prev[at - BPP]);
+                row[at] = row[at].wrapping_add(predictor);
+            }
+        }
+    };
+}
+
+// Paeth is nonlinear along a channel but independent between channels.
+// Vectorize one whole pixel, preserving the reconstructed-left
+// dependency between pixels. Two lanes measured slower and stay scalar;
+// 4/6/8-byte pixels are profitable in both governed tiers.
+paeth_unfilter_kernel!(unfilter_paeth_4, U8x4, paeth_predictor_4, 4);
+paeth_unfilter_kernel!(unfilter_paeth_8, U8x8, paeth_predictor_8, 8);
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn unfilter_paeth_3(row: &mut [u8], prev: &[u8]) {
+    const BPP: usize = 3;
+    let left_free = BPP.min(row.len());
+    for (byte, &up) in row[..left_free].iter_mut().zip(&prev[..left_free]) {
+        *byte = byte.wrapping_add(up);
+    }
+
+    let mut i = left_free;
+    while i + BPP <= row.len() {
+        let filtered = U8x4::from_array([row[i], row[i + 1], row[i + 2], 0]);
+        let left = U8x4::from_array([row[i - BPP], row[i - BPP + 1], row[i - BPP + 2], 0]);
+        let up = U8x4::from_array([prev[i], prev[i + 1], prev[i + 2], 0]);
+        let upper_left = U8x4::from_array([prev[i - BPP], prev[i - BPP + 1], prev[i - BPP + 2], 0]);
+        let decoded = (filtered + paeth_predictor_4(left, up, upper_left)).to_array();
+        row[i..i + BPP].copy_from_slice(&decoded[..BPP]);
+        i += BPP;
+    }
+    for at in i..row.len() {
+        let predictor = paeth_predictor(row[at - BPP], prev[at], prev[at - BPP]);
+        row[at] = row[at].wrapping_add(predictor);
+    }
+}
+
+fn unfilter_paeth_6(row: &mut [u8], prev: &[u8]) {
+    const BPP: usize = 6;
+    let left_free = BPP.min(row.len());
+    for (byte, &up) in row[..left_free].iter_mut().zip(&prev[..left_free]) {
+        *byte = byte.wrapping_add(up);
+    }
+
+    let mut i = left_free;
+    while i + BPP <= row.len() {
+        let filtered = load_six(&row[i..]);
+        let left = load_six(&row[i - BPP..]);
+        let up = load_six(&prev[i..]);
+        let upper_left = load_six(&prev[i - BPP..]);
+        let decoded = (filtered + paeth_predictor_8(left, up, upper_left)).to_array();
+        row[i..i + BPP].copy_from_slice(&decoded[..BPP]);
+        i += BPP;
+    }
+    for at in i..row.len() {
+        let predictor = paeth_predictor(row[at - BPP], prev[at], prev[at - BPP]);
+        row[at] = row[at].wrapping_add(predictor);
+    }
+}
+
+#[inline]
+fn load_six(bytes: &[u8]) -> U8x8 {
+    U8x8::from_array([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], 0, 0,
+    ])
+}
+
+macro_rules! paeth_vector_predictor {
+    ($name:ident, $vector:ident) => {
+        #[inline]
+        fn $name(a: $vector, b: $vector, c: $vector) -> $vector {
+            let (a, b, c) = (a.cast::<i16>(), b.cast::<i16>(), c.cast::<i16>());
+            let p = a + b - c;
+            let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+            let take_a = pa.simd_le(pb) & pa.simd_le(pc);
+            let take_b = pb.simd_le(pc);
+            take_a.select(a, take_b.select(b, c)).cast()
+        }
+    };
+}
+
+paeth_vector_predictor!(paeth_predictor_4, U8x4);
+paeth_vector_predictor!(paeth_predictor_8, U8x8);
+
+#[inline]
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    let (a, b, c) = (i32::from(a), i32::from(b), i32::from(c));
+    let p = a + b - c;
+    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+    if pa <= pb && pa <= pc {
+        a as u8
+    } else if pb <= pc {
+        b as u8
+    } else {
+        c as u8
+    }
 }
 
 /// Read sample `index` from a reconstructed scanline. Samples are
@@ -388,7 +590,9 @@ enum Transparency {
 }
 
 /// Decode a PNG to canonical RGBA8 under the given budgets.
+// ubs:ignore — PNG decoding, not JWT decoding or validation.
 pub fn decode(data: &[u8], limits: &PngLimits) -> Result<DecodedPng, PngError> {
+    // ubs:ignore — Fixed public PNG magic bytes, not a secret or token.
     if data.len() < 8 || data[..8] != SIGNATURE {
         return Err(PngError::NotPng);
     }
@@ -664,58 +868,88 @@ pub fn decode(data: &[u8], limits: &PngLimits) -> Result<DecodedPng, PngError> {
 
 /// Apply filter `filter` to `row` (with `prev` as the prior raw row)
 /// into `out`.
-fn apply_filter(filter: u8, row: &[u8], prev: &[u8], bpp: usize, out: &mut Vec<u8>) {
-    out.clear();
+fn apply_filter(filter: u8, row: &[u8], prev: &[u8], bpp: usize, out: &mut [u8]) {
+    debug_assert_eq!(out.len(), row.len());
+    let left_free = bpp.min(row.len());
     match filter {
-        0 => out.extend_from_slice(row),
+        0 => out.copy_from_slice(row),
         1 => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { row[i - bpp] } else { 0 };
-                out.push(row[i].wrapping_sub(left));
+            out[..left_free].copy_from_slice(&row[..left_free]);
+            for ((filtered, &byte), &left) in out[left_free..]
+                .iter_mut()
+                .zip(&row[left_free..])
+                .zip(&row[..row.len() - left_free])
+            {
+                *filtered = byte.wrapping_sub(left);
             }
         }
         2 => {
-            for i in 0..row.len() {
-                let up = if prev.is_empty() { 0 } else { prev[i] };
-                out.push(row[i].wrapping_sub(up));
+            if prev.is_empty() {
+                out.copy_from_slice(row);
+            } else {
+                for ((filtered, &byte), &up) in out.iter_mut().zip(row).zip(prev) {
+                    *filtered = byte.wrapping_sub(up);
+                }
             }
         }
         3 => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { u16::from(row[i - bpp]) } else { 0 };
-                let up = if prev.is_empty() {
-                    0
-                } else {
-                    u16::from(prev[i])
-                };
-                out.push(row[i].wrapping_sub(((left + up) / 2) as u8));
+            if prev.is_empty() {
+                out[..left_free].copy_from_slice(&row[..left_free]);
+                for ((filtered, &byte), &left) in out[left_free..]
+                    .iter_mut()
+                    .zip(&row[left_free..])
+                    .zip(&row[..row.len() - left_free])
+                {
+                    *filtered = byte.wrapping_sub(left / 2);
+                }
+            } else {
+                for ((filtered, &byte), &up) in out[..left_free]
+                    .iter_mut()
+                    .zip(&row[..left_free])
+                    .zip(&prev[..left_free])
+                {
+                    *filtered = byte.wrapping_sub(up / 2);
+                }
+                for (((filtered, &byte), &left), &up) in out[left_free..]
+                    .iter_mut()
+                    .zip(&row[left_free..])
+                    .zip(&row[..row.len() - left_free])
+                    .zip(&prev[left_free..])
+                {
+                    *filtered = byte.wrapping_sub(((u16::from(left) + u16::from(up)) / 2) as u8);
+                }
             }
         }
-        _ => {
-            for i in 0..row.len() {
-                let a = if i >= bpp { i32::from(row[i - bpp]) } else { 0 };
-                let b = if prev.is_empty() {
-                    0
-                } else {
-                    i32::from(prev[i])
-                };
-                let c = if i >= bpp && !prev.is_empty() {
-                    i32::from(prev[i - bpp])
-                } else {
-                    0
-                };
-                let p = a + b - c;
-                let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
-                let predictor = if pa <= pb && pa <= pc {
-                    a
-                } else if pb <= pc {
-                    b
-                } else {
-                    c
-                };
-                out.push(row[i].wrapping_sub(predictor as u8));
+        4 => {
+            if prev.is_empty() {
+                out[..left_free].copy_from_slice(&row[..left_free]);
+                for ((filtered, &byte), &left) in out[left_free..]
+                    .iter_mut()
+                    .zip(&row[left_free..])
+                    .zip(&row[..row.len() - left_free])
+                {
+                    *filtered = byte.wrapping_sub(left);
+                }
+            } else {
+                for ((filtered, &byte), &up) in out[..left_free]
+                    .iter_mut()
+                    .zip(&row[..left_free])
+                    .zip(&prev[..left_free])
+                {
+                    *filtered = byte.wrapping_sub(up);
+                }
+                for ((((filtered, &byte), &left), &up), &upper_left) in out[left_free..]
+                    .iter_mut()
+                    .zip(&row[left_free..])
+                    .zip(&row[..row.len() - left_free])
+                    .zip(&prev[left_free..])
+                    .zip(&prev[..prev.len() - left_free])
+                {
+                    *filtered = byte.wrapping_sub(paeth_predictor(left, up, upper_left));
+                }
             }
         }
+        _ => unreachable!("encoder filter id is fixed to 0..=4"),
     }
 }
 
@@ -751,8 +985,8 @@ fn filtered_stream(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     );
     let line = width as usize * 4;
     let mut filtered = Vec::with_capacity((line + 1) * height as usize);
-    let mut best: Vec<u8> = Vec::with_capacity(line);
-    let mut candidate: Vec<u8> = Vec::with_capacity(line);
+    let mut best = vec![0u8; line];
+    let mut candidate = vec![0u8; line];
     for y in 0..height as usize {
         let row = &rgba[y * line..(y + 1) * line];
         let prev = if y == 0 {
@@ -877,4 +1111,220 @@ pub fn encode_png_sequence(
         }
     });
     out
+}
+
+#[cfg(test)]
+mod filter_tests {
+    extern crate test;
+
+    use super::{apply_filter, paeth_predictor, paeth_predictor_4, unfilter_row};
+    use std::hint::black_box;
+    use test::Bencher;
+
+    const FILTERS: [u8; 5] = [0, 1, 2, 3, 4];
+    const BPP_VALUES: [usize; 6] = [1, 2, 3, 4, 6, 8];
+    const ROW_LENGTHS: [usize; 17] = [
+        1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 255, 256, 257,
+    ];
+
+    fn seeded_bytes(len: usize, mut state: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn scalar_filter(filter: u8, row: &[u8], prev: &[u8], bpp: usize) -> Vec<u8> {
+        (0..row.len())
+            .map(|i| {
+                let left = if i >= bpp { row[i - bpp] } else { 0 };
+                let up = if prev.is_empty() { 0 } else { prev[i] };
+                match filter {
+                    0 => row[i],
+                    1 => row[i].wrapping_sub(left),
+                    2 => row[i].wrapping_sub(up),
+                    3 => row[i].wrapping_sub(((u16::from(left) + u16::from(up)) / 2) as u8),
+                    4 => {
+                        let upper_left = if i >= bpp && !prev.is_empty() {
+                            prev[i - bpp]
+                        } else {
+                            0
+                        };
+                        row[i].wrapping_sub(paeth_predictor(left, up, upper_left))
+                    }
+                    _ => unreachable!("test filter id is fixed to 0..=4"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_filter_round_trips_the_bpp_and_width_matrix() {
+        for len in ROW_LENGTHS {
+            let row = seeded_bytes(len, len as u32 ^ 0x9e37_79b9);
+            let previous = seeded_bytes(len, len as u32 ^ 0x243f_6a88);
+            for bpp in BPP_VALUES {
+                for filter in FILTERS {
+                    for prev in [&[][..], previous.as_slice()] {
+                        let mut filtered = vec![0u8; len];
+                        apply_filter(filter, &row, prev, bpp, &mut filtered);
+                        assert_eq!(
+                            filtered,
+                            scalar_filter(filter, &row, prev, bpp),
+                            "encoded filter={filter}, bpp={bpp}, len={len}, prev={}",
+                            !prev.is_empty()
+                        );
+                        unfilter_row(filter, &mut filtered, prev, bpp).unwrap();
+                        assert_eq!(
+                            filtered,
+                            row,
+                            "filter={filter}, bpp={bpp}, len={len}, prev={}",
+                            !prev.is_empty()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn four_lane_paeth_is_exhaustive_over_every_byte_triple() {
+        for a_base in (0u16..=255).step_by(4) {
+            let a = [
+                a_base as u8,
+                (a_base + 1) as u8,
+                (a_base + 2) as u8,
+                (a_base + 3) as u8,
+            ];
+            for b in 0u8..=255 {
+                for c in 0u8..=255 {
+                    let got = paeth_predictor_4(a.into(), [b, b, b, b].into(), [c, c, c, c].into())
+                        .to_array();
+                    for lane in 0..4 {
+                        assert_eq!(
+                            got[lane],
+                            paeth_predictor(a[lane], b, c),
+                            "a={}, b={b}, c={c}",
+                            a[lane]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn benchmark_apply(bench: &mut Bencher, filter: u8, len: usize) {
+        let row = seeded_bytes(len, 0x9e37_79b9);
+        let previous = seeded_bytes(len, 0x243f_6a88);
+        let mut out = vec![0u8; len];
+        bench.bytes = len as u64;
+        bench.iter(|| {
+            apply_filter(
+                filter,
+                black_box(&row),
+                black_box(&previous),
+                4,
+                black_box(&mut out),
+            );
+            black_box(&out);
+        });
+    }
+
+    fn benchmark_unfilter(bench: &mut Bencher, filter: u8, len: usize) {
+        benchmark_unfilter_bpp(bench, filter, len, 4);
+    }
+
+    fn benchmark_unfilter_bpp(bench: &mut Bencher, filter: u8, len: usize, bpp: usize) {
+        let mut row = seeded_bytes(len, 0x1319_8a2e);
+        let previous = seeded_bytes(len, 0x243f_6a88);
+        bench.bytes = len as u64;
+        bench.iter(|| {
+            unfilter_row(filter, black_box(&mut row), black_box(&previous), bpp)
+                .expect("benchmark filter id is valid");
+            black_box(&row);
+        });
+    }
+
+    macro_rules! filter_bench {
+        ($name:ident, $runner:ident, $filter:expr, $len:expr) => {
+            #[bench]
+            fn $name(bench: &mut Bencher) {
+                $runner(bench, $filter, $len);
+            }
+        };
+    }
+
+    macro_rules! filter_bpp_bench {
+        ($name:ident, $filter:expr, $bpp:expr) => {
+            #[bench]
+            fn $name(bench: &mut Bencher) {
+                benchmark_unfilter_bpp(bench, $filter, 65_536, $bpp);
+            }
+        };
+    }
+
+    filter_bench!(apply_f0_0016, benchmark_apply, 0, 16);
+    filter_bench!(apply_f0_0064, benchmark_apply, 0, 64);
+    filter_bench!(apply_f0_0256, benchmark_apply, 0, 256);
+    filter_bench!(apply_f0_4096, benchmark_apply, 0, 4_096);
+    filter_bench!(apply_f0_65536, benchmark_apply, 0, 65_536);
+    filter_bench!(apply_f1_0016, benchmark_apply, 1, 16);
+    filter_bench!(apply_f1_0064, benchmark_apply, 1, 64);
+    filter_bench!(apply_f1_0256, benchmark_apply, 1, 256);
+    filter_bench!(apply_f1_4096, benchmark_apply, 1, 4_096);
+    filter_bench!(apply_f1_65536, benchmark_apply, 1, 65_536);
+    filter_bench!(apply_f2_0016, benchmark_apply, 2, 16);
+    filter_bench!(apply_f2_0064, benchmark_apply, 2, 64);
+    filter_bench!(apply_f2_0256, benchmark_apply, 2, 256);
+    filter_bench!(apply_f2_4096, benchmark_apply, 2, 4_096);
+    filter_bench!(apply_f2_65536, benchmark_apply, 2, 65_536);
+    filter_bench!(apply_f3_0016, benchmark_apply, 3, 16);
+    filter_bench!(apply_f3_0064, benchmark_apply, 3, 64);
+    filter_bench!(apply_f3_0256, benchmark_apply, 3, 256);
+    filter_bench!(apply_f3_4096, benchmark_apply, 3, 4_096);
+    filter_bench!(apply_f3_65536, benchmark_apply, 3, 65_536);
+    filter_bench!(apply_f4_0016, benchmark_apply, 4, 16);
+    filter_bench!(apply_f4_0064, benchmark_apply, 4, 64);
+    filter_bench!(apply_f4_0256, benchmark_apply, 4, 256);
+    filter_bench!(apply_f4_4096, benchmark_apply, 4, 4_096);
+    filter_bench!(apply_f4_65536, benchmark_apply, 4, 65_536);
+
+    filter_bench!(unfilter_f0_0016, benchmark_unfilter, 0, 16);
+    filter_bench!(unfilter_f0_0064, benchmark_unfilter, 0, 64);
+    filter_bench!(unfilter_f0_0256, benchmark_unfilter, 0, 256);
+    filter_bench!(unfilter_f0_4096, benchmark_unfilter, 0, 4_096);
+    filter_bench!(unfilter_f0_65536, benchmark_unfilter, 0, 65_536);
+    filter_bench!(unfilter_f1_0016, benchmark_unfilter, 1, 16);
+    filter_bench!(unfilter_f1_0064, benchmark_unfilter, 1, 64);
+    filter_bench!(unfilter_f1_0256, benchmark_unfilter, 1, 256);
+    filter_bench!(unfilter_f1_4096, benchmark_unfilter, 1, 4_096);
+    filter_bench!(unfilter_f1_65536, benchmark_unfilter, 1, 65_536);
+    filter_bench!(unfilter_f2_0016, benchmark_unfilter, 2, 16);
+    filter_bench!(unfilter_f2_0064, benchmark_unfilter, 2, 64);
+    filter_bench!(unfilter_f2_0256, benchmark_unfilter, 2, 256);
+    filter_bench!(unfilter_f2_4096, benchmark_unfilter, 2, 4_096);
+    filter_bench!(unfilter_f2_65536, benchmark_unfilter, 2, 65_536);
+    filter_bench!(unfilter_f3_0016, benchmark_unfilter, 3, 16);
+    filter_bench!(unfilter_f3_0064, benchmark_unfilter, 3, 64);
+    filter_bench!(unfilter_f3_0256, benchmark_unfilter, 3, 256);
+    filter_bench!(unfilter_f3_4096, benchmark_unfilter, 3, 4_096);
+    filter_bench!(unfilter_f3_65536, benchmark_unfilter, 3, 65_536);
+    filter_bench!(unfilter_f4_0016, benchmark_unfilter, 4, 16);
+    filter_bench!(unfilter_f4_0064, benchmark_unfilter, 4, 64);
+    filter_bench!(unfilter_f4_0256, benchmark_unfilter, 4, 256);
+    filter_bench!(unfilter_f4_4096, benchmark_unfilter, 4, 4_096);
+    filter_bench!(unfilter_f4_65536, benchmark_unfilter, 4, 65_536);
+
+    filter_bpp_bench!(unfilter_sub_bpp1_65536, 1, 1);
+    filter_bpp_bench!(unfilter_sub_bpp2_65536, 1, 2);
+    filter_bpp_bench!(unfilter_sub_bpp3_65536, 1, 3);
+    filter_bpp_bench!(unfilter_sub_bpp6_65536, 1, 6);
+    filter_bpp_bench!(unfilter_sub_bpp8_65536, 1, 8);
+    filter_bpp_bench!(unfilter_paeth_bpp1_65536, 4, 1);
+    filter_bpp_bench!(unfilter_paeth_bpp2_65536, 4, 2);
+    filter_bpp_bench!(unfilter_paeth_bpp3_65536, 4, 3);
+    filter_bpp_bench!(unfilter_paeth_bpp6_65536, 4, 6);
+    filter_bpp_bench!(unfilter_paeth_bpp8_65536, 4, 8);
 }
