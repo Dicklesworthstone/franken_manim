@@ -12,22 +12,20 @@
 //!   durable. `Line` keeps its `path_arc` for the rest of its life, because
 //!   the Reference's `Line.get_arc_length` and `put_start_and_end_on` both
 //!   consult it after arbitrary transforms.
-//! * **The geometric payload** — a circle's centre and radius — which is
-//!   true only while nothing has written the points since construction.
+//! * **The object-space geometric payload** — a circle's centre and radius —
+//!   which is true only while nothing has rewritten the object-space points
+//!   since construction. An independent affine placement does not make it
+//!   false; consumers either transform the hint or take the general route.
 //!
 //! [`Stage::shape`] returns the first; [`Stage::primitive_hint`] returns
 //! the tag only when the second still holds. Validity is decided by
 //! comparing the `point` field's revision against the one recorded when the
-//! tag was set, so **every** channel that can write points invalidates the
-//! hint automatically — a positional transform, a raw `RecordBuffer` write,
-//! a writable live view, a resize, an alignment pass — with no dirty-flag
-//! bookkeeping to get wrong. It is the same D-20 lazy-revisioned pattern
-//! the bounding box uses.
-//!
-//! A transform that *preserves* the shape (a shift, a uniform scale) still
-//! demotes the hint here. That is conservative, never wrong, and cheap to
-//! improve later; carrying tags through shape-preserving transforms is a
-//! W5 optimization (fm-o70), not a correctness matter.
+//! tag was set, so **every** channel that can rewrite object geometry
+//! invalidates the hint automatically — a raw `RecordBuffer` write, a writable
+//! live view, `set_points`, a resize, an alignment bake — with no dirty-flag
+//! bookkeeping to get wrong. Affine positional operations edit the independent
+//! placement channel (fm-7if), so they preserve the object-space hint. It is the
+//! same D-20 lazy-revisioned pattern the bounding box uses.
 
 use fmn_core::types::Vec3;
 
@@ -242,22 +240,21 @@ mod tests {
     }
 
     #[test]
-    fn every_point_write_channel_demotes_the_hint() {
+    fn object_geometry_writes_demote_but_placement_preserves_the_hint() {
         let tag = ShapeTag::Dot {
             center: [0.0; 3],
             radius: 0.08,
         };
 
-        // Channel 1: a positional transform.
+        // Placement is not an object-space point write.
         let mut stage = Stage::new();
         let mob = stage.add(Mobject::from_points(&square_points()));
         stage.set_shape(mob, tag);
         stage.shift(mob, [1.0, 0.0, 0.0]);
-        assert_eq!(stage.primitive_hint(mob), None);
-        // …but the durable tag is still readable.
+        assert_eq!(stage.primitive_hint(mob), Some(tag));
         assert_eq!(stage.shape(mob), tag);
 
-        // Channel 2: a raw record write.
+        // Channel 1: a raw record write.
         let mut stage = Stage::new();
         let mob = stage.add(Mobject::from_points(&square_points()));
         stage.set_shape(mob, tag);
@@ -268,14 +265,14 @@ mod tests {
             .write(0, "point", &[9.0, 9.0, 9.0]);
         assert_eq!(stage.primitive_hint(mob), None);
 
-        // Channel 3: set_points.
+        // Channel 2: set_points.
         let mut stage = Stage::new();
         let mob = stage.add(Mobject::from_points(&square_points()));
         stage.set_shape(mob, tag);
         stage.set_points(mob, &square_points()).unwrap();
         assert_eq!(stage.primitive_hint(mob), None);
 
-        // Channel 4: a writable live view.
+        // Channel 3: a writable live view.
         let mut stage = Stage::new();
         let mob = stage.add(Mobject::from_points(&square_points()));
         stage.set_shape(mob, tag);
@@ -346,9 +343,9 @@ mod tests {
             Some(tag),
             "a copy's points are the same points"
         );
-        // Mutating the copy leaves the original's hint intact.
+        // Independently placing the copy preserves both object-space hints.
         stage.shift(copy, [0.0, 1.0, 0.0]);
-        assert_eq!(stage.primitive_hint(copy), None);
+        assert_eq!(stage.primitive_hint(copy), Some(tag));
         assert_eq!(stage.primitive_hint(mob), Some(tag));
     }
 

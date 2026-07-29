@@ -5,8 +5,8 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.3,
-//!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v1.3; the self-golden suites hold `FMNS`):
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.4,
+//!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v1.4; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
 //! - **Deterministic bytes**: canonical field order (schema order for
@@ -41,22 +41,24 @@ use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Write
 
 use fmn_core::types::Vec3;
 
+use crate::Placement;
 use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::{ShapeSlot, ShapeTag};
 use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.3.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.4.
 ///
 /// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
 /// stream decodes with no tag, which is exactly what `General` means. Minor
 /// 1.2 appended `z_index`; minor 1.3 preserves the monotonic updater-id
-/// cursor, including identities removed before the snapshot.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 3);
+/// cursor, including identities removed before the snapshot. Minor 1.4 appends
+/// the object→world placement table from fm-7if.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 4);
 
-/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.3 — it
+/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.4 — it
 /// embeds a snapshot, so it moves with [`SNAPSHOT_SCHEMA`].
-pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 3);
+pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 4);
 
 /// Errors from snapshot decode.
 #[derive(Debug, Clone, PartialEq)]
@@ -493,6 +495,23 @@ impl Snapshot {
             put_mob(&mut w, root);
         }
         w.put_u64(self.next_updater_id);
+        // Minor 1.4: appended after the complete 1.3 payload so an older
+        // compatible reader can stop before it. Runtime revision counters are
+        // intentionally absent: canonical bytes describe state, not the edit
+        // sequence that produced it.
+        for (_, entry) in &self.slots {
+            match entry {
+                Some(entry) => {
+                    w.put_bool(true);
+                    for coefficient in entry.placement.coefficients() {
+                        w.put_f64(coefficient);
+                    }
+                }
+                None => {
+                    w.put_bool(false);
+                }
+            }
+        }
         w.finish()
     }
 
@@ -672,6 +691,8 @@ impl Snapshot {
                 let z_index = if r.version().1 >= 2 { r.get_i32()? } else { 0 };
                 Some(SnapshotEntry {
                     buffer,
+                    placement: Placement::IDENTITY,
+                    placement_revision: 0,
                     submobjects,
                     parents,
                     updaters: Vec::new(), // callables never serialize
@@ -724,6 +745,43 @@ impl Snapshot {
                 .ok_or(PersistError::Malformed("updater id space is exhausted"))?
                 .max(1)
         };
+        if r.version().1 >= 4 {
+            for entry in &mut slots {
+                let present = r.get_bool()?;
+                match (present, &mut entry.1) {
+                    (false, None) => {}
+                    (true, Some(entry)) => {
+                        let coefficients = [
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                            r.get_f64()?,
+                        ];
+                        entry.placement = Placement::new(
+                            [
+                                [coefficients[0], coefficients[1], coefficients[2]],
+                                [coefficients[4], coefficients[5], coefficients[6]],
+                                [coefficients[8], coefficients[9], coefficients[10]],
+                            ],
+                            [coefficients[3], coefficients[7], coefficients[11]],
+                        );
+                    }
+                    _ => {
+                        return Err(PersistError::Malformed(
+                            "placement table does not match arena liveness",
+                        ));
+                    }
+                }
+            }
+        }
         r.finish()?;
         Ok(DecodedSnapshot {
             snapshot: Snapshot {

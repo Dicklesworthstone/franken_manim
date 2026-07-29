@@ -99,6 +99,36 @@ fn round_trip_representative_scene() {
 }
 
 #[test]
+fn durable_round_trip_preserves_affine_placement_without_baking_points() {
+    let mut stage = Stage::new();
+    let mob = vmob(
+        &mut stage,
+        &[[0.0, 0.0, 0.0], [1.0, 0.5, 0.0], [2.0, 1.0, 0.0]],
+        [0.2, 0.4, 0.6, 1.0],
+    );
+    let object_points = stage.get_object_points(mob).unwrap();
+    stage.shift(mob, [4.0, -3.0, 0.25]);
+    stage.rotate(
+        mob,
+        std::f64::consts::FRAC_PI_3,
+        [0.0, 0.0, 1.0],
+        Some([4.0, -3.0, 0.25]),
+        None,
+    );
+    let placement = stage.placement(mob).unwrap();
+    let world_points = stage.get_points(mob).unwrap();
+
+    let bytes = stage.snapshot_bytes().unwrap();
+    stage.set_points(mob, &[[99.0, 99.0, 99.0]]).unwrap();
+    let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+    stage.restore(&decoded.snapshot);
+
+    assert!(stage.placement(mob).unwrap().same_bits(placement));
+    assert_eq!(stage.get_object_points(mob).unwrap(), object_points);
+    assert_eq!(stage.get_points(mob).unwrap(), world_points);
+}
+
+#[test]
 fn byte_determinism_twice_and_across_reopen() {
     let mut stage = Stage::new();
     build_scene(&mut stage);

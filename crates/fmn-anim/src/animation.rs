@@ -52,7 +52,7 @@
 
 use fmn_core::rate;
 use fmn_mobject::animate::{AnimateArgs, AnimateError, IntoAnimate};
-use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Stage, StageError};
+use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Placement, Stage, StageError};
 
 /// The Reference's `DEFAULT_ANIMATION_RUN_TIME`.
 pub const DEFAULT_ANIMATION_RUN_TIME: f64 = 1.0;
@@ -904,16 +904,40 @@ impl Animation for MethodAnimation {
         mobs
     }
 
-    /// Straight field lerp `start → target` written into the live
-    /// submobject, every record field, computed in f64 and stored back at
-    /// record precision (§6.1's mixed-precision doctrine). Uniforms are
-    /// untouched: no [`fmn_mobject::animate::AnimateCommand`] records a
-    /// uniform write, so both endpoints agree by construction (full
-    /// uniform interpolation is Transform's, fm-cye).
+    /// Straight field and affine-placement lerp `start → target` written into
+    /// the live submobject, computed in f64 and stored back at record precision
+    /// (§6.1's mixed-precision doctrine). Identical object-space columns are
+    /// left untouched, so `.animate.shift(...)` advances Transform without
+    /// masquerading as a Geometry edit (fm-7if). Uniforms are untouched: no
+    /// [`fmn_mobject::animate::AnimateCommand`] records a uniform write, so both
+    /// endpoints agree by construction (full uniform interpolation is
+    /// Transform's, fm-cye).
     fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64) {
         let [submob, starting, target] = *mobs else {
             return; // rows are triples by all_mobjects; anything else is pre-begin
         };
+        let endpoint_placements = stage.placement(starting).zip(stage.placement(target));
+        let sync_live_points = stage.get(submob).is_some_and(|entry| {
+            entry.buffer.live_view_count() > 0
+                && !entry.buffer.is_empty()
+                && entry.buffer.schema().offset("point").is_some()
+        });
+        let placement = endpoint_placements.map(|(from, to)| {
+            let from = from.coefficients();
+            let to = to.coefficients();
+            let mut out = [0.0; 12];
+            for index in 0..12 {
+                out[index] = (1.0 - sub_alpha) * from[index] + sub_alpha * to[index];
+            }
+            Placement::new(
+                [
+                    [out[0], out[1], out[2]],
+                    [out[4], out[5], out[6]],
+                    [out[8], out[9], out[10]],
+                ],
+                [out[3], out[7], out[11]],
+            )
+        });
         let fields: Vec<String> = match stage.get(submob) {
             Some(entry) => entry
                 .buffer
@@ -942,10 +966,52 @@ impl Animation for MethodAnimation {
             if from.len() != to.len() {
                 continue;
             }
-            let lerped = interpolate_linear_column(&from, &to, sub_alpha);
-            if let Some(entry) = stage.get_mut(submob) {
+            #[allow(clippy::cast_possible_truncation)]
+            let lerped = if sync_live_points && field == "point" {
+                let Some((from_placement, to_placement)) = endpoint_placements else {
+                    continue;
+                };
+                let (from_points, from_remainder) = from.as_chunks::<3>();
+                let (to_points, to_remainder) = to.as_chunks::<3>();
+                debug_assert!(
+                    from_remainder.is_empty() && to_remainder.is_empty(),
+                    "point fields are 3-lane"
+                );
+                from_points
+                    .iter()
+                    .zip(to_points)
+                    .flat_map(|(a, b)| {
+                        let a = from_placement.apply_point([
+                            f64::from(a[0]),
+                            f64::from(a[1]),
+                            f64::from(a[2]),
+                        ]);
+                        let b = to_placement.apply_point([
+                            f64::from(b[0]),
+                            f64::from(b[1]),
+                            f64::from(b[2]),
+                        ]);
+                        let point = [
+                            (1.0 - sub_alpha) * a[0] + sub_alpha * b[0],
+                            (1.0 - sub_alpha) * a[1] + sub_alpha * b[1],
+                            (1.0 - sub_alpha) * a[2] + sub_alpha * b[2],
+                        ];
+                        [point[0] as f32, point[1] as f32, point[2] as f32]
+                    })
+                    .collect()
+            } else {
+                interpolate_linear_column(&from, &to, sub_alpha)
+            };
+            if let Some(entry) = stage.get_mut(submob)
+                && entry.buffer.read_column(&field).as_deref() != Some(lerped.as_slice())
+            {
                 entry.buffer.write_range(&field, 0, &lerped);
             }
+        }
+        if sync_live_points {
+            let _ = stage.set_placement(submob, Placement::IDENTITY);
+        } else if let Some(placement) = placement {
+            let _ = stage.set_placement(submob, placement);
         }
     }
 }

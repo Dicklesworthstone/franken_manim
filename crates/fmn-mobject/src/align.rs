@@ -48,6 +48,25 @@ fn read_points(stage: &Stage, mob: Mob) -> Result<Vec<Vec3>, StageError> {
     stage.get_points(mob).ok_or(StageError::StaleHandle)
 }
 
+fn refresh_joint_angles(stage: &mut Stage, mob: Mob) -> Result<(), StageError> {
+    let points = stage
+        .get_object_points(mob)
+        .ok_or(StageError::StaleHandle)?;
+    if points.is_empty() {
+        return Ok(());
+    }
+    let angles = QuadPath::from_points(points)
+        .map_err(StageError::Geometry)?
+        .joint_angles();
+    #[allow(clippy::cast_possible_truncation)]
+    let flat: Vec<f32> = angles.iter().map(|angle| *angle as f32).collect();
+    let entry = stage.get_mut(mob).ok_or(StageError::StaleHandle)?;
+    if entry.buffer.read_column("joint_angle").as_deref() != Some(flat.as_slice()) {
+        entry.buffer.write_range("joint_angle", 0, &flat);
+    }
+    Ok(())
+}
+
 /// Resize the whole record run preserving order, then write the new point
 /// run and (for vmobject records) refreshed joint angles.
 fn write_points(stage: &mut Stage, mob: Mob, points: &[Vec3]) -> Result<(), StageError> {
@@ -264,8 +283,10 @@ impl Stage {
             .buffer
             .read_column("joint_angle")
             .ok_or(StageError::SchemaMismatch)?;
+        let source_placement = self.try_get(source)?.placement();
         {
             let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            entry.set_placement(source_placement);
             if entry.buffer.len() != src_len {
                 entry.buffer.resize_preserving_order(src_len);
             }
@@ -367,7 +388,9 @@ impl Stage {
                 continue;
             }
             if is_vmobject_schema(self, member)? {
-                let mut points = read_points(self, member)?;
+                let mut points = self
+                    .get_object_points(member)
+                    .ok_or(StageError::StaleHandle)?;
                 let path = QuadPath::from_points(points.clone()).map_err(StageError::Geometry)?;
                 let end_indices = path.subpath_end_indices();
                 for &e in &end_indices[..end_indices.len().saturating_sub(1)] {
@@ -429,11 +452,7 @@ impl Stage {
             if !is_vmobject_schema(self, member)? {
                 continue;
             }
-            let points = read_points(self, member)?;
-            if points.is_empty() {
-                continue;
-            }
-            write_points(self, member, &points)?;
+            refresh_joint_angles(self, member)?;
         }
         Ok(())
     }
@@ -443,9 +462,11 @@ impl Stage {
         let mut pa = read_points(self, a)?;
         let mut pb = read_points(self, b)?;
         if pa.len() == pb.len() {
-            // Equal counts: refresh joint angles only.
-            write_points(self, a, &pa)?;
-            write_points(self, b, &pb)?;
+            // Equal counts need no point write. Joint angles are object-space
+            // geometry, so refreshing them must not bake an independent
+            // placement back into the point buffer (fm-7if).
+            refresh_joint_angles(self, a)?;
+            refresh_joint_angles(self, b)?;
             return Ok(());
         }
         // No points → one point at the center (start_new_path(get_center())).

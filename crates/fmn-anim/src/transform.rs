@@ -27,7 +27,7 @@
 //! functional maps) lands in later fm-cye slices.
 
 use fmn_core::types::Vec3;
-use fmn_mobject::{Mob, Stage};
+use fmn_mobject::{Mob, Placement, Stage};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, interpolate_linear_column,
@@ -144,6 +144,20 @@ impl PathFunc {
 
 // ------------------------------------------------------------- lerp core
 
+fn interpolate_placement(from: Placement, to: Placement, alpha: f64, path: PathFunc) -> Placement {
+    let origin = path.eval(from.apply_point([0.0; 3]), to.apply_point([0.0; 3]), alpha);
+    let mut linear = [[0.0; 3]; 3];
+    for axis in 0..3 {
+        let mut basis = [0.0; 3];
+        basis[axis] = 1.0;
+        let placed = path.eval(from.apply_point(basis), to.apply_point(basis), alpha);
+        for row in 0..3 {
+            linear[row][axis] = placed[row] - origin[row];
+        }
+    }
+    Placement::new(linear, origin)
+}
+
 /// The Reference's `Mobject.interpolate` (mobject.py:1810) over one
 /// zipped submobject triple: pointlike fields route through `path`, every
 /// other field lerps linearly, locked fields are skipped, numeric
@@ -159,14 +173,55 @@ pub fn interpolate_fields(
     let Some(entry) = stage.get(submob) else {
         return;
     };
+    let endpoint_placements = stage.placement(from).zip(stage.placement(to));
+    let sync_live_points = entry.buffer.live_view_count() > 0
+        && !entry.buffer.is_empty()
+        && entry.buffer.schema().offset("point").is_some();
+    let placement =
+        endpoint_placements.map(|(from, to)| interpolate_placement(from, to, alpha, path));
     let schema = entry.buffer.schema();
     let pointlike: Vec<String> = schema.pointlike_keys().to_vec();
     let fields: Vec<String> = schema
         .fields()
         .iter()
         .map(|f| f.name.clone())
+        .filter(|name| !(sync_live_points && name == "point"))
         .filter(|name| !entry.buffer.is_locked(name))
         .collect();
+    if sync_live_points
+        && let (Some((from_placement, to_placement)), Some(a), Some(b)) = (
+            endpoint_placements,
+            stage
+                .get(from)
+                .and_then(|entry| entry.buffer.read_column("point")),
+            stage
+                .get(to)
+                .and_then(|entry| entry.buffer.read_column("point")),
+        )
+        && a.len() == b.len()
+    {
+        let (pa, ra) = a.as_chunks::<3>();
+        let (pb, rb) = b.as_chunks::<3>();
+        debug_assert!(ra.is_empty() && rb.is_empty(), "point fields are 3-lane");
+        #[allow(clippy::cast_possible_truncation)]
+        let out: Vec<f32> = pa
+            .iter()
+            .zip(pb)
+            .flat_map(|(a, b)| {
+                let point = path.eval(
+                    from_placement.apply_point([f64::from(a[0]), f64::from(a[1]), f64::from(a[2])]),
+                    to_placement.apply_point([f64::from(b[0]), f64::from(b[1]), f64::from(b[2])]),
+                    alpha,
+                );
+                [point[0] as f32, point[1] as f32, point[2] as f32]
+            })
+            .collect();
+        if let Some(entry) = stage.get_mut(submob)
+            && entry.buffer.read_column("point").as_deref() != Some(out.as_slice())
+        {
+            entry.buffer.write_range("point", 0, &out);
+        }
+    }
     for field in fields {
         let (Some(a), Some(b)) = (
             stage.get(from).and_then(|e| e.buffer.read_column(&field)),
@@ -196,9 +251,16 @@ pub fn interpolate_fields(
         } else {
             interpolate_linear_column(&a, &b, alpha)
         };
-        if let Some(entry) = stage.get_mut(submob) {
+        if let Some(entry) = stage.get_mut(submob)
+            && entry.buffer.read_column(&field).as_deref() != Some(out.as_slice())
+        {
             entry.buffer.write_range(&field, 0, &out);
         }
+    }
+    if sync_live_points {
+        let _ = stage.set_placement(submob, Placement::IDENTITY);
+    } else if let Some(placement) = placement {
+        let _ = stage.set_placement(submob, placement);
     }
     // Numeric uniforms lerp linearly (the Reference lerps every shared
     // uniform key); discrete state (flags, joint type) stays the live
@@ -444,12 +506,51 @@ impl Animation for Transform {
         if !stage.contains(self.target) {
             return Err(AnimError::StaleHandle(self.target));
         }
-        let target_copy = if stage.is_aligned_with(mobject, self.target) {
+        let mut target_copy = if stage.is_aligned_with(mobject, self.target) {
             self.target
         } else {
             stage.copy_family(self.target)?
         };
         stage.align_data_and_family(mobject, target_copy)?;
+        // A pair whose object-space point runs differ cannot be represented by
+        // placement interpolation alone. Bake each side once into world-space
+        // geometry; pairs with equal object geometry retain their independent
+        // placements, which is the fast and revision-correct path for
+        // translate/rotate/scale transforms (fm-7if).
+        let source_family = stage.family(mobject);
+        let target_family = stage.family(target_copy);
+        let needs_geometry_bake =
+            source_family
+                .iter()
+                .zip(&target_family)
+                .any(|(&source, &target)| {
+                    stage
+                        .get(source)
+                        .and_then(|entry| entry.buffer.read_column("point"))
+                        != stage
+                            .get(target)
+                            .and_then(|entry| entry.buffer.read_column("point"))
+                });
+        // An already aligned target is normally safe to share. Baking is the
+        // exception because it changes stored coordinates; preserve the user's
+        // target by switching to a private family copy first.
+        if needs_geometry_bake && target_copy == self.target {
+            target_copy = stage.copy_family(self.target)?;
+        }
+        let source_family = stage.family(mobject);
+        let target_family = stage.family(target_copy);
+        for (&source, &target) in source_family.iter().zip(target_family.iter()) {
+            let source_points = stage
+                .get(source)
+                .and_then(|entry| entry.buffer.read_column("point"));
+            let target_points = stage
+                .get(target)
+                .and_then(|entry| entry.buffer.read_column("point"));
+            if source_points != target_points {
+                stage.bake_placement(source)?;
+                stage.bake_placement(target)?;
+            }
+        }
         self.target_copy = Some(target_copy);
         Ok(())
     }

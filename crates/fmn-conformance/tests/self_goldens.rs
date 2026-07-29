@@ -21,9 +21,16 @@
 //!
 //! | Platform | `geom_lifecycle.v1` | `stage_lifecycle.v1` |
 //! |---|---|---|
-//! | linux-x86_64 (glibc, native) | `f0e73e89…` | `3ff84b3b…` |
-//! | linux-aarch64 (musl, qemu-user) | `f0e73e89…` | `3ff84b3b…` |
-//! | macos-aarch64 (Darwin, M4 Pro, native) | `f0e73e89…` | `3ff84b3b…` |
+//! | linux-x86_64 (glibc, native) | `f0e73e89…` | `958ff777…` |
+//! | linux-aarch64 (musl, qemu-user) | `f0e73e89…` | `958ff777…` |
+//! | macos-aarch64 (Darwin, M4 Pro, native) | `f0e73e89…` | `958ff777…` |
+//!
+//! The stage lock was re-measured on all three legs on 2026-07-29 (fm-7if)
+//! after positional operations moved to a composed `f64` placement. Its
+//! square and triangle records stayed byte-identical; the bar now rounds once
+//! to the nearest final `f32` instead of accumulating intermediate record
+//! writes, and the `f64` family bounds move correspondingly closer to the
+//! analytic values.
 //!
 //! One lock now speaks for the matrix, which is the stronger arrangement for the
 //! reason `docs/INPUT_CLOSURE.md` §6 gives: a per-platform lock passes everywhere
@@ -89,15 +96,15 @@ fn geom_lifecycle_doc() -> Vec<u8> {
     w.finish().expect("geometry snapshot encodes")
 }
 
-/// Append one mobject's own f32 point records to the document.
+/// Append one mobject's own world-space points at record precision.
 fn put_records_f32(w: &mut Writer, label: &str, stage: &Stage, mob: Mob) {
-    let col = stage
-        .get(mob)
-        .and_then(|e| e.buffer.read_column("point"))
-        .unwrap_or_default();
-    w.put_str(label).put_u64(col.len() as u64);
-    for &v in &col {
-        w.put_f32(v);
+    let points = stage.get_points(mob).unwrap_or_default();
+    w.put_str(label).put_u64((points.len() * 3) as u64);
+    for point in points {
+        for component in point {
+            #[allow(clippy::cast_possible_truncation)]
+            w.put_f32(component as f32);
+        }
     }
 }
 

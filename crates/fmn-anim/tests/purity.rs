@@ -301,8 +301,8 @@ fn wait_classification_matrix() {
 
 // ------------------------------------------ frame-parallel equivalence
 
-/// Bit-exact fingerprint of a packet: header fields plus every record
-/// field of every rooted family member, as raw f32 bits.
+/// Bit-exact fingerprint of a packet: header fields plus every record field and
+/// affine placement of every rooted family member.
 fn fingerprint(stage: &mut Stage, packet: &FramePacket) -> Vec<u32> {
     stage.restore(packet.state());
     let mut bits: Vec<u32> = Vec::new();
@@ -331,6 +331,19 @@ fn fingerprint(stage: &mut Stage, packet: &FramePacket) -> Vec<u32> {
                     .and_then(|e| e.buffer.read_column(&field))
                     .expect("column reads");
                 bits.extend(column.iter().map(|v| v.to_bits()));
+            }
+            for coefficient in stage
+                .placement(member)
+                .expect("family resolves")
+                .coefficients()
+            {
+                bits.extend(
+                    coefficient
+                        .to_bits()
+                        .to_le_bytes()
+                        .chunks(4)
+                        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4 bytes"))),
+                );
             }
         }
     }

@@ -24,7 +24,7 @@ use crate::camera::{Camera, EdgeSampleLimit};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
 use crate::plan::RenderPlan;
 use crate::stroke::{aa_coverage, stroke_rgba_at};
-use crate::table::{Segment, Style};
+use crate::table::{Segment, Style, reparameterize_arc_length};
 use crate::texture::{SamplerPolicy, Texture};
 
 /// Surface's kept `(reflectiveness, gloss, shadow)` defaults.
@@ -1003,16 +1003,29 @@ fn compile_vector<'a>(
     let lo = (shape.first_segment as usize).min(all.len());
     let hi = (lo + shape.segment_count as usize).min(all.len());
     let source = &all[lo..hi];
-    // A path normal is object-space geometry. Derive it before applying the
-    // instance offset so two translated instances cannot acquire different
-    // floating-point normals through cancellation of large coordinates.
-    let normal = shape_unit_normal(source, &shape.subpath_starts);
-    let world_segments: Vec<Segment> = source
+    // Apply the linear map before deriving the path normal, but keep translation
+    // out of that calculation so two translated instances cannot acquire
+    // different floating-point normals through cancellation of large
+    // coordinates.
+    let mut linear_segments: Vec<Segment> = source
         .iter()
         .map(|segment| Segment {
-            p0: add(segment.p0, instance.offset),
-            p1: add(segment.p1, instance.offset),
-            p2: add(segment.p2, instance.offset),
+            p0: instance.placement.apply_vector(segment.p0),
+            p1: instance.placement.apply_vector(segment.p1),
+            p2: instance.placement.apply_vector(segment.p2),
+            s0: segment.s0,
+            s1: segment.s1,
+        })
+        .collect();
+    reparameterize_arc_length(&mut linear_segments);
+    let normal = shape_unit_normal(&linear_segments, &shape.subpath_starts);
+    let translation = instance.placement.translation();
+    let world_segments: Vec<Segment> = linear_segments
+        .iter()
+        .map(|segment| Segment {
+            p0: add(segment.p0, translation),
+            p1: add(segment.p1, translation),
+            p2: add(segment.p2, translation),
             s0: segment.s0,
             s1: segment.s1,
         })

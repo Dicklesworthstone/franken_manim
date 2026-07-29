@@ -48,9 +48,9 @@ fn rng() -> RngRoot {
     RngRoot::from_seed(42)
 }
 
-/// The record plane of one mobject, as raw bits.
+/// The record plane and independent placement of one mobject, as raw bits.
 fn point_bits(stage: &Stage, mob: Mob) -> Vec<u32> {
-    stage
+    let mut bits: Vec<u32> = stage
         .get(mob)
         .expect("live")
         .buffer
@@ -58,7 +58,17 @@ fn point_bits(stage: &Stage, mob: Mob) -> Vec<u32> {
         .expect("point column")
         .iter()
         .map(|v| v.to_bits())
-        .collect()
+        .collect();
+    for coefficient in stage.placement(mob).expect("live").coefficients() {
+        bits.extend(
+            coefficient
+                .to_bits()
+                .to_le_bytes()
+                .chunks(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4 bytes"))),
+        );
+    }
+    bits
 }
 
 /// Bit-exact fingerprint of a frame: the packet's own header plus every
@@ -85,6 +95,19 @@ fn frame_bits(stage: &mut Stage, packet: &FramePacket) -> Vec<u32> {
                     .and_then(|e| e.buffer.read_column(&field))
                     .expect("column reads");
                 bits.extend(column.iter().map(|v| v.to_bits()));
+            }
+            for coefficient in stage
+                .placement(member)
+                .expect("family resolves")
+                .coefficients()
+            {
+                bits.extend(
+                    coefficient
+                        .to_bits()
+                        .to_le_bytes()
+                        .chunks(4)
+                        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4 bytes"))),
+                );
             }
         }
     }

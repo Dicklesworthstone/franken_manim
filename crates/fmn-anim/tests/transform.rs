@@ -4,7 +4,7 @@
 //! parameterizations.
 
 use fmn_anim::animation::Animation;
-use fmn_anim::{AnimError, PathFunc, Transform, classify_play};
+use fmn_anim::{AnimConfig, AnimError, PathFunc, RateFunc, Transform, classify_play};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -29,7 +29,13 @@ fn vmob(stage: &mut Stage, points: &[[f64; 3]], rgba: [f32; 4]) -> Mob {
 }
 
 fn points_of(stage: &Stage, mob: Mob) -> Vec<f32> {
-    stage.get(mob).unwrap().buffer.read_column("point").unwrap()
+    #[allow(clippy::cast_possible_truncation)]
+    stage
+        .get_points(mob)
+        .unwrap()
+        .into_iter()
+        .flat_map(|point| point.map(|component| component as f32))
+        .collect()
 }
 
 // ------------------------------------------------------------- path funcs
@@ -136,6 +142,66 @@ fn aligned_target_is_shared_not_copied() {
         Some(b),
         "is_aligned_with pair shares the target (transform.py:60)"
     );
+}
+
+#[test]
+fn a_translation_transform_interpolates_placement_without_rewriting_points() {
+    let mut stage = Stage::new();
+    let points = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+    let source = vmob(&mut stage, &points, [1.0; 4]);
+    let target = vmob(&mut stage, &points, [1.0; 4]);
+    stage.shift(target, [8.0, -4.0, 0.0]);
+    let object_points = stage.get_object_points(source).unwrap();
+    let point_revision = stage.get(source).unwrap().buffer.field_revision("point");
+
+    let mut transform = Transform::new(source, target);
+    transform.begin(&mut stage).unwrap();
+    transform.interpolate(&mut stage, 0.5);
+
+    assert_eq!(stage.get_object_points(source).unwrap(), object_points);
+    assert_eq!(
+        stage.get(source).unwrap().buffer.field_revision("point"),
+        point_revision
+    );
+    assert_eq!(
+        stage.get_points(source).unwrap(),
+        vec![[4.0, -2.0, 0.0], [5.0, -2.0, 0.0], [6.0, -2.0, 0.0]]
+    );
+    transform.finish(&mut stage);
+}
+
+#[test]
+fn a_translation_transform_synchronizes_each_frame_into_a_live_view() {
+    let mut stage = Stage::new();
+    let points = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+    let source = vmob(&mut stage, &points, [1.0; 4]);
+    let target = vmob(&mut stage, &points, [1.0; 4]);
+    stage.shift(target, [8.0, -4.0, 0.0]);
+    let view = stage
+        .get_mut(source)
+        .expect("live")
+        .buffer
+        .export_view(false);
+    let mut transform = Transform::new(source, target).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    transform.begin(&mut stage).unwrap();
+
+    transform.interpolate(&mut stage, 0.25);
+    assert_eq!(view.read(0, "point"), Some(vec![2.0, -1.0, 0.0]));
+    assert!(
+        stage.placement(source).expect("live").is_identity(),
+        "the pinned buffer is the authoritative world-space frame"
+    );
+
+    transform.interpolate(&mut stage, 0.75);
+    assert_eq!(view.read(0, "point"), Some(vec![6.0, -3.0, 0.0]));
+    assert!(
+        stage.placement(source).expect("live").is_identity(),
+        "frames derive from frozen endpoints instead of accumulating"
+    );
+    transform.finish(&mut stage);
 }
 
 #[test]

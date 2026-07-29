@@ -100,21 +100,16 @@ impl Animation for Homotopy {
         // Per-member map: the rows already cover every family member, so
         // the member-local application lands the Reference's final state
         // without its redundant subtree re-application.
-        let mapped: Option<Vec<f32>> = stage.get(submob).and_then(|entry| {
-            entry.buffer.read_column("point").map(|col| {
-                #[allow(clippy::cast_possible_truncation)]
-                col.as_chunks::<3>()
-                    .0
-                    .iter()
-                    .flat_map(|c| {
-                        let q = f(f64::from(c[0]), f64::from(c[1]), f64::from(c[2]), sub_alpha);
-                        [q[0] as f32, q[1] as f32, q[2] as f32]
-                    })
-                    .collect()
-            })
-        });
-        if let (Some(mapped), Some(entry)) = (mapped, stage.get_mut(submob)) {
-            entry.buffer.write_range("point", 0, &mapped);
+        // This hook is already called once per family member. Read its
+        // world-space points and bake the arbitrary map into that member only;
+        // calling the family-wide `apply_points_function` here would remap
+        // descendants repeatedly.
+        if let Some(points) = stage.get_points(submob) {
+            let mapped: Vec<Vec3> = points
+                .into_iter()
+                .map(|point| f(point[0], point[1], point[2], sub_alpha))
+                .collect();
+            let _ = stage.set_points(submob, &mapped);
         }
         if self.smoothed {
             let _ = stage.make_family_smooth(submob);

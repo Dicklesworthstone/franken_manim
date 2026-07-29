@@ -79,7 +79,7 @@ use crate::plan::RenderPlan;
 #[cfg(test)]
 use crate::stroke::stroke_shade;
 use crate::stroke::{self, JoinWedge, half_width_px, stroke_rgba_at};
-use crate::table::{Segment, Style};
+use crate::table::{Segment, Style, reparameterize_arc_length};
 pub use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
@@ -819,6 +819,12 @@ struct Draw {
     shape: u32,
     /// The instance's screen translation.
     translate: [f64; 2],
+    /// Frame-local world-space segments for a non-translation affine
+    /// placement. Pure translations keep borrowing the retained object-space
+    /// table and pay only [`Draw::translate`].
+    transformed_segments: Option<Vec<Segment>>,
+    /// Doubly-monotone pieces derived from [`Draw::transformed_segments`].
+    transformed_pieces: Option<Vec<fill::MonoPiece>>,
     /// The interned style, copied so the tile loop indexes no table.
     style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
@@ -1068,17 +1074,55 @@ impl<'a> FrameJob<'a> {
                     .any(|component| *component != 0.0)
                 || style.scale_stroke_with_zoom
                 || style.depth_test;
-            let leaves_view_plane = segs.iter().any(|segment| {
+            let transformed_segments = (!inst.placement.is_translation()).then(|| {
+                let mut transformed = segs
+                    .iter()
+                    .map(|segment| Segment {
+                        p0: inst.placement.apply_vector(segment.p0),
+                        p1: inst.placement.apply_vector(segment.p1),
+                        p2: inst.placement.apply_vector(segment.p2),
+                        s0: segment.s0,
+                        s1: segment.s1,
+                    })
+                    .collect::<Vec<_>>();
+                // Translation cannot change length. Keep it out of the
+                // quadrature so a large world origin cannot perturb normalized
+                // spans through cancellation, then place the coefficients.
+                reparameterize_arc_length(&mut transformed);
+                let translation = inst.placement.translation();
+                for segment in &mut transformed {
+                    for point in [&mut segment.p0, &mut segment.p1, &mut segment.p2] {
+                        for axis in 0..3 {
+                            point[axis] += translation[axis];
+                        }
+                    }
+                }
+                transformed
+            });
+            let effective_segments = transformed_segments.as_deref().unwrap_or(segs);
+            let placement_z = if transformed_segments.is_some() {
+                0.0
+            } else {
+                inst.placement.translation()[2]
+            };
+            let leaves_view_plane = effective_segments.iter().any(|segment| {
                 [segment.p0, segment.p1, segment.p2]
                     .iter()
                     .any(|point| point[2] != 0.0)
-            }) || inst.offset[2] != 0.0;
+            }) || placement_z != 0.0;
             if camera_uniform || leaves_view_plane {
                 return Err(FrameJobError::CameraProjectionRequired {
                     instance: instance_index as u32,
                 });
             }
-            let translate = fill::instance_translation(inst, map);
+            let translate = if transformed_segments.is_some() {
+                [0.0; 2]
+            } else {
+                fill::instance_translation(inst, map)
+            };
+            let transformed_pieces = transformed_segments.as_ref().map(|segments| {
+                fill::MonoTable::pieces_for_segments(segments, &shape.subpath_starts, map)
+            });
 
             let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
             let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
@@ -1092,31 +1136,44 @@ impl<'a> FrameJob<'a> {
             }
 
             let flat = fill_is_flat(&style);
+            let kernel = if inst.hint_unsafe || !inst.placement.is_translation() {
+                FillKernel::General
+            } else {
+                FillKernel::select(shape, segs, map, translate)
+            };
+            let joins = stroke::join_wedges(
+                effective_segments,
+                &shape.subpath_starts,
+                &style,
+                map,
+                translate,
+            );
+            let stroke = draws_stroke
+                .then(|| stroke::PreparedStroke::new(effective_segments, &style, map, translate));
+            let field = if draws_fill && !flat {
+                Some(GradientField::build(effective_segments, map))
+            } else {
+                None
+            };
+            let fill_slab = hull_slab(effective_segments, map, translate);
             draws.push(Some(Draw {
                 first_segment: shape.first_segment,
                 segment_count: shape.segment_count,
                 shape: inst.shape,
                 translate,
+                transformed_segments,
+                transformed_pieces,
                 style,
-                kernel: if inst.hint_unsafe {
-                    FillKernel::General
-                } else {
-                    FillKernel::select(shape, segs, map, translate)
-                },
-                joins: stroke::join_wedges(segs, &shape.subpath_starts, &style, map, translate),
-                stroke: draws_stroke
-                    .then(|| stroke::PreparedStroke::new(segs, &style, map, translate)),
-                field: if draws_fill && !flat {
-                    Some(GradientField::build(segs, map))
-                } else {
-                    None
-                },
+                kernel,
+                joins,
+                stroke,
+                field,
                 flat_fill: if flat {
                     Some(fill_rgba_at(&style, 0.0))
                 } else {
                     None
                 },
-                fill_slab: hull_slab(shape, map, translate),
+                fill_slab,
                 draws_fill,
                 draws_stroke,
             }));
@@ -1512,7 +1569,7 @@ impl<'a> FrameJob<'a> {
         // is the order of §10.4's own argument: a classified interior costs
         // nothing, a hinted kernel costs a closed form, and the general machinery
         // is the fallback rather than the toll road.
-        let pieces = self.mono.pieces_of(rec.shape);
+        let pieces = self.pieces_of(rec);
         let mut general_classified = false;
         if interior {
             worker.cov[..w].copy_from_slice(worker.scratch.interior_row(x_lo, x_hi));
@@ -1770,7 +1827,7 @@ impl<'a> FrameJob<'a> {
                 )
                 .unwrap_or_else(|| {
                     fill::coverage_at_subcell(
-                        self.mono.pieces_of(rec.shape),
+                        self.pieces_of(rec),
                         rec.translate,
                         subcell.py,
                         subcell.px,
@@ -1825,11 +1882,22 @@ impl<'a> FrameJob<'a> {
     }
 
     /// This draw's slice of the plan's one flat segment table.
-    fn segments_of(&self, rec: &Draw) -> &[Segment] {
+    fn segments_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [Segment] {
+        if let Some(segments) = rec.transformed_segments.as_deref() {
+            return segments;
+        }
         let all = self.plan.segments();
         let lo = (rec.first_segment as usize).min(all.len());
         let hi = (rec.first_segment as usize + rec.segment_count as usize).min(all.len());
         &all[lo..hi]
+    }
+
+    /// This draw's fill pieces, transformed once per frame when its placement
+    /// has a non-identity linear part.
+    fn pieces_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [fill::MonoPiece] {
+        rec.transformed_pieces
+            .as_deref()
+            .unwrap_or_else(|| self.mono.pieces_of(rec.shape))
     }
 }
 
@@ -2107,26 +2175,34 @@ fn row_misses(slab: [f64; 4], py: u32) -> bool {
     slab[3] <= lo || slab[1] >= lo + 1.0
 }
 
-/// A compiled outline's screen-space AABB.
-///
-/// Built from the two extreme corners and then normalized, because a negative
-/// `ScreenMap::scale` maps `min` above `max` and an un-normalized box would
-/// reject every row.
-fn hull_slab(shape: &crate::table::Shape, map: ScreenMap, translate: [f64; 2]) -> [f64; 4] {
+/// A prepared segment run's screen-space control-hull AABB.
+fn hull_slab(segments: &[Segment], map: ScreenMap, translate: [f64; 2]) -> [f64; 4] {
+    if segments.is_empty() {
+        return [0.0; 4];
+    }
     let to_px = |p: fmn_core::types::Vec3| {
         [
             map.origin[0] + p[0] * map.scale + translate[0],
             map.origin[1] + p[1] * map.scale + translate[1],
         ]
     };
-    let a = to_px(shape.bounds.min);
-    let b = to_px(shape.bounds.max);
-    [
-        a[0].min(b[0]),
-        a[1].min(b[1]),
-        a[0].max(b[0]),
-        a[1].max(b[1]),
-    ]
+    let mut slab = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for point in segments
+        .iter()
+        .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
+    {
+        let pixel = to_px(point);
+        slab[0] = slab[0].min(pixel[0]);
+        slab[1] = slab[1].min(pixel[1]);
+        slab[2] = slab[2].max(pixel[0]);
+        slab[3] = slab[3].max(pixel[1]);
+    }
+    slab
 }
 
 #[cfg(test)]
@@ -2134,7 +2210,7 @@ mod tests {
     use super::*;
     use crate::bin::covers_tile;
     use crate::fill::MonoTable;
-    use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage};
+    use fmn_mobject::{Mob, Mobject, Placement, RecordBuffer, RecordSchema, ShapeTag, Stage};
 
     /// A vmobject with a filled and/or stroked style written across its records.
     ///
@@ -2362,7 +2438,7 @@ mod tests {
                                 cov[..w].copy_from_slice(scratch.interior_row(x_lo, x_hi));
                             } else if !rec.kernel.row(py, x_lo, x_hi, &mut cov[..w]) {
                                 cov[..w].copy_from_slice(scratch.fill_row(
-                                    job.mono.pieces_of(rec.shape),
+                                    job.pieces_of(rec),
                                     rec.translate,
                                     py,
                                     x_lo,
@@ -2455,6 +2531,59 @@ mod tests {
         assert!(job.draws[0].is_none(), "the ghost must hold its slot");
         assert!(job.draws[1].is_some());
         assert_eq!(job.draw_count(), 1, "and must not be counted as a draw");
+    }
+
+    #[test]
+    fn affine_instance_render_matches_the_same_geometry_baked_to_points() {
+        let make_stage = |bake: bool| {
+            let mut stage = Stage::new();
+            let points = rect_points(36.0, 44.0, 76.0, 68.0);
+            let mob = stage.add(vmob(
+                &points,
+                [0.2, 0.7, 0.9, 0.8],
+                [1.0, 0.3, 0.1, 1.0],
+                240.0,
+            ));
+            let last = points.len() - 1;
+            let entry = stage.get_mut(mob).expect("live");
+            entry.buffer.write(last, "fill_rgba", &[0.9, 0.2, 0.4, 0.8]);
+            entry
+                .buffer
+                .write(last, "stroke_rgba", &[0.1, 0.8, 0.3, 1.0]);
+            entry.buffer.write(last, "stroke_width", &[480.0]);
+            stage.add_to_scene(mob).expect("live");
+            let pivot = [56.0, 56.0, 0.0];
+            stage.apply_affine(
+                mob,
+                Placement::about([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], pivot),
+            );
+            stage.stretch_about(mob, 1.5, 0, Some(pivot), None);
+            stage.stretch_about(mob, 0.75, 1, Some(pivot), None);
+            if bake {
+                stage.bake_placement(mob).expect("live");
+            }
+            stage
+        };
+        let placed = make_stage(false);
+        let baked = make_stage(true);
+        let cfg = config();
+
+        let (placed_plan, placed_mono, placed_binning) = derive(&placed, cfg, default_tiling());
+        let placed_frame = FrameJob::new(&placed_plan, &placed_mono, &placed_binning, cfg)
+            .expect("placed artifacts")
+            .render(1)
+            .expect("placed render");
+        let (baked_plan, baked_mono, baked_binning) = derive(&baked, cfg, default_tiling());
+        let baked_frame = FrameJob::new(&baked_plan, &baked_mono, &baked_binning, cfg)
+            .expect("baked artifacts")
+            .render(1)
+            .expect("baked render");
+
+        assert_frames_equal(
+            &placed_frame,
+            &baked_frame,
+            "affine placement diverged from the same world-space geometry",
+        );
     }
 
     #[test]

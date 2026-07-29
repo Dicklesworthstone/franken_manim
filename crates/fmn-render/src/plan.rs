@@ -14,9 +14,9 @@
 //! So the sync loop's inner question is a comparison of seven integers
 //! ([`crate::revision`]), and everything expensive sits behind it. The cheap
 //! things that genuinely must happen every frame — the painter-order instance
-//! list — are rebuilt every frame, because an instance is an index, an offset
-//! and two more indices, and pretending otherwise would buy nothing and cost
-//! correctness.
+//! list — are rebuilt every frame, because an instance is an index, an affine
+//! placement and two more indices, and pretending otherwise would buy nothing
+//! and cost correctness.
 //!
 //! ## The observable
 //!
@@ -31,7 +31,7 @@ use crate::table::{Instance, Segment, ShapeTable, Style, StyleTable, compile_sha
 use fmn_core::types::Vec3;
 use fmn_geom::quadpath::QuadPath;
 use fmn_hash::{Digest, Sha256};
-use fmn_mobject::{Mob, RecordBuffer, Stage};
+use fmn_mobject::{Mob, Placement, RecordBuffer, Stage};
 use std::collections::HashMap;
 
 /// The axes a compiled outline depends on.
@@ -40,7 +40,7 @@ use std::collections::HashMap;
 /// family change reshapes it. Deliberately **not** style, order or camera: a
 /// recolour, a `z_index` bump and a pan must all leave a compiled outline alone,
 /// which is the §10.8 promise this constant makes checkable.
-pub const SHAPE_AXES: [Axis; 3] = [Axis::Topology, Axis::Geometry, Axis::Transform];
+pub const SHAPE_AXES: [Axis; 2] = [Axis::Topology, Axis::Geometry];
 
 /// The axes a style row depends on.
 pub const STYLE_AXES: [Axis; 1] = [Axis::Style];
@@ -91,8 +91,9 @@ struct Retained {
     style_dep: Dependency,
     shape: u32,
     style: u32,
-    /// The instance offset, kept so a reuse needs no point read.
-    offset: Vec3,
+    /// The object-space first-anchor normalization, kept so a reuse needs no
+    /// point read. The entry placement composes with it per frame.
+    local_origin: Vec3,
 }
 
 /// The compiled, backend-neutral render IR for a scene, retained across frames.
@@ -235,6 +236,9 @@ impl RenderPlan {
             seen.push(mob);
 
             let previous = self.retained.get(&mob).cloned();
+            let Some(entry_placement) = stage.placement(mob) else {
+                continue;
+            };
             let (hint_unsafe, style_unsafe) = stage.get(mob).map_or((false, false), |entry| {
                 (
                     writable_view_affects_any(&entry.buffer, &SHAPE_VIEW_FIELDS),
@@ -243,34 +247,43 @@ impl RenderPlan {
             });
 
             // --- geometry: the expensive half, and the one that must be skipped.
-            let (shape, offset) = match &previous {
+            let (shape, local_origin) = match &previous {
                 Some(r) if !hint_unsafe && !r.shape_dep.is_stale(&now) => {
                     stats.shapes_reused += 1;
-                    (r.shape, r.offset)
+                    (r.shape, r.local_origin)
                 }
                 _ => {
-                    let Some(points) = stage.get_points(mob) else {
+                    let Some(object_points) = stage.get_object_points(mob) else {
                         continue;
                     };
-                    if points.is_empty() {
+                    if object_points.is_empty() {
                         continue;
                     }
                     // Shape-local, matching the normalization `shape_digest`
                     // hashes under: the outline is translated so its first
-                    // anchor sits at the origin, and `offset` is what places it
-                    // back. Compiling absolute points would still dedup — and
-                    // would put every later copy of a glyph wherever the first
-                    // one happened to be.
-                    let offset = points[0];
-                    let local: Vec<Vec3> = points
+                    // anchor sits at the origin, and the instance placement puts
+                    // that origin back in world space. Compiling absolute points
+                    // would still dedup — and would put every later copy of a
+                    // glyph wherever the first one happened to be.
+                    let local_origin = object_points[0];
+                    let local: Vec<Vec3> = object_points
                         .iter()
-                        .map(|p| [p[0] - offset[0], p[1] - offset[1], p[2] - offset[2]])
+                        .map(|p| {
+                            [
+                                p[0] - local_origin[0],
+                                p[1] - local_origin[1],
+                                p[2] - local_origin[2],
+                            ]
+                        })
                         .collect();
-                    let digest = shape_digest(&points);
+                    let digest = shape_digest(&object_points);
                     let before = self.shapes.shapes().len();
                     let first_segment = self.segments.len() as u32;
-                    let hint =
-                        Hint::of(stage, mob).translated([-offset[0], -offset[1], -offset[2]]);
+                    let hint = Hint::of(stage, mob).translated([
+                        -local_origin[0],
+                        -local_origin[1],
+                        -local_origin[2],
+                    ]);
                     let segments_out = &mut self.segments;
                     let index = self.shapes.intern_shape(digest, || {
                         let path =
@@ -286,7 +299,7 @@ impl RenderPlan {
                         // compiled: §10.8's instancing, paying for itself.
                         stats.shapes_shared += 1;
                     }
-                    (index, offset)
+                    (index, local_origin)
                 }
             };
 
@@ -306,12 +319,17 @@ impl RenderPlan {
             // no revision bumped, so it cannot be folded into `revisions` — it
             // has to be a separate flag that poisons any cache downstream.
             let volatile = hint_unsafe || style_unsafe;
+            // Compiled points are normalized by subtracting `local_origin`.
+            // Compose that object-space translation *inside* the entry's
+            // object→world map: E(q + origin), not E(q) + origin. The
+            // distinction is observable under rotation, stretch and shear.
+            let placement = entry_placement.compose(Placement::from_translation(local_origin));
 
             self.shapes.push_instance(Instance {
                 shape,
                 style,
                 mob,
-                offset,
+                placement,
                 order: order as u32,
                 revisions: now.fold(),
                 volatile,
@@ -325,7 +343,7 @@ impl RenderPlan {
                     style_dep: Dependency::new(now, &STYLE_AXES),
                     shape,
                     style,
-                    offset,
+                    local_origin,
                 },
             );
         }
@@ -474,7 +492,7 @@ impl RenderPlan {
                 }
                 None => hash.bool(false),
             }
-            for component in instance.offset {
+            for component in instance.placement.coefficients() {
                 hash.f64(component);
             }
             hash.u32(instance.order);
@@ -835,6 +853,46 @@ mod tests {
     }
 
     #[test]
+    fn affine_placement_reuses_the_object_space_outline() {
+        let (mut stage, mobs) = staged(1);
+        let mob = mobs[0];
+        let point_revision = stage.get(mob).unwrap().buffer.field_revision("point");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let geometry = plan.geometry_identity();
+
+        stage.shift(mob, [7.0, -3.0, 0.5]);
+        let translated = plan.sync(&stage, 0);
+        assert_eq!(translated.shapes_reused, 1);
+        assert_eq!(translated.shapes_compiled, 0);
+        assert_eq!(translated.shapes_shared, 0);
+        assert_eq!(plan.geometry_identity(), geometry);
+        assert_eq!(
+            stage.get(mob).unwrap().buffer.field_revision("point"),
+            point_revision
+        );
+        assert_eq!(
+            plan.shapes().instances()[0].placement.translation(),
+            [7.0, -3.0, 0.5]
+        );
+
+        stage.rotate(
+            mob,
+            std::f64::consts::FRAC_PI_2,
+            [0.0, 0.0, 1.0],
+            Some([7.0, -3.0, 0.5]),
+            None,
+        );
+        let rotated = plan.sync(&stage, 0);
+        assert_eq!(
+            rotated.shapes_reused, 1,
+            "linear placement is screen-derived state, not a reshape"
+        );
+        assert_eq!(rotated.shapes_compiled, 0);
+        assert_eq!(plan.geometry_identity(), geometry);
+    }
+
+    #[test]
     fn moving_one_point_recompiles_exactly_one_outline() {
         let (mut stage, mobs) = staged(3);
         let mut plan = RenderPlan::new();
@@ -894,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn instances_carry_painter_order_and_the_offset_that_places_them() {
+    fn instances_carry_painter_order_and_the_placement_that_positions_them() {
         let (stage, mobs) = staged(3);
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
@@ -906,7 +964,7 @@ mod tests {
             // The outline is shared, so the placement is what distinguishes the
             // three — which is the whole reason position is excluded from the
             // shape digest.
-            assert!((inst.offset[0] - i as f64 * 10.0).abs() < 1e-9);
+            assert!((inst.placement.translation()[0] - i as f64 * 10.0).abs() < 1e-9);
         }
         assert_eq!(instances[0].shape, instances[2].shape);
     }

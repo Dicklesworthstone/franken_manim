@@ -634,8 +634,20 @@ fn packet_freeze_cost_is_o_touched() {
     for (m, id) in mobs.iter().zip(&ids_before) {
         assert_eq!(stage.get(*m).unwrap().buffer.storage_id(), *id);
     }
-    // Touching one entry unshares exactly that entry.
+    // Affine motion touches the independent placement and therefore does not
+    // unshare object-space record storage at all.
     stage.set_x(mobs[3], 5.0);
+    for (m, id) in mobs.iter().zip(&ids_before) {
+        assert_eq!(
+            stage.get(*m).unwrap().buffer.storage_id(),
+            *id,
+            "placement must not clone the RecordBuffer"
+        );
+    }
+
+    // A real object-space geometry write still unshares exactly that entry.
+    let points = stage.get_points(mobs[3]).expect("points");
+    stage.set_points(mobs[3], &points).expect("geometry write");
     for (i, (m, id)) in mobs.iter().zip(&ids_before).enumerate() {
         let now = stage.get(*m).unwrap().buffer.storage_id();
         if i == 3 {

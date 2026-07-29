@@ -102,7 +102,7 @@
 
 use crate::bin::ScreenMap;
 use crate::plan::{GeometryIdentity, RenderPlan};
-use crate::table::Instance;
+use crate::table::{Instance, Segment};
 
 // ----------------------------------------------------------------- arithmetic
 
@@ -288,9 +288,10 @@ fn solve_quadratic<T: Real>(a2: T, a1: T, a0: T, out: &mut [T; 2]) -> usize {
 /// A quadratic piece that is monotone in **both** axes, in screen pixels.
 ///
 /// Shape-local: the [`ScreenMap`]'s scale and origin are applied, the
-/// occurrence's offset is not. §10.8 interns outlines, so an occurrence is a
-/// translation of the shared pieces and paying for it in geometry would undo the
-/// interning — see [`instance_translation`].
+/// occurrence's placement is not. §10.8 interns outlines, so a pure-translation
+/// occurrence shifts the shared pieces and paying for it in geometry would undo
+/// the interning — see [`instance_translation`]. A non-translation affine map
+/// derives frame-local pieces from the same retained object-space segments.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MonoPiece {
     /// Start anchor.
@@ -331,6 +332,44 @@ pub struct MonoTable {
 }
 
 impl MonoTable {
+    /// Derive doubly-monotone pieces for one already placed segment run.
+    ///
+    /// The shared table calls this with object-space segments. A non-translation
+    /// instance calls it once while preparing its frame-local draw, after
+    /// applying that instance's affine placement.
+    pub(crate) fn pieces_for_segments(
+        segments: &[Segment],
+        subpath_starts: &[u32],
+        map: ScreenMap,
+    ) -> Vec<MonoPiece> {
+        let screen = |p: fmn_core::types::Vec3| {
+            [
+                map.origin[0] + p[0] * map.scale,
+                map.origin[1] + p[1] * map.scale,
+            ]
+        };
+        let mut pieces = Vec::with_capacity(segments.len() * 2);
+        let mut curves: Vec<[[f64; 2]; 3]> = Vec::new();
+        for (index, &start) in subpath_starts.iter().enumerate() {
+            let end = subpath_starts
+                .get(index + 1)
+                .copied()
+                .unwrap_or(segments.len() as u32);
+            let (lo, hi) = (start as usize, (end as usize).min(segments.len()));
+            if lo >= hi {
+                continue;
+            }
+            curves.clear();
+            curves.extend(
+                segments[lo..hi]
+                    .iter()
+                    .map(|segment| [screen(segment.p0), screen(segment.p1), screen(segment.p2)]),
+            );
+            append_subpath(&curves, &mut pieces);
+        }
+        pieces
+    }
+
     /// Derive the table from a synchronized plan under a screen mapping.
     #[must_use]
     pub fn build(plan: &RenderPlan, map: ScreenMap) -> MonoTable {
@@ -338,17 +377,6 @@ impl MonoTable {
         let segments = plan.segments();
         let mut pieces = Vec::with_capacity(segments.len() * 2);
         let mut ranges = Vec::with_capacity(shapes.len());
-        // Shape-local screen space: scale and origin, no offset. A uniform scale
-        // and a translation preserve monotonicity in both axes, so the split
-        // parameters are the same ones object space would give — which is what
-        // lets one split serve every occurrence.
-        let s = |p: fmn_core::types::Vec3| {
-            [
-                map.origin[0] + p[0] * map.scale,
-                map.origin[1] + p[1] * map.scale,
-            ]
-        };
-        let mut curves: Vec<[[f64; 2]; 3]> = Vec::new();
         for shape in shapes {
             let first = pieces.len() as u32;
             let lo = (shape.first_segment as usize).min(segments.len());
@@ -360,17 +388,7 @@ impl MonoTable {
             // continuity: reconstructing them is almost right and silently wrong
             // when one subpath happens to begin exactly where the previous one
             // ended.
-            let starts = &shape.subpath_starts;
-            for (k, &start) in starts.iter().enumerate() {
-                let end = starts.get(k + 1).copied().unwrap_or(own.len() as u32);
-                let (a, b) = (start as usize, (end as usize).min(own.len()));
-                if a >= b {
-                    continue;
-                }
-                curves.clear();
-                curves.extend(own[a..b].iter().map(|g| [s(g.p0), s(g.p1), s(g.p2)]));
-                append_subpath(&curves, &mut pieces);
-            }
+            pieces.extend(Self::pieces_for_segments(own, &shape.subpath_starts, map));
             ranges.push((first, pieces.len() as u32 - first));
         }
         MonoTable {
@@ -434,11 +452,17 @@ impl MonoTable {
 /// The pixel translation one occurrence contributes.
 ///
 /// [`MonoTable`]'s pieces already carry the map's origin, so an occurrence adds
-/// only its offset scaled to pixels. Splitting the placement this way is what
-/// makes interning pay: N copies of a glyph are N of these and one outline.
+/// only its translation scaled to pixels. Splitting the placement this way is
+/// what makes interning pay: N translated copies of a glyph are N of these and
+/// one outline.
 #[must_use]
 pub fn instance_translation(inst: &Instance, map: ScreenMap) -> [f64; 2] {
-    [inst.offset[0] * map.scale, inst.offset[1] * map.scale]
+    debug_assert!(
+        inst.placement.is_translation(),
+        "non-translation placements require frame-local transformed pieces"
+    );
+    let translation = inst.placement.translation();
+    [translation[0] * map.scale, translation[1] * map.scale]
 }
 
 /// The parameter of a quadratic component's extremum, if it lies strictly inside

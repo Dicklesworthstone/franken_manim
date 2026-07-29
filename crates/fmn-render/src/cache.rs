@@ -128,7 +128,7 @@ impl TileKey {
         let flags = binning.tile_flags(tile);
         let instances = plan.shapes().instances();
 
-        let mut commands: Vec<u64> = Vec::with_capacity(draws.len() * 2);
+        let mut commands: Vec<u64> = Vec::with_capacity(draws.len() * 15);
         let mut revisions: Vec<u64> = Vec::with_capacity(draws.len());
         for (k, &d) in draws.iter().enumerate() {
             let inst = instances.get(d as usize)?;
@@ -142,9 +142,7 @@ impl TileKey {
             commands.push(u64::from(inst.shape));
             commands.push(u64::from(inst.style));
             commands.push(u64::from(flags[k]));
-            commands.push(inst.offset[0].to_bits());
-            commands.push(inst.offset[1].to_bits());
-            commands.push(inst.offset[2].to_bits());
+            commands.extend(inst.placement.coefficients().into_iter().map(f64::to_bits));
             revisions.push(inst.revisions);
         }
 

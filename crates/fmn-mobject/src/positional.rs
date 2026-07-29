@@ -30,8 +30,9 @@
 
 use fmn_core::constants::{DOWN, FRAME_X_RADIUS, FRAME_Y_RADIUS, IN, LEFT, ORIGIN, OUT, RIGHT, UP};
 use fmn_core::types::Vec3;
-use fmn_geom::{QuadPath, space_ops};
+use fmn_geom::{Mat3, QuadPath, space_ops};
 
+use crate::Placement;
 use crate::StageError;
 use crate::bbox::{BoundingBox, BoxAccum};
 use crate::stage::{Mob, Stage};
@@ -115,7 +116,7 @@ const MIN_SCALE_FACTOR: f64 = 1e-8;
 impl Stage {
     // ---------------------------------------------------------- bounding box
 
-    /// A subtree signature: any point write (revision bump), resize, or
+    /// A subtree signature: any point write, placement edit, resize, or
     /// structural change alters it, which is what drives cache invalidation.
     fn bbox_signature(&self, mob: Mob) -> u64 {
         // FNV-1a over the family. In-memory only; never serialized, so no
@@ -128,6 +129,7 @@ impl Stage {
             mix(m.bits());
             if let Some(e) = self.get(m) {
                 mix(e.buffer.field_revision("point").unwrap_or(0));
+                mix(e.placement_revision());
                 mix(e.buffer.len() as u64);
             }
         }
@@ -141,9 +143,14 @@ impl Stage {
             if let Some(e) = self.get(m)
                 && let Some(col) = e.buffer.read_column("point")
             {
+                let placement = e.placement();
                 let (tris, _rem) = col.as_chunks::<3>();
                 for tri in tris {
-                    acc.push([f64::from(tri[0]), f64::from(tri[1]), f64::from(tri[2])]);
+                    acc.push(placement.apply_point([
+                        f64::from(tri[0]),
+                        f64::from(tri[1]),
+                        f64::from(tri[2]),
+                    ]));
                 }
             }
         }
@@ -296,7 +303,10 @@ impl Stage {
     pub fn get_start(&self, mob: Mob) -> Option<Vec3> {
         let e = self.get(mob)?;
         let v = e.buffer.read(0, "point")?;
-        Some([f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
+        Some(
+            e.placement()
+                .apply_point([f64::from(v[0]), f64::from(v[1]), f64::from(v[2])]),
+        )
     }
 
     /// The last `point` record (Reference `get_end`), or `None` if empty.
@@ -305,7 +315,10 @@ impl Stage {
         let e = self.get(mob)?;
         let n = e.buffer.len();
         let v = e.buffer.read(n.checked_sub(1)?, "point")?;
-        Some([f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
+        Some(
+            e.placement()
+                .apply_point([f64::from(v[0]), f64::from(v[1]), f64::from(v[2])]),
+        )
     }
 
     /// Reference `get_start_and_end`. `None` when the entry has no points
@@ -315,10 +328,13 @@ impl Stage {
         Some((self.get_start(mob)?, self.get_end(mob)?))
     }
 
-    /// Reference `get_points`: this entry's own `point` records in f64
-    /// (§6.1), not recursing into the family.
+    /// This entry's object-space `point` records in f64 (§6.1).
+    ///
+    /// Lumen consumes this surface for artifacts keyed on Geometry alone.
+    /// Scene-facing geometry queries use [`Stage::get_points`], which applies
+    /// the independent object→world placement.
     #[must_use]
-    pub fn get_points(&self, mob: Mob) -> Option<Vec<Vec3>> {
+    pub fn get_object_points(&self, mob: Mob) -> Option<Vec<Vec3>> {
         let column = self.get(mob)?.buffer.read_column("point")?;
         Some(
             column
@@ -330,9 +346,24 @@ impl Stage {
         )
     }
 
-    /// Reference `set_points`: resize this entry's records to `points`
-    /// (order-preserving, so the surrounding style columns survive) and
-    /// write the run.
+    /// Reference `get_points`: this entry's own world-space points in f64,
+    /// not recursing into the family.
+    #[must_use]
+    pub fn get_points(&self, mob: Mob) -> Option<Vec<Vec3>> {
+        let entry = self.get(mob)?;
+        let placement = entry.placement();
+        self.get_object_points(mob).map(|points| {
+            points
+                .into_iter()
+                .map(|point| placement.apply_point(point))
+                .collect()
+        })
+    }
+
+    /// Reference `set_points`: replace this entry with the supplied world-space
+    /// points, reset its placement to identity, resize its records
+    /// (order-preserving, so the surrounding style columns survive), and write
+    /// the run.
     ///
     /// On a vmobject-shaped record the `joint_angle` column is refreshed
     /// from the new path in the same call — the Reference recomputes it
@@ -348,6 +379,7 @@ impl Stage {
             None
         };
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        entry.set_placement(Placement::IDENTITY);
         entry.buffer.resize_preserving_order(points.len());
         #[allow(clippy::cast_possible_truncation)]
         let flat: Vec<f32> = points
@@ -432,6 +464,66 @@ impl Stage {
 
     // ----------------------------------------------------- the transform core
 
+    /// This entry's object→world placement.
+    #[must_use]
+    pub fn placement(&self, mob: Mob) -> Option<Placement> {
+        self.get(mob).map(|entry| entry.placement())
+    }
+
+    /// This entry's independent placement revision.
+    #[must_use]
+    pub fn placement_revision(&self, mob: Mob) -> Option<u64> {
+        self.get(mob).map(|entry| entry.placement_revision())
+    }
+
+    /// Replace one entry's placement, advancing only its placement revision
+    /// when the affine coefficients changed bit-for-bit.
+    pub fn set_placement(
+        &mut self,
+        mob: Mob,
+        placement: Placement,
+    ) -> Result<&mut Self, StageError> {
+        self.get_mut(mob)
+            .ok_or(StageError::StaleHandle)?
+            .set_placement(placement);
+        Ok(self)
+    }
+
+    /// Bake one entry's current world-space points back into its object-space
+    /// buffer and reset placement to identity.
+    ///
+    /// Arbitrary pointwise maps need this boundary because their result is not
+    /// generally representable by one affine map. Affine positional operations
+    /// never call it.
+    pub fn bake_placement(&mut self, mob: Mob) -> Result<bool, StageError> {
+        let placement = self.get(mob).ok_or(StageError::StaleHandle)?.placement();
+        if placement.is_identity() {
+            return Ok(false);
+        }
+        let Some(points) = self.get_points(mob) else {
+            // A custom record schema may carry no `point` field. Its placement
+            // has no geometric observable to bake, but normalizing it keeps a
+            // later authoritative-buffer read from reporting a false stale
+            // handle.
+            self.set_placement(mob, Placement::IDENTITY)?;
+            return Ok(true);
+        };
+        self.set_points(mob, &points)?;
+        Ok(true)
+    }
+
+    /// [`Stage::bake_placement`] over a whole family.
+    pub fn bake_family_placements(&mut self, mob: Mob) -> Result<(), StageError> {
+        let family = self.family(mob);
+        if family.is_empty() {
+            return Err(StageError::StaleHandle);
+        }
+        for member in family {
+            self.bake_placement(member)?;
+        }
+        Ok(())
+    }
+
     /// Resolve the pivot the Reference's `apply_points_function` uses: an
     /// explicit `about_point` wins; else `about_edge` (if given) resolves to the
     /// box's critical point there; else there is no pivot (transform in place).
@@ -453,26 +545,49 @@ impl Stage {
     /// the record revision bump.
     fn transform_points<F: Fn(Vec3) -> Vec3>(&mut self, mob: Mob, pivot: Option<Vec3>, f: F) {
         for m in self.family(mob) {
-            let col = match self.get(m).and_then(|e| e.buffer.read_column("point")) {
-                Some(c) if !c.is_empty() => c,
+            let points = match self.get_points(m) {
+                Some(points) if !points.is_empty() => points,
                 _ => continue,
             };
-            let mut out = Vec::with_capacity(col.len());
-            let (tris, _rem) = col.as_chunks::<3>();
-            for tri in tris {
-                let p = [f64::from(tri[0]), f64::from(tri[1]), f64::from(tri[2])];
-                let q = match pivot {
-                    Some(pv) => add(f(sub(p, pv)), pv),
-                    None => f(p),
-                };
-                out.push(q[0] as f32);
-                out.push(q[1] as f32);
-                out.push(q[2] as f32);
+            let out: Vec<Vec3> = points
+                .into_iter()
+                .map(|point| match pivot {
+                    Some(pv) => add(f(sub(point, pv)), pv),
+                    None => f(point),
+                })
+                .collect();
+            let _ = self.set_points(m, &out);
+        }
+    }
+
+    /// Compose one world-space affine operation over every family member.
+    ///
+    /// `affine` acts after each member's current placement. Object-space points
+    /// and their field revisions stay untouched unless a live record view pins
+    /// the authoritative buffer. In that case the operation bakes through the
+    /// existing generation so V3's engine-write visibility remains true for
+    /// zero-copy NumPy views.
+    pub fn apply_affine(&mut self, mob: Mob, affine: Placement) -> &mut Self {
+        for member in self.family(mob) {
+            let has_live_view = self
+                .get(member)
+                .is_some_and(|entry| entry.buffer.live_view_count() > 0);
+            if has_live_view
+                && let Some(points) = self.get_points(member)
+                && !points.is_empty()
+            {
+                let transformed: Vec<Vec3> = points
+                    .into_iter()
+                    .map(|point| affine.apply_point(point))
+                    .collect();
+                let _ = self.set_points(member, &transformed);
+                continue;
             }
-            if let Some(e) = self.get_mut(m) {
-                e.buffer.write_range("point", 0, &out);
+            if let Some(entry) = self.get_mut(member) {
+                entry.set_placement(affine.compose(entry.placement()));
             }
         }
+        self
     }
 
     /// The Reference's `apply_points_function` made public: apply `f` to
@@ -511,13 +626,8 @@ impl Stage {
             about_edge
         };
         let pivot = self.resolve_pivot(mob, about_point, edge);
-        self.transform_points(mob, pivot, move |p| {
-            [
-                m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
-                m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
-                m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
-            ]
-        });
+        let affine = pivot.map_or_else(|| Placement::new(m, [0.0; 3]), |p| Placement::about(m, p));
+        self.apply_affine(mob, affine);
         self
     }
 
@@ -526,19 +636,21 @@ impl Stage {
     /// column. Applies member-for-member is the *caller's* concern — this
     /// is the single-entry rule, exactly the Reference's.
     pub fn match_points(&mut self, mob: Mob, source: Mob) {
-        let (len, columns): (usize, Vec<(String, Vec<f32>)>) = match self.get(source) {
-            Some(entry) => (
-                entry.buffer.len(),
-                entry
-                    .buffer
-                    .schema()
-                    .pointlike_keys()
-                    .iter()
-                    .filter_map(|k| entry.buffer.read_column(k).map(|c| (k.clone(), c)))
-                    .collect(),
-            ),
-            None => return,
-        };
+        let (len, placement, columns): (usize, Placement, Vec<(String, Vec<f32>)>) =
+            match self.get(source) {
+                Some(entry) => (
+                    entry.buffer.len(),
+                    entry.placement(),
+                    entry
+                        .buffer
+                        .schema()
+                        .pointlike_keys()
+                        .iter()
+                        .filter_map(|k| entry.buffer.read_column(k).map(|c| (k.clone(), c)))
+                        .collect(),
+                ),
+                None => return,
+            };
         let Some(entry) = self.get_mut(mob) else {
             return;
         };
@@ -546,16 +658,18 @@ impl Stage {
             entry.buffer.resize_preserving_order(len);
         }
         for (field, column) in columns {
-            entry.buffer.write_range(&field, 0, &column);
+            if entry.buffer.read_column(&field).as_deref() != Some(column.as_slice()) {
+                entry.buffer.write_range(&field, 0, &column);
+            }
         }
+        entry.set_placement(placement);
     }
 
     // ---------------------------------------------------------- positional API
 
     /// Shift every point by `vector`.
     pub fn shift(&mut self, mob: Mob, vector: Vec3) -> &mut Self {
-        self.transform_points(mob, None, |p| add(p, vector));
-        self
+        self.apply_affine(mob, Placement::from_translation(vector))
     }
 
     /// Scale about the box center (Reference default `about_edge=ORIGIN`).
@@ -574,8 +688,12 @@ impl Stage {
     ) -> &mut Self {
         let factor = factor.max(MIN_SCALE_FACTOR);
         let pivot = self.resolve_pivot(mob, about_point, about_edge);
-        self.transform_points(mob, pivot, move |p| scaled(p, factor));
-        self
+        let linear = [[factor, 0.0, 0.0], [0.0, factor, 0.0], [0.0, 0.0, factor]];
+        let affine = pivot.map_or_else(
+            || Placement::new(linear, [0.0; 3]),
+            |p| Placement::about(linear, p),
+        );
+        self.apply_affine(mob, affine)
     }
 
     /// Stretch along one axis about the box center.
@@ -593,11 +711,13 @@ impl Stage {
         about_edge: Option<Vec3>,
     ) -> &mut Self {
         let pivot = self.resolve_pivot(mob, about_point, about_edge);
-        self.transform_points(mob, pivot, move |mut p| {
-            p[dim] *= factor;
-            p
-        });
-        self
+        let mut linear: Mat3 = Placement::IDENTITY.linear();
+        linear[dim][dim] = factor;
+        let affine = pivot.map_or_else(
+            || Placement::new(linear, [0.0; 3]),
+            |p| Placement::about(linear, p),
+        );
+        self.apply_affine(mob, affine)
     }
 
     /// Move the box center to the origin.

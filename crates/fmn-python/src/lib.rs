@@ -171,8 +171,9 @@ fn with_buffer<T>(
     };
     if let Some((engine, mob)) = bound {
         let mut scene = engine.borrow_mut();
-        let entry = scene
-            .stage_mut()
+        let stage = scene.stage_mut();
+        stage.bake_placement(mob).map_err(stage_error)?;
+        let entry = stage
             .get_mut(mob)
             .ok_or_else(|| StaleHandleError::new_err("mobject handle no longer resolves"))?;
         return Ok(operation(&mut entry.buffer));
@@ -197,9 +198,14 @@ fn with_buffer_ref<T>(
             .map(|(engine, mob)| (Rc::clone(engine), mob))
     };
     if let Some((engine, mob)) = bound {
-        let scene = engine.borrow();
-        let entry = scene
-            .stage()
+        // RecordBuffer is the live `mobject.data` contract. Materialize any
+        // pending affine placement before a Python read so the zero-copy view
+        // remains authoritative and exposes the same world-space points as
+        // manim's data array (§8.2, fm-7if).
+        let mut scene = engine.borrow_mut();
+        let stage = scene.stage_mut();
+        stage.bake_placement(mob).map_err(stage_error)?;
+        let entry = stage
             .get(mob)
             .ok_or_else(|| StaleHandleError::new_err("mobject handle no longer resolves"))?;
         return Ok(operation(&entry.buffer));
@@ -1541,6 +1547,83 @@ mod tests {
                 .expect("test module name");
             py.run(source.as_c_str(), Some(&globals), Some(&globals))
                 .expect("Python bridge acceptance suite");
+
+            // fm-7if keeps affine motion out of object-space records until the
+            // authoritative Python data surface demands synchronization. An
+            // already exported zero-copy array must still observe engine
+            // writes, and a later scalar read must materialize a pending
+            // placement before exposing the buffer.
+            let parent = globals
+                .get_item("parent")
+                .expect("globals lookup")
+                .expect("bridge suite defines parent");
+            let proxy = parent.cast::<BridgeMobject>().expect("parent proxy");
+            let (engine, mob) = bound_parts(&proxy.borrow()).expect("bound parent");
+            let data = parent.getattr("data").expect("live NumPy data");
+            let before: Vec<f32> = data
+                .get_item("point")
+                .expect("point field")
+                .get_item(0)
+                .expect("first point")
+                .call_method0("tolist")
+                .expect("point list")
+                .extract()
+                .expect("f32 point");
+            engine.borrow_mut().stage_mut().shift(mob, [2.0, -1.0, 0.0]);
+            let viewed: Vec<f32> = data
+                .get_item("point")
+                .expect("point field")
+                .get_item(0)
+                .expect("first point")
+                .call_method0("tolist")
+                .expect("point list")
+                .extract()
+                .expect("f32 point");
+            #[allow(clippy::cast_possible_truncation)]
+            let expected_viewed = [
+                (f64::from(before[0]) + 2.0) as f32,
+                (f64::from(before[1]) - 1.0) as f32,
+                before[2],
+            ];
+            assert_eq!(viewed, expected_viewed);
+            assert!(
+                engine
+                    .borrow()
+                    .stage()
+                    .placement(mob)
+                    .expect("live")
+                    .is_identity(),
+                "an attached view receives affine writes in-place"
+            );
+            drop(data);
+
+            engine.borrow_mut().stage_mut().shift(mob, [1.0, 0.0, 0.0]);
+            assert!(
+                !engine
+                    .borrow()
+                    .stage()
+                    .placement(mob)
+                    .expect("live")
+                    .is_identity(),
+                "without a view, motion stays in the placement channel"
+            );
+            let read: Vec<f32> = parent
+                .call_method1("get_field", ("point", 0))
+                .expect("world-space field read")
+                .extract()
+                .expect("f32 point");
+            #[allow(clippy::cast_possible_truncation)]
+            let expected_read = [(f64::from(viewed[0]) + 1.0) as f32, viewed[1], viewed[2]];
+            assert_eq!(read, expected_read);
+            assert!(
+                engine
+                    .borrow()
+                    .stage()
+                    .placement(mob)
+                    .expect("live")
+                    .is_identity(),
+                "an API read synchronizes placement back to RecordBuffer"
+            );
         });
     }
 }

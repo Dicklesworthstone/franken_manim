@@ -29,6 +29,7 @@ use crate::StageError;
 use crate::bbox::BboxCache;
 use crate::mobject::Mobject;
 use crate::persist::{UpdaterIdentity, UpdaterKindTag};
+use crate::placement::Placement;
 use crate::record::RecordBuffer;
 use crate::shape::ShapeSlot;
 use crate::uniforms::Uniforms;
@@ -127,8 +128,11 @@ pub struct UpdaterSlot {
 /// family cache invalidates correctly.
 pub struct Entry {
     /// The per-object record data (fm-cus layers the full RecordBuffer
-    /// surface onto this).
+    /// surface onto this). Its `point` field is object-space geometry;
+    /// [`Entry::placement`] carries object→world motion independently.
     pub buffer: RecordBuffer,
+    placement: Placement,
+    placement_revision: u64,
     submobjects: Vec<Mob>,
     parents: Vec<Mob>,
     updaters: Vec<UpdaterSlot>,
@@ -176,6 +180,8 @@ impl Entry {
     fn from_data(buffer: RecordBuffer) -> Self {
         Self {
             buffer,
+            placement: Placement::IDENTITY,
+            placement_revision: 0,
             submobjects: Vec::new(),
             parents: Vec::new(),
             updaters: Vec::new(),
@@ -204,6 +210,27 @@ impl Entry {
     /// `mobject.uniforms` directly).
     pub fn uniforms_mut(&mut self) -> &mut Uniforms {
         &mut self.uniforms
+    }
+
+    /// This entry's object→world affine placement (§10.8).
+    #[must_use]
+    pub fn placement(&self) -> Placement {
+        self.placement
+    }
+
+    /// Monotonic revision of [`Entry::placement`].
+    #[must_use]
+    pub fn placement_revision(&self) -> u64 {
+        self.placement_revision
+    }
+
+    pub(crate) fn set_placement(&mut self, placement: Placement) -> bool {
+        if self.placement.same_bits(placement) {
+            return false;
+        }
+        self.placement = placement;
+        self.placement_revision = self.placement_revision.wrapping_add(1);
+        true
     }
 
     pub(crate) fn shape(&self) -> ShapeSlot {
@@ -279,6 +306,8 @@ impl Snapshot {
 
 pub(crate) struct SnapshotEntry {
     pub(crate) buffer: RecordBuffer,
+    pub(crate) placement: Placement,
+    pub(crate) placement_revision: u64,
     pub(crate) submobjects: Vec<Mob>,
     pub(crate) parents: Vec<Mob>,
     pub(crate) updaters: Vec<UpdaterSlot>,
@@ -917,6 +946,8 @@ impl Stage {
             };
             let new_entry = Entry {
                 buffer,
+                placement: entry.placement,
+                placement_revision: 0,
                 submobjects: entry.submobjects.clone(), // remapped below
                 parents: entry.parents.clone(),         // remapped below
                 updaters: entry.updaters.clone(),       // by reference
@@ -1076,10 +1107,11 @@ impl Stage {
             if a == b {
                 continue;
             }
-            let (src, uniforms, z_index, tracker) = {
+            let (src, placement, uniforms, z_index, tracker) = {
                 let e2 = self.get(b).expect("prechecked");
                 (
                     e2.buffer.snapshot_clone(),
+                    e2.placement,
                     e2.uniforms,
                     e2.z_index,
                     e2.tracker,
@@ -1089,6 +1121,7 @@ impl Stage {
             if !e1.buffer.assign_from(&src) {
                 return Err(StageError::SchemaMismatch); // unreachable: prechecked
             }
+            e1.set_placement(placement);
             e1.uniforms = uniforms;
             e1.z_index = z_index;
             e1.tracker = tracker;
@@ -1108,6 +1141,7 @@ impl Stage {
             && entry.shape.point_revision == entry.buffer.field_revision("point")
             && !entry.buffer.writable_view_affects("point");
         let mut copied = Entry::from_data(entry.buffer.deep_clone());
+        copied.placement = entry.placement;
         copied.shape = ShapeSlot {
             tag: entry.shape.tag,
             point_revision: hint_was_live
@@ -1579,6 +1613,8 @@ impl Stage {
                                         .flatten(),
                                 },
                                 buffer,
+                                placement: entry.placement,
+                                placement_revision: entry.placement_revision,
                                 submobjects: entry.submobjects.clone(),
                                 parents: entry.parents.clone(),
                                 updaters: entry.updaters.clone(),
@@ -1618,6 +1654,8 @@ impl Stage {
                 generation: *generation,
                 entry: entry.as_ref().map(|e| Entry {
                     buffer: e.buffer.snapshot_clone(),
+                    placement: e.placement,
+                    placement_revision: e.placement_revision,
                     submobjects: e.submobjects.clone(),
                     parents: e.parents.clone(),
                     updaters: e.updaters.clone(),

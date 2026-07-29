@@ -28,7 +28,7 @@
 //!   `fmn_render::stroke`; a golden is a rasterized frame, and there was no
 //!   engine to rasterize one, so fm-oac closed by handing the item here.
 //! - **`fills.v1`** — the same for §10.2: flat and gradient fills, a winding
-//!   hole, the hinted disc and rectangle routes, the **unhinted** general path,
+//!   hole, the hinted disc and rectangle routes, the general fill path,
 //!   a self-intersecting pentagram, and the inner border.
 //! - **`composite.v1`** — the frame that stands where G0-6's does. It carries
 //!   what fm-zn9 named — gradient fills, a winding hole, joins, a tapered
@@ -55,7 +55,7 @@ use fmn_render::engine::{
     FAST_VISUAL_BUDGET_V1_MIN_SSIM, FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, FrameConfig, FrameJob,
     Tier, encode_frame, journal_digest,
 };
-use fmn_render::fill::MonoTable;
+use fmn_render::fill::{FillKernel, MonoTable, instance_translation};
 use fmn_render::plan::RenderPlan;
 use std::path::PathBuf;
 
@@ -806,25 +806,57 @@ fn the_corpus_actually_exercises_what_it_claims() {
             .any(|s| s.fill_border_width > 0.0),
         "no inner border, so ADR-0011's band is untested"
     );
-    let hinted = plan
+    // Measure the route the frame job actually takes, rather than treating
+    // every retained shape hint as a specialized fill kernel. In particular, a
+    // closed polyline is a useful durable classification for binning and
+    // strokes, but `FillKernel::select` correctly sends its fill through the
+    // general winding solver. fm-7if made this distinction observable by
+    // preserving a translated rectangle's `Rect` hint instead of rewriting its
+    // points and accidentally demoting it to `General`.
+    let routes: Vec<_> = plan
         .shapes()
-        .shapes()
+        .instances()
         .iter()
-        .filter(|s| !s.hint.is_general())
+        .map(|instance| {
+            let shape = plan
+                .shapes()
+                .shape(instance.shape)
+                .expect("instance names a compiled shape");
+            let first = shape.first_segment as usize;
+            let end = first + shape.segment_count as usize;
+            let segments = &plan.segments()[first..end];
+            let kernel = if instance.hint_unsafe || !instance.placement.is_translation() {
+                FillKernel::General
+            } else {
+                FillKernel::select(
+                    shape,
+                    segments,
+                    cfg.map,
+                    instance_translation(instance, cfg.map),
+                )
+            };
+            (shape.hint, kernel)
+        })
+        .collect();
+    let specialized = routes
+        .iter()
+        .filter(|(_, kernel)| !matches!(kernel, FillKernel::General))
         .count();
-    assert!(hinted >= 2, "the hinted fill routes are not exercised");
+    assert!(
+        specialized >= 2,
+        "the specialized fill routes are not exercised: {routes:?}"
+    );
     // And the general machinery, which is easy to lose: at this scale every
-    // `Circle` is inside the hint budget, so without a deliberately unhinted
-    // shape the corpus would exercise §10.2's centrepiece almost not at all.
-    let general = plan
-        .shapes()
-        .shapes()
+    // `Circle` is inside the hint budget. The closed-polyline pentagram and the
+    // multi-subpath annulus must therefore both exercise §10.2's centrepiece.
+    let general = routes
         .iter()
-        .filter(|s| s.hint.is_general())
+        .filter(|(_, kernel)| matches!(kernel, FillKernel::General))
         .count();
     assert!(
         general >= 2,
-        "the general quadratic fill is barely exercised: {general} unhinted shapes"
+        "the general quadratic fill is barely exercised: {general} instances; \
+         retained hint/kernel routes: {routes:?}"
     );
 
     let mut plan = RenderPlan::new();

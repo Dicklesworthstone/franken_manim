@@ -45,11 +45,8 @@ fn pieces_of(stage: &Stage, mob: Mob) -> Vec<Mob> {
 fn all_points(stage: &Stage, mob: Mob) -> Vec<f64> {
     let mut out = Vec::new();
     for member in stage.family(mob) {
-        if let Some(column) = stage
-            .get(member)
-            .and_then(|e| e.buffer.read_column("point"))
-        {
-            out.extend(column.iter().map(|&v| f64::from(v)));
+        if let Some(points) = stage.get_points(member) {
+            out.extend(points.into_iter().flatten());
         }
     }
     out

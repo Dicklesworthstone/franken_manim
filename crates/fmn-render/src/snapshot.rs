@@ -11,8 +11,8 @@
 //!
 //! **In:** everything that decides pixels — segment control points and their
 //! arc-length spans, hull bounds, the primitive hint, every interned style
-//! field, and the painter-ordered instance list with its shape, style, offset
-//! and order.
+//! field, and the painter-ordered instance list with its shape, style, affine
+//! placement and order.
 //!
 //! **Out: handles.** A `Mob` is `(index, generation)` into a slot arena, so it
 //! encodes *allocation history* rather than content — insert an unrelated
@@ -44,7 +44,7 @@ use fmn_hash::{Digest, Schema, Writer};
 /// Bumping the minor version is how a *compatible* IR extension announces
 /// itself; the major version is for a reshape. Either way the digest moves, and
 /// the golden it moves is adjudicated rather than re-blessed.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 1);
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 2);
 
 /// Serialize a plan canonically.
 ///
@@ -121,7 +121,7 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
         w.put_u32(i.shape);
         w.put_u32(i.style);
         w.put_u32(i.order);
-        for c in i.offset {
+        for c in i.placement.coefficients() {
             w.put_f64(c);
         }
     }
@@ -193,10 +193,11 @@ pub fn describe(plan: &RenderPlan) -> String {
         );
     }
     for inst in plan.shapes().instances() {
+        let placement = inst.placement.coefficients();
         let _ = writeln!(
             out,
-            "  draw {}: shape {} style {} at [{:.4},{:.4},{:.4}]",
-            inst.order, inst.shape, inst.style, inst.offset[0], inst.offset[1], inst.offset[2],
+            "  draw {}: shape {} style {} placement {:?}",
+            inst.order, inst.shape, inst.style, placement,
         );
     }
     out
@@ -306,8 +307,8 @@ mod tests {
     ///
     /// **Moved once, 2026-07-25 (fm-tg6).** Compiled outlines became
     /// shape-local: the circle's bounds went from `[29,-1]..[31,1]` to
-    /// `[-2,-1]..[0,1]`, and its instance offset `[31,0,0]` reconstructs the
-    /// original exactly. That was a *fix* — `shape_digest` had always excluded
+    /// `[-2,-1]..[0,1]`, and its instance placement reconstructs the original
+    /// exactly. That was a *fix* — `shape_digest` had always excluded
     /// position, so storing absolute points meant every copy of an interned
     /// outline rendered wherever the first copy happened to be. The golden is
     /// what surfaced it as a decision rather than a silent difference.
@@ -318,7 +319,13 @@ mod tests {
     /// Lumen's retained style row. The dump above adjudicates the fixture's
     /// default values; dedicated sensitivity tests move the digest when one
     /// changes.
-    const FIXTURE_DIGEST: &str = "bbf8e9c59a7a6ea6e7cbbc904b4bccbe98c0cbdc719e82b75d18f6524ab53e66";
+    ///
+    /// **Moved again, 2026-07-29 (fm-7if).** Snapshot schema 1.2 replaces
+    /// each instance's translation-only offset with its canonical 3x4 affine
+    /// placement. The adjudication dump retains the same shapes, styles and
+    /// translations; the additional identity coefficients establish the
+    /// independent transform-revision channel used by Marionette and Lumen.
+    const FIXTURE_DIGEST: &str = "ec451e59522c46040a2b69d01725eb663991f91c7390935a949756f3c17c3335";
 
     #[test]
     fn the_fixture_ir_is_bit_locked() {
@@ -369,6 +376,27 @@ mod tests {
         let mut plan2 = RenderPlan::new();
         plan2.sync(&stage2, 0);
         assert_ne!(digest(&plan2).expect("encodes"), before);
+    }
+
+    #[test]
+    fn the_snapshot_moves_when_only_the_placement_moves() {
+        let stage = fixture();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let before = digest(&plan).expect("encodes");
+
+        let mut moved = fixture();
+        let mob = moved.draw_plan().items()[0].mob;
+        let point_revision = moved.get(mob).expect("live").buffer.field_revision("point");
+        moved.shift(mob, [3.0, -2.0, 0.0]);
+        assert_eq!(
+            moved.get(mob).expect("live").buffer.field_revision("point"),
+            point_revision
+        );
+        let mut moved_plan = RenderPlan::new();
+        moved_plan.sync(&moved, 0);
+
+        assert_ne!(digest(&moved_plan).expect("encodes"), before);
     }
 
     #[test]

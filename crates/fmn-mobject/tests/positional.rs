@@ -188,15 +188,7 @@ fn apply(stage: &mut Stage, name: &str, h: &[Mob]) {
 }
 
 fn own_points(stage: &Stage, mob: Mob) -> Vec<Vec3> {
-    let col = stage
-        .get(mob)
-        .and_then(|e| e.buffer.read_column("point"))
-        .unwrap_or_default();
-    col.as_chunks::<3>()
-        .0
-        .iter()
-        .map(|c| [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])
-        .collect()
+    stage.get_points(mob).unwrap_or_default()
 }
 
 fn close(a: Vec3, b: Vec3, ctx: &str) {
@@ -236,4 +228,120 @@ fn positional_parity_corpus() {
         close(bb.mid, s.bbox[1], &format!("{} bbox.mid", s.name));
         close(bb.max, s.bbox[2], &format!("{} bbox.max", s.name));
     }
+}
+
+#[test]
+fn affine_motion_has_an_independent_revision_and_object_space_buffer() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[
+        [0.0, 0.0, 0.0],
+        [1.0, 0.5, 0.0],
+        [2.0, 1.0, 0.0],
+    ]));
+    let object_points = stage.get_object_points(mob).unwrap();
+    let point_revision = stage
+        .get(mob)
+        .unwrap()
+        .buffer
+        .field_revision("point")
+        .unwrap();
+    let placement_revision = stage.placement_revision(mob).unwrap();
+
+    stage.shift(mob, [5.0, -2.0, 0.25]);
+    assert_eq!(stage.get_object_points(mob).unwrap(), object_points);
+    assert_eq!(
+        stage.get(mob).unwrap().buffer.field_revision("point"),
+        Some(point_revision)
+    );
+    assert!(stage.placement_revision(mob).unwrap() > placement_revision);
+    assert_eq!(
+        stage.get_points(mob).unwrap(),
+        vec![[5.0, -2.0, 0.25], [6.0, -1.5, 0.25], [7.0, -1.0, 0.25],]
+    );
+
+    stage.rotate(
+        mob,
+        std::f64::consts::FRAC_PI_2,
+        [0.0, 0.0, 1.0],
+        Some([5.0, -2.0, 0.25]),
+        None,
+    );
+    stage.scale_about(mob, 2.0, Some([5.0, -2.0, 0.25]), None);
+    assert_eq!(
+        stage.get_object_points(mob).unwrap(),
+        object_points,
+        "rotation and scale are placement edits too"
+    );
+    assert_eq!(
+        stage.get(mob).unwrap().buffer.field_revision("point"),
+        Some(point_revision)
+    );
+}
+
+#[test]
+fn affine_motion_stays_visible_through_an_existing_zero_copy_view() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]));
+    let view = stage.get_mut(mob).expect("live").buffer.export_view(false);
+
+    stage.shift(mob, [5.0, -1.0, 0.25]);
+
+    assert_eq!(view.read(0, "point"), Some(vec![6.0, 1.0, 0.25]));
+    assert_eq!(view.read(1, "point"), Some(vec![8.0, 3.0, 0.25]));
+    assert!(
+        stage.placement(mob).unwrap().is_identity(),
+        "a pinned authoritative buffer receives the affine write directly"
+    );
+}
+
+#[test]
+fn an_arbitrary_point_map_bakes_the_current_placement_once() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    stage.shift(mob, [3.0, 4.0, 0.0]);
+    let before = stage
+        .get(mob)
+        .unwrap()
+        .buffer
+        .field_revision("point")
+        .unwrap();
+
+    stage.apply_points_function(
+        mob,
+        |point| [point[0] * 2.0, point[1] - 1.0, point[2]],
+        None,
+        None,
+    );
+
+    assert!(stage.placement(mob).unwrap().is_identity());
+    assert_eq!(stage.get_points(mob).unwrap(), vec![[8.0, 5.0, 0.0]]);
+    assert!(
+        stage
+            .get(mob)
+            .unwrap()
+            .buffer
+            .field_revision("point")
+            .unwrap()
+            > before
+    );
+}
+
+#[test]
+fn copies_and_in_memory_snapshots_carry_placement_state() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    stage.shift(mob, [3.0, -1.0, 0.5]);
+    stage.stretch_about(mob, 2.0, 0, Some([4.0, 1.0, 0.5]), None);
+    let placement = stage.placement(mob).unwrap();
+    let world_points = stage.get_points(mob).unwrap();
+
+    let copy = stage.copy_family(mob).unwrap();
+    assert!(stage.placement(copy).unwrap().same_bits(placement));
+    assert_eq!(stage.get_points(copy).unwrap(), world_points);
+
+    let snapshot = stage.snapshot();
+    stage.shift(mob, [100.0, 0.0, 0.0]);
+    stage.restore(&snapshot);
+    assert!(stage.placement(mob).unwrap().same_bits(placement));
+    assert_eq!(stage.get_points(mob).unwrap(), world_points);
 }

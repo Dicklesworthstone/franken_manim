@@ -33,6 +33,7 @@ pub mod dynamics;
 pub mod mobject;
 pub mod order;
 pub mod persist;
+pub mod placement;
 pub mod positional;
 pub mod record;
 pub mod shape;
@@ -48,6 +49,7 @@ pub use persist::{
     DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,
     SceneState, UpdaterIdentity, UpdaterKindTag, UpdaterManifest,
 };
+pub use placement::Placement;
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
 pub use shape::ShapeTag;

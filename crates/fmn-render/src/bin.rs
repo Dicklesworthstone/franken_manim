@@ -56,6 +56,7 @@ use crate::hint::Hint;
 use crate::plan::{PlanIdentity, RenderPlan};
 use crate::table::{Instance, Shape};
 use fmn_core::types::Vec3;
+use fmn_mobject::Placement;
 
 /// The command touches the tile's edge: coverage must be evaluated.
 pub const CLASS_PARTIAL: u32 = 0;
@@ -93,16 +94,17 @@ impl Default for ScreenMap {
 }
 
 impl ScreenMap {
-    /// Map a **shape-local** point placed by an instance offset, to pixels.
+    /// Map a **shape-local** point through its instance placement to pixels.
     ///
     /// Both arguments are required, and that is the point: compiled outlines are
     /// shape-local so that instancing can share them, so nothing downstream may
-    /// read a shape's coordinates without the offset that places it.
+    /// read a shape's coordinates without the affine map that places it.
     #[must_use]
-    pub fn place(&self, p: Vec3, offset: Vec3) -> [f64; 2] {
+    pub fn place(&self, p: Vec3, placement: Placement) -> [f64; 2] {
+        let world = placement.apply_point(p);
         [
-            self.origin[0] + (p[0] + offset[0]) * self.scale,
-            self.origin[1] + (p[1] + offset[1]) * self.scale,
+            self.origin[0] + world[0] * self.scale,
+            self.origin[1] + world[1] * self.scale,
         ]
     }
 }
@@ -577,19 +579,24 @@ fn screen_aabb(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> Option<[f6
     if shape.segment_count == 0 {
         return None;
     }
-    // Shape-local bounds, placed by the instance. Reading `shape.bounds`
-    // without `inst.offset` is the bug this signature exists to prevent: every
-    // copy of an interned outline would bin at the first copy's position.
+    // An affine image of an axis-aligned box reaches each screen-axis extremum
+    // at a corner. Check all eight because a 3D linear part may mix z into x/y.
     let b = shape.bounds;
-    let lo = map.place(b.min, inst.offset);
-    let hi = map.place(b.max, inst.offset);
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for x in [b.min[0], b.max[0]] {
+        for y in [b.min[1], b.max[1]] {
+            for z in [b.min[2], b.max[2]] {
+                let point = map.place([x, y, z], inst.placement);
+                for axis in 0..2 {
+                    lo[axis] = lo[axis].min(point[axis]);
+                    hi[axis] = hi[axis].max(point[axis]);
+                }
+            }
+        }
+    }
     let pad = stroke_expansion(plan, inst, map);
-    Some([
-        lo[0].min(hi[0]) - pad,
-        lo[1].min(hi[1]) - pad,
-        lo[0].max(hi[0]) + pad,
-        lo[1].max(hi[1]) + pad,
-    ])
+    Some([lo[0] - pad, lo[1] - pad, hi[0] + pad, hi[1] + pad])
 }
 
 /// How far beyond its outline a draw's stroke can reach, in screen pixels.
@@ -636,8 +643,8 @@ pub fn covers_tile(plan: &RenderPlan, inst: &Instance, map: ScreenMap, rect: [f6
     // A writable point view can change the outline without an engine callback.
     // The retained row may still carry a hint interned before that view existed,
     // so only the general predicate is admissible for its lifetime.
-    if inst.hint_unsafe {
-        return covers_convex(plan, shape, map, inst.offset, grown);
+    if inst.hint_unsafe || !inst.placement.is_translation() {
+        return covers_convex(plan, shape, map, inst.placement, grown);
     }
     match shape.hint {
         Hint::Rect {
@@ -645,7 +652,7 @@ pub fn covers_tile(plan: &RenderPlan, inst: &Instance, map: ScreenMap, rect: [f6
             width,
             height,
         } => {
-            let c = map.place(center, inst.offset);
+            let c = map.place(center, inst.placement);
             let hw = 0.5 * width * map.scale;
             let hh = 0.5 * height * map.scale;
             grown[0] >= c[0] - hw
@@ -662,7 +669,7 @@ pub fn covers_tile(plan: &RenderPlan, inst: &Instance, map: ScreenMap, rect: [f6
             // Conservatively the inscribed rectangle, shrunk by the corner
             // radius on every side: any point inside that is inside the rounded
             // rectangle, whatever the corners do.
-            let c = map.place(center, inst.offset);
+            let c = map.place(center, inst.placement);
             let hw = (0.5 * width - corner_radius).max(0.0) * map.scale;
             let hh = (0.5 * height - corner_radius).max(0.0) * map.scale;
             grown[0] >= c[0] - hw
@@ -671,7 +678,7 @@ pub fn covers_tile(plan: &RenderPlan, inst: &Instance, map: ScreenMap, rect: [f6
                 && grown[3] <= c[1] + hh
         }
         Hint::Circle { center, radius } | Hint::Dot { center, radius } => {
-            let c = map.place(center, inst.offset);
+            let c = map.place(center, inst.placement);
             let r = radius * map.scale;
             // A rectangle is inside a disc iff its farthest corner is.
             let dx = (c[0] - grown[0]).abs().max((c[0] - grown[2]).abs());
@@ -679,7 +686,7 @@ pub fn covers_tile(plan: &RenderPlan, inst: &Instance, map: ScreenMap, rect: [f6
             dx * dx + dy * dy <= r * r
         }
         Hint::Polyline { closed: true } | Hint::General => {
-            covers_convex(plan, shape, map, inst.offset, grown)
+            covers_convex(plan, shape, map, inst.placement, grown)
         }
         _ => false,
     }
@@ -696,7 +703,7 @@ fn covers_convex(
     plan: &RenderPlan,
     shape: &Shape,
     map: ScreenMap,
-    offset: Vec3,
+    placement: Placement,
     rect: [f64; 4],
 ) -> bool {
     let first = shape.first_segment as usize;
@@ -714,7 +721,7 @@ fn covers_convex(
 
     let poly: Vec<[f64; 2]> = segs
         .iter()
-        .flat_map(|s| [map.place(s.p0, offset), map.place(s.p1, offset)])
+        .flat_map(|s| [map.place(s.p0, placement), map.place(s.p1, placement)])
         .collect();
     let n = poly.len();
     let mut sign = 0i32;
@@ -1364,8 +1371,8 @@ mod tests {
         // coordinates. Two 60x60 rectangles at (40,40) and (200,200) therefore
         // shared a shape whose bounds were the first one's, so the second binned
         // on top of the first and an opaque cover pruned a draw that was
-        // nowhere near it. Outlines are shape-local now, and the instance offset
-        // places them.
+        // nowhere near it. Outlines are shape-local now, and the instance
+        // placement puts each occurrence in world space.
         let stage = scene(&[
             (40.0, 40.0, 60.0, 60.0, 1.0),
             (200.0, 200.0, 60.0, 60.0, 1.0),

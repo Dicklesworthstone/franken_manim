@@ -526,6 +526,7 @@ fn update_rate_info_sets_explicit_zeros() {
 fn animate_chain_plays_source_to_target() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);
+    let point_revision = stage.get(mob).expect("live").buffer.field_revision("point");
     let builder = mob
         .animate()
         .set_anim_args(AnimateArgs {
@@ -543,10 +544,101 @@ fn animate_chain_plays_source_to_target() {
     );
     anim.interpolate(&mut stage, 0.5);
     assert!((stage.get_center(mob)[0] - 1.0).abs() < 1e-5);
+    assert_eq!(
+        stage.get(mob).expect("live").buffer.field_revision("point"),
+        point_revision,
+        "a shift animation must edit placement, not object geometry"
+    );
     anim.interpolate(&mut stage, 1.0);
     assert!((stage.get_center(mob)[0] - 2.0).abs() < 1e-5);
     anim.finish(&mut stage);
     assert!((stage.get_center(mob)[0] - 2.0).abs() < 1e-5);
+}
+
+#[test]
+fn animate_scale_keeps_object_points_and_evaluates_the_endpoint_in_f64() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.shift(mob, [0.37, -0.22, 0.0]);
+    let object_points = stage.get_object_points(mob).expect("points");
+    let start_points = stage.get_points(mob).expect("points");
+    let pivot = stage.get_center(mob);
+    let point_revision = stage.get(mob).expect("live").buffer.field_revision("point");
+    let factor = 0.89;
+    let builder = mob
+        .animate()
+        .set_anim_args(AnimateArgs {
+            rate_func: Some(rate::linear),
+            ..AnimateArgs::default()
+        })
+        .and_then(|builder| builder.scale(factor))
+        .expect("chain records");
+
+    let mut anim = prepare_animation(builder, &mut stage).expect("prepares");
+    anim.begin(&mut stage).expect("begin");
+    anim.interpolate(&mut stage, 1.0);
+
+    assert_eq!(stage.get_object_points(mob).unwrap(), object_points);
+    assert_eq!(
+        stage.get(mob).expect("live").buffer.field_revision("point"),
+        point_revision,
+        "a scale animation must edit placement, not object geometry"
+    );
+    let expected: Vec<_> = start_points
+        .iter()
+        .map(|point| {
+            [
+                pivot[0] + factor * (point[0] - pivot[0]),
+                pivot[1] + factor * (point[1] - pivot[1]),
+                pivot[2] + factor * (point[2] - pivot[2]),
+            ]
+        })
+        .collect();
+    let actual = stage.get_points(mob).expect("points");
+    for (actual, expected) in actual.iter().zip(&expected) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= TOL, "{actual} vs {expected}");
+        }
+    }
+    assert!(
+        actual
+            .iter()
+            .flatten()
+            .any(|component| { component.to_bits() != f64::from(*component as f32).to_bits() }),
+        "the endpoint was quantized back through the f32 RecordBuffer"
+    );
+}
+
+#[test]
+fn animate_chain_synchronizes_placement_into_an_existing_live_view() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let view = stage.get_mut(mob).expect("live").buffer.export_view(false);
+    let builder = mob
+        .animate()
+        .set_anim_args(AnimateArgs {
+            rate_func: Some(rate::linear),
+            ..AnimateArgs::default()
+        })
+        .and_then(|builder| builder.shift([2.0, 0.0, 0.0]))
+        .expect("chain records");
+    let mut anim = prepare_animation(builder, &mut stage).expect("prepares");
+    anim.begin(&mut stage).expect("begin");
+
+    anim.interpolate(&mut stage, 0.25);
+    assert_eq!(view.read(0, "point"), Some(vec![0.0, -0.5, 0.0]));
+    assert!(
+        stage.placement(mob).expect("live").is_identity(),
+        "a pinned authoritative buffer carries the frame's world points"
+    );
+
+    anim.interpolate(&mut stage, 0.75);
+    assert_eq!(view.read(0, "point"), Some(vec![1.0, -0.5, 0.0]));
+    assert!(
+        stage.placement(mob).expect("live").is_identity(),
+        "successive frames must derive from frozen endpoints, not accumulate"
+    );
+    anim.finish(&mut stage);
 }
 
 #[test]

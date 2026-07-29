@@ -18,20 +18,11 @@
 //!
 //! ## Where the numbers come from, and where they do not
 //!
-//! Marionette already carries per-field revision counters on the `RecordBuffer`
-//! (`record.rs`), bumped on every write and *preserved* across copy-on-write
-//! unsharing, which is what makes laziness survive snapshots. Five of the seven
-//! axes read directly off that machinery plus the family and the uniforms. Two
-//! do not, and saying so precisely is more useful than a plausible number:
+//! Marionette carries per-field revision counters on the `RecordBuffer`
+//! (`record.rs`) plus fm-7if's independent affine placement revision on every
+//! entry. Five of the seven axes read directly off that machinery plus the
+//! family and uniforms. Two are produced elsewhere:
 //!
-//! - **`Transform` is currently aliased to `Geometry`.** Marionette applies
-//!   transforms by writing points, so a translation bumps the point revision and
-//!   is indistinguishable from a reshape. §10.8's example — "a translation does
-//!   not recompute an object-space arc-length table" — therefore does not yet
-//!   pay, and it will not until Marionette carries an object-space buffer plus a
-//!   separate transform. That is filed, not faked: **fm-7if**. Everything
-//!   downstream is written against the axis rather than against the point
-//!   revision, so when the channel appears, no consumer changes.
 //! - **`Image` has no Marionette producer yet** — there are no image mobjects,
 //!   so its revision remains an explicit input supplied by §12's
 //!   `ImageMobject`.
@@ -64,9 +55,6 @@ pub enum Axis {
     /// Point positions in object space.
     Geometry,
     /// The object→world placement.
-    ///
-    /// **Aliased to [`Axis::Geometry`] today** — see the module docs and
-    /// fm-7if.
     Transform,
     /// Colours, widths, and the per-object uniforms that reach a shader.
     Style,
@@ -208,6 +196,7 @@ impl Revisions {
             field("joint_angle"),
             field("base_normal"),
         ]);
+        let transform = mix(&[generation, entry.placement_revision()]);
 
         // Style: everything that reaches a shader without moving a vertex,
         // including the per-object uniforms (§8.5 makes those part of the batch
@@ -231,8 +220,7 @@ impl Revisions {
         Some(Revisions {
             topology,
             geometry,
-            // Aliased, deliberately and visibly. See the module docs / fm-7if.
-            transform: geometry,
+            transform,
             style,
             order,
             image: 0,
@@ -432,10 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_point_touches_geometry_and_transform_together() {
-        // And *only* those two, which is the honest statement of today's
-        // aliasing: `transform` moves with `geometry` because Marionette applies
-        // transforms by writing points (fm-7if).
+    fn moving_an_object_space_point_touches_geometry_alone() {
         let (mut stage, mob) = one_mobject();
         let before = read(&stage, mob);
         let entry = stage.get_mut(mob).expect("live");
@@ -445,7 +430,22 @@ mod tests {
             .then_some(())
             .expect("field exists");
         let after = read(&stage, mob);
-        assert_eq!(after.diff(&before), vec![Axis::Geometry, Axis::Transform]);
+        assert_eq!(after.diff(&before), vec![Axis::Geometry]);
+    }
+
+    #[test]
+    fn translating_touches_transform_alone() {
+        let (mut stage, mob) = one_mobject();
+        let before = read(&stage, mob);
+        let point_revision = stage.get(mob).expect("live").buffer.field_revision("point");
+        stage.shift(mob, [3.0, -2.0, 0.5]);
+        let after = read(&stage, mob);
+        assert_eq!(after.diff(&before), vec![Axis::Transform]);
+        assert_eq!(
+            stage.get(mob).expect("live").buffer.field_revision("point"),
+            point_revision,
+            "placement must not masquerade as object-space geometry"
+        );
     }
 
     #[test]
@@ -564,6 +564,13 @@ mod tests {
 
         dep.refresh(moved);
         assert!(!dep.is_stale(&moved));
+
+        stage.shift(mob, [4.0, 0.0, 0.0]);
+        let translated = read(&stage, mob);
+        assert!(
+            !dep.is_stale(&translated),
+            "placement must not stale a geometry-only artifact"
+        );
     }
 
     #[test]

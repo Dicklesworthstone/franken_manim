@@ -38,10 +38,10 @@
 
 use crate::hint::Hint;
 use fmn_core::types::Vec3;
-use fmn_geom::arclength::ArcLengthTable;
+use fmn_geom::arclength::{ArcLengthTable, quadratic_arc_length};
 use fmn_geom::quadpath::QuadPath;
 use fmn_hash::Digest;
-use fmn_mobject::{BoundingBox, JointType, Mob, Uniforms};
+use fmn_mobject::{BoundingBox, JointType, Mob, Placement, Uniforms};
 use std::collections::HashMap;
 
 /// One quadratic segment of a compiled path, in **object space**.
@@ -55,7 +55,11 @@ use std::collections::HashMap;
 /// interpolates stroke width and colour by arc length, and §7.3's arc-length
 /// layer is transcendental-dense and branchy — the wrong shape for a per-pixel
 /// kernel and the right shape for the host (G0-8 finding F3). The span is a
-/// function of geometry alone, so it survives a restyle and a transform.
+/// function of object-space geometry alone, so it survives a restyle and any
+/// translation. A non-translation placement derives transformed segments once
+/// per frame and reparameterizes their spans: non-uniform scale and shear
+/// change relative arc lengths even though the retained coefficients remain
+/// reusable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
     /// Start anchor.
@@ -68,6 +72,38 @@ pub struct Segment {
     pub s0: f64,
     /// Normalized arc length at `t = 1`.
     pub s1: f64,
+}
+
+/// Recompute normalized path arc-length spans after transforming coefficients.
+///
+/// The retained [`Segment`] table is object-space geometry. Rotation and
+/// uniform scale preserve its normalized spans mathematically, but a general
+/// affine placement does not: stretch and shear change the relative lengths of
+/// differently oriented curves. Frame-local transformed segments therefore
+/// pass through this once before stroke ramps or gradient stations consume
+/// `s0/s1`.
+pub(crate) fn reparameterize_arc_length(segments: &mut [Segment]) {
+    let mut total = 0.0;
+    for segment in &mut *segments {
+        let length = quadratic_arc_length(segment.p0, segment.p1, segment.p2);
+        segment.s0 = 0.0;
+        segment.s1 = length;
+        total += length;
+    }
+    if total <= 0.0 || !total.is_finite() {
+        for segment in segments {
+            segment.s0 = 0.0;
+            segment.s1 = 0.0;
+        }
+        return;
+    }
+    let mut accumulated = 0.0;
+    for segment in segments {
+        let length = segment.s1;
+        segment.s0 = accumulated / total;
+        accumulated += length;
+        segment.s1 = accumulated / total;
+    }
 }
 
 /// The style a compiled path draws under.
@@ -261,8 +297,8 @@ impl StyleTable {
 /// under. That is not tidiness, it is what makes interning *correct*. Store the
 /// points where the first mobject happened to be and every later instance
 /// sharing the outline inherits that position — the interning still dedups, and
-/// the picture is wrong. An instance's placement is [`Instance::offset`], and it
-/// is the only thing that says where the outline goes.
+/// the picture is wrong. An instance's [`Instance::placement`] is the only thing
+/// that says where the outline goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
     /// The content address of the object-space points.
@@ -307,12 +343,7 @@ pub struct Instance {
     /// The mobject this occurrence came from, for the inspector and the journal.
     pub mob: Mob,
     /// Object→world placement.
-    ///
-    /// A translation today, because that is all Marionette can express without
-    /// the transform channel (fm-7if): every other transform is baked into the
-    /// points, which is why they hash differently and do not intern. A full
-    /// matrix here would be a field nothing can fill.
-    pub offset: Vec3,
+    pub placement: Placement,
     /// Painter order: position in the draw sequence.
     pub order: u32,
     /// A fold of this occurrence's seven revision axes at sync time.
@@ -433,8 +464,8 @@ impl ShapeTable {
 ///
 /// **Position is excluded**: the points are hashed relative to the first anchor,
 /// so two copies of one glyph at different places share a compiled shape and
-/// differ only in their [`Instance::offset`]. That is the entire mechanism —
-/// without it, interning would find nothing in a real formula.
+/// differ only in their [`Instance::placement`]. That is the entire mechanism
+/// — without it, interning would find nothing in a real formula.
 #[must_use]
 pub fn shape_digest(points: &[Vec3]) -> Digest {
     const SCHEMA: fmn_hash::Schema = fmn_hash::Schema::new(*b"FMNR", 1, 1, 0);
@@ -750,7 +781,7 @@ mod tests {
                 shape,
                 style: 0,
                 mob,
-                offset: [pts[0][0], pts[0][1], pts[0][2]],
+                placement: Placement::from_translation([pts[0][0], pts[0][1], pts[0][2]]),
                 order: i as u32,
                 revisions: 0,
                 volatile: false,

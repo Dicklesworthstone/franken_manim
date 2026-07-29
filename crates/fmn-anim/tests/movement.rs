@@ -40,16 +40,12 @@ fn line5(stage: &mut Stage) -> Mob {
 }
 
 fn coords(stage: &Stage, mob: Mob, lane: usize) -> Vec<f32> {
+    #[allow(clippy::cast_possible_truncation)]
     stage
-        .get(mob)
+        .get_points(mob)
         .unwrap()
-        .buffer
-        .read_column("point")
-        .unwrap()
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|c| c[lane])
+        .into_iter()
+        .map(|point| point[lane] as f32)
         .collect()
 }
 

@@ -46,16 +46,12 @@ fn line5(stage: &mut Stage) -> Mob {
 }
 
 fn xs_of(stage: &Stage, mob: Mob) -> Vec<f32> {
+    #[allow(clippy::cast_possible_truncation)]
     stage
-        .get(mob)
+        .get_points(mob)
         .unwrap()
-        .buffer
-        .read_column("point")
-        .unwrap()
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|c| c[0])
+        .into_iter()
+        .map(|point| point[0] as f32)
         .collect()
 }
 
