@@ -42,7 +42,7 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb", default-features = false }
 fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8", features = ["bundled-faces"] }
 fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8" }
-ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "d43b3a73988c4070a78fdc8eaa65a6c027b457ae" }
+ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "752d988b04448199d0fdbf645c3361109e3f1805" }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
 fmn-hash = { path = "crates/fmn-hash" }

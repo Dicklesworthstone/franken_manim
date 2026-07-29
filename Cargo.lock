@@ -844,7 +844,7 @@ dependencies = [
 [[package]]
 name = "ft-kernel-metal"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/frankentorch?rev=d43b3a73988c4070a78fdc8eaa65a6c027b457ae#d43b3a73988c4070a78fdc8eaa65a6c027b457ae"
+source = "git+https://github.com/Dicklesworthstone/frankentorch?rev=752d988b04448199d0fdbf645c3361109e3f1805#752d988b04448199d0fdbf645c3361109e3f1805"
 dependencies = [
  "core-graphics-types",
  "foreign-types",
