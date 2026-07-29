@@ -76,7 +76,9 @@ use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
 };
 use crate::plan::RenderPlan;
-use crate::stroke::{self, JoinWedge, half_width_px, stroke_rgba_at, stroke_shade};
+#[cfg(test)]
+use crate::stroke::stroke_shade;
+use crate::stroke::{self, JoinWedge, half_width_px, stroke_rgba_at};
 use crate::table::{Segment, Style};
 pub use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, PremulRgba};
@@ -132,7 +134,7 @@ pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
 /// every pixel. It is deliberately not the crate version: a refactor that cannot
 /// move a bit must not invalidate a manifest, and a one-line change to the AA
 /// profile must.
-pub const RENDERER_VERSION: u32 = 3;
+pub const RENDERER_VERSION: u32 = 4;
 
 /// Boundary-sheet count at which an adaptive cell escalates to 2×2 samples.
 ///
@@ -823,6 +825,8 @@ struct Draw {
     kernel: FillKernel,
     /// The joint overrides; empty for the round settings (ADR-0012).
     joins: Vec<JoinWedge>,
+    /// Per-segment slabs and arc lengths derived for this styled occurrence.
+    stroke: Option<stroke::PreparedStroke>,
     /// The interior colour field — `None` when the fill is flat, which is the
     /// overwhelming majority and the case that must not pay for the field.
     field: Option<GradientField>,
@@ -830,8 +834,6 @@ struct Draw {
     flat_fill: Option<[f32; 4]>,
     /// Screen AABB of the outline hull: rows outside it have zero fill coverage.
     fill_slab: [f64; 4],
-    /// Screen AABB of the stroke, hull plus the widest half-width and the AA band.
-    stroke_slab: [f64; 4],
     /// Does this instance contribute a fill pass at all?
     draws_fill: bool,
     /// Does it contribute a stroke pass?
@@ -1102,6 +1104,8 @@ impl<'a> FrameJob<'a> {
                     FillKernel::select(shape, segs, map, translate)
                 },
                 joins: stroke::join_wedges(segs, &shape.subpath_starts, &style, map, translate),
+                stroke: draws_stroke
+                    .then(|| stroke::PreparedStroke::new(segs, &style, map, translate)),
                 field: if draws_fill && !flat {
                     Some(GradientField::build(segs, map))
                 } else {
@@ -1113,7 +1117,6 @@ impl<'a> FrameJob<'a> {
                     None
                 },
                 fill_slab: hull_slab(shape, map, translate),
-                stroke_slab: stroke_slab(segs, &style, map, translate),
                 draws_fill,
                 draws_stroke,
             }));
@@ -1583,17 +1586,21 @@ impl<'a> FrameJob<'a> {
         x_hi: u32,
         classify: bool,
     ) {
-        if !rec.draws_stroke || row_misses(rec.stroke_slab, py) {
+        let Some(stroke) = rec.stroke.as_ref() else {
+            return;
+        };
+        let slab = stroke.slab();
+        if !rec.draws_stroke || row_misses(slab, py) {
             return;
         }
         let segments = self.segments_of(rec);
         let w = (x_hi - x_lo) as usize;
         for i in 0..w {
             let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
-            if p[0] < rec.stroke_slab[0] || p[0] > rec.stroke_slab[2] {
+            if p[0] < slab[0] || p[0] > slab[2] {
                 continue;
             }
-            let (coverage, s) = stroke_shade(
+            let (coverage, s) = stroke.shade(
                 segments,
                 &rec.joins,
                 &rec.style,
@@ -1651,10 +1658,13 @@ impl<'a> FrameJob<'a> {
         if constant_width && centre_is_saturated && aa_band > std::f64::consts::FRAC_1_SQRT_2 {
             return false;
         }
+        let Some(stroke) = rec.stroke.as_ref() else {
+            return false;
+        };
         for dy in [0.25, 0.75] {
             for dx in [0.25, 0.75] {
                 let p = [f64::from(px) + dx, f64::from(py) + dy];
-                let (coverage, s) = stroke_shade(
+                let (coverage, s) = stroke.shade(
                     segments,
                     &rec.joins,
                     &rec.style,
@@ -1795,11 +1805,11 @@ impl<'a> FrameJob<'a> {
         subcell: Subcell,
         dst: K::Pixel,
     ) -> K::Pixel {
-        if !rec.draws_stroke {
+        let Some(stroke) = rec.stroke.as_ref() else {
             return dst;
-        }
+        };
         let p = subcell.centre();
-        let (coverage, s) = stroke_shade(
+        let (coverage, s) = stroke.shade(
             self.segments_of(rec),
             &rec.joins,
             &rec.style,
@@ -2117,29 +2127,6 @@ fn hull_slab(shape: &crate::table::Shape, map: ScreenMap, translate: [f64; 2]) -
         a[0].max(b[0]),
         a[1].max(b[1]),
     ]
-}
-
-/// The union of a shape's per-segment stroke slabs.
-fn stroke_slab(
-    segments: &[Segment],
-    style: &Style,
-    map: ScreenMap,
-    translate: [f64; 2],
-) -> [f64; 4] {
-    let mut out = [
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    ];
-    for seg in segments {
-        let s = stroke::segment_slab(seg, style, map, translate);
-        out[0] = out[0].min(s[0]);
-        out[1] = out[1].min(s[1]);
-        out[2] = out[2].max(s[2]);
-        out[3] = out[3].max(s[3]);
-    }
-    out
 }
 
 #[cfg(test)]

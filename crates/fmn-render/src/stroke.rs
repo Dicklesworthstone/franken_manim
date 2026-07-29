@@ -65,6 +65,26 @@
 //! which is exactly the coupling §10.8's revision axes exist to avoid. So
 //! [`segment_slab`] computes it per draw from retained data, and it is cheap: a
 //! hull and an add.
+//!
+//! ## Prepared rejection and the SIMD ruling
+//!
+//! fm-4wt.3 found that the engine used only the union slab: every pixel inside
+//! that union still ran the cubic nearest-point solve and both arc-length
+//! evaluations for every segment. [`PreparedStroke`] now derives each segment's
+//! style/placement-dependent slab and geometry-only total arc length once per
+//! draw. The scalar kernel keeps segment order, rejects only provably
+//! zero-coverage segments, and remains bit-identical to the unculled oracle
+//! wherever coverage can change.
+//!
+//! On the committed 512×256 curved-chain benchmark, 8/32/64 segments fell from
+//! 86.63/373.44/770.93 ms to 14.84/28.94/45.95 ms: 5.8×/12.9×/16.8× from
+//! eliminating work. A governed x86-64-v3 `f64x4` prototype then evaluated four
+//! slab admissions together while retaining scalar f64 cubic solves in original
+//! order. Three SIMD sweeps measured 14.60–14.84/28.32–29.46/43.79–44.58 ms
+//! versus scalar sweeps of 14.64–15.02/27.96–28.80/43.43–45.43 ms. That is
+//! noise, not a repeatable tier speedup, so the packing route is deliberately
+//! not retained.
+//! The ill-conditioned distance solve remains f64 exactly as G0-8 ruled.
 
 use crate::bin::ScreenMap;
 use crate::table::{Segment, Style};
@@ -160,9 +180,151 @@ pub fn segment_slab(seg: &Segment, style: &Style, map: ScreenMap, translate: [f6
             hi[k] = hi[k].max(q[k]);
         }
     }
-    let widest = 0.5 * width_px(style.stroke_width, map).max(width_px(style.stroke_width_end, map));
-    let pad = widest + f64::from(style.anti_alias_width);
+    let pad = max_stroke_reach_px(style, map);
     [lo[0] - pad, lo[1] - pad, hi[0] + pad, hi[1] + pad]
+}
+
+/// Maximum screen-space reach beyond the control-polygon hull.
+///
+/// Round and bevelled strokes reach one half-width beyond the centreline. An
+/// admitted miter may reach [`MITER_LIMIT`] half-widths, and the binning and
+/// engine slabs must include that tip before they are allowed to reject a
+/// pixel. The antialiasing band is added in either case.
+#[must_use]
+pub fn max_stroke_reach_px(style: &Style, map: ScreenMap) -> f64 {
+    let widest = 0.5
+        * width_px(style.stroke_width, map)
+            .max(width_px(style.stroke_width_end, map))
+            .max(0.0);
+    let geometric = if style.joint_type == fmn_mobject::JointType::Miter {
+        MITER_LIMIT * widest
+    } else {
+        widest
+    };
+    geometric + f64::from(style.anti_alias_width).max(0.0)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedSegment {
+    slab: [f64; 4],
+    total_arc_length: f64,
+}
+
+/// Per-draw stroke data whose inputs are fixed before a tile is touched.
+///
+/// The retained [`Segment`] remains geometry-only. These values additionally
+/// depend on style, placement, and camera scale, so they belong to the
+/// per-frame draw derivation: one conservative slab and one total arc length
+/// per segment. A pixel outside a segment slab cannot receive coverage from
+/// that segment, which lets the engine avoid its cubic solve without changing a
+/// visible bit.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedStroke {
+    segments: Vec<PreparedSegment>,
+    slab: [f64; 4],
+}
+
+impl PreparedStroke {
+    pub(crate) fn new(
+        segments: &[Segment],
+        style: &Style,
+        map: ScreenMap,
+        translate: [f64; 2],
+    ) -> Self {
+        let mut prepared = Vec::with_capacity(segments.len());
+        let mut slab = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for segment in segments {
+            let segment_slab = segment_slab(segment, style, map, translate);
+            slab[0] = slab[0].min(segment_slab[0]);
+            slab[1] = slab[1].min(segment_slab[1]);
+            slab[2] = slab[2].max(segment_slab[2]);
+            slab[3] = slab[3].max(segment_slab[3]);
+            prepared.push(PreparedSegment {
+                slab: segment_slab,
+                total_arc_length: fmn_geom::arclength::quadratic_arc_length(
+                    segment.p0, segment.p1, segment.p2,
+                ),
+            });
+        }
+        Self {
+            segments: prepared,
+            slab,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn slab(&self) -> [f64; 4] {
+        self.slab
+    }
+
+    fn nearest(
+        &self,
+        segments: &[Segment],
+        style: &Style,
+        map: ScreenMap,
+        translate: [f64; 2],
+        p: [f64; 2],
+    ) -> Option<(f64, f64)> {
+        let scale = map.scale;
+        if scale == 0.0 || segments.is_empty() || segments.len() != self.segments.len() {
+            return None;
+        }
+        let obj = [
+            (p[0] - map.origin[0] - translate[0]) / scale,
+            (p[1] - map.origin[1] - translate[1]) / scale,
+            0.0,
+        ];
+        let mut best = f64::INFINITY;
+        let mut best_s = 0.0;
+        let mut admitted = false;
+        for (segment, prepared) in segments.iter().zip(&self.segments) {
+            if p[0] < prepared.slab[0]
+                || p[0] > prepared.slab[2]
+                || p[1] < prepared.slab[1]
+                || p[1] > prepared.slab[3]
+            {
+                continue;
+            }
+            admitted = true;
+            let (excess, s) =
+                segment_excess_and_s(segment, prepared.total_arc_length, style, map, obj);
+            if excess < best {
+                best = excess;
+                best_s = s;
+            }
+        }
+        admitted.then_some((best, best_s))
+    }
+
+    #[must_use]
+    pub(crate) fn shade(
+        &self,
+        segments: &[Segment],
+        joins: &[JoinWedge],
+        style: &Style,
+        map: ScreenMap,
+        translate: [f64; 2],
+        p: [f64; 2],
+    ) -> (f64, f64) {
+        if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+            return (0.0, 0.0);
+        }
+        match self.nearest(segments, style, map, translate, p) {
+            Some((round, s)) => (
+                aa_coverage(
+                    apply_joins(round, joins, style.joint_type, p),
+                    f64::from(style.anti_alias_width),
+                ),
+                s,
+            ),
+            None => (0.0, 0.0),
+        }
+    }
 }
 
 /// The stroke's **signed excess** at a screen point, in pixels: negative inside
@@ -230,26 +392,39 @@ pub fn stroke_nearest(
     let mut best = f64::INFINITY;
     let mut best_s = 0.0;
     for g in segments {
-        let near = fmn_geom::distance::nearest_on_quadratic(g.p0, g.p1, g.p2, obj);
-        // Arc length at the nearest point, not the parameter: the ramp is
-        // arc-length-parameterized (BN-03), and `t` and `s` differ by exactly the
-        // amount that note exists to talk about.
         let total = fmn_geom::arclength::quadratic_arc_length(g.p0, g.p1, g.p2);
-        let frac = if total > 0.0 {
-            let sub = fmn_geom::bezier::partial_quadratic(&[g.p0, g.p1, g.p2], 0.0, near.t);
-            (fmn_geom::arclength::quadratic_arc_length(sub[0], sub[1], sub[2]) / total)
-                .clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let s = g.s0 + (g.s1 - g.s0) * frac;
-        let excess = near.distance * scale.abs() - half_width_px(style, map, s);
+        let (excess, s) = segment_excess_and_s(g, total, style, map, obj);
         if excess < best {
             best = excess;
             best_s = s;
         }
     }
     Some((best, best_s))
+}
+
+fn segment_excess_and_s(
+    segment: &Segment,
+    total_arc_length: f64,
+    style: &Style,
+    map: ScreenMap,
+    object_point: fmn_core::types::Vec3,
+) -> (f64, f64) {
+    let near =
+        fmn_geom::distance::nearest_on_quadratic(segment.p0, segment.p1, segment.p2, object_point);
+    // Arc length at the nearest point, not the parameter: the ramp is
+    // arc-length-parameterized (BN-03), and `t` and `s` differ by exactly the
+    // amount that note exists to talk about.
+    let frac = if total_arc_length > 0.0 {
+        let sub =
+            fmn_geom::bezier::partial_quadratic(&[segment.p0, segment.p1, segment.p2], 0.0, near.t);
+        (fmn_geom::arclength::quadratic_arc_length(sub[0], sub[1], sub[2]) / total_arc_length)
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let s = segment.s0 + (segment.s1 - segment.s0) * frac;
+    let excess = near.distance * map.scale.abs() - half_width_px(style, map, s);
+    (excess, s)
 }
 
 /// The stroke's coverage **and** its ramp coordinate at a screen point — the
@@ -904,6 +1079,151 @@ mod tests {
     }
 
     #[test]
+    fn the_miter_tip_is_inside_the_conservative_slab() {
+        // A shallow V whose admitted miter reaches more than one half-width
+        // beyond the hull along y. Growing only by the round body clips this
+        // point in both the binner and the engine's explicit slab reject.
+        let mut path = QuadPath::default();
+        path.start_new_path([-20.0, 40.0, 0.0]);
+        path.add_line_to([0.0, 0.0, 0.0], false).unwrap();
+        path.add_line_to([20.0, 40.0, 0.0], false).unwrap();
+        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0);
+        let style = Style {
+            joint_type: JointType::Miter,
+            ..flat_stroke_style(2000.0)
+        };
+        let joins = join_wedges(&segments, &shape.subpath_starts, &style, unit(), [0.0, 0.0]);
+        assert_eq!(joins.len(), 1);
+        let join = joins[0];
+        assert!(
+            (1.0..MITER_LIMIT).contains(&join.miter_ratio()),
+            "fixture must exercise an admitted extension: {}",
+            join.miter_ratio()
+        );
+        let probe_distance = 0.9 * join.miter_ratio() * join.half_width;
+        let probe = [
+            join.anchor[0] + probe_distance * join.bisector[0],
+            join.anchor[1] + probe_distance * join.bisector[1],
+        ];
+        assert_eq!(
+            stroke_coverage_with_joins(&segments, &joins, &style, unit(), [0.0, 0.0], probe),
+            1.0,
+            "fixture probe must be inside the miter"
+        );
+        let round_pad = join.half_width + f64::from(style.anti_alias_width);
+        assert!(
+            probe[1] < -round_pad,
+            "the probe must expose the old half-width-only slab"
+        );
+
+        let slab = segments
+            .iter()
+            .map(|segment| segment_slab(segment, &style, unit(), [0.0, 0.0]))
+            .fold(
+                [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ],
+                |mut union, segment| {
+                    union[0] = union[0].min(segment[0]);
+                    union[1] = union[1].min(segment[1]);
+                    union[2] = union[2].max(segment[2]);
+                    union[3] = union[3].max(segment[3]);
+                    union
+                },
+            );
+        assert!(
+            probe[0] >= slab[0]
+                && probe[0] <= slab[2]
+                && probe[1] >= slab[1]
+                && probe[1] <= slab[3],
+            "covered miter point {probe:?} outside slab {slab:?}"
+        );
+    }
+
+    #[test]
+    fn prepared_stroke_rejection_is_bit_exact_where_coverage_can_change() {
+        let mut path = QuadPath::default();
+        path.start_new_path([-28.0, -3.0, 0.0]);
+        path.add_quadratic_bezier_curve_to([-20.0, 24.0, 0.0], [-10.0, 1.0, 0.0], false)
+            .unwrap();
+        path.add_quadratic_bezier_curve_to([0.0, -22.0, 0.0], [11.0, 4.0, 0.0], false)
+            .unwrap();
+        path.add_quadratic_bezier_curve_to([26.0, 4.0, 0.0], [18.0, -2.0, 0.0], false)
+            .unwrap();
+        path.add_quadratic_bezier_curve_to([24.0, -2.0 + 1e-12, 0.0], [30.0, -2.0, 0.0], false)
+            .unwrap();
+        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0);
+        let translate = [13.0, -9.0];
+
+        for map in [
+            ScreenMap {
+                scale: 1.75,
+                origin: [7.0, -4.0],
+            },
+            ScreenMap {
+                scale: -1.75,
+                origin: [7.0, -4.0],
+            },
+        ] {
+            for joint_type in [JointType::Auto, JointType::Bevel, JointType::Miter] {
+                let style = Style {
+                    stroke_width: 300.0,
+                    stroke_width_end: 900.0,
+                    joint_type,
+                    ..flat_stroke_style(300.0)
+                };
+                let joins = join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
+                let prepared = PreparedStroke::new(&segments, &style, map, translate);
+                for y in -80..80 {
+                    for x in -80..120 {
+                        let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
+                        let scalar = stroke_shade(&segments, &joins, &style, map, translate, point);
+                        let culled =
+                            prepared.shade(&segments, &joins, &style, map, translate, point);
+                        assert_eq!(
+                            culled.0.to_bits(),
+                            scalar.0.to_bits(),
+                            "{joint_type:?} scale {} coverage at {point:?}",
+                            map.scale
+                        );
+                        if scalar.0 > 0.0 {
+                            assert_eq!(
+                                culled.1.to_bits(),
+                                scalar.1.to_bits(),
+                                "{joint_type:?} scale {} ramp coordinate at {point:?}",
+                                map.scale
+                            );
+                        }
+                    }
+                }
+
+                let first_slab = prepared.segments[0].slab;
+                let near_first = [
+                    0.5 * (first_slab[0] + first_slab[2]),
+                    0.5 * (first_slab[1] + first_slab[3]),
+                ];
+                assert!(
+                    prepared
+                        .segments
+                        .iter()
+                        .filter(|segment| {
+                            near_first[0] >= segment.slab[0]
+                                && near_first[0] <= segment.slab[2]
+                                && near_first[1] >= segment.slab[1]
+                                && near_first[1] <= segment.slab[3]
+                        })
+                        .count()
+                        < segments.len(),
+                    "the corpus must exercise a rejected segment"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_degenerate_corpus_produces_no_stroke_rather_than_a_panic() {
         let map = unit();
         let style = flat_stroke_style(200.0);
@@ -916,21 +1236,38 @@ mod tests {
             stroke_coverage(&[], &style, map, [0.0, 0.0], [1.0, 1.0]),
             0.0
         );
-        // A degenerate map has no pixels to measure in.
-        let path = line(10.0);
-        let segs = segs_of(&path);
         assert_eq!(
-            stroke_excess_px(
-                &segs,
+            PreparedStroke::new(&[], &style, map, [0.0, 0.0]).shade(
+                &[],
+                &[],
                 &style,
-                ScreenMap {
-                    scale: 0.0,
-                    origin: [0.0, 0.0]
-                },
+                map,
                 [0.0, 0.0],
                 [1.0, 1.0]
             ),
+            (0.0, 0.0)
+        );
+        // A degenerate map has no pixels to measure in.
+        let path = line(10.0);
+        let segs = segs_of(&path);
+        let degenerate_map = ScreenMap {
+            scale: 0.0,
+            origin: [0.0, 0.0],
+        };
+        assert_eq!(
+            stroke_excess_px(&segs, &style, degenerate_map, [0.0, 0.0], [1.0, 1.0]),
             None
+        );
+        assert_eq!(
+            PreparedStroke::new(&segs, &style, degenerate_map, [0.0, 0.0]).shade(
+                &segs,
+                &[],
+                &style,
+                degenerate_map,
+                [0.0, 0.0],
+                [1.0, 1.0]
+            ),
+            (0.0, 0.0)
         );
         // A zero width draws nothing at all, not a hairline from the AA band.
         let zero = Style {
@@ -950,11 +1287,21 @@ mod tests {
         cusp.add_quadratic_bezier_curve_to([20.0, 0.0, 0.0], [0.0, 0.0, 0.0], true)
             .unwrap();
         let cusp_segs = segs_of(&cusp);
+        let prepared_cusp = PreparedStroke::new(&cusp_segs, &style, map, [0.0, 0.0]);
         for x in 0..12 {
-            let c = stroke_coverage(&cusp_segs, &style, map, [0.0, 0.0], [f64::from(x), 0.5]);
+            let point = [f64::from(x), 0.5];
+            let c = stroke_coverage(&cusp_segs, &style, map, [0.0, 0.0], point);
             assert!(
                 (0.0..=1.0).contains(&c) && c.is_finite(),
                 "cusp at x={x}: {c}"
+            );
+            assert_eq!(
+                prepared_cusp
+                    .shade(&cusp_segs, &[], &style, map, [0.0, 0.0], point)
+                    .0
+                    .to_bits(),
+                c.to_bits(),
+                "prepared cusp at x={x}"
             );
         }
     }

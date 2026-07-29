@@ -4,7 +4,7 @@
 extern crate test;
 
 use fmn_core::color::LinearRgba;
-use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
+use fmn_mobject::{JointType, Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
     Binning, EngineIdentity, EngineKind, FrameConfig, FrameJob, MonoPiece, MonoTable, RenderPlan,
     RowScratch, ScreenMap, Tier, Tiling, Viewport,
@@ -14,6 +14,7 @@ use test::Bencher;
 
 const WIDTH: u32 = 512;
 const HEIGHT: u32 = 512;
+const STROKE_HEIGHT: u32 = HEIGHT / 2;
 const LAYERS: usize = 32;
 
 fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64, fill: [f32; 4]) -> Mobject {
@@ -42,6 +43,109 @@ struct Fixture {
     mono: MonoTable,
     binning: Binning,
     config: FrameConfig,
+}
+
+fn stroked_chain(segment_count: usize) -> Mobject {
+    let x_lo = 16.0;
+    let x_hi = f64::from(WIDTH) - 16.0;
+    let span = (x_hi - x_lo) / segment_count as f64;
+    let centre_y = f64::from(STROKE_HEIGHT) * 0.5;
+    let mut points = Vec::with_capacity(2 * segment_count + 1);
+    points.push([x_lo, centre_y, 0.0]);
+    for segment in 0..segment_count {
+        let x0 = x_lo + segment as f64 * span;
+        let x2 = x0 + span;
+        let y2 = centre_y
+            + if segment.is_multiple_of(2) {
+                20.0
+            } else {
+                -20.0
+            };
+        let handle_y = centre_y
+            + if segment.is_multiple_of(2) {
+                -56.0
+            } else {
+                56.0
+            };
+        points.push([0.5 * (x0 + x2), handle_y, 0.0]);
+        points.push([x2, y2, 0.0]);
+    }
+
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    for (i, point) in points.iter().enumerate() {
+        buffer.write(
+            i,
+            "point",
+            &[point[0] as f32, point[1] as f32, point[2] as f32],
+        );
+        buffer.write(i, "fill_rgba", &[0.0, 0.0, 0.0, 0.0]);
+        buffer.write(i, "stroke_rgba", &[0.2, 0.7, 0.9, 1.0]);
+        buffer.write(i, "stroke_width", &[600.0]);
+    }
+    Mobject::from_buffer(buffer)
+}
+
+struct StrokeFixture {
+    plan: RenderPlan,
+    mono: MonoTable,
+    binning: Binning,
+    config: FrameConfig,
+}
+
+impl StrokeFixture {
+    fn new(segment_count: usize) -> Self {
+        let mut stage = Stage::new();
+        let mob = stage.add(stroked_chain(segment_count));
+        stage.add_to_scene(mob).expect("live benchmark stroke");
+        stage
+            .uniforms_mut(mob)
+            .expect("live benchmark stroke")
+            .joint_type = JointType::Miter;
+
+        let config = FrameConfig::new(
+            Viewport {
+                width: WIDTH,
+                height: STROKE_HEIGHT,
+            },
+            ScreenMap::default(),
+            LinearRgba {
+                r: 0.02,
+                g: 0.02,
+                b: 0.02,
+                a: 1.0,
+            },
+        );
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let mono = MonoTable::build(&plan, config.map);
+        let binning = Binning::build(
+            &plan,
+            config.viewport,
+            Tiling {
+                macro_tile: 128,
+                fine_tile: 16,
+            },
+            config.map,
+        );
+        Self {
+            plan,
+            mono,
+            binning,
+            config,
+        }
+    }
+
+    fn render(&self) {
+        let job = FrameJob::with_identity(
+            &self.plan,
+            &self.mono,
+            &self.binning,
+            self.config,
+            EngineIdentity::certified(),
+        )
+        .expect("coherent benchmark stroke artifacts");
+        black_box(job.render(1).expect("benchmark stroke render"));
+    }
 }
 
 impl Fixture {
@@ -179,3 +283,21 @@ column_root_benches!(column_roots_08, 8);
 column_root_benches!(column_roots_16, 16);
 column_root_benches!(column_roots_32, 32);
 column_root_benches!(column_roots_64, 64);
+
+fn benchmark_stroke_sdf(bench: &mut Bencher, segment_count: usize) {
+    let fixture = StrokeFixture::new(segment_count);
+    bench.iter(|| fixture.render());
+}
+
+macro_rules! stroke_sdf_benches {
+    ($name:ident, $segment_count:expr) => {
+        #[bench]
+        fn $name(bench: &mut Bencher) {
+            benchmark_stroke_sdf(bench, $segment_count);
+        }
+    };
+}
+
+stroke_sdf_benches!(stroke_sdf_chain_08, 8);
+stroke_sdf_benches!(stroke_sdf_chain_32, 32);
+stroke_sdf_benches!(stroke_sdf_chain_64, 64);

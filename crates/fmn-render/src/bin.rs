@@ -594,11 +594,13 @@ fn screen_aabb(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> Option<[f6
 
 /// How far beyond its outline a draw's stroke can reach, in screen pixels.
 ///
-/// The widest half-width the ramp attains plus the antialiasing band — the same
-/// pad [`crate::stroke::segment_slab`] applies per segment, computed here once
-/// per instance. Zero for a style that strokes nothing, so a pure fill is binned
-/// to exactly its own hull: the analytic fill's coverage *is* its antialiasing,
-/// and it is exactly zero outside the path.
+/// The widest geometric reach plus the antialiasing band — the same pad
+/// [`crate::stroke::segment_slab`] applies per segment, computed here once per
+/// instance. This is one half-width for round/bevel joins and up to
+/// [`crate::stroke::MITER_LIMIT`] half-widths for a miter. Zero for a style that
+/// strokes nothing, so a pure fill is binned to exactly its own hull: the
+/// analytic fill's coverage *is* its antialiasing, and it is exactly zero
+/// outside the path.
 fn stroke_expansion(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> f64 {
     let Some(style) = plan.styles().get(inst.style) else {
         return 0.0;
@@ -606,9 +608,7 @@ fn stroke_expansion(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> f64 {
     if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
         return 0.0;
     }
-    let widest = crate::stroke::width_px(style.stroke_width, map)
-        .max(crate::stroke::width_px(style.stroke_width_end, map));
-    0.5 * widest + f64::from(style.anti_alias_width)
+    crate::stroke::max_stroke_reach_px(style, map)
 }
 
 /// Does this instance's shape contain the whole tile?
@@ -769,7 +769,7 @@ fn is_opaque_fill(plan: &RenderPlan, inst: &Instance) -> bool {
 mod tests {
     use super::*;
     use crate::plan::RenderPlan;
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage};
+    use fmn_mobject::{JointType, Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage};
 
     fn rect_mobject(cx: f64, cy: f64, w: f64, h: f64, fill_alpha: f32) -> Mobject {
         let (hw, hh) = (0.5 * w, 0.5 * h);
@@ -840,6 +840,27 @@ mod tests {
         Mobject::from_buffer(buffer)
     }
 
+    fn shallow_stroked_v(width: f32) -> Mobject {
+        let points = [
+            [40.0, 104.0, 0.0],
+            [52.0, 84.0, 0.0],
+            [64.0, 64.0, 0.0],
+            [76.0, 84.0, 0.0],
+            [88.0, 104.0, 0.0],
+        ];
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        for (i, point) in points.iter().enumerate() {
+            buffer.write(
+                i,
+                "point",
+                &[point[0] as f32, point[1] as f32, point[2] as f32],
+            );
+            buffer.write(i, "stroke_rgba", &[1.0, 1.0, 1.0, 1.0]);
+            buffer.write(i, "stroke_width", &[width]);
+        }
+        Mobject::from_buffer(buffer)
+    }
+
     #[test]
     fn a_stroke_is_binned_to_the_tiles_its_width_reaches() {
         // §10.3's per-draw width expansion, as a test rather than a sentence.
@@ -866,6 +887,27 @@ mod tests {
             listed(64, 63),
             "the tile row above the boundary is unlisted, so the stroke's upper \
              half-width and AA band would never be drawn"
+        );
+    }
+
+    #[test]
+    fn a_miter_is_binned_to_the_tiles_its_tip_reaches() {
+        // The V's apex is at y=64 and its admitted miter reaches into the
+        // y=32..48 tile. A half-width-only expansion stops in y=48..64 and
+        // silently clips the tip before the stroke kernel can see it.
+        let mut stage = Stage::new();
+        let mob = stage.add(shallow_stroked_v(2000.0));
+        stage.uniforms_mut(mob).expect("live").joint_type = JointType::Miter;
+        stage.add_to_scene(mob).expect("live");
+        let plan = synced(&stage);
+        let tiling = Tiling {
+            macro_tile: 128,
+            fine_tile: 16,
+        };
+        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default());
+        assert!(
+            !b.tile(b.tile_of(64, 47)).is_empty(),
+            "the miter-tip tile is absent"
         );
     }
 
