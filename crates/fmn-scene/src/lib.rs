@@ -22,5 +22,5 @@ pub use runtime::{
     HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase, NullSceneSink,
     OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram, SceneRegistration,
     SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError, SceneSink,
-    SceneStateRestore, ThreeDAddOptions, ThreeDScene,
+    SceneStateRestore, SoundRequest, ThreeDAddOptions, ThreeDScene,
 };

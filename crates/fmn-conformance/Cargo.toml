@@ -25,6 +25,7 @@ fmd-math.workspace = true
 # shipped §19 edge set: the conformance library itself does not acquire frame,
 # scheduler, or platform dependencies.
 fmn-frame.workspace = true
+fmn-codec.workspace = true
 fmn-platform.workspace = true
 fmn-runtime.workspace = true
 

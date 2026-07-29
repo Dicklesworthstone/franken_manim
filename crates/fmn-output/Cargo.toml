@@ -8,6 +8,7 @@ description = "Sink orchestration, the negotiated ffmpeg boundary, and sound (§
 
 [dependencies]
 fmn-core.workspace = true
+fmn-dmath.workspace = true
 fmn-hash.workspace = true
 fmn-platform.workspace = true
 fmn-frame.workspace = true

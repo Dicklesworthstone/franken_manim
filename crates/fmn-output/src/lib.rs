@@ -10,13 +10,16 @@
 //! its absence is a capability error naming the native alternative.
 //!
 //! [`emitter`] is the bounded, preallocated, frame-index-ordered handoff
-//! between Lumen/runtime workers and every sink. Still to land in this
-//! crate: the sound mixer (fm-0m7).
+//! between Lumen/runtime workers and every sink. [`sound`] is the native
+//! WAV/PCM path: sample-exact placement, a named deterministic resampler,
+//! ordered gain/duck mixing, explicit clipping evidence, and certified WAV
+//! bytes.
 #![forbid(unsafe_code)]
 
 pub mod emitter;
 pub mod ffmpeg;
 pub mod negotiate;
+pub mod sound;
 
 pub use emitter::{
     EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport, EmitterStats,
@@ -30,4 +33,7 @@ pub use ffmpeg::{
 pub use negotiate::{
     ColorDescription, Container, EncoderChoice, NegotiationError, Primaries, Transfer, VideoJob,
     WireFormat,
+};
+pub use sound::{
+    DitherPolicy, MixReport, MixerConfig, RESAMPLER_NAME, SoundCue, SoundError, SoundMixer,
 };

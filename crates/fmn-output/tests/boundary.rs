@@ -430,15 +430,18 @@ fn hardware_encoder_explicit_and_unknown() {
     // Absent from caps: refused before any spawn.
     let (result, runs, _) =
         scripted_encode(EncoderChoice::Named("hevc_videotoolbox".into()), frame);
-    match result {
-        Err(BoundaryError::UnknownEncoder {
-            requested,
-            hardware_available,
-        }) => {
-            assert_eq!(requested, "hevc_videotoolbox");
-            assert_eq!(hardware_available, vec!["h264_nvenc".to_string()]);
-        }
-        other => panic!("expected UnknownEncoder, got {other:?}"),
+    let error = result.expect_err("unknown hardware encoder must be refused");
+    assert!(
+        matches!(&error, BoundaryError::UnknownEncoder { .. }),
+        "expected UnknownEncoder, got {error:?}"
+    );
+    if let BoundaryError::UnknownEncoder {
+        requested,
+        hardware_available,
+    } = error
+    {
+        assert_eq!(requested, "hevc_videotoolbox");
+        assert_eq!(hardware_available, vec!["h264_nvenc".to_string()]);
     }
     // Only the -version probe ran.
     assert_eq!(runs.len(), 1);
@@ -472,12 +475,16 @@ fn failure_modes_map_to_typed_refusals() {
         },
     );
     let boundary = Boundary::new(tool.clone(), &runner, JobLimits::default(), dir.clone());
-    match boundary.encode(&j, frames.clone(), &caps, &dir.join("a.mp4")) {
-        Err(BoundaryError::EncodeFailed { code, stderr }) => {
-            assert_eq!(code, Some(1));
-            assert!(stderr.contains("Unknown encoder"));
-        }
-        other => panic!("expected EncodeFailed, got {other:?}"),
+    let error = boundary
+        .encode(&j, frames.clone(), &caps, &dir.join("a.mp4"))
+        .expect_err("nonzero ffmpeg exit must be refused");
+    assert!(
+        matches!(&error, BoundaryError::EncodeFailed { .. }),
+        "expected EncodeFailed, got {error:?}"
+    );
+    if let BoundaryError::EncodeFailed { code, stderr } = error {
+        assert_eq!(code, Some(1));
+        assert!(stderr.contains("Unknown encoder"));
     }
 
     // Timeout.
@@ -704,12 +711,14 @@ fn sandbox_failed_job_preserves_existing_destination() {
         &caps,
         &destination,
     );
-    match result {
-        Err(BoundaryError::EncodeFailed { code, stderr }) => {
-            assert_eq!(code, Some(7));
-            assert!(stderr.contains("boom"));
-        }
-        other => panic!("expected EncodeFailed, got {other:?}"),
+    let error = result.expect_err("failed ffmpeg job must be refused");
+    assert!(
+        matches!(&error, BoundaryError::EncodeFailed { .. }),
+        "expected EncodeFailed, got {error:?}"
+    );
+    if let BoundaryError::EncodeFailed { code, stderr } = error {
+        assert_eq!(code, Some(7));
+        assert!(stderr.contains("boom"));
     }
     assert_eq!(std::fs::read(&destination).unwrap(), b"the old render");
 }
@@ -750,6 +759,41 @@ fn two_stage_mux_runs_both_stages_and_copies_video() {
     assert!(lines[1].contains("-c:v copy"), "stage 2 copies video");
     assert!(lines[1].contains("-c:a aac"), "stage 2 encodes audio");
     assert!(!lines[1].contains("libx264"), "stage 2 must not re-encode");
+}
+
+#[cfg(unix)]
+#[test]
+fn audio_transcode_uses_the_fake_capability_and_publishes_wav() {
+    let (dir, _gate) = scratch("audio-transcode");
+    let (tool, runner) = real_tool(&dir, FAKE_FFMPEG);
+    let limits = JobLimits {
+        keep_workdir: true,
+        ..JobLimits::default()
+    };
+    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let input = dir.join("source.mp3");
+    let destination = dir.join("decoded/track.wav");
+    std::fs::write(&input, b"fake compressed audio").unwrap();
+
+    let report = boundary
+        .transcode_audio(&input, &destination)
+        .expect("fake ffmpeg decodes");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
+    assert!(report.provenance.encoder.is_none());
+    assert!(
+        report
+            .provenance
+            .argv
+            .windows(2)
+            .any(|args| { args == ["-acodec", "pcm_s16le"] })
+    );
+    assert!(
+        report
+            .provenance
+            .argv
+            .last()
+            .is_some_and(|path| path.ends_with("decoded.wav"))
+    );
 }
 
 #[cfg(unix)]

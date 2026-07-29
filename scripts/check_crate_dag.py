@@ -56,7 +56,17 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-render",
         "fmn-scene",
     },
-    "fmn-output": {"fmn-core", "fmn-hash", "fmn-platform", "fmn-frame", "fmn-codec", "fmn-cache"},
+    # dmath: the named windowed-sinc resampler and dB gain conversion
+    # affect certified WAV bits (ADR-0014).
+    "fmn-output": {
+        "fmn-core",
+        "fmn-dmath",
+        "fmn-hash",
+        "fmn-platform",
+        "fmn-frame",
+        "fmn-codec",
+        "fmn-cache",
+    },
     "fmn-runtime": {"fmn-core", "fmn-platform"},
     "fmn-cli": {"fmn-core", "fmn-config", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
     "fmn-conformance": {"fmn-core", "fmn-hash", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-library", "fmn-scene", "fmn-output"},

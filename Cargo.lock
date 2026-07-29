@@ -553,6 +553,7 @@ version = "0.1.0"
 dependencies = [
  "fmd-math",
  "fmn-anim",
+ "fmn-codec",
  "fmn-core",
  "fmn-frame",
  "fmn-geom",
@@ -630,6 +631,7 @@ dependencies = [
  "fmn-cache",
  "fmn-codec",
  "fmn-core",
+ "fmn-dmath",
  "fmn-frame",
  "fmn-hash",
  "fmn-platform",

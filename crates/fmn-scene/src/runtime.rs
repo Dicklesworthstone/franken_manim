@@ -357,6 +357,26 @@ pub struct LifecycleEvent {
     pub skipping: bool,
 }
 
+/// One insertion-ordered request from `Scene.add_sound`.
+///
+/// Reel converts [`Self::time`] from the rational frame grid to its output
+/// sample grid exactly, then applies [`Self::time_offset`] once. Keeping those
+/// values separate prevents float accumulation from entering A/V placement
+/// (BN-02, BN-14).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundRequest {
+    /// User asset path; the composition root resolves/decodes it.
+    pub sound_file: PathBuf,
+    /// Exact Scene time at the call site.
+    pub time: RationalTime,
+    /// Reference-compatible relative offset in seconds.
+    pub time_offset: f64,
+    /// Foreground gain in dB.
+    pub gain: Option<f64>,
+    /// Existing-background gain in dB during the overlay.
+    pub gain_to_background: Option<f64>,
+}
+
 /// The lower-boundary adapter implemented by the CLI/Studio composition root.
 ///
 /// `capture` receives immutable front-end state, not pixels. An implementation
@@ -546,6 +566,7 @@ pub struct Scene {
     preflight: Box<dyn PreflightHook>,
     hold_controller: Box<dyn HoldController>,
     unbound_updaters: Option<UpdaterManifest>,
+    sound_requests: Vec<SoundRequest>,
 }
 
 impl fmt::Debug for Scene {
@@ -557,6 +578,7 @@ impl fmt::Debug for Scene {
             .field("skipping", &self.skipping)
             .field("preflight_done", &self.preflight_done)
             .field("has_unbound_updaters", &self.unbound_updaters.is_some())
+            .field("sound_requests", &self.sound_requests.len())
             .finish_non_exhaustive()
     }
 }
@@ -590,6 +612,7 @@ impl Scene {
             preflight: Box::new(NoPreflight),
             hold_controller: Box::new(ImmediateRelease),
             unbound_updaters: None,
+            sound_requests: Vec::new(),
         })
     }
 
@@ -709,6 +732,57 @@ impl Scene {
     #[must_use]
     pub fn mobjects(&self) -> &[Mob] {
         self.stage.roots()
+    }
+
+    /// Insertion-ordered sound requests for Reel's end-of-scene mix.
+    #[must_use]
+    pub fn sound_requests(&self) -> &[SoundRequest] {
+        &self.sound_requests
+    }
+
+    /// Queue a sound with the Reference's four arguments.
+    ///
+    /// `gain` and `gain_to_background` are dB. Skip mode is an early no-op,
+    /// matching the Reference. The rational call-site time remains separate
+    /// from the relative offset so Reel can place frame time with exact integer
+    /// arithmetic; a resulting pre-zero start is clipped rather than rejected
+    /// (BN-14).
+    ///
+    /// # Errors
+    /// A non-finite offset or gain is rejected before it can enter output
+    /// provenance. Skip mode returns before validation, matching the
+    /// Reference's early-return semantics.
+    pub fn add_sound(
+        &mut self,
+        sound_file: impl Into<PathBuf>,
+        time_offset: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<&mut Self, SceneError> {
+        if self.skipping {
+            return Ok(self);
+        }
+        if !time_offset.is_finite() {
+            return Err(SceneError::InvalidConfig(
+                "sound time_offset must be finite",
+            ));
+        }
+        if gain.is_some_and(|value| !value.is_finite()) {
+            return Err(SceneError::InvalidConfig("sound gain must be finite"));
+        }
+        if gain_to_background.is_some_and(|value| !value.is_finite()) {
+            return Err(SceneError::InvalidConfig(
+                "sound gain_to_background must be finite",
+            ));
+        }
+        self.sound_requests.push(SoundRequest {
+            sound_file: sound_file.into(),
+            time: self.clock.now(),
+            time_offset,
+            gain,
+            gain_to_background,
+        });
+        Ok(self)
     }
 
     /// Drive one play through `prepare overrides → pre_play →

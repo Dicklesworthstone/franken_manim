@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use fmn_platform::process::{ProcessError, ProcessOutcome, ProcessRunner, ProcessSpec};
 
-use crate::negotiate::{NegotiationError, VideoJob, encode_argv, mux_argv};
+use crate::negotiate::{NegotiationError, VideoJob, encode_argv, mux_argv, transcode_audio_argv};
 
 /// The message every "ffmpeg is missing" error carries: the named
 /// native alternative (D2 — a capability error, never a substitution).
@@ -598,6 +598,33 @@ impl<'r> Boundary<'r> {
             let argv = mux_argv(&video, audio, &muxed);
             self.run_publishing(argv, &workdir, None, &muxed, destination, encoder.clone())
         })();
+        self.cleanup(&workdir);
+        result
+    }
+
+    /// Decode any ffmpeg-readable audio source to native s16 PCM WAV.
+    ///
+    /// The source is resolved before entering the private working directory so
+    /// relative caller paths retain their meaning. The decoded WAV is born in
+    /// that directory and reaches `destination` only through the same bounded,
+    /// atomic publication path as encoded video. Certified runs consume the
+    /// resulting PCM through the native decoder; the ffmpeg product itself is
+    /// outside certification by construction.
+    ///
+    /// # Errors
+    /// Every refusal in [`BoundaryError`].
+    pub fn transcode_audio(
+        &self,
+        input: &Path,
+        destination: &Path,
+    ) -> Result<BoundaryReport, BoundaryError> {
+        let input = std::fs::canonicalize(input).map_err(|error| BoundaryError::Workdir {
+            detail: format!("resolve audio input {}: {error}", input.display()),
+        })?;
+        let workdir = self.make_workdir()?;
+        let artifact = workdir.join("decoded.wav");
+        let argv = transcode_audio_argv(&input, &artifact);
+        let result = self.run_publishing(argv, &workdir, None, &artifact, destination, None);
         self.cleanup(&workdir);
         result
     }

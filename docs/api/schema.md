@@ -32,10 +32,10 @@ Generated from `API_SCHEMA.tsv` (extracted from the pinned Reference) and `API_O
 | Status | Symbols |
 |---|---|
 | same | 1 |
-| improved | 8 |
+| improved | 9 |
 | tiered | 0 |
 | excluded | 2 |
-| unreviewed | 2265 |
+| unreviewed | 2264 |
 
 `unreviewed` is the honest default for a surface nobody has adjudicated yet; it is the number the Parity Ledger ratchets down.
 

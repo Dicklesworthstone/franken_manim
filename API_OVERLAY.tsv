@@ -190,5 +190,6 @@ manimlib.mobject.geometry:Arc	improved	BN-09
 manimlib.mobject.svg.brace:Brace	improved	BN-08
 manimlib.mobject.numbers:DecimalNumber	improved	BN-08
 manimlib.mobject.matrix:Matrix	improved	BN-08
+manimlib.scene.scene:Scene.add_sound	improved	BN-14
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	C-7 documented no-op; our fill never needed it
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	arbitrary GLSL is out of the compatibility claim (README Limitations)

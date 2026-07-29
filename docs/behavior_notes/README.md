@@ -47,8 +47,9 @@ migration guidance users read:
 | BN-11 | Composition honours its declared timing (C-10, C-11) | [BN-11-composition-timing.md](BN-11-composition-timing.md) | W4 | Draft |
 | BN-12 | The Animation contract's typed edges (§9.1) | [BN-12-animation-contract.md](BN-12-animation-contract.md) | W4 | Draft |
 | BN-13 | Cubic curves use one C1, error-bounded reduction; the simple shortcut cannot lower fidelity | [BN-13-error-bounded-cubic-reduction.md](BN-13-error-bounded-cubic-reduction.md) | W2 | Draft |
+| BN-14 | Sound is sample-exact on the rational frame clock; pre-zero audio clips instead of raising | [BN-14-sample-exact-sound.md](BN-14-sample-exact-sound.md) | W8 | Draft |
 
-BN-10, BN-12, and BN-13 grew past §16.8's seed list, which is expected — the
+BN-10, BN-12, BN-13, and BN-14 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds
 another deliberate divergence writes it a note rather than filing it nowhere.
 ADR-0009 trues §16.8 up to this table and fixes the numbering rules above so

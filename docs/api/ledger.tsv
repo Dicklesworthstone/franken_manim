@@ -1883,7 +1883,7 @@ manimlib.scene.scene	Scene	Scene	class	1	unreviewed	-
 manimlib.scene.scene	Scene.__init__	Scene.__init__	method	0	unreviewed	-
 manimlib.scene.scene	Scene.add	Scene.add	method	0	unreviewed	-
 manimlib.scene.scene	Scene.add_mobjects_among	Scene.add_mobjects_among	method	0	unreviewed	-
-manimlib.scene.scene	Scene.add_sound	Scene.add_sound	method	0	unreviewed	-
+manimlib.scene.scene	Scene.add_sound	Scene.add_sound	method	0	improved	BN-14
 manimlib.scene.scene	Scene.affects_mobject_list	Scene.affects_mobject_list	method	0	unreviewed	-
 manimlib.scene.scene	Scene.assemble_render_groups	Scene.assemble_render_groups	method	0	unreviewed	-
 manimlib.scene.scene	Scene.begin_animations	Scene.begin_animations	method	0	unreviewed	-

@@ -12,7 +12,7 @@ use fmn_mobject::{Mobject, SceneState, Stage, StageError, UpdaterFn, UpdaterKind
 use fmn_scene::{
     CameraOrientation, CaptureReason, EndScene, HoldDecision, HoldKind, IntegrationError,
     LifecycleEvent, LifecyclePhase, NullSceneSink, OutputNaming, PlayOverrides, RuntimeConfig,
-    Scene, SceneError, SceneProgram, SceneRegistry, SceneSelectionError, SceneSink,
+    Scene, SceneError, SceneProgram, SceneRegistry, SceneSelectionError, SceneSink, SoundRequest,
     ThreeDAddOptions, ThreeDScene,
 };
 
@@ -136,6 +136,46 @@ fn stable_scene_membership_operations_are_marionettes_one_rule() {
         scene.stage().contains(a),
         "clear is membership, not deletion"
     );
+}
+
+#[test]
+fn add_sound_keeps_exact_scene_time_and_reference_arguments() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        3,
+    )
+    .expect("scene");
+    scene
+        .wait(Some(0.25), &mut NullSceneSink)
+        .expect("advance to frame two");
+    scene
+        .add_sound("click.wav", -0.125, Some(-6.0), Some(-12.0))
+        .expect("sound request");
+
+    assert_eq!(
+        scene.sound_requests(),
+        &[SoundRequest {
+            sound_file: "click.wav".into(),
+            time: fmn_anim::RationalTime::zero(8) + 2,
+            time_offset: -0.125,
+            gain: Some(-6.0),
+            gain_to_background: Some(-12.0),
+        }]
+    );
+
+    scene.force_skipping();
+    scene
+        .add_sound("ignored.wav", f64::NAN, Some(f64::INFINITY), None)
+        .expect("skip is the Reference's early no-op");
+    assert_eq!(scene.sound_requests().len(), 1);
+    scene.revert_to_original_skipping_status();
+    assert!(matches!(
+        scene.add_sound("bad.wav", 0.0, None, Some(f64::NEG_INFINITY)),
+        Err(SceneError::InvalidConfig(_))
+    ));
 }
 
 #[test]
