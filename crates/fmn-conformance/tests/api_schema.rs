@@ -26,8 +26,8 @@
 use std::path::{Path, PathBuf};
 
 use fmn_conformance::schema::{
-    Schema, Status, SymbolKind, generate_cli_table_md, generate_config_rs, generate_docs_md,
-    generate_ledger_tsv,
+    Schema, Status, SymbolKind, generate_cli_rs, generate_cli_table_md, generate_config_rs,
+    generate_docs_md, generate_ledger_tsv,
 };
 
 /// Repo-root-relative path (`CARGO_MANIFEST_DIR` is `crates/fmn-conformance`).
@@ -397,6 +397,14 @@ fn the_generated_ledger_matches_the_schema() {
 #[test]
 fn the_generated_cli_table_matches_the_schema() {
     artifact("docs/api/cli_flags.md", &generate_cli_table_md(&schema()));
+}
+
+#[test]
+fn the_generated_cli_parser_contract_matches_the_schema() {
+    artifact(
+        "crates/fmn-cli/src/generated.rs",
+        &generate_cli_rs(&schema()),
+    );
 }
 
 #[test]

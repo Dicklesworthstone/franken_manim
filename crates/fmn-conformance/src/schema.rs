@@ -84,6 +84,17 @@ pub enum SchemaError {
         /// Human-readable statement of the mismatch.
         detail: String,
     },
+    /// The authored CLI layer does not cover the extracted flag surface
+    /// exactly once.
+    FlagCoverage {
+        /// Human-readable statement of the mismatch.
+        detail: String,
+    },
+    /// The authored CLI contract refers to an unknown or duplicate identity.
+    CliContract {
+        /// Human-readable statement of the invalid contract.
+        detail: String,
+    },
 }
 
 impl fmt::Display for SchemaError {
@@ -115,6 +126,8 @@ impl fmt::Display for SchemaError {
                  rerun scripts/gen_api_schema.py and reconcile"
             ),
             Self::ConfigCoverage { detail } => write!(f, "config-key coverage: {detail}"),
+            Self::FlagCoverage { detail } => write!(f, "CLI flag coverage: {detail}"),
+            Self::CliContract { detail } => write!(f, "CLI contract: {detail}"),
         }
     }
 }
@@ -373,6 +386,161 @@ pub struct Flag {
     pub help: Option<String>,
 }
 
+/// Which `fmn` command accepts a flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CliCommand {
+    /// Accepted before or after every command name.
+    Global,
+    /// The default `fmn render` command.
+    Render,
+    /// `fmn doctor`.
+    Doctor,
+    /// `fmn batch` (behind the `batch` feature at runtime).
+    Batch,
+    /// `fmn studio`.
+    Studio,
+}
+
+impl CliCommand {
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "global" => Self::Global,
+            "render" => Self::Render,
+            "doctor" => Self::Doctor,
+            "batch" => Self::Batch,
+            "studio" => Self::Studio,
+            _ => return None,
+        })
+    }
+
+    /// Stable schema/generated-code spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Render => "render",
+            Self::Doctor => "doctor",
+            Self::Batch => "batch",
+            Self::Studio => "studio",
+        }
+    }
+}
+
+/// One authored ruling and Rust binding for an extracted Reference flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlagBinding {
+    /// Exact comma-joined key from `API_SCHEMA.tsv [flags]`.
+    pub options: String,
+    /// Same/improved/tiered/excluded ruling.
+    pub status: Status,
+    /// Command accepting the flag.
+    pub command: CliCommand,
+    /// Stable generated-parser field name.
+    pub binding: String,
+    /// Evidence or user-facing semantic note.
+    pub note: String,
+}
+
+/// One FrankenManim-native flag absent from the pinned Reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeFlag {
+    /// Comma-joined option aliases.
+    pub options: String,
+    /// Parser action (`store` or `store_true`).
+    pub action: String,
+    /// Parser arity (`?`, `*`, or absent).
+    pub nargs: Option<String>,
+    /// Authored default literal, if any.
+    pub default: Option<String>,
+    /// Stable value-type name, if the flag takes a value.
+    pub ty: Option<String>,
+    /// Command accepting the flag.
+    pub command: CliCommand,
+    /// Stable generated-parser field name.
+    pub binding: String,
+    /// Semantic status relative to the Reference surface.
+    pub status: Status,
+    /// Help text.
+    pub help: String,
+}
+
+/// One native command in the `fmn` command tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subcommand {
+    /// Command name.
+    pub command: CliCommand,
+    /// Semantic status relative to the Reference's single command.
+    pub status: Status,
+    /// Help-table summary.
+    pub help: String,
+}
+
+/// One stable process exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitCode {
+    /// Numeric process status.
+    pub code: u8,
+    /// Stable robot-schema identity.
+    pub name: String,
+    /// User-facing meaning.
+    pub meaning: String,
+}
+
+/// Executable relationship between authored flag bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagInteractionKind {
+    /// No more than one operand may be present.
+    AtMostOne,
+    /// The two operands cannot coexist.
+    Conflicts,
+    /// The first operand requires at least one later operand.
+    RequiresAny,
+    /// Presence of the first operand sets the second.
+    Implies,
+    /// The operand cannot accompany any other non-global action.
+    Exclusive,
+}
+
+impl FlagInteractionKind {
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "at_most_one" => Self::AtMostOne,
+            "conflicts" => Self::Conflicts,
+            "requires_any" => Self::RequiresAny,
+            "implies" => Self::Implies,
+            "exclusive" => Self::Exclusive,
+            _ => return None,
+        })
+    }
+
+    /// Stable schema/generated-code spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AtMostOne => "at_most_one",
+            Self::Conflicts => "conflicts",
+            Self::RequiresAny => "requires_any",
+            Self::Implies => "implies",
+            Self::Exclusive => "exclusive",
+        }
+    }
+}
+
+/// One generated parser rule from `[flag_interaction]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlagInteraction {
+    /// Stable rule identity used by fixtures and diagnostics.
+    pub id: String,
+    /// Executable rule form.
+    pub kind: FlagInteractionKind,
+    /// `|`-separated authored binding names.
+    pub operands: Vec<String>,
+    /// Stable exit-code name, or absent for non-failing implications.
+    pub exit_code: Option<String>,
+    /// User-facing diagnostic/contract note.
+    pub message: String,
+}
+
 /// The YAML shape a config value takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -542,6 +710,16 @@ pub struct Schema {
     pub params: Vec<Param>,
     /// The Reference's CLI flag surface.
     pub flags: Vec<Flag>,
+    /// Authored rulings and generated-parser bindings for Reference flags.
+    pub flag_bindings: Vec<FlagBinding>,
+    /// FrankenManim-native flags.
+    pub native_flags: Vec<NativeFlag>,
+    /// Native command tree.
+    pub subcommands: Vec<Subcommand>,
+    /// Stable CLI process statuses.
+    pub exit_codes: Vec<ExitCode>,
+    /// Executable flag relationships.
+    pub flag_interactions: Vec<FlagInteraction>,
     /// The shipped config-key surface.
     pub config: Vec<ConfigKey>,
     /// C-9 canonical-name rulings, by `module:Name`.
@@ -719,7 +897,309 @@ impl Schema {
             schema.statuses.insert(f[0].clone(), (status, f[2].clone()));
         }
 
+        for row in ov.typed("flag_binding", 5)? {
+            let f = &row.fields;
+            schema.flag_bindings.push(FlagBinding {
+                options: f[0].clone(),
+                status: Status::parse(&f[1]).ok_or_else(|| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "status",
+                    found: f[1].clone(),
+                })?,
+                command: CliCommand::parse(&f[2]).ok_or_else(|| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "command",
+                    found: f[2].clone(),
+                })?,
+                binding: f[3].clone(),
+                note: f[4].clone(),
+            });
+        }
+
+        for row in ov.typed("native_flags", 9)? {
+            let f = &row.fields;
+            schema.native_flags.push(NativeFlag {
+                options: f[0].clone(),
+                action: f[1].clone(),
+                nargs: opt(&f[2]).map(str::to_owned),
+                default: opt(&f[3]).map(str::to_owned),
+                ty: opt(&f[4]).map(str::to_owned),
+                command: CliCommand::parse(&f[5]).ok_or_else(|| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "command",
+                    found: f[5].clone(),
+                })?,
+                binding: f[6].clone(),
+                status: Status::parse(&f[7]).ok_or_else(|| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "status",
+                    found: f[7].clone(),
+                })?,
+                help: f[8].clone(),
+            });
+        }
+
+        for row in ov.typed("subcommands", 3)? {
+            let f = &row.fields;
+            let command = CliCommand::parse(&f[0]).ok_or_else(|| SchemaError::Field {
+                file: ov.file,
+                line: row.line,
+                column: "command",
+                found: f[0].clone(),
+            })?;
+            if command == CliCommand::Global {
+                return Err(SchemaError::CliContract {
+                    detail: "`global` is a flag scope, not a subcommand".to_owned(),
+                });
+            }
+            schema.subcommands.push(Subcommand {
+                command,
+                status: Status::parse(&f[1]).ok_or_else(|| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "status",
+                    found: f[1].clone(),
+                })?,
+                help: f[2].clone(),
+            });
+        }
+
+        for row in ov.typed("exit_codes", 3)? {
+            let f = &row.fields;
+            schema.exit_codes.push(ExitCode {
+                code: f[0].parse().map_err(|_| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "code",
+                    found: f[0].clone(),
+                })?,
+                name: f[1].clone(),
+                meaning: f[2].clone(),
+            });
+        }
+
+        for row in ov.typed("flag_interaction", 5)? {
+            let f = &row.fields;
+            schema.flag_interactions.push(FlagInteraction {
+                id: f[0].clone(),
+                kind: FlagInteractionKind::parse(&f[1]).ok_or_else(|| SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "interaction",
+                    found: f[1].clone(),
+                })?,
+                operands: f[2].split('|').map(str::to_owned).collect(),
+                exit_code: opt(&f[3]).map(str::to_owned),
+                message: f[4].clone(),
+            });
+        }
+
+        schema.check_cli_contract()?;
         Ok(schema)
+    }
+
+    fn check_cli_contract(&self) -> Result<(), SchemaError> {
+        let extracted: std::collections::BTreeSet<&str> = self
+            .flags
+            .iter()
+            .map(|flag| flag.options.as_str())
+            .collect();
+        let mut ruled = std::collections::BTreeSet::new();
+        let mut problems = Vec::new();
+        for binding in &self.flag_bindings {
+            if !extracted.contains(binding.options.as_str()) {
+                return Err(SchemaError::DanglingOverlay {
+                    section: "flag_binding",
+                    key: binding.options.clone(),
+                });
+            }
+            if !ruled.insert(binding.options.as_str()) {
+                problems.push(format!("`{}` is ruled more than once", binding.options));
+            }
+        }
+        for option in extracted.difference(&ruled) {
+            problems.push(format!("extracted flag `{option}` has no ruling"));
+        }
+        if !problems.is_empty() {
+            return Err(SchemaError::FlagCoverage {
+                detail: problems.join("; "),
+            });
+        }
+
+        let mut aliases = std::collections::BTreeMap::new();
+        let mut bindings = std::collections::BTreeSet::new();
+        for binding in &self.flag_bindings {
+            if !bindings.insert(binding.binding.as_str()) {
+                return Err(SchemaError::CliContract {
+                    detail: format!("flag binding `{}` is duplicated", binding.binding),
+                });
+            }
+            for alias in binding.options.split(',') {
+                if let Some(previous) = aliases.insert(alias, binding.binding.as_str()) {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "option alias `{alias}` belongs to both `{previous}` and `{}`",
+                            binding.binding
+                        ),
+                    });
+                }
+            }
+        }
+        for flag in &self.native_flags {
+            if !matches!(flag.action.as_str(), "store" | "store_true") {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "native flag `{}` has unsupported action `{}`",
+                        flag.options, flag.action
+                    ),
+                });
+            }
+            if !bindings.insert(flag.binding.as_str()) {
+                return Err(SchemaError::CliContract {
+                    detail: format!("flag binding `{}` is duplicated", flag.binding),
+                });
+            }
+            for alias in flag.options.split(',') {
+                if let Some(previous) = aliases.insert(alias, flag.binding.as_str()) {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "option alias `{alias}` belongs to both `{previous}` and `{}`",
+                            flag.binding
+                        ),
+                    });
+                }
+            }
+        }
+
+        let mut commands = std::collections::BTreeSet::new();
+        for subcommand in &self.subcommands {
+            if !commands.insert(subcommand.command) {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "subcommand `{}` is declared twice",
+                        subcommand.command.as_str()
+                    ),
+                });
+            }
+        }
+        if !commands.contains(&CliCommand::Render) {
+            return Err(SchemaError::CliContract {
+                detail: "the default `render` subcommand is missing".to_owned(),
+            });
+        }
+
+        let mut exit_names = std::collections::BTreeSet::new();
+        let mut exit_values = std::collections::BTreeSet::new();
+        for exit in &self.exit_codes {
+            if !exit_names.insert(exit.name.as_str()) {
+                return Err(SchemaError::CliContract {
+                    detail: format!("exit-code name `{}` is duplicated", exit.name),
+                });
+            }
+            if !exit_values.insert(exit.code) {
+                return Err(SchemaError::CliContract {
+                    detail: format!("exit-code value `{}` is duplicated", exit.code),
+                });
+            }
+        }
+        if !exit_values.contains(&0) {
+            return Err(SchemaError::CliContract {
+                detail: "exit code 0 must be declared".to_owned(),
+            });
+        }
+
+        let mut interaction_ids = std::collections::BTreeSet::new();
+        for interaction in &self.flag_interactions {
+            if !interaction_ids.insert(interaction.id.as_str()) {
+                return Err(SchemaError::CliContract {
+                    detail: format!("interaction id `{}` is duplicated", interaction.id),
+                });
+            }
+            if interaction.operands.is_empty() || interaction.operands.iter().any(String::is_empty)
+            {
+                return Err(SchemaError::CliContract {
+                    detail: format!("interaction `{}` has an empty operand", interaction.id),
+                });
+            }
+            for operand in &interaction.operands {
+                if !bindings.contains(operand.as_str()) {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "interaction `{}` names unknown binding `{operand}`",
+                            interaction.id
+                        ),
+                    });
+                }
+            }
+            match interaction.kind {
+                FlagInteractionKind::AtMostOne if interaction.operands.len() < 2 => {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "interaction `{}` needs at least two operands",
+                            interaction.id
+                        ),
+                    });
+                }
+                FlagInteractionKind::Conflicts | FlagInteractionKind::Implies
+                    if interaction.operands.len() != 2 =>
+                {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "interaction `{}` needs exactly two operands",
+                            interaction.id
+                        ),
+                    });
+                }
+                FlagInteractionKind::RequiresAny if interaction.operands.len() < 2 => {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "interaction `{}` needs a trigger and requirement",
+                            interaction.id
+                        ),
+                    });
+                }
+                FlagInteractionKind::Exclusive if interaction.operands.len() != 1 => {
+                    return Err(SchemaError::CliContract {
+                        detail: format!(
+                            "interaction `{}` needs exactly one operand",
+                            interaction.id
+                        ),
+                    });
+                }
+                _ => {}
+            }
+            if let Some(exit_code) = interaction.exit_code.as_deref()
+                && !exit_names.contains(exit_code)
+            {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "interaction `{}` names unknown exit code `{exit_code}`",
+                        interaction.id
+                    ),
+                });
+            }
+            if interaction.kind == FlagInteractionKind::Implies && interaction.exit_code.is_some() {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "non-failing implication `{}` must not carry an exit code",
+                        interaction.id
+                    ),
+                });
+            }
+            if interaction.kind != FlagInteractionKind::Implies && interaction.exit_code.is_none() {
+                return Err(SchemaError::CliContract {
+                    detail: format!(
+                        "failing interaction `{}` must name an exit code",
+                        interaction.id
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Every config key is bound exactly once, and every binding names a key.
@@ -1011,24 +1491,376 @@ pub fn generate_cli_table_md(schema: &Schema) -> String {
     out.push_str("\n# The `fmn` flag surface\n\n");
     let _ = writeln!(
         out,
-        "The Reference's `manimlib/config.py` declares {} options. Each is kept, \
-         re-specified, or dropped by W9 (fm-c53); this table is the inventory that \
-         decision is made against, and it is generated, so the inventory cannot \
-         quietly shrink.\n",
+        "The Reference's `manimlib/config.py` declares {} options. Every row has \
+         exactly one authored ruling and generated-parser binding; coverage is \
+         fail-closed, so the inventory cannot quietly shrink.\n",
         schema.flags.len()
     );
-    out.push_str("| Options | Action | Default | Help |\n|---|---|---|---|\n");
+    out.push_str(
+        "## Reference flags\n\n\
+         | Options | Command | Binding | Status | Action | Default | Semantics |\n\
+         |---|---|---|---|---|---|---|\n",
+    );
     for flag in &schema.flags {
+        let Some(binding) = schema
+            .flag_bindings
+            .iter()
+            .find(|binding| binding.options == flag.options)
+        else {
+            continue;
+        };
+        let default = flag.default.as_deref().unwrap_or_else(|| {
+            if flag.action == "store_true" {
+                "false"
+            } else {
+                "—"
+            }
+        });
         let _ = writeln!(
             out,
-            "| `{}` | {} | {} | {} |",
+            "| `{}` | {} | `{}` | {} | {} | {} | {} |",
             flag.options,
+            binding.command.as_str(),
+            binding.binding,
+            binding.status.as_str(),
+            flag.action,
+            default,
+            binding.note
+        );
+    }
+
+    out.push_str(
+        "\n## Native flags\n\n\
+         | Options | Command | Binding | Status | Action | Default | Help |\n\
+         |---|---|---|---|---|---|---|\n",
+    );
+    for flag in &schema.native_flags {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | `{}` | {} | {} | {} | {} |",
+            flag.options,
+            flag.command.as_str(),
+            flag.binding,
+            flag.status.as_str(),
             flag.action,
             flag.default.as_deref().unwrap_or("—"),
-            flag.help.as_deref().unwrap_or("—")
+            flag.help
+        );
+    }
+
+    out.push_str("\n## Commands\n\n| Command | Status | Meaning |\n|---|---|---|\n");
+    for subcommand in &schema.subcommands {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} |",
+            subcommand.command.as_str(),
+            subcommand.status.as_str(),
+            subcommand.help
+        );
+    }
+
+    out.push_str("\n## Exit codes\n\n| Code | Identity | Meaning |\n|---:|---|---|\n");
+    for exit in &schema.exit_codes {
+        let _ = writeln!(
+            out,
+            "| {} | `{}` | {} |",
+            exit.code, exit.name, exit.meaning
+        );
+    }
+
+    out.push_str(
+        "\n## Flag interactions\n\n\
+         These rules are emitted into the parser artifact and executed after \
+         token collection. `implies` rules are non-failing; every other rule \
+         names the stable exit identity returned on violation.\n\n\
+         | Rule | Kind | Bindings | Exit | Diagnostic |\n\
+         |---|---|---|---|---|\n",
+    );
+    for interaction in &schema.flag_interactions {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | `{}` | {} | {} |",
+            interaction.id,
+            interaction.kind.as_str(),
+            interaction.operands.join("`, `"),
+            interaction.exit_code.as_deref().unwrap_or("—"),
+            interaction.message
         );
     }
     out
+}
+
+/// Generate the typed parser contract consumed by `fmn-cli`.
+///
+/// This artifact deliberately contains data, not parser logic. `fmn-cli`
+/// executes the generated action/arity/interaction vocabulary without a
+/// runtime dependency on the schema crate or the repository TSV files.
+#[must_use]
+pub fn generate_cli_rs(schema: &Schema) -> String {
+    let mut out = banner(
+        Comment::PerLine("//!"),
+        "The typed `fmn` parser contract (§13.6).",
+        schema.reference_commit(),
+    );
+    out.push_str(
+        "\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum CommandScope {\n\
+         \x20   Global,\n\
+         \x20   Render,\n\
+         \x20   Doctor,\n\
+         \x20   Batch,\n\
+         \x20   Studio,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum FlagAction {\n\
+         \x20   SetTrue,\n\
+         \x20   Store,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum FlagArity {\n\
+         \x20   None,\n\
+         \x20   One,\n\
+         \x20   Optional,\n\
+         \x20   Many,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum FlagStatus {\n\
+         \x20   Same,\n\
+         \x20   Improved,\n\
+         \x20   Tiered,\n\
+         \x20   Excluded,\n\
+         \x20   Unreviewed,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum FlagSource {\n\
+         \x20   Reference,\n\
+         \x20   Native,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub struct FlagSpec {\n\
+         \x20   pub options: &'static [&'static str],\n\
+         \x20   pub binding: &'static str,\n\
+         \x20   pub command: CommandScope,\n\
+         \x20   pub action: FlagAction,\n\
+         \x20   pub arity: FlagArity,\n\
+         \x20   pub default: Option<&'static str>,\n\
+         \x20   pub value_type: Option<&'static str>,\n\
+         \x20   pub status: FlagStatus,\n\
+         \x20   pub source: FlagSource,\n\
+         \x20   pub help: &'static str,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub struct SubcommandSpec {\n\
+         \x20   pub command: CommandScope,\n\
+         \x20   pub status: FlagStatus,\n\
+         \x20   pub help: &'static str,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub struct ExitCodeSpec {\n\
+         \x20   pub code: u8,\n\
+         \x20   pub name: &'static str,\n\
+         \x20   pub meaning: &'static str,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum InteractionKind {\n\
+         \x20   AtMostOne,\n\
+         \x20   Conflicts,\n\
+         \x20   RequiresAny,\n\
+         \x20   Implies,\n\
+         \x20   Exclusive,\n\
+         }\n\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub struct InteractionSpec {\n\
+         \x20   pub id: &'static str,\n\
+         \x20   pub kind: InteractionKind,\n\
+         \x20   pub operands: &'static [&'static str],\n\
+         \x20   pub exit_code: Option<&'static str>,\n\
+         \x20   pub message: &'static str,\n\
+         }\n\n",
+    );
+
+    out.push_str("pub const FLAG_SPECS: &[FlagSpec] = &[\n");
+    for flag in &schema.flags {
+        let Some(binding) = schema
+            .flag_bindings
+            .iter()
+            .find(|binding| binding.options == flag.options)
+        else {
+            continue;
+        };
+        write_flag_spec(
+            &mut out,
+            &flag.options,
+            &binding.binding,
+            binding.command,
+            &flag.action,
+            flag.nargs.as_deref(),
+            flag.default.as_deref(),
+            flag.ty.as_deref(),
+            binding.status,
+            "Reference",
+            flag.help.as_deref().unwrap_or(""),
+        );
+    }
+    for flag in &schema.native_flags {
+        write_flag_spec(
+            &mut out,
+            &flag.options,
+            &flag.binding,
+            flag.command,
+            &flag.action,
+            flag.nargs.as_deref(),
+            flag.default.as_deref(),
+            flag.ty.as_deref(),
+            flag.status,
+            "Native",
+            &flag.help,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("pub const SUBCOMMAND_SPECS: &[SubcommandSpec] = &[\n");
+    for subcommand in &schema.subcommands {
+        let _ = writeln!(
+            out,
+            "    SubcommandSpec {{\n        command: CommandScope::{},\n        \
+             status: FlagStatus::{},\n        help: {:?},\n    }},",
+            command_variant(subcommand.command),
+            status_variant(subcommand.status),
+            subcommand.help
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("pub const EXIT_CODE_SPECS: &[ExitCodeSpec] = &[\n");
+    for exit in &schema.exit_codes {
+        let _ = writeln!(
+            out,
+            "    ExitCodeSpec {{\n        code: {},\n        name: {:?},\n        \
+             meaning: {:?},\n    }},",
+            exit.code, exit.name, exit.meaning
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("pub const INTERACTION_SPECS: &[InteractionSpec] = &[\n");
+    for interaction in &schema.flag_interactions {
+        let operands = interaction
+            .operands
+            .iter()
+            .map(|operand| format!("{operand:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let exit = interaction
+            .exit_code
+            .as_ref()
+            .map_or_else(|| "None".to_owned(), |name| format!("Some({name:?})"));
+        let _ = writeln!(
+            out,
+            "    InteractionSpec {{\n        id: {:?},\n        kind: \
+             InteractionKind::{},\n        operands: &[{}],\n        exit_code: {},\n        \
+             message: {:?},\n    }},",
+            interaction.id,
+            interaction_variant(interaction.kind),
+            operands,
+            exit,
+            interaction.message
+        );
+    }
+    out.push_str("];\n");
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_flag_spec(
+    out: &mut String,
+    options: &str,
+    binding: &str,
+    command: CliCommand,
+    action: &str,
+    nargs: Option<&str>,
+    default: Option<&str>,
+    value_type: Option<&str>,
+    status: Status,
+    source: &str,
+    help: &str,
+) {
+    let options = options
+        .split(',')
+        .map(|option| format!("{option:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (action, arity) = if action == "store_true" {
+        ("SetTrue", "None")
+    } else {
+        (
+            "Store",
+            match nargs {
+                Some("'?'") | Some("?") => "Optional",
+                Some("'*'") | Some("*") => "Many",
+                _ => "One",
+            },
+        )
+    };
+    let default = default.map_or_else(
+        || {
+            if action == "SetTrue" {
+                "Some(\"false\")".to_owned()
+            } else {
+                "None".to_owned()
+            }
+        },
+        |value| format!("Some({value:?})"),
+    );
+    let value_type =
+        value_type.map_or_else(|| "None".to_owned(), |value| format!("Some({value:?})"));
+    let _ = writeln!(
+        out,
+        "    FlagSpec {{\n        options: &[{}],\n        binding: {:?},\n        \
+         command: CommandScope::{},\n        action: FlagAction::{},\n        arity: \
+         FlagArity::{},\n        default: {},\n        value_type: {},\n        status: \
+         FlagStatus::{},\n        source: FlagSource::{},\n        help: {:?},\n    }},",
+        options,
+        binding,
+        command_variant(command),
+        action,
+        arity,
+        default,
+        value_type,
+        status_variant(status),
+        source,
+        help
+    );
+}
+
+const fn command_variant(command: CliCommand) -> &'static str {
+    match command {
+        CliCommand::Global => "Global",
+        CliCommand::Render => "Render",
+        CliCommand::Doctor => "Doctor",
+        CliCommand::Batch => "Batch",
+        CliCommand::Studio => "Studio",
+    }
+}
+
+const fn status_variant(status: Status) -> &'static str {
+    match status {
+        Status::Same => "Same",
+        Status::Improved => "Improved",
+        Status::Tiered => "Tiered",
+        Status::Excluded => "Excluded",
+        Status::Unreviewed => "Unreviewed",
+    }
+}
+
+const fn interaction_variant(kind: FlagInteractionKind) -> &'static str {
+    match kind {
+        FlagInteractionKind::AtMostOne => "AtMostOne",
+        FlagInteractionKind::Conflicts => "Conflicts",
+        FlagInteractionKind::RequiresAny => "RequiresAny",
+        FlagInteractionKind::Implies => "Implies",
+        FlagInteractionKind::Exclusive => "Exclusive",
+    }
 }
 
 /// Generate the schema's human-facing summary — the docs artifact of §16.2,
@@ -1136,7 +1968,12 @@ mod tests {
         [canonical]\nm:A.foo_listner\tfoo_listener\tC-9\t-\n\n\
         [param_canonical]\n\n\
         [config_binding]\ncamera.fps\tCameraConfig\tfps\tu32\n\n\
-        [status]\nm:A\timproved\tBN-01\n";
+        [status]\nm:A\timproved\tBN-01\n\n\
+        [flag_binding]\n-w,--write\tsame\trender\twrite\tkept\n\n\
+        [native_flags]\n-h,--help\tstore_true\t-\tFalse\t-\tglobal\thelp\timproved\tHelp\n\n\
+        [subcommands]\nrender\tsame\tRender scenes\n\n\
+        [exit_codes]\n0\tsuccess\tCompleted\n2\tusage\tBad arguments\n\n\
+        [flag_interaction]\n";
 
     fn schema() -> Schema {
         Schema::parse(EXTRACT, OVERLAY).expect("fixture parses")
@@ -1148,6 +1985,10 @@ mod tests {
         assert_eq!(s.reference_commit(), "abc123");
         assert_eq!(s.symbols.len(), 2);
         assert_eq!(s.flags.len(), 1);
+        assert_eq!(s.flag_bindings.len(), 1);
+        assert_eq!(s.native_flags.len(), 1);
+        assert_eq!(s.subcommands.len(), 1);
+        assert_eq!(s.exit_codes.len(), 2);
         assert_eq!(s.config.len(), 1);
         assert_eq!(s.bindings.len(), 1);
     }
@@ -1205,6 +2046,46 @@ mod tests {
             "got {err}"
         );
         assert!(err.to_string().contains("gen_api_schema.py"));
+    }
+
+    #[test]
+    fn every_extracted_flag_needs_exactly_one_authored_binding() {
+        let missing = OVERLAY.replace("-w,--write\tsame\trender\twrite\tkept\n", "");
+        let err = Schema::parse(EXTRACT, &missing).unwrap_err(); // ubs:ignore — negative parser test
+        assert!(matches!(err, SchemaError::FlagCoverage { .. }), "got {err}");
+        assert!(err.to_string().contains("has no ruling"), "got {err}");
+
+        let stale = OVERLAY.replace("-w,--write\tsame", "--gone\tsame");
+        let err = Schema::parse(EXTRACT, &stale).unwrap_err(); // ubs:ignore — negative parser test
+        assert!(
+            matches!(
+                err,
+                SchemaError::DanglingOverlay {
+                    section: "flag_binding",
+                    ..
+                }
+            ),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn interactions_are_checked_against_bindings_and_exit_codes() {
+        let unknown_binding = OVERLAY.replace(
+            "[flag_interaction]\n",
+            "[flag_interaction]\nbad\tconflicts\twrite|ghost\tusage\tbad\n",
+        );
+        let err = Schema::parse(EXTRACT, &unknown_binding).unwrap_err(); // ubs:ignore — negative parser test
+        assert!(matches!(err, SchemaError::CliContract { .. }), "got {err}");
+        assert!(err.to_string().contains("unknown binding"), "got {err}");
+
+        let unknown_exit = OVERLAY.replace(
+            "[flag_interaction]\n",
+            "[flag_interaction]\nbad\texclusive\twrite\tghost\tbad\n",
+        );
+        let err = Schema::parse(EXTRACT, &unknown_exit).unwrap_err(); // ubs:ignore — negative parser test
+        assert!(matches!(err, SchemaError::CliContract { .. }), "got {err}");
+        assert!(err.to_string().contains("unknown exit code"), "got {err}");
     }
 
     #[test]
@@ -1270,6 +2151,7 @@ mod tests {
             generate_config_rs(&s),
             generate_ledger_tsv(&s),
             generate_cli_table_md(&s),
+            generate_cli_rs(&s),
             generate_docs_md(&s),
         ] {
             assert!(artifact.contains("abc123"), "artifact lost the pin");
@@ -1285,5 +2167,6 @@ mod tests {
         let s = schema();
         assert_eq!(generate_config_rs(&s), generate_config_rs(&schema()));
         assert_eq!(generate_ledger_tsv(&s), generate_ledger_tsv(&schema()));
+        assert_eq!(generate_cli_rs(&s), generate_cli_rs(&schema()));
     }
 }

@@ -193,3 +193,129 @@ manimlib.mobject.matrix:Matrix	improved	BN-08
 manimlib.scene.scene:Scene.add_sound	improved	BN-14
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	C-7 documented no-op; our fill never needed it
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	arbitrary GLSL is out of the compatibility claim (README Limitations)
+
+# ---------------------------------------------------------------------------
+# [flag_binding] — rulings and generated-parser identities for every extracted
+# Reference flag.
+#
+# The first field is the exact `API_SCHEMA.tsv [flags]` key. Coverage is
+# fail-closed: every extracted row must appear exactly once, and a stale key is
+# a DanglingOverlay error. `binding` is the stable identity used by generated
+# Rust and by [flag_interaction]; it is not inferred from argparse's sometimes
+# implicit `dest`.
+#
+# options	status	command	binding	note
+[flag_binding]
+--autoreload	tiered	render	autoreload	re-specified as supervised Studio worker reload
+--clear-cache	improved	global	clear_cache	safe content-store lifecycle operation
+--config_file	same	global	config_file	defaults then user file then CLI precedence
+--file_name	same	render	file_name	explicit output stem
+--finder	improved	render	finder	portable reveal-in-file-manager action
+--fps	same	render	fps	positive integer frame rate
+--hd	same	render	hd	1080p resolution preset
+--leave_progress_bars	same	render	leave_progress_bars	human progress policy
+--log-level	same	global	log_level	stable log-level vocabulary
+--pix_fmt	same	render	pix_fmt	explicit ffmpeg wire pixel format
+--prerun	improved	render	prerun	deterministic count-only scene pass
+--show_animation_progress	same	render	show_animation_progress	per-animation human progress
+--subdivide	same	render	subdivide	one output per animation segment
+--uhd	same	render	uhd	2160p resolution preset
+--vcodec	same	render	vcodec	explicit ffmpeg encoder
+--video_dir	same	render	video_dir	explicit output directory
+-a,--write_all	same	render	write_all	select every scene in declaration order
+-c,--color	same	render	background	explicit background color
+-e,--embed	tiered	render	embed	Python front door or Studio breakpoint only
+-f,--full_screen	same	render	full_screen	fullscreen interactive presentation
+-i,--gif	same	render	gif	native GIF output
+-l,--low_quality	same	render	low_quality	480p resolution preset
+-m,--medium_quality	same	render	medium_quality	720p resolution preset
+-n,--start_at_animation_number	improved	render	animation_range	validated start or half-open start,end play range
+-o,--open	improved	render	open	portable host open action
+-p,--presenter_mode	same	render	presenter_mode	presenter-controlled waits
+-q,--quiet	same	global	quiet	suppress human decoration only
+-r,--resolution	improved	render	resolution	validated WIDTHxHEIGHT override
+-s,--skip_animations	same	render	skip_animations	capture the final state
+-t,--transparent	improved	render	transparent	alpha-capable output negotiation
+-v,--version	same	global	version	stable version report
+-w,--write_file	same	render	write_file	durable output instead of preview-only
+file	same	render	file	scene source path
+scene_names	same	render	scene_names	explicit scene-name selection
+
+# ---------------------------------------------------------------------------
+# [native_flags] — FrankenManim additions. These are authored because they do
+# not exist in the pinned Reference and therefore cannot be extracted.
+#
+# options	action	nargs	default	type	command	binding	status	help
+[native_flags]
+-h,--help	store_true	-	False	-	global	help	improved	Show command help and exit
+--robot	store_true	-	False	-	global	robot	improved	Emit only schema-versioned NDJSON records
+--reproducible	store_true	-	False	-	global	reproducible	improved	Select certified CPU rendering and canonical certified artifacts
+--threads	store	-	-	usize	global	threads	improved	Bound render-team CPU threads
+--ffmpeg	store	-	-	path	global	ffmpeg	improved	Absolute path to the optional ffmpeg executable
+--cache-dir	store	-	-	path	global	cache_dir	improved	Explicit FrankenManim content-store root
+--format	store	-	auto	output_format	render	format	improved	Select auto, png, png-sequence, gif, y4m, wav, or video output
+--math-pack	store	-	default	pack	render	math_pack	improved	Select an fmd-math preamble pack
+--budget-ms	store	-	-	u64	batch	budget_ms	improved	Wall-clock budget for the batch
+--max-scenes	store	-	-	usize	batch	max_scenes	improved	Bound simultaneously active scene jobs
+--fail-fast	store_true	-	False	-	batch	fail_fast	improved	Cancel remaining jobs after the first failure
+--manifest-dir	store	-	-	path	batch	manifest_dir	improved	Write per-scene manifests under this directory
+--require-ffmpeg	store_true	-	False	-	doctor	require_ffmpeg	improved	Exit with capability status when ffmpeg is unavailable
+--bind	store	-	127.0.0.1	ip	studio	bind	improved	Loopback address for the Studio host
+--port	store	-	0	u16	studio	port	improved	Studio TCP port, with zero selecting an ephemeral port
+--no-browser	store_true	-	False	-	studio	no_browser	improved	Do not launch the host browser
+--tui	store_true	-	False	-	studio	tui	improved	Attach the kitty or sixel terminal client
+--checkpoint-frames	store	-	120	u64	studio	checkpoint_frames	improved	Maximum frames between replay checkpoints
+--preview-codec	store	-	png	preview_codec	studio	preview_codec	improved	Select permanent multipart PNG or optional MJPEG preview
+
+# ---------------------------------------------------------------------------
+# [subcommands] — the native command tree. `render` is also the default when
+# the first non-option token is not a command name.
+#
+# command	status	help
+[subcommands]
+render	same	Render one or more selected scenes
+doctor	improved	Report capabilities and the derived ExecutionPlan
+batch	improved	Render a bounded multi-scene farm under asupersync
+studio	improved	Run the isolated-worker live Studio
+
+# ---------------------------------------------------------------------------
+# [exit_codes] — stable process statuses shared by human and robot modes.
+#
+# code	name	meaning
+[exit_codes]
+0	success	The requested command completed
+2	usage	Arguments, flag interactions, or selection syntax are invalid
+3	config	A configuration file or resolved value is invalid
+4	capability	A required optional capability is unavailable
+5	scene	Scene discovery, construction, or execution failed
+6	render	Rasterization, output, or publication failed
+7	cancelled	The operation was cooperatively cancelled
+8	budget	A declared time, memory, or concurrency budget was exhausted
+70	internal	An invariant failed inside FrankenManim
+
+# ---------------------------------------------------------------------------
+# [flag_interaction] — executable rules over stable binding identities.
+#
+# `implies` is non-failing and therefore uses `-` for exit_code. All other
+# rules name a declared exit code. The generated parser executes these rows;
+# its tests enumerate them rather than duplicating the policy in prose.
+#
+# id	kind	operands	exit_code	message
+[flag_interaction]
+quality-exclusive	at_most_one	low_quality|medium_quality|hd|uhd|resolution	usage	choose at most one quality preset or explicit resolution
+open-writes	implies	open|write_file	-	--open implies durable output
+finder-writes	implies	finder|write_file	-	--finder implies durable output
+gif-writes	implies	gif|write_file	-	--gif implies durable output
+transparent-writes	implies	transparent|write_file	-	--transparent implies durable output
+codec-writes	implies	vcodec|write_file	-	--vcodec implies durable output
+pixel-format-writes	implies	pix_fmt|write_file	-	--pix_fmt implies durable output
+subdivide-writes	implies	subdivide|write_file	-	--subdivide implies durable output
+filename-writes	implies	file_name|write_file	-	--file_name implies durable output
+video-directory-writes	implies	video_dir|write_file	-	--video_dir implies durable output
+skip-vs-subdivide	conflicts	skip_animations|subdivide	usage	--skip_animations cannot produce per-animation subdivisions
+write-all-vs-selection	conflicts	write_all|scene_names	usage	--write_all cannot accompany explicit scene names
+embed-vs-certified	conflicts	embed|reproducible	usage	interactive embed points are outside certified execution
+reload-vs-certified	conflicts	autoreload|reproducible	usage	a changing source tree is outside one certified input closure
+clear-cache-only	exclusive	clear_cache	usage	--clear-cache is a standalone lifecycle action
+version-only	exclusive	version	usage	--version is a standalone query
+help-only	exclusive	help	usage	--help is a standalone query for the selected command
