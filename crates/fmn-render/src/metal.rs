@@ -14,7 +14,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_hash::{Digest, Schema, Writer, sha256};
 use fmn_mobject::JointType;
 use ft_kernel_metal::Error as GatewayError;
@@ -28,6 +28,8 @@ use crate::{Binning, Segment};
 const KERNEL_SOURCE: &str = include_str!("shaders/metal.metal");
 const RASTER_KERNEL: &str = "fmn_render_frame";
 const RGBA8_KERNEL: &str = "fmn_rgba16f_to_rgba8";
+const NV12_KERNEL: &str = "fmn_rgba16f_to_nv12";
+const P010_KERNEL: &str = "fmn_rgba16f_to_p010";
 const SEGMENT_ARC_INTERVALS: usize = 16;
 const SEGMENT_ARC_VALUES: usize = SEGMENT_ARC_INTERVALS + 1;
 const SEGMENT_STRIDE: usize = 8 + SEGMENT_ARC_VALUES + 1;
@@ -39,6 +41,9 @@ const DRAW_F32_STRIDE: usize = 8;
 const STYLE_STRIDE: usize = 20;
 const STATUS_COMPLETE: u32 = 0x464d_4e4d;
 const TRANSFER_TILE: usize = 16;
+const TRANSFER_TABLE_ENTRIES: usize = 1 << 16;
+const TRANSFER_TABLE_WORDS_PER_PLANE: usize = TRANSFER_TABLE_ENTRIES / 4;
+const TRANSFER_TABLE_WORDS: usize = TRANSFER_TABLE_WORDS_PER_PLANE * 2;
 
 const DRAW_FILL: u32 = 1 << 0;
 const DRAW_STROKE: u32 = 1 << 1;
@@ -46,7 +51,7 @@ const STROKE_BEHIND: u32 = 1 << 2;
 const FLAT_FILL: u32 = 1 << 3;
 
 /// Canonical schema for the annex-specific half of C7.
-pub const METAL_BACKEND_SCHEMA: Schema = Schema::new(*b"FMNM", 1, 0, 0);
+pub const METAL_BACKEND_SCHEMA: Schema = Schema::new(*b"FMNM", 1, 0, 1);
 
 /// Version-1 maximum linear-channel error for Metal versus certified.
 ///
@@ -69,10 +74,9 @@ pub const METAL_VISUAL_BUDGET_V1_MIN_SSIM: f64 = 0.999_87;
 
 /// Maximum encoded-code error for the GPU RGBA16F-to-RGBA8 transfer.
 ///
-/// The MSL path uses safe math and is compared against Reel's canonical table
-/// conversion from the same raw surface. One 8-bit code is the admitted
-/// standard-preview rounding difference.
-pub const METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR: u8 = 1;
+/// Both implementations index the same authoritative Reel transfer tables by
+/// raw binary16 bits, so this is exact rather than a visual-equivalence budget.
+pub const METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR: u8 = 0;
 
 /// A Metal dispatch could not truthfully produce the requested frame.
 #[derive(Debug)]
@@ -201,6 +205,8 @@ pub struct MetalReport {
     pub math_mode: &'static str,
     /// Hash of the exact embedded MSL source.
     pub kernel_digest: Digest,
+    /// Hash of the exact binary16-to-byte tables resident on the device.
+    pub transfer_table_digest: Digest,
     /// Fine-tile threads used by the raster pipeline.
     pub threads_per_threadgroup: usize,
     /// Raster pipeline occupancy ceiling.
@@ -219,6 +225,10 @@ pub struct MetalReport {
     pub elapsed: Duration,
     /// Format copied back to the host.
     pub output_format: PixelFormat,
+    /// Quantization range for a planar YUV output.
+    pub color_range: Option<ColorRange>,
+    /// Chroma siting for a planar YUV output.
+    pub chroma_siting: Option<ChromaSiting>,
 }
 
 impl MetalReport {
@@ -239,6 +249,9 @@ impl MetalReport {
         writer.put_u64(self.max_threads_per_threadgroup as u64);
         writer.put_u64(self.thread_execution_width as u64);
         writer.put_str(format_name(self.output_format));
+        writer.put_bytes(self.transfer_table_digest.as_bytes());
+        writer.put_str(color_range_name(self.color_range));
+        writer.put_str(chroma_siting_name(self.chroma_siting));
         writer
             .finish()
             .expect("the fixed-size Metal backend identity fits the schema limits")
@@ -301,7 +314,7 @@ impl PreviewFrame {
 /// Studio's renderer-owned selection and fallback boundary.
 pub enum PreviewRenderer {
     /// Supported Metal device and compiled pipelines.
-    Metal(MetalRenderer),
+    Metal(Box<MetalRenderer>),
     /// Declared CPU fallback.
     FastCpu(PreviewFallback),
 }
@@ -322,7 +335,7 @@ impl PreviewRenderer {
     /// defect and is returned, not mislabeled as hardware absence.
     pub fn new() -> Result<Self, MetalError> {
         match MetalRenderer::new() {
-            Ok(renderer) => Ok(Self::Metal(renderer)),
+            Ok(renderer) => Ok(Self::Metal(Box::new(renderer))),
             Err(error) if error.unavailable() => Ok(Self::FastCpu(PreviewFallback::Unavailable)),
             Err(error) => Err(error),
         }
@@ -372,11 +385,15 @@ pub struct MetalRenderer {
     gateway: Gateway,
     raster: Pipeline,
     rgba8: Pipeline,
+    nv12: Pipeline,
+    p010: Pipeline,
+    transfer_table: SharedBuffer,
     raw_surface: Option<SurfaceSlot>,
-    output_surface: Option<SurfaceSlot>,
+    output_surface: Option<OutputSurfaceSlot>,
     device: String,
     unified_memory: bool,
     kernel_digest: Digest,
+    transfer_table_digest: Digest,
 }
 
 impl fmt::Debug for MetalRenderer {
@@ -390,7 +407,10 @@ impl fmt::Debug for MetalRenderer {
             )
             .field(
                 "output_surface_bytes",
-                &self.output_surface.as_ref().map(|s| s.bytes),
+                &self
+                    .output_surface
+                    .as_ref()
+                    .map(|surface| surface.layout.total_bytes()),
             )
             .finish_non_exhaustive()
     }
@@ -409,15 +429,23 @@ impl MetalRenderer {
         let library = gateway.library_with(KERNEL_SOURCE, MathMode::Safe)?;
         let raster = library.pipeline(RASTER_KERNEL)?;
         let rgba8 = library.pipeline(RGBA8_KERNEL)?;
+        let nv12 = library.pipeline(NV12_KERNEL)?;
+        let p010 = library.pipeline(P010_KERNEL)?;
+        let (transfer_words, transfer_table_digest) = build_transfer_table();
+        let transfer_table = gateway.buffer_u32(&transfer_words)?;
         Ok(Self {
             gateway,
             raster,
             rgba8,
+            nv12,
+            p010,
+            transfer_table,
             raw_surface: None,
             output_surface: None,
             device: gateway.device_name(),
             unified_memory: gateway.has_unified_memory(),
             kernel_digest: sha256(KERNEL_SOURCE.as_bytes()),
+            transfer_table_digest,
         })
     }
 
@@ -448,6 +476,8 @@ impl MetalRenderer {
             false,
             started.elapsed(),
             PixelFormat::Rgba16F,
+            None,
+            None,
         );
         Ok((frame, report))
     }
@@ -474,11 +504,8 @@ impl MetalRenderer {
             config.viewport.width,
             config.viewport.height,
         )?;
-        let output_reused = ensure_surface(
-            self.gateway,
-            &mut self.output_surface,
-            output_layout.total_bytes(),
-        )?;
+        let output_reused =
+            ensure_output_surface(self.gateway, &mut self.output_surface, &output_layout)?;
         let transfer_params = [
             config.viewport.width,
             config.viewport.height,
@@ -504,6 +531,7 @@ impl MetalRenderer {
                     .as_ref()
                     .ok_or(MetalError::Layout("raw surface disappeared"))?
                     .buffer,
+                &self.transfer_table,
                 &self
                     .output_surface
                     .as_ref()
@@ -531,6 +559,158 @@ impl MetalRenderer {
             output_reused,
             started.elapsed(),
             PixelFormat::Rgba8,
+            None,
+            None,
+        );
+        Ok((frame, report))
+    }
+
+    /// Render and convert on-device to a negotiated NV12 layout.
+    ///
+    /// The layout's per-plane strides are honored exactly. Only the compact
+    /// Y′CbCr allocation crosses to the host; the linear RGBA16F surface stays
+    /// device-resident.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_nv12(
+        &mut self,
+        plan: &RenderPlan,
+        mono: &MonoTable,
+        binning: &Binning,
+        config: FrameConfig,
+        output_layout: FrameLayout,
+        range: ColorRange,
+        siting: ChromaSiting,
+    ) -> Result<(FrameBuffer, MetalReport), MetalError> {
+        self.render_yuv420(
+            plan,
+            mono,
+            binning,
+            config,
+            output_layout,
+            PixelFormat::Nv12,
+            range,
+            siting,
+        )
+    }
+
+    /// Render and convert on-device to a negotiated P010 layout.
+    ///
+    /// Reel defines P010 as limited-range only. Full range is therefore a
+    /// typed refusal before any raster work is submitted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_p010(
+        &mut self,
+        plan: &RenderPlan,
+        mono: &MonoTable,
+        binning: &Binning,
+        config: FrameConfig,
+        output_layout: FrameLayout,
+        range: ColorRange,
+        siting: ChromaSiting,
+    ) -> Result<(FrameBuffer, MetalReport), MetalError> {
+        self.render_yuv420(
+            plan,
+            mono,
+            binning,
+            config,
+            output_layout,
+            PixelFormat::P010,
+            range,
+            siting,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_yuv420(
+        &mut self,
+        plan: &RenderPlan,
+        mono: &MonoTable,
+        binning: &Binning,
+        config: FrameConfig,
+        output_layout: FrameLayout,
+        expected_format: PixelFormat,
+        range: ColorRange,
+        siting: ChromaSiting,
+    ) -> Result<(FrameBuffer, MetalReport), MetalError> {
+        validate_yuv_output(&output_layout, config, expected_format, range)?;
+
+        let started = Instant::now();
+        let job = FrameJob::for_metal(plan, mono, binning, config)?;
+        let flat = FlatFrame::derive(&job)?;
+        let raw_layout = config.layout()?;
+        let (raw_reused, upload_bytes) = self.dispatch_raster(&flat, raw_layout.total_bytes())?;
+        let output_reused =
+            ensure_output_surface(self.gateway, &mut self.output_surface, &output_layout)?;
+
+        let sample_size = output_layout.format().sample_size();
+        let transfer_params = [
+            output_layout.width(),
+            output_layout.height(),
+            checked_u32(output_layout.stride(0) / sample_size, "YUV luma stride")?,
+            checked_u32(output_layout.stride(1) / sample_size, "YUV chroma stride")?,
+            checked_u32(
+                output_layout.plane_offset(1) / sample_size,
+                "YUV chroma offset",
+            )?,
+            color_range_code(range),
+            chroma_siting_code(siting),
+        ];
+        let params = self.gateway.buffer_u32(&transfer_params)?;
+        let quad_width = output_layout.width() as usize / 2;
+        let quad_height = output_layout.height() as usize / 2;
+        let groups_x = quad_width.div_ceil(TRANSFER_TILE);
+        let groups_y = quad_height.div_ceil(TRANSFER_TILE);
+        let group_count = groups_x
+            .checked_mul(groups_y)
+            .ok_or(MetalError::SizeOverflow("YUV transfer group count"))?;
+        let (pipeline, kernel) = match expected_format {
+            PixelFormat::Nv12 => (&self.nv12, NV12_KERNEL),
+            PixelFormat::P010 => (&self.p010, P010_KERNEL),
+            _ => return Err(MetalError::Layout("non-YUV transfer pipeline selected")),
+        };
+        validate_threadgroup(pipeline, kernel, TRANSFER_TILE, TRANSFER_TILE)?;
+        let status =
+            self.gateway
+                .buffer_zeroed(checked_bytes(group_count, 4, "YUV transfer status")?)?;
+        self.gateway.dispatch(
+            pipeline,
+            &[
+                &params,
+                &self
+                    .raw_surface
+                    .as_ref()
+                    .ok_or(MetalError::Layout("raw surface disappeared"))?
+                    .buffer,
+                &self.transfer_table,
+                &self
+                    .output_surface
+                    .as_ref()
+                    .ok_or(MetalError::Layout("YUV surface disappeared"))?
+                    .buffer,
+                &status,
+            ],
+            Grid::grid_2d(groups_x, groups_y, TRANSFER_TILE, TRANSFER_TILE),
+        )?;
+        verify_status(&status, group_count, kernel)?;
+
+        let mut frame = FrameBuffer::new(output_layout);
+        self.output_surface
+            .as_ref()
+            .ok_or(MetalError::Layout("YUV surface disappeared"))?
+            .buffer
+            .read_u8(frame.as_bytes_mut())?;
+        let report = self.report(
+            &flat,
+            upload_bytes
+                .checked_add(std::mem::size_of_val(&transfer_params))
+                .ok_or(MetalError::SizeOverflow("frame upload count"))?,
+            frame.as_bytes().len(),
+            raw_reused,
+            output_reused,
+            started.elapsed(),
+            expected_format,
+            Some(range),
+            Some(siting),
         );
         Ok((frame, report))
     }
@@ -601,6 +781,8 @@ impl MetalRenderer {
         output_surface_reused: bool,
         elapsed: Duration,
         output_format: PixelFormat,
+        color_range: Option<ColorRange>,
+        chroma_siting: Option<ChromaSiting>,
     ) -> MetalReport {
         let threads = flat.tile().saturating_mul(flat.tile());
         MetalReport {
@@ -609,6 +791,7 @@ impl MetalRenderer {
             unified_memory: self.unified_memory,
             math_mode: "safe",
             kernel_digest: self.kernel_digest,
+            transfer_table_digest: self.transfer_table_digest,
             threads_per_threadgroup: threads,
             max_threads_per_threadgroup: self.raster.max_threads_per_threadgroup(),
             thread_execution_width: self.raster.thread_execution_width(),
@@ -618,12 +801,19 @@ impl MetalRenderer {
             output_surface_reused,
             elapsed,
             output_format,
+            color_range,
+            chroma_siting,
         }
     }
 }
 
 struct SurfaceSlot {
     bytes: usize,
+    buffer: SharedBuffer,
+}
+
+struct OutputSurfaceSlot {
+    layout: FrameLayout,
     buffer: SharedBuffer,
 }
 
@@ -639,6 +829,94 @@ fn ensure_surface(
     let buffer = gateway.buffer_zeroed(bytes)?;
     *slot = Some(SurfaceSlot { bytes, buffer });
     Ok(false)
+}
+
+/// Return whether the exact negotiated layout's lifetime-held surface was
+/// reused. Byte length alone is insufficient: equal-size layouts can put
+/// padding at different offsets, and transfer kernels intentionally leave
+/// padding untouched.
+fn ensure_output_surface(
+    gateway: Gateway,
+    slot: &mut Option<OutputSurfaceSlot>,
+    layout: &FrameLayout,
+) -> Result<bool, MetalError> {
+    if slot
+        .as_ref()
+        .is_some_and(|surface| surface.layout == *layout)
+    {
+        return Ok(true);
+    }
+    let buffer = gateway.buffer_zeroed(layout.total_bytes())?;
+    *slot = Some(OutputSurfaceSlot {
+        layout: layout.clone(),
+        buffer,
+    });
+    Ok(false)
+}
+
+fn validate_yuv_output(
+    layout: &FrameLayout,
+    config: FrameConfig,
+    expected_format: PixelFormat,
+    range: ColorRange,
+) -> Result<(), MetalError> {
+    if expected_format == PixelFormat::P010 && range != ColorRange::Limited {
+        return Err(FrameError::UnsupportedConversion("P010 output is limited-range only").into());
+    }
+    let expected = match expected_format {
+        PixelFormat::Nv12 => "Nv12 destination",
+        PixelFormat::P010 => "P010 destination",
+        _ => return Err(MetalError::Layout("non-YUV output format selected")),
+    };
+    if layout.format() != expected_format {
+        return Err(FrameError::FormatMismatch {
+            expected,
+            got: layout.format(),
+        }
+        .into());
+    }
+    if layout.width() != config.viewport.width || layout.height() != config.viewport.height {
+        return Err(FrameError::DimensionMismatch.into());
+    }
+    Ok(())
+}
+
+fn build_transfer_table() -> (Vec<u32>, Digest) {
+    let tables = fmn_frame::transfer::tables();
+    let mut bytes = Vec::with_capacity(TRANSFER_TABLE_ENTRIES * 2);
+    for bits in 0..=u16::MAX {
+        bytes.push(tables.srgb8_from_f16(bits));
+    }
+    for bits in 0..=u16::MAX {
+        bytes.push(tables.linear8_from_f16(bits));
+    }
+    let digest = sha256(&bytes);
+    let (chunks, remainder) = bytes.as_chunks::<4>();
+    debug_assert!(remainder.is_empty());
+    let words = chunks
+        .iter()
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect::<Vec<_>>();
+    debug_assert_eq!(words.len(), TRANSFER_TABLE_WORDS);
+    (words, digest)
+}
+
+fn checked_u32(value: usize, name: &'static str) -> Result<u32, MetalError> {
+    u32::try_from(value).map_err(|_| MetalError::SizeOverflow(name))
+}
+
+const fn color_range_code(range: ColorRange) -> u32 {
+    match range {
+        ColorRange::Limited => 0,
+        ColorRange::Full => 1,
+    }
+}
+
+const fn chroma_siting_code(siting: ChromaSiting) -> u32 {
+    match siting {
+        ChromaSiting::Left => 0,
+        ChromaSiting::Center => 1,
+    }
 }
 
 fn validate_threadgroup(
@@ -1064,6 +1342,22 @@ const fn format_name(format: PixelFormat) -> &'static str {
     }
 }
 
+const fn color_range_name(range: Option<ColorRange>) -> &'static str {
+    match range {
+        Some(ColorRange::Limited) => "limited",
+        Some(ColorRange::Full) => "full",
+        None => "none",
+    }
+}
+
+const fn chroma_siting_name(siting: Option<ChromaSiting>) -> &'static str {
+    match siting {
+        Some(ChromaSiting::Left) => "left",
+        Some(ChromaSiting::Center) => "center",
+        None => "none",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(not(target_os = "macos"))]
@@ -1086,13 +1380,17 @@ mod tests {
             ("DRAW_U32_STRIDE", DRAW_U32_STRIDE),
             ("DRAW_F32_STRIDE", DRAW_F32_STRIDE),
             ("STYLE_STRIDE", STYLE_STRIDE),
+            (
+                "TRANSFER_TABLE_WORDS_PER_PLANE",
+                TRANSFER_TABLE_WORDS_PER_PLANE,
+            ),
         ] {
             assert!(
                 KERNEL_SOURCE.contains(&format!("#define {name} {value}")),
                 "shader is missing the mirrored `{name}` stride"
             );
         }
-        for kernel in [RASTER_KERNEL, RGBA8_KERNEL] {
+        for kernel in [RASTER_KERNEL, RGBA8_KERNEL, NV12_KERNEL, P010_KERNEL] {
             assert!(
                 KERNEL_SOURCE.contains(&format!("kernel void {kernel}(")),
                 "shader is missing `{kernel}`"
@@ -1108,6 +1406,7 @@ mod tests {
             unified_memory: true,
             math_mode: "safe",
             kernel_digest: sha256(b"kernel"),
+            transfer_table_digest: sha256(b"transfer table"),
             threads_per_threadgroup: 256,
             max_threads_per_threadgroup: 1024,
             thread_execution_width: 32,
@@ -1117,6 +1416,8 @@ mod tests {
             output_surface_reused: false,
             elapsed: Duration::from_millis(2),
             output_format: PixelFormat::Rgba8,
+            color_range: None,
+            chroma_siting: None,
         };
         let mut observed = base.clone();
         observed.upload_bytes = 999;
@@ -1125,6 +1426,32 @@ mod tests {
         assert_eq!(base.backend_digest(), observed.backend_digest());
         observed.device.push_str("-other");
         assert_ne!(base.backend_digest(), observed.backend_digest());
+        let mut yuv = base.clone();
+        yuv.output_format = PixelFormat::Nv12;
+        yuv.color_range = Some(ColorRange::Limited);
+        yuv.chroma_siting = Some(ChromaSiting::Left);
+        assert_ne!(base.backend_digest(), yuv.backend_digest());
+    }
+
+    #[test]
+    fn packed_transfer_table_is_the_authoritative_reel_table() {
+        let (words, digest) = build_transfer_table();
+        assert_eq!(words.len(), TRANSFER_TABLE_WORDS);
+        let tables = fmn_frame::transfer::tables();
+        let unpack = |plane: usize, bits: u16| {
+            let index = bits as usize;
+            let word = words[plane * TRANSFER_TABLE_WORDS_PER_PLANE + index / 4];
+            ((word >> ((index % 4) * 8)) & 0xff) as u8
+        };
+        for bits in [0, 1, 0x3555, 0x3c00, 0x7c00, 0x7e00, u16::MAX] {
+            assert_eq!(unpack(0, bits), tables.srgb8_from_f16(bits));
+            assert_eq!(unpack(1, bits), tables.linear8_from_f16(bits));
+        }
+        let rebuilt_bytes = words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(digest, sha256(&rebuilt_bytes));
     }
 
     #[test]
@@ -1146,6 +1473,49 @@ mod tests {
             .permits_preview_fallback()
         );
         assert!(!MetalError::SizeOverflow("fixture").permits_preview_fallback());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn yuv_output_validation_refuses_semantic_mismatches_before_dispatch() {
+        let config = FrameConfig::new(
+            Viewport {
+                width: 16,
+                height: 16,
+            },
+            ScreenMap {
+                scale: 1.0,
+                origin: [8.0, 8.0],
+            },
+            LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        let p010 = FrameLayout::tight(PixelFormat::P010, 16, 16).expect("valid P010 layout");
+        assert!(matches!(
+            validate_yuv_output(&p010, config, PixelFormat::P010, ColorRange::Full),
+            Err(MetalError::Frame(FrameError::UnsupportedConversion(
+                "P010 output is limited-range only"
+            )))
+        ));
+
+        let rgba = FrameLayout::tight(PixelFormat::Rgba8, 16, 16).expect("valid RGBA layout");
+        assert!(matches!(
+            validate_yuv_output(&rgba, config, PixelFormat::Nv12, ColorRange::Limited),
+            Err(MetalError::Frame(FrameError::FormatMismatch {
+                expected: "Nv12 destination",
+                got: PixelFormat::Rgba8,
+            }))
+        ));
+
+        let other_size = FrameLayout::tight(PixelFormat::Nv12, 18, 16).expect("valid NV12 layout");
+        assert!(matches!(
+            validate_yuv_output(&other_size, config, PixelFormat::Nv12, ColorRange::Limited,),
+            Err(MetalError::Frame(FrameError::DimensionMismatch))
+        ));
     }
 
     #[cfg(not(target_os = "macos"))]

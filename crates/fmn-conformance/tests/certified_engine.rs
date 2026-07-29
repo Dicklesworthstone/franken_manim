@@ -45,6 +45,8 @@
 use fmn_conformance::golden::{GoldenStore, Scope};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, GREEN_B, MAROON_C, RED_C, TEAL_B, WHITE, YELLOW_C};
+#[cfg(feature = "metal")]
+use fmn_frame::{ChromaSiting, ColorRange};
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_library::style::VStyle;
 use fmn_library::{Circle, Dot, Line, Polygon, Rectangle};
@@ -60,6 +62,7 @@ use fmn_render::fill::{FillKernel, MonoTable, instance_translation};
 use fmn_render::metal::{
     METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR, METAL_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
     METAL_VISUAL_BUDGET_V1_MIN_SSIM, METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, MetalRenderer,
+    MetalReport,
 };
 use fmn_render::plan::RenderPlan;
 use std::path::PathBuf;
@@ -657,12 +660,85 @@ fn metal_annex_stays_inside_budget_and_reuses_its_surfaces() {
             assert!(gpu_second_report.raw_surface_reused);
             assert!(gpu_second_report.output_surface_reused);
             assert_eq!(gpu_first.as_bytes(), gpu_second.as_bytes());
-            assert!(
-                maximum_rgba8_code_error(&expected, &gpu_first)
-                    <= METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR
+            assert_eq!(
+                maximum_rgba8_code_error(&expected, &gpu_first),
+                METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR
             );
+            let rgba_transfer_digest = gpu_first_report.transfer_table_digest;
+            let rgba_readback_bytes = expected.as_bytes().len();
+
+            for (format, range, siting) in [
+                (PixelFormat::Nv12, ColorRange::Limited, ChromaSiting::Left),
+                (PixelFormat::Nv12, ColorRange::Limited, ChromaSiting::Center),
+                (PixelFormat::Nv12, ColorRange::Full, ChromaSiting::Left),
+                (PixelFormat::Nv12, ColorRange::Full, ChromaSiting::Center),
+                (PixelFormat::P010, ColorRange::Limited, ChromaSiting::Left),
+                (PixelFormat::P010, ColorRange::Limited, ChromaSiting::Center),
+            ] {
+                let layout = negotiated_yuv_layout(format);
+                let mut cpu = FrameBuffer::new(layout.clone());
+                match format {
+                    PixelFormat::Nv12 => {
+                        fmn_frame::convert::rgba_to_nv12(&expected, &mut cpu, range, siting)
+                            .expect("CPU NV12 oracle");
+                    }
+                    PixelFormat::P010 => {
+                        fmn_frame::convert::rgba_to_p010(&expected, &mut cpu, range, siting)
+                            .expect("CPU P010 oracle");
+                    }
+                    _ => unreachable!("the case table contains only YUV420 formats"),
+                }
+                let (gpu_first, yuv_first_report) = match format {
+                    PixelFormat::Nv12 => renderer
+                        .render_nv12(&plan, &mono, &binning, cfg, layout.clone(), range, siting)
+                        .expect("Metal transfers NV12 before readback"),
+                    PixelFormat::P010 => renderer
+                        .render_p010(&plan, &mono, &binning, cfg, layout.clone(), range, siting)
+                        .expect("Metal transfers P010 before readback"),
+                    _ => unreachable!("the case table contains only YUV420 formats"),
+                };
+                let (gpu_second, yuv_second_report) = match format {
+                    PixelFormat::Nv12 => renderer
+                        .render_nv12(&plan, &mono, &binning, cfg, layout.clone(), range, siting)
+                        .expect("Metal repeats NV12 transfer"),
+                    PixelFormat::P010 => renderer
+                        .render_p010(&plan, &mono, &binning, cfg, layout.clone(), range, siting)
+                        .expect("Metal repeats P010 transfer"),
+                    _ => unreachable!("the case table contains only YUV420 formats"),
+                };
+
+                assert_eq!(gpu_first.layout(), &layout);
+                assert_eq!(yuv_first_report.output_format, format);
+                assert_eq!(yuv_first_report.color_range, Some(range));
+                assert_eq!(yuv_first_report.chroma_siting, Some(siting));
+                assert_eq!(yuv_first_report.transfer_table_digest, rgba_transfer_digest);
+                assert_eq!(yuv_first_report.readback_bytes, layout.total_bytes());
+                assert!(
+                    yuv_first_report.readback_bytes < rgba_readback_bytes,
+                    "{format:?} did not reduce the RGBA8 readback"
+                );
+                assert!(yuv_second_report.raw_surface_reused);
+                assert!(yuv_second_report.output_surface_reused);
+                assert_eq!(gpu_first.as_bytes(), gpu_second.as_bytes());
+                assert_eq!(
+                    cpu.as_bytes(),
+                    gpu_first.as_bytes(),
+                    "{format:?} {range:?} {siting:?} diverged from Reel's CPU oracle"
+                );
+            }
         }
     }
+}
+
+#[cfg(feature = "metal")]
+fn negotiated_yuv_layout(format: PixelFormat) -> FrameLayout {
+    let width = WIDTH as usize;
+    let strides = match format {
+        PixelFormat::Nv12 => [width + 8, width + 24],
+        PixelFormat::P010 => [width * 2 + 16, width * 2 + 32],
+        _ => unreachable!("YUV layout requested for {format:?}"),
+    };
+    FrameLayout::with_strides(format, WIDTH, HEIGHT, &strides).expect("valid padded YUV layout")
 }
 
 #[cfg(feature = "metal")]
@@ -675,6 +751,54 @@ fn maximum_rgba8_code_error(reference: &FrameBuffer, candidate: &FrameBuffer) ->
         .map(|(&a, &b)| a.abs_diff(b))
         .max()
         .unwrap_or(0)
+}
+
+#[cfg(feature = "metal")]
+fn render_pg_a_format(
+    renderer: &mut MetalRenderer,
+    plan: &RenderPlan,
+    mono: &MonoTable,
+    binning: &Binning,
+    config: FrameConfig,
+    format: PixelFormat,
+) -> MetalReport {
+    match format {
+        PixelFormat::Rgba8 => {
+            renderer
+                .render_rgba8(plan, mono, binning, config)
+                .expect("PG-A RGBA8 frame")
+                .1
+        }
+        PixelFormat::Nv12 => {
+            renderer
+                .render_nv12(
+                    plan,
+                    mono,
+                    binning,
+                    config,
+                    FrameLayout::tight(PixelFormat::Nv12, WIDTH, HEIGHT).expect("PG-A NV12 layout"),
+                    ColorRange::Limited,
+                    ChromaSiting::Center,
+                )
+                .expect("PG-A NV12 frame")
+                .1
+        }
+        PixelFormat::P010 => {
+            renderer
+                .render_p010(
+                    plan,
+                    mono,
+                    binning,
+                    config,
+                    FrameLayout::tight(PixelFormat::P010, WIDTH, HEIGHT).expect("PG-A P010 layout"),
+                    ColorRange::Limited,
+                    ChromaSiting::Center,
+                )
+                .expect("PG-A P010 frame")
+                .1
+        }
+        _ => unreachable!("unsupported PG-A format {format:?}"),
+    }
 }
 
 #[cfg(feature = "metal")]
@@ -696,48 +820,53 @@ fn metal_annex_pg_a_reports_the_empty_floor_beside_the_corpus() {
         let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
         binning.prune_occluded(&plan).expect("matching plan");
 
-        renderer
-            .render_rgba8(&plan, &mono, &binning, cfg)
-            .expect("PG-A warmup frame");
-        let mut elapsed = Vec::with_capacity(MEASURED_FRAMES);
-        let mut last = None;
-        for _ in 0..MEASURED_FRAMES {
-            let (_, report) = renderer
-                .render_rgba8(&plan, &mono, &binning, cfg)
-                .expect("PG-A measured frame");
-            assert!(report.raw_surface_reused);
-            assert!(report.output_surface_reused);
-            elapsed.push(report.elapsed);
-            last = Some(report);
-        }
-        elapsed.sort_unstable();
-        let median = elapsed[MEASURED_FRAMES / 2];
-        let report = last.expect("the measurement count is nonzero");
-        let fps = 1.0 / median.as_secs_f64();
-        assert!(fps.is_finite() && fps > 0.0);
-        assert!(report.upload_bytes > 0);
-        assert_eq!(
-            report.readback_bytes,
-            FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT)
-                .expect("PG-A output layout")
-                .total_bytes()
-        );
+        for format in [PixelFormat::Rgba8, PixelFormat::Nv12, PixelFormat::P010] {
+            render_pg_a_format(&mut renderer, &plan, &mono, &binning, cfg, format);
+            let mut elapsed = Vec::with_capacity(MEASURED_FRAMES);
+            let mut last = None;
+            for _ in 0..MEASURED_FRAMES {
+                let report = render_pg_a_format(&mut renderer, &plan, &mono, &binning, cfg, format);
+                assert!(report.raw_surface_reused);
+                assert!(report.output_surface_reused);
+                elapsed.push(report.elapsed);
+                last = Some(report);
+            }
+            elapsed.sort_unstable();
+            let median = elapsed[MEASURED_FRAMES / 2];
+            let report = last.expect("the measurement count is nonzero");
+            let fps = 1.0 / median.as_secs_f64();
+            assert!(fps.is_finite() && fps > 0.0);
+            assert!(report.upload_bytes > 0);
+            assert_eq!(
+                report.readback_bytes,
+                FrameLayout::tight(format, WIDTH, HEIGHT)
+                    .expect("PG-A output layout")
+                    .total_bytes()
+            );
 
-        println!(
-            "{{\"schema\":\"fmn.pg_a.v1\",\"case\":\"{case}\",\"device\":{:?},\
-             \"unified_memory\":{},\"frames\":{MEASURED_FRAMES},\"median_ns\":{},\
-             \"fps\":{fps},\"upload_bytes\":{},\"readback_bytes\":{},\
-             \"threads_per_threadgroup\":{},\"max_threads_per_threadgroup\":{},\
-             \"thread_execution_width\":{}}}",
-            report.device,
-            report.unified_memory,
-            median.as_nanos(),
-            report.upload_bytes,
-            report.readback_bytes,
-            report.threads_per_threadgroup,
-            report.max_threads_per_threadgroup,
-            report.thread_execution_width,
-        );
+            println!(
+                "{{\"schema\":\"fmn.pg_a.v1\",\"case\":\"{case}\",\
+                 \"format\":\"{}\",\"device\":{:?},\"unified_memory\":{},\
+                 \"frames\":{MEASURED_FRAMES},\"median_ns\":{},\"fps\":{fps},\
+                 \"upload_bytes\":{},\"readback_bytes\":{},\
+                 \"threads_per_threadgroup\":{},\"max_threads_per_threadgroup\":{},\
+                 \"thread_execution_width\":{}}}",
+                match format {
+                    PixelFormat::Rgba8 => "rgba8",
+                    PixelFormat::Nv12 => "nv12",
+                    PixelFormat::P010 => "p010",
+                    _ => unreachable!(),
+                },
+                report.device,
+                report.unified_memory,
+                median.as_nanos(),
+                report.upload_bytes,
+                report.readback_bytes,
+                report.threads_per_threadgroup,
+                report.max_threads_per_threadgroup,
+                report.thread_execution_width,
+            );
+        }
     }
 }
 

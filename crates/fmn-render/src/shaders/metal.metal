@@ -24,6 +24,9 @@ using namespace metal;
 #define FLAT_FILL 8u
 #define CLASS_INTERIOR 1u
 #define STATUS_COMPLETE 0x464d4e4du
+#define TRANSFER_TABLE_WORDS_PER_PLANE 16384
+#define YUV_RANGE_FULL 1u
+#define CHROMA_SITING_CENTER 1u
 
 #define DEGENERATE_REL 1e-6f
 #define MIN_AA_WIDTH 1e-8f
@@ -1008,22 +1011,90 @@ kernel void fmn_render_frame(
     }
 }
 
-static uchar quantize_unit(float value) {
-    return (uchar)clamp(round(clamp(value, 0.0f, 1.0f) * 255.0f), 0.0f, 255.0f);
+// Reel's canonical binary16-to-byte tables are packed little-endian, four
+// entries per uint: sRGB first, then linear alpha. Reading raw ushort samples
+// avoids any platform-dependent half-to-float conversion or OETF arithmetic.
+static uint transfer_byte(
+    device const uint *tables,
+    uint plane,
+    ushort bits
+) {
+    uint index = (uint)bits;
+    uint word = tables[
+        plane * (uint)TRANSFER_TABLE_WORDS_PER_PLANE + (index >> 2u)
+    ];
+    return (word >> ((index & 3u) * 8u)) & 0xffu;
 }
 
-static float srgb_encode(float linear) {
-    float value = clamp(linear, 0.0f, 1.0f);
-    return (value <= 0.0031308f)
-        ? 12.92f * value
-        : 1.055f * pow(value, 1.0f / 2.4f) - 0.055f;
+static uint3 srgb_pixel(
+    device const ushort *source,
+    device const uint *tables,
+    uint width,
+    uint px,
+    uint py
+) {
+    uint base = (py * width + px) * 4u;
+    return uint3(
+        transfer_byte(tables, 0u, source[base + 0u]),
+        transfer_byte(tables, 0u, source[base + 1u]),
+        transfer_byte(tables, 0u, source[base + 2u])
+    );
+}
+
+// Explicit floor division makes the negative-chroma rounding rule independent
+// of implementation-defined signed right-shift behavior.
+static int floor_div_pow2(int value, uint shift) {
+    int divisor = (int)(1u << shift);
+    if (value >= 0) return value / divisor;
+    return -((-value + divisor - 1) / divisor);
+}
+
+static int3 yuv_sums(uint3 rgb, bool full_range) {
+    int r = (int)rgb.r;
+    int g = (int)rgb.g;
+    int b = (int)rgb.b;
+    if (full_range) {
+        return int3(
+            13933 * r + 46871 * g + 4732 * b,
+            -7509 * r - 25259 * g + 32768 * b,
+            32768 * r - 29763 * g - 3005 * b
+        );
+    }
+    return int3(
+        11966 * r + 40254 * g + 4064 * b,
+        -6596 * r - 22189 * g + 28785 * b,
+        28785 * r - 26145 * g - 2640 * b
+    );
+}
+
+static uint quant8_sum(int sum, int offset) {
+    int code = floor_div_pow2(sum + (1 << 15), 16u) + offset;
+    return (uint)clamp(code, 0, 255);
+}
+
+static uint quant10_sum(int sum, int offset) {
+    int code = floor_div_pow2(sum + (1 << 13), 14u) + offset * 4;
+    return (uint)clamp(code, 0, 1023);
+}
+
+static int site_sum(
+    bool centered,
+    int s00,
+    int s01,
+    int s10,
+    int s11
+) {
+    return centered
+        ? floor_div_pow2(s00 + s01 + s10 + s11 + 2, 2u)
+        : floor_div_pow2(s00 + s10 + 1, 1u);
 }
 
 kernel void fmn_rgba16f_to_rgba8(
     constant uint *params [[buffer(0)]], // width, height, stride
-    device const half4 *source [[buffer(1)]],
-    device uchar *output [[buffer(2)]],
-    device uint *status [[buffer(3)]],
+    device const ushort *source [[buffer(1)]],
+    device const uint *tables [[buffer(2)]],
+    device uchar *output [[buffer(3)]],
+    device uint *status [[buffer(4)]],
     uint2 group_id [[threadgroup_position_in_grid]],
     uint2 local_id [[thread_position_in_threadgroup]],
     uint2 group_size [[threads_per_threadgroup]]
@@ -1031,16 +1102,107 @@ kernel void fmn_rgba16f_to_rgba8(
     uint px = group_id.x * group_size.x + local_id.x;
     uint py = group_id.y * group_size.y + local_id.y;
     if (px < params[0] && py < params[1]) {
-        float4 value = float4(source[py * params[0] + px]);
+        uint source_base = (py * params[0] + px) * 4u;
         uint base = py * params[2] + px * 4u;
-        output[base + 0u] = quantize_unit(srgb_encode(value.r));
-        output[base + 1u] = quantize_unit(srgb_encode(value.g));
-        output[base + 2u] = quantize_unit(srgb_encode(value.b));
-        output[base + 3u] = quantize_unit(value.a);
+        output[base + 0u] = (uchar)transfer_byte(tables, 0u, source[source_base + 0u]);
+        output[base + 1u] = (uchar)transfer_byte(tables, 0u, source[source_base + 1u]);
+        output[base + 2u] = (uchar)transfer_byte(tables, 0u, source[source_base + 2u]);
+        output[base + 3u] = (uchar)transfer_byte(tables, 1u, source[source_base + 3u]);
     }
     threadgroup_barrier(mem_flags::mem_device);
     if (local_id.x == 0u && local_id.y == 0u) {
         uint groups_x = (params[0] + group_size.x - 1u) / group_size.x;
+        status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
+    }
+}
+
+kernel void fmn_rgba16f_to_nv12(
+    constant uint *params [[buffer(0)]],
+    // width, height, Y stride bytes, C stride bytes, C offset bytes,
+    // range (limited/full), siting (left/center)
+    device const ushort *source [[buffer(1)]],
+    device const uint *tables [[buffer(2)]],
+    device uchar *output [[buffer(3)]],
+    device uint *status [[buffer(4)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]]
+) {
+    uint qx = group_id.x * group_size.x + local_id.x;
+    uint qy = group_id.y * group_size.y + local_id.y;
+    uint quad_width = params[0] / 2u;
+    uint quad_height = params[1] / 2u;
+    if (qx < quad_width && qy < quad_height) {
+        uint px = qx * 2u;
+        uint py = qy * 2u;
+        bool full_range = params[5] == YUV_RANGE_FULL;
+        bool centered = params[6] == CHROMA_SITING_CENTER;
+        int3 s00 = yuv_sums(srgb_pixel(source, tables, params[0], px, py), full_range);
+        int3 s01 = yuv_sums(srgb_pixel(source, tables, params[0], px + 1u, py), full_range);
+        int3 s10 = yuv_sums(srgb_pixel(source, tables, params[0], px, py + 1u), full_range);
+        int3 s11 =
+            yuv_sums(srgb_pixel(source, tables, params[0], px + 1u, py + 1u), full_range);
+        int y_offset = full_range ? 0 : 16;
+        uint y_base_0 = py * params[2] + px;
+        uint y_base_1 = (py + 1u) * params[2] + px;
+        output[y_base_0 + 0u] = (uchar)quant8_sum(s00.x, y_offset);
+        output[y_base_0 + 1u] = (uchar)quant8_sum(s01.x, y_offset);
+        output[y_base_1 + 0u] = (uchar)quant8_sum(s10.x, y_offset);
+        output[y_base_1 + 1u] = (uchar)quant8_sum(s11.x, y_offset);
+
+        uint c_base = params[4] + qy * params[3] + px;
+        int cb = site_sum(centered, s00.y, s01.y, s10.y, s11.y);
+        int cr = site_sum(centered, s00.z, s01.z, s10.z, s11.z);
+        output[c_base + 0u] = (uchar)quant8_sum(cb, 128);
+        output[c_base + 1u] = (uchar)quant8_sum(cr, 128);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        uint groups_x = (quad_width + group_size.x - 1u) / group_size.x;
+        status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
+    }
+}
+
+kernel void fmn_rgba16f_to_p010(
+    constant uint *params [[buffer(0)]],
+    // width, height, Y stride u16s, C stride u16s, C offset u16s,
+    // limited range, siting (left/center)
+    device const ushort *source [[buffer(1)]],
+    device const uint *tables [[buffer(2)]],
+    device ushort *output [[buffer(3)]],
+    device uint *status [[buffer(4)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]]
+) {
+    uint qx = group_id.x * group_size.x + local_id.x;
+    uint qy = group_id.y * group_size.y + local_id.y;
+    uint quad_width = params[0] / 2u;
+    uint quad_height = params[1] / 2u;
+    if (qx < quad_width && qy < quad_height) {
+        uint px = qx * 2u;
+        uint py = qy * 2u;
+        bool centered = params[6] == CHROMA_SITING_CENTER;
+        int3 s00 = yuv_sums(srgb_pixel(source, tables, params[0], px, py), false);
+        int3 s01 = yuv_sums(srgb_pixel(source, tables, params[0], px + 1u, py), false);
+        int3 s10 = yuv_sums(srgb_pixel(source, tables, params[0], px, py + 1u), false);
+        int3 s11 = yuv_sums(srgb_pixel(source, tables, params[0], px + 1u, py + 1u), false);
+        uint y_base_0 = py * params[2] + px;
+        uint y_base_1 = (py + 1u) * params[2] + px;
+        output[y_base_0 + 0u] = (ushort)(quant10_sum(s00.x, 16) << 6u);
+        output[y_base_0 + 1u] = (ushort)(quant10_sum(s01.x, 16) << 6u);
+        output[y_base_1 + 0u] = (ushort)(quant10_sum(s10.x, 16) << 6u);
+        output[y_base_1 + 1u] = (ushort)(quant10_sum(s11.x, 16) << 6u);
+
+        uint c_base = params[4] + qy * params[3] + px;
+        int cb = site_sum(centered, s00.y, s01.y, s10.y, s11.y);
+        int cr = site_sum(centered, s00.z, s01.z, s10.z, s11.z);
+        output[c_base + 0u] = (ushort)(quant10_sum(cb, 128) << 6u);
+        output[c_base + 1u] = (ushort)(quant10_sum(cr, 128) << 6u);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        uint groups_x = (quad_width + group_size.x - 1u) / group_size.x;
         status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
     }
 }
