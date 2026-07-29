@@ -27,14 +27,20 @@
 //!
 //! Also here: the one-command **repro bundle** (§18) — journal + input
 //! closure, content-addressed, so every bug report is a deterministic
-//! replay — and the journal's content hash for provenance sidecars.
+//! replay — and the journal's content hash for provenance sidecars. Since
+//! schema minor 1.1, the same container carries the exact typed input stream
+//! (sequence + rational-clock timestamp + payload); minor 1.0 remains readable
+//! as a command-only journal with an empty event stream.
 
+use fmn_anim::RationalTime;
 use fmn_anim::purity::{ImpureEffect, Purity};
 use fmn_hash::serial::{Error as SerialError, Limits, Reader, Schema, UnknownPolicy, Writer};
 use fmn_hash::sha256::{Digest, sha256};
 
+use crate::events::{EventError, EventPayload, EventType, InputEvent, Key, Modifiers, MouseButton};
+
 /// The journal's versioned container schema (FMNA/3).
-pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 0);
+pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 1);
 /// The repro bundle's versioned container schema (FMNA/4).
 pub const BUNDLE_SCHEMA: Schema = Schema::new(*b"FMNA", 4, 1, 0);
 
@@ -43,6 +49,8 @@ pub const BUNDLE_SCHEMA: Schema = Schema::new(*b"FMNA", 4, 1, 0);
 pub enum JournalError {
     /// The canonical container refused the bytes.
     Serial(SerialError),
+    /// A recorded input event violated its typed contract.
+    Event(EventError),
     /// The payload decoded but violates a journal invariant.
     Malformed(&'static str),
 }
@@ -51,6 +59,7 @@ impl std::fmt::Display for JournalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Serial(e) => write!(f, "journal container: {e}"),
+            Self::Event(e) => write!(f, "journal event: {e}"),
             Self::Malformed(what) => write!(f, "malformed journal: {what}"),
         }
     }
@@ -61,6 +70,12 @@ impl std::error::Error for JournalError {}
 impl From<SerialError> for JournalError {
     fn from(e: SerialError) -> Self {
         Self::Serial(e)
+    }
+}
+
+impl From<EventError> for JournalError {
+    fn from(e: EventError) -> Self {
+        Self::Event(e)
     }
 }
 
@@ -278,6 +293,7 @@ impl Entry {
 #[derive(Debug, Clone, Default)]
 pub struct Journal {
     entries: Vec<Entry>,
+    events: Vec<InputEvent>,
 }
 
 impl Journal {
@@ -303,6 +319,48 @@ impl Journal {
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Append one dispatched input event.
+    ///
+    /// Events must remain in exact dispatch order: timestamps never move
+    /// backward and sequence ids always increase.
+    pub fn record_event(&mut self, event: InputEvent) -> Result<(), JournalError> {
+        let event = InputEvent::new(event.sequence, event.timestamp, event.payload)?;
+        if self.events.last().is_some_and(|previous| {
+            event.timestamp < previous.timestamp || event.sequence <= previous.sequence
+        }) {
+            return Err(EventError::ReplayOutOfOrder.into());
+        }
+        self.events.push(event);
+        Ok(())
+    }
+
+    /// Append a dispatched event stream without partial mutation on refusal.
+    pub fn record_events(&mut self, events: &[InputEvent]) -> Result<(), JournalError> {
+        let mut canonical = Vec::with_capacity(events.len());
+        let mut previous = self
+            .events
+            .last()
+            .map(|event| (event.timestamp, event.sequence));
+        for event in events {
+            let event = InputEvent::new(event.sequence, event.timestamp, event.payload.clone())?;
+            if previous.is_some_and(|(timestamp, sequence)| {
+                event.timestamp < timestamp || event.sequence <= sequence
+            }) {
+                return Err(EventError::ReplayOutOfOrder.into());
+            }
+            previous = Some((event.timestamp, event.sequence));
+            canonical.push(event);
+        }
+        self.events.extend(canonical);
+        Ok(())
+    }
+
+    /// Recorded input events in dispatch order.
+    #[must_use]
+    pub fn events(&self) -> &[InputEvent] {
+        &self.events
     }
 
     /// Serialize into the versioned canonical container.
@@ -337,6 +395,10 @@ impl Journal {
                 }
             }
             w.put_digest(&entry.state_hash);
+        }
+        w.put_u32(self.events.len() as u32);
+        for event in &self.events {
+            put_input_event(&mut w, event);
         }
         w.finish()
     }
@@ -389,8 +451,18 @@ impl Journal {
                 state_hash,
             });
         }
+        let mut journal = Self {
+            entries,
+            events: Vec::new(),
+        };
+        if r.version().1 >= 1 {
+            let event_count = r.get_u32()? as usize;
+            for _ in 0..event_count {
+                journal.record_event(get_input_event(&mut r)?)?;
+            }
+        }
         r.finish()?;
-        Ok(Self { entries })
+        Ok(journal)
     }
 
     /// The journal's content address — what provenance sidecars carry.
@@ -459,6 +531,130 @@ fn get_effect(r: &mut Reader<'_>) -> Result<EffectClass, JournalError> {
         3 => EffectClass::Opaque,
         _ => return Err(JournalError::Malformed("effect class")),
     })
+}
+
+fn put_input_event(w: &mut Writer, event: &InputEvent) {
+    w.put_u64(event.sequence);
+    w.put_i64(event.timestamp.frames());
+    w.put_u32(event.timestamp.fps());
+    w.put_u8(event.event_type().code());
+    match &event.payload {
+        EventPayload::MouseMotion {
+            point,
+            delta,
+            modifiers,
+        } => {
+            put_vec3(w, *point);
+            put_vec3(w, *delta);
+            w.put_u8(modifiers.bits());
+        }
+        EventPayload::MousePress {
+            point,
+            button,
+            modifiers,
+        }
+        | EventPayload::MouseRelease {
+            point,
+            button,
+            modifiers,
+        } => {
+            put_vec3(w, *point);
+            put_mouse_button(w, *button);
+            w.put_u8(modifiers.bits());
+        }
+        EventPayload::MouseDrag {
+            point,
+            delta,
+            button,
+            modifiers,
+        } => {
+            put_vec3(w, *point);
+            put_vec3(w, *delta);
+            put_mouse_button(w, *button);
+            w.put_u8(modifiers.bits());
+        }
+        EventPayload::MouseScroll {
+            point,
+            offset,
+            modifiers,
+        } => {
+            put_vec3(w, *point);
+            w.put_f64(offset[0]);
+            w.put_f64(offset[1]);
+            w.put_u8(modifiers.bits());
+        }
+        EventPayload::KeyPress { key, modifiers } | EventPayload::KeyRelease { key, modifiers } => {
+            let (tag, value) = key.code();
+            w.put_u8(tag);
+            w.put_u32(value);
+            w.put_u8(modifiers.bits());
+        }
+    }
+}
+
+fn get_input_event(r: &mut Reader<'_>) -> Result<InputEvent, JournalError> {
+    let sequence = r.get_u64()?;
+    let frames = r.get_i64()?;
+    let fps = r.get_u32()?;
+    let event_type = EventType::from_code(r.get_u8()?)?;
+    let payload = match event_type {
+        EventType::MouseMotion => EventPayload::MouseMotion {
+            point: get_vec3(r)?,
+            delta: get_vec3(r)?,
+            modifiers: Modifiers::from_bits(r.get_u8()?)?,
+        },
+        EventType::MousePress => EventPayload::MousePress {
+            point: get_vec3(r)?,
+            button: get_mouse_button(r)?,
+            modifiers: Modifiers::from_bits(r.get_u8()?)?,
+        },
+        EventType::MouseRelease => EventPayload::MouseRelease {
+            point: get_vec3(r)?,
+            button: get_mouse_button(r)?,
+            modifiers: Modifiers::from_bits(r.get_u8()?)?,
+        },
+        EventType::MouseDrag => EventPayload::MouseDrag {
+            point: get_vec3(r)?,
+            delta: get_vec3(r)?,
+            button: get_mouse_button(r)?,
+            modifiers: Modifiers::from_bits(r.get_u8()?)?,
+        },
+        EventType::MouseScroll => EventPayload::MouseScroll {
+            point: get_vec3(r)?,
+            offset: [r.get_f64()?, r.get_f64()?],
+            modifiers: Modifiers::from_bits(r.get_u8()?)?,
+        },
+        EventType::KeyPress | EventType::KeyRelease => {
+            let key = Key::from_code(r.get_u8()?, r.get_u32()?)?;
+            let modifiers = Modifiers::from_bits(r.get_u8()?)?;
+            if event_type == EventType::KeyPress {
+                EventPayload::KeyPress { key, modifiers }
+            } else {
+                EventPayload::KeyRelease { key, modifiers }
+            }
+        }
+    };
+    InputEvent::new(sequence, RationalTime::zero(fps) + frames, payload).map_err(Into::into)
+}
+
+fn put_vec3(w: &mut Writer, point: [f64; 3]) {
+    for value in point {
+        w.put_f64(value);
+    }
+}
+
+fn get_vec3(r: &mut Reader<'_>) -> Result<[f64; 3], JournalError> {
+    Ok([r.get_f64()?, r.get_f64()?, r.get_f64()?])
+}
+
+fn put_mouse_button(w: &mut Writer, button: MouseButton) {
+    let (tag, value) = button.code();
+    w.put_u8(tag);
+    w.put_u16(value);
+}
+
+fn get_mouse_button(r: &mut Reader<'_>) -> Result<MouseButton, JournalError> {
+    MouseButton::from_code(r.get_u8()?, r.get_u16()?).map_err(Into::into)
 }
 
 // ---- replay planning ------------------------------------------------

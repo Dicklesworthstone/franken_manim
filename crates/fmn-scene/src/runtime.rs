@@ -18,12 +18,14 @@
 //! assertion-friendly surface for “preflight happened before frame zero” and
 //! “pre/play/post ran in order”; human decoration belongs above this crate.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use fmn_anim::{
     AnimError, Animation, FramePacket, ImpureEffect, Purity, RateFunc, RationalFrameClock,
-    RationalTime, SegmentKind, SegmentReport, play_segment, wait_segment,
+    RationalTime, SegmentKind, SegmentReport, play_segment_with_boundary,
+    wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -35,6 +37,8 @@ use fmn_render::{
     CameraConfig as RenderCameraConfig, CameraError, CameraFrame, THREE_D_CAMERA_SAMPLES,
     ThreeDCamera,
 };
+
+use crate::events::{EventDispatcher, EventError, EventInbox, EventPayload, InputEvent};
 
 const DEFAULT_FPS: u32 = 30;
 const DEFAULT_WAIT_TIME: f64 = 1.0;
@@ -212,6 +216,8 @@ pub enum SceneError {
     Persist(PersistError),
     /// Durable-state encode failure.
     Serialize(SerialError),
+    /// Typed input validation/replay failure.
+    Event(EventError),
     /// Scribe/Reel/Studio/presenter adapter failure.
     Integration(IntegrationError),
     /// Normal early scene termination, caught by [`Scene::run`].
@@ -232,6 +238,7 @@ impl fmt::Display for SceneError {
             Self::Camera(error) => write!(f, "scene camera failed: {error}"),
             Self::Persist(error) => write!(f, "scene-state decode failed: {error}"),
             Self::Serialize(error) => write!(f, "scene-state encode failed: {error}"),
+            Self::Event(error) => write!(f, "scene event failed: {error}"),
             Self::Integration(error) => error.fmt(f),
             Self::EndScene(error) => error.fmt(f),
         }
@@ -246,6 +253,7 @@ impl std::error::Error for SceneError {
             Self::Camera(error) => Some(error),
             Self::Persist(error) => Some(error),
             Self::Serialize(error) => Some(error),
+            Self::Event(error) => Some(error),
             Self::Integration(error) => Some(error),
             Self::EndScene(error) => Some(error),
             Self::InvalidConfig(_)
@@ -283,6 +291,12 @@ impl From<PersistError> for SceneError {
 impl From<SerialError> for SceneError {
     fn from(error: SerialError) -> Self {
         Self::Serialize(error)
+    }
+}
+
+impl From<EventError> for SceneError {
+    fn from(error: EventError) -> Self {
+        Self::Event(error)
     }
 }
 
@@ -552,6 +566,14 @@ pub struct SceneStateRestore {
     pub updaters: UpdaterManifest,
 }
 
+enum QueuedEvent {
+    Live {
+        sequence: u64,
+        payload: EventPayload,
+    },
+    Replay(InputEvent),
+}
+
 /// The Scene state machine.
 pub struct Scene {
     config: RuntimeConfig,
@@ -567,6 +589,12 @@ pub struct Scene {
     hold_controller: Box<dyn HoldController>,
     unbound_updaters: Option<UpdaterManifest>,
     sound_requests: Vec<SoundRequest>,
+    event_dispatcher: EventDispatcher,
+    event_inbox: EventInbox,
+    queued_events: VecDeque<QueuedEvent>,
+    recorded_events: Vec<InputEvent>,
+    next_event_sequence: Option<u64>,
+    event_error: Option<EventError>,
 }
 
 impl fmt::Debug for Scene {
@@ -579,6 +607,9 @@ impl fmt::Debug for Scene {
             .field("preflight_done", &self.preflight_done)
             .field("has_unbound_updaters", &self.unbound_updaters.is_some())
             .field("sound_requests", &self.sound_requests.len())
+            .field("event_listeners", &self.event_dispatcher.listener_count())
+            .field("queued_events", &self.queued_events.len())
+            .field("recorded_events", &self.recorded_events.len())
             .finish_non_exhaustive()
     }
 }
@@ -613,6 +644,12 @@ impl Scene {
             hold_controller: Box::new(ImmediateRelease),
             unbound_updaters: None,
             sound_requests: Vec::new(),
+            event_dispatcher: EventDispatcher::new(),
+            event_inbox: EventInbox::new(),
+            queued_events: VecDeque::new(),
+            recorded_events: Vec::new(),
+            next_event_sequence: Some(0),
+            event_error: None,
         })
     }
 
@@ -662,6 +699,113 @@ impl Scene {
     /// [`FramePacket::rng_fork`] instead.
     pub fn rng_mut(&mut self) -> &mut Pcg64Dxsm {
         &mut self.scene_rng
+    }
+
+    /// Deterministic input dispatcher. Listeners should be installed during
+    /// construction, before the event stream they consume is queued.
+    #[must_use]
+    pub fn event_dispatcher(&self) -> &EventDispatcher {
+        &self.event_dispatcher
+    }
+
+    /// Mutable input dispatcher for listener registration/removal.
+    pub fn event_dispatcher_mut(&mut self) -> &mut EventDispatcher {
+        &mut self.event_dispatcher
+    }
+
+    /// Cloneable Studio/browser/TUI submission handle.
+    ///
+    /// Payloads arriving through this inbox are assigned sequence ids and exact
+    /// rational timestamps only when the Scene drains them at a serial
+    /// pre-capture boundary.
+    #[must_use]
+    pub fn event_inbox(&self) -> EventInbox {
+        self.event_inbox.clone()
+    }
+
+    /// Queue one already-available live event for the next serial boundary.
+    ///
+    /// Returns the stable sequence id reserved for it.
+    pub fn queue_event(&mut self, payload: EventPayload) -> Result<u64, EventError> {
+        let canonical = InputEvent::new(0, RationalTime::zero(self.fps()), payload)?.payload;
+        let sequence = self.allocate_event_sequence()?;
+        self.queued_events.push_back(QueuedEvent::Live {
+            sequence,
+            payload: canonical,
+        });
+        Ok(sequence)
+    }
+
+    /// Queue a complete recorded stream for deterministic timed replay.
+    ///
+    /// Replay starts from an empty input queue/inbox, uses the Scene's exact fps,
+    /// and requires nondecreasing timestamps plus globally increasing sequence
+    /// ids. Events become eligible at the first serial boundary whose clock
+    /// time reaches their timestamp.
+    pub fn queue_replay_events(&mut self, events: &[InputEvent]) -> Result<(), EventError> {
+        if !self.queued_events.is_empty() || !self.event_inbox.is_empty() {
+            return Err(EventError::ReplayOutOfOrder);
+        }
+        let mut canonical = Vec::with_capacity(events.len());
+        let mut previous_timestamp = None;
+        let mut candidate_sequence = self.next_event_sequence;
+        for event in events {
+            let event = InputEvent::new(event.sequence, event.timestamp, event.payload.clone())?;
+            if event.timestamp.fps() != self.fps() {
+                return Err(EventError::TimestampGridMismatch {
+                    expected: self.fps(),
+                    found: event.timestamp.fps(),
+                });
+            }
+            if previous_timestamp.is_some_and(|prior| event.timestamp < prior) {
+                return Err(EventError::ReplayOutOfOrder);
+            }
+            let minimum_sequence = candidate_sequence.ok_or(EventError::SequenceExhausted)?;
+            if event.sequence < minimum_sequence {
+                return Err(EventError::ReplayOutOfOrder);
+            }
+            candidate_sequence = event.sequence.checked_add(1);
+            previous_timestamp = Some(event.timestamp);
+            canonical.push(event);
+        }
+        self.next_event_sequence = candidate_sequence;
+        for event in canonical {
+            self.queued_events.push_back(QueuedEvent::Replay(event));
+        }
+        Ok(())
+    }
+
+    /// Drain all inputs eligible at the current rational-clock instant.
+    ///
+    /// This is the explicit paused/manual serial boundary. `play`, `wait`,
+    /// `show`, skipped previews, and presenter holds call the same machinery.
+    pub fn dispatch_pending_events(&mut self) -> Result<usize, EventError> {
+        let time = self.clock.now();
+        let dispatched = drain_event_queue(
+            &mut self.event_dispatcher,
+            &self.event_inbox,
+            &mut self.queued_events,
+            &mut self.recorded_events,
+            &mut self.next_event_sequence,
+            &mut self.event_error,
+            &mut self.stage,
+            time,
+        );
+        match self.event_error.take() {
+            Some(error) => Err(error),
+            None => Ok(dispatched),
+        }
+    }
+
+    /// Events in the exact order and at the exact times they were dispatched.
+    #[must_use]
+    pub fn recorded_events(&self) -> &[InputEvent] {
+        &self.recorded_events
+    }
+
+    /// Move the current event record into a journal writer.
+    pub fn take_recorded_events(&mut self) -> Vec<InputEvent> {
+        std::mem::take(&mut self.recorded_events)
     }
 
     /// Install Scribe's constructed-scene preflight.
@@ -816,7 +960,32 @@ impl Scene {
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Play))?;
 
         let mut sink_error = None;
+        let skipping = self.skipping;
         let report = {
+            let Scene {
+                stage,
+                clock,
+                rng_root,
+                event_dispatcher,
+                event_inbox,
+                queued_events,
+                recorded_events,
+                next_event_sequence,
+                event_error,
+                ..
+            } = self;
+            let mut boundary = |stage: &mut Stage, time: RationalTime| {
+                drain_event_queue(
+                    event_dispatcher,
+                    event_inbox,
+                    queued_events,
+                    recorded_events,
+                    next_event_sequence,
+                    event_error,
+                    stage,
+                    time,
+                );
+            };
             let mut emit = |packet| {
                 if sink_error.is_none()
                     && let Err(error) = sink.capture(CaptureReason::Segment, packet)
@@ -824,24 +993,33 @@ impl Scene {
                     sink_error = Some(error);
                 }
             };
-            play_segment(
-                &mut self.stage,
-                &mut self.clock,
-                &self.rng_root,
+            play_segment_with_boundary(
+                stage,
+                clock,
+                rng_root,
                 &mut animations,
-                self.skipping,
+                skipping,
+                &mut boundary,
                 &mut emit,
             )?
         };
         self.sync_stage_time();
+        let event_error = self.event_error.take();
 
-        let finish_result = if sink_error.is_none() {
+        let finish_result = if sink_error.is_none() && event_error.is_none() {
             self.emit_event(sink, LifecyclePhase::FinishSegment, Some(SegmentKind::Play))
         } else {
             Ok(())
         };
-        let post_result = self.post_play(SegmentKind::Play, sink, sink_error.is_none());
+        let post_result = self.post_play(
+            SegmentKind::Play,
+            sink,
+            sink_error.is_none() && event_error.is_none(),
+        );
         if let Some(error) = sink_error {
+            return Err(error.into());
+        }
+        if let Some(error) = event_error {
             return Err(error.into());
         }
         finish_result?;
@@ -897,7 +1075,32 @@ impl Scene {
             self.presenter_wait(sink)?
         } else {
             let mut sink_error = None;
+            let skipping = self.skipping;
             let report = {
+                let Scene {
+                    stage,
+                    clock,
+                    rng_root,
+                    event_dispatcher,
+                    event_inbox,
+                    queued_events,
+                    recorded_events,
+                    next_event_sequence,
+                    event_error,
+                    ..
+                } = self;
+                let mut boundary = |stage: &mut Stage, time: RationalTime| {
+                    drain_event_queue(
+                        event_dispatcher,
+                        event_inbox,
+                        queued_events,
+                        recorded_events,
+                        next_event_sequence,
+                        event_error,
+                        stage,
+                        time,
+                    );
+                };
                 let mut emit = |packet| {
                     if sink_error.is_none()
                         && let Err(error) = sink.capture(CaptureReason::Segment, packet)
@@ -905,18 +1108,23 @@ impl Scene {
                         sink_error = Some(error);
                     }
                 };
-                wait_segment(
-                    &mut self.stage,
-                    &mut self.clock,
-                    &self.rng_root,
+                wait_segment_with_boundary(
+                    stage,
+                    clock,
+                    rng_root,
                     duration,
                     stop_condition,
-                    self.skipping,
+                    skipping,
+                    &mut boundary,
                     &mut emit,
                 )?
             };
             self.sync_stage_time();
             if let Some(error) = sink_error {
+                self.post_play(SegmentKind::Wait, sink, false)?;
+                return Err(error.into());
+            }
+            if let Some(error) = self.event_error.take() {
                 self.post_play(SegmentKind::Wait, sink, false)?;
                 return Err(error.into());
             }
@@ -938,6 +1146,7 @@ impl Scene {
             self.stage.update_mobject(root, 0.0);
         }
         self.sync_stage_time();
+        self.dispatch_pending_events()?;
         sink.capture(
             CaptureReason::Show,
             FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
@@ -1110,6 +1319,14 @@ impl Scene {
         }
     }
 
+    fn allocate_event_sequence(&mut self) -> Result<u64, EventError> {
+        let sequence = self
+            .next_event_sequence
+            .ok_or(EventError::SequenceExhausted)?;
+        self.next_event_sequence = sequence.checked_add(1);
+        Ok(sequence)
+    }
+
     fn ensure_preflight(
         &mut self,
         animation_anchors: &[Mob],
@@ -1166,6 +1383,7 @@ impl Scene {
         let result = if notify_sink {
             if self.config.preview_while_skipping && self.skipping && self.config.windowed {
                 self.sync_stage_time();
+                self.dispatch_pending_events()?;
                 let preview = sink.capture(
                     CaptureReason::SkippedPreview,
                     FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
@@ -1222,6 +1440,7 @@ impl Scene {
     ) -> Result<(), SceneError> {
         self.emit_event(sink, LifecyclePhase::HoldBegin, Some(segment))?;
         loop {
+            self.dispatch_pending_events()?;
             match self
                 .hold_controller
                 .poll(kind, &self.stage, self.clock.now())?
@@ -1232,6 +1451,7 @@ impl Scene {
                     self.clock.advance_frames(1).map_err(AnimError::Clock)?;
                     self.stage
                         .update_at_time(self.clock.dt().to_f64(), self.clock.now().to_f64());
+                    self.dispatch_pending_events()?;
                     if !self.skipping {
                         sink.capture(
                             CaptureReason::PresenterHold,
@@ -1286,6 +1506,12 @@ impl Scene {
         self.play_count = play_count;
         self.scene_rng = Pcg64Dxsm::restore(rng_state.0, rng_state.1);
         self.preflight_done = false;
+        self.event_dispatcher.reset_state();
+        self.queued_events.clear();
+        let _ = self.event_inbox.drain();
+        self.recorded_events.clear();
+        self.next_event_sequence = Some(0);
+        self.event_error = None;
         self.skipping = self.original_skipping
             || self
                 .config
@@ -1293,6 +1519,60 @@ impl Scene {
                 .is_some_and(|start| play_count < start);
         Ok(())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_event_queue(
+    dispatcher: &mut EventDispatcher,
+    inbox: &EventInbox,
+    queued: &mut VecDeque<QueuedEvent>,
+    recorded: &mut Vec<InputEvent>,
+    next_sequence: &mut Option<u64>,
+    event_error: &mut Option<EventError>,
+    stage: &mut Stage,
+    time: RationalTime,
+) -> usize {
+    if event_error.is_some() {
+        return 0;
+    }
+
+    let mut candidate_sequence = *next_sequence;
+    let mut host_events = Vec::new();
+    for payload in inbox.drain() {
+        let Some(sequence) = candidate_sequence else {
+            *event_error = Some(EventError::SequenceExhausted);
+            return 0;
+        };
+        candidate_sequence = sequence.checked_add(1);
+        host_events.push(QueuedEvent::Live { sequence, payload });
+    }
+    *next_sequence = candidate_sequence;
+    queued.extend(host_events);
+
+    let mut dispatched = 0;
+    loop {
+        let due = match queued.front() {
+            Some(QueuedEvent::Live { .. }) => true,
+            Some(QueuedEvent::Replay(event)) => event.timestamp <= time,
+            None => false,
+        };
+        if !due {
+            break;
+        }
+        let event = match queued.pop_front() {
+            Some(QueuedEvent::Live { sequence, payload }) => InputEvent {
+                sequence,
+                timestamp: time,
+                payload,
+            },
+            Some(QueuedEvent::Replay(event)) => event,
+            None => break,
+        };
+        dispatcher.dispatch(&event, stage);
+        recorded.push(event);
+        dispatched += 1;
+    }
+    dispatched
 }
 
 fn frames_for_restored_time(time: f64, fps: u32) -> Result<i64, SceneError> {

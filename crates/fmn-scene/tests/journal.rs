@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use fmn_anim::purity::{classify_play, classify_wait};
 use fmn_core::rng::Pcg64Dxsm;
+use fmn_hash::serial::{Schema, Writer};
 use fmn_hash::sha256::sha256;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, SceneState, Stage};
@@ -83,6 +84,16 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
     journal.record(e3);
 
     (journal, incoming, state3)
+}
+
+#[test]
+fn journal_minor_one_reads_legacy_minor_zero_without_events() {
+    let mut writer = Writer::new(Schema::new(*b"FMNA", 3, 1, 0));
+    writer.put_u32(0);
+    let legacy = writer.finish().expect("legacy fixture encodes");
+    let decoded = Journal::from_bytes(&legacy).expect("minor-zero journal remains readable");
+    assert!(decoded.entries().is_empty());
+    assert!(decoded.events().is_empty());
 }
 
 #[test]

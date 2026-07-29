@@ -14,9 +14,10 @@
 //!    `always_redraw`-style scenes semantically depend on step 4 seeing
 //!    step 2's output, and on time having already advanced (the
 //!    Reference's `increment_time` precedes `update_mobjects`);
-//! 5. capture — Rev 4's boundary: an immutable [`FramePacket`] freezes
-//!    here, after which the frame no longer depends on mutable scene
-//!    state;
+//! 5. capture — the serial-front-end boundary hook runs, then Rev 4's
+//!    immutable [`FramePacket`] freezes. The hook is where Proscenium drains
+//!    journaled input events; it is still part of capture preparation, never a
+//!    concurrent or mid-capture mutation;
 //! 6. emit — the packet leaves through the sink, in frame order.
 //!
 //! This order is a contract, not an implementation choice. The update-order
@@ -221,6 +222,7 @@ fn frame_step(
     rng: &RngRoot,
     animations: &mut [Box<dyn Animation>],
     plan: &StepPlan,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
     // Steps 1–2, per animation, interleaved exactly as the Reference does.
@@ -236,6 +238,10 @@ fn frame_step(
         .map_err(AnimError::Clock)?;
     // Step 4: scene updaters, observing post-interpolation state.
     stage.update_at_time(plan.dt, clock.now().to_f64());
+    // Step 5 preparation: the sole serial-front-end mutation point for
+    // journaled input. It runs in skip mode too, because skip preserves state
+    // evolution and differs only by suppressing capture/emission.
+    boundary(stage, clock.now());
     // Steps 5–6: freeze and emit.
     if plan.capture {
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
@@ -387,6 +393,38 @@ pub fn advance_play(
     upto: i64,
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    advance_play_with_boundary(
+        stage,
+        clock,
+        rng,
+        animations,
+        open,
+        upto,
+        &mut |_, _| {},
+        emit,
+    )
+}
+
+/// As [`advance_play`], with one serial-front-end callback after scene
+/// updaters and immediately before each immutable frame freeze.
+///
+/// The callback also runs for stepped frames whose eventual caller suppresses
+/// capture. It must not retain the borrowed Stage; downstream capture consumes
+/// only the packet frozen after it returns.
+///
+/// # Errors
+/// As [`advance_play`].
+#[allow(clippy::too_many_arguments)]
+pub fn advance_play_with_boundary(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+    upto: i64,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<(), AnimError> {
     let target = upto.clamp(open.stepped, open.segment.n_frames());
     let dt = clock.dt().to_f64();
     for sample in open
@@ -401,7 +439,7 @@ pub fn advance_play(
             advance: 1,
             capture: true,
         };
-        frame_step(stage, clock, rng, animations, &plan, emit)?;
+        frame_step(stage, clock, rng, animations, &plan, boundary, emit)?;
         open.stepped += 1;
     }
     match animations.iter().find_map(|a| a.deferred_error()) {
@@ -473,6 +511,27 @@ pub fn play_segment(
     skip: bool,
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
+    play_segment_with_boundary(stage, clock, rng, animations, skip, &mut |_, _| {}, emit)
+}
+
+/// As [`play_segment`], with a deterministic serial-front-end callback after
+/// scene updaters and before every possible frame freeze.
+///
+/// Proscenium uses this one seam for input events. Keeping it inside Choreo's
+/// driver proves that a listener can mutate neither an already-frozen packet
+/// nor a capture in progress.
+///
+/// # Errors
+/// As [`play_segment`].
+pub fn play_segment_with_boundary(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    animations: &mut [Box<dyn Animation>],
+    skip: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<SegmentReport, AnimError> {
     let prologue = play_prologue(stage, clock, animations, skip)?;
     let segment = prologue.segment;
     let report = prologue.report(SegmentKind::Play);
@@ -487,7 +546,7 @@ pub fn play_segment(
                 advance: 1,
                 capture: false,
             };
-            frame_step(stage, clock, rng, animations, &plan, emit)?;
+            frame_step(stage, clock, rng, animations, &plan, boundary, emit)?;
         }
     } else {
         let mut open = OpenSegment {
@@ -495,13 +554,14 @@ pub fn play_segment(
             segment,
             stepped: 0,
         };
-        advance_play(
+        advance_play_with_boundary(
             stage,
             clock,
             rng,
             animations,
             &mut open,
             segment.n_frames(),
+            boundary,
             emit,
         )?;
     }
@@ -531,8 +591,37 @@ pub fn wait_segment(
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
     duration: f64,
+    stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
+    skip: bool,
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<SegmentReport, AnimError> {
+    wait_segment_with_boundary(
+        stage,
+        clock,
+        rng,
+        duration,
+        stop_condition,
+        skip,
+        &mut |_, _| {},
+        emit,
+    )
+}
+
+/// As [`wait_segment`], with a deterministic serial-front-end callback after
+/// scene updaters and before each possible frame freeze. The stop condition
+/// observes the callback's mutation for that frame.
+///
+/// # Errors
+/// As [`wait_segment`].
+#[allow(clippy::too_many_arguments)]
+pub fn wait_segment_with_boundary(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    duration: f64,
     mut stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
     skip: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
     update_scene_mobjects(stage, 0.0);
@@ -554,6 +643,7 @@ pub fn wait_segment(
         clock.advance_frames(1).map_err(AnimError::Clock)?;
         stage.update_at_time(dt, clock.now().to_f64());
         stepped += 1;
+        boundary(stage, clock.now());
         if !skip {
             emit(FramePacket::freeze(stage, clock, rng, &sample));
         }

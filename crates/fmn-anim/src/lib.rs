@@ -80,8 +80,8 @@ pub use fading::{
     fade_transform_pieces, v_fade_in, v_fade_in_then_out, v_fade_out,
 };
 pub use frame::{
-    FramePacket, OpenSegment, advance_play, open_play, play_segment, wait_segment,
-    wait_segment_upto,
+    FramePacket, OpenSegment, advance_play, advance_play_with_boundary, open_play, play_segment,
+    play_segment_with_boundary, wait_segment, wait_segment_upto, wait_segment_with_boundary,
 };
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{

@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fmn_anim::frame::{FramePacket, play_segment, wait_segment};
+use fmn_anim::frame::{FramePacket, play_segment, wait_segment, wait_segment_with_boundary};
 use fmn_anim::{Animation, FrameSample, RationalFrameClock, RationalTime, prepare_animation};
 use fmn_core::rng::RngRoot;
 use fmn_mobject::animate::AnimateArgs;
@@ -463,6 +463,55 @@ fn wait_emits_frames_and_runs_an_initial_zero_dt_pass() {
     assert_eq!(observed.len(), 16, "initial dt=0 pass + one per frame");
     assert_eq!(observed[0], 0.0, "the Reference's update_mobjects(dt=0)");
     assert!((observed[1] - 1.0 / 30.0).abs() < 1e-12);
+}
+
+#[test]
+fn serial_boundary_runs_after_updaters_and_before_packet_freeze() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).expect("rooted");
+    stage
+        .add_dt_updater(
+            mob,
+            |stage, me, dt| {
+                if dt > 0.0 {
+                    stage.shift(me, [1.0, 0.0, 0.0]);
+                }
+            },
+            false,
+        )
+        .expect("updater");
+
+    let mut clock = RationalFrameClock::new(1).expect("fps");
+    let mut seen_before_boundary_write = Vec::new();
+    let mut packets = Vec::new();
+    wait_segment_with_boundary(
+        &mut stage,
+        &mut clock,
+        &rng(),
+        1.0,
+        None,
+        false,
+        &mut |stage, time| {
+            assert_eq!(time, RationalTime::zero(1) + 1);
+            seen_before_boundary_write.push(stage.get_center(mob)[0]);
+            stage.shift(mob, [10.0, 0.0, 0.0]);
+        },
+        &mut |packet| packets.push(packet),
+    )
+    .expect("waits");
+
+    assert_eq!(
+        seen_before_boundary_write,
+        [1.0],
+        "the Scene updater must have run before the boundary"
+    );
+    assert_eq!(packets.len(), 1);
+    assert_eq!(
+        packets[0].materialize_stage().get_center(mob)[0],
+        11.0,
+        "the immutable packet must include the boundary mutation"
+    );
 }
 
 #[test]
