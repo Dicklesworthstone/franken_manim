@@ -2405,9 +2405,8 @@ mod tests {
 
     #[test]
     fn native_preview_validates_dimensions_before_platform_probe() {
-        let error = NativePreviewRenderer::new(0, 16, "invalid")
-            .err()
-            .expect("zero width is rejected");
+        let error =
+            NativePreviewRenderer::new(0, 16, "invalid").expect_err("zero width is rejected");
         assert!(matches!(
             error,
             NativePreviewError::Presentation(PresentationError::InvalidDimensions {
