@@ -82,8 +82,8 @@ mod store;
 
 pub use key::{CacheKey, KeyBuilder};
 pub use store::{
-    CacheClearAuthorization, CacheClearOutcome, EvictOutcome, EvictReport, Namespace,
-    NamespacePolicy, Pin, Store, StoreConfig,
+    CacheClearAuthorization, CacheClearOutcome, CacheRootError, DEFAULT_CACHE_LEAF, EvictOutcome,
+    EvictReport, Namespace, NamespacePolicy, Pin, Store, StoreConfig, resolve_host_cache_root,
 };
 
 use fmn_platform::fs::FsError;
@@ -115,6 +115,9 @@ pub enum CacheError {
         /// The fail-closed reason.
         reason: String,
     },
+    /// The effective cache configuration could not be resolved to one
+    /// absolute host root.
+    RootResolution(CacheRootError),
     /// An entry payload exceeds the configured per-entry ceiling; the caller
     /// skips caching this value.
     EntryTooLarge {
@@ -143,6 +146,7 @@ impl fmt::Display for CacheError {
             Self::RootRefused { root, reason } => {
                 write!(f, "refusing cache root {}: {reason}", root.display())
             }
+            Self::RootResolution(err) => write!(f, "cache root resolution failed: {err}"),
             Self::EntryTooLarge { limit, needed } => {
                 write!(
                     f,
@@ -160,6 +164,7 @@ impl std::error::Error for CacheError {
         match self {
             Self::Storage(err) => Some(err),
             Self::Encode(err) => Some(err),
+            Self::RootResolution(err) => Some(err),
             _ => None,
         }
     }
@@ -174,5 +179,11 @@ impl From<FsError> for CacheError {
 impl From<fmn_hash::SerialError> for CacheError {
     fn from(err: fmn_hash::SerialError) -> Self {
         Self::Encode(err)
+    }
+}
+
+impl From<CacheRootError> for CacheError {
+    fn from(err: CacheRootError) -> Self {
+        Self::RootResolution(err)
     }
 }

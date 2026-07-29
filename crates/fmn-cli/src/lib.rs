@@ -19,7 +19,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use fmn_platform::fs::FileSystem;
+use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
 pub const ROBOT_SCHEMA_VERSION: u32 = 1;
@@ -354,9 +354,9 @@ pub enum CacheReport {
         /// Read-only inspection failure, when any.
         warning: Option<String>,
     },
-    /// Empty config awaits a platform-default resolver.
+    /// Root resolution failed before inspection.
     Unresolved {
-        /// Why no path was guessed.
+        /// Why no path was available.
         reason: String,
     },
 }
@@ -1216,8 +1216,8 @@ pub fn resolve_render_config(
     fs: &dyn FileSystem,
     command: &RenderCommand,
 ) -> Result<fmn_config::Config, CliError> {
-    let user_text = read_user_config(fs, command.common.config_file.as_deref())?;
-    let layers = config_layers(&user_text);
+    let documents = read_config_documents(fs, command.common.config_file.as_deref())?;
+    let layers = documents.layers();
     let base = fmn_config::Config::resolve(&layers, None)
         .map_err(|error| CliError::new("config", error.to_string()))?
         .config;
@@ -1297,8 +1297,8 @@ pub fn resolve_common_config(
     fs: &dyn FileSystem,
     common: &CommonOptions,
 ) -> Result<fmn_config::Config, CliError> {
-    let user_text = read_user_config(fs, common.config_file.as_deref())?;
-    let layers = config_layers(&user_text);
+    let documents = read_config_documents(fs, common.config_file.as_deref())?;
+    let layers = documents.layers();
     fmn_config::Config::resolve(
         &layers,
         Some(fmn_config::config::overlay(common_overlay(common)?)),
@@ -1307,27 +1307,66 @@ pub fn resolve_common_config(
     .map_err(|error| CliError::new("config", error.to_string()))
 }
 
-fn read_user_config(fs: &dyn FileSystem, path: Option<&Path>) -> Result<Option<String>, CliError> {
-    path.map(|path| {
-        fs.read_to_string(path).map_err(|error| {
-            CliError::new(
-                "config",
-                format!("could not read config {}: {error}", path.display()),
-            )
-        })
-    })
-    .transpose()
+#[derive(Debug)]
+struct ConfigDocument {
+    source: String,
+    text: String,
 }
 
-fn config_layers(text: &Option<String>) -> Vec<fmn_config::config::Layer<'_>> {
-    text.as_deref()
-        .map(|text| {
-            vec![fmn_config::config::Layer {
-                name: "user config",
-                text,
-            }]
-        })
-        .unwrap_or_default()
+#[derive(Debug, Default)]
+struct ConfigDocuments {
+    custom: Option<ConfigDocument>,
+    explicit: Option<ConfigDocument>,
+}
+
+impl ConfigDocuments {
+    fn layers(&self) -> Vec<fmn_config::config::Layer<'_>> {
+        let mut layers = Vec::with_capacity(2);
+        if let Some(document) = self.custom.as_ref() {
+            layers.push(fmn_config::config::Layer {
+                name: &document.source,
+                text: &document.text,
+            });
+        }
+        if let Some(document) = self.explicit.as_ref() {
+            layers.push(fmn_config::config::Layer {
+                name: &document.source,
+                text: &document.text,
+            });
+        }
+        layers
+    }
+}
+
+fn read_config_documents(
+    fs: &dyn FileSystem,
+    explicit_path: Option<&Path>,
+) -> Result<ConfigDocuments, CliError> {
+    Ok(ConfigDocuments {
+        custom: read_optional_config(fs, Path::new("custom_config.yml"), "custom_config.yml")?,
+        explicit: explicit_path
+            .map(|path| {
+                read_optional_config(fs, path, format!("--config_file {:?}", path.as_os_str()))
+            })
+            .transpose()?
+            .flatten(),
+    })
+}
+
+fn read_optional_config(
+    fs: &dyn FileSystem,
+    path: &Path,
+    source: impl Into<String>,
+) -> Result<Option<ConfigDocument>, CliError> {
+    let source = source.into();
+    match fs.read_to_string(path) {
+        Ok(text) => Ok(Some(ConfigDocument { source, text })),
+        Err(FsError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(CliError::new(
+            "config",
+            format!("could not read {source}: {error}"),
+        )),
+    }
 }
 
 fn common_overlay(
@@ -1349,19 +1388,31 @@ fn common_overlay(
     if let Some(ffmpeg) = &common.ffmpeg {
         pairs.push((
             "file_writer.ffmpeg_bin",
-            fmn_config::Value::Str(ffmpeg.to_string_lossy().into_owned()),
+            fmn_config::Value::Str(strict_path_text(ffmpeg, "ffmpeg path")?.to_owned()),
         ));
     }
     if let Some(cache_dir) = &common.cache_dir {
         pairs.push((
             "directories.cache",
-            fmn_config::Value::Str(cache_dir.to_string_lossy().into_owned()),
+            fmn_config::Value::Str(strict_path_text(cache_dir, "cache root")?.to_owned()),
         ));
     }
     if let Some(level) = &common.log_level {
         pairs.push(("log_level", fmn_config::Value::Str(level.clone())));
     }
     Ok(pairs)
+}
+
+fn strict_path_text<'a>(path: &'a Path, label: &str) -> Result<&'a str, CliError> {
+    if path.as_os_str().is_empty() {
+        return Err(CliError::new("config", format!("{label} may not be empty")));
+    }
+    path.to_str().ok_or_else(|| {
+        CliError::new(
+            "config",
+            format!("{label} is not valid UTF-8 and cannot be represented by the CLI schema"),
+        )
+    })
 }
 
 /// Collect a truthful doctor snapshot. Optional capabilities are represented
@@ -1493,7 +1544,10 @@ pub fn collect_doctor_snapshot(
 
     let ffmpeg_path = PathBuf::from(&config.file_writer.ffmpeg_bin);
     let ffmpeg = probe_ffmpeg(runner, &ffmpeg_path);
-    let cache = inspect_cache(fs, &config.directories.cache);
+    let cache = cache_report_from_resolution(
+        fs,
+        fmn_cache::resolve_host_cache_root(&config.directories.cache),
+    )?;
     let math_packs = fmn_config::PackRegistry::builtin()
         .names()
         .into_iter()
@@ -1522,6 +1576,21 @@ pub fn collect_doctor_snapshot(
         math_packs,
         certification: certification_report(),
     })
+}
+
+fn cache_report_from_resolution(
+    fs: &dyn FileSystem,
+    resolution: Result<PathBuf, fmn_cache::CacheRootError>,
+) -> Result<CacheReport, CliError> {
+    match resolution {
+        Ok(root) => Ok(inspect_cache(fs, &root)),
+        Err(error @ fmn_cache::CacheRootError::InvalidConfigured { .. }) => {
+            Err(cache_root_cli_error(error))
+        }
+        Err(error) => Ok(CacheReport::Unresolved {
+            reason: error.to_string(),
+        }),
+    }
 }
 
 fn execution_plan_error(error: fmn_runtime::PlanError) -> CliError {
@@ -1580,31 +1649,62 @@ fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) 
     }
 }
 
-fn inspect_cache(fs: &dyn FileSystem, configured: &str) -> CacheReport {
-    if configured.is_empty() {
-        return CacheReport::Unresolved {
-            reason: "cache root is empty and the platform-default resolver is not yet available"
-                .to_owned(),
-        };
+fn cache_root_cli_error(error: fmn_cache::CacheRootError) -> CliError {
+    let exit_name = match &error {
+        fmn_cache::CacheRootError::InvalidConfigured { .. } => "config",
+        fmn_cache::CacheRootError::CurrentDirectory { .. }
+        | fmn_cache::CacheRootError::PlatformDefaultUnavailable { .. } => "capability",
+    };
+    CliError::new(exit_name, error.to_string())
+}
+
+fn inspect_cache(fs: &dyn FileSystem, root: &Path) -> CacheReport {
+    let mut components: Vec<&Path> = root
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    components.reverse();
+    for component in components {
+        match fs.node_kind_no_follow(component) {
+            Ok(Some(FsNodeKind::Directory)) => {}
+            Ok(Some(kind)) => {
+                return CacheReport::Configured {
+                    root: root.to_path_buf(),
+                    exists: component == root,
+                    direct_entries: None,
+                    warning: Some(format!(
+                        "cache traversal refused {kind:?} at {:?}",
+                        component.as_os_str()
+                    )),
+                };
+            }
+            Ok(None) => {
+                return CacheReport::Configured {
+                    root: root.to_path_buf(),
+                    exists: false,
+                    direct_entries: Some(0),
+                    warning: None,
+                };
+            }
+            Err(error) => {
+                return CacheReport::Configured {
+                    root: root.to_path_buf(),
+                    exists: false,
+                    direct_entries: None,
+                    warning: Some(error.to_string()),
+                };
+            }
+        }
     }
-    let root = PathBuf::from(configured);
-    if !fs.exists(&root) {
-        return CacheReport::Configured {
-            root,
-            exists: false,
-            direct_entries: Some(0),
-            warning: None,
-        };
-    }
-    match fs.list_dir(&root) {
+    match fs.list_dir(root) {
         Ok(entries) => CacheReport::Configured {
-            root,
+            root: root.to_path_buf(),
             exists: true,
             direct_entries: Some(entries.len()),
             warning: None,
         },
         Err(error) => CacheReport::Configured {
-            root,
+            root: root.to_path_buf(),
             exists: true,
             direct_entries: None,
             warning: Some(error.to_string()),
@@ -1670,8 +1770,12 @@ fn platform_name(os: &str, arch: &str) -> String {
 impl DoctorSnapshot {
     /// Stable line-oriented robot report. Every line is an independent JSON
     /// object carrying the schema name and version.
-    #[must_use]
-    pub fn to_ndjson(&self) -> String {
+    ///
+    /// # Errors
+    ///
+    /// [`CliError`] if a native path cannot be represented exactly by the
+    /// version-1 UTF-8 robot schema.
+    pub fn to_ndjson(&self) -> Result<String, CliError> {
         let mut out = String::new();
         let (source, source_detail) = match &self.topology_source {
             TopologySource::LinuxSysfs => ("linux-sysfs", None),
@@ -1721,13 +1825,14 @@ impl DoctorSnapshot {
                 hardware_encoders,
                 hardware_encoder_probe_error,
             } => {
+                let path = strict_path_text(path, "doctor ffmpeg path")?;
                 let _ = writeln!(
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"ffmpeg\",\
                      \"available\":true,\"path\":{},\"sha256\":{},\"ffmpeg_version\":{},\
                      \"hardware_encoders\":{},\"hardware_encoder_probe_error\":{}}}",
                     ROBOT_SCHEMA_VERSION,
-                    json_string(&path.to_string_lossy()),
+                    json_string(path),
                     json_string(sha256),
                     json_string(version),
                     json_array(hardware_encoders),
@@ -1739,13 +1844,14 @@ impl DoctorSnapshot {
                 reason,
                 alternative,
             } => {
+                let attempted = strict_path_text(attempted, "doctor ffmpeg attempted path")?;
                 let _ = writeln!(
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"ffmpeg\",\
                      \"available\":false,\"attempted\":{},\"reason\":{},\
                      \"alternative\":{}}}",
                     ROBOT_SCHEMA_VERSION,
-                    json_string(&attempted.to_string_lossy()),
+                    json_string(attempted),
                     json_string(reason),
                     json_string(alternative),
                 );
@@ -1758,6 +1864,7 @@ impl DoctorSnapshot {
                 direct_entries,
                 warning,
             } => {
+                let root = strict_path_text(root, "doctor cache root")?;
                 let entries = direct_entries.map_or_else(|| "null".to_owned(), |n| n.to_string());
                 let _ = writeln!(
                     out,
@@ -1765,7 +1872,7 @@ impl DoctorSnapshot {
                      \"resolved\":true,\"root\":{},\"exists\":{},\
                      \"direct_entries\":{},\"warning\":{}}}",
                     ROBOT_SCHEMA_VERSION,
-                    json_string(&root.to_string_lossy()),
+                    json_string(root),
                     exists,
                     entries,
                     json_option(warning.as_deref()),
@@ -1808,7 +1915,7 @@ impl DoctorSnapshot {
             self.certification.supported,
             json_string(&self.certification.detail),
         );
-        out
+        Ok(out)
     }
 
     /// Human report. This presentation is never used in robot mode.
@@ -1985,7 +2092,10 @@ where
         Invocation::Doctor(command) => match collect_doctor_snapshot(fs, runner, &command) {
             Ok(snapshot) => {
                 let stdout = if command.common.robot {
-                    snapshot.to_ndjson()
+                    match snapshot.to_ndjson() {
+                        Ok(stdout) => stdout,
+                        Err(error) => return error_output(true, &error),
+                    }
                 } else {
                     snapshot.to_human()
                 };
@@ -2050,37 +2160,23 @@ fn clear_cache(fs: &dyn FileSystem, common: &CommonOptions) -> RunOutput {
         Ok(config) => config,
         Err(error) => return error_output(common.robot, &error),
     };
-    if config.directories.cache.is_empty() {
-        return error_output(
-            common.robot,
-            &CliError::new(
-                "capability",
-                "--clear-cache needs an explicit --cache-dir or configured directories.cache until the platform-default resolver lands",
-            ),
-        );
-    }
-    let authorization =
-        match fmn_cache::CacheClearAuthorization::authorize(&config.directories.cache) {
-            Ok(authorization) => authorization,
-            Err(error) => {
-                let exit_name = if matches!(error, fmn_cache::CacheError::RootRefused { .. }) {
-                    "config"
-                } else {
-                    "capability"
-                };
-                return error_output(common.robot, &CliError::new(exit_name, error.to_string()));
-            }
-        };
-    let root = match authorization.root().to_str() {
-        Some(root) => root.to_owned(),
-        None => {
-            return error_output(
-                common.robot,
-                &CliError::new(
-                    "config",
-                    "the cache root is not valid UTF-8 and cannot be represented by the CLI schema",
-                ),
-            );
+    let root_path = match fmn_cache::resolve_host_cache_root(&config.directories.cache) {
+        Ok(root) => root,
+        Err(error) => return error_output(common.robot, &cache_root_cli_error(error)),
+    };
+    let root = match strict_path_text(&root_path, "cache root") {
+        Ok(root) => root.to_owned(),
+        Err(error) => return error_output(common.robot, &error),
+    };
+    let authorization = match fmn_cache::CacheClearAuthorization::authorize(&root_path) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            let exit_name = if matches!(error, fmn_cache::CacheError::RootRefused { .. }) {
+                "config"
+            } else {
+                "capability"
+            };
+            return error_output(common.robot, &CliError::new(exit_name, error.to_string()));
         }
     };
     let outcome = match authorization.clear() {
@@ -2670,6 +2766,73 @@ mod tests {
     }
 
     #[test]
+    fn config_precedence_is_defaults_then_cwd_then_explicit_then_cli() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "custom_config.yml",
+            b"camera:\n  fps: 24\n  background_color: \"#101010\"\ndirectories:\n  cache: /cwd-cache\n"
+                .to_vec(),
+        );
+        fs.insert(
+            "/cfg/explicit.yml",
+            b"camera:\n  fps: 48\ndirectories:\n  cache: /explicit-cache\n".to_vec(),
+        );
+        let command = render(
+            parse_args([
+                "--config_file",
+                "/cfg/explicit.yml",
+                "--cache-dir",
+                "/cli-cache",
+                "--fps",
+                "60",
+            ])
+            .expect("valid command"),
+        );
+        let config = resolve_render_config(&fs, &command).expect("valid layered config");
+        assert_eq!(config.camera.fps, 60, "CLI wins");
+        assert_eq!(
+            config.camera.background_color, "#101010",
+            "cwd-only value survives the explicit layer"
+        );
+        assert_eq!(
+            config.directories.cache, "/cli-cache",
+            "cache CLI overlay wins"
+        );
+    }
+
+    #[test]
+    fn missing_optional_config_layers_match_reference_empty_layers() {
+        let fs = VirtualFs::new();
+        let command =
+            render(parse_args(["--config_file", "/missing/config.yml"]).expect("valid command"));
+        let config = resolve_render_config(&fs, &command).expect("missing layer is empty");
+        assert_eq!(config.camera.fps, 30);
+    }
+
+    #[test]
+    fn config_parse_errors_name_the_exact_layer() {
+        let fs = VirtualFs::new();
+        fs.insert("custom_config.yml", b"camera: [unsupported]\n".to_vec());
+        let command = render(parse_args([] as [&str; 0]).expect("default render command"));
+        let error = resolve_render_config(&fs, &command).expect_err("invalid cwd config");
+        assert!(error.message().starts_with("custom_config.yml:"));
+
+        let fs = VirtualFs::new();
+        fs.insert("/cfg/broken.yml", b"camera: [unsupported]\n".to_vec());
+        let command =
+            render(parse_args(["--config_file", "/cfg/broken.yml"]).expect("valid command"));
+        let error = resolve_render_config(&fs, &command).expect_err("invalid explicit config");
+        assert!(error.message().contains("/cfg/broken.yml"));
+    }
+
+    #[test]
+    fn explicitly_empty_cache_root_is_not_reinterpreted_as_the_default() {
+        let error = parse_args(["--cache-dir="]).expect_err("empty override is invalid");
+        assert_eq!(error.exit_name(), "usage");
+        assert!(error.message().contains("invalid path value"));
+    }
+
+    #[test]
     fn exact_resolution_is_not_reinterpreted_as_a_custom_preset() {
         let fs = VirtualFs::new();
         fs.insert(
@@ -2772,7 +2935,12 @@ mod tests {
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"math_packs\",\"packs\":[\"default\",\"minimal\"]}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"certification\",\"platform\":\"linux-x86_64\",\"supported\":true,\"detail\":\"fixture certified\"}\n",
         );
-        assert_eq!(synthetic_doctor().to_ndjson(), expected);
+        assert_eq!(
+            synthetic_doctor()
+                .to_ndjson()
+                .expect("fixture paths are UTF-8"),
+            expected
+        );
         for line in expected.lines() {
             assert!(line.starts_with("{\"schema\":\"fmn.doctor\",\"version\":1,"));
             assert!(line.ends_with('}'));
@@ -2783,7 +2951,8 @@ mod tests {
     fn production_doctor_reports_degraded_capabilities_without_guessing() {
         let fs = VirtualFs::new();
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output = run_with_capabilities(["doctor", "--robot"], &fs, &runner);
+        let output =
+            run_with_capabilities(["doctor", "--robot", "--cache-dir", "/cache"], &fs, &runner);
         assert_eq!(output.code, 0);
         assert!(output.stderr.is_empty());
         assert_eq!(output.stdout.lines().count(), 7);
@@ -2797,10 +2966,80 @@ mod tests {
         assert!(
             output
                 .stdout
-                .contains("\"kind\":\"cache\",\"resolved\":false")
+                .contains("\"kind\":\"cache\",\"resolved\":true")
         );
         assert!(output.stdout.contains("\"kind\":\"fonts\""));
         assert!(output.stdout.contains("\"complete\":false"));
+    }
+
+    #[test]
+    fn doctor_uses_the_same_platform_default_cache_root_as_the_store_contract() {
+        let expected =
+            fmn_cache::resolve_host_cache_root("").expect("supported host cache convention");
+        let fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let command = DoctorCommand {
+            common: CommonOptions {
+                robot: true,
+                quiet: false,
+                reproducible: false,
+                config_file: None,
+                cache_dir: None,
+                ffmpeg: None,
+                threads: None,
+                log_level: None,
+            },
+            require_ffmpeg: false,
+        };
+        let snapshot =
+            collect_doctor_snapshot(&fs, &runner, &command).expect("doctor snapshot resolves");
+        assert!(matches!(
+            snapshot.cache,
+            CacheReport::Configured { ref root, .. } if root == &expected
+        ));
+    }
+
+    #[test]
+    fn doctor_degrades_unavailable_platform_defaults_but_rejects_invalid_config() {
+        let fs = VirtualFs::new();
+        let unavailable = fmn_cache::CacheRootError::PlatformDefaultUnavailable {
+            platform: "fixture",
+            reason: "no declared cache base",
+        };
+        assert_eq!(
+            cache_report_from_resolution(&fs, Err(unavailable)).unwrap(),
+            CacheReport::Unresolved {
+                reason: "fixture cache default is unavailable: no declared cache base".to_owned()
+            }
+        );
+
+        let invalid = fmn_cache::CacheRootError::InvalidConfigured {
+            path: PathBuf::from("../escape"),
+            reason: "parent-directory components are not accepted",
+        };
+        let error =
+            cache_report_from_resolution(&fs, Err(invalid)).expect_err("invalid config must abort");
+        assert_eq!(error.exit_name(), "config");
+    }
+
+    #[test]
+    fn doctor_cache_inspection_refuses_a_wrong_kind_ancestor() {
+        let fs = VirtualFs::new();
+        fs.insert("/cache/blocker", b"foreign file".to_vec());
+        match inspect_cache(&fs, Path::new("/cache/blocker/owned")) {
+            CacheReport::Configured {
+                exists,
+                direct_entries,
+                warning: Some(warning),
+                ..
+            } => {
+                assert!(!exists);
+                assert_eq!(direct_entries, None);
+                assert!(warning.contains("RegularFile"));
+                assert!(warning.contains("/cache/blocker"));
+            }
+            other => panic!("expected a no-follow traversal warning, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2866,6 +3105,57 @@ mod tests {
         assert!(quiet.stdout.is_empty());
         assert!(quiet.stderr.is_empty());
         let _ = StdFs.remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relative_cache_root_is_absolutized_for_doctor_and_clear() {
+        use fmn_cache::{NamespacePolicy, Store, StoreConfig};
+        use fmn_platform::clock::StdClock;
+        use fmn_platform::fs::StdFs;
+        use std::sync::Arc;
+
+        let relative = PathBuf::from(format!(".fmn-cli-relative-cache-{}", std::process::id()));
+        let absolute = std::env::current_dir()
+            .expect("test current directory")
+            .join(&relative);
+        let _ = StdFs.remove_dir_all(&absolute);
+        let store = Store::open(
+            Arc::new(StdFs),
+            Arc::new(StdClock::new()),
+            absolute.clone(),
+            StoreConfig::default(),
+        )
+        .expect("create resolved cache root");
+        store
+            .namespace("relative", 1, NamespacePolicy::default())
+            .expect("create managed subtree");
+        drop(store);
+
+        let relative_text = relative.to_str().expect("test path is UTF-8");
+        let virtual_fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let doctor = run_with_capabilities(
+            ["doctor", "--robot", "--cache-dir", relative_text],
+            &virtual_fs,
+            &runner,
+        );
+        assert_eq!(doctor.code, 0);
+        let absolute_text = absolute.to_str().expect("test path is UTF-8");
+        assert!(
+            doctor
+                .stdout
+                .contains(&format!("\"root\":{}", json_string(absolute_text)))
+        );
+
+        let clear = run(["--clear-cache", "--cache-dir", relative_text, "--robot"]);
+        assert_eq!(clear.code, 0);
+        assert!(
+            clear
+                .stdout
+                .contains(&format!("\"root\":{}", json_string(absolute_text)))
+        );
+        assert!(!absolute.join("ns").exists());
+        let _ = StdFs.remove_dir_all(&absolute);
     }
 
     #[test]
@@ -3069,5 +3359,24 @@ mod tests {
         assert_eq!(output.code, 2);
         assert!(output.stderr.is_empty());
         assert!(output.stdout.contains("\"exit_name\":\"usage\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_robot_output_refuses_non_utf8_paths_without_replacement() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let mut snapshot = synthetic_doctor();
+        snapshot.cache = CacheReport::Configured {
+            root: PathBuf::from(OsString::from_vec(b"/cache-\xff".to_vec())),
+            exists: false,
+            direct_entries: Some(0),
+            warning: None,
+        };
+        let error = snapshot
+            .to_ndjson()
+            .expect_err("version-1 schema cannot carry native non-UTF-8");
+        assert_eq!(error.exit_name(), "config");
+        assert!(error.message().contains("not valid UTF-8"));
     }
 }

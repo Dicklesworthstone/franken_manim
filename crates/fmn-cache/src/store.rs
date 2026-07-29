@@ -43,10 +43,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
@@ -62,6 +63,12 @@ const FORMAT_FILE: &str = "STORE_FORMAT";
 const OWNER_PREFIX: &str = "franken-manim cache root 1 ";
 /// The ownership marker's file name under the store root.
 const OWNER_FILE: &str = "STORE_OWNER";
+/// Dedicated application leaf below the host's per-user cache directory.
+///
+/// This deliberately does not reuse the Reference's `manim` leaf: a Python
+/// Manim cache is foreign data and must never become claimable by
+/// FrankenManim's owned-store protocol.
+pub const DEFAULT_CACHE_LEAF: &str = "franken-manim";
 
 /// The advisory LRU index document.
 const INDEX_SCHEMA: Schema = Schema::new(*b"FMNC", 2, 1, 0);
@@ -76,6 +83,246 @@ static NEXT_CLEAR: AtomicU64 = AtomicU64::new(1);
 /// Bound collision work so a hostile directory full of guessed names cannot
 /// make a lifecycle command spin forever.
 const MAX_QUARANTINE_ATTEMPTS: usize = 4_096;
+
+/// Failure to turn the effective cache configuration into one absolute host
+/// path.
+#[derive(Debug)]
+pub enum CacheRootError {
+    /// A relative configured path could not be anchored because the host
+    /// current directory was unavailable.
+    CurrentDirectory {
+        /// The host failure.
+        err: io::Error,
+    },
+    /// A configured path escaped through `..` or otherwise could not be made
+    /// into a safe absolute store location.
+    InvalidConfigured {
+        /// The configured path.
+        path: PathBuf,
+        /// Precise refusal reason.
+        reason: &'static str,
+    },
+    /// The platform's per-user cache base could not be derived without
+    /// guessing or falling back to the current/temp directory.
+    PlatformDefaultUnavailable {
+        /// `std::env::consts::OS` spelling.
+        platform: &'static str,
+        /// Precise missing or invalid environment contract.
+        reason: &'static str,
+    },
+}
+
+impl fmt::Display for CacheRootError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentDirectory { err } => {
+                write!(
+                    f,
+                    "could not resolve the current directory for the cache root: {err}"
+                )
+            }
+            Self::InvalidConfigured { path, reason } => {
+                write!(
+                    f,
+                    "invalid configured cache root {:?}: {reason}",
+                    path.as_os_str()
+                )
+            }
+            Self::PlatformDefaultUnavailable { platform, reason } => {
+                write!(f, "{platform} cache default is unavailable: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CacheRootError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CurrentDirectory { err } => Some(err),
+            Self::InvalidConfigured { .. } | Self::PlatformDefaultUnavailable { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CacheRootEnvironment {
+    platform: &'static str,
+    current_dir: Option<PathBuf>,
+    xdg_cache_home: Option<OsString>,
+    home: Option<OsString>,
+    local_app_data: Option<OsString>,
+    user_profile: Option<OsString>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CacheRootOrigin {
+    Configured,
+    PlatformDefault,
+}
+
+impl CacheRootEnvironment {
+    fn host(configured: &str) -> Result<Self, CacheRootError> {
+        let configured_path = Path::new(configured);
+        let current_dir = if configured.is_empty() || configured_path.is_absolute() {
+            None
+        } else {
+            Some(env::current_dir().map_err(|err| CacheRootError::CurrentDirectory { err })?)
+        };
+        Ok(Self {
+            platform: env::consts::OS,
+            current_dir,
+            xdg_cache_home: env::var_os("XDG_CACHE_HOME"),
+            home: env::var_os("HOME"),
+            local_app_data: env::var_os("LOCALAPPDATA"),
+            user_profile: env::var_os("USERPROFILE"),
+        })
+    }
+}
+
+/// Resolve the effective cache setting to one absolute, byte-preserving host
+/// path shared by [`Store::open_host`], doctor inspection, and
+/// `--clear-cache`.
+///
+/// A non-empty configured value wins and is anchored to the current
+/// directory when relative. An empty value selects the platform convention:
+/// `XDG_CACHE_HOME` (or `HOME/.cache`) on Unix, `HOME/Library/Caches` on
+/// macOS, and `LOCALAPPDATA` (or `USERPROFILE/AppData/Local`) on Windows, then
+/// appends [`DEFAULT_CACHE_LEAF`]. Environment paths remain native
+/// [`OsString`] bytes; this function never performs lossy Unicode conversion.
+///
+/// # Errors
+///
+/// [`CacheRootError`] if a configured value contains `..`, a relative value
+/// cannot be anchored, or no trustworthy absolute platform base is
+/// available.
+pub fn resolve_host_cache_root(configured: &str) -> Result<PathBuf, CacheRootError> {
+    let environment = CacheRootEnvironment::host(configured)?;
+    resolve_cache_root(configured, &environment)
+}
+
+fn resolve_cache_root(
+    configured: &str,
+    environment: &CacheRootEnvironment,
+) -> Result<PathBuf, CacheRootError> {
+    if !configured.is_empty() {
+        return absolute_configured_root(Path::new(configured), environment);
+    }
+
+    let base = match environment.platform {
+        "windows" => absolute_environment_path(environment.local_app_data.as_ref())
+            .or_else(|| {
+                absolute_environment_path(environment.user_profile.as_ref())
+                    .map(|profile| profile.join("AppData").join("Local"))
+            })
+            .ok_or(CacheRootError::PlatformDefaultUnavailable {
+                platform: environment.platform,
+                reason: "LOCALAPPDATA and an absolute USERPROFILE are unavailable",
+            })?,
+        "macos" => absolute_environment_path(environment.home.as_ref())
+            .map(|home| home.join("Library").join("Caches"))
+            .ok_or(CacheRootError::PlatformDefaultUnavailable {
+                platform: environment.platform,
+                reason: "an absolute HOME is unavailable",
+            })?,
+        "linux" | "android" | "freebsd" | "dragonfly" | "netbsd" | "openbsd" | "solaris"
+        | "illumos" | "aix" | "haiku" => {
+            absolute_environment_path(environment.xdg_cache_home.as_ref())
+                .or_else(|| {
+                    absolute_environment_path(environment.home.as_ref())
+                        .map(|home| home.join(".cache"))
+                })
+                .ok_or(CacheRootError::PlatformDefaultUnavailable {
+                    platform: environment.platform,
+                    reason: "XDG_CACHE_HOME and an absolute HOME are unavailable",
+                })?
+        }
+        _ => {
+            return Err(CacheRootError::PlatformDefaultUnavailable {
+                platform: environment.platform,
+                reason: "this platform has no declared per-user cache convention",
+            });
+        }
+    };
+    finish_resolved_root(
+        base.join(DEFAULT_CACHE_LEAF),
+        environment.platform,
+        CacheRootOrigin::PlatformDefault,
+    )
+}
+
+fn absolute_configured_root(
+    configured: &Path,
+    environment: &CacheRootEnvironment,
+) -> Result<PathBuf, CacheRootError> {
+    if configured.as_os_str().is_empty() {
+        return Err(CacheRootError::InvalidConfigured {
+            path: configured.to_path_buf(),
+            reason: "an explicitly configured cache root may not be empty",
+        });
+    }
+    if configured
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(CacheRootError::InvalidConfigured {
+            path: configured.to_path_buf(),
+            reason: "parent-directory components are not accepted",
+        });
+    }
+    let resolved =
+        if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            let current_dir = environment.current_dir.as_ref().ok_or(
+                CacheRootError::PlatformDefaultUnavailable {
+                    platform: environment.platform,
+                    reason: "the current directory was not captured for a relative cache root",
+                },
+            )?;
+            current_dir.join(configured)
+        };
+    finish_resolved_root(resolved, environment.platform, CacheRootOrigin::Configured)
+}
+
+fn absolute_environment_path(value: Option<&OsString>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    (!path.as_os_str().is_empty() && path.is_absolute()).then_some(path)
+}
+
+fn finish_resolved_root(
+    root: PathBuf,
+    platform: &'static str,
+    origin: CacheRootOrigin,
+) -> Result<PathBuf, CacheRootError> {
+    if !root.is_absolute() {
+        return Err(match origin {
+            CacheRootOrigin::Configured => CacheRootError::InvalidConfigured {
+                path: root,
+                reason: "the resolved cache root is not absolute",
+            },
+            CacheRootOrigin::PlatformDefault => CacheRootError::PlatformDefaultUnavailable {
+                platform,
+                reason: "the resolved platform cache root is not absolute",
+            },
+        });
+    }
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(match origin {
+            CacheRootOrigin::Configured => CacheRootError::InvalidConfigured {
+                path: root,
+                reason: "the resolved cache root contains a parent-directory component",
+            },
+            CacheRootOrigin::PlatformDefault => CacheRootError::PlatformDefaultUnavailable {
+                platform,
+                reason: "the platform cache base contains a parent-directory component",
+            },
+        });
+    }
+    Ok(root)
+}
 
 fn lock_poisoned<T>(err: PoisonError<T>) -> T {
     err.into_inner()
@@ -236,6 +483,22 @@ fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheE
         }
     }
     Ok(())
+}
+
+/// Prepare only the platform cache base above a resolved application leaf.
+///
+/// Platform conventions name directories such as `$HOME/.cache` which may
+/// legitimately be absent on a fresh profile. The application-owned leaf is
+/// intentionally left absent so [`Store::open`] remains the sole operation
+/// that can atomically claim and stamp it.
+fn ensure_platform_cache_parent(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheError> {
+    let parent = root.parent().ok_or_else(|| {
+        root_refused(
+            root,
+            "the resolved platform cache root must name a dedicated leaf",
+        )
+    })?;
+    ensure_capability_root(fs, parent)
 }
 
 fn managed_leaf_kind(
@@ -1097,7 +1360,46 @@ impl fmt::Debug for Store {
 }
 
 impl Store {
+    /// Resolve the effective host cache setting and open its owned store.
+    ///
+    /// This is the construction entry point for a user-facing cache setting:
+    /// a configured absolute or relative path follows
+    /// [`resolve_host_cache_root`], while an empty setting selects the
+    /// platform default. For that default only, a missing platform cache base
+    /// is created one real directory component at a time; the dedicated
+    /// [`DEFAULT_CACHE_LEAF`] remains for [`Store::open`] to claim and stamp.
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::RootResolution`] if the setting cannot be resolved,
+    /// [`CacheError::RootRefused`] if the capability is not the ambient host
+    /// filesystem or ownership cannot be proven,
+    /// [`CacheError::FormatUnsupported`] if the owned root carries a stamp
+    /// from a different store format, or [`CacheError::Storage`].
+    pub fn open_host(
+        fs: Arc<dyn FileSystem>,
+        clock: Arc<dyn Clock>,
+        configured: &str,
+        config: StoreConfig,
+    ) -> Result<Self, CacheError> {
+        let root = resolve_host_cache_root(configured)?;
+        if !fs.grants_host_destructive_lifecycle() {
+            return Err(root_refused(
+                &root,
+                "host cache configuration requires the ambient host filesystem capability",
+            ));
+        }
+        if configured.is_empty() {
+            ensure_platform_cache_parent(fs.as_ref(), &root)?;
+        }
+        Self::open(fs, clock, root, config)
+    }
+
     /// Open (creating if needed) the owned store at `root`.
+    ///
+    /// Callers starting from the user-facing cache configuration use
+    /// [`Store::open_host`]; this lower-level constructor accepts an already
+    /// resolved absolute root.
     ///
     /// A missing absolute leaf under an existing real parent may be claimed.
     /// Any existing unstamped directory (including an empty one), a symlinked
@@ -1796,6 +2098,183 @@ impl Drop for Namespace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_absolute(name: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(r"C:\{name}"))
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(format!("/{name}"))
+        }
+    }
+
+    fn root_environment(platform: &'static str) -> CacheRootEnvironment {
+        CacheRootEnvironment {
+            platform,
+            current_dir: Some(test_absolute("work")),
+            xdg_cache_home: None,
+            home: None,
+            local_app_data: None,
+            user_profile: None,
+        }
+    }
+
+    #[test]
+    fn configured_cache_roots_become_absolute_without_rewriting() {
+        let environment = root_environment("linux");
+        assert_eq!(
+            resolve_cache_root("relative/cache", &environment).unwrap(),
+            test_absolute("work").join("relative/cache")
+        );
+        let absolute = test_absolute("explicit-cache");
+        assert_eq!(
+            resolve_cache_root(absolute.to_str().unwrap(), &environment).unwrap(),
+            absolute
+        );
+        assert!(matches!(
+            resolve_cache_root("../escape", &environment),
+            Err(CacheRootError::InvalidConfigured { .. })
+        ));
+    }
+
+    #[test]
+    fn platform_cache_defaults_have_one_dedicated_leaf() {
+        let unix_base = test_absolute("xdg");
+        let mut unix = root_environment("linux");
+        unix.xdg_cache_home = Some(unix_base.clone().into_os_string());
+        unix.home = Some(test_absolute("home").into_os_string());
+        assert_eq!(
+            resolve_cache_root("", &unix).unwrap(),
+            unix_base.join(DEFAULT_CACHE_LEAF)
+        );
+
+        let home = test_absolute("home");
+        unix.xdg_cache_home = Some(PathBuf::from("relative-xdg").into_os_string());
+        unix.home = Some(home.clone().into_os_string());
+        assert_eq!(
+            resolve_cache_root("", &unix).unwrap(),
+            home.join(".cache").join(DEFAULT_CACHE_LEAF)
+        );
+
+        let mut macos = root_environment("macos");
+        macos.home = Some(home.clone().into_os_string());
+        assert_eq!(
+            resolve_cache_root("", &macos).unwrap(),
+            home.join("Library").join("Caches").join(DEFAULT_CACHE_LEAF)
+        );
+
+        let local = test_absolute("local-app-data");
+        let mut windows = root_environment("windows");
+        windows.local_app_data = Some(local.clone().into_os_string());
+        assert_eq!(
+            resolve_cache_root("", &windows).unwrap(),
+            local.join(DEFAULT_CACHE_LEAF)
+        );
+        windows.local_app_data = None;
+        let profile = test_absolute("windows-profile");
+        windows.user_profile = Some(profile.clone().into_os_string());
+        assert_eq!(
+            resolve_cache_root("", &windows).unwrap(),
+            profile
+                .join("AppData")
+                .join("Local")
+                .join(DEFAULT_CACHE_LEAF)
+        );
+    }
+
+    #[test]
+    fn platform_cache_default_never_guesses_cwd_or_temp() {
+        let environment = root_environment("linux");
+        assert!(matches!(
+            resolve_cache_root("", &environment),
+            Err(CacheRootError::PlatformDefaultUnavailable { .. })
+        ));
+        let unsupported = root_environment("unknown");
+        assert!(matches!(
+            resolve_cache_root("", &unsupported),
+            Err(CacheRootError::PlatformDefaultUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn platform_parent_preparation_leaves_the_owned_leaf_for_store_claim() {
+        use fmn_platform::clock::FakeClock;
+        use fmn_platform::fs::VirtualFs;
+
+        let fs = Arc::new(VirtualFs::new());
+        let root = test_absolute("fresh")
+            .join("cache-base")
+            .join(DEFAULT_CACHE_LEAF);
+        ensure_platform_cache_parent(fs.as_ref(), &root).unwrap();
+        assert_eq!(
+            fs.node_kind_no_follow(root.parent().unwrap()).unwrap(),
+            Some(FsNodeKind::Directory)
+        );
+        assert_eq!(fs.node_kind_no_follow(&root).unwrap(), None);
+
+        let store = Store::open(
+            fs.clone(),
+            Arc::new(FakeClock::new()),
+            root.clone(),
+            StoreConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(store.root(), root);
+        assert_eq!(
+            fs.node_kind_no_follow(store.root()).unwrap(),
+            Some(FsNodeKind::Directory)
+        );
+    }
+
+    #[test]
+    fn host_constructor_resolves_before_requiring_the_host_capability() {
+        use fmn_platform::clock::FakeClock;
+        use fmn_platform::fs::VirtualFs;
+
+        let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
+        assert!(matches!(
+            Store::open_host(
+                fs.clone(),
+                clock.clone(),
+                "../escape",
+                StoreConfig::default()
+            ),
+            Err(CacheError::RootResolution(
+                CacheRootError::InvalidConfigured { .. }
+            ))
+        ));
+
+        let configured = test_absolute("configured-cache");
+        match Store::open_host(
+            fs,
+            clock,
+            configured.to_str().unwrap(),
+            StoreConfig::default(),
+        ) {
+            Err(CacheError::RootRefused { root, reason }) => {
+                assert_eq!(root, configured);
+                assert!(reason.contains("ambient host filesystem capability"));
+            }
+            other => panic!("expected host-capability refusal, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_cache_default_preserves_non_utf8_home_bytes() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let mut environment = root_environment("linux");
+        environment.home = Some(OsString::from_vec(b"/home/native-\xff".to_vec()));
+        let root = resolve_cache_root("", &environment).unwrap();
+        assert_eq!(
+            root.as_os_str().as_bytes(),
+            b"/home/native-\xff/.cache/franken-manim"
+        );
+    }
 
     #[test]
     fn namespace_names_are_strictly_validated() {
