@@ -30,6 +30,7 @@ fmn-geom = { path = "../../crates/fmn-geom" }
 fmn-hash = { path = "../../crates/fmn-hash" }
 fmn-frame = { path = "../../crates/fmn-frame" }
 fmn-codec = { path = "../../crates/fmn-codec" }
+fmn-mobject = { path = "../../crates/fmn-mobject" }
 fmn-render = { path = "../../crates/fmn-render" }
 ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "5dbcc1d2c2a857f3ead07138055c3451b8094438" }
 

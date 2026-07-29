@@ -133,6 +133,7 @@ dependencies = [
  "fmn-frame",
  "fmn-geom",
  "fmn-hash",
+ "fmn-mobject",
  "fmn-render",
  "ft-kernel-metal",
 ]

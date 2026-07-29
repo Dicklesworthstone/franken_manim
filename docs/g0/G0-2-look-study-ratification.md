@@ -2,9 +2,10 @@
 
 **Status:** Ratified, 2026-07-25. **Verdict: the 3b1b look is KEPT, and every
 constant that defines it is now a measured number rather than a remembered
-one.** Six of §20.1 spike 2's decisions are fixed below with their evidence;
-the one that cannot yet be fixed by measurement is named as such, with the
-bead that owns it.
+one.** Six of §20.1 spike 2's decisions are fixed below with their evidence.
+W5's completed interior colour field now makes the last comparison panel
+reviewable; §6 records the marshal's recommendation without substituting it
+for G1's required program-owner verdict.
 
 **Why this spike exists (D-04, R2).** The Reference's look constants are the
 aesthetic DNA of 3Blue1Brown and are kept deliberately — but they were tuned
@@ -30,9 +31,9 @@ was the finding — see L2 and L5.
 
 **The rendered evidence.** `docs/g0/g0-2-renders/` holds five panels at the
 capture resolution, in the *same pixel coordinates* as the Reference stills:
-four from the analytic prototype and `lighting_3d` from Lumen's integrated 3D
-path. They are produced by
-`cargo run --release --bin g0_2_look` in `spikes/g0-8-accelerator`. The
+`gradient_fills` from production Lumen, three settled panels from the compact
+analytic calibration fixture, and `lighting_3d` from Lumen's integrated 3D
+path. They are produced by `g0_2_look` in `spikes/g0-8-accelerator`. The
 Reference stills stay private (§15.3); ours are our own primitives and are
 committed.
 
@@ -385,8 +386,24 @@ Verdicts in §16.3's vocabulary:
 | `self_intersections` | **at-least-as-good** | The Reference's star core is visibly **lighter** than its limbs: winding number 2 composites the fill twice through the signed-alpha trick. Ours renders one uniform colour, which is what the nonzero rule means. |
 | `joints_and_caps` | **different-but-fine** (Behavior-Noted) | Four different corners become one round join; no notch at any vertex, and round caps at the ends. L6. |
 | `glow` | **at-least-as-good** | Falloff character matches (L7). Registration is close, not exact — our disc reads slightly larger, since `GlowDot`'s `radius` parameter and the visible extent are not the same quantity. |
-| `gradient_fills` | **open — fm-5oi decides** | The Reference shows a hard **diagonal seam** across the square: its fill gradient is per-vertex around the outline, interpolated across the triangle fan from `base_point`, so the fan edges are Gouraud discontinuities. Ours is smooth — but ours is a *defined stand-in* (a screen-space axis), not §10.2's interior field. The real field is fm-5oi's to build, and this panel is its calibration input, not a settled result. |
+| `gradient_fills` | **owner review pending — marshal recommends different-but-fine (Behavior-Noted)** | This now runs through production Lumen's §10.2 field. The Reference's hard **diagonal seam** comes from per-vertex colour interpolated across its triangle fan; ours is the smooth, true-arclength boundary ramp extended by mean value coordinates. Gradient direction, opacity, stroke ramp, and capture registration agree. The smoother, subdivision-stable field is the deliberate BN-06 behavior fm-5oi landed. The marshal found no regression candidate; governance still requires the program owner to record the human Gallery verdict against the G1 packet. |
 | `lighting_3d` | **at-least-as-good** | The integrated Lumen path uses the exact capture inputs: `Sphere(radius=2)`, the Reference's `(101, 51)` UV grid and parameterization, BLUE_E, and `frame.reorient(20, 70)`. Silhouette, light direction, and retained Gouraud shading coincide closely. Whole-frame normalized RMSE is **0.00212857** and normalized SSIM distortion is **0.000145104**; these are smoke alarms, not gates. |
+
+The production gradient panel is reproduced with:
+
+```bash
+cargo run --release --locked \
+  --manifest-path spikes/g0-8-accelerator/Cargo.toml \
+  --bin g0_2_look -- docs/g0/g0-2-renders --gradient-only
+```
+
+Its Rgba16F framebuffer SHA-256 is
+`8c6d52060c318e948f6d08bf1eb0f45ba566e7d317971e3b95a542fb51fb3de9`;
+the committed canonical PNG SHA-256 is
+`5c49c5224b36c497eab0d636623b7a602dde2f39f1e05dbb4e441d71c40f1345`.
+The registered whole-frame normalized RMSE against the private capture is
+**0.0483394**. That metric sees the intentionally different interior field and
+is a smoke alarm, not a pass threshold.
 
 The lighting panel is reproduced with:
 
@@ -430,9 +447,10 @@ affect any constant decided above.
 
 ## 8. Follow-ups
 
-- **fm-5oi** — analytic fill. Consumes (a) and L3; the `gradient_fills` panel
-  is its calibration input, and §10.2's interior colour field is the open
-  question there, not the coverage.
+- **fm-5oi** (closed) — analytic fill consumed (a) and L3 and landed §10.2's
+  mean-value-coordinate interior colour field. Its production
+  `gradient_fills` panel is review-ready above; G1's program owner owns the
+  final Gallery verdict.
 - **fm-oac** — strokes. Consumes (b), (c), L6, and the 3.1623 miter limit.
 - **fm-6cf** — the cubic→quad converter. Consumes (f)'s 0.1 px default and L8's
   measured baseline.
