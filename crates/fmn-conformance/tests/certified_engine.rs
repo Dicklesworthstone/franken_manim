@@ -60,11 +60,17 @@ use fmn_render::engine::{
 use fmn_render::fill::{FillKernel, MonoTable, instance_translation};
 #[cfg(feature = "metal")]
 use fmn_render::metal::{
-    METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR, METAL_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
-    METAL_VISUAL_BUDGET_V1_MIN_SSIM, METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, MetalRenderer,
-    MetalReport,
+    METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR, METAL_THREE_D_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+    METAL_THREE_D_VISUAL_BUDGET_V1_MIN_SSIM, METAL_THREE_D_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
+    METAL_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR, METAL_VISUAL_BUDGET_V1_MIN_SSIM,
+    METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, MetalRenderer, MetalReport,
 };
 use fmn_render::plan::RenderPlan;
+#[cfg(feature = "metal")]
+use fmn_render::{
+    Camera, CameraConfig, SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDDraw, ThreeDJob,
+    TrueDotDraw,
+};
 use std::path::PathBuf;
 
 /// The frame every corpus renders into.
@@ -731,6 +737,168 @@ fn metal_annex_stays_inside_budget_and_reuses_its_surfaces() {
 }
 
 #[cfg(feature = "metal")]
+struct MetalThreeDCorpus {
+    camera: Camera,
+    surface: SurfaceMesh,
+    dots: Vec<TrueDotDraw>,
+}
+
+#[cfg(feature = "metal")]
+impl MetalThreeDCorpus {
+    fn new() -> Self {
+        let background = Srgb::from_rgb8(0x18, 0x1a, 0x20).to_linear(1.0);
+        let camera = Camera::new(CameraConfig {
+            resolution: (WIDTH, HEIGHT),
+            samples: 2,
+            background,
+            ..CameraConfig::default()
+        })
+        .expect("3D camera");
+        let nu = 6u32;
+        let nv = 5u32;
+        let mut vertices = Vec::with_capacity((nu * nv) as usize);
+        for u in 0..nu {
+            for v in 0..nv {
+                let x = -3.2 + 6.4 * f64::from(u) / f64::from(nu - 1);
+                let y = -1.65 + 3.3 * f64::from(v) / f64::from(nv - 1);
+                let z = -0.7 + 0.08 * x * y;
+                let color = Srgb {
+                    r: 0.18 + 0.07 * f64::from(u),
+                    g: 0.24 + 0.08 * f64::from(v),
+                    b: 0.68 - 0.04 * f64::from(u),
+                }
+                .to_linear(0.88);
+                vertices.push(SurfaceVertex::colored(
+                    [x, y, z],
+                    [-0.08 * y, -0.08 * x, 1.0],
+                    color,
+                ));
+            }
+        }
+        let surface = SurfaceMesh::from_uv_grid(vertices, (nu, nv)).expect("fixed UV surface");
+        let mut dots = Vec::new();
+        for row in 0..5u32 {
+            for column in 0..12u32 {
+                let x = -3.3 + 0.6 * f64::from(column);
+                let y = -1.35 + 0.68 * f64::from(row);
+                let z = if (row + column).is_multiple_of(3) {
+                    -1.1
+                } else {
+                    0.25
+                };
+                let color = if (row + column).is_multiple_of(2) {
+                    Srgb::from_rgb8(0xff, 0x78, 0x30).to_linear(0.68)
+                } else {
+                    Srgb::from_rgb8(0x42, 0xc9, 0xff).to_linear(0.62)
+                };
+                let mut dot = if column.is_multiple_of(3) {
+                    TrueDotDraw::new([x, y, z], 0.22, color)
+                } else {
+                    TrueDotDraw::glow([x, y, z], 0.34, color)
+                };
+                dot.depth_test = row.is_multiple_of(2);
+                if row == 0 && column == 0 {
+                    dot.shading = [0.3, 0.2, 0.4];
+                }
+                dots.push(dot);
+            }
+        }
+        Self {
+            camera,
+            surface,
+            dots,
+        }
+    }
+
+    fn with_job<R>(&self, run: impl FnOnce(&ThreeDJob<'_>) -> R) -> R {
+        let mut surface_draw = SurfaceDraw::new(&self.surface);
+        surface_draw.depth_test = true;
+        let mut draws = Vec::with_capacity(self.dots.len() + 1);
+        draws.push(ThreeDDraw::Surface(surface_draw));
+        draws.extend(self.dots.iter().copied().map(ThreeDDraw::TrueDot));
+        let job = ThreeDJob::new(&self.camera, &draws, TILING).expect("prepared 3D corpus");
+        run(&job)
+    }
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_annex_keeps_glow_dots_and_lit_surfaces_inside_the_three_d_budget() {
+    if !MetalRenderer::is_available() {
+        return;
+    }
+    MetalThreeDCorpus::new().with_job(|job| {
+        let cpu = job.render(1).expect("CPU 3D oracle");
+        let mut renderer = MetalRenderer::new()
+            .expect("an available Metal device must compile the production shader");
+        let (first, first_report) = renderer
+            .render_three_d_raw(job)
+            .expect("Metal renders the prepared 3D corpus");
+        let (second, second_report) = renderer
+            .render_three_d_raw(job)
+            .expect("Metal repeats the prepared 3D corpus");
+        let measured = divergence(&cpu, &first);
+        println!(
+            "{{\"schema\":\"fmn.metal_3d_equivalence.v1\",\
+             \"maximum\":{},\"rms\":{},\"ssim\":{},\
+             \"upload_bytes\":{},\"readback_bytes\":{}}}",
+            measured.maximum,
+            measured.rms,
+            measured.ssim,
+            first_report.upload_bytes,
+            first_report.readback_bytes,
+        );
+
+        assert_eq!(first_report.identity, EngineIdentity::metal());
+        assert_eq!(first_report.output_format, PixelFormat::Rgba16F);
+        assert!(first_report.upload_bytes > 0);
+        assert_eq!(first_report.readback_bytes, first.as_bytes().len());
+        assert!(second_report.raw_surface_reused);
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert!(
+            measured.maximum <= METAL_THREE_D_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
+            "3D Metal max={} at {:?} (CPU {}, Metal {}) exceeds {}",
+            measured.maximum,
+            measured.maximum_at,
+            measured.reference_at_maximum,
+            measured.candidate_at_maximum,
+            METAL_THREE_D_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR
+        );
+        assert!(
+            measured.rms <= METAL_THREE_D_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR,
+            "3D Metal rms={} exceeds {}",
+            measured.rms,
+            METAL_THREE_D_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR
+        );
+        assert!(
+            measured.ssim >= METAL_THREE_D_VISUAL_BUDGET_V1_MIN_SSIM,
+            "3D Metal ssim={} is below {}",
+            measured.ssim,
+            METAL_THREE_D_VISUAL_BUDGET_V1_MIN_SSIM
+        );
+
+        let mut expected = FrameBuffer::new(
+            FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT).expect("RGBA8 comparison layout"),
+        );
+        fmn_frame::convert::rgba16f_to_rgba8(&first, &mut expected).expect("canonical transfer");
+        let (rgba_first, rgba_first_report) = renderer
+            .render_three_d_rgba8(job)
+            .expect("Metal transfers the 3D preview");
+        let (rgba_second, rgba_second_report) = renderer
+            .render_three_d_rgba8(job)
+            .expect("Metal repeats the 3D preview transfer");
+        assert_eq!(rgba_first_report.output_format, PixelFormat::Rgba8);
+        assert!(rgba_first_report.raw_surface_reused);
+        assert!(rgba_second_report.output_surface_reused);
+        assert_eq!(rgba_first.as_bytes(), rgba_second.as_bytes());
+        assert_eq!(
+            maximum_rgba8_code_error(&expected, &rgba_first),
+            METAL_RGBA8_TRANSFER_V1_MAX_CODE_ERROR
+        );
+    });
+}
+
+#[cfg(feature = "metal")]
 fn negotiated_yuv_layout(format: PixelFormat) -> FrameLayout {
     let width = WIDTH as usize;
     let strides = match format {
@@ -868,6 +1036,60 @@ fn metal_annex_pg_a_reports_the_empty_floor_beside_the_corpus() {
             );
         }
     }
+}
+
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "PG-A runs explicitly on the pinned Apple profile"]
+fn metal_three_d_pg_a_profiles_glow_and_surface_work() {
+    if !MetalRenderer::is_available() {
+        return;
+    }
+    const MEASURED_FRAMES: usize = 33;
+    MetalThreeDCorpus::new().with_job(|job| {
+        let mut renderer = MetalRenderer::new()
+            .expect("an available Metal device must compile the production shader");
+        renderer
+            .render_three_d_rgba8(job)
+            .expect("PG-A 3D warmup frame");
+        let mut elapsed = Vec::with_capacity(MEASURED_FRAMES);
+        let mut last = None;
+        for _ in 0..MEASURED_FRAMES {
+            let report = renderer.render_three_d_rgba8(job).expect("PG-A 3D frame").1;
+            assert!(report.raw_surface_reused);
+            assert!(report.output_surface_reused);
+            elapsed.push(report.elapsed);
+            last = Some(report);
+        }
+        elapsed.sort_unstable();
+        let median = elapsed[MEASURED_FRAMES / 2];
+        let report = last.expect("the measurement count is nonzero");
+        let fps = 1.0 / median.as_secs_f64();
+        assert!(fps.is_finite() && fps > 0.0);
+        assert!(report.upload_bytes > 0);
+        assert_eq!(
+            report.readback_bytes,
+            FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT)
+                .expect("PG-A 3D output layout")
+                .total_bytes()
+        );
+        println!(
+            "{{\"schema\":\"fmn.pg_a.v1\",\"case\":\"three_d_glow_surface\",\
+             \"format\":\"rgba8\",\"device\":{:?},\"unified_memory\":{},\
+             \"frames\":{MEASURED_FRAMES},\"median_ns\":{},\"fps\":{fps},\
+             \"upload_bytes\":{},\"readback_bytes\":{},\
+             \"threads_per_threadgroup\":{},\"max_threads_per_threadgroup\":{},\
+             \"thread_execution_width\":{}}}",
+            report.device,
+            report.unified_memory,
+            median.as_nanos(),
+            report.upload_bytes,
+            report.readback_bytes,
+            report.threads_per_threadgroup,
+            report.max_threads_per_threadgroup,
+            report.thread_execution_width,
+        );
+    });
 }
 
 #[test]

@@ -17,7 +17,9 @@ use std::sync::{Mutex, PoisonError};
 
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_core::types::Vec3;
-use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
+use fmn_frame::{
+    FrameBuffer, FrameError, FrameLayout, PixelFormat, transfer::srgb_decode as srgb_eotf,
+};
 
 use crate::bin::{ScreenMap, Tiling};
 use crate::camera::{Camera, EdgeSampleLimit};
@@ -159,9 +161,9 @@ pub fn finalize_color(
         }
     }
     LinearRgba {
-        r: fmn_frame::transfer::srgb_decode(encoded[0]),
-        g: fmn_frame::transfer::srgb_decode(encoded[1]),
-        b: fmn_frame::transfer::srgb_decode(encoded[2]),
+        r: srgb_eotf(encoded[0]),
+        g: srgb_eotf(encoded[1]),
+        b: srgb_eotf(encoded[2]),
         a: color.a,
     }
 }
@@ -605,12 +607,12 @@ pub enum ThreeDDraw<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Attributes {
-    world: Vec3,
-    normal: Vec3,
-    color: [f64; 4],
-    uv: [f64; 2],
-    opacity: f64,
+pub(crate) struct Attributes {
+    pub(crate) world: Vec3,
+    pub(crate) normal: Vec3,
+    pub(crate) color: [f64; 4],
+    pub(crate) uv: [f64; 2],
+    pub(crate) opacity: f64,
 }
 
 impl Attributes {
@@ -665,17 +667,17 @@ impl ProjectedVertex {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RasterVertex {
-    attributes: Attributes,
-    screen: [f64; 2],
-    inverse_w: f64,
-    ndc_z: f64,
+pub(crate) struct RasterVertex {
+    pub(crate) attributes: Attributes,
+    pub(crate) screen: [f64; 2],
+    pub(crate) inverse_w: f64,
+    pub(crate) ndc_z: f64,
 }
 
 #[derive(Debug, Clone)]
-struct RasterTriangle {
-    vertices: [RasterVertex; 3],
-    bounds: [f64; 4],
+pub(crate) struct RasterTriangle {
+    pub(crate) vertices: [RasterVertex; 3],
+    pub(crate) bounds: [f64; 4],
 }
 
 const PERSPECTIVE_VECTOR_TOLERANCE_PX: f64 = 1.0 / 256.0;
@@ -702,7 +704,7 @@ struct PlanarGradientField {
 }
 
 #[derive(Debug, Clone)]
-struct CompiledVector {
+pub(crate) struct CompiledVector {
     fill: Vec<MonoPiece>,
     curves: Vec<ProjectedCurvePiece>,
     joins: Vec<crate::stroke::JoinWedge>,
@@ -715,7 +717,7 @@ struct CompiledVector {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Shader<'a> {
+pub(crate) enum Shader<'a> {
     Gouraud,
     Texture {
         material: TextureMaterial<'a>,
@@ -737,14 +739,14 @@ enum Shader<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct CompiledDraw<'a> {
-    primitive: CompiledPrimitive<'a>,
-    depth_test: bool,
-    bounds: Option<[f64; 4]>,
+pub(crate) struct CompiledDraw<'a> {
+    pub(crate) primitive: CompiledPrimitive<'a>,
+    pub(crate) depth_test: bool,
+    pub(crate) bounds: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone)]
-enum CompiledPrimitive<'a> {
+pub(crate) enum CompiledPrimitive<'a> {
     Triangles {
         triangles: Vec<RasterTriangle>,
         shader: Shader<'a>,
@@ -807,6 +809,28 @@ impl<'a> ThreeDJob<'a> {
     #[must_use]
     pub const fn camera_revision(&self) -> u64 {
         self.camera_revision
+    }
+
+    /// Camera captured by this prepared frame.
+    ///
+    /// Annex executors consume this together with [`Self::prepared_draws`] so
+    /// projection, clipping, painter order, and adaptive-AA selection retain one
+    /// authority.
+    #[cfg(feature = "metal")]
+    pub(crate) const fn camera(&self) -> &Camera {
+        self.camera
+    }
+
+    /// Camera-bound draw IR shared by the CPU and annex executors.
+    #[cfg(feature = "metal")]
+    pub(crate) fn prepared_draws(&self) -> &[CompiledDraw<'a>] {
+        &self.draws
+    }
+
+    /// Captured edge-sampling grid (`1`, `2`, or `4`).
+    #[cfg(feature = "metal")]
+    pub(crate) const fn sample_grid(&self) -> u32 {
+        self.sample_grid
     }
 
     /// Raw-frame layout.

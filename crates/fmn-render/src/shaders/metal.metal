@@ -1,9 +1,9 @@
 // Lumen's standard-only Metal annex.
 //
-// The host derives these flat arrays from the same prepared FrameJob consumed
-// by the CPU engines. One threadgroup owns one fine tile; one thread owns one
-// output pixel and walks the tile's CSR command run in painter order. There are
-// no atomics, unordered appends, or intermediate compositing surfaces.
+// The host derives these flat arrays from the same prepared FrameJob/ThreeDJob
+// consumed by the CPU engines. One threadgroup owns one fine tile; one thread
+// owns one output pixel and walks the tile's CSR command run in painter order.
+// There are no atomics, unordered appends, or intermediate compositing surfaces.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -17,11 +17,18 @@ using namespace metal;
 #define DRAW_U32_STRIDE 10
 #define DRAW_F32_STRIDE 8
 #define STYLE_STRIDE 20
+#define THREE_D_VERTEX_STRIDE 17
+#define THREE_D_TRIANGLE_STRIDE 51
+#define THREE_D_DRAW_U32_STRIDE 4
+#define THREE_D_DRAW_F32_STRIDE 24
+#define THREE_D_MAX_SAMPLES 16
 
 #define DRAW_FILL 1u
 #define DRAW_STROKE 2u
 #define STROKE_BEHIND 4u
 #define FLAT_FILL 8u
+#define THREE_D_SHADER_GOURAUD 1u
+#define THREE_D_SHADER_DOT 2u
 #define CLASS_INTERIOR 1u
 #define STATUS_COMPLETE 0x464d4e4du
 #define TRANSFER_TABLE_WORDS_PER_PLANE 16384
@@ -1005,6 +1012,469 @@ kernel void fmn_render_frame(
     // Every lane reaches the barrier, including padding lanes at edge tiles.
     // A fresh status buffer therefore distinguishes a completed dispatch from
     // the pinned gateway returning after a command-buffer runtime failure.
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        status[group_id.y * params_u32[3] + group_id.x] = STATUS_COMPLETE;
+    }
+}
+
+// ThreeDJob has already applied camera projection, homogeneous/user clipping,
+// fixed-grid tessellation, kept per-vertex lighting, and painter ordering. The
+// annex consumes that prepared triangle IR directly. Tile command lists are
+// produced by stable host count/prefix/scatter; one GPU thread owns all samples
+// and depth state for one output pixel, so no atomics or ordering races exist.
+static uint three_d_vertex_base(uint triangle, uint corner) {
+    return triangle * (uint)THREE_D_TRIANGLE_STRIDE
+        + corner * (uint)THREE_D_VERTEX_STRIDE;
+}
+
+static float2 three_d_screen(
+    device const float *triangles,
+    uint triangle,
+    uint corner
+) {
+    uint base = three_d_vertex_base(triangle, corner);
+    return float2(triangles[base + 0u], triangles[base + 1u]);
+}
+
+static float three_d_orient(float2 a, float2 b, float2 point) {
+    return (b.x - a.x) * (point.y - a.y)
+        - (b.y - a.y) * (point.x - a.x);
+}
+
+static bool three_d_top_left(float2 start, float2 end) {
+    float dx = end.x - start.x;
+    float dy = end.y - start.y;
+    return dy < 0.0f || (dy == 0.0f && dx > 0.0f);
+}
+
+static bool three_d_barycentric(
+    device const float *triangles,
+    uint triangle,
+    float2 point,
+    thread float3 *weights
+) {
+    float2 a = three_d_screen(triangles, triangle, 0u);
+    float2 b = three_d_screen(triangles, triangle, 1u);
+    float2 c = three_d_screen(triangles, triangle, 2u);
+    float area = three_d_orient(a, b, c);
+    if (!(area > 0.0f) || !isfinite(area)) return false;
+    float3 numerators = float3(
+        three_d_orient(b, c, point),
+        three_d_orient(c, a, point),
+        three_d_orient(a, b, point)
+    );
+    bool outside =
+        numerators.x < 0.0f
+        || (numerators.x == 0.0f && !three_d_top_left(b, c))
+        || numerators.y < 0.0f
+        || (numerators.y == 0.0f && !three_d_top_left(c, a))
+        || numerators.z < 0.0f
+        || (numerators.z == 0.0f && !three_d_top_left(a, b));
+    if (outside) return false;
+    *weights = numerators / area;
+    return true;
+}
+
+static bool three_d_pixel_in_triangle_bounds(
+    device const float *triangles,
+    uint triangle,
+    uint px,
+    uint py
+) {
+    float2 a = three_d_screen(triangles, triangle, 0u);
+    float2 b = three_d_screen(triangles, triangle, 1u);
+    float2 c = three_d_screen(triangles, triangle, 2u);
+    float min_x = min(a.x, min(b.x, c.x));
+    float min_y = min(a.y, min(b.y, c.y));
+    float max_x = max(a.x, max(b.x, c.x));
+    float max_y = max(a.y, max(b.y, c.y));
+    return (float)px >= floor(min_x)
+        && (float)py >= floor(min_y)
+        && (float)px < ceil(max_x)
+        && (float)py < ceil(max_y);
+}
+
+static bool three_d_triangle_marks_boundary(
+    device const float *triangles,
+    uint triangle,
+    uint px,
+    uint py
+) {
+    if (!three_d_pixel_in_triangle_bounds(triangles, triangle, px, py)) {
+        return false;
+    }
+    float3 ignored;
+    return !three_d_barycentric(
+            triangles,
+            triangle,
+            float2((float)px, (float)py),
+            &ignored
+        )
+        || !three_d_barycentric(
+            triangles,
+            triangle,
+            float2((float)px + 1.0f, (float)py),
+            &ignored
+        )
+        || !three_d_barycentric(
+            triangles,
+            triangle,
+            float2((float)px, (float)py + 1.0f),
+            &ignored
+        )
+        || !three_d_barycentric(
+            triangles,
+            triangle,
+            float2((float)px + 1.0f, (float)py + 1.0f),
+            &ignored
+        );
+}
+
+struct ThreeDAttributes {
+    float3 world;
+    float3 normal;
+    float4 color;
+    float2 uv;
+    float opacity;
+    float depth;
+};
+
+static bool three_d_interpolate(
+    device const float *triangles,
+    uint triangle,
+    float3 barycentric,
+    thread ThreeDAttributes *attributes
+) {
+    float3 corrected = float3(0.0f);
+    float denominator = 0.0f;
+    float ndc_z = 0.0f;
+    for (uint corner = 0u; corner < 3u; corner++) {
+        uint base = three_d_vertex_base(triangle, corner);
+        corrected[corner] = barycentric[corner] * triangles[base + 2u];
+        denominator += corrected[corner];
+        ndc_z += triangles[base + 3u] * barycentric[corner];
+    }
+    if (denominator == 0.0f || !isfinite(denominator)) return false;
+    corrected /= denominator;
+
+    attributes->world = float3(0.0f);
+    attributes->normal = float3(0.0f);
+    attributes->color = float4(0.0f);
+    attributes->uv = float2(0.0f);
+    attributes->opacity = 0.0f;
+    for (uint corner = 0u; corner < 3u; corner++) {
+        uint base = three_d_vertex_base(triangle, corner);
+        float weight = corrected[corner];
+        attributes->world += float3(
+            triangles[base + 4u],
+            triangles[base + 5u],
+            triangles[base + 6u]
+        ) * weight;
+        attributes->normal += float3(
+            triangles[base + 7u],
+            triangles[base + 8u],
+            triangles[base + 9u]
+        ) * weight;
+        attributes->color += float4(
+            triangles[base + 10u],
+            triangles[base + 11u],
+            triangles[base + 12u],
+            triangles[base + 13u]
+        ) * weight;
+        attributes->uv += float2(
+            triangles[base + 14u],
+            triangles[base + 15u]
+        ) * weight;
+        attributes->opacity += triangles[base + 16u] * weight;
+    }
+    attributes->depth = 0.5f * (ndc_z + 1.0f);
+    return true;
+}
+
+static bool three_d_normalize(float3 value, thread float3 *normalized) {
+    float magnitude = length(value);
+    if (magnitude == 0.0f || !isfinite(magnitude)) return false;
+    *normalized = value / magnitude;
+    return true;
+}
+
+static float three_d_srgb_encode(float linear) {
+    return (linear <= 0.0031308f)
+        ? 12.92f * linear
+        : 1.055f * pow(linear, 1.0f / 2.4f) - 0.055f;
+}
+
+static float three_d_srgb_decode(float encoded) {
+    return (encoded <= 0.04045f)
+        ? encoded / 12.92f
+        : pow((encoded + 0.055f) / 1.055f, 2.4f);
+}
+
+static float4 three_d_finalize_color(
+    float4 color,
+    float3 point,
+    float3 unit_normal,
+    float3 shading,
+    float3 light_position,
+    float3 camera_position
+) {
+    if (shading.x == 0.0f && shading.y == 0.0f && shading.z == 0.0f) {
+        return color;
+    }
+    float3 to_camera;
+    float3 to_light;
+    if (!three_d_normalize(camera_position - point, &to_camera)
+        || !three_d_normalize(light_position - point, &to_light)) {
+        return color;
+    }
+    float light_to_normal = dot(to_light, unit_normal);
+    float bright_factor = max(light_to_normal, 0.0f) * shading.x;
+    float3 incoming = -to_light;
+    float3 reflection =
+        incoming - unit_normal * (2.0f * dot(incoming, unit_normal));
+    float light_to_camera = dot(reflection, to_camera);
+    float miss = 1.0f - light_to_camera;
+    bright_factor += shading.y * exp(-3.0f * miss * miss);
+
+    float3 encoded = float3(
+        three_d_srgb_encode(color.r),
+        three_d_srgb_encode(color.g),
+        three_d_srgb_encode(color.b)
+    );
+    encoded += (float3(1.0f) - encoded) * bright_factor;
+    if (light_to_normal < 0.0f) {
+        float shadow = max(-light_to_normal, 0.0f) * shading.z;
+        encoded += (float3(0.0f) - encoded) * shadow;
+    }
+    return float4(
+        three_d_srgb_decode(encoded.r),
+        three_d_srgb_decode(encoded.g),
+        three_d_srgb_decode(encoded.b),
+        color.a
+    );
+}
+
+static bool three_d_shade(
+    device const float *draw_f32,
+    uint draw,
+    uint shader,
+    ThreeDAttributes attributes,
+    thread float4 *source
+) {
+    if (shader == THREE_D_SHADER_GOURAUD) {
+        *source = attributes.color;
+        source->a *= clamp(attributes.opacity, 0.0f, 1.0f);
+        return true;
+    }
+    if (shader != THREE_D_SHADER_DOT) return false;
+
+    uint base = draw * (uint)THREE_D_DRAW_F32_STRIDE;
+    float r = length(attributes.uv);
+    if (!isfinite(r) || r > 1.0f || r < 0.0f) return false;
+    float glow_factor = draw_f32[base + 8u];
+    float alpha = 1.0f;
+    if (glow_factor > 0.0f) {
+        alpha *= pow(1.0f - r, glow_factor);
+    }
+    float aa_width = max(draw_f32[base + 15u], 2.220446e-16f);
+    float edge = clamp((1.0f - r) / aa_width, 0.0f, 1.0f);
+    alpha *= edge * edge * (3.0f - 2.0f * edge);
+    float4 color = float4(
+        draw_f32[base + 4u],
+        draw_f32[base + 5u],
+        draw_f32[base + 6u],
+        draw_f32[base + 7u] * alpha
+    );
+    float3 shading = float3(
+        draw_f32[base + 9u],
+        draw_f32[base + 10u],
+        draw_f32[base + 11u]
+    );
+    if (shading.x != 0.0f || shading.y != 0.0f || shading.z != 0.0f) {
+        float3 center = float3(
+            draw_f32[base + 0u],
+            draw_f32[base + 1u],
+            draw_f32[base + 2u]
+        );
+        float radius = draw_f32[base + 3u];
+        float3 to_camera = float3(
+            draw_f32[base + 12u],
+            draw_f32[base + 13u],
+            draw_f32[base + 14u]
+        );
+        float3 point = attributes.world
+            + to_camera * radius * sqrt(max(1.0f - r * r, 0.0f));
+        float3 normal;
+        if (!three_d_normalize(point - center, &normal)) {
+            normal = to_camera;
+        }
+        color = three_d_finalize_color(
+            color,
+            point,
+            normal,
+            shading,
+            float3(
+                draw_f32[base + 16u],
+                draw_f32[base + 17u],
+                draw_f32[base + 18u]
+            ),
+            float3(
+                draw_f32[base + 19u],
+                draw_f32[base + 20u],
+                draw_f32[base + 21u]
+            )
+        );
+    }
+    *source = color;
+    return true;
+}
+
+static float4 three_d_source_over(float4 source, float4 destination) {
+    float remaining = 1.0f - source.a;
+    return float4(
+        source.rgb * source.a + destination.rgb * remaining,
+        source.a + destination.a * remaining
+    );
+}
+
+kernel void fmn_render_three_d(
+    constant uint *params_u32 [[buffer(0)]],
+    constant float *params_f32 [[buffer(1)]],
+    device const float *triangles [[buffer(2)]],
+    device const uint *draw_u32 [[buffer(3)]],
+    device const float *draw_f32 [[buffer(4)]],
+    device const uint *tile_offsets [[buffer(5)]],
+    device const uint *tile_draws [[buffer(6)]],
+    device half4 *surface [[buffer(7)]],
+    device uint *status [[buffer(8)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]]
+) {
+    uint width = params_u32[0];
+    uint height = params_u32[1];
+    uint tile = params_u32[2];
+    uint cols = params_u32[3];
+    uint sample_grid = params_u32[4];
+    uint draw_count = params_u32[5];
+    uint px = group_id.x * tile + local_id.x;
+    uint py = group_id.y * tile + local_id.y;
+    bool active = px < width && py < height;
+
+    if (active) {
+        uint tile_index = group_id.y * cols + group_id.x;
+        uint command_lo = tile_offsets[tile_index];
+        uint command_hi = tile_offsets[tile_index + 1u];
+        bool boundary = false;
+        if (sample_grid > 1u) {
+            for (uint command = command_lo;
+                 command < command_hi && !boundary;
+                 command++) {
+                uint draw = tile_draws[command];
+                if (draw >= draw_count) continue;
+                uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
+                uint triangle_lo = draw_u32[draw_base + 0u];
+                uint triangle_hi = triangle_lo + draw_u32[draw_base + 1u];
+                for (uint triangle = triangle_lo;
+                     triangle < triangle_hi;
+                     triangle++) {
+                    if (three_d_triangle_marks_boundary(
+                            triangles, triangle, px, py)) {
+                        boundary = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        uint samples = boundary ? sample_grid : 1u;
+        uint sample_count = samples * samples;
+        float4 background = float4(
+            params_f32[0],
+            params_f32[1],
+            params_f32[2],
+            params_f32[3]
+        );
+        float4 initial = float4(
+            background.rgb * background.a,
+            background.a
+        );
+        float4 colors[THREE_D_MAX_SAMPLES];
+        float depths[THREE_D_MAX_SAMPLES];
+        for (uint sample = 0u; sample < sample_count; sample++) {
+            colors[sample] = initial;
+            depths[sample] = 1.0f;
+        }
+
+        for (uint command = command_lo; command < command_hi; command++) {
+            uint draw = tile_draws[command];
+            if (draw >= draw_count) continue;
+            uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
+            uint triangle_lo = draw_u32[draw_base + 0u];
+            uint triangle_hi = triangle_lo + draw_u32[draw_base + 1u];
+            uint shader = draw_u32[draw_base + 2u];
+            bool depth_test = draw_u32[draw_base + 3u] != 0u;
+            for (uint triangle = triangle_lo;
+                 triangle < triangle_hi;
+                 triangle++) {
+                if (!three_d_pixel_in_triangle_bounds(
+                        triangles, triangle, px, py)) {
+                    continue;
+                }
+                for (uint sample_y = 0u; sample_y < samples; sample_y++) {
+                    for (uint sample_x = 0u; sample_x < samples; sample_x++) {
+                        uint sample = sample_y * samples + sample_x;
+                        float2 point = float2(
+                            (float)px + ((float)sample_x + 0.5f) / (float)samples,
+                            (float)py + ((float)sample_y + 0.5f) / (float)samples
+                        );
+                        float3 barycentric;
+                        if (!three_d_barycentric(
+                                triangles, triangle, point, &barycentric)) {
+                            continue;
+                        }
+                        ThreeDAttributes attributes;
+                        if (!three_d_interpolate(
+                                triangles,
+                                triangle,
+                                barycentric,
+                                &attributes)) {
+                            continue;
+                        }
+                        if (depth_test && attributes.depth >= depths[sample]) {
+                            continue;
+                        }
+                        float4 source;
+                        if (!three_d_shade(
+                                draw_f32,
+                                draw,
+                                shader,
+                                attributes,
+                                &source)) {
+                            continue;
+                        }
+                        colors[sample] =
+                            three_d_source_over(source, colors[sample]);
+                        if (depth_test) {
+                            depths[sample] = attributes.depth;
+                        }
+                    }
+                }
+            }
+        }
+
+        float4 premultiplied = float4(0.0f);
+        for (uint sample = 0u; sample < sample_count; sample++) {
+            premultiplied += colors[sample];
+        }
+        premultiplied /= (float)sample_count;
+        float3 straight = (premultiplied.a > 0.0f)
+            ? premultiplied.rgb / premultiplied.a
+            : float3(0.0f);
+        surface[py * width + px] =
+            half4(half3(straight), half(premultiplied.a));
+    }
+
     threadgroup_barrier(mem_flags::mem_device);
     if (local_id.x == 0u && local_id.y == 0u) {
         status[group_id.y * params_u32[3] + group_id.x] = STATUS_COMPLETE;

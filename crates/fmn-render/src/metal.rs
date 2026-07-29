@@ -1,11 +1,11 @@
 //! The standard-only Metal annex executor.
 //!
 //! This module is the production descendant of G0-8 and G0-8b. It derives a
-//! packed, single-typed device layout from the same prepared [`FrameJob`] the
-//! CPU engines consume, dispatches only through frankentorch's safe generic
-//! gateway, and keeps its output surfaces alive across frames. The semantic
-//! front-end, painter-ordered CSR command runs, fill-before-stroke rule, and
-//! affine preparation therefore have one authority.
+//! packed, single-typed device layouts from the same prepared [`FrameJob`] and
+//! [`ThreeDJob`] the CPU engines consume, dispatches only through frankentorch's
+//! safe generic gateway, and keeps its output surfaces alive across frames. The
+//! semantic front-end, painter-ordered CSR command runs, fill-before-stroke
+//! rule, camera clipping, and affine preparation therefore have one authority.
 //!
 //! The annex never participates in `certified`. Its public preview composition
 //! root reports whether Metal actually produced a frame or whether the declared
@@ -23,10 +23,12 @@ use ft_kernel_metal::compute::{Gateway, Grid, MathMode, Pipeline, SharedBuffer};
 use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, FrameJobError};
 use crate::fill::MonoTable;
 use crate::plan::RenderPlan;
+use crate::three_d::{CompiledPrimitive, Shader, ThreeDJob};
 use crate::{Binning, Segment};
 
 const KERNEL_SOURCE: &str = include_str!("shaders/metal.metal");
 const RASTER_KERNEL: &str = "fmn_render_frame";
+const THREE_D_KERNEL: &str = "fmn_render_three_d";
 const RGBA8_KERNEL: &str = "fmn_rgba16f_to_rgba8";
 const NV12_KERNEL: &str = "fmn_rgba16f_to_nv12";
 const P010_KERNEL: &str = "fmn_rgba16f_to_p010";
@@ -39,6 +41,10 @@ const STATION_STRIDE: usize = 3;
 const DRAW_U32_STRIDE: usize = 10;
 const DRAW_F32_STRIDE: usize = 8;
 const STYLE_STRIDE: usize = 20;
+const THREE_D_VERTEX_STRIDE: usize = 17;
+const THREE_D_TRIANGLE_STRIDE: usize = THREE_D_VERTEX_STRIDE * 3;
+const THREE_D_DRAW_U32_STRIDE: usize = 4;
+const THREE_D_DRAW_F32_STRIDE: usize = 24;
 const STATUS_COMPLETE: u32 = 0x464d_4e4d;
 const TRANSFER_TILE: usize = 16;
 const TRANSFER_TABLE_ENTRIES: usize = 1 << 16;
@@ -49,6 +55,8 @@ const DRAW_FILL: u32 = 1 << 0;
 const DRAW_STROKE: u32 = 1 << 1;
 const STROKE_BEHIND: u32 = 1 << 2;
 const FLAT_FILL: u32 = 1 << 3;
+const THREE_D_SHADER_GOURAUD: u32 = 1;
+const THREE_D_SHADER_DOT: u32 = 2;
 
 /// Canonical schema for the annex-specific half of C7.
 pub const METAL_BACKEND_SCHEMA: Schema = Schema::new(*b"FMNM", 1, 0, 1);
@@ -71,6 +79,25 @@ pub const METAL_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR: f64 = 0.002_14;
 /// The production corpus minimum is `0.9998831140399521`; the bound applies
 /// five percent headroom to perceptual distortion (`1 - SSIM`).
 pub const METAL_VISUAL_BUDGET_V1_MIN_SSIM: f64 = 0.999_87;
+
+/// Version-1 maximum linear-channel error for prepared 3D triangles.
+///
+/// This separately gates fixed-grid Gouraud surfaces and true/glow dots because
+/// their perspective interpolation and radial falloff do not exercise the 2D
+/// curve-distance residual measured above. The production corpus measures one
+/// binary16 step (`0.00048828125`); the bound leaves five percent headroom.
+pub const METAL_THREE_D_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR: f64 = 0.000_513;
+
+/// Version-1 RMS linear-channel error for prepared 3D triangles.
+///
+/// The production corpus measures `0.0000013473872790351067`.
+pub const METAL_THREE_D_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR: f64 = 0.000_001_42;
+
+/// Version-1 minimum global sRGB-luma SSIM for prepared 3D triangles.
+///
+/// The production corpus measures `1.0`; the smoke-alarm threshold leaves one
+/// part per million for cross-device standard-mode arithmetic.
+pub const METAL_THREE_D_VISUAL_BUDGET_V1_MIN_SSIM: f64 = 0.999_999;
 
 /// Maximum encoded-code error for the GPU RGBA16F-to-RGBA8 transfer.
 ///
@@ -114,6 +141,14 @@ pub enum MetalError {
     },
     /// A backend-specific invariant drifted from its shader mirror.
     Layout(&'static str),
+    /// The prepared 3D painter sequence contains a primitive not yet mapped by
+    /// this annex pipeline.
+    UnsupportedThreeDPrimitive {
+        /// Painter-sequence index.
+        draw: usize,
+        /// Stable primitive description.
+        primitive: &'static str,
+    },
 }
 
 impl MetalError {
@@ -156,6 +191,10 @@ impl fmt::Display for MetalError {
                 "{kernel} completed {completed} of {expected} threadgroups"
             ),
             Self::Layout(message) => write!(f, "Metal derived-layout mismatch: {message}"),
+            Self::UnsupportedThreeDPrimitive { draw, primitive } => write!(
+                f,
+                "Metal 3D draw {draw} uses unsupported prepared primitive {primitive}"
+            ),
         }
     }
 }
@@ -169,7 +208,8 @@ impl std::error::Error for MetalError {
             Self::SizeOverflow(_)
             | Self::ThreadgroupTooLarge { .. }
             | Self::IncompleteDispatch { .. }
-            | Self::Layout(_) => None,
+            | Self::Layout(_)
+            | Self::UnsupportedThreeDPrimitive { .. } => None,
         }
     }
 }
@@ -276,6 +316,8 @@ impl MetalReport {
 pub enum PreviewFallback {
     /// This target or machine has no usable Metal device.
     Unavailable,
+    /// The current prepared frame uses an annex feature that has not landed.
+    Unsupported(String),
     /// A device existed but a later annex operation failed.
     BackendFailure(String),
 }
@@ -378,12 +420,57 @@ impl PreviewRenderer {
             metal: None,
         })
     }
+
+    /// Render a prepared 3D Studio frame through the same truthful annex/fallback
+    /// boundary.
+    ///
+    /// An unsupported prepared primitive falls back for this frame only; it does
+    /// not poison a healthy Metal device. A runtime backend failure retains the
+    /// existing permanent demotion policy.
+    pub fn render_three_d(
+        &mut self,
+        job: &ThreeDJob<'_>,
+        cpu_threads: usize,
+    ) -> Result<PreviewFrame, MetalError> {
+        let mut transient = None;
+        let reason = match self {
+            Self::Metal(renderer) => match renderer.render_three_d_rgba8(job) {
+                Ok((frame, report)) => {
+                    return Ok(PreviewFrame {
+                        frame,
+                        route: PreviewRoute::Metal,
+                        metal: Some(report),
+                    });
+                }
+                Err(error @ MetalError::UnsupportedThreeDPrimitive { .. }) => {
+                    let reason = PreviewFallback::Unsupported(error.to_string());
+                    transient = Some(reason.clone());
+                    reason
+                }
+                Err(error) if error.permits_preview_fallback() => {
+                    PreviewFallback::BackendFailure(error.to_string())
+                }
+                Err(error) => return Err(error),
+            },
+            Self::FastCpu(reason) => reason.clone(),
+        };
+        if transient.is_none() {
+            *self = Self::FastCpu(reason.clone());
+        }
+        let frame = render_cpu_three_d_rgba8(job, cpu_threads)?;
+        Ok(PreviewFrame {
+            frame,
+            route: PreviewRoute::FastCpu(reason),
+            metal: None,
+        })
+    }
 }
 
 /// Lifetime-held Metal pipelines and output surfaces.
 pub struct MetalRenderer {
     gateway: Gateway,
     raster: Pipeline,
+    three_d: Pipeline,
     rgba8: Pipeline,
     nv12: Pipeline,
     p010: Pipeline,
@@ -428,6 +515,7 @@ impl MetalRenderer {
         let gateway = Gateway::open()?;
         let library = gateway.library_with(KERNEL_SOURCE, MathMode::Safe)?;
         let raster = library.pipeline(RASTER_KERNEL)?;
+        let three_d = library.pipeline(THREE_D_KERNEL)?;
         let rgba8 = library.pipeline(RGBA8_KERNEL)?;
         let nv12 = library.pipeline(NV12_KERNEL)?;
         let p010 = library.pipeline(P010_KERNEL)?;
@@ -436,6 +524,7 @@ impl MetalRenderer {
         Ok(Self {
             gateway,
             raster,
+            three_d,
             rgba8,
             nv12,
             p010,
@@ -469,7 +558,8 @@ impl MetalRenderer {
             .buffer
             .read_u8(frame.as_bytes_mut())?;
         let report = self.report(
-            &flat,
+            &self.raster,
+            flat.tile().saturating_mul(flat.tile()),
             upload_bytes,
             frame.as_bytes().len(),
             raw_reused,
@@ -499,61 +589,80 @@ impl MetalRenderer {
         let raw_layout = config.layout()?;
         let (raw_reused, upload_bytes) = self.dispatch_raster(&flat, raw_layout.total_bytes())?;
 
-        let output_layout = FrameLayout::tight(
+        let (frame, output_reused, transfer_upload_bytes) =
+            self.transfer_rgba8(config.viewport.width, config.viewport.height)?;
+        let report = self.report(
+            &self.raster,
+            flat.tile().saturating_mul(flat.tile()),
+            upload_bytes
+                .checked_add(transfer_upload_bytes)
+                .ok_or(MetalError::SizeOverflow("frame upload count"))?,
+            frame.as_bytes().len(),
+            raw_reused,
+            output_reused,
+            started.elapsed(),
             PixelFormat::Rgba8,
-            config.viewport.width,
-            config.viewport.height,
-        )?;
-        let output_reused =
-            ensure_output_surface(self.gateway, &mut self.output_surface, &output_layout)?;
-        let transfer_params = [
-            config.viewport.width,
-            config.viewport.height,
-            u32::try_from(output_layout.stride(0))
-                .map_err(|_| MetalError::SizeOverflow("RGBA8 stride"))?,
-        ];
-        let params = self.gateway.buffer_u32(&transfer_params)?;
-        let groups_x = (config.viewport.width as usize).div_ceil(TRANSFER_TILE);
-        let groups_y = (config.viewport.height as usize).div_ceil(TRANSFER_TILE);
-        let group_count = groups_x
-            .checked_mul(groups_y)
-            .ok_or(MetalError::SizeOverflow("transfer group count"))?;
-        validate_threadgroup(&self.rgba8, RGBA8_KERNEL, TRANSFER_TILE, TRANSFER_TILE)?;
-        let status =
-            self.gateway
-                .buffer_zeroed(checked_bytes(group_count, 4, "transfer status")?)?;
-        self.gateway.dispatch(
-            &self.rgba8,
-            &[
-                &params,
-                &self
-                    .raw_surface
-                    .as_ref()
-                    .ok_or(MetalError::Layout("raw surface disappeared"))?
-                    .buffer,
-                &self.transfer_table,
-                &self
-                    .output_surface
-                    .as_ref()
-                    .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?
-                    .buffer,
-                &status,
-            ],
-            Grid::grid_2d(groups_x, groups_y, TRANSFER_TILE, TRANSFER_TILE),
-        )?;
-        verify_status(&status, group_count, RGBA8_KERNEL)?;
+            None,
+            None,
+        );
+        Ok((frame, report))
+    }
 
-        let mut frame = FrameBuffer::new(output_layout);
-        self.output_surface
+    /// Render a prepared 3D painter sequence into its linear-light comparison
+    /// surface.
+    ///
+    /// The first annex tranche accepts camera-clipped true/glow dots and
+    /// untextured Gouraud surfaces. Both consume the exact triangle IR already
+    /// prepared for [`ThreeDJob`]'s CPU executor; retained vectors and textured
+    /// surfaces return a typed refusal so a preview owner can select its declared
+    /// CPU fallback without mislabeling the bytes.
+    pub fn render_three_d_raw(
+        &mut self,
+        job: &ThreeDJob<'_>,
+    ) -> Result<(FrameBuffer, MetalReport), MetalError> {
+        let started = Instant::now();
+        let flat = FlatThreeDFrame::derive(job)?;
+        let raw_layout = job.layout()?;
+        let (raw_reused, upload_bytes) = self.dispatch_three_d(&flat, raw_layout.total_bytes())?;
+        let mut frame = FrameBuffer::new(raw_layout);
+        self.raw_surface
             .as_ref()
-            .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?
+            .ok_or(MetalError::Layout("raw surface disappeared"))?
             .buffer
             .read_u8(frame.as_bytes_mut())?;
         let report = self.report(
-            &flat,
+            &self.three_d,
+            flat.tile().saturating_mul(flat.tile()),
+            upload_bytes,
+            frame.as_bytes().len(),
+            raw_reused,
+            false,
+            started.elapsed(),
+            PixelFormat::Rgba16F,
+            None,
+            None,
+        );
+        Ok((frame, report))
+    }
+
+    /// Render a prepared dot/surface 3D frame and transfer it on-device to the
+    /// tight RGBA8 Studio payload.
+    pub fn render_three_d_rgba8(
+        &mut self,
+        job: &ThreeDJob<'_>,
+    ) -> Result<(FrameBuffer, MetalReport), MetalError> {
+        let started = Instant::now();
+        let flat = FlatThreeDFrame::derive(job)?;
+        let layout = job.layout()?;
+        let (raw_reused, upload_bytes) = self.dispatch_three_d(&flat, layout.total_bytes())?;
+        let (frame, output_reused, transfer_upload_bytes) =
+            self.transfer_rgba8(layout.width(), layout.height())?;
+        let report = self.report(
+            &self.three_d,
+            flat.tile().saturating_mul(flat.tile()),
             upload_bytes
-                .checked_add(std::mem::size_of_val(&transfer_params))
-                .ok_or(MetalError::SizeOverflow("frame upload count"))?,
+                .checked_add(transfer_upload_bytes)
+                .ok_or(MetalError::SizeOverflow("3D frame upload count"))?,
             frame.as_bytes().len(),
             raw_reused,
             output_reused,
@@ -700,7 +809,8 @@ impl MetalRenderer {
             .buffer
             .read_u8(frame.as_bytes_mut())?;
         let report = self.report(
-            &flat,
+            &self.raster,
+            flat.tile().saturating_mul(flat.tile()),
             upload_bytes
                 .checked_add(std::mem::size_of_val(&transfer_params))
                 .ok_or(MetalError::SizeOverflow("frame upload count"))?,
@@ -771,10 +881,115 @@ impl MetalRenderer {
         Ok((raw_reused, flat.upload_bytes()?))
     }
 
+    fn dispatch_three_d(
+        &mut self,
+        flat: &FlatThreeDFrame,
+        raw_bytes: usize,
+    ) -> Result<(bool, usize), MetalError> {
+        let raw_reused = ensure_surface(self.gateway, &mut self.raw_surface, raw_bytes)?;
+        let params_u32 = self.gateway.buffer_u32(&flat.params_u32)?;
+        let params_f32 = self.gateway.buffer_f32(&flat.params_f32)?;
+        let triangles = self.gateway.buffer_f32(nonempty_f32(&flat.triangles))?;
+        let draw_u32 = self.gateway.buffer_u32(nonempty_u32(&flat.draw_u32))?;
+        let draw_f32 = self.gateway.buffer_f32(nonempty_f32(&flat.draw_f32))?;
+        let tile_offsets = self.gateway.buffer_u32(&flat.tile_offsets)?;
+        let tile_draws = self.gateway.buffer_u32(nonempty_u32(&flat.tile_draws))?;
+        let group_count = flat
+            .cols()
+            .checked_mul(flat.rows())
+            .ok_or(MetalError::SizeOverflow("3D raster group count"))?;
+        let status =
+            self.gateway
+                .buffer_zeroed(checked_bytes(group_count, 4, "3D raster status")?)?;
+
+        let tile = flat.tile();
+        validate_threadgroup(&self.three_d, THREE_D_KERNEL, tile, tile)?;
+        self.gateway.dispatch(
+            &self.three_d,
+            &[
+                &params_u32,
+                &params_f32,
+                &triangles,
+                &draw_u32,
+                &draw_f32,
+                &tile_offsets,
+                &tile_draws,
+                &self
+                    .raw_surface
+                    .as_ref()
+                    .ok_or(MetalError::Layout("raw surface disappeared"))?
+                    .buffer,
+                &status,
+            ],
+            Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
+        )?;
+        verify_status(&status, group_count, THREE_D_KERNEL)?;
+        Ok((raw_reused, flat.upload_bytes()?))
+    }
+
+    fn transfer_rgba8(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<(FrameBuffer, bool, usize), MetalError> {
+        let output_layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)?;
+        let output_reused =
+            ensure_output_surface(self.gateway, &mut self.output_surface, &output_layout)?;
+        let transfer_params = [
+            width,
+            height,
+            u32::try_from(output_layout.stride(0))
+                .map_err(|_| MetalError::SizeOverflow("RGBA8 stride"))?,
+        ];
+        let params = self.gateway.buffer_u32(&transfer_params)?;
+        let groups_x = (width as usize).div_ceil(TRANSFER_TILE);
+        let groups_y = (height as usize).div_ceil(TRANSFER_TILE);
+        let group_count = groups_x
+            .checked_mul(groups_y)
+            .ok_or(MetalError::SizeOverflow("transfer group count"))?;
+        validate_threadgroup(&self.rgba8, RGBA8_KERNEL, TRANSFER_TILE, TRANSFER_TILE)?;
+        let status =
+            self.gateway
+                .buffer_zeroed(checked_bytes(group_count, 4, "transfer status")?)?;
+        self.gateway.dispatch(
+            &self.rgba8,
+            &[
+                &params,
+                &self
+                    .raw_surface
+                    .as_ref()
+                    .ok_or(MetalError::Layout("raw surface disappeared"))?
+                    .buffer,
+                &self.transfer_table,
+                &self
+                    .output_surface
+                    .as_ref()
+                    .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?
+                    .buffer,
+                &status,
+            ],
+            Grid::grid_2d(groups_x, groups_y, TRANSFER_TILE, TRANSFER_TILE),
+        )?;
+        verify_status(&status, group_count, RGBA8_KERNEL)?;
+
+        let mut frame = FrameBuffer::new(output_layout);
+        self.output_surface
+            .as_ref()
+            .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?
+            .buffer
+            .read_u8(frame.as_bytes_mut())?;
+        Ok((
+            frame,
+            output_reused,
+            std::mem::size_of_val(&transfer_params),
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn report(
         &self,
-        flat: &FlatFrame,
+        pipeline: &Pipeline,
+        threads_per_threadgroup: usize,
         upload_bytes: usize,
         readback_bytes: usize,
         raw_surface_reused: bool,
@@ -784,7 +999,6 @@ impl MetalRenderer {
         color_range: Option<ColorRange>,
         chroma_siting: Option<ChromaSiting>,
     ) -> MetalReport {
-        let threads = flat.tile().saturating_mul(flat.tile());
         MetalReport {
             identity: EngineIdentity::metal(),
             device: self.device.clone(),
@@ -792,9 +1006,9 @@ impl MetalRenderer {
             math_mode: "safe",
             kernel_digest: self.kernel_digest,
             transfer_table_digest: self.transfer_table_digest,
-            threads_per_threadgroup: threads,
-            max_threads_per_threadgroup: self.raster.max_threads_per_threadgroup(),
-            thread_execution_width: self.raster.thread_execution_width(),
+            threads_per_threadgroup,
+            max_threads_per_threadgroup: pipeline.max_threads_per_threadgroup(),
+            thread_execution_width: pipeline.thread_execution_width(),
             upload_bytes,
             readback_bytes,
             raw_surface_reused,
@@ -973,6 +1187,21 @@ fn render_cpu_rgba8(
         PixelFormat::Rgba8,
         config.viewport.width,
         config.viewport.height,
+    )?;
+    let mut output = FrameBuffer::new(layout);
+    fmn_frame::convert::rgba16f_to_rgba8(&raw, &mut output)?;
+    Ok(output)
+}
+
+fn render_cpu_three_d_rgba8(
+    job: &ThreeDJob<'_>,
+    threads: usize,
+) -> Result<FrameBuffer, MetalError> {
+    let raw = job.render(threads)?;
+    let layout = FrameLayout::tight(
+        PixelFormat::Rgba8,
+        raw.layout().width(),
+        raw.layout().height(),
     )?;
     let mut output = FrameBuffer::new(layout);
     fmn_frame::convert::rgba16f_to_rgba8(&raw, &mut output)?;
@@ -1262,6 +1491,327 @@ impl FlatFrame {
     }
 }
 
+#[derive(Debug)]
+struct FlatThreeDFrame {
+    params_u32: Vec<u32>,
+    params_f32: Vec<f32>,
+    triangles: Vec<f32>,
+    draw_u32: Vec<u32>,
+    draw_f32: Vec<f32>,
+    tile_offsets: Vec<u32>,
+    tile_draws: Vec<u32>,
+}
+
+impl FlatThreeDFrame {
+    fn derive(job: &ThreeDJob<'_>) -> Result<Self, MetalError> {
+        let camera = job.camera();
+        let width = camera.pixel_width();
+        let height = camera.pixel_height();
+        let tile = job.tiling().fine_tile.max(1);
+        let cols = width.div_ceil(tile);
+        let sample_grid = job.sample_grid();
+        if !matches!(sample_grid, 1 | 2 | 4) {
+            return Err(MetalError::Layout("unsupported 3D sample grid"));
+        }
+        let draw_count = u32::try_from(job.prepared_draws().len())
+            .map_err(|_| MetalError::SizeOverflow("3D draw count"))?;
+        let background = camera.background();
+        let mut flat = Self {
+            params_u32: vec![width, height, tile, cols, sample_grid, draw_count],
+            params_f32: vec![
+                background.r as f32,
+                background.g as f32,
+                background.b as f32,
+                background.a as f32,
+            ],
+            triangles: Vec::new(),
+            draw_u32: Vec::with_capacity(job.prepared_draws().len() * THREE_D_DRAW_U32_STRIDE),
+            draw_f32: Vec::with_capacity(job.prepared_draws().len() * THREE_D_DRAW_F32_STRIDE),
+            tile_offsets: Vec::new(),
+            tile_draws: Vec::new(),
+        };
+        let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
+
+        for (draw_index, draw) in job.prepared_draws().iter().enumerate() {
+            let CompiledPrimitive::Triangles { triangles, shader } = &draw.primitive else {
+                return Err(MetalError::UnsupportedThreeDPrimitive {
+                    draw: draw_index,
+                    primitive: "retained-vector",
+                });
+            };
+            let shader_code = match *shader {
+                Shader::Gouraud => THREE_D_SHADER_GOURAUD,
+                Shader::Dot { .. } => THREE_D_SHADER_DOT,
+                Shader::Texture { .. } => {
+                    return Err(MetalError::UnsupportedThreeDPrimitive {
+                        draw: draw_index,
+                        primitive: "textured-surface",
+                    });
+                }
+            };
+
+            let first_triangle = scalar_row(
+                &flat.triangles,
+                THREE_D_TRIANGLE_STRIDE,
+                "3D triangle index",
+            )?;
+            for triangle in triangles {
+                push_three_d_triangle(&mut flat.triangles, triangle);
+            }
+            let triangle_count = scalar_row(
+                &flat.triangles,
+                THREE_D_TRIANGLE_STRIDE,
+                "3D triangle count",
+            )?
+            .checked_sub(first_triangle)
+            .ok_or(MetalError::Layout("3D triangle range reversed"))?;
+            flat.draw_u32.extend_from_slice(&[
+                first_triangle,
+                triangle_count,
+                shader_code,
+                u32::from(draw.depth_test),
+            ]);
+            flat.draw_f32
+                .extend_from_slice(&three_d_shader_slab(*shader));
+            draw_bounds.push(draw.bounds);
+        }
+
+        (flat.tile_offsets, flat.tile_draws) =
+            stable_three_d_bins(&draw_bounds, width, height, tile)?;
+        flat.validate()?;
+        Ok(flat)
+    }
+
+    fn validate(&self) -> Result<(), MetalError> {
+        if self.params_u32.len() != 6 || self.params_f32.len() != 4 {
+            return Err(MetalError::Layout("3D frame parameters"));
+        }
+        if !self.triangles.len().is_multiple_of(THREE_D_TRIANGLE_STRIDE)
+            || !self.draw_u32.len().is_multiple_of(THREE_D_DRAW_U32_STRIDE)
+            || !self.draw_f32.len().is_multiple_of(THREE_D_DRAW_F32_STRIDE)
+        {
+            return Err(MetalError::Layout("3D scalar-table stride"));
+        }
+        if self
+            .params_f32
+            .iter()
+            .chain(&self.triangles)
+            .chain(&self.draw_f32)
+            .any(|value| !value.is_finite())
+        {
+            return Err(MetalError::Layout(
+                "3D f32 packet contains a non-finite value",
+            ));
+        }
+        let draws = self.draw_u32.len() / THREE_D_DRAW_U32_STRIDE;
+        if self.draw_f32.len() / THREE_D_DRAW_F32_STRIDE != draws
+            || self.params_u32.get(5).copied() != u32::try_from(draws).ok()
+        {
+            return Err(MetalError::Layout("3D draw tables are not parallel"));
+        }
+        let tile_count = self
+            .cols()
+            .checked_mul(self.rows())
+            .ok_or(MetalError::SizeOverflow("3D tile count"))?;
+        if self.tile_offsets.len() != tile_count + 1
+            || self.tile_offsets.first().copied() != Some(0)
+            || self.tile_offsets.last().copied() != u32::try_from(self.tile_draws.len()).ok()
+            || self.tile_offsets.windows(2).any(|pair| pair[0] > pair[1])
+            || self.tile_draws.iter().any(|&draw| draw as usize >= draws)
+        {
+            return Err(MetalError::Layout("3D stable tile CSR"));
+        }
+        Ok(())
+    }
+
+    fn tile(&self) -> usize {
+        self.params_u32[2] as usize
+    }
+
+    fn cols(&self) -> usize {
+        self.params_u32[3] as usize
+    }
+
+    fn rows(&self) -> usize {
+        (self.params_u32[1] as usize).div_ceil(self.tile())
+    }
+
+    fn upload_bytes(&self) -> Result<usize, MetalError> {
+        let scalars = [
+            self.params_u32.len(),
+            self.params_f32.len(),
+            self.triangles.len(),
+            self.draw_u32.len(),
+            self.draw_f32.len(),
+            self.tile_offsets.len(),
+            self.tile_draws.len(),
+        ]
+        .into_iter()
+        .try_fold(0usize, |sum, len| sum.checked_add(len))
+        .ok_or(MetalError::SizeOverflow("3D upload scalar count"))?;
+        checked_bytes(scalars, 4, "3D upload bytes")
+    }
+}
+
+fn push_three_d_triangle(out: &mut Vec<f32>, triangle: &crate::three_d::RasterTriangle) {
+    for vertex in triangle.vertices {
+        out.extend_from_slice(&[
+            vertex.screen[0] as f32,
+            vertex.screen[1] as f32,
+            vertex.inverse_w as f32,
+            vertex.ndc_z as f32,
+            vertex.attributes.world[0] as f32,
+            vertex.attributes.world[1] as f32,
+            vertex.attributes.world[2] as f32,
+            vertex.attributes.normal[0] as f32,
+            vertex.attributes.normal[1] as f32,
+            vertex.attributes.normal[2] as f32,
+            vertex.attributes.color[0] as f32,
+            vertex.attributes.color[1] as f32,
+            vertex.attributes.color[2] as f32,
+            vertex.attributes.color[3] as f32,
+            vertex.attributes.uv[0] as f32,
+            vertex.attributes.uv[1] as f32,
+            vertex.attributes.opacity as f32,
+        ]);
+    }
+}
+
+fn three_d_shader_slab(shader: Shader<'_>) -> [f32; THREE_D_DRAW_F32_STRIDE] {
+    let mut slab = [0.0; THREE_D_DRAW_F32_STRIDE];
+    if let Shader::Dot {
+        center,
+        radius,
+        color,
+        glow_factor,
+        shading,
+        to_camera,
+        scaled_aa_width,
+        light_position,
+        camera_position,
+    } = shader
+    {
+        slab[0..3].copy_from_slice(&center.map(|value| value as f32));
+        slab[3] = radius as f32;
+        slab[4..8].copy_from_slice(&[
+            color.r as f32,
+            color.g as f32,
+            color.b as f32,
+            color.a as f32,
+        ]);
+        slab[8] = glow_factor as f32;
+        slab[9..12].copy_from_slice(&shading.map(|value| value as f32));
+        slab[12..15].copy_from_slice(&to_camera.map(|value| value as f32));
+        slab[15] = scaled_aa_width as f32;
+        slab[16..19].copy_from_slice(&light_position.map(|value| value as f32));
+        slab[19..22].copy_from_slice(&camera_position.map(|value| value as f32));
+    }
+    slab
+}
+
+fn stable_three_d_bins(
+    bounds: &[Option<[f64; 4]>],
+    width: u32,
+    height: u32,
+    tile: u32,
+) -> Result<(Vec<u32>, Vec<u32>), MetalError> {
+    let cols = width.div_ceil(tile) as usize;
+    let rows = height.div_ceil(tile) as usize;
+    let tile_count = cols
+        .checked_mul(rows)
+        .ok_or(MetalError::SizeOverflow("3D tile count"))?;
+    let mut counts = vec![0usize; tile_count];
+    for &draw_bounds in bounds {
+        visit_three_d_tiles(draw_bounds, width, height, tile, |index| {
+            counts[index] = counts[index]
+                .checked_add(1)
+                .ok_or(MetalError::SizeOverflow("3D tile command count"))?;
+            Ok(())
+        })?;
+    }
+
+    let mut tile_offsets = Vec::with_capacity(tile_count + 1);
+    tile_offsets.push(0);
+    let mut total = 0usize;
+    for &count in &counts {
+        total = total
+            .checked_add(count)
+            .ok_or(MetalError::SizeOverflow("3D tile command total"))?;
+        tile_offsets.push(
+            u32::try_from(total).map_err(|_| MetalError::SizeOverflow("3D tile command offset"))?,
+        );
+    }
+    let mut tile_draws = vec![0u32; total];
+    let mut cursors = tile_offsets[..tile_count]
+        .iter()
+        .map(|&offset| offset as usize)
+        .collect::<Vec<_>>();
+    for (draw, &draw_bounds) in bounds.iter().enumerate() {
+        let draw = u32::try_from(draw).map_err(|_| MetalError::SizeOverflow("3D draw index"))?;
+        visit_three_d_tiles(draw_bounds, width, height, tile, |index| {
+            let cursor = cursors[index];
+            tile_draws[cursor] = draw;
+            cursors[index] = cursor + 1;
+            Ok(())
+        })?;
+    }
+    Ok((tile_offsets, tile_draws))
+}
+
+fn visit_three_d_tiles(
+    bounds: Option<[f64; 4]>,
+    width: u32,
+    height: u32,
+    tile: u32,
+    mut visit: impl FnMut(usize) -> Result<(), MetalError>,
+) -> Result<(), MetalError> {
+    let Some(bounds) = bounds else {
+        return Ok(());
+    };
+    if bounds.iter().any(|value| !value.is_finite()) {
+        return Err(MetalError::Layout("non-finite 3D draw bounds"));
+    }
+    let cols = width.div_ceil(tile) as usize;
+    let rows = height.div_ceil(tile) as usize;
+    let candidate = |minimum: f64, maximum: f64, cells: usize| {
+        let scale = f64::from(tile);
+        let lo = (minimum / scale).floor() - 1.0;
+        let hi = (maximum / scale).ceil() + 1.0;
+        let clamp = |value: f64| {
+            if value <= 0.0 {
+                0
+            } else if value >= cells as f64 {
+                cells
+            } else {
+                value as usize
+            }
+        };
+        clamp(lo)..clamp(hi)
+    };
+    let xs = candidate(bounds[0], bounds[2], cols);
+    let ys = candidate(bounds[1], bounds[3], rows);
+    for y in ys {
+        for x in xs.clone() {
+            let x0 = (x as u32).saturating_mul(tile);
+            let y0 = (y as u32).saturating_mul(tile);
+            let rectangle = [
+                x0,
+                y0,
+                x0.saturating_add(tile).min(width),
+                y0.saturating_add(tile).min(height),
+            ];
+            if bounds[2] >= f64::from(rectangle[0])
+                && bounds[3] >= f64::from(rectangle[1])
+                && bounds[0] <= f64::from(rectangle[2])
+                && bounds[1] <= f64::from(rectangle[3])
+            {
+                visit(y * cols + x)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn push_segment(
     out: &mut Vec<f32>,
     segment: &Segment,
@@ -1362,12 +1912,15 @@ const fn chroma_siting_name(siting: Option<ChromaSiting>) -> &'static str {
 mod tests {
     #[cfg(not(target_os = "macos"))]
     use fmn_core::color::LinearRgba;
+    use fmn_core::color::Srgb;
     #[cfg(not(target_os = "macos"))]
     use fmn_mobject::Stage;
 
     use super::*;
     #[cfg(not(target_os = "macos"))]
     use crate::bin::{ScreenMap, Tiling, Viewport};
+    use crate::camera::{Camera, CameraConfig};
+    use crate::three_d::{SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDDraw, TrueDotDraw};
 
     #[test]
     fn the_shader_mirrors_every_host_stride_and_entry_point() {
@@ -1380,6 +1933,10 @@ mod tests {
             ("DRAW_U32_STRIDE", DRAW_U32_STRIDE),
             ("DRAW_F32_STRIDE", DRAW_F32_STRIDE),
             ("STYLE_STRIDE", STYLE_STRIDE),
+            ("THREE_D_VERTEX_STRIDE", THREE_D_VERTEX_STRIDE),
+            ("THREE_D_TRIANGLE_STRIDE", THREE_D_TRIANGLE_STRIDE),
+            ("THREE_D_DRAW_U32_STRIDE", THREE_D_DRAW_U32_STRIDE),
+            ("THREE_D_DRAW_F32_STRIDE", THREE_D_DRAW_F32_STRIDE),
             (
                 "TRANSFER_TABLE_WORDS_PER_PLANE",
                 TRANSFER_TABLE_WORDS_PER_PLANE,
@@ -1390,12 +1947,84 @@ mod tests {
                 "shader is missing the mirrored `{name}` stride"
             );
         }
-        for kernel in [RASTER_KERNEL, RGBA8_KERNEL, NV12_KERNEL, P010_KERNEL] {
+        for kernel in [
+            RASTER_KERNEL,
+            THREE_D_KERNEL,
+            RGBA8_KERNEL,
+            NV12_KERNEL,
+            P010_KERNEL,
+        ] {
             assert!(
                 KERNEL_SOURCE.contains(&format!("kernel void {kernel}(")),
                 "shader is missing `{kernel}`"
             );
         }
+    }
+
+    #[test]
+    fn three_d_packet_keeps_prepared_triangles_and_stable_painter_bins() {
+        let black = Srgb::from_rgb8(0, 0, 0).to_linear(1.0);
+        let white = Srgb::from_rgb8(255, 255, 255).to_linear(0.8);
+        let camera = Camera::new(CameraConfig {
+            resolution: (64, 48),
+            samples: 2,
+            background: black,
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let mesh = SurfaceMesh::new(
+            vec![
+                SurfaceVertex::colored([-2.0, -1.0, 0.0], [0.0, 0.0, 1.0], white),
+                SurfaceVertex::colored([2.0, -1.0, 0.0], [0.0, 0.0, 1.0], white),
+                SurfaceVertex::colored([0.0, 1.5, 0.0], [0.0, 0.0, 1.0], white),
+            ],
+            vec![0, 1, 2],
+        )
+        .expect("surface");
+        let draws = [
+            ThreeDDraw::Surface(SurfaceDraw::new(&mesh)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow([-0.5, 0.0, 1.0], 0.7, white)),
+            ThreeDDraw::TrueDot(TrueDotDraw::new([0.5, 0.0, 1.2], 0.4, white)),
+        ];
+        let job = ThreeDJob::new(
+            &camera,
+            &draws,
+            crate::bin::Tiling {
+                macro_tile: 32,
+                fine_tile: 8,
+            },
+        )
+        .expect("prepared 3D job");
+        let flat = FlatThreeDFrame::derive(&job).expect("Metal packet");
+
+        assert_eq!(flat.params_u32, [64, 48, 8, 8, 2, 3]);
+        assert_eq!(
+            flat.triangles.len() / THREE_D_TRIANGLE_STRIDE,
+            5,
+            "one surface triangle plus two billboard triangles per dot"
+        );
+        assert_eq!(
+            flat.draw_u32
+                .as_chunks::<THREE_D_DRAW_U32_STRIDE>()
+                .0
+                .iter()
+                .map(|draw| draw[2])
+                .collect::<Vec<_>>(),
+            [
+                THREE_D_SHADER_GOURAUD,
+                THREE_D_SHADER_DOT,
+                THREE_D_SHADER_DOT
+            ]
+        );
+        assert!(
+            flat.tile_offsets.windows(2).all(|range| {
+                flat.tile_draws[range[0] as usize..range[1] as usize]
+                    .windows(2)
+                    .all(|pair| pair[0] <= pair[1])
+            }),
+            "stable scatter must never invert painter order"
+        );
+        assert!(flat.upload_bytes().expect("bounded packet") > 0);
     }
 
     #[test]
@@ -1473,6 +2102,61 @@ mod tests {
             .permits_preview_fallback()
         );
         assert!(!MetalError::SizeOverflow("fixture").permits_preview_fallback());
+        assert!(
+            !MetalError::UnsupportedThreeDPrimitive {
+                draw: 0,
+                primitive: "fixture",
+            }
+            .permits_preview_fallback(),
+            "frame-local capability gaps must not demote a healthy device"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unsupported_three_d_packet_falls_back_without_demoting_metal() {
+        use crate::texture::{Texture, TextureEncoding};
+
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let camera = Camera::new(CameraConfig {
+            resolution: (16, 16),
+            samples: 1,
+            background: Srgb::from_rgb8(0, 0, 0).to_linear(1.0),
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let texture = Texture::from_rgba8(1, 1, &[255, 128, 32, 255], TextureEncoding::Linear)
+            .expect("texture");
+        let normal = [0.0, 0.0, 1.0];
+        let mesh = SurfaceMesh::from_uv_grid(
+            vec![
+                SurfaceVertex::textured([-4.0, 3.0, 0.0], normal, [0.0, 0.0], 1.0),
+                SurfaceVertex::textured([-4.0, -3.0, 0.0], normal, [0.0, 1.0], 1.0),
+                SurfaceVertex::textured([4.0, 3.0, 0.0], normal, [1.0, 0.0], 1.0),
+                SurfaceVertex::textured([4.0, -3.0, 0.0], normal, [1.0, 1.0], 1.0),
+            ],
+            (2, 2),
+        )
+        .expect("quad");
+        let draws = [ThreeDDraw::Surface(SurfaceDraw::image(&mesh, &texture))];
+        let job = ThreeDJob::new(&camera, &draws, crate::bin::Tiling::default()).expect("job");
+        let expected = render_cpu_three_d_rgba8(&job, 1).expect("CPU frame");
+        let mut renderer = PreviewRenderer::new().expect("Metal preview renderer");
+        let preview = renderer
+            .render_three_d(&job, 1)
+            .expect("unsupported texture uses CPU for this frame");
+
+        assert!(matches!(
+            preview.route,
+            PreviewRoute::FastCpu(PreviewFallback::Unsupported(_))
+        ));
+        assert_eq!(preview.frame.as_bytes(), expected.as_bytes());
+        assert!(
+            matches!(renderer, PreviewRenderer::Metal(_)),
+            "a frame-local capability gap must not demote the device"
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1560,6 +2244,30 @@ mod tests {
         );
         assert_eq!(preview.identity(), EngineIdentity::fast());
         assert!(preview.metal.is_none());
+        assert_eq!(preview.frame.as_bytes(), expected.as_bytes());
+
+        let camera = Camera::new(CameraConfig {
+            resolution: (16, 16),
+            samples: 1,
+            background: config.background,
+            ..CameraConfig::default()
+        })
+        .expect("3D camera");
+        let dot = TrueDotDraw::glow(
+            [0.0, 0.0, 0.0],
+            0.5,
+            Srgb::from_rgb8(255, 128, 32).to_linear(0.8),
+        );
+        let draws = [ThreeDDraw::TrueDot(dot)];
+        let job = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("3D job");
+        let expected = render_cpu_three_d_rgba8(&job, 1).expect("3D CPU comparison frame");
+        let preview = renderer
+            .render_three_d(&job, 1)
+            .expect("CPU fallback renders a 3D preview frame");
+        assert_eq!(
+            preview.route,
+            PreviewRoute::FastCpu(PreviewFallback::Unavailable)
+        );
         assert_eq!(preview.frame.as_bytes(), expected.as_bytes());
     }
 }
