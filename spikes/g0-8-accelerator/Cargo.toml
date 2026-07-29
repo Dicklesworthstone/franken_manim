@@ -11,13 +11,10 @@
 # annex consumption happens once, with fmn-render's `metal` feature (fm-xsz),
 # against rows authored at that time — this spike only proves the mapping.
 #
-# ft-kernel-metal enters by PATH, not by git rev, and that is the honest
-# statement of where the upstream work stands: the generic Metal compute
-# gateway this spike needs (UPSTREAM_LEDGER row 8) is landed upstream as
-# 5dbcc1d2 but not yet pinned in SUITE.lock. The pin bump — and the switch to
-# a git dep at that rev, which is what removes this crate's requirement that
-# frankentorch be checked out as a sibling — is fm-xsz's step 3 of the §2.9
-# ritual, not this spike's.
+# ft-kernel-metal enters by the exact SUITE.lock git revision. This makes the
+# proof reproducible without a sibling frankentorch checkout and keeps the
+# generic gateway on the same governed pin the production annex consumes
+# (UPSTREAM_LEDGER row 8; fm-xsz's §2.9 pin ritual).
 [package]
 name = "fmn-spike-accelerator"
 version = "0.0.0"
@@ -34,7 +31,7 @@ fmn-hash = { path = "../../crates/fmn-hash" }
 fmn-frame = { path = "../../crates/fmn-frame" }
 fmn-codec = { path = "../../crates/fmn-codec" }
 fmn-render = { path = "../../crates/fmn-render" }
-ft-kernel-metal = { path = "../../../frankentorch/crates/ft-kernel-metal" }
+ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "5dbcc1d2c2a857f3ead07138055c3451b8094438" }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
