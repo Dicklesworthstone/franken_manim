@@ -14,6 +14,47 @@
 //! interval, then adds its own sample after `gain`; both values are dB, matching
 //! the Reference. Parallel work splits only the output timeline, so every
 //! sample observes that same cue order at every thread count.
+//! The scalar oracle walks samples first and cues second. The compiled route
+//! transposes only those independent loops: cues remain in insertion order,
+//! while each cue visits its active sample interval once. Governed v3/v4/NEON
+//! artifacts use 4/8/2 `std::simd` lanes respectively; the portable artifact
+//! keeps the overlap-aware scalar kernel. No route performs a horizontal
+//! floating-point reduction, so lane width cannot reassociate a mix.
+//!
+//! ## Build-tier result
+//!
+//! fm-4wt.7 measured seven fully overlapping stereo cues, including output
+//! allocation, final clamping, and narrowing, on an AMD EPYC 7282. Times are
+//! medians from libtest's optimized benchmark harness:
+//!
+//! | stereo frames | portable scalar | portable compiled | v3 scalar | v3 compiled |
+//! |---:|---:|---:|---:|---:|
+//! | 4 | 167.58 ns | 119.07 ns | 190.76 ns | 124.55 ns |
+//! | 256 | 7.105 µs | 1.945 µs | 7.998 µs | 1.356 µs |
+//! | 4,096 | 116.15 µs | 28.63 µs | 128.20 µs | 22.96 µs |
+//! | 65,536 | 1.879 ms | 0.487 ms | 2.050 ms | 0.424 ms |
+//!
+//! The weekly v4 artifact was also measured on a real 16-vCPU AMD EPYC Genoa
+//! worker:
+//!
+//! | stereo frames | v4 scalar | v4 compiled |
+//! |---:|---:|---:|
+//! | 4 | 124.62 ns | 74.91 ns |
+//! | 256 | 5.867 µs | 1.195 µs |
+//! | 4,096 | 95.564 µs | 21.857 µs |
+//! | 65,536 | 1.512 ms | 0.373 ms |
+//!
+//! Two interleaved samples were below break-even; eight were the first measured
+//! profitable size, so shorter chunks stay on the scalar oracle. At 4,096
+//! frames, overlap-aware traversal is 4.1× faster on portable and the v3 SIMD
+//! route is 5.6× faster than its scalar oracle (and 1.25× faster than portable
+//! compiled); v4 is 4.37× faster than its same-host scalar oracle. The NEON
+//! artifact executes its identity suite through aarch64 emulation, whose timing
+//! is deliberately not presented as hardware performance. The 64-tap resampler
+//! stays scalar: its tap sum and weight sum are fixed-order reductions, and
+//! vector-width horizontal sums would violate the certified association rule.
+//! SIMD is only across output samples whose arithmetic histories are
+//! independent.
 //!
 //! Placement converts `(frame, fps)` to the nearest sample by exact integer
 //! arithmetic, with ties away from zero. A user `time_offset` is converted from
@@ -24,6 +65,39 @@
 use std::fmt;
 
 use fmn_codec::{SampleFormat, WavAudio, encode_wav};
+use fmn_platform::topology::SimdTier;
+
+// A standalone fmn-output build must reject the same improvised x86 feature
+// subsets as the renderer. ADR-0016 admits only SUITE.lock's exact artifacts.
+#[cfg(all(
+    target_arch = "x86_64",
+    any(
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ),
+    not(any(
+        all(
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ),
+        all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        )
+    ))
+))]
+compile_error!(
+    "unsupported partial x86 SIMD tier; use SUITE.lock's portable, x86-64-v3, or x86-64-v4 flags"
+);
 
 /// The stable name recorded in documentation and provenance for sample-rate
 /// conversion.
@@ -36,6 +110,79 @@ const DEFAULT_MAX_OUTPUT_FRAMES: u64 = 48_000_u64 * 60 * 60;
 const MAX_MIX_THREADS: usize = 1_024;
 const DB_DIVISOR: f64 = 20.0;
 const S16_STEP: f64 = 1.0 / 32_768.0;
+// The portable benchmark crosses over between two and eight interleaved
+// samples. Keep the scalar oracle below the first measured profitable size.
+const MIX_OVERLAP_BREAK_EVEN_SAMPLES: usize = 8;
+
+/// The SUITE.lock build tier compiled into this artifact.
+pub const COMPILED_MIX_TIER: SimdTier = if cfg!(all(
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    target_feature = "avx512bw",
+    target_feature = "avx512dq",
+    target_feature = "avx512vl"
+)) {
+    SimdTier::X86_64V4
+} else if cfg!(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "bmi2",
+    target_feature = "fma"
+)) {
+    SimdTier::X86_64V3
+} else if cfg!(all(target_arch = "aarch64", target_feature = "neon")) {
+    SimdTier::Aarch64Neon
+} else {
+    SimdTier::Portable
+};
+
+/// Maximum independent floating-point lanes used by the compiled mixer route.
+///
+/// Chunks shorter than the measured break-even remain on the scalar oracle.
+pub const COMPILED_MIX_LANES: usize = match COMPILED_MIX_TIER {
+    SimdTier::Portable => 1,
+    SimdTier::X86_64V3 => 4,
+    SimdTier::X86_64V4 => 8,
+    SimdTier::Aarch64Neon => 2,
+};
+
+/// Select the scalar oracle or this artifact's one compiled build-tier route.
+///
+/// There is deliberately no runtime ISA detection. W11 selects an artifact;
+/// this enum only lets the Gauntlet compare that artifact with the scalar
+/// definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MixKernel {
+    /// Sample-major scalar definition.
+    Scalar,
+    /// Overlap-aware route compiled for [`COMPILED_MIX_TIER`].
+    Compiled,
+}
+
+impl MixKernel {
+    /// Both routes every artifact must test.
+    pub const ALL: &'static [Self] = &[Self::Scalar, Self::Compiled];
+
+    /// Stable provenance name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Compiled => COMPILED_MIX_TIER.name(),
+        }
+    }
+
+    /// Maximum independent floating-point lanes used by this route.
+    ///
+    /// The compiled route may retain the scalar oracle for short chunks.
+    #[must_use]
+    pub const fn lanes(self) -> usize {
+        match self {
+            Self::Scalar => 1,
+            Self::Compiled => COMPILED_MIX_LANES,
+        }
+    }
+}
 
 /// Typed sound-mixer refusals.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +204,11 @@ pub enum SoundError {
     /// An input sample is NaN or infinite.
     NonFiniteSample {
         /// Interleaved sample index.
+        index: usize,
+    },
+    /// Finite inputs produced an indeterminate NaN during accumulation.
+    IndeterminateMixSample {
+        /// Interleaved output sample index.
         index: usize,
     },
     /// A dB parameter is NaN, infinite, or converts outside finite amplitude.
@@ -111,6 +263,12 @@ impl fmt::Display for SoundError {
             ),
             Self::NonFiniteSample { index } => {
                 write!(f, "audio sample {index} is NaN or infinite")
+            }
+            Self::IndeterminateMixSample { index } => {
+                write!(
+                    f,
+                    "mixed audio sample {index} became NaN during accumulation"
+                )
             }
             Self::InvalidGain { parameter } => {
                 write!(f, "{parameter} must be finite and yield finite amplitude")
@@ -229,6 +387,11 @@ struct PreparedCue {
     background_gain: Option<f64>,
 }
 
+struct OverlapSlices<'output, 'cue> {
+    destination: &'output mut [f64],
+    source: &'cue [f64],
+}
+
 /// Dither policy for bit-depth reduction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DitherPolicy {
@@ -253,6 +416,8 @@ pub struct MixReport {
     pub cues_mixed: usize,
     /// Actual disjoint timeline workers used (zero for an empty mix).
     pub workers_used: usize,
+    /// Arithmetic route used by this report.
+    pub kernel: MixKernel,
 }
 
 impl MixReport {
@@ -382,12 +547,16 @@ impl SoundMixer {
             });
         }
         let mapped = map_channels(&cue.audio, self.config.channels)?;
-        let samples = resample(
-            &mapped,
-            self.config.channels,
-            cue.audio.sample_rate,
-            self.config.sample_rate,
-        )?;
+        let samples = if cue.audio.sample_rate == self.config.sample_rate {
+            mapped
+        } else {
+            resample(
+                &mapped,
+                self.config.channels,
+                cue.audio.sample_rate,
+                self.config.sample_rate,
+            )?
+        };
 
         self.cues.push(PreparedCue {
             start,
@@ -402,8 +571,25 @@ impl SoundMixer {
     /// Mix the complete timeline with disjoint output-range workers.
     ///
     /// # Errors
-    /// An invalid worker count or a worker panic.
+    /// An invalid worker count, worker panic, or indeterminate accumulated
+    /// sample.
     pub fn mix(&self, threads: usize) -> Result<MixReport, SoundError> {
+        self.mix_with_kernel(threads, MixKernel::Compiled)
+    }
+
+    /// Mix with an explicitly selected scalar-or-compiled kernel.
+    ///
+    /// This is the Gauntlet boundary for lane-count equivalence. Production
+    /// callers ordinarily use [`Self::mix`], which selects the compiled route.
+    ///
+    /// # Errors
+    /// An invalid worker count, worker panic, or indeterminate accumulated
+    /// sample.
+    pub fn mix_with_kernel(
+        &self,
+        threads: usize,
+        kernel: MixKernel,
+    ) -> Result<MixReport, SoundError> {
         if threads == 0 {
             return Err(SoundError::ZeroThreads);
         }
@@ -432,7 +618,7 @@ impl SoundMixer {
 
         let worker_target = threads.min(total_frames);
         let workers_used = if worker_target == 1 {
-            mix_chunk(&mut mixed, 0, channels, &self.cues);
+            mix_chunk(&mut mixed, 0, channels, &self.cues, kernel)?;
             1
         } else if worker_target > 1 {
             let chunk_frames = total_frames.div_ceil(worker_target);
@@ -440,39 +626,39 @@ impl SoundMixer {
                 .checked_mul(channels)
                 .ok_or(SoundError::SampleCountOverflow)?;
             let actual_workers = total_frames.div_ceil(chunk_frames);
-            let worker_result = std::thread::scope(|scope| {
+            std::thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(actual_workers);
                 for (chunk_index, chunk) in mixed.chunks_mut(chunk_samples).enumerate() {
                     let start_frame = chunk_index * chunk_frames;
                     let cues = &self.cues;
-                    handles.push(scope.spawn(move || {
-                        mix_chunk(chunk, start_frame, channels, cues);
-                    }));
+                    handles.push(
+                        scope.spawn(move || mix_chunk(chunk, start_frame, channels, cues, kernel)),
+                    );
                 }
-                let mut panicked = false;
                 for handle in handles {
-                    panicked |= handle.join().is_err();
+                    match handle.join() {
+                        Ok(result) => result?,
+                        Err(_) => return Err(SoundError::WorkerPanicked),
+                    }
                 }
-                panicked
-            });
-            if worker_result {
-                return Err(SoundError::WorkerPanicked);
-            }
+                Ok(())
+            })?;
             actual_workers
         } else {
             0
         };
 
         let mut clipped_samples = 0_u64;
-        let samples = mixed
-            .into_iter()
-            .map(|sample| {
-                if !(-1.0..=1.0).contains(&sample) {
-                    clipped_samples += 1;
-                }
-                sample.clamp(-1.0, 1.0) as f32
-            })
-            .collect();
+        let mut samples = Vec::with_capacity(mixed.len());
+        for (index, sample) in mixed.into_iter().enumerate() {
+            if sample.is_nan() {
+                return Err(SoundError::IndeterminateMixSample { index });
+            }
+            if !(-1.0..=1.0).contains(&sample) {
+                clipped_samples += 1;
+            }
+            samples.push(sample.clamp(-1.0, 1.0) as f32);
+        }
         Ok(MixReport {
             audio: WavAudio {
                 channels: self.config.channels,
@@ -483,6 +669,7 @@ impl SoundMixer {
             clipped_samples,
             cues_mixed: self.cues.len(),
             workers_used,
+            kernel,
         })
     }
 }
@@ -635,7 +822,27 @@ fn resampled_frame_count(
     usize::try_from(output_frames).map_err(|_| SoundError::SampleCountOverflow)
 }
 
-fn mix_chunk(output: &mut [f64], start_frame: usize, channels: usize, cues: &[PreparedCue]) {
+fn mix_chunk(
+    output: &mut [f64],
+    start_frame: usize,
+    channels: usize,
+    cues: &[PreparedCue],
+    kernel: MixKernel,
+) -> Result<(), SoundError> {
+    match kernel {
+        MixKernel::Scalar => {
+            mix_chunk_scalar(output, start_frame, channels, cues);
+            Ok(())
+        }
+        MixKernel::Compiled if output.len() < MIX_OVERLAP_BREAK_EVEN_SAMPLES => {
+            mix_chunk_scalar(output, start_frame, channels, cues);
+            Ok(())
+        }
+        MixKernel::Compiled => mix_chunk_compiled(output, start_frame, channels, cues),
+    }
+}
+
+fn mix_chunk_scalar(output: &mut [f64], start_frame: usize, channels: usize, cues: &[PreparedCue]) {
     for (relative_frame, frame) in output.chunks_exact_mut(channels).enumerate() {
         let global_frame = start_frame + relative_frame;
         for (channel, destination) in frame.iter_mut().enumerate() {
@@ -654,6 +861,191 @@ fn mix_chunk(output: &mut [f64], start_frame: usize, channels: usize, cues: &[Pr
             *destination = sample;
         }
     }
+}
+
+fn mix_chunk_compiled(
+    output: &mut [f64],
+    start_frame: usize,
+    channels: usize,
+    cues: &[PreparedCue],
+) -> Result<(), SoundError> {
+    for cue in cues {
+        let Some(overlap) = cue_overlap(output, start_frame, channels, cue)? else {
+            continue;
+        };
+        mix_overlap_compiled(
+            overlap.destination,
+            overlap.source,
+            cue.gain,
+            cue.background_gain,
+        );
+    }
+    Ok(())
+}
+
+fn cue_overlap<'output, 'cue>(
+    output: &'output mut [f64],
+    start_frame: usize,
+    channels: usize,
+    cue: &'cue PreparedCue,
+) -> Result<Option<OverlapSlices<'output, 'cue>>, SoundError> {
+    let chunk_frames = output.len() / channels;
+    let chunk_start = i128::try_from(start_frame).map_err(|_| SoundError::SampleCountOverflow)?;
+    let chunk_end = chunk_start
+        .checked_add(i128::try_from(chunk_frames).map_err(|_| SoundError::SampleCountOverflow)?)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let cue_start = i128::from(cue.start);
+    let cue_end = cue_start
+        .checked_add(i128::try_from(cue.frames).map_err(|_| SoundError::SampleCountOverflow)?)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let overlap_start = chunk_start.max(cue_start);
+    let overlap_end = chunk_end.min(cue_end);
+    if overlap_start >= overlap_end {
+        return Ok(None);
+    }
+
+    let destination_frame = usize::try_from(overlap_start - chunk_start)
+        .map_err(|_| SoundError::SampleCountOverflow)?;
+    let source_frame =
+        usize::try_from(overlap_start - cue_start).map_err(|_| SoundError::SampleCountOverflow)?;
+    let frames = usize::try_from(overlap_end - overlap_start)
+        .map_err(|_| SoundError::SampleCountOverflow)?;
+    let destination_start = destination_frame
+        .checked_mul(channels)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let source_start = source_frame
+        .checked_mul(channels)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let samples = frames
+        .checked_mul(channels)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let destination_end = destination_start
+        .checked_add(samples)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let source_end = source_start
+        .checked_add(samples)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let destination = output
+        .get_mut(destination_start..destination_end)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    let source = cue
+        .samples
+        .get(source_start..source_end)
+        .ok_or(SoundError::SampleCountOverflow)?;
+    Ok(Some(OverlapSlices {
+        destination,
+        source,
+    }))
+}
+
+fn mix_overlap_compiled(
+    destination: &mut [f64],
+    source: &[f64],
+    gain: f64,
+    background_gain: Option<f64>,
+) {
+    #[cfg(not(any(
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ),
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
+    )))]
+    mix_overlap_scalar(destination, source, gain, background_gain);
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma",
+        not(target_feature = "avx512f")
+    ))]
+    mix_overlap_simd::<4>(destination, source, gain, background_gain);
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ))]
+    mix_overlap_simd::<8>(destination, source, gain, background_gain);
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    mix_overlap_simd::<2>(destination, source, gain, background_gain);
+}
+
+fn mix_overlap_scalar(
+    destination: &mut [f64],
+    source: &[f64],
+    gain: f64,
+    background_gain: Option<f64>,
+) {
+    for (destination, &source) in destination.iter_mut().zip(source) {
+        if let Some(background_gain) = background_gain {
+            *destination *= background_gain;
+        }
+        *destination += source * gain;
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma"
+    ),
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl"
+    ),
+    all(target_arch = "aarch64", target_feature = "neon")
+))]
+fn mix_overlap_simd<const LANES: usize>(
+    destination: &mut [f64],
+    source: &[f64],
+    gain: f64,
+    background_gain: Option<f64>,
+) {
+    use std::simd::Simd;
+
+    let complete = destination.len().min(source.len()) / LANES * LANES;
+    let gain_vector = Simd::<f64, LANES>::splat(gain);
+    let background_vector = background_gain.map(Simd::<f64, LANES>::splat);
+    for (destination, source) in destination[..complete]
+        .as_chunks_mut::<LANES>()
+        .0
+        .iter_mut()
+        .zip(source[..complete].as_chunks::<LANES>().0)
+    {
+        let mut mixed = Simd::from_array(*destination);
+        if let Some(background_gain) = background_vector {
+            mixed *= background_gain;
+        }
+        mixed += Simd::from_array(*source) * gain_vector;
+        *destination = mixed.to_array();
+    }
+    mix_overlap_scalar(
+        &mut destination[complete..],
+        &source[complete..],
+        gain,
+        background_gain,
+    );
 }
 
 fn round_ratio(numerator: i128, denominator: u128) -> Result<i64, SoundError> {
@@ -736,7 +1128,11 @@ fn tpdf(seed: u64, counter: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    extern crate test;
+
     use super::*;
+    use std::hint::black_box;
+    use test::Bencher;
 
     fn audio(sample_rate: u32, channels: u16, format: SampleFormat, samples: &[f32]) -> WavAudio {
         WavAudio {
@@ -757,6 +1153,15 @@ mod tests {
 
     fn cue(samples: &[f32], frame: i64, fps: u32) -> SoundCue {
         SoundCue::new(audio(8, 1, SampleFormat::F32, samples), frame, fps)
+    }
+
+    #[test]
+    fn compiled_kernel_names_the_governed_artifact_tier_and_lane_count() {
+        assert_eq!(MixKernel::ALL, &[MixKernel::Scalar, MixKernel::Compiled]);
+        assert_eq!(MixKernel::Scalar.name(), "scalar");
+        assert_eq!(MixKernel::Scalar.lanes(), 1);
+        assert_eq!(MixKernel::Compiled.name(), COMPILED_MIX_TIER.name());
+        assert_eq!(MixKernel::Compiled.lanes(), COMPILED_MIX_LANES);
     }
 
     #[test]
@@ -920,7 +1325,92 @@ mod tests {
     }
 
     #[test]
-    fn wav_bytes_are_identical_at_one_four_and_sixteen_threads() {
+    fn opposing_finite_overflows_are_a_typed_refusal_not_nan_pcm() {
+        let mut mixer = SoundMixer::new(config(8, 1)).expect("mixer");
+        for sample in [f32::MAX, -f32::MAX] {
+            let mut explosive = cue(&[sample; 9], 0, 8);
+            explosive.gain = Some(6_000.0);
+            mixer.add(explosive).expect("finite gain");
+        }
+        for &kernel in MixKernel::ALL {
+            assert!(matches!(
+                mixer.mix_with_kernel(1, kernel),
+                Err(SoundError::IndeterminateMixSample { index: 0 })
+            ));
+        }
+    }
+
+    fn tier_fixture(frames: usize) -> SoundMixer {
+        let mut mixer = SoundMixer::new(config(48_000, 2)).expect("mixer");
+        let source: Vec<f32> = (0..frames * 2)
+            .map(|index| ((index % 257) as f32 - 128.0) * (1.0 / 4_096.0))
+            .collect();
+        for index in 0_u32..7 {
+            let mut placed = SoundCue::new(
+                audio(48_000, 2, SampleFormat::S24, &source),
+                i64::from(index) * 3 - 5,
+                48_000,
+            );
+            placed.gain = Some(-f64::from(index));
+            placed.gain_to_background = (index % 2 == 0).then_some(-1.5);
+            mixer.add(placed).expect("cue");
+        }
+        mixer
+    }
+
+    fn raw_frame_count(mixer: &SoundMixer) -> usize {
+        let frames = mixer
+            .cues
+            .iter()
+            .filter_map(|cue| {
+                let end = i128::from(cue.start) + cue.frames as i128;
+                (cue.frames > 0 && end > 0).then_some(end)
+            })
+            .max()
+            .unwrap_or(0);
+        usize::try_from(frames).expect("test fixture fits usize")
+    }
+
+    fn raw_scalar(mixer: &SoundMixer) -> Vec<f64> {
+        let channels = usize::from(mixer.config.channels);
+        let mut output = vec![0.0; raw_frame_count(mixer) * channels];
+        mix_chunk_scalar(&mut output, 0, channels, &mixer.cues);
+        output
+    }
+
+    fn raw_simd<const LANES: usize>(mixer: &SoundMixer) -> Vec<f64> {
+        let channels = usize::from(mixer.config.channels);
+        let mut output = vec![0.0; raw_frame_count(mixer) * channels];
+        for cue in &mixer.cues {
+            let Some(overlap) = cue_overlap(&mut output, 0, channels, cue).expect("test overlap")
+            else {
+                continue;
+            };
+            mix_overlap_simd::<LANES>(
+                overlap.destination,
+                overlap.source,
+                cue.gain,
+                cue.background_gain,
+            );
+        }
+        output
+    }
+
+    fn bits(samples: &[f64]) -> Vec<u64> {
+        samples.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    #[test]
+    fn two_four_and_eight_lanes_are_the_scalar_definition_bit_for_bit() {
+        let mixer = tier_fixture(4_111);
+        let scalar = bits(&raw_scalar(&mixer));
+        assert_eq!(bits(&raw_simd::<2>(&mixer)), scalar);
+        assert_eq!(bits(&raw_simd::<4>(&mixer)), scalar);
+        assert_eq!(bits(&raw_simd::<8>(&mixer)), scalar);
+    }
+
+    #[test]
+    fn wav_bytes_are_identical_across_kernels_and_one_four_sixteen_threads() {
         let mut mixer = SoundMixer::new(config(48_000, 2)).expect("mixer");
         let source = tone(44_100, 997, 2_048);
         for index in 0..7 {
@@ -930,18 +1420,27 @@ mod tests {
             placed.gain_to_background = (index % 2 == 0).then_some(-1.5);
             mixer.add(placed).expect("cue");
         }
-        let one = mixer.mix(1).expect("one");
-        let four = mixer.mix(4).expect("four");
-        let sixteen = mixer.mix(16).expect("sixteen");
-        assert_eq!(one.audio.samples, four.audio.samples);
-        assert_eq!(one.audio.samples, sixteen.audio.samples);
-        let encode = |report: &MixReport| {
+        let scalar = mixer.mix_with_kernel(1, MixKernel::Scalar).expect("scalar");
+        let encode_s16 = |report: &MixReport| {
             report
                 .wav_bytes(SampleFormat::S16, DitherPolicy::Tpdf { seed: 99 })
                 .expect("wav")
         };
-        assert_eq!(encode(&one), encode(&four));
-        assert_eq!(encode(&one), encode(&sixteen));
+        let encode_f32 = |report: &MixReport| {
+            report
+                .wav_bytes(SampleFormat::F32, DitherPolicy::None)
+                .expect("wav")
+        };
+        for &kernel in MixKernel::ALL {
+            for threads in [1, 4, 16] {
+                let report = mixer
+                    .mix_with_kernel(threads, kernel)
+                    .expect("kernel/thread matrix");
+                assert_eq!(report.kernel, kernel);
+                assert_eq!(encode_s16(&report), encode_s16(&scalar));
+                assert_eq!(encode_f32(&report), encode_f32(&scalar));
+            }
+        }
     }
 
     #[test]
@@ -1019,4 +1518,47 @@ mod tests {
             }) if frames == u64::from(u32::MAX)
         ));
     }
+
+    fn benchmark_mix(bench: &mut Bencher, frames: usize, kernel: MixKernel) {
+        let mut mixer = tier_fixture(frames);
+        for cue in &mut mixer.cues {
+            cue.start = 0;
+        }
+        let output_bytes = frames
+            .checked_mul(usize::from(mixer.config.channels))
+            .and_then(|samples| samples.checked_mul(size_of::<f64>()))
+            .expect("benchmark byte count");
+        bench.bytes = u64::try_from(output_bytes).expect("benchmark byte count fits u64");
+        bench.iter(|| {
+            black_box(
+                mixer
+                    .mix_with_kernel(1, black_box(kernel))
+                    .expect("benchmark mix"),
+            );
+        });
+    }
+
+    macro_rules! mix_bench {
+        ($name:ident, $frames:expr, $kernel:expr) => {
+            #[bench]
+            fn $name(bench: &mut Bencher) {
+                benchmark_mix(bench, $frames, $kernel);
+            }
+        };
+    }
+
+    mix_bench!(mix_scalar_0001, 1, MixKernel::Scalar);
+    mix_bench!(mix_compiled_0001, 1, MixKernel::Compiled);
+    mix_bench!(mix_scalar_0004, 4, MixKernel::Scalar);
+    mix_bench!(mix_compiled_0004, 4, MixKernel::Compiled);
+    mix_bench!(mix_scalar_0016, 16, MixKernel::Scalar);
+    mix_bench!(mix_compiled_0016, 16, MixKernel::Compiled);
+    mix_bench!(mix_scalar_0064, 64, MixKernel::Scalar);
+    mix_bench!(mix_compiled_0064, 64, MixKernel::Compiled);
+    mix_bench!(mix_scalar_0256, 256, MixKernel::Scalar);
+    mix_bench!(mix_compiled_0256, 256, MixKernel::Compiled);
+    mix_bench!(mix_scalar_4096, 4_096, MixKernel::Scalar);
+    mix_bench!(mix_compiled_4096, 4_096, MixKernel::Compiled);
+    mix_bench!(mix_scalar_65536, 65_536, MixKernel::Scalar);
+    mix_bench!(mix_compiled_65536, 65_536, MixKernel::Compiled);
 }

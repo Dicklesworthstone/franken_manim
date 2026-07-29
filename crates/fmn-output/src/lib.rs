@@ -14,6 +14,27 @@
 //! WAV/PCM path: sample-exact placement, a named deterministic resampler,
 //! ordered gain/duck mixing, explicit clipping evidence, and certified WAV
 //! bytes.
+#![cfg_attr(
+    any(
+        test,
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "bmi2",
+            target_feature = "fma"
+        ),
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512dq",
+            target_feature = "avx512vl"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
+    ),
+    feature(portable_simd)
+)]
+#![cfg_attr(test, feature(test))]
 #![forbid(unsafe_code)]
 
 pub mod emitter;
@@ -35,5 +56,6 @@ pub use negotiate::{
     WireFormat,
 };
 pub use sound::{
-    DitherPolicy, MixReport, MixerConfig, RESAMPLER_NAME, SoundCue, SoundError, SoundMixer,
+    COMPILED_MIX_LANES, COMPILED_MIX_TIER, DitherPolicy, MixKernel, MixReport, MixerConfig,
+    RESAMPLER_NAME, SoundCue, SoundError, SoundMixer,
 };
