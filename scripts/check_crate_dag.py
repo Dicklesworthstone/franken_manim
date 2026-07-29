@@ -68,21 +68,46 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-cache",
     },
     "fmn-runtime": {"fmn-core", "fmn-platform"},
-    "fmn-cli": {"fmn-core", "fmn-config", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
+    "fmn-cli": {"fmn-core", "fmn-config", "fmn-cache", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
     "fmn-conformance": {"fmn-core", "fmn-hash", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-library", "fmn-scene", "fmn-output"},
     "fmn-python": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-anim", "fmn-library", "fmn-scene"},
 }
 
 LAYER = {name: i for i, name in enumerate(EXPECTED)}
+METADATA_TIMEOUT_SECONDS = 120
 
 
 def main() -> int:
-    meta = json.loads(
-        subprocess.run(
+    try:
+        completed = subprocess.run(
             ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-            check=True, capture_output=True, text=True,
-        ).stdout
-    )
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=METADATA_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        print("crate-DAG check FAILED: cargo is not on PATH", file=sys.stderr)
+        return 1
+    except subprocess.TimeoutExpired:
+        print(
+            f"crate-DAG check FAILED: cargo metadata exceeded "
+            f"{METADATA_TIMEOUT_SECONDS}s",
+            file=sys.stderr,
+        )
+        return 1
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() or f"exit status {error.returncode}"
+        print(f"crate-DAG check FAILED: cargo metadata: {detail}", file=sys.stderr)
+        return 1
+    try:
+        meta = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        print(
+            f"crate-DAG check FAILED: cargo metadata emitted invalid JSON: {error}",
+            file=sys.stderr,
+        )
+        return 1
     workspace_ids = set(meta["workspace_members"])
     actual: dict[str, set[str]] = {}
     spikes: set[str] = set()

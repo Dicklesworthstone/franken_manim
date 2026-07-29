@@ -552,6 +552,7 @@ dependencies = [
 name = "fmn-cli"
 version = "0.1.0"
 dependencies = [
+ "fmn-cache",
  "fmn-config",
  "fmn-core",
  "fmn-library",

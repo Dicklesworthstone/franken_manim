@@ -466,8 +466,8 @@ pub enum Invocation {
         /// Robot-mode response.
         robot: bool,
     },
-    /// Defined cache lifecycle action. Dispatch remains fail-closed until the
-    /// cache crate proves root ownership.
+    /// Defined cache lifecycle action through fmn-cache's one-shot owned-root
+    /// authorization.
     ClearCache {
         /// Shared configuration and robot flags.
         common: CommonOptions,
@@ -2007,13 +2007,7 @@ where
             }
             Err(error) => error_output(command.common.robot, &error),
         },
-        Invocation::ClearCache { common } => error_output(
-            common.robot,
-            &CliError::new(
-                "capability",
-                "--clear-cache is refused until the cache store proves root ownership and rejects dangerous/symlinked roots",
-            ),
-        ),
+        Invocation::ClearCache { common } => clear_cache(fs, &common),
         Invocation::Render(command) => error_output(
             command.common.robot,
             &CliError::new(
@@ -2039,6 +2033,87 @@ where
                 "Studio composition is unavailable: no concrete WorkerService or audited host-entropy capability is registered",
             ),
         ),
+    }
+}
+
+fn clear_cache(fs: &dyn FileSystem, common: &CommonOptions) -> RunOutput {
+    if !fs.grants_host_destructive_lifecycle() {
+        return error_output(
+            common.robot,
+            &CliError::new(
+                "capability",
+                "--clear-cache requires an explicit host-filesystem lifecycle capability",
+            ),
+        );
+    }
+    let config = match resolve_common_config(fs, common) {
+        Ok(config) => config,
+        Err(error) => return error_output(common.robot, &error),
+    };
+    if config.directories.cache.is_empty() {
+        return error_output(
+            common.robot,
+            &CliError::new(
+                "capability",
+                "--clear-cache needs an explicit --cache-dir or configured directories.cache until the platform-default resolver lands",
+            ),
+        );
+    }
+    let authorization =
+        match fmn_cache::CacheClearAuthorization::authorize(&config.directories.cache) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                let exit_name = if matches!(error, fmn_cache::CacheError::RootRefused { .. }) {
+                    "config"
+                } else {
+                    "capability"
+                };
+                return error_output(common.robot, &CliError::new(exit_name, error.to_string()));
+            }
+        };
+    let root = match authorization.root().to_str() {
+        Some(root) => root.to_owned(),
+        None => {
+            return error_output(
+                common.robot,
+                &CliError::new(
+                    "config",
+                    "the cache root is not valid UTF-8 and cannot be represented by the CLI schema",
+                ),
+            );
+        }
+    };
+    let outcome = match authorization.clear() {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let exit_name = if matches!(error, fmn_cache::CacheError::RootRefused { .. }) {
+                "config"
+            } else {
+                "capability"
+            };
+            return error_output(common.robot, &CliError::new(exit_name, error.to_string()));
+        }
+    };
+    if common.robot {
+        RunOutput::success(format!(
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"cache_clear\",\
+             \"root\":{},\"outcome\":{}}}\n",
+            ROBOT_SCHEMA_VERSION,
+            json_string(&root),
+            json_string(match outcome {
+                fmn_cache::CacheClearOutcome::Cleared => "cleared",
+                fmn_cache::CacheClearOutcome::AlreadyAbsent => "already_absent",
+            })
+        ))
+    } else if common.quiet {
+        RunOutput::success(String::new())
+    } else {
+        RunOutput::success(match outcome {
+            fmn_cache::CacheClearOutcome::Cleared => format!("cleared cache: {root}\n"),
+            fmn_cache::CacheClearOutcome::AlreadyAbsent => {
+                format!("cache already absent: {root}\n")
+            }
+        })
     }
 }
 
@@ -2726,6 +2801,100 @@ mod tests {
         );
         assert!(output.stdout.contains("\"kind\":\"fonts\""));
         assert!(output.stdout.contains("\"complete\":false"));
+    }
+
+    #[test]
+    fn clear_cache_dispatch_uses_owned_root_authorization_and_stable_streams() {
+        use fmn_cache::{KeyBuilder, NamespacePolicy, Store, StoreConfig};
+        use fmn_platform::clock::StdClock;
+        use fmn_platform::fs::StdFs;
+        use std::sync::Arc;
+
+        let root = std::env::temp_dir().join(format!("fmn-cli-clear-cache-{}", std::process::id()));
+        let _ = StdFs.remove_dir_all(&root);
+        let store = Store::open(
+            Arc::new(StdFs),
+            Arc::new(StdClock::new()),
+            root.clone(),
+            StoreConfig::default(),
+        )
+        .expect("create owned cache root");
+        let namespace = store
+            .namespace("cli", 1, NamespacePolicy::default())
+            .expect("open cache namespace");
+        let key = KeyBuilder::new("cli-clear")
+            .push_str("fixture")
+            .finish()
+            .expect("cache key");
+        namespace.put(&key, b"cached").expect("seed cache");
+        drop(namespace);
+        drop(store);
+
+        let root_text = root.to_str().expect("test path is UTF-8");
+        let virtual_fs = VirtualFs::new();
+        let runner = fmn_platform::process::ScriptedRunner::new();
+        let refused = run_with_capabilities(
+            ["--clear-cache", "--cache-dir", root_text, "--robot"],
+            &virtual_fs,
+            &runner,
+        );
+        assert_eq!(refused.code, exit_code("capability"));
+        assert!(refused.stderr.is_empty());
+        assert!(refused.stdout.contains("\"exit_name\":\"capability\""));
+        assert!(
+            root.join("ns").is_dir(),
+            "virtual dispatch mutated the host"
+        );
+
+        let output = run(["--clear-cache", "--cache-dir", root_text, "--robot"]);
+        assert_eq!(output.code, 0);
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.lines().count(), 1);
+        assert!(output.stdout.contains("\"kind\":\"cache_clear\""));
+        assert!(output.stdout.contains("\"outcome\":\"cleared\""));
+        assert!(root.join("STORE_OWNER").is_file());
+        assert!(root.join("STORE_FORMAT").is_file());
+        assert!(!root.join("ns").exists());
+
+        let output = run(["--clear-cache", "--cache-dir", root_text, "--robot"]);
+        assert_eq!(output.code, 0);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("\"outcome\":\"already_absent\""));
+
+        let quiet = run(["--clear-cache", "--cache-dir", root_text, "--quiet"]);
+        assert_eq!(quiet.code, 0);
+        assert!(quiet.stdout.is_empty());
+        assert!(quiet.stderr.is_empty());
+        let _ = StdFs.remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_cache_dispatch_refuses_a_foreign_root_without_mutation() {
+        use fmn_platform::fs::StdFs;
+
+        let root =
+            std::env::temp_dir().join(format!("fmn-cli-foreign-cache-{}", std::process::id()));
+        let _ = StdFs.remove_dir_all(&root);
+        std::fs::create_dir(&root).expect("create foreign root");
+        let sentinel = root.join("important.txt");
+        std::fs::write(&sentinel, b"keep").expect("write sentinel");
+
+        let output = run([
+            "--clear-cache",
+            "--cache-dir",
+            root.to_str().expect("test path is UTF-8"),
+            "--robot",
+        ]);
+        assert_eq!(output.code, exit_code("config"));
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.lines().count(), 1);
+        assert!(output.stdout.contains("\"kind\":\"error\""));
+        assert!(output.stdout.contains("\"exit_name\":\"config\""));
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel survives"),
+            b"keep"
+        );
+        let _ = StdFs.remove_dir_all(&root);
     }
 
     #[test]

@@ -50,9 +50,20 @@
 //! definitionally equivalent to a recompute and certified renders are
 //! bit-identical with a cold or warm cache. Every cache failure degrades to a
 //! recompute ([`Namespace::get_or_compute`] swallows storage trouble); nothing
-//! in this crate can fail a render. `--clear-cache` ([`Store::clear`]) is safe
-//! at any moment: concurrent readers see misses, concurrent writers recreate
-//! what they need.
+//! in this crate can fail a render. `--clear-cache`
+//! ([`CacheClearAuthorization`]) retains the path-bound owned root and
+//! atomically quarantines only its managed namespace tree: concurrent readers
+//! see misses and concurrent writers recreate what they need at the original
+//! `ns` path.
+//!
+//! The clear authorization protects against dangerous configuration, static
+//! symlinks, copied markers, and races among cooperating FrankenManim
+//! processes. Portable safe `std` does not provide handle-relative rename and
+//! recursive removal on every supported platform, so it cannot promise
+//! immunity from a hostile same-user process replacing path components
+//! between validation and rename. The implementation revalidates immediately
+//! before that linearization point and keeps the deletion boundary to `ns`;
+//! stronger stable-identity/generation binding is tracked separately.
 //!
 //! LRU bookkeeping uses a logical sequence counter — never wall time — so
 //! eviction order is reproducible in the deterministic lab; the only clock
@@ -64,7 +75,10 @@ mod key;
 mod store;
 
 pub use key::{CacheKey, KeyBuilder};
-pub use store::{EvictOutcome, EvictReport, Namespace, NamespacePolicy, Pin, Store, StoreConfig};
+pub use store::{
+    CacheClearAuthorization, CacheClearOutcome, EvictOutcome, EvictReport, Namespace,
+    NamespacePolicy, Pin, Store, StoreConfig,
+};
 
 use fmn_platform::fs::FsError;
 use std::fmt;
@@ -86,6 +100,14 @@ pub enum CacheError {
     FormatUnsupported {
         /// The stamp found on disk.
         found: String,
+    },
+    /// A store root could not be claimed or cleared without risking foreign
+    /// data.
+    RootRefused {
+        /// The configured or resolved root.
+        root: std::path::PathBuf,
+        /// The fail-closed reason.
+        reason: String,
     },
     /// An entry payload exceeds the configured per-entry ceiling; the caller
     /// skips caching this value.
@@ -112,6 +134,9 @@ impl fmt::Display for CacheError {
                 f,
                 "unsupported cache store format {found:?}; clear the cache to migrate"
             ),
+            Self::RootRefused { root, reason } => {
+                write!(f, "refusing cache root {}: {reason}", root.display())
+            }
             Self::EntryTooLarge { limit, needed } => {
                 write!(
                     f,

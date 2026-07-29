@@ -13,10 +13,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// because two threads of one process writing the same destination would
 /// collide on the temp path and race each other's rename.
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+/// A collision storm is an I/O failure, not permission to spin forever.
+const MAX_TEMP_ATTEMPTS: usize = 4_096;
 
-/// A temp-file sibling name unique across processes (pid) and within this
-/// process (sequence), for the write-then-rename and write-then-link
-/// protocols.
+/// A candidate temp-file sibling name, distinguished across live processes
+/// (pid) and within this process (sequence). Callers still open it with
+/// `create_new`: PID reuse and crash leftovers must be treated as collisions,
+/// never as files that may be truncated.
 fn unique_temp_name(prefix: &str, path: &Path) -> String {
     format!(
         "{prefix}.{}.{}.{}",
@@ -26,6 +29,37 @@ fn unique_temp_name(prefix: &str, path: &Path) -> String {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     )
+}
+
+fn write_unique_temp(prefix: &str, path: &Path, bytes: &[u8]) -> Result<PathBuf, FsError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let tmp = parent.join(unique_temp_name(prefix, path));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(io_error(&tmp, err)),
+        };
+        if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io_error(&tmp, err));
+        }
+        drop(file);
+        return Ok(tmp);
+    }
+    Err(io_error(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("could not reserve a temporary sibling after {MAX_TEMP_ATTEMPTS} collisions"),
+        ),
+    ))
 }
 
 /// A filesystem failure, carrying the path it happened at.
@@ -73,6 +107,16 @@ impl std::error::Error for FsError {
 /// listing order ([`FileSystem::list_dir`] returns sorted paths) so no
 /// consumer inherits host directory-iteration order.
 pub trait FileSystem: Send + Sync {
+    /// Whether this capability explicitly represents the process's ambient
+    /// host filesystem for destructive lifecycle operations.
+    ///
+    /// The default is fail-closed. Virtual, recording, read-only, and test
+    /// implementations must not opt in merely because they delegate some
+    /// reads to the host.
+    fn grants_host_destructive_lifecycle(&self) -> bool {
+        false
+    }
+
     /// Read the full contents of a file.
     ///
     /// # Errors
@@ -142,35 +186,33 @@ pub trait FileSystem: Send + Sync {
 pub struct StdFs;
 
 impl FileSystem for StdFs {
+    fn grants_host_destructive_lifecycle(&self) -> bool {
+        true
+    }
+
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         std::fs::read(path).map_err(|err| io_error(path, err))
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
         // Unique sibling temp name, then rename into place.
-        let tmp = parent.join(unique_temp_name(".fmn-tmp", path));
-        let mut f = std::fs::File::create(&tmp).map_err(|err| io_error(&tmp, err))?;
-        f.write_all(bytes).map_err(|err| io_error(&tmp, err))?;
-        f.sync_all().map_err(|err| io_error(&tmp, err))?;
-        drop(f);
-        std::fs::rename(&tmp, path).map_err(|err| io_error(path, err))
+        let tmp = write_unique_temp(".fmn-tmp", path, bytes)?;
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(io_error(path, err))
+            }
+        }
     }
 
     fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
         // Write the contents to a unique sibling, then `hard_link` it into
         // place: link creation is atomic and fails if the destination exists,
         // so the file appears fully written or not at all — the lock-file
         // guarantee. A plain `File::create_new` + write would expose an
         // empty-then-filled window to concurrent readers.
-        let tmp = parent.join(unique_temp_name(".fmn-new", path));
-        let mut f = std::fs::File::create(&tmp).map_err(|err| io_error(&tmp, err))?;
-        f.write_all(bytes).map_err(|err| io_error(&tmp, err))?;
-        f.sync_all().map_err(|err| io_error(&tmp, err))?;
-        drop(f);
+        let tmp = write_unique_temp(".fmn-new", path, bytes)?;
         let linked = match std::fs::hard_link(&tmp, path) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
@@ -334,7 +376,8 @@ impl FileSystem for VirtualFs {
                     }
                 }
             }
-            if out.is_empty() && !self.exists(path) {
+            let exists = files.contains_key(path) || files.keys().any(|key| key.starts_with(path));
+            if out.is_empty() && !exists {
                 return Err(FsError::NotFound {
                     path: path.to_path_buf(),
                 });
@@ -401,6 +444,61 @@ mod tests {
             fs.remove_dir_all(Path::new("/ns/a")),
             Err(FsError::NotFound { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn std_fs_temp_name_collisions_never_follow_preexisting_symlinks() {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-platform-temp-collision-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).expect("create test root");
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"keep").expect("write victim");
+        let destination = root.join("destination");
+        let exclusive = root.join("exclusive");
+
+        let first_sequence = TEMP_SEQ.load(Ordering::Relaxed);
+        for sequence in first_sequence..first_sequence.saturating_add(256) {
+            let write_collision = root.join(format!(
+                ".fmn-tmp.{}.{}.destination",
+                std::process::id(),
+                sequence
+            ));
+            std::os::unix::fs::symlink(&victim, write_collision).expect("preplant write symlink");
+        }
+
+        StdFs
+            .write_atomic(&destination, b"replacement")
+            .expect("atomic write skips collisions");
+
+        let create_sequence = TEMP_SEQ.load(Ordering::Relaxed);
+        for sequence in create_sequence..create_sequence.saturating_add(256) {
+            let create_collision = root.join(format!(
+                ".fmn-new.{}.{}.exclusive",
+                std::process::id(),
+                sequence
+            ));
+            std::os::unix::fs::symlink(&victim, create_collision).expect("preplant create symlink");
+        }
+
+        assert!(
+            StdFs
+                .create_new(&exclusive, b"exclusive contents")
+                .expect("exclusive create skips collisions")
+        );
+        assert_eq!(std::fs::read(&victim).expect("victim survives"), b"keep");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination"),
+            b"replacement"
+        );
+        assert_eq!(
+            std::fs::read(&exclusive).expect("exclusive"),
+            b"exclusive contents"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

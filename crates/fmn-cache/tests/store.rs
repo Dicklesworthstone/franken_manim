@@ -675,39 +675,39 @@ fn a_version_bump_is_a_cold_start_and_purges_only_its_own_stale_versions() {
 }
 
 // ---------------------------------------------------------------------------
-// clear() — the --clear-cache flag
+// Owned-root establishment — the --clear-cache prerequisite
 // ---------------------------------------------------------------------------
 
 #[test]
-fn clear_is_safe_at_any_moment() {
-    let (fs, _clock, store) = fresh();
-    let n = ns(&store, None);
-    let k = key("entry");
-    n.put(&k, b"value").unwrap();
-    let pin = n.pin(&k); // even a live pin does not make clear unsafe
-
-    store.clear().unwrap();
-    assert_eq!(n.get(&k).unwrap(), None, "readers see misses after clear");
-    n.put(&k, b"recreated").unwrap();
-    assert_eq!(n.get(&k).unwrap().as_deref(), Some(&b"recreated"[..]));
-    drop(pin);
-
-    // The store re-stamped itself and reopens cleanly.
-    let reopened = open_store(fs.clone(), Arc::new(FakeClock::new()));
-    let n2 = ns(&reopened, None);
-    assert_eq!(n2.get(&k).unwrap().as_deref(), Some(&b"recreated"[..]));
+fn an_existing_nonempty_unowned_root_is_never_claimed() {
+    let fs = Arc::new(VirtualFs::new());
+    fs.insert(Path::new(ROOT).join("important.txt"), b"keep me".to_vec());
+    match Store::open(
+        fs.clone(),
+        Arc::new(FakeClock::new()),
+        ROOT,
+        StoreConfig::default(),
+    ) {
+        Err(CacheError::RootRefused { reason, .. }) => {
+            assert!(reason.contains("ownership marker"));
+        }
+        other => panic!("expected RootRefused, got {other:?}"),
+    }
+    assert_eq!(
+        fs.read(&Path::new(ROOT).join("important.txt")).unwrap(),
+        b"keep me"
+    );
+    assert!(!fs.exists(&Path::new(ROOT).join("STORE_OWNER")));
+    assert!(!fs.exists(&Path::new(ROOT).join("STORE_FORMAT")));
 }
 
 #[test]
 fn a_foreign_format_stamp_is_a_precise_refusal() {
-    let fs: Arc<dyn FileSystem> = {
-        let v = VirtualFs::new();
-        v.insert(
-            Path::new(ROOT).join("STORE_FORMAT"),
-            b"fmn-cache 999\n".to_vec(),
-        );
-        Arc::new(v)
-    };
+    let (fs, _clock, _store) = fresh();
+    fs.insert(
+        Path::new(ROOT).join("STORE_FORMAT"),
+        b"fmn-cache 999\n".to_vec(),
+    );
     match Store::open(fs, Arc::new(FakeClock::new()), ROOT, StoreConfig::default()) {
         Err(CacheError::FormatUnsupported { found }) => {
             assert_eq!(found, "fmn-cache 999");
@@ -812,6 +812,7 @@ fn arbitrary_key_bytes_never_map_outside_the_root() {
             // Everything else the store wrote is one of its fixed artifacts.
             assert!(
                 s == format!("{ROOT}/STORE_FORMAT")
+                    || s == format!("{ROOT}/STORE_OWNER")
                     || s.ends_with("/index")
                     || s.ends_with("/lock"),
                 "unexpected file: {s}"

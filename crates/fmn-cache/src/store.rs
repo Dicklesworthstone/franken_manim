@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! <root>/
+//!   STORE_OWNER                 path-bound ownership marker
 //!   STORE_FORMAT                  the store-format stamp ("fmn-cache 1")
 //!   ns/<name>/v<version>/         one versioned namespace
 //!     objects/<hh>/<hex…>         entries, sharded by the first digest byte
@@ -38,7 +39,10 @@ use fmn_platform::fs::{FileSystem, FsError};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -50,6 +54,11 @@ use std::time::{Duration, SystemTime};
 const FORMAT_STAMP: &str = "fmn-cache 1";
 /// The stamp's file name under the store root.
 const FORMAT_FILE: &str = "STORE_FORMAT";
+/// Stable ownership-marker prefix, independent of the replaceable store
+/// format. The suffix binds the marker to the canonical absolute host path.
+const OWNER_PREFIX: &str = "franken-manim cache root 1 ";
+/// The ownership marker's file name under the store root.
+const OWNER_FILE: &str = "STORE_OWNER";
 
 /// The advisory LRU index document.
 const INDEX_SCHEMA: Schema = Schema::new(*b"FMNC", 2, 1, 0);
@@ -59,9 +68,514 @@ const LOCK_SCHEMA: Schema = Schema::new(*b"FMNC", 4, 1, 0);
 /// Process-wide store-instance counter, distinguishing lock tokens from two
 /// stores (or two openings) in one process.
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+/// Process-local uniquifier for clear-quarantine directory names.
+static NEXT_CLEAR: AtomicU64 = AtomicU64::new(1);
+/// Bound collision work so a hostile directory full of guessed names cannot
+/// make a lifecycle command spin forever.
+const MAX_QUARANTINE_ATTEMPTS: usize = 4_096;
 
 fn lock_poisoned<T>(err: PoisonError<T>) -> T {
     err.into_inner()
+}
+
+fn root_refused(root: &Path, reason: impl Into<String>) -> CacheError {
+    CacheError::RootRefused {
+        root: root.to_path_buf(),
+        reason: reason.into(),
+    }
+}
+
+fn owner_stamp(root: &Path) -> Vec<u8> {
+    let digest = sha256(root.as_os_str().as_encoded_bytes());
+    format!("{OWNER_PREFIX}{}\n", digest.to_hex()).into_bytes()
+}
+
+fn verify_stamp(
+    fs: &dyn FileSystem,
+    path: &Path,
+    expected: &[u8],
+    root: &Path,
+    label: &str,
+) -> Result<(), CacheError> {
+    let found = fs.read(path)?;
+    if found == expected {
+        Ok(())
+    } else {
+        Err(root_refused(
+            root,
+            format!("{label} is foreign or bound to a different path"),
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RootOpenState {
+    /// The root existed before this opener inspected it.
+    Existing,
+    /// This opener atomically created the exact host leaf.
+    CreatedHostLeaf,
+    /// A non-host capability may establish an isolated missing root.
+    CapabilityManaged,
+}
+
+/// Establish ownership only when this opener proved it created the exact host
+/// leaf, or when a non-host capability reports a missing isolated root.
+fn ensure_owned_root(
+    fs: &dyn FileSystem,
+    root: &Path,
+    state: RootOpenState,
+) -> Result<(), CacheError> {
+    if !root.is_absolute() {
+        return Err(root_refused(root, "the store root must be absolute"));
+    }
+    let owner_path = root.join(OWNER_FILE);
+    let expected_owner = owner_stamp(root);
+    match fs.read(&owner_path) {
+        Ok(found) => {
+            if found != expected_owner {
+                return Err(root_refused(
+                    root,
+                    "ownership marker is foreign or bound to a different path",
+                ));
+            }
+        }
+        Err(FsError::NotFound { .. }) => {
+            match state {
+                RootOpenState::Existing => {
+                    return Err(root_refused(
+                        root,
+                        "an existing directory has no ownership marker",
+                    ));
+                }
+                RootOpenState::CreatedHostLeaf => {}
+                RootOpenState::CapabilityManaged => match fs.list_dir(root) {
+                    Ok(_) => {
+                        return Err(root_refused(
+                            root,
+                            "an existing directory has no ownership marker",
+                        ));
+                    }
+                    Err(FsError::NotFound { .. }) => {}
+                    Err(err) => return Err(err.into()),
+                },
+            }
+            if !fs.create_new(&owner_path, &expected_owner)? {
+                // Another claimant won. Its complete published bytes, not our
+                // intent, decide whether this is the same owned root.
+                verify_stamp(fs, &owner_path, &expected_owner, root, "ownership marker")?;
+            }
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    let format_path = root.join(FORMAT_FILE);
+    let expected_format = format!("{FORMAT_STAMP}\n");
+    match fs.read_to_string(&format_path) {
+        Ok(found) if found.trim_end() == FORMAT_STAMP => Ok(()),
+        Ok(found) => Err(CacheError::FormatUnsupported {
+            found: found.trim_end().to_owned(),
+        }),
+        Err(FsError::NotFound { .. }) => {
+            if !fs.create_new(&format_path, expected_format.as_bytes())? {
+                verify_stamp(
+                    fs,
+                    &format_path,
+                    expected_format.as_bytes(),
+                    root,
+                    "format stamp",
+                )?;
+            }
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn validate_existing_host_store_root(root: &Path, cwd: &Path) -> Result<PathBuf, CacheError> {
+    reject_symlink_components(root)?;
+    let canonical_root = fs::canonicalize(root).map_err(|err| host_io(root, err))?;
+    let metadata =
+        fs::symlink_metadata(&canonical_root).map_err(|err| host_io(&canonical_root, err))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(root_refused(root, "root is not a real directory"));
+    }
+    reject_protected_host_root(&canonical_root, root, cwd)?;
+    Ok(canonical_root)
+}
+
+fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), CacheError> {
+    if !root.is_absolute() {
+        return Err(root_refused(root, "the store root must be absolute"));
+    }
+    if root
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(root_refused(
+            root,
+            "parent-directory components are not accepted in a store root",
+        ));
+    }
+    let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
+    match fs::symlink_metadata(root) {
+        Ok(_) => validate_existing_host_store_root(root, &cwd)
+            .map(|root| (root, RootOpenState::Existing)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let parent = root.parent().ok_or_else(|| {
+                root_refused(root, "a store root must have an existing parent directory")
+            })?;
+            match fs::symlink_metadata(parent) {
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    return Err(root_refused(
+                        root,
+                        "a store root's immediate parent must already exist",
+                    ));
+                }
+                Err(err) => return Err(host_io(parent, err)),
+            }
+            reject_symlink_components(parent)?;
+            let canonical_parent = match fs::canonicalize(parent) {
+                Ok(parent) => parent,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    return Err(root_refused(
+                        root,
+                        "a store root's immediate parent must already exist",
+                    ));
+                }
+                Err(err) => return Err(host_io(parent, err)),
+            };
+            let metadata = fs::symlink_metadata(&canonical_parent)
+                .map_err(|err| host_io(&canonical_parent, err))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(root_refused(
+                    root,
+                    "a store root's parent is not a real directory",
+                ));
+            }
+            let leaf = root.file_name().ok_or_else(|| {
+                root_refused(root, "a store root must name a dedicated leaf directory")
+            })?;
+            let canonical_root = canonical_parent.join(leaf);
+            reject_protected_host_root(&canonical_root, root, &cwd)?;
+            match fs::create_dir(&canonical_root) {
+                Ok(()) => Ok((canonical_root, RootOpenState::CreatedHostLeaf)),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    validate_existing_host_store_root(root, &cwd)
+                        .map(|root| (root, RootOpenState::Existing))
+                }
+                Err(err) => Err(host_io(&canonical_root, err)),
+            }
+        }
+        Err(err) => Err(host_io(root, err)),
+    }
+}
+
+/// Result of a one-shot cache clear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheClearOutcome {
+    /// A managed namespace tree was quarantined and removed.
+    Cleared,
+    /// The configured root or its managed namespace tree was already absent.
+    AlreadyAbsent,
+}
+
+#[derive(Debug)]
+enum ClearState {
+    Absent,
+    Owned {
+        canonical_root: PathBuf,
+        owner: Vec<u8>,
+    },
+}
+
+/// A non-creating, single-use authorization for `--clear-cache`.
+///
+/// Authorization is intentionally host-only: it binds the configured path to
+/// its canonical identity, rejects symlinked components and protected roots,
+/// and verifies the path-bound ownership marker plus a format stamp. Clearing
+/// retains the root and both stamps; only the managed `ns` subtree is atomically
+/// quarantined and recursively removed.
+#[derive(Debug)]
+pub struct CacheClearAuthorization {
+    configured_root: PathBuf,
+    state: ClearState,
+}
+
+impl CacheClearAuthorization {
+    /// Inspect `root` without creating or stamping it.
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::RootRefused`] for dangerous, symlinked, foreign, or
+    /// unstamped roots, and [`CacheError::Storage`] for host I/O failures.
+    pub fn authorize(root: impl AsRef<Path>) -> Result<Self, CacheError> {
+        let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
+        let configured_root = absolute_without_parent_components(root.as_ref(), &cwd)?;
+        let state = match fs::symlink_metadata(&configured_root) {
+            Ok(_) => {
+                let (canonical_root, owner) = validate_host_owned_root(&configured_root, &cwd)?;
+                ClearState::Owned {
+                    canonical_root,
+                    owner,
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => ClearState::Absent,
+            Err(err) => return Err(host_io(&configured_root, err)),
+        };
+        Ok(Self {
+            configured_root,
+            state,
+        })
+    }
+
+    /// The absolute configured root this authorization names.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.configured_root
+    }
+
+    /// Consume this authorization and clear only the managed namespace tree.
+    ///
+    /// The root is revalidated immediately before the linearization point.
+    /// `ns` is then renamed to a unique sibling inside the retained root; all
+    /// stale Store handles still address the original `ns` path and can only
+    /// recreate fresh cache content, never write into the quarantined tree.
+    pub fn clear(self) -> Result<CacheClearOutcome, CacheError> {
+        let ClearState::Owned {
+            canonical_root,
+            owner,
+        } = self.state
+        else {
+            return Ok(CacheClearOutcome::AlreadyAbsent);
+        };
+        let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
+        let (current_root, current_owner) = validate_host_owned_root(&self.configured_root, &cwd)?;
+        if current_root != canonical_root || current_owner != owner {
+            return Err(root_refused(
+                &self.configured_root,
+                "root identity changed after clear authorization",
+            ));
+        }
+
+        let namespaces = canonical_root.join("ns");
+        let mut quarantine = None;
+        for _ in 0..MAX_QUARANTINE_ATTEMPTS {
+            let candidate = canonical_root.join(format!(
+                ".fmn-clear.{}.{}",
+                std::process::id(),
+                NEXT_CLEAR.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => {
+                    quarantine = Some(candidate);
+                    break;
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(host_io(&candidate, err)),
+            }
+        }
+        let quarantine = quarantine.ok_or_else(|| {
+            root_refused(
+                &self.configured_root,
+                format!(
+                    "could not reserve a quarantine directory after \
+                     {MAX_QUARANTINE_ATTEMPTS} collision attempts"
+                ),
+            )
+        })?;
+        let (final_root, final_owner) = validate_host_owned_root(&self.configured_root, &cwd)?;
+        if final_root != canonical_root || final_owner != owner {
+            return Err(root_refused(
+                &self.configured_root,
+                "root identity changed while reserving the clear quarantine",
+            ));
+        }
+        let quarantined_namespaces = quarantine.join("ns");
+        match fs::rename(&namespaces, &quarantined_namespaces) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                fs::remove_dir(&quarantine).map_err(|cleanup_err| {
+                    host_io(
+                        &quarantine,
+                        io::Error::new(
+                            cleanup_err.kind(),
+                            format!(
+                                "cache namespace was absent but its empty quarantine could not be removed: {cleanup_err}"
+                            ),
+                        ),
+                    )
+                })?;
+                refresh_host_format_stamp(&canonical_root)?;
+                return Ok(CacheClearOutcome::AlreadyAbsent);
+            }
+            Err(err) => {
+                let _ = fs::remove_dir(&quarantine);
+                return Err(host_io(&namespaces, err));
+            }
+        }
+
+        fs::remove_dir_all(&quarantine).map_err(|err| host_io(&quarantine, err))?;
+        refresh_host_format_stamp(&canonical_root)?;
+        Ok(CacheClearOutcome::Cleared)
+    }
+}
+
+fn refresh_host_format_stamp(root: &Path) -> Result<(), CacheError> {
+    fmn_platform::fs::StdFs
+        .write_atomic(
+            &root.join(FORMAT_FILE),
+            format!("{FORMAT_STAMP}\n").as_bytes(),
+        )
+        .map_err(CacheError::Storage)
+}
+
+fn absolute_without_parent_components(path: &Path, cwd: &Path) -> Result<PathBuf, CacheError> {
+    if !path.is_absolute() {
+        return Err(root_refused(
+            path,
+            format!(
+                "destructive cache targets must be absolute (current directory: {})",
+                cwd.display()
+            ),
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(root_refused(
+            path,
+            "parent-directory components are not accepted for destructive targets",
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn validate_host_owned_root(
+    configured_root: &Path,
+    cwd: &Path,
+) -> Result<(PathBuf, Vec<u8>), CacheError> {
+    reject_symlink_components(configured_root)?;
+    let canonical_root =
+        fs::canonicalize(configured_root).map_err(|err| host_io(configured_root, err))?;
+    let metadata =
+        fs::symlink_metadata(&canonical_root).map_err(|err| host_io(&canonical_root, err))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(root_refused(
+            configured_root,
+            "root is not a real directory",
+        ));
+    }
+    reject_protected_host_root(&canonical_root, configured_root, cwd)?;
+    let owner_path = canonical_root.join(OWNER_FILE);
+    reject_symlink_leaf(&owner_path, configured_root, "ownership marker")?;
+    let owner = fs::read(&owner_path).map_err(|err| host_io(&owner_path, err))?;
+    let expected = owner_stamp(&canonical_root);
+    if owner != expected {
+        return Err(root_refused(
+            configured_root,
+            "ownership marker is absent, foreign, or bound to another path",
+        ));
+    }
+    let format_path = canonical_root.join(FORMAT_FILE);
+    reject_symlink_leaf(&format_path, configured_root, "format stamp")?;
+    let format = fs::read_to_string(&format_path).map_err(|err| host_io(&format_path, err))?;
+    if !format.trim_end().starts_with("fmn-cache ") {
+        return Err(root_refused(
+            configured_root,
+            "format stamp is absent or foreign",
+        ));
+    }
+    Ok((canonical_root, owner))
+}
+
+fn reject_protected_host_root(
+    canonical_root: &Path,
+    configured_root: &Path,
+    cwd: &Path,
+) -> Result<(), CacheError> {
+    if canonical_root.parent().is_none() {
+        return Err(root_refused(
+            configured_root,
+            "filesystem roots are never cache roots",
+        ));
+    }
+    let canonical_cwd = fs::canonicalize(cwd).map_err(|err| host_io(cwd, err))?;
+    if canonical_cwd.starts_with(canonical_root) {
+        return Err(root_refused(
+            configured_root,
+            "root is the current directory or one of its ancestors",
+        ));
+    }
+    let home = host_home().ok_or_else(|| {
+        root_refused(
+            configured_root,
+            "home directory is unavailable; destructive authorization fails closed",
+        )
+    })?;
+    let canonical_home = fs::canonicalize(&home).map_err(|err| host_io(&home, err))?;
+    if canonical_home.starts_with(canonical_root) {
+        return Err(root_refused(
+            configured_root,
+            "root is the home directory or one of its ancestors",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    for component in ancestors {
+        let metadata = fs::symlink_metadata(component).map_err(|err| host_io(component, err))?;
+        if metadata.file_type().is_symlink() {
+            return Err(root_refused(
+                path,
+                "root contains a symlinked path component",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_leaf(path: &Path, root: &Path, label: &str) -> Result<(), CacheError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(root_refused(root, format!("{label} is absent")));
+        }
+        Err(err) => return Err(host_io(path, err)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(root_refused(root, format!("{label} is not a regular file")));
+    }
+    Ok(())
+}
+
+fn host_home() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = env::var_os("HOMEDRIVE")?;
+            let path = env::var_os("HOMEPATH")?;
+            Some(PathBuf::from(drive).join(path))
+        })
+}
+
+fn host_io(path: &Path, err: io::Error) -> CacheError {
+    let err = if err.kind() == io::ErrorKind::NotFound {
+        FsError::NotFound {
+            path: path.to_path_buf(),
+        }
+    } else {
+        FsError::Io {
+            path: path.to_path_buf(),
+            err,
+        }
+    };
+    CacheError::Storage(err)
 }
 
 /// Config-visible store knobs (surfaced through fmn-config once fm-3gl's
@@ -222,35 +736,30 @@ impl fmt::Debug for Store {
 }
 
 impl Store {
-    /// Open (creating if needed) the store at `root`, stamping or verifying
-    /// its format.
+    /// Open (creating if needed) the owned store at `root`.
+    ///
+    /// A missing absolute leaf under an existing real parent may be claimed.
+    /// Any existing unstamped directory (including an empty one), a symlinked
+    /// host path, a copied/path-mismatched ownership marker, or a lost stamp
+    /// race is refused.
     ///
     /// # Errors
-    /// [`CacheError::FormatUnsupported`] if the root carries a stamp from a
-    /// different store format, or [`CacheError::Storage`].
+    /// [`CacheError::RootRefused`] if ownership cannot be proven,
+    /// [`CacheError::FormatUnsupported`] if the owned root carries a stamp
+    /// from a different store format, or [`CacheError::Storage`].
     pub fn open(
         fs: Arc<dyn FileSystem>,
         clock: Arc<dyn Clock>,
         root: impl Into<PathBuf>,
         config: StoreConfig,
     ) -> Result<Self, CacheError> {
-        let root = root.into();
-        let stamp_path = root.join(FORMAT_FILE);
-        match fs.read_to_string(&stamp_path) {
-            Ok(found) => {
-                if found.trim_end() != FORMAT_STAMP {
-                    return Err(CacheError::FormatUnsupported {
-                        found: found.trim_end().to_owned(),
-                    });
-                }
-            }
-            Err(FsError::NotFound { .. }) => {
-                // First opener stamps; a concurrent loser of this race just
-                // finds the identical stamp already present.
-                let _ = fs.create_new(&stamp_path, format!("{FORMAT_STAMP}\n").as_bytes())?;
-            }
-            Err(err) => return Err(err.into()),
-        }
+        let requested_root = root.into();
+        let (root, state) = if fs.grants_host_destructive_lifecycle() {
+            prepare_host_store_root(&requested_root)?
+        } else {
+            (requested_root, RootOpenState::CapabilityManaged)
+        };
+        ensure_owned_root(fs.as_ref(), &root, state)?;
 
         let entry_limits = Limits {
             max_field: config.max_entry_bytes,
@@ -317,25 +826,6 @@ impl Store {
         ns.load_index();
         let _ = ns.purge_stale_versions();
         Ok(ns)
-    }
-
-    /// Drop the entire store — the `--clear-cache` operation, safe at any
-    /// moment: concurrent readers see misses and concurrent writers recreate
-    /// whatever they need. The format stamp is re-laid immediately.
-    ///
-    /// # Errors
-    /// [`CacheError::Storage`] on a filesystem failure other than the root
-    /// already being absent.
-    pub fn clear(&self) -> Result<(), CacheError> {
-        match self.inner.fs.remove_dir_all(&self.inner.root) {
-            Ok(()) | Err(FsError::NotFound { .. }) => {}
-            Err(err) => return Err(err.into()),
-        }
-        let _ = self.inner.fs.create_new(
-            &self.inner.root.join(FORMAT_FILE),
-            format!("{FORMAT_STAMP}\n").as_bytes(),
-        )?;
-        Ok(())
     }
 }
 
