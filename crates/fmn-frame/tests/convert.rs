@@ -4,7 +4,7 @@
 
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::half::{f16_from_f32, f16_to_f64};
-use fmn_frame::transfer::{TransferTables, quantize8, srgb_decode, srgb_encode};
+use fmn_frame::transfer::{TransferTables, quantize8, srgb_decode, srgb_encode, tables};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 
 /// A w×h RGBA8 buffer filled with one color.
@@ -205,10 +205,14 @@ fn kernels_honor_strides_and_leave_padding_untouched() {
 
 /// Write one RGBA16F pixel from f32 channel values.
 fn put_f16_px(b: &mut FrameBuffer, x: usize, y: usize, rgba: [f32; 4]) {
+    put_f16_bits_px(b, x, y, rgba.map(f16_from_f32));
+}
+
+/// Write one RGBA16F pixel from raw binary16 channel bits.
+fn put_f16_bits_px(b: &mut FrameBuffer, x: usize, y: usize, rgba: [u16; 4]) {
     let stride = b.layout().stride(0);
     let at = y * stride + x * 8;
-    for (ch, v) in rgba.iter().enumerate() {
-        let bits = f16_from_f32(*v);
+    for (ch, bits) in rgba.iter().enumerate() {
         b.plane_mut(0)[at + ch * 2..at + ch * 2 + 2].copy_from_slice(&bits.to_le_bytes());
     }
 }
@@ -228,7 +232,7 @@ fn certified_conversion_anchors() {
 }
 
 #[test]
-fn certified_conversion_is_deterministic_and_matches_the_scalar_path() {
+fn certified_conversion_is_deterministic() {
     // A varied deterministic pattern over every channel.
     let mut src = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba16F, 16, 16).unwrap());
     let mut state = 0x9e37_79b9_u32;
@@ -250,20 +254,194 @@ fn certified_conversion_is_deterministic_and_matches_the_scalar_path() {
     rgba16f_to_rgba8(&src, &mut once).unwrap();
     rgba16f_to_rgba8(&src, &mut twice).unwrap();
     assert_eq!(once.as_bytes(), twice.as_bytes());
+}
 
-    // The table path IS the scalar fmn-dmath path, entry for entry.
-    let t1 = TransferTables::build();
-    let t2 = TransferTables::build();
-    for bits in (0..=u16::MAX).step_by(7) {
-        assert_eq!(t1.srgb8_from_f16(bits), t2.srgb8_from_f16(bits));
+#[test]
+fn transfer_tables_match_the_scalar_path_for_every_f16_pattern() {
+    // The table path IS the scalar fmn-dmath path, entry for entry,
+    // including every negative, infinity, and NaN representation.
+    let table = TransferTables::build();
+    for bits in 0..=u16::MAX {
         let v = f16_to_f64(bits);
         let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
         assert_eq!(
-            t1.srgb8_from_f16(bits),
+            table.srgb8_from_f16(bits),
             quantize8(srgb_encode(v)),
             "srgb table diverges from scalar at {bits:#06x}"
         );
-        assert_eq!(t1.linear8_from_f16(bits), quantize8(v));
+        assert_eq!(
+            table.linear8_from_f16(bits),
+            quantize8(v),
+            "linear table diverges from scalar at {bits:#06x}"
+        );
+    }
+}
+
+#[test]
+fn certified_kernel_visits_every_f16_table_entry() {
+    const SIDE: u32 = 256;
+
+    let mut src = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba16F, SIDE, SIDE).unwrap());
+    for bits in 0..=u16::MAX {
+        let pixel = usize::from(bits);
+        put_f16_bits_px(
+            &mut src,
+            pixel % SIDE as usize,
+            pixel / SIDE as usize,
+            [bits; 4],
+        );
+    }
+    let mut dst = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, SIDE, SIDE).unwrap());
+    rgba16f_to_rgba8(&src, &mut dst).unwrap();
+
+    let table = tables();
+    for bits in 0..=u16::MAX {
+        let pixel = usize::from(bits);
+        let at = pixel * 4;
+        assert_eq!(
+            &dst.plane(0)[at..at + 4],
+            &[
+                table.srgb8_from_f16(bits),
+                table.srgb8_from_f16(bits),
+                table.srgb8_from_f16(bits),
+                table.linear8_from_f16(bits),
+            ],
+            "kernel diverges from table at {bits:#06x}"
+        );
+    }
+}
+
+#[test]
+fn certified_conversion_covers_stride_and_width_boundaries() {
+    const SENTINEL: u8 = 0xA7;
+    const WIDTHS: [u32; 11] = [1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33];
+
+    for width in WIDTHS {
+        for (src_alignment, dst_alignment) in [(8, 4), (8, 32), (64, 4), (64, 32)] {
+            let mut src = FrameBuffer::new(
+                FrameLayout::with_row_alignment(PixelFormat::Rgba16F, width, 3, src_alignment)
+                    .unwrap(),
+            );
+            src.as_bytes_mut().fill(SENTINEL);
+            let src_stride = src.layout().stride(0);
+            for y in 0..3 {
+                let row = &mut src.plane_mut(0)[y * src_stride..(y + 1) * src_stride];
+                for x in 0..width as usize {
+                    for ch in 0..4 {
+                        let bits = (x as u16)
+                            .wrapping_mul(40_503)
+                            .wrapping_add((y as u16).wrapping_mul(9_973))
+                            .wrapping_add((ch as u16).wrapping_mul(17_189));
+                        row[x * 8 + ch * 2..x * 8 + ch * 2 + 2]
+                            .copy_from_slice(&bits.to_le_bytes());
+                    }
+                }
+            }
+            let src_before = src.as_bytes().to_vec();
+
+            let mut dst = FrameBuffer::new(
+                FrameLayout::with_row_alignment(PixelFormat::Rgba8, width, 3, dst_alignment)
+                    .unwrap(),
+            );
+            dst.as_bytes_mut().fill(SENTINEL);
+            rgba16f_to_rgba8(&src, &mut dst).unwrap();
+            assert_eq!(src.as_bytes(), src_before);
+
+            let dst_stride = dst.layout().stride(0);
+            for y in 0..3 {
+                let s_row = &src.plane(0)[y * src_stride..(y + 1) * src_stride];
+                let d_row = &dst.plane(0)[y * dst_stride..(y + 1) * dst_stride];
+                for x in 0..width as usize {
+                    let mut expected = [0u8; 4];
+                    for (ch, byte) in expected.iter_mut().enumerate() {
+                        let at = x * 8 + ch * 2;
+                        let bits = u16::from_le_bytes([s_row[at], s_row[at + 1]]);
+                        *byte = if ch == 3 {
+                            tables().linear8_from_f16(bits)
+                        } else {
+                            tables().srgb8_from_f16(bits)
+                        };
+                    }
+                    assert_eq!(
+                        &d_row[x * 4..x * 4 + 4],
+                        &expected,
+                        "width={width}, src_alignment={src_alignment}, \
+                         dst_alignment={dst_alignment}, x={x}, y={y}"
+                    );
+                }
+                assert!(
+                    d_row[width as usize * 4..]
+                        .iter()
+                        .all(|&byte| byte == SENTINEL),
+                    "destination padding touched for width={width}, \
+                     src_alignment={src_alignment}, dst_alignment={dst_alignment}, y={y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn swizzle_covers_both_formats_strides_and_width_boundaries() {
+    const SENTINEL: u8 = 0xD3;
+    const WIDTHS: [u32; 11] = [1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33];
+
+    for width in WIDTHS {
+        for (src_format, dst_format) in [
+            (PixelFormat::Rgba8, PixelFormat::Bgra8),
+            (PixelFormat::Bgra8, PixelFormat::Rgba8),
+        ] {
+            for (src_alignment, dst_alignment) in [(4, 4), (4, 32), (64, 4), (64, 32)] {
+                let mut src = FrameBuffer::new(
+                    FrameLayout::with_row_alignment(src_format, width, 3, src_alignment).unwrap(),
+                );
+                src.as_bytes_mut().fill(SENTINEL);
+                let src_stride = src.layout().stride(0);
+                for y in 0..3 {
+                    let row = &mut src.plane_mut(0)[y * src_stride..(y + 1) * src_stride];
+                    for x in 0..width as usize {
+                        row[x * 4..x * 4 + 4].copy_from_slice(&[
+                            x as u8,
+                            (y * 61) as u8,
+                            (x * 17 + y * 29) as u8,
+                            255 - x as u8,
+                        ]);
+                    }
+                }
+                let src_before = src.as_bytes().to_vec();
+
+                let mut dst = FrameBuffer::new(
+                    FrameLayout::with_row_alignment(dst_format, width, 3, dst_alignment).unwrap(),
+                );
+                dst.as_bytes_mut().fill(SENTINEL);
+                swap_rb8(&src, &mut dst).unwrap();
+                assert_eq!(src.as_bytes(), src_before);
+
+                let dst_stride = dst.layout().stride(0);
+                for y in 0..3 {
+                    let s_row = &src.plane(0)[y * src_stride..(y + 1) * src_stride];
+                    let d_row = &dst.plane(0)[y * dst_stride..(y + 1) * dst_stride];
+                    for x in 0..width as usize {
+                        let s = &s_row[x * 4..x * 4 + 4];
+                        assert_eq!(
+                            &d_row[x * 4..x * 4 + 4],
+                            &[s[2], s[1], s[0], s[3]],
+                            "width={width}, src={src_format:?}, dst={dst_format:?}, \
+                             src_alignment={src_alignment}, dst_alignment={dst_alignment}, \
+                             x={x}, y={y}"
+                        );
+                    }
+                    assert!(
+                        d_row[width as usize * 4..]
+                            .iter()
+                            .all(|&byte| byte == SENTINEL),
+                        "destination padding touched for width={width}, src={src_format:?}, \
+                         dst={dst_format:?}, src_alignment={src_alignment}, \
+                         dst_alignment={dst_alignment}, y={y}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -289,7 +467,7 @@ fn srgb_round_trip_precision() {
             "linear {linear}: byte {byte} vs encoded {expected}"
         );
         // And decoding lands back near the original linear value.
-        let back = srgb_decode(f64::from(byte) / 255.0);
+        let back = srgb_decode(f64::from(byte) / 255.0); // ubs:ignore — sRGB transfer, not JWT
         assert!((back - linear).abs() < 0.01, "linear {linear} → {back}");
     }
 }

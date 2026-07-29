@@ -16,6 +16,18 @@
 //! touched), allocates nothing, and reads/writes in output orientation
 //! only (D-23: no vflip exists anywhere in the system).
 //!
+//! # Build-tier result
+//!
+//! fm-4wt.4 profiled these kernels under the governed portable and
+//! x86-64-v3 build tiers. Fixed-size pixel chunks remove indexing work
+//! from the exact binary16-table path and let the portable compiler
+//! vectorize the swizzle; LLVM lowers the same swizzle source to
+//! `vpshufb` at v3. An explicit `std::simd` byte-gather prototype was
+//! slower at every measured size: AVX2 has no native byte gather, so it
+//! added lane assembly around scalar table loads. The certified
+//! conversion therefore keeps the faster scalar gathers and exact
+//! 65,536-entry tables; build-tier selection never forces a slower route.
+//!
 //! # The fixed-point contract
 //!
 //! Coefficients are BT.709 (Kr = 0.2126, Kb = 0.0722) scaled by 2¹⁶ and
@@ -30,7 +42,19 @@
 use crate::FrameError;
 use crate::buffer::FrameBuffer;
 use crate::format::{ChromaSiting, ColorRange, PixelFormat};
-use crate::transfer::tables;
+use crate::transfer::{TransferTables, tables};
+
+#[inline]
+fn convert_rgba16f_pixels(src: &[[u8; 8]], dst: &mut [[u8; 4]], tables: &TransferTables) {
+    for (s, d) in src.iter().zip(dst) {
+        *d = [
+            tables.srgb8_from_f16(u16::from_le_bytes([s[0], s[1]])),
+            tables.srgb8_from_f16(u16::from_le_bytes([s[2], s[3]])),
+            tables.srgb8_from_f16(u16::from_le_bytes([s[4], s[5]])),
+            tables.linear8_from_f16(u16::from_le_bytes([s[6], s[7]])),
+        ];
+    }
+}
 
 /// One BT.709 RGB → Y′CbCr coefficient set, Q16.16.
 struct Coef {
@@ -136,16 +160,11 @@ pub fn rgba16f_to_rgba8(src: &FrameBuffer, dst: &mut FrameBuffer) -> Result<(), 
     for y in 0..height {
         let s_row = &src_plane[y * src_stride..y * src_stride + width * 8];
         let d_row = &mut dst_plane[y * dst_stride..y * dst_stride + width * 4];
-        for x in 0..width {
-            let s = &s_row[x * 8..x * 8 + 8];
-            let d = &mut d_row[x * 4..x * 4 + 4];
-            for ch in 0..3 {
-                let bits = u16::from_le_bytes([s[ch * 2], s[ch * 2 + 1]]);
-                d[ch] = t.srgb8_from_f16(bits);
-            }
-            let a_bits = u16::from_le_bytes([s[6], s[7]]);
-            d[3] = t.linear8_from_f16(a_bits);
-        }
+        let (src_pixels, src_tail) = s_row.as_chunks::<8>();
+        let (dst_pixels, dst_tail) = d_row.as_chunks_mut::<4>();
+        debug_assert!(src_tail.is_empty());
+        debug_assert!(dst_tail.is_empty());
+        convert_rgba16f_pixels(src_pixels, dst_pixels, t);
     }
     Ok(())
 }
@@ -338,13 +357,12 @@ pub fn swap_rb8(src: &FrameBuffer, dst: &mut FrameBuffer) -> Result<(), FrameErr
     for y in 0..height {
         let s_row = &src_plane[y * src_stride..y * src_stride + width * 4];
         let d_row = &mut dst_plane[y * dst_stride..y * dst_stride + width * 4];
-        for x in 0..width {
-            let s = &s_row[x * 4..x * 4 + 4];
-            let d = &mut d_row[x * 4..x * 4 + 4];
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
-            d[3] = s[3];
+        let (src_pixels, src_tail) = s_row.as_chunks::<4>();
+        let (dst_pixels, dst_tail) = d_row.as_chunks_mut::<4>();
+        debug_assert!(src_tail.is_empty());
+        debug_assert!(dst_tail.is_empty());
+        for (s, d) in src_pixels.iter().zip(dst_pixels) {
+            *d = [s[2], s[1], s[0], s[3]];
         }
     }
     Ok(())
