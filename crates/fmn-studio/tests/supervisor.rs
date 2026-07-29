@@ -892,6 +892,17 @@ impl WorkerLauncher for TcpLauncher {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // Darwin carries the listener's nonblocking mode onto the
+                    // accepted socket. The channel below is intentionally
+                    // blocking and enforces its own read/write deadlines.
+                    if let Err(error) = stream.set_nonblocking(false) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(LaunchError::Spawn {
+                            program: artifact.executable.clone(),
+                            error,
+                        });
+                    }
                     return Ok(Box::new(TcpChannel {
                         stream,
                         child: Some(child),
