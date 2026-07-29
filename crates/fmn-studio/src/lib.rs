@@ -11,6 +11,8 @@
 
 pub mod host;
 pub mod inspect;
+#[cfg(feature = "metal")]
+pub mod preview;
 pub mod protocol;
 pub mod scrub;
 pub mod supervisor;
@@ -45,4 +47,13 @@ pub use tui::{TerminalPreview, TerminalProtocol, TuiError, TuiLimits};
 pub use worker::{ServiceError, WorkerServeError, WorkerServeOutcome, WorkerService, serve_worker};
 
 #[cfg(feature = "metal")]
-pub use fmn_render::metal::{PreviewFallback, PreviewFrame, PreviewRenderer, PreviewRoute};
+pub use fmn_render::metal::{
+    NativePreviewError, NativePreviewRenderer, NativePreviewReport, PresentOutcome,
+    PresentationPipelineInfo, PresentationState, PreviewFallback, PreviewFrame, PreviewRenderer,
+    PreviewRoute,
+};
+#[cfg(feature = "metal")]
+pub use preview::{
+    StudioPreviewConfig, StudioPreviewError, StudioPreviewOutput, StudioPreviewRenderer,
+    StudioPreviewRoute,
+};

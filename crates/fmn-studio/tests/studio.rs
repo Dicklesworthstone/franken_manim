@@ -182,6 +182,54 @@ fn studio_metal_feature_uses_the_truthful_preview_selector() {
     ));
 }
 
+#[cfg(all(feature = "metal", not(target_os = "macos")))]
+#[test]
+fn native_preview_unavailability_uses_the_cpu_visible_studio_stream() {
+    let mut renderer = fmn_studio::StudioPreviewRenderer::new(
+        fmn_studio::StudioPreviewConfig::new(16, 16, "fallback", 1),
+    )
+    .unwrap();
+    assert_eq!(
+        renderer.route(),
+        fmn_studio::StudioPreviewRoute::CpuStream(fmn_studio::PreviewFallback::Unavailable)
+    );
+    assert!(renderer.presentation_pipeline_info().is_none());
+    assert_eq!(renderer.poll_events().unwrap(), None);
+
+    let stage = Stage::new();
+    let config = fmn_render::FrameConfig::new(
+        fmn_render::Viewport {
+            width: 16,
+            height: 16,
+        },
+        fmn_render::ScreenMap {
+            scale: 1.0,
+            origin: [8.0, 8.0],
+        },
+        fmn_core::color::Srgb::from_rgb8(12, 18, 24).to_linear(1.0),
+    );
+    let mut plan = fmn_render::RenderPlan::new();
+    plan.sync(&stage, 0);
+    let mono = fmn_render::MonoTable::build(&plan, config.map);
+    let binning = fmn_render::Binning::build(
+        &plan,
+        config.viewport,
+        fmn_render::Tiling::default(),
+        config.map,
+    );
+    let output = renderer.render(&plan, &mono, &binning, config).unwrap();
+    let frame = output
+        .into_stream()
+        .expect("off-macOS Studio preview returns CPU-visible bytes");
+    assert_eq!(
+        frame.route,
+        fmn_studio::PreviewRoute::FastCpu(fmn_studio::PreviewFallback::Unavailable)
+    );
+    assert_eq!(frame.frame.as_bytes().len(), 16 * 16 * 4);
+    assert!(frame.metal.is_none());
+    renderer.close().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn kitty_preview_crosses_a_real_pseudoterminal() {

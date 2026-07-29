@@ -19,6 +19,10 @@ use fmn_hash::{Digest, Schema, Writer, sha256};
 use fmn_mobject::JointType;
 use ft_kernel_metal::Error as GatewayError;
 use ft_kernel_metal::compute::{Gateway, Grid, MathMode, Pipeline, SharedBuffer};
+use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
+pub use ft_kernel_metal::presentation::{
+    PresentOutcome, PresentationError, PresentationPipelineInfo, PresentationState,
+};
 
 use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, FrameJobError};
 use crate::fill::MonoTable;
@@ -60,6 +64,9 @@ const THREE_D_SHADER_DOT: u32 = 2;
 
 /// Canonical schema for the annex-specific half of C7.
 pub const METAL_BACKEND_SCHEMA: Schema = Schema::new(*b"FMNM", 1, 0, 1);
+
+/// Canonical schema for native Studio presentation provenance.
+pub const NATIVE_PREVIEW_BACKEND_SCHEMA: Schema = Schema::new(*b"FMNP", 1, 0, 1);
 
 /// Version-1 maximum linear-channel error for Metal versus certified.
 ///
@@ -255,13 +262,17 @@ pub struct MetalReport {
     pub thread_execution_width: usize,
     /// Bytes materialized into new input buffers for this frame.
     pub upload_bytes: usize,
-    /// Bytes copied to the host for the requested output.
+    /// Frame-pixel bytes copied to the host for the requested output.
+    ///
+    /// Status sentinels are control-plane validation, not frame pixels. Native
+    /// presentation reports zero here because its lifetime-held RGBA8 surface
+    /// remains GPU-visible through the drawable handoff.
     pub readback_bytes: usize,
     /// Whether the renderer reused its lifetime-held raw surface.
     pub raw_surface_reused: bool,
     /// Whether a converted output surface was reused.
     pub output_surface_reused: bool,
-    /// Host-observed prepare/upload/dispatch/readback wall time.
+    /// Host-observed prepare/upload/dispatch/output-handoff wall time.
     pub elapsed: Duration,
     /// Format copied back to the host.
     pub output_format: PixelFormat,
@@ -308,6 +319,145 @@ impl MetalReport {
     pub fn frames_per_second(&self) -> Option<f64> {
         let seconds = self.elapsed.as_secs_f64();
         (seconds > 0.0).then_some(1.0 / seconds)
+    }
+}
+
+/// A native Studio frame could not render or reach its drawable.
+#[derive(Debug)]
+pub enum NativePreviewError {
+    /// Lumen could not produce the lifetime-held RGBA8 surface.
+    Render(MetalError),
+    /// Frankentorch could not create, update, or present the native surface.
+    Presentation(PresentationError),
+}
+
+impl NativePreviewError {
+    /// Declared CPU-stream fallback, when this failure is backend-local.
+    ///
+    /// Caller input, frame-layout, and size failures remain errors. An
+    /// unsupported 3D primitive is a frame-local fallback; other admitted
+    /// backend and presentation failures demote the native route.
+    #[must_use]
+    pub fn stream_fallback(&self) -> Option<PreviewFallback> {
+        match self {
+            Self::Render(MetalError::Gateway(GatewayError::Unavailable))
+            | Self::Presentation(PresentationError::Unavailable) => {
+                Some(PreviewFallback::Unavailable)
+            }
+            Self::Render(error @ MetalError::UnsupportedThreeDPrimitive { .. }) => {
+                Some(PreviewFallback::Unsupported(error.to_string()))
+            }
+            Self::Render(error) if error.permits_preview_fallback() => {
+                Some(PreviewFallback::BackendFailure(error.to_string()))
+            }
+            Self::Presentation(
+                error @ (PresentationError::WrongThread
+                | PresentationError::Window(_)
+                | PresentationError::Pipeline(_)
+                | PresentationError::Closed
+                | PresentationError::CommandBuffer(_)),
+            ) => Some(PreviewFallback::BackendFailure(error.to_string())),
+            Self::Render(_)
+            | Self::Presentation(
+                PresentationError::InvalidDimensions { .. }
+                | PresentationError::InvalidStride { .. }
+                | PresentationError::SizeOverflow
+                | PresentationError::BufferTooSmall { .. },
+            ) => None,
+        }
+    }
+
+    /// Declared fallback during native-route construction.
+    ///
+    /// A missing Metal device and presentation-surface failures may select the
+    /// CPU stream. Renderer shader or pipeline construction failures remain
+    /// product errors instead of being hidden by fallback.
+    #[must_use]
+    pub fn construction_stream_fallback(&self) -> Option<PreviewFallback> {
+        match self {
+            Self::Render(MetalError::Gateway(GatewayError::Unavailable))
+            | Self::Presentation(_) => self.stream_fallback(),
+            Self::Render(_) => None,
+        }
+    }
+
+    /// Whether this is a per-frame capability gap rather than a dead backend.
+    #[must_use]
+    pub fn is_frame_local_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::Render(MetalError::UnsupportedThreeDPrimitive { .. })
+        )
+    }
+}
+
+impl fmt::Display for NativePreviewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Render(error) => error.fmt(f),
+            Self::Presentation(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for NativePreviewError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Render(error) => Some(error),
+            Self::Presentation(error) => Some(error),
+        }
+    }
+}
+
+impl From<MetalError> for NativePreviewError {
+    fn from(error: MetalError) -> Self {
+        Self::Render(error)
+    }
+}
+
+impl From<PresentationError> for NativePreviewError {
+    fn from(error: PresentationError) -> Self {
+        Self::Presentation(error)
+    }
+}
+
+/// PG-A evidence for one native Studio presentation attempt.
+#[derive(Debug, Clone)]
+pub struct NativePreviewReport {
+    /// Lumen render and transfer facts; `readback_bytes` is always zero.
+    pub metal: MetalReport,
+    /// Occupancy facts for frankentorch's drawable transfer pipeline.
+    pub presentation: PresentationPipelineInfo,
+    /// Whether a drawable was presented or temporarily unavailable.
+    pub outcome: PresentOutcome,
+}
+
+impl NativePreviewReport {
+    /// Stable combined renderer/presentation backend identity.
+    #[must_use]
+    pub fn backend_journal(&self) -> Vec<u8> {
+        let mut writer = Writer::new(NATIVE_PREVIEW_BACKEND_SCHEMA);
+        writer.put_bytes(&self.metal.backend_journal());
+        writer.put_str("native-cametal-layer");
+        writer.put_u64(self.presentation.threads_per_threadgroup[0] as u64);
+        writer.put_u64(self.presentation.threads_per_threadgroup[1] as u64);
+        writer.put_u64(self.presentation.max_threads_per_threadgroup as u64);
+        writer.put_u64(self.presentation.thread_execution_width as u64);
+        writer
+            .finish()
+            .expect("the fixed-size native preview identity fits the schema limits")
+    }
+
+    /// Digest of [`NativePreviewReport::backend_journal`].
+    #[must_use]
+    pub fn backend_digest(&self) -> Digest {
+        sha256(&self.backend_journal())
+    }
+
+    /// Frame-pixel bytes copied back to host memory.
+    #[must_use]
+    pub fn frame_pixel_readback_bytes(&self) -> usize {
+        self.metal.readback_bytes
     }
 }
 
@@ -584,22 +734,15 @@ impl MetalRenderer {
         config: FrameConfig,
     ) -> Result<(FrameBuffer, MetalReport), MetalError> {
         let started = Instant::now();
-        let job = FrameJob::for_metal(plan, mono, binning, config)?;
-        let flat = FlatFrame::derive(&job)?;
-        let raw_layout = config.layout()?;
-        let (raw_reused, upload_bytes) = self.dispatch_raster(&flat, raw_layout.total_bytes())?;
-
-        let (frame, output_reused, transfer_upload_bytes) =
-            self.transfer_rgba8(config.viewport.width, config.viewport.height)?;
+        let dispatch = self.dispatch_rgba8_surface(plan, mono, binning, config)?;
+        let frame = self.read_rgba8_surface()?;
         let report = self.report(
             &self.raster,
-            flat.tile().saturating_mul(flat.tile()),
-            upload_bytes
-                .checked_add(transfer_upload_bytes)
-                .ok_or(MetalError::SizeOverflow("frame upload count"))?,
+            dispatch.threads_per_threadgroup,
+            dispatch.upload_bytes,
             frame.as_bytes().len(),
-            raw_reused,
-            output_reused,
+            dispatch.raw_surface_reused,
+            dispatch.output_surface_reused,
             started.elapsed(),
             PixelFormat::Rgba8,
             None,
@@ -652,26 +795,69 @@ impl MetalRenderer {
         job: &ThreeDJob<'_>,
     ) -> Result<(FrameBuffer, MetalReport), MetalError> {
         let started = Instant::now();
-        let flat = FlatThreeDFrame::derive(job)?;
-        let layout = job.layout()?;
-        let (raw_reused, upload_bytes) = self.dispatch_three_d(&flat, layout.total_bytes())?;
-        let (frame, output_reused, transfer_upload_bytes) =
-            self.transfer_rgba8(layout.width(), layout.height())?;
+        let dispatch = self.dispatch_three_d_rgba8_surface(job)?;
+        let frame = self.read_rgba8_surface()?;
         let report = self.report(
             &self.three_d,
-            flat.tile().saturating_mul(flat.tile()),
-            upload_bytes
-                .checked_add(transfer_upload_bytes)
-                .ok_or(MetalError::SizeOverflow("3D frame upload count"))?,
+            dispatch.threads_per_threadgroup,
+            dispatch.upload_bytes,
             frame.as_bytes().len(),
-            raw_reused,
-            output_reused,
+            dispatch.raw_surface_reused,
+            dispatch.output_surface_reused,
             started.elapsed(),
             PixelFormat::Rgba8,
             None,
             None,
         );
         Ok((frame, report))
+    }
+
+    fn dispatch_rgba8_surface(
+        &mut self,
+        plan: &RenderPlan,
+        mono: &MonoTable,
+        binning: &Binning,
+        config: FrameConfig,
+    ) -> Result<Rgba8SurfaceDispatch, MetalError> {
+        let job = FrameJob::for_metal(plan, mono, binning, config)?;
+        let flat = FlatFrame::derive(&job)?;
+        let raw_layout = config.layout()?;
+        let (raw_surface_reused, upload_bytes) =
+            self.dispatch_raster(&flat, raw_layout.total_bytes())?;
+        let (output_surface_reused, transfer_upload_bytes) =
+            self.transfer_rgba8_surface(config.viewport.width, config.viewport.height)?;
+        Ok(Rgba8SurfaceDispatch {
+            width: config.viewport.width,
+            height: config.viewport.height,
+            threads_per_threadgroup: flat.tile().saturating_mul(flat.tile()),
+            upload_bytes: upload_bytes
+                .checked_add(transfer_upload_bytes)
+                .ok_or(MetalError::SizeOverflow("frame upload count"))?,
+            raw_surface_reused,
+            output_surface_reused,
+        })
+    }
+
+    fn dispatch_three_d_rgba8_surface(
+        &mut self,
+        job: &ThreeDJob<'_>,
+    ) -> Result<Rgba8SurfaceDispatch, MetalError> {
+        let flat = FlatThreeDFrame::derive(job)?;
+        let layout = job.layout()?;
+        let (raw_surface_reused, upload_bytes) =
+            self.dispatch_three_d(&flat, layout.total_bytes())?;
+        let (output_surface_reused, transfer_upload_bytes) =
+            self.transfer_rgba8_surface(layout.width(), layout.height())?;
+        Ok(Rgba8SurfaceDispatch {
+            width: layout.width(),
+            height: layout.height(),
+            threads_per_threadgroup: flat.tile().saturating_mul(flat.tile()),
+            upload_bytes: upload_bytes
+                .checked_add(transfer_upload_bytes)
+                .ok_or(MetalError::SizeOverflow("3D frame upload count"))?,
+            raw_surface_reused,
+            output_surface_reused,
+        })
     }
 
     /// Render and convert on-device to a negotiated NV12 layout.
@@ -927,11 +1113,11 @@ impl MetalRenderer {
         Ok((raw_reused, flat.upload_bytes()?))
     }
 
-    fn transfer_rgba8(
+    fn transfer_rgba8_surface(
         &mut self,
         width: u32,
         height: u32,
-    ) -> Result<(FrameBuffer, bool, usize), MetalError> {
+    ) -> Result<(bool, usize), MetalError> {
         let output_layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)?;
         let output_reused =
             ensure_output_surface(self.gateway, &mut self.output_surface, &output_layout)?;
@@ -972,17 +1158,17 @@ impl MetalRenderer {
         )?;
         verify_status(&status, group_count, RGBA8_KERNEL)?;
 
-        let mut frame = FrameBuffer::new(output_layout);
-        self.output_surface
+        Ok((output_reused, std::mem::size_of_val(&transfer_params)))
+    }
+
+    fn read_rgba8_surface(&self) -> Result<FrameBuffer, MetalError> {
+        let surface = self
+            .output_surface
             .as_ref()
-            .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?
-            .buffer
-            .read_u8(frame.as_bytes_mut())?;
-        Ok((
-            frame,
-            output_reused,
-            std::mem::size_of_val(&transfer_params),
-        ))
+            .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?;
+        let mut frame = FrameBuffer::new(surface.layout.clone());
+        surface.buffer.read_u8(frame.as_bytes_mut())?;
+        Ok(frame)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1018,6 +1204,161 @@ impl MetalRenderer {
             color_range,
             chroma_siting,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Rgba8SurfaceDispatch {
+    width: u32,
+    height: u32,
+    threads_per_threadgroup: usize,
+    upload_bytes: usize,
+    raw_surface_reused: bool,
+    output_surface_reused: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NativeRenderPipeline {
+    TwoD,
+    ThreeD,
+}
+
+/// Lumen's main-thread native Metal preview surface.
+///
+/// This owner couples the renderer's lifetime-held RGBA8 [`SharedBuffer`] to
+/// frankentorch's `CAMetalLayer` presenter. No frame-pixel readback occurs on
+/// this path. Browser multipart-PNG and terminal protocols are separate,
+/// CPU-visible stream consumers and are selected by `fmn-studio` only when
+/// native presentation is unavailable or fails.
+pub struct NativePreviewRenderer {
+    renderer: MetalRenderer,
+    presenter: NativePresenter,
+}
+
+impl fmt::Debug for NativePreviewRenderer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativePreviewRenderer")
+            .field("renderer", &self.renderer)
+            .field("presentation", &self.presenter.pipeline_info())
+            .field("closed", &self.presenter.is_closed())
+            .finish()
+    }
+}
+
+impl NativePreviewRenderer {
+    /// Open Lumen and a native `CAMetalLayer` preview window.
+    ///
+    /// Frankentorch enforces the process-main-thread requirement and retains
+    /// every AppKit, Objective-C, drawable, and command-buffer lifetime.
+    pub fn new(
+        width: u32,
+        height: u32,
+        title: impl Into<String>,
+    ) -> Result<Self, NativePreviewError> {
+        let config = PresentationConfig::new(width, height, title);
+        config.validate()?;
+        let renderer = MetalRenderer::new()?;
+        let presenter = NativePresenter::open(&renderer.gateway, config)?;
+        Ok(Self {
+            renderer,
+            presenter,
+        })
+    }
+
+    /// Fixed occupancy facts for the native drawable transfer pipeline.
+    #[must_use]
+    pub fn presentation_pipeline_info(&self) -> PresentationPipelineInfo {
+        self.presenter.pipeline_info()
+    }
+
+    /// Whether the native window has completed teardown.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.presenter.is_closed()
+    }
+
+    /// Drain pending AppKit events and report the native surface state.
+    pub fn poll_events(&mut self) -> Result<PresentationState, NativePreviewError> {
+        self.presenter.poll_events().map_err(Into::into)
+    }
+
+    /// Render and present a 2D Studio frame without copying frame pixels back
+    /// into host-owned memory.
+    pub fn render(
+        &mut self,
+        plan: &RenderPlan,
+        mono: &MonoTable,
+        binning: &Binning,
+        config: FrameConfig,
+    ) -> Result<NativePreviewReport, NativePreviewError> {
+        let started = Instant::now();
+        let dispatch = self
+            .renderer
+            .dispatch_rgba8_surface(plan, mono, binning, config)?;
+        self.present_dispatch(dispatch, NativeRenderPipeline::TwoD, started)
+    }
+
+    /// Render and present a prepared 3D Studio frame without frame-pixel
+    /// readback.
+    pub fn render_three_d(
+        &mut self,
+        job: &ThreeDJob<'_>,
+    ) -> Result<NativePreviewReport, NativePreviewError> {
+        let started = Instant::now();
+        let dispatch = self.renderer.dispatch_three_d_rgba8_surface(job)?;
+        self.present_dispatch(dispatch, NativeRenderPipeline::ThreeD, started)
+    }
+
+    /// Idempotently close the native preview surface.
+    pub fn close(&mut self) -> Result<(), NativePreviewError> {
+        self.presenter.close().map_err(Into::into)
+    }
+
+    fn present_dispatch(
+        &mut self,
+        dispatch: Rgba8SurfaceDispatch,
+        pipeline: NativeRenderPipeline,
+        started: Instant,
+    ) -> Result<NativePreviewReport, NativePreviewError> {
+        let surface = self
+            .renderer
+            .output_surface
+            .as_ref()
+            .ok_or(MetalError::Layout("RGBA8 surface disappeared"))?;
+        if surface.layout.width() != dispatch.width || surface.layout.height() != dispatch.height {
+            return Err(MetalError::Layout("RGBA8 presentation dimensions drifted").into());
+        }
+        let outcome = self.presenter.present_rgba8(
+            &surface.buffer,
+            dispatch.width,
+            dispatch.height,
+            surface.layout.stride(0),
+        )?;
+        let upload_bytes = dispatch
+            .upload_bytes
+            .checked_add(std::mem::size_of::<[u32; 3]>())
+            .ok_or(MetalError::SizeOverflow("native presentation upload count"))?;
+        let render_pipeline = match pipeline {
+            NativeRenderPipeline::TwoD => &self.renderer.raster,
+            NativeRenderPipeline::ThreeD => &self.renderer.three_d,
+        };
+        let metal = self.renderer.report(
+            render_pipeline,
+            dispatch.threads_per_threadgroup,
+            upload_bytes,
+            0,
+            dispatch.raw_surface_reused,
+            dispatch.output_surface_reused,
+            started.elapsed(),
+            PixelFormat::Rgba8,
+            None,
+            None,
+        );
+        Ok(NativePreviewReport {
+            metal,
+            presentation: self.presenter.pipeline_info(),
+            outcome,
+        })
     }
 }
 
@@ -2063,6 +2404,20 @@ mod tests {
     }
 
     #[test]
+    fn native_preview_validates_dimensions_before_platform_probe() {
+        let error = NativePreviewRenderer::new(0, 16, "invalid")
+            .err()
+            .expect("zero width is rejected");
+        assert!(matches!(
+            error,
+            NativePreviewError::Presentation(PresentationError::InvalidDimensions {
+                width: 0,
+                height: 16
+            })
+        ));
+    }
+
+    #[test]
     fn packed_transfer_table_is_the_authoritative_reel_table() {
         let (words, digest) = build_transfer_table();
         assert_eq!(words.len(), TRANSFER_TABLE_WORDS);
@@ -2109,6 +2464,23 @@ mod tests {
             }
             .permits_preview_fallback(),
             "frame-local capability gaps must not demote a healthy device"
+        );
+        assert_eq!(
+            NativePreviewError::Presentation(PresentationError::Unavailable).stream_fallback(),
+            Some(PreviewFallback::Unavailable)
+        );
+        assert!(matches!(
+            NativePreviewError::Presentation(PresentationError::WrongThread).stream_fallback(),
+            Some(PreviewFallback::BackendFailure(_))
+        ));
+        assert!(
+            NativePreviewError::Presentation(PresentationError::InvalidDimensions {
+                width: 0,
+                height: 1,
+            })
+            .stream_fallback()
+            .is_none(),
+            "caller layout errors must not be mislabeled as backend fallback"
         );
     }
 
