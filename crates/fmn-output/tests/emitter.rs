@@ -4,8 +4,8 @@
 
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_output::{
-    EmitterConfig, EmitterError, FrameReservation, FrameSink, OrderedEmitter, SinkBinding,
-    SinkFailure, SinkMode, SinkWrite,
+    CancelOutcome, EmitterConfig, EmitterError, FrameReservation, FrameSink, OrderedEmitter,
+    SinkBinding, SinkFailure, SinkMode, SinkWrite,
 };
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -402,7 +402,7 @@ fn sink_panics_are_contained_and_reported() {
     let sink = SinkBinding::reliable(
         "panics",
         |_sequence: u64, _frame: &FrameBuffer| -> Result<SinkWrite, SinkFailure> {
-            panic!("deliberate sink panic")
+            std::panic::panic_any("deliberate sink panic")
         },
     );
     let emitter = OrderedEmitter::new(config(1, 0), vec![sink]).expect("emitter");
@@ -471,4 +471,296 @@ fn reservation_order_is_fail_closed_without_poisoning_the_stream() {
         .expect("publish");
     emitter.finish().expect("drain");
     assert_eq!(lock(&frames).len(), 1);
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Lifecycle {
+    writes: u64,
+    finishes: u64,
+    aborts: u64,
+}
+
+struct LifecycleSink {
+    lifecycle: Arc<Mutex<Lifecycle>>,
+    fail_finish: bool,
+    panic_abort: bool,
+}
+
+impl FrameSink for LifecycleSink {
+    fn write_frame(
+        &mut self,
+        _sequence: u64,
+        _frame: &FrameBuffer,
+    ) -> Result<SinkWrite, SinkFailure> {
+        lock(&self.lifecycle).writes += 1;
+        Ok(SinkWrite::Consumed)
+    }
+
+    fn finish(&mut self) -> Result<(), SinkFailure> {
+        lock(&self.lifecycle).finishes += 1;
+        if self.fail_finish {
+            Err(SinkFailure::new("deliberate finish failure"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn abort(&mut self) {
+        lock(&self.lifecycle).aborts += 1;
+        assert!(!self.panic_abort, "deliberate abort panic");
+    }
+}
+
+fn lifecycle_sink(
+    name: &str,
+    fail_finish: bool,
+    panic_abort: bool,
+) -> (SinkBinding, Arc<Mutex<Lifecycle>>) {
+    let lifecycle = Arc::new(Mutex::new(Lifecycle::default()));
+    (
+        SinkBinding::reliable(
+            name,
+            LifecycleSink {
+                lifecycle: Arc::clone(&lifecycle),
+                fail_finish,
+                panic_abort,
+            },
+        ),
+        lifecycle,
+    )
+}
+
+#[test]
+fn successful_stream_finishes_without_aborting() {
+    let (sink, lifecycle) = lifecycle_sink("artifact", false, false);
+    let emitter = OrderedEmitter::new(config(1, 0), vec![sink]).expect("emitter");
+    fill(emitter.reserve(0).expect("reserve"), 1)
+        .publish()
+        .expect("publish");
+    emitter.finish().expect("successful finish");
+    assert_eq!(
+        *lock(&lifecycle),
+        Lifecycle {
+            writes: 1,
+            finishes: 1,
+            aborts: 0,
+        }
+    );
+}
+
+#[test]
+fn cancellation_aborts_every_sink_without_finishing() {
+    let (first, first_lifecycle) = lifecycle_sink("first", false, true);
+    let (second, second_lifecycle) = lifecycle_sink("second", false, false);
+    let emitter = OrderedEmitter::new(config(1, 0), vec![first, second]).expect("ordered emitter");
+    emitter.cancel();
+    let failure = emitter.finish().expect_err("cancelled");
+    assert_eq!(failure.error, EmitterError::Cancelled);
+    assert_eq!(
+        *lock(&first_lifecycle),
+        Lifecycle {
+            writes: 0,
+            finishes: 0,
+            aborts: 1,
+        }
+    );
+    assert_eq!(
+        *lock(&second_lifecycle),
+        Lifecycle {
+            writes: 0,
+            finishes: 0,
+            aborts: 1,
+        }
+    );
+}
+
+#[test]
+fn finish_failure_aborts_the_failing_and_remaining_sinks() {
+    let (first, first_lifecycle) = lifecycle_sink("first", true, false);
+    let (second, second_lifecycle) = lifecycle_sink("second", false, false);
+    let emitter = OrderedEmitter::new(config(1, 0), vec![first, second]).expect("ordered emitter");
+    fill(emitter.reserve(0).expect("reserve"), 1)
+        .publish()
+        .expect("publish");
+    let failure = emitter.finish().expect_err("first finish fails");
+    assert!(matches!(
+        failure.error,
+        EmitterError::SinkFailed { sequence: None, .. }
+    ));
+    assert_eq!(
+        *lock(&first_lifecycle),
+        Lifecycle {
+            writes: 1,
+            finishes: 1,
+            aborts: 1,
+        }
+    );
+    assert_eq!(
+        *lock(&second_lifecycle),
+        Lifecycle {
+            writes: 1,
+            finishes: 0,
+            aborts: 1,
+        }
+    );
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FinalizationRace {
+    prepares: u64,
+    commits: u64,
+    aborts: u64,
+}
+
+enum FinalizationGate {
+    Prepare,
+    Commit,
+}
+
+struct FinalizationGateSink {
+    lifecycle: Arc<Mutex<FinalizationRace>>,
+    gate: FinalizationGate,
+    entered: Option<SyncSender<()>>,
+    release: Receiver<()>,
+}
+
+impl FinalizationGateSink {
+    fn wait_at_gate(&mut self) -> Result<(), SinkFailure> {
+        if let Some(entered) = self.entered.take() {
+            entered
+                .send(())
+                .map_err(|error| SinkFailure::new(error.to_string()))?;
+            self.release
+                .recv()
+                .map_err(|error| SinkFailure::new(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+impl FrameSink for FinalizationGateSink {
+    fn write_frame(
+        &mut self,
+        _sequence: u64,
+        _frame: &FrameBuffer,
+    ) -> Result<SinkWrite, SinkFailure> {
+        Ok(SinkWrite::Consumed)
+    }
+
+    fn prepare_finish(&mut self) -> Result<(), SinkFailure> {
+        lock(&self.lifecycle).prepares += 1;
+        if matches!(self.gate, FinalizationGate::Prepare) {
+            self.wait_at_gate()?;
+        }
+        Ok(())
+    }
+
+    fn commit_finish(&mut self) -> Result<(), SinkFailure> {
+        lock(&self.lifecycle).commits += 1;
+        if matches!(self.gate, FinalizationGate::Commit) {
+            self.wait_at_gate()?;
+        }
+        Ok(())
+    }
+
+    fn abort(&mut self) {
+        lock(&self.lifecycle).aborts += 1;
+    }
+}
+
+fn finalization_gate_sink(
+    gate: FinalizationGate,
+) -> (
+    SinkBinding,
+    Arc<Mutex<FinalizationRace>>,
+    Receiver<()>,
+    SyncSender<()>,
+) {
+    let lifecycle = Arc::new(Mutex::new(FinalizationRace::default()));
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let binding = SinkBinding::reliable(
+        "publication",
+        FinalizationGateSink {
+            lifecycle: Arc::clone(&lifecycle),
+            gate,
+            entered: Some(entered_tx),
+            release: release_rx,
+        },
+    );
+    (binding, lifecycle, entered_rx, release_tx)
+}
+
+#[test]
+fn cancellation_during_prepare_wins_and_publication_never_runs() {
+    let (sink, lifecycle, entered, release) = finalization_gate_sink(FinalizationGate::Prepare);
+    let emitter = OrderedEmitter::new(config(1, 0), vec![sink]).expect("emitter");
+    let handle = emitter.handle();
+    let finisher = thread::spawn(move || emitter.finish());
+
+    entered
+        .recv_timeout(Duration::from_secs(2))
+        .expect("prepare entered");
+    assert_eq!(handle.cancel(), CancelOutcome::Won);
+    release.send(()).expect("release prepare");
+
+    let failure = finisher
+        .join()
+        .expect("finisher thread")
+        .expect_err("cancellation wins");
+    assert_eq!(failure.error, EmitterError::Cancelled);
+    assert_eq!(
+        *lock(&lifecycle),
+        FinalizationRace {
+            prepares: 1,
+            commits: 0,
+            aborts: 1,
+        }
+    );
+}
+
+#[test]
+fn cancellation_after_commit_grant_is_too_late_and_cannot_change_success() {
+    let (sink, lifecycle, entered, release) = finalization_gate_sink(FinalizationGate::Commit);
+    let emitter = OrderedEmitter::new(config(1, 0), vec![sink]).expect("emitter");
+    let handle = emitter.handle();
+    let finisher = thread::spawn(move || emitter.finish());
+
+    entered
+        .recv_timeout(Duration::from_secs(2))
+        .expect("commit entered");
+    let (cancelled_tx, cancelled_rx) = mpsc::sync_channel(1);
+    let canceller = thread::spawn(move || {
+        cancelled_tx
+            .send(handle.cancel())
+            .expect("cancellation receiver");
+    });
+    assert!(
+        matches!(
+            cancelled_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "cancellation must wait behind the publication grant"
+    );
+    release.send(()).expect("release commit");
+
+    finisher
+        .join()
+        .expect("finisher thread")
+        .expect("publication succeeds");
+    assert_eq!(
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancellation result"),
+        CancelOutcome::TooLate
+    );
+    canceller.join().expect("canceller thread");
+    assert_eq!(
+        *lock(&lifecycle),
+        FinalizationRace {
+            prepares: 1,
+            commits: 1,
+            aborts: 0,
+        }
+    );
 }

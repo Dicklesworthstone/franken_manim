@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use fmn_frame::ColorRange;
@@ -14,7 +14,7 @@ use fmn_output::{
     Boundary, BoundaryError, ColorDescription, Container, EncoderCapabilities, EncoderChoice,
     FfmpegTool, JobLimits, VideoJob, WireFormat, negotiate,
 };
-use fmn_platform::process::{ProcessOutcome, ScriptedRunner, StdProcessRunner};
+use fmn_platform::process::{ProcessOutcome, ProcessTermination, ScriptedRunner, StdProcessRunner};
 
 fn job(wire: WireFormat, container: Container, encoder: EncoderChoice) -> VideoJob {
     VideoJob {
@@ -313,11 +313,9 @@ fn scripted_tool(dir: &Path) -> (PathBuf, ScriptedRunner) {
     runner.script(
         &tool_path,
         ProcessOutcome {
-            code: Some(0),
+            termination: ProcessTermination::Exited(Some(0)),
             stdout: format!("{FAKE_VERSION}\nbuilt with fake-gcc\n").into_bytes(),
             stderr: Vec::new(),
-            timed_out: false,
-            truncated: false,
         },
     );
     (tool_path, runner)
@@ -372,8 +370,9 @@ fn scripted_encode(
     let (dir, _gate) = scratch("contract");
     let (tool_path, runner) = scripted_tool(&dir);
     let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
+    let runner = Arc::new(runner);
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
-    let boundary = Boundary::new(tool, &runner, JobLimits::default(), dir.clone());
+    let boundary = Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone());
     let destination = dir.join("final/out.mp4");
     let result = boundary
         .encode(
@@ -457,24 +456,22 @@ fn payload_geometry_is_checked_before_spawn() {
 #[test]
 fn failure_modes_map_to_typed_refusals() {
     let (dir, _gate) = scratch("failures");
-    let (tool_path, mut runner) = scripted_tool(&dir);
-    let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
     let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
     let j = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
 
     // Nonzero exit with stderr.
+    let (tool_path, mut runner) = scripted_tool(&dir);
+    let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     runner.script(
         &tool_path,
         ProcessOutcome {
-            code: Some(1),
+            termination: ProcessTermination::Exited(Some(1)),
             stdout: Vec::new(),
             stderr: b"Unknown encoder 'libx264'".to_vec(),
-            timed_out: false,
-            truncated: false,
         },
     );
-    let boundary = Boundary::new(tool.clone(), &runner, JobLimits::default(), dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone());
     let error = boundary
         .encode(&j, frames.clone(), &caps, &dir.join("a.mp4"))
         .expect_err("nonzero ffmpeg exit must be refused");
@@ -488,34 +485,34 @@ fn failure_modes_map_to_typed_refusals() {
     }
 
     // Timeout.
+    let (tool_path, mut runner) = scripted_tool(&dir);
+    let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     runner.script(
         &tool_path,
         ProcessOutcome {
-            code: None,
+            termination: ProcessTermination::TimedOut,
             stdout: Vec::new(),
             stderr: Vec::new(),
-            timed_out: true,
-            truncated: false,
         },
     );
-    let boundary = Boundary::new(tool.clone(), &runner, JobLimits::default(), dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone());
     assert!(matches!(
         boundary.encode(&j, frames.clone(), &caps, &dir.join("b.mp4")),
         Err(BoundaryError::JobTimedOut { .. })
     ));
 
     // Log overflow.
+    let (tool_path, mut runner) = scripted_tool(&dir);
+    let tool = FfmpegTool::resolve(&tool_path, &runner).unwrap();
     runner.script(
         &tool_path,
         ProcessOutcome {
-            code: None,
+            termination: ProcessTermination::OutputLimitExceeded,
             stdout: Vec::new(),
             stderr: Vec::new(),
-            timed_out: false,
-            truncated: true,
         },
     );
-    let boundary = Boundary::new(tool, &runner, JobLimits::default(), dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone());
     assert!(matches!(
         boundary.encode(&j, frames, &caps, &dir.join("c.mp4")),
         Err(BoundaryError::LogOverflow)
@@ -582,7 +579,7 @@ fn sandbox_publishes_atomically_and_pins_the_environment() {
         keep_workdir: true,
         ..JobLimits::default()
     };
-    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone());
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
     let destination = dir.join("published/movie.mp4");
     let frames = vec![7u8; WireFormat::Nv12.frame_bytes(64, 36)];
@@ -597,10 +594,12 @@ fn sandbox_publishes_atomically_and_pins_the_environment() {
 
     // Published by rename: destination holds the artifact bytes.
     assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
-    assert_eq!(report.provenance.destination, destination);
-    assert_eq!(report.provenance.encoder.as_deref(), Some("libx264"));
+    assert_eq!(report.destination, destination);
+    assert_eq!(report.invocations.len(), 1);
+    let invocation = &report.invocations[0];
+    assert_eq!(invocation.provenance.encoder.as_deref(), Some("libx264"));
     assert!(
-        report
+        invocation
             .provenance
             .tool_version
             .starts_with("ffmpeg version 7.1-fake")
@@ -608,7 +607,7 @@ fn sandbox_publishes_atomically_and_pins_the_environment() {
 
     // The env the child actually observed: pinned locale, private
     // TMPDIR, and no ambient leakage.
-    let workdir: PathBuf = report.provenance.argv.last().unwrap().into();
+    let workdir: PathBuf = invocation.provenance.argv.last().unwrap().into();
     let envdump = std::fs::read_to_string(format!("{}.envdump", workdir.display())).unwrap();
     assert!(envdump.contains("LANG=C"));
     assert!(envdump.contains("LC_ALL=C"));
@@ -627,25 +626,23 @@ fn sandbox_publishes_atomically_and_pins_the_environment() {
 #[test]
 fn sandbox_timeout_kills_and_leaves_destination_untouched() {
     let (dir, _gate) = scratch("timeout");
-    // `exec` so the sleep IS the direct child — the mechanism's kill
-    // promise covers the direct child (a plain `sleep` line would be a
-    // grandchild holding the pipes, the documented tree-kill gap).
-    let (tool, runner) = unprobed_tool(&dir, "#!/bin/sh\nexec sleep 5\n");
+    // The shell remains the direct child while `sleep` inherits its pipes.
+    // Returning promptly therefore proves the whole isolated process group
+    // was killed; direct-child-only cancellation would block until sleep exits.
+    let (tool, runner) = unprobed_tool(&dir, "#!/bin/sh\nsleep 5\n");
     let limits = JobLimits {
         timeout: Duration::from_millis(200),
         ..JobLimits::default()
     };
-    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone());
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
     let destination = dir.join("never.mp4");
-    let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+    let mut blocked_job = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+    blocked_job.width = 3840;
+    blocked_job.height = 2160;
+    let frames = vec![0u8; WireFormat::Nv12.frame_bytes(blocked_job.width, blocked_job.height)];
     let started = std::time::Instant::now();
-    let result = boundary.encode(
-        &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
-        frames,
-        &caps,
-        &destination,
-    );
+    let result = boundary.encode(&blocked_job, frames, &caps, &destination);
     assert!(
         matches!(result, Err(BoundaryError::JobTimedOut { .. })),
         "expected a timeout, got {result:?}"
@@ -669,7 +666,7 @@ fn sandbox_refuses_oversized_artifacts() {
         max_artifact_bytes: 1024,
         ..JobLimits::default()
     };
-    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone());
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
     let destination = dir.join("big.mp4");
     let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
@@ -700,7 +697,7 @@ fn sandbox_failed_job_preserves_existing_destination() {
         &dir,
         "#!/bin/sh\ncat > /dev/null\necho 'boom' >&2\nexit 7\n",
     );
-    let boundary = Boundary::new(tool, &runner, JobLimits::default(), dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone());
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
     let destination = dir.join("keep.mp4");
     std::fs::write(&destination, b"the old render").unwrap();
@@ -732,7 +729,7 @@ fn two_stage_mux_runs_both_stages_and_copies_video() {
         keep_workdir: true,
         ..JobLimits::default()
     };
-    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone());
     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
     let destination = dir.join("with_audio.mp4");
     let audio = dir.join("track.wav");
@@ -751,7 +748,8 @@ fn two_stage_mux_runs_both_stages_and_copies_video() {
 
     // The private dir's argv log shows both stages; stage 2 copied the
     // video stream and never re-encoded it.
-    let workdir: PathBuf = report.provenance.argv.last().unwrap().into();
+    assert_eq!(report.invocations.len(), 2);
+    let workdir: PathBuf = report.invocations[0].provenance.argv.last().unwrap().into();
     let log = std::fs::read_to_string(workdir.parent().unwrap().join("argv.log")).unwrap();
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 2, "expected two stages:\n{log}");
@@ -770,7 +768,7 @@ fn audio_transcode_uses_the_fake_capability_and_publishes_wav() {
         keep_workdir: true,
         ..JobLimits::default()
     };
-    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone());
     let input = dir.join("source.mp3");
     let destination = dir.join("decoded/track.wav");
     std::fs::write(&input, b"fake compressed audio").unwrap();
@@ -779,16 +777,18 @@ fn audio_transcode_uses_the_fake_capability_and_publishes_wav() {
         .transcode_audio(&input, &destination)
         .expect("fake ffmpeg decodes");
     assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
-    assert!(report.provenance.encoder.is_none());
+    assert_eq!(report.invocations.len(), 1);
+    let invocation = &report.invocations[0];
+    assert!(invocation.provenance.encoder.is_none());
     assert!(
-        report
+        invocation
             .provenance
             .argv
             .windows(2)
             .any(|args| { args == ["-acodec", "pcm_s16le"] })
     );
     assert!(
-        report
+        invocation
             .provenance
             .argv
             .last()
@@ -805,12 +805,13 @@ fn concat_writes_a_list_and_copies_streams() {
         keep_workdir: true,
         ..JobLimits::default()
     };
-    let boundary = Boundary::new(tool, &runner, limits, dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone());
     let parts = vec![dir.join("part0.mp4"), dir.join("part1.mp4")];
     let destination = dir.join("joined.mp4");
     let report = boundary.concat(&parts, &destination).unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
-    assert!(report.provenance.encoder.is_none());
+    assert_eq!(report.invocations.len(), 1);
+    assert!(report.invocations[0].provenance.encoder.is_none());
 
     // A quoted path is refused, not escaped.
     let evil = vec![dir.join("it's.mp4")];
@@ -834,7 +835,7 @@ fn real_ffmpeg_smoke() {
     assert!(caps.offers("libx264") || caps.offers("mpeg4"));
 
     let (dir, _gate) = scratch("real");
-    let boundary = Boundary::new(tool, &runner, JobLimits::default(), dir.clone());
+    let boundary = Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone());
     let destination = dir.join("smoke.mp4");
     let mut j = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
     j.fps = (30, 1);
@@ -845,10 +846,10 @@ fn real_ffmpeg_smoke() {
         .unwrap();
     let bytes = std::fs::read(&destination).unwrap();
     assert!(bytes.len() > 100, "suspiciously small mp4");
-    assert!(report.provenance.tool_sha256_hex.len() == 64);
+    assert!(report.invocations[0].provenance.tool_sha256_hex.len() == 64);
     println!(
         "real ffmpeg smoke OK: {} bytes via {}",
         bytes.len(),
-        report.provenance.tool_version
+        report.invocations[0].provenance.tool_version
     );
 }

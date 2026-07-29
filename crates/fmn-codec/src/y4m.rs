@@ -63,6 +63,66 @@ impl Y4mColorspace {
     }
 }
 
+/// Encode the complete y4m stream header.
+#[must_use]
+pub fn y4m_header(width: u32, height: u32, fps: (u32, u32), colorspace: Y4mColorspace) -> Vec<u8> {
+    format!(
+        "YUV4MPEG2 W{width} H{height} F{}:{} Ip A1:1 {}\n",
+        fps.0,
+        fps.1,
+        colorspace.tag()
+    )
+    .into_bytes()
+}
+
+/// Append one NV12 frame record to a reusable buffer.
+///
+/// The caller may clear and reuse `out` for each frame, keeping memory
+/// duration-independent. Stride padding is dropped and NV12 chroma is
+/// deinterleaved into y4m's planar I420 order.
+///
+/// # Errors
+/// [`Y4mError::WrongSource`] / [`Y4mError::GeometryMismatch`].
+pub fn append_y4m_frame_nv12(
+    out: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    frame: &FrameBuffer,
+) -> Result<(), Y4mError> {
+    let layout = frame.layout();
+    if layout.format() != PixelFormat::Nv12 {
+        return Err(Y4mError::WrongSource {
+            got: layout.format(),
+        });
+    }
+    if layout.width() != width || layout.height() != height {
+        return Err(Y4mError::GeometryMismatch);
+    }
+    let width = width as usize;
+    let height = height as usize;
+    out.extend_from_slice(b"FRAME\n");
+    let luma = frame.plane(0);
+    let luma_stride = layout.stride(0);
+    for row in 0..height {
+        out.extend_from_slice(&luma[row * luma_stride..row * luma_stride + width]);
+    }
+    let chroma = frame.plane(1);
+    let chroma_stride = layout.stride(1);
+    for row in 0..height / 2 {
+        let row = &chroma[row * chroma_stride..row * chroma_stride + width];
+        for pair in row.as_chunks::<2>().0 {
+            out.push(pair[0]);
+        }
+    }
+    for row in 0..height / 2 {
+        let row = &chroma[row * chroma_stride..row * chroma_stride + width];
+        for pair in row.as_chunks::<2>().0 {
+            out.push(pair[1]);
+        }
+    }
+    Ok(())
+}
+
 /// A y4m stream writer accumulating into bytes.
 #[derive(Debug)]
 pub struct Y4mWriter {
@@ -75,16 +135,7 @@ impl Y4mWriter {
     /// Begin a stream: the header carries the exact rational rate.
     #[must_use]
     pub fn new(width: u32, height: u32, fps: (u32, u32), colorspace: Y4mColorspace) -> Self {
-        let mut out = Vec::new();
-        out.extend_from_slice(
-            format!(
-                "YUV4MPEG2 W{width} H{height} F{}:{} Ip A1:1 {}\n",
-                fps.0,
-                fps.1,
-                colorspace.tag()
-            )
-            .as_bytes(),
-        );
+        let out = y4m_header(width, height, fps, colorspace);
         Self { width, height, out }
     }
 
@@ -95,41 +146,7 @@ impl Y4mWriter {
     /// # Errors
     /// [`Y4mError::WrongSource`] / [`Y4mError::GeometryMismatch`].
     pub fn write_frame_nv12(&mut self, frame: &FrameBuffer) -> Result<(), Y4mError> {
-        let layout = frame.layout();
-        if layout.format() != PixelFormat::Nv12 {
-            return Err(Y4mError::WrongSource {
-                got: layout.format(),
-            });
-        }
-        if layout.width() != self.width || layout.height() != self.height {
-            return Err(Y4mError::GeometryMismatch);
-        }
-        let w = self.width as usize;
-        let h = self.height as usize;
-        self.out.extend_from_slice(b"FRAME\n");
-        // Luma rows, payload only.
-        let luma = frame.plane(0);
-        let luma_stride = layout.stride(0);
-        for y in 0..h {
-            self.out
-                .extend_from_slice(&luma[y * luma_stride..y * luma_stride + w]);
-        }
-        // Chroma: NV12 interleaves CbCr; I420 wants all Cb then all Cr.
-        let chroma = frame.plane(1);
-        let chroma_stride = layout.stride(1);
-        for y in 0..h / 2 {
-            let row = &chroma[y * chroma_stride..y * chroma_stride + w];
-            for pair in row.as_chunks::<2>().0 {
-                self.out.push(pair[0]);
-            }
-        }
-        for y in 0..h / 2 {
-            let row = &chroma[y * chroma_stride..y * chroma_stride + w];
-            for pair in row.as_chunks::<2>().0 {
-                self.out.push(pair[1]);
-            }
-        }
-        Ok(())
+        append_y4m_frame_nv12(&mut self.out, self.width, self.height, frame)
     }
 
     /// Finish the stream.

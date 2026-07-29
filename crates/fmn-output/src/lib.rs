@@ -5,15 +5,18 @@
 //! negotiation model and deterministic argv construction (no `vflip`,
 //! no `eq`, structurally); [`ffmpeg`] is the sandboxed execution layer
 //! over fmn-platform's process capability: fingerprinted tool
-//! resolution, private per-job directories, environment allowlist,
-//! artifact verification, and atomic publication. ffmpeg is optional —
-//! its absence is a capability error naming the native alternative.
+//! resolution, job-scoped directories, environment allowlist, artifact
+//! verification, and atomic publication. Exclusive directory creation and
+//! spawn-time identity binding remain the `fm-yw7h` hardening contract.
+//! ffmpeg is optional — its absence is a capability error naming the native
+//! alternative.
 //!
 //! [`emitter`] is the bounded, preallocated, frame-index-ordered handoff
 //! between Lumen/runtime workers and every sink. [`sound`] is the native
 //! WAV/PCM path: sample-exact placement, a named deterministic resampler,
 //! ordered gain/duck mixing, explicit clipping evidence, and certified WAV
-//! bytes.
+//! bytes. [`sinks`] supplies the production, bounded adapters that compose
+//! those pieces into cancellation-safe native and negotiated artifacts.
 #![cfg_attr(
     any(
         test,
@@ -40,20 +43,28 @@
 pub mod emitter;
 pub mod ffmpeg;
 pub mod negotiate;
+pub mod sinks;
 pub mod sound;
 
 pub use emitter::{
-    EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport, EmitterStats,
-    FrameReservation, FrameSink, OrderedEmitter, SinkBinding, SinkFailure, SinkMode, SinkReport,
-    SinkWrite,
+    CancelOutcome, EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport,
+    EmitterStats, FrameReservation, FrameSink, OrderedEmitter, SinkBinding, SinkFailure, SinkMode,
+    SinkReport, SinkWrite,
 };
 pub use ffmpeg::{
     Boundary, BoundaryError, BoundaryReport, EncoderCapabilities, FfmpegTool, HARDWARE_ENCODERS,
-    JobLimits, NATIVE_ALTERNATIVE, Provenance,
+    InvocationReport, JobLimits, NATIVE_ALTERNATIVE, PreparedFfmpegArtifact, Provenance,
+    StreamingEncode,
 };
 pub use negotiate::{
     ColorDescription, Container, EncoderChoice, NegotiationError, Primaries, Transfer, VideoJob,
     WireFormat,
+};
+pub use sinks::{
+    FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, GifSink, GifSinkConfig, NativeArtifactKind,
+    NativeArtifactReport, OutputProfile, PngSink, PngSinkConfig, PngTarget, ReceiptError,
+    SinkAdapterError, SinkLimits, SinkReceipt, WavPublicationConfig, WavPublicationReport, Y4mSink,
+    Y4mSinkConfig, publish_wav,
 };
 pub use sound::{
     COMPILED_MIX_LANES, COMPILED_MIX_TIER, DitherPolicy, MixKernel, MixReport, MixerConfig,

@@ -27,7 +27,7 @@ pub mod wav;
 pub mod y4m;
 
 pub use deflate::{CompressionLevel, deflate as deflate_bytes, deflate_segment, zlib_compress};
-pub use gif::{GifError, encode_gif};
+pub use gif::{GifError, GifStreamEncoder, encode_gif};
 pub use inflate::{InflateError, inflate as inflate_bytes, zlib_decompress};
 pub use jpeg::{DecodedJpeg, JpegError, JpegLimits, decode as decode_jpeg};
 pub use png::{
@@ -35,4 +35,6 @@ pub use png::{
     encode_rgba8_segmented,
 };
 pub use wav::{SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav};
-pub use y4m::{DecodedY4m, Y4mColorspace, Y4mError, Y4mWriter, decode_y4m};
+pub use y4m::{
+    DecodedY4m, Y4mColorspace, Y4mError, Y4mWriter, append_y4m_frame_nv12, decode_y4m, y4m_header,
+};

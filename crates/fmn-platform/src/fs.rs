@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// Process-wide uniquifier for temp-file names: the pid alone is not enough,
 /// because two threads of one process writing the same destination would
@@ -31,12 +31,12 @@ fn unique_temp_name(prefix: &str, path: &Path) -> String {
     )
 }
 
-fn write_unique_temp(prefix: &str, path: &Path, bytes: &[u8]) -> Result<PathBuf, FsError> {
+fn open_unique_temp(prefix: &str, path: &Path) -> Result<(PathBuf, std::fs::File), FsError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let tmp = parent.join(unique_temp_name(prefix, path));
-        let mut file = match std::fs::OpenOptions::new()
+        let file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)
@@ -45,19 +45,44 @@ fn write_unique_temp(prefix: &str, path: &Path, bytes: &[u8]) -> Result<PathBuf,
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(io_error(&tmp, err)),
         };
-        if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-            drop(file);
-            let _ = std::fs::remove_file(&tmp);
-            return Err(io_error(&tmp, err));
-        }
-        drop(file);
-        return Ok(tmp);
+        return Ok((tmp, file));
     }
     Err(io_error(
         path,
         std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("could not reserve a temporary sibling after {MAX_TEMP_ATTEMPTS} collisions"),
+        ),
+    ))
+}
+
+fn write_unique_temp(prefix: &str, path: &Path, bytes: &[u8]) -> Result<PathBuf, FsError> {
+    let (tmp, mut file) = open_unique_temp(prefix, path)?;
+    if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, err));
+    }
+    drop(file);
+    Ok(tmp)
+}
+
+fn create_unique_temp_dir(prefix: &str, path: &Path) -> Result<PathBuf, FsError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let tmp = parent.join(unique_temp_name(prefix, path));
+        match std::fs::create_dir(&tmp) {
+            Ok(()) => return Ok(tmp),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(io_error(&tmp, err)),
+        }
+    }
+    Err(io_error(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("could not reserve a temporary directory after {MAX_TEMP_ATTEMPTS} collisions"),
         ),
     ))
 }
@@ -120,6 +145,80 @@ impl std::error::Error for FsError {
     }
 }
 
+/// A private, incrementally written file that is not yet visible at its
+/// destination.
+///
+/// Dropping an unprepared writer aborts it. [`Self::prepare`] flushes and
+/// syncs the private bytes but still does not mutate the destination.
+pub trait AtomicFileWriter: Send {
+    /// Append one bounded chunk.
+    ///
+    /// # Errors
+    /// [`FsError`] when the private file cannot accept the bytes.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), FsError>;
+
+    /// Flush and sync the private file, yielding the sole publication token.
+    ///
+    /// # Errors
+    /// [`FsError`] when durable preparation fails.
+    fn prepare(self: Box<Self>) -> Result<Box<dyn PreparedAtomicFile>, FsError>;
+}
+
+/// A fully written private file whose destination remains untouched.
+///
+/// Dropping this value aborts publication. [`Self::commit`] is the only
+/// operation that can replace the destination.
+pub trait PreparedAtomicFile: Send {
+    /// Atomically publish the prepared file.
+    ///
+    /// # Errors
+    /// [`FsError`] when publication fails.
+    fn commit(self: Box<Self>) -> Result<(), FsError>;
+}
+
+/// Reserved last-published marker for immutable directory generations.
+///
+/// A directory is a complete artifact only when this regular file exists.
+/// Implementations stage every child first and publish this marker last.
+pub const ATOMIC_DIRECTORY_COMPLETE_LEAF: &str = "FMN_COMPLETE";
+
+const ATOMIC_DIRECTORY_COMPLETE_BYTES: &[u8] = b"fmn-atomic-directory-v1\n";
+
+/// A private immutable directory generation.
+///
+/// Children are conservative cross-platform ASCII leaves created exactly
+/// once: alphanumeric first byte, then alphanumeric/`_`/`-`/`.`, with Windows
+/// device names and trailing dot/space refused. Dropping the writer removes
+/// only its private generation.
+pub trait AtomicDirectoryWriter: Send {
+    /// Write one complete child file under `leaf`.
+    ///
+    /// # Errors
+    /// [`FsError`] for an unsafe/duplicate leaf or an I/O failure.
+    fn write_file(&mut self, leaf: &Path, bytes: &[u8]) -> Result<(), FsError>;
+
+    /// Finish the generation without making it visible.
+    ///
+    /// # Errors
+    /// [`FsError`] when preparation fails.
+    fn prepare(self: Box<Self>) -> Result<Box<dyn PreparedAtomicDirectory>, FsError>;
+}
+
+/// A complete private directory generation awaiting no-clobber publication.
+///
+/// The destination must be absent. Host implementations claim it with an
+/// exact directory create, move prepared children, and atomically publish
+/// [`ATOMIC_DIRECTORY_COMPLETE_LEAF`] last. Concurrent compliant publishers
+/// therefore fail closed, and a crash can leave only an explicitly incomplete
+/// directory that readers must ignore.
+pub trait PreparedAtomicDirectory: Send {
+    /// Publish the directory as one immutable generation.
+    ///
+    /// # Errors
+    /// [`FsError`] when the destination exists or publication fails.
+    fn commit(self: Box<Self>) -> Result<(), FsError>;
+}
+
 /// The filesystem capability. Implementations must be deterministic in
 /// listing order ([`FileSystem::list_dir`] returns sorted paths) so no
 /// consumer inherits host directory-iteration order.
@@ -173,6 +272,44 @@ pub trait FileSystem: Send + Sync {
     /// # Errors
     /// [`FsError::Io`].
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError>;
+
+    /// Begin an incrementally written atomic file.
+    ///
+    /// Production implementations stream to a unique sibling temporary file.
+    /// The default refuses the operation so read-only/test capabilities cannot
+    /// accidentally claim bounded host publication.
+    ///
+    /// # Errors
+    /// [`FsError`] when unsupported or when private-file creation fails.
+    fn begin_atomic_file(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn AtomicFileWriter>, FsError> {
+        Err(io_error(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "filesystem capability does not support streaming atomic files",
+            ),
+        ))
+    }
+
+    /// Begin an immutable, no-clobber atomic directory generation.
+    ///
+    /// # Errors
+    /// [`FsError`] when unsupported or when private-directory creation fails.
+    fn begin_atomic_directory(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn AtomicDirectoryWriter>, FsError> {
+        Err(io_error(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "filesystem capability does not support atomic directory generations",
+            ),
+        ))
+    }
 
     /// Create `path` with `bytes` **only if nothing exists there** — the
     /// lock-file primitive. Returns `Ok(true)` if this call created the file,
@@ -286,6 +423,31 @@ impl FileSystem for StdFs {
         }
     }
 
+    fn begin_atomic_file(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn AtomicFileWriter>, FsError> {
+        let (temporary, file) = open_unique_temp(".fmn-stream", path)?;
+        Ok(Box::new(StdAtomicFileWriter {
+            destination: path.to_path_buf(),
+            temporary,
+            file: Some(file),
+            cleanup: true,
+        }))
+    }
+
+    fn begin_atomic_directory(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn AtomicDirectoryWriter>, FsError> {
+        let temporary = create_unique_temp_dir(".fmn-generation", path)?;
+        Ok(Box::new(StdAtomicDirectoryWriter {
+            destination: path.to_path_buf(),
+            temporary,
+            cleanup: true,
+        }))
+    }
+
     fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
         // Write the contents to a unique sibling, then `hard_link` it into
         // place: link creation is atomic and fails if the destination exists,
@@ -323,6 +485,283 @@ impl FileSystem for StdFs {
         out.sort();
         Ok(out)
     }
+}
+
+struct StdAtomicFileWriter {
+    destination: PathBuf,
+    temporary: PathBuf,
+    file: Option<std::fs::File>,
+    cleanup: bool,
+}
+
+impl AtomicFileWriter for StdAtomicFileWriter {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), FsError> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| {
+                io_error(
+                    &self.temporary,
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "atomic file is already prepared",
+                    ),
+                )
+            })?
+            .write_all(bytes)
+            .map_err(|error| io_error(&self.temporary, error))
+    }
+
+    fn prepare(mut self: Box<Self>) -> Result<Box<dyn PreparedAtomicFile>, FsError> {
+        let file = self.file.take().ok_or_else(|| {
+            io_error(
+                &self.temporary,
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "atomic file is already prepared",
+                ),
+            )
+        })?;
+        file.sync_all()
+            .map_err(|error| io_error(&self.temporary, error))?;
+        drop(file);
+        self.cleanup = false;
+        Ok(Box::new(StdPreparedAtomicFile {
+            destination: self.destination.clone(),
+            temporary: self.temporary.clone(),
+            cleanup: true,
+        }))
+    }
+}
+
+impl Drop for StdAtomicFileWriter {
+    fn drop(&mut self) {
+        if self.cleanup {
+            self.file.take();
+            let _ = std::fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+struct StdPreparedAtomicFile {
+    destination: PathBuf,
+    temporary: PathBuf,
+    cleanup: bool,
+}
+
+impl PreparedAtomicFile for StdPreparedAtomicFile {
+    fn commit(mut self: Box<Self>) -> Result<(), FsError> {
+        std::fs::rename(&self.temporary, &self.destination)
+            .map_err(|error| io_error(&self.destination, error))?;
+        self.cleanup = false;
+        Ok(())
+    }
+}
+
+impl Drop for StdPreparedAtomicFile {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+struct StdAtomicDirectoryWriter {
+    destination: PathBuf,
+    temporary: PathBuf,
+    cleanup: bool,
+}
+
+impl AtomicDirectoryWriter for StdAtomicDirectoryWriter {
+    fn write_file(&mut self, leaf: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        if !is_safe_relative_leaf(leaf) || leaf == Path::new(ATOMIC_DIRECTORY_COMPLETE_LEAF) {
+            return Err(io_error(
+                leaf,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "atomic-directory child must be one normal relative component",
+                ),
+            ));
+        }
+        let path = self.temporary.join(leaf);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| io_error(&path, error))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| io_error(&path, error))
+    }
+
+    fn prepare(mut self: Box<Self>) -> Result<Box<dyn PreparedAtomicDirectory>, FsError> {
+        let marker = self.temporary.join(ATOMIC_DIRECTORY_COMPLETE_LEAF);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .map_err(|error| io_error(&marker, error))?;
+        file.write_all(ATOMIC_DIRECTORY_COMPLETE_BYTES)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| io_error(&marker, error))?;
+        self.cleanup = false;
+        Ok(Box::new(StdPreparedAtomicDirectory {
+            destination: self.destination.clone(),
+            temporary: self.temporary.clone(),
+            cleanup: true,
+        }))
+    }
+}
+
+impl Drop for StdAtomicDirectoryWriter {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_dir_all(&self.temporary);
+        }
+    }
+}
+
+struct StdPreparedAtomicDirectory {
+    destination: PathBuf,
+    temporary: PathBuf,
+    cleanup: bool,
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), FsError> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error(path, error))
+}
+
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), FsError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error(path, error))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_directory(path: &Path) -> Result<(), FsError> {
+    Err(io_error(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory durability sync is unavailable on this target",
+        ),
+    ))
+}
+
+impl PreparedAtomicDirectory for StdPreparedAtomicDirectory {
+    fn commit(mut self: Box<Self>) -> Result<(), FsError> {
+        match std::fs::create_dir(&self.destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(io_error(
+                    &self.destination,
+                    std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "atomic directory destination already exists",
+                    ),
+                ));
+            }
+            Err(error) => return Err(io_error(&self.destination, error)),
+        }
+        if let Some(parent) = nonempty_parent(&self.destination) {
+            sync_directory(parent)?;
+        }
+
+        let mut entries = std::fs::read_dir(&self.temporary)
+            .map_err(|error| io_error(&self.temporary, error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| io_error(&self.temporary, error))?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let marker = self.temporary.join(ATOMIC_DIRECTORY_COMPLETE_LEAF);
+        for entry in entries {
+            let source = entry.path();
+            if source == marker {
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|error| io_error(&source, error))?
+                .is_file()
+            {
+                return Err(io_error(
+                    &source,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "atomic directory contains a non-file child",
+                    ),
+                ));
+            }
+            let destination = self.destination.join(entry.file_name());
+            std::fs::rename(&source, &destination)
+                .map_err(|error| io_error(&destination, error))?;
+        }
+
+        // Persist every child directory entry before the completion marker can
+        // become visible. A successful marker sync is therefore also a
+        // durable ordering boundary for the entire generation.
+        sync_directory(&self.destination)?;
+        let published_marker = self.destination.join(ATOMIC_DIRECTORY_COMPLETE_LEAF);
+        std::fs::rename(&marker, &published_marker)
+            .map_err(|error| io_error(&published_marker, error))?;
+        sync_directory(&self.destination)?;
+        let _ = std::fs::remove_dir(&self.temporary);
+        self.cleanup = false;
+        Ok(())
+    }
+}
+
+impl Drop for StdPreparedAtomicDirectory {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_dir_all(&self.temporary);
+        }
+    }
+}
+
+fn is_safe_relative_leaf(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return false;
+    }
+    let Some(leaf) = path.to_str() else {
+        return false;
+    };
+    let mut bytes = leaf.bytes();
+    let first_is_safe = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let rest_is_safe =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    if !first_is_safe || !rest_is_safe || leaf.ends_with('.') || leaf.ends_with(' ') {
+        return false;
+    }
+    let basename = leaf
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    !is_windows_device_name(&basename)
+}
+
+fn is_windows_device_name(name: &str) -> bool {
+    matches!(name, "CON" | "PRN" | "AUX" | "NUL")
+        || name.strip_prefix("COM").is_some_and(|number| {
+            matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || name.strip_prefix("LPT").is_some_and(|number| {
+            matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
 }
 
 fn metadata_node_kind(metadata: &std::fs::Metadata) -> FsNodeKind {
@@ -542,6 +981,28 @@ impl FileSystem for VirtualFs {
         Ok(())
     }
 
+    fn begin_atomic_file(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn AtomicFileWriter>, FsError> {
+        Ok(Box::new(VirtualAtomicFileWriter {
+            fs: self,
+            destination: path.to_path_buf(),
+            bytes: Vec::new(),
+        }))
+    }
+
+    fn begin_atomic_directory(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn AtomicDirectoryWriter>, FsError> {
+        Ok(Box::new(VirtualAtomicDirectoryWriter {
+            fs: self,
+            destination: path.to_path_buf(),
+            files: BTreeMap::new(),
+        }))
+    }
+
     fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
         let mut files = self
             .state
@@ -679,6 +1140,134 @@ impl FileSystem for VirtualFs {
             }
             Ok(out.into_iter().collect())
         })
+    }
+}
+
+struct VirtualAtomicFileWriter {
+    fs: Arc<VirtualFs>,
+    destination: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl AtomicFileWriter for VirtualAtomicFileWriter {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), FsError> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn prepare(self: Box<Self>) -> Result<Box<dyn PreparedAtomicFile>, FsError> {
+        let Self {
+            fs,
+            destination,
+            bytes,
+        } = *self;
+        Ok(Box::new(VirtualPreparedAtomicFile {
+            fs,
+            destination,
+            bytes,
+        }))
+    }
+}
+
+struct VirtualPreparedAtomicFile {
+    fs: Arc<VirtualFs>,
+    destination: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl PreparedAtomicFile for VirtualPreparedAtomicFile {
+    fn commit(self: Box<Self>) -> Result<(), FsError> {
+        self.fs.write_atomic(&self.destination, &self.bytes)
+    }
+}
+
+struct VirtualAtomicDirectoryWriter {
+    fs: Arc<VirtualFs>,
+    destination: PathBuf,
+    files: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+impl AtomicDirectoryWriter for VirtualAtomicDirectoryWriter {
+    fn write_file(&mut self, leaf: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        if !is_safe_relative_leaf(leaf) || leaf == Path::new(ATOMIC_DIRECTORY_COMPLETE_LEAF) {
+            return Err(io_error(
+                leaf,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "atomic-directory child must be one normal relative component",
+                ),
+            ));
+        }
+        if self.files.contains_key(leaf) {
+            return Err(io_error(
+                leaf,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "atomic-directory child already exists",
+                ),
+            ));
+        }
+        self.files.insert(leaf.to_path_buf(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn prepare(self: Box<Self>) -> Result<Box<dyn PreparedAtomicDirectory>, FsError> {
+        let Self {
+            fs,
+            destination,
+            mut files,
+        } = *self;
+        files.insert(
+            PathBuf::from(ATOMIC_DIRECTORY_COMPLETE_LEAF),
+            ATOMIC_DIRECTORY_COMPLETE_BYTES.to_vec(),
+        );
+        Ok(Box::new(VirtualPreparedAtomicDirectory {
+            fs,
+            destination,
+            files,
+        }))
+    }
+}
+
+struct VirtualPreparedAtomicDirectory {
+    fs: Arc<VirtualFs>,
+    destination: PathBuf,
+    files: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+impl PreparedAtomicDirectory for VirtualPreparedAtomicDirectory {
+    fn commit(self: Box<Self>) -> Result<(), FsError> {
+        let mut state = self
+            .fs
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if virtual_node_kind(&state, &self.destination).is_some() {
+            return Err(io_error(
+                &self.destination,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "atomic directory destination already exists",
+                ),
+            ));
+        }
+        if let Some(blocker) = virtual_file_ancestor(&state, &self.destination) {
+            return Err(io_error(
+                &blocker,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "a parent component is a file",
+                ),
+            ));
+        }
+        insert_parent_directories(&mut state, &self.destination);
+        state.directories.insert(self.destination.clone());
+        for (leaf, bytes) in &self.files {
+            state
+                .files
+                .insert(self.destination.join(leaf), bytes.clone());
+        }
+        Ok(())
     }
 }
 

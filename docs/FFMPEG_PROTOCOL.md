@@ -39,7 +39,7 @@ opaque wire, CRF on a non-CRF encoder, an encoder the installed
 ffmpeg does not offer, a payload that is not a whole number of
 frames, zero dimensions or frame rate.
 
-## 2. The security protocol (D2, complete)
+## 2. The D2 invocation protocol
 
 Every invocation:
 
@@ -47,25 +47,28 @@ Every invocation:
    argument vector. No shell exists in the API; relative paths are
    refused by the mechanism itself (no ambient `PATH` can choose the
    executable).
-2. **Private working directory.** Each job gets a fresh directory;
-   the child's `cwd` and `TMPDIR` point into it; the artifact is born
-   there.
+2. **Job-scoped working directory.** The child's `cwd` and `TMPDIR`
+   point into a job-specific directory, and the artifact is born
+   there. Exclusive creation and stale-directory refusal are the
+   separate `fm-yw7h` boundary-hardening contract and are not implied
+   here.
 3. **Environment allowlist + locale pinning.** The child environment
    is cleared and rebuilt as exactly `LANG=C`, `LC_ALL=C`,
-   `TMPDIR=<private dir>`.
-4. **Timeout + cancellation.** A wall-clock bound kills the child on
-   expiry. (Tree-kill honesty: the std mechanism kills the direct
-   child; ffmpeg does not daemonize under this contract — see
-   `fmn-platform::process` docs for the revisit path.)
+   `TMPDIR=<job dir>`.
+4. **Timeout + cancellation.** A wall-clock bound or cooperative
+   cancellation kills the complete isolated process group. Targets
+   without a safe process-tree mechanism are refused before spawn.
 5. **Output-size limits.** Captured logs are capped per stream
    (overflow kills the child); the artifact is size-checked against a
    declared budget before publication.
 6. **Atomic publication.** The artifact reaches its destination only
    through `rename` after verification. A failed, timed-out, or
    oversized job leaves the destination untouched.
-7. **Provenance.** Tool path **and content hash** (SHA-256 of the
-   executable bytes), `-version` line, resolved encoder, and the full
-   argv are recorded on every job.
+7. **Provenance.** The resolved tool path and its resolution-time
+   content hash (SHA-256), `-version` line, resolved encoder, and the
+   full argv are recorded on every job. Spawn-time executable
+   revalidation is tracked separately by `fm-yw7h`; these records do
+   not claim that stronger binding until it lands.
 
 ## 3. Optionality
 

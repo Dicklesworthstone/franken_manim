@@ -10,8 +10,17 @@
 //! on the hot path. When every slot is outstanding, the next dispatch blocks
 //! before receiving a buffer, so sink pressure propagates without letting later
 //! frames occupy the slot needed by the drain's next sequence.
+//!
+//! Finalization prepares every sink without publication, then takes one commit
+//! grant linearized against cancellation and commits in binding order. A
+//! prepare failure aborts every sink. A commit failure aborts the failing and
+//! later sinks; earlier sinks may already have published, so this is ordered
+//! multi-sink delivery, not a cross-sink filesystem transaction. Composition
+//! that needs one durable artifact plus previews should bind the durable
+//! publisher last.
 
 use fmn_frame::{FrameBuffer, FrameLayout, FramePool};
+use fmn_platform::process::ProcessCancellation;
 use std::fmt;
 use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -32,6 +41,7 @@ pub enum SinkWrite {
 /// A sink-owned failure, normalized at the Reel boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkFailure {
+    code: Arc<str>,
     message: Arc<str>,
 }
 
@@ -39,9 +49,22 @@ impl SinkFailure {
     /// Construct a failure with a stable human-readable message.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
+        Self::with_code("sink.failure", message)
+    }
+
+    /// Construct a failure with a stable machine-readable category.
+    #[must_use]
+    pub fn with_code(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
+            code: Arc::from(code.into()),
             message: Arc::from(message.into()),
         }
+    }
+
+    /// Stable machine-readable failure category.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
     }
 
     /// The sink-provided message.
@@ -61,7 +84,7 @@ impl std::error::Error for SinkFailure {}
 
 impl From<std::io::Error> for SinkFailure {
     fn from(value: std::io::Error) -> Self {
-        Self::new(value.to_string())
+        Self::with_code("sink.io", value.to_string())
     }
 }
 
@@ -71,6 +94,13 @@ impl From<std::io::Error> for SinkFailure {
 /// applies backpressure by blocking inside that call. A preview sink configured
 /// for explicit dropping may instead return [`SinkWrite::WouldBlock`].
 pub trait FrameSink: Send + 'static {
+    /// Attach the emitter's cooperative cancellation token before the drain
+    /// thread starts.
+    ///
+    /// Process-backed sinks pass this token into their long-lived subprocess
+    /// supervisor so cancellation can interrupt a blocked stdin write.
+    fn set_cancellation(&mut self, _cancellation: ProcessCancellation) {}
+
     /// Consume one complete immutable frame.
     fn write_frame(&mut self, sequence: u64, frame: &FrameBuffer)
     -> Result<SinkWrite, SinkFailure>;
@@ -82,6 +112,42 @@ pub trait FrameSink: Send + 'static {
     fn finish(&mut self) -> Result<(), SinkFailure> {
         Ok(())
     }
+
+    /// Complete expensive/private work without publishing a destination.
+    ///
+    /// The emitter runs this phase while cancellation may still win. The
+    /// default has no preparation; legacy one-shot sinks run entirely in
+    /// [`Self::commit_finish`] under the commit grant.
+    fn prepare_finish(&mut self) -> Result<(), SinkFailure> {
+        Ok(())
+    }
+
+    /// Publish prepared work after the emitter has granted commit.
+    ///
+    /// The default delegates to [`Self::finish`]. The emitter linearizes
+    /// cancellation before calling this method.
+    fn commit_finish(&mut self) -> Result<(), SinkFailure> {
+        self.finish()
+    }
+
+    /// Abandon buffered work after the emitter has failed or been cancelled.
+    ///
+    /// This hook must not publish an artifact. It exists separately from
+    /// [`Self::finish`] so a buffered durable sink cannot mistake a partial
+    /// stream for a successful render. Panics are contained by the emitter,
+    /// and the stream's original terminal failure remains authoritative.
+    fn abort(&mut self) {}
+}
+
+/// Outcome of a cooperative cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// Cancellation won before publication was granted.
+    Won,
+    /// The stream was already cancelled or had already failed.
+    AlreadyTerminal,
+    /// Publication had already been granted; cancellation did not take effect.
+    TooLate,
 }
 
 impl<F> FrameSink for F
@@ -553,8 +619,8 @@ impl EmitterHandle {
     }
 
     /// Request cooperative cancellation and wake every waiter.
-    pub fn cancel(&self) {
-        self.shared.fail(EmitterError::Cancelled);
+    pub fn cancel(&self) -> CancelOutcome {
+        self.shared.cancel()
     }
 
     /// Snapshot counters without changing emitter state.
@@ -633,7 +699,7 @@ impl OrderedEmitter {
     /// # Errors
     ///
     /// Refuses an empty/unnamed sink set and reports thread creation failure.
-    pub fn new(config: EmitterConfig, sinks: Vec<SinkBinding>) -> Result<Self, EmitterError> {
+    pub fn new(config: EmitterConfig, mut sinks: Vec<SinkBinding>) -> Result<Self, EmitterError> {
         if sinks.is_empty() {
             return Err(EmitterError::NoSinks);
         }
@@ -654,6 +720,10 @@ impl OrderedEmitter {
         }
 
         let first_sequence = config.first_sequence;
+        let cancellation = ProcessCancellation::new();
+        for sink in &mut sinks {
+            sink.sink.set_cancellation(cancellation.clone());
+        }
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 config,
@@ -670,7 +740,9 @@ impl OrderedEmitter {
                 backpressure_waits: 0,
                 closed: false,
                 failure: None,
+                cancellation,
             }),
+            finalization: Mutex::new(FinalizationState::Open),
             ready: Condvar::new(),
             slot_available: Condvar::new(),
         });
@@ -707,8 +779,8 @@ impl OrderedEmitter {
     }
 
     /// Request cooperative cancellation.
-    pub fn cancel(&self) {
-        self.handle.cancel();
+    pub fn cancel(&self) -> CancelOutcome {
+        self.handle.cancel()
     }
 
     /// Close dispatch, drain every published/reserved frame, finish sinks, and
@@ -716,7 +788,8 @@ impl OrderedEmitter {
     ///
     /// Existing reservations may still publish after close begins. The caller
     /// should join render workers before calling this method; otherwise this
-    /// method correctly waits for their reservations.
+    /// method correctly waits for their reservations. Sinks finalize in
+    /// binding order; a failure aborts the failing and remaining sinks.
     pub fn finish(mut self) -> Result<EmitterReport, EmitterFailure> {
         self.handle.shared.close();
         let sink_reports = match self.worker.take() {
@@ -748,7 +821,7 @@ impl OrderedEmitter {
 impl Drop for OrderedEmitter {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
-            self.handle.shared.fail(EmitterError::Cancelled);
+            self.handle.shared.cancel();
             drop(worker);
         }
     }
@@ -830,6 +903,7 @@ impl Drop for ReservationGuard {
 
 struct Shared {
     state: Mutex<State>,
+    finalization: Mutex<FinalizationState>,
     ready: Condvar,
     slot_available: Condvar,
 }
@@ -858,6 +932,30 @@ impl Shared {
         self.notify_all();
     }
 
+    fn cancel(&self) -> CancelOutcome {
+        let mut finalization = self
+            .finalization
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match *finalization {
+            FinalizationState::Committing | FinalizationState::Complete => CancelOutcome::TooLate,
+            FinalizationState::Cancelled => CancelOutcome::AlreadyTerminal,
+            FinalizationState::Open => {
+                let mut state = self.lock();
+                if state.failure.is_some() {
+                    *finalization = FinalizationState::Cancelled;
+                    return CancelOutcome::AlreadyTerminal;
+                }
+                *finalization = FinalizationState::Cancelled;
+                state.fail(EmitterError::Cancelled);
+                drop(state);
+                drop(finalization);
+                self.notify_all();
+                CancelOutcome::Won
+            }
+        }
+    }
+
     fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
@@ -869,6 +967,14 @@ impl Shared {
         self.ready.notify_all();
         self.slot_available.notify_all();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FinalizationState {
+    Open,
+    Cancelled,
+    Committing,
+    Complete,
 }
 
 struct State {
@@ -886,12 +992,14 @@ struct State {
     backpressure_waits: u64,
     closed: bool,
     failure: Option<EmitterError>,
+    cancellation: ProcessCancellation,
 }
 
 impl State {
     fn fail(&mut self, error: EmitterError) {
         if self.failure.is_none() {
             self.failure = Some(error);
+            self.cancellation.cancel();
         }
     }
 
@@ -1005,7 +1113,7 @@ fn drain(shared: Arc<Shared>, sinks: Vec<SinkBinding>) -> Vec<SinkReport> {
         }
     }
 
-    finish_sinks(&shared, &mut sinks);
+    finalize_sinks(&shared, &mut sinks);
     sinks.into_iter().map(SinkWorker::report).collect()
 }
 
@@ -1088,24 +1196,75 @@ fn deliver_frame(
     Ok(())
 }
 
-fn finish_sinks(shared: &Shared, sinks: &mut [SinkWorker]) {
-    for worker in sinks {
-        let result = catch_unwind(AssertUnwindSafe(|| worker.binding.sink.finish()));
-        let error = match result {
-            Ok(Ok(())) => None,
-            Ok(Err(source)) => Some(EmitterError::SinkFailed {
-                sink: Arc::clone(&worker.binding.name),
-                sequence: None,
-                source,
-            }),
-            Err(_) => Some(EmitterError::SinkPanicked {
-                sink: Arc::clone(&worker.binding.name),
-                sequence: None,
-            }),
+fn finalize_sinks(shared: &Shared, sinks: &mut [SinkWorker]) {
+    if shared.lock().failure.is_some() {
+        abort_sinks(sinks);
+        return;
+    }
+
+    for index in 0..sinks.len() {
+        let error = {
+            let worker = &mut sinks[index];
+            let result = catch_unwind(AssertUnwindSafe(|| worker.binding.sink.prepare_finish()));
+            finalization_error(worker, result)
         };
         if let Some(error) = error {
             shared.fail(error);
+            abort_sinks(sinks);
+            return;
         }
+    }
+
+    let mut finalization = shared
+        .finalization
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if *finalization != FinalizationState::Open || shared.lock().failure.is_some() {
+        *finalization = FinalizationState::Cancelled;
+        drop(finalization);
+        abort_sinks(sinks);
+        return;
+    }
+    *finalization = FinalizationState::Committing;
+
+    for index in 0..sinks.len() {
+        let error = {
+            let worker = &mut sinks[index];
+            let result = catch_unwind(AssertUnwindSafe(|| worker.binding.sink.commit_finish()));
+            finalization_error(worker, result)
+        };
+        if let Some(error) = error {
+            *finalization = FinalizationState::Complete;
+            shared.fail(error);
+            drop(finalization);
+            abort_sinks(&mut sinks[index..]);
+            return;
+        }
+    }
+    *finalization = FinalizationState::Complete;
+}
+
+fn finalization_error(
+    worker: &SinkWorker,
+    result: Result<Result<(), SinkFailure>, Box<dyn std::any::Any + Send>>,
+) -> Option<EmitterError> {
+    match result {
+        Ok(Ok(())) => None,
+        Ok(Err(source)) => Some(EmitterError::SinkFailed {
+            sink: Arc::clone(&worker.binding.name),
+            sequence: None,
+            source,
+        }),
+        Err(_) => Some(EmitterError::SinkPanicked {
+            sink: Arc::clone(&worker.binding.name),
+            sequence: None,
+        }),
+    }
+}
+
+fn abort_sinks(sinks: &mut [SinkWorker]) {
+    for worker in sinks {
+        let _ = catch_unwind(AssertUnwindSafe(|| worker.binding.sink.abort()));
     }
 }
 

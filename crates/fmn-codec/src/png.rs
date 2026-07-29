@@ -1049,18 +1049,77 @@ pub fn encode_rgba8_segmented(
     rgba: &[u8],
     level: CompressionLevel,
 ) -> Vec<u8> {
+    encode_rgba8_segmented_parallel(width, height, rgba, level, 1)
+}
+
+/// Encode one canonical segmented frame, fanning its fixed DEFLATE segments
+/// across `threads` workers.
+///
+/// Segment boundaries and concatenation order depend only on filtered byte
+/// length, so output is byte-identical at every nonzero worker count. This is
+/// the bounded-streaming sequence path: callers need retain only one frame,
+/// rather than batching a whole render to obtain parallel encode.
+///
+/// # Panics
+/// As [`encode_rgba8`].
+#[must_use]
+pub fn encode_rgba8_segmented_parallel(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    level: CompressionLevel,
+    threads: usize,
+) -> Vec<u8> {
     let filtered = filtered_stream(width, height, rgba);
     let mut idat = crate::deflate::zlib_header(level).to_vec();
     let count = filtered.len().div_ceil(SEQUENCE_SEGMENT_BYTES).max(1);
-    for i in 0..count {
-        let start = i * SEQUENCE_SEGMENT_BYTES;
-        let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
-        idat.extend_from_slice(&crate::deflate::deflate_segment(
-            &filtered[..start],
-            &filtered[start..end],
-            level,
-            i + 1 == count,
-        ));
+    let workers = threads.max(1).min(count);
+    if workers == 1 {
+        for i in 0..count {
+            let start = i * SEQUENCE_SEGMENT_BYTES;
+            let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
+            idat.extend_from_slice(&crate::deflate::deflate_segment(
+                &filtered[..start],
+                &filtered[start..end],
+                level,
+                i + 1 == count,
+            ));
+        }
+    } else {
+        let mut segments = vec![Vec::new(); count];
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for worker in 0..workers {
+                let filtered = &filtered;
+                handles.push(scope.spawn(move || {
+                    let mut produced = Vec::new();
+                    let mut index = worker;
+                    while index < count {
+                        let start = index * SEQUENCE_SEGMENT_BYTES;
+                        let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
+                        produced.push((
+                            index,
+                            crate::deflate::deflate_segment(
+                                &filtered[..start],
+                                &filtered[start..end],
+                                level,
+                                index + 1 == count,
+                            ),
+                        ));
+                        index += workers;
+                    }
+                    produced
+                }));
+            }
+            for handle in handles {
+                for (index, bytes) in handle.join().expect("png segment worker panicked") {
+                    segments[index] = bytes;
+                }
+            }
+        });
+        for segment in segments {
+            idat.extend_from_slice(&segment);
+        }
     }
     idat.extend_from_slice(&crate::checksum::adler32(&filtered).to_be_bytes());
     assemble_png(width, height, &idat)

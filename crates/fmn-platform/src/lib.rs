@@ -43,6 +43,10 @@
 //! `ExecutionPlan` derivation consumes (§17.4). Introspection itself obeys
 //! the doctrine — it reads sysfs *through* [`fs::FileSystem`], so synthetic
 //! machines are just fixtures.
+#![cfg_attr(
+    all(unix, not(target_os = "espidf")),
+    feature(unix_kill_process_group, unix_send_signal)
+)]
 #![forbid(unsafe_code)]
 
 pub mod clock;

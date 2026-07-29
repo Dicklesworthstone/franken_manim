@@ -5,9 +5,13 @@
 //! spawning, the cleared-environment allowlist, timeout kill, output-cap
 //! kill, and stdin plumbing — all against coreutils, Unix-only (`cfg`).
 
-use fmn_platform::fs::{FileSystem, FsNodeKind, StdFs};
-use fmn_platform::process::{ProcessOutcome, ProcessRunner, ProcessSpec, ScriptedRunner};
-use std::path::PathBuf;
+use fmn_platform::fs::{ATOMIC_DIRECTORY_COMPLETE_LEAF, FileSystem, FsNodeKind, StdFs, VirtualFs};
+use fmn_platform::process::{
+    ProcessCancellation, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStdinLimits,
+    ProcessTermination, ScriptedRunner,
+};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn scratch(name: &str) -> PathBuf {
@@ -103,6 +107,226 @@ fn std_fs_create_new_and_removal_lifecycle() {
     assert_eq!(fs.read(&dir.join("ns/b/objects/y")).unwrap(), b"y");
 }
 
+#[test]
+fn streaming_atomic_capabilities_separate_prepare_from_publication() {
+    let fs = Arc::new(VirtualFs::new());
+    let destination = PathBuf::from("/artifacts/frame.png");
+    fs.insert(&destination, b"old".to_vec());
+
+    let mut writer = fs
+        .clone()
+        .begin_atomic_file(&destination)
+        .expect("begin private file");
+    writer.write(b"new-").expect("first file chunk");
+    writer.write(b"bytes").expect("second file chunk");
+    let prepared = writer.prepare().expect("prepare private file");
+    assert_eq!(fs.read(&destination).expect("old destination"), b"old");
+    drop(prepared);
+    assert_eq!(
+        fs.read(&destination).expect("drop preserves destination"),
+        b"old"
+    );
+
+    let mut writer = fs
+        .clone()
+        .begin_atomic_file(&destination)
+        .expect("begin replacement file");
+    writer.write(b"replacement").expect("replacement bytes");
+    let prepared = writer.prepare().expect("prepare replacement");
+    assert_eq!(fs.read(&destination).expect("still old"), b"old");
+    prepared.commit().expect("commit replacement");
+    assert_eq!(
+        fs.read(&destination).expect("published replacement"),
+        b"replacement"
+    );
+}
+
+#[test]
+fn std_streaming_atomic_file_and_directory_publish_only_at_commit() {
+    let root = scratch("stdfs_streaming_atomic");
+    let _ = StdFs.remove_dir_all(&root);
+    std::fs::create_dir(&root).expect("fresh streaming root");
+    let fs = Arc::new(StdFs);
+
+    let file = root.join("artifact.bin");
+    std::fs::write(&file, b"old").expect("old artifact");
+    let mut writer = fs
+        .clone()
+        .begin_atomic_file(&file)
+        .expect("begin host private file");
+    writer.write(b"new").expect("host private bytes");
+    let prepared = writer.prepare().expect("prepare host private file");
+    assert_eq!(std::fs::read(&file).expect("still old"), b"old");
+    prepared.commit().expect("publish host file");
+    assert_eq!(std::fs::read(&file).expect("host replacement"), b"new");
+
+    let generation = root.join("frames");
+    let mut writer = fs
+        .clone()
+        .begin_atomic_directory(&generation)
+        .expect("begin host generation");
+    writer
+        .write_file(Path::new("frame_0001.png"), b"one")
+        .expect("first host child");
+    writer
+        .write_file(Path::new("frame_0002.png"), b"two")
+        .expect("second host child");
+    let prepared = writer.prepare().expect("prepare host generation");
+    assert!(!generation.exists());
+    prepared.commit().expect("publish host generation");
+    assert_eq!(
+        std::fs::read(generation.join(ATOMIC_DIRECTORY_COMPLETE_LEAF)).expect("completion marker"),
+        b"fmn-atomic-directory-v1\n"
+    );
+    assert_eq!(
+        std::fs::read(generation.join("frame_0001.png")).expect("first host child"),
+        b"one"
+    );
+    assert_eq!(
+        std::fs::read(generation.join("frame_0002.png")).expect("second host child"),
+        b"two"
+    );
+
+    let mut contender = fs
+        .clone()
+        .begin_atomic_directory(&generation)
+        .expect("begin host contender");
+    contender
+        .write_file(Path::new("frame_0001.png"), b"replacement")
+        .expect("private host contender");
+    assert!(
+        contender
+            .prepare()
+            .expect("prepare host contender")
+            .commit()
+            .is_err(),
+        "host generation must be no-clobber"
+    );
+    assert_eq!(
+        std::fs::read(generation.join("frame_0001.png")).expect("stable host child"),
+        b"one"
+    );
+}
+
+#[test]
+fn std_atomic_directory_concurrent_commit_is_no_clobber() {
+    let root = scratch("stdfs_atomic_directory_race");
+    let _ = StdFs.remove_dir_all(&root);
+    std::fs::create_dir(&root).expect("fresh race root");
+    let fs = Arc::new(StdFs);
+    let destination = root.join("frames");
+
+    let prepare = |bytes: &'static [u8]| {
+        let mut writer = fs
+            .clone()
+            .begin_atomic_directory(&destination)
+            .expect("begin contender");
+        writer
+            .write_file(Path::new("frame.png"), bytes)
+            .expect("stage contender");
+        writer.prepare().expect("prepare contender")
+    };
+    let first = prepare(b"first");
+    let second = prepare(b"second");
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let spawn = |prepared: Box<dyn fmn_platform::fs::PreparedAtomicDirectory>| {
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            prepared.commit()
+        })
+    };
+    let first = spawn(first);
+    let second = spawn(second);
+    barrier.wait();
+    let first = first.join().expect("first contender thread");
+    let second = second.join().expect("second contender thread");
+
+    assert_ne!(
+        first.is_ok(),
+        second.is_ok(),
+        "exactly one no-clobber commit must win"
+    );
+    assert!(destination.join(ATOMIC_DIRECTORY_COMPLETE_LEAF).exists());
+    let frame = std::fs::read(destination.join("frame.png")).expect("winner frame");
+    assert!(
+        frame == b"first" || frame == b"second",
+        "generation mixed unexpected bytes: {frame:?}"
+    );
+}
+
+#[test]
+fn atomic_directory_generation_is_complete_no_clobber_and_leaf_safe() {
+    let fs = Arc::new(VirtualFs::new());
+    let destination = PathBuf::from("/frames");
+    let mut writer = fs
+        .clone()
+        .begin_atomic_directory(&destination)
+        .expect("begin generation");
+    for leaf in [
+        "../escape",
+        "nested/frame.png",
+        "bad\\name",
+        "C:",
+        "bad:name",
+        "_leading",
+        "trailing.",
+        "trailing ",
+        "CON",
+        "con.txt",
+        "COM1.png",
+        "LPT9.gif",
+        ATOMIC_DIRECTORY_COMPLETE_LEAF,
+    ] {
+        assert!(
+            writer.write_file(Path::new(leaf), b"x").is_err(),
+            "unsafe cross-platform leaf was accepted: {leaf:?}"
+        );
+    }
+    writer
+        .write_file(Path::new("frame_0001.png"), b"one")
+        .expect("first child");
+    assert!(
+        writer
+            .write_file(Path::new("frame_0001.png"), b"duplicate")
+            .is_err()
+    );
+    writer
+        .write_file(Path::new("frame_0002.png"), b"two")
+        .expect("second child");
+    let prepared = writer.prepare().expect("prepare generation");
+    assert!(!fs.exists(&destination));
+    prepared.commit().expect("publish complete generation");
+    assert_eq!(
+        fs.list_dir(&destination).expect("generation listing"),
+        vec![
+            destination.join(ATOMIC_DIRECTORY_COMPLETE_LEAF),
+            destination.join("frame_0001.png"),
+            destination.join("frame_0002.png"),
+        ]
+    );
+
+    let mut contender = fs
+        .clone()
+        .begin_atomic_directory(&destination)
+        .expect("begin competing generation");
+    contender
+        .write_file(Path::new("frame_0001.png"), b"new")
+        .expect("private competing child");
+    let contender = contender.prepare().expect("prepare competitor");
+    assert!(contender.commit().is_err(), "existing generation wins");
+    assert_eq!(
+        fs.read(&destination.join("frame_0001.png"))
+            .expect("original child"),
+        b"one"
+    );
+    assert_eq!(
+        fs.read(&destination.join("frame_0002.png"))
+            .expect("original tail"),
+        b"two"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn std_fs_classifies_links_without_following_them() {
@@ -144,6 +368,8 @@ fn spec(program: &str, argv: &[&str]) -> ProcessSpec {
 mod std_runner {
     use super::*;
     use fmn_platform::process::StdProcessRunner;
+    use std::sync::mpsc;
+    use std::thread;
 
     #[test]
     fn argv_only_echo_succeeds() {
@@ -153,7 +379,7 @@ mod std_runner {
         assert!(out.success());
         // The two argv entries arrive as two arguments — no shell splitting.
         assert_eq!(out.stdout, b"hello argv world\n");
-        assert!(!out.timed_out && !out.truncated);
+        assert!(matches!(out.termination, ProcessTermination::Exited(_)));
     }
 
     #[test]
@@ -161,7 +387,7 @@ mod std_runner {
         let out = StdProcessRunner
             .run(&spec("/usr/bin/false", &[]))
             .expect("run");
-        assert_eq!(out.code, Some(1));
+        assert_eq!(out.termination, ProcessTermination::Exited(Some(1)));
         assert!(!out.success());
     }
 
@@ -187,17 +413,72 @@ mod std_runner {
     }
 
     #[test]
-    fn timeout_kills_the_child() {
-        let mut s = spec("/usr/bin/sleep", &["30"]);
+    fn timeout_kills_the_complete_process_group() {
+        let script = scratch("process_tree").join("ffmpeg-with-descendant.sh");
+        std::fs::write(&script, "sleep 5\n").expect("write descendant fixture");
+        let script = script.to_str().expect("UTF-8 fixture path");
+        let mut s = spec("/bin/sh", &[script]);
         s.timeout = Duration::from_millis(200);
         let started = std::time::Instant::now();
         let out = StdProcessRunner.run(&s).expect("run");
-        assert!(out.timed_out);
+        assert_eq!(out.termination, ProcessTermination::TimedOut);
         assert!(!out.success());
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "kill was not prompt: {:?}",
+            started.elapsed() < Duration::from_secs(3),
+            "process-tree kill was not prompt: {:?}",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn exited_group_leader_cannot_disarm_descendant_timeout() {
+        let script = scratch("process_tree").join("ffmpeg-with-background-descendant.sh");
+        std::fs::write(&script, "sleep 5 &\nexit 0\n")
+            .expect("write background-descendant fixture");
+        let script = script.to_str().expect("UTF-8 fixture path");
+        let mut s = spec("/bin/sh", &[script]);
+        s.timeout = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let out = StdProcessRunner.run(&s).expect("run");
+        assert_eq!(out.termination, ProcessTermination::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "exited leader disarmed process-tree kill: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn successful_exit_kills_redirected_descendants_before_return() {
+        let dir = scratch("process_tree");
+        let script = dir.join("ffmpeg-with-redirected-descendant.sh");
+        let marker = dir.join(format!(
+            "redirected-descendant-leak-{}.txt",
+            std::process::id()
+        ));
+        assert!(!marker.exists(), "test marker must start absent");
+        std::fs::write(
+            &script,
+            "(sleep 1; printf leaked > \"$1\") >/dev/null 2>&1 &\nexit 0\n",
+        )
+        .expect("write redirected-descendant fixture");
+        let script = script.to_str().expect("UTF-8 fixture path");
+        let marker_arg = marker.to_str().expect("UTF-8 marker path");
+        let started = std::time::Instant::now();
+        let out = StdProcessRunner
+            .run(&spec("/bin/sh", &[script, marker_arg]))
+            .expect("run");
+        assert!(out.success(), "group leader should retain its zero exit");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "successful process-tree cleanup was not prompt: {:?}",
+            started.elapsed()
+        );
+        // A leaked descendant would create the marker after its delayed write.
+        std::thread::sleep(Duration::from_millis(1_200)); // ubs:ignore bounded process-lifecycle probe
+        assert!(
+            !marker.exists(),
+            "redirected descendant outlived successful group leader"
         );
     }
 
@@ -210,8 +491,7 @@ mod std_runner {
         s.max_output_bytes = 64 * 1024;
         let started = std::time::Instant::now();
         let out = StdProcessRunner.run(&s).expect("run");
-        assert!(out.truncated);
-        assert!(!out.timed_out);
+        assert_eq!(out.termination, ProcessTermination::OutputLimitExceeded);
         assert!(out.stdout.len() as u64 <= s.max_output_bytes);
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -226,6 +506,62 @@ mod std_runner {
             .run(&spec("/nonexistent/fmn-no-such-program", &[]))
             .unwrap_err();
         assert!(err.to_string().contains("fmn-no-such-program"));
+    }
+
+    #[test]
+    fn external_cancellation_unblocks_a_full_stdin_pipe_and_reaps_the_child() {
+        let cancellation = ProcessCancellation::new();
+        let process = StdProcessRunner
+            .start(
+                &spec("/usr/bin/sleep", &["30"]),
+                cancellation.clone(),
+                ProcessStdinLimits::new(8 << 20, 8 << 20),
+            )
+            .expect("start sleeping child");
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let mut process = process;
+            started_tx.send(()).expect("start signal");
+            let write = process.write_stdin(&vec![0u8; 8 << 20]);
+            let finish = process.finish();
+            (write, finish)
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer started");
+        thread::sleep(Duration::from_millis(50));
+        // ubs:ignore - elapsed-time assertion, not security-token generation.
+        let started = std::time::Instant::now();
+        cancellation.cancel();
+        let (write, finish) = worker.join().expect("writer thread");
+        assert!(write.is_err(), "the killed child's pipe must close");
+        assert_eq!(
+            finish.expect("supervisor outcome").termination,
+            ProcessTermination::Cancelled
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "cancellation did not promptly unblock and reap"
+        );
+    }
+
+    #[test]
+    fn dropping_a_live_session_cancels_and_reaps_before_returning() {
+        // ubs:ignore - elapsed-time assertion, not security-token generation.
+        let started = std::time::Instant::now();
+        let process = StdProcessRunner
+            .start(
+                &spec("/usr/bin/sleep", &["30"]),
+                ProcessCancellation::new(),
+                ProcessStdinLimits::new(1, 1),
+            )
+            .expect("start sleeping child");
+        drop(process);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "drop did not promptly cancel and reap"
+        );
     }
 }
 
@@ -249,11 +585,9 @@ fn scripted_runner_replays_and_logs() {
     r.script(
         "/fake/ffmpeg",
         ProcessOutcome {
-            code: Some(0),
+            termination: ProcessTermination::Exited(Some(0)),
             stdout: b"frame=  1".to_vec(),
             stderr: Vec::new(),
-            timed_out: false,
-            truncated: false,
         },
     );
     let s = spec("/fake/ffmpeg", &["-i", "-", "out.mp4"]);
@@ -262,6 +596,71 @@ fn scripted_runner_replays_and_logs() {
     assert_eq!(out.stdout, b"frame=  1");
     assert!(r.run(&spec("/fake/other", &[])).is_err());
     let runs = r.runs();
-    assert_eq!(runs.len(), 2);
+    assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].argv, vec!["-i", "-", "out.mp4"]);
+    assert!(runs[0].stdin.is_none());
+}
+
+#[test]
+fn scripted_stream_preserves_chunk_order_and_enforces_both_input_bounds() {
+    let mut runner = ScriptedRunner::new();
+    runner.script(
+        "/fake/ffmpeg",
+        ProcessOutcome {
+            termination: ProcessTermination::Exited(Some(0)),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+    );
+    let runner = Arc::new(runner);
+    let stream_spec = spec("/fake/ffmpeg", &["-i", "-", "out.mp4"]);
+    let mut process = runner
+        .start(
+            &stream_spec,
+            ProcessCancellation::new(),
+            ProcessStdinLimits::new(4, 6),
+        )
+        .expect("start scripted stream");
+    process.write_stdin(b"ab").expect("first chunk");
+    process.write_stdin(b"cdef").expect("second chunk");
+    assert!(process.finish().expect("finish").success());
+    assert_eq!(
+        runner.runs()[0].stdin.as_deref(),
+        Some(b"abcdef".as_slice())
+    );
+
+    let mut process = runner
+        .start(
+            &stream_spec,
+            ProcessCancellation::new(),
+            ProcessStdinLimits::new(3, 10),
+        )
+        .expect("start chunk-bound stream");
+    assert!(matches!(
+        process.write_stdin(b"four"),
+        Err(fmn_platform::process::ProcessError::StdinChunkLimit {
+            attempted: 4,
+            max: 3,
+            ..
+        })
+    ));
+    process.cancel().expect("cancel chunk-bound stream");
+
+    let mut process = runner
+        .start(
+            &stream_spec,
+            ProcessCancellation::new(),
+            ProcessStdinLimits::new(4, 5),
+        )
+        .expect("start total-bound stream");
+    process.write_stdin(b"abc").expect("first bounded chunk");
+    assert!(matches!(
+        process.write_stdin(b"def"),
+        Err(fmn_platform::process::ProcessError::StdinTotalLimit {
+            attempted: 6,
+            max: 5,
+            ..
+        })
+    ));
+    process.cancel().expect("cancel total-bound stream");
 }

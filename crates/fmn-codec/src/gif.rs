@@ -55,6 +55,168 @@ impl std::error::Error for GifError {}
 const TRANSPARENT_THRESHOLD: u8 = 128;
 const MAX_COLORS: usize = 256;
 
+/// A duration-independent GIF89a encoder.
+///
+/// Each frame carries a deterministic local palette. That keeps resident
+/// memory bounded by one RGBA frame plus its encoded chunk and avoids a
+/// whole-render palette pass. Palette identity has no visual semantics in
+/// GIF; local tables also give every frame the full color budget.
+#[derive(Debug)]
+pub struct GifStreamEncoder {
+    width: u32,
+    height: u32,
+    fps: (u32, u32),
+    loop_forever: bool,
+    next_frame: u64,
+}
+
+impl GifStreamEncoder {
+    /// Validate a streaming GIF configuration.
+    ///
+    /// # Errors
+    /// [`GifError`] for zero/oversized geometry or a zero frame rate.
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: (u32, u32),
+        loop_forever: bool,
+    ) -> Result<Self, GifError> {
+        if width == 0 || height == 0 {
+            return Err(GifError::EmptyInput("dimensions"));
+        }
+        if width > 0xffff || height > 0xffff {
+            return Err(GifError::TooLarge);
+        }
+        if fps.0 == 0 || fps.1 == 0 {
+            return Err(GifError::EmptyInput("frame rate"));
+        }
+        Ok(Self {
+            width,
+            height,
+            fps,
+            loop_forever,
+            next_frame: 0,
+        })
+    }
+
+    /// GIF89a header and optional forever-loop extension.
+    #[must_use]
+    pub fn header(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GIF89a");
+        out.extend_from_slice(&(self.width as u16).to_le_bytes());
+        out.extend_from_slice(&(self.height as u16).to_le_bytes());
+        // No global color table. Every frame declares its local table.
+        out.extend_from_slice(&[0x70, 0, 0]);
+        if self.loop_forever {
+            out.extend_from_slice(&[0x21, 0xff, 0x0b]);
+            out.extend_from_slice(b"NETSCAPE2.0");
+            out.extend_from_slice(&[0x03, 0x01, 0x00, 0x00, 0x00]);
+        }
+        out
+    }
+
+    /// Encode the next full-canvas RGBA frame with a local palette.
+    ///
+    /// # Errors
+    /// [`GifError::BadFrameSize`] when `rgba` does not match the configured
+    /// geometry.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn encode_frame(&mut self, rgba: &[u8]) -> Result<Vec<u8>, GifError> {
+        let (width, height) = (self.width as usize, self.height as usize);
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(GifError::TooLarge)?;
+        if rgba.len() != expected {
+            return Err(GifError::BadFrameSize {
+                frame: usize::try_from(self.next_frame).unwrap_or(usize::MAX),
+                expected,
+                got: rgba.len(),
+            });
+        }
+
+        let mut histogram = BTreeMap::new();
+        let mut any_transparent = false;
+        for pixel in rgba.as_chunks::<4>().0 {
+            if pixel[3] < TRANSPARENT_THRESHOLD {
+                any_transparent = true;
+            } else {
+                *histogram
+                    .entry(pack(pixel[0], pixel[1], pixel[2]))
+                    .or_insert(0) += 1;
+            }
+        }
+        let color_budget = if any_transparent {
+            MAX_COLORS - 1
+        } else {
+            MAX_COLORS
+        };
+        let palette = median_cut(&histogram, color_budget);
+        let transparent_index = any_transparent.then_some(palette.len());
+        let total_entries = palette.len() + usize::from(any_transparent);
+        let mut table_bits = 1u8;
+        while (1usize << table_bits) < total_entries.max(2) {
+            table_bits += 1;
+        }
+        let table_len = 1usize << table_bits;
+        let min_code_size = table_bits.max(2);
+
+        let delay_at = |frame: u64| -> u128 {
+            let numerator =
+                100u128 * u128::from(frame) * u128::from(self.fps.1) + u128::from(self.fps.0) / 2;
+            numerator / u128::from(self.fps.0)
+        };
+        let delay = (delay_at(self.next_frame + 1) - delay_at(self.next_frame))
+            .min(u128::from(u16::MAX)) as u16;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x21, 0xf9, 0x04]);
+        out.push(if transparent_index.is_some() {
+            0x09
+        } else {
+            0x04
+        });
+        out.extend_from_slice(&delay.to_le_bytes());
+        out.push(transparent_index.unwrap_or(0) as u8);
+        out.push(0);
+        out.push(0x2c);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(self.width as u16).to_le_bytes());
+        out.extend_from_slice(&(self.height as u16).to_le_bytes());
+        out.push(0x80 | (table_bits - 1));
+        for &[r, g, b] in &palette {
+            out.extend_from_slice(&[r, g, b]);
+        }
+        for _ in palette.len()..table_len {
+            out.extend_from_slice(&[0, 0, 0]);
+        }
+        let indices = dither(rgba, width, height, &palette, transparent_index);
+        out.push(min_code_size);
+        let compressed = lzw_compress(&indices, min_code_size);
+        for block in compressed.chunks(255) {
+            out.push(block.len() as u8);
+            out.extend_from_slice(block);
+        }
+        out.push(0);
+        self.next_frame = self.next_frame.saturating_add(1);
+        Ok(out)
+    }
+
+    /// GIF trailer byte.
+    #[must_use]
+    pub const fn trailer() -> [u8; 1] {
+        [0x3b]
+    }
+
+    /// Frames encoded so far.
+    #[must_use]
+    pub const fn frame_count(&self) -> u64 {
+        self.next_frame
+    }
+}
+
 fn pack(r: u8, g: u8, b: u8) -> u32 {
     (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
