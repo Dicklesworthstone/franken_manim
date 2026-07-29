@@ -15,6 +15,10 @@
 //! `cbrt(+-inf) = +-inf`, NaN propagates, and the sign is carried
 //! through the bit pipeline so `cbrt(-x) == -cbrt(x)` bitwise.
 
+use crate::bits::{F64x, SIMD_LANES, U64x};
+use std::simd::cmp::SimdPartialOrd;
+use std::simd::num::SimdFloat;
+
 /// B1 = (1023 - 1023/3 - 0.03306235651) * 2^20 — exponent-bias fixup for
 /// the normal-range initial estimate (s_cbrt.c).
 const B1: u32 = 715_094_163;
@@ -88,6 +92,57 @@ pub fn cbrt(x: f64) -> f64 {
     let w = t + t; // t+t is exact
     let r = (r - t) / (w + r); // r-t is exact; w+r ~= 3t
     t + t * r // error <= 0.5 + 0.5/3 + epsilon
+}
+
+/// Apply [`cbrt`] to a slice in place, grouping independent normal inputs
+/// into build-tier SIMD lanes.
+///
+/// A chunk containing zero, a subnormal, infinity, or NaN takes the scalar
+/// definition as a unit. That keeps every special-value and payload rule
+/// exact while the overwhelmingly common normal finite path executes the
+/// polynomial and Newton refinement lane-wise. There is no horizontal
+/// reduction, so lane count cannot affect any result.
+pub fn cbrt_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let high = (input.to_bits() >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+        let normal =
+            high.simd_ge(U64x::splat(0x0010_0000)) & high.simd_lt(U64x::splat(0x7ff0_0000));
+        if normal.all() {
+            cbrt_normal_lanes(input).copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = cbrt(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = cbrt(*value);
+    }
+}
+
+#[inline]
+fn cbrt_normal_lanes(x: F64x) -> F64x {
+    let bits = x.to_bits();
+    let high = (bits >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+    let initial_high = high / U64x::splat(3) + U64x::splat(u64::from(B1));
+    let sign = bits & U64x::splat(1_u64 << 63);
+    let mut t = F64x::from_bits(sign | (initial_high << U64x::splat(32)));
+
+    let r = (t * t) * (t / x);
+    t *= (F64x::splat(P0) + r * (F64x::splat(P1) + r * F64x::splat(P2)))
+        + ((r * r) * r) * (F64x::splat(P3) + r * F64x::splat(P4));
+
+    let rounded = (t.to_bits() + U64x::splat(0x8000_0000)) & U64x::splat(0xffff_ffff_c000_0000);
+    t = F64x::from_bits(rounded);
+
+    let s = t * t;
+    let r = x / s;
+    let w = t + t;
+    let r = (r - t) / (w + r);
+    t + t * r
 }
 
 #[cfg(test)]

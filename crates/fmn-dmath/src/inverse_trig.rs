@@ -19,6 +19,11 @@
 //! quadrant table of `atan2`) are reproduced exactly; `f64::sqrt` is the
 //! one delegation (correctly rounded per IEEE 754, hence bit-identical
 //! everywhere), needed by the |x| >= 0.5 paths of `asin`/`acos`.
+//!
+//! A §17.3 independent-lane bulk prototype was measured and rejected:
+//! interval masks plus eager evaluation of mutually exclusive rational and
+//! square-root branches cost more than these compact scalar functions. The
+//! scalar definitions remain the measured implementation.
 
 use crate::bits::{hi, lo, zero_lo};
 

@@ -6,6 +6,11 @@
 //! land 1 ulp(f32) from the correctly rounded f32 answer in rare cases —
 //! deterministically so, on every platform, which is the property the
 //! certified path needs.
+//!
+//! The §17.3 bulk kernels live on the authoritative f64 definitions. These
+//! wrappers remain scalar until a real f32 caller can amortize widening,
+//! f64-lane evaluation, and the single final narrowing without adding a
+//! second polynomial surface.
 
 macro_rules! f32_unary {
     ($(#[$doc:meta])* $name:ident) => {

@@ -20,7 +20,12 @@
 //! All magic constants are given as exact bit patterns; the decimal in
 //! each comment is the published FDLIBM value they encode.
 
-use crate::bits::{from_parts, hi, horner, lo, with_hi, zero_lo};
+use crate::bits::{
+    F64x, I64x, SIMD_LANES, U64x, from_parts, hi, horner, lo, simd_horner, with_hi, zero_lo,
+};
+use std::simd::Select;
+use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+use std::simd::num::{SimdFloat, SimdInt, SimdUint};
 
 const HUGE: f64 = 1.0e300;
 const TINY: f64 = 1.0e-300;
@@ -250,7 +255,12 @@ pub fn expm1(x: f64) -> f64 {
     let hxs = x * hfx;
     let r1 = 1.0 + hxs * horner(hxs, &[Q5, Q4, Q3, Q2, Q1]);
     let t = 3.0 - r1 * hfx;
-    let mut e = hxs * ((r1 - t) / (6.0 - x * t));
+    let e = hxs * ((r1 - t) / (6.0 - x * t));
+    expm1_reconstruct(x, k, c, e, hxs)
+}
+
+#[inline]
+fn expm1_reconstruct(x: f64, k: i32, c: f64, mut e: f64, hxs: f64) -> f64 {
     if k == 0 {
         return x - (x * e - hxs); // c is 0
     }
@@ -428,6 +438,279 @@ pub fn log2(x: f64) -> f64 {
     let val_hi = w2;
 
     val_lo + val_hi
+}
+
+/// Apply [`exp`] to a slice in place.
+///
+/// Normal finite inputs whose reconstruction stays in the direct exponent
+/// range execute as independent SIMD lanes. Chunks containing tiny,
+/// overflow-edge, underflow-edge, or non-finite values use the scalar
+/// definition so every FDLIBM special branch remains exact.
+pub fn exp_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let absolute_high = (input.to_bits() >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+        let direct = absolute_high.simd_ge(U64x::splat(0x3e30_0000))
+            & input.simd_gt(F64x::splat(-708.0))
+            & input.simd_lt(F64x::splat(709.0));
+        if direct.all() {
+            exp_lanes(input).copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = exp(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = exp(*value);
+    }
+}
+
+#[inline]
+pub(crate) fn exp_lanes(input: F64x) -> F64x {
+    let bits = input.to_bits();
+    let absolute_high = (bits >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+    let negative = (bits >> U64x::splat(63)).simd_eq(U64x::splat(1));
+    let reduce = absolute_high.simd_gt(U64x::splat(0x3fd6_2e42));
+    let one_step = absolute_high.simd_lt(U64x::splat(0x3ff0_a2b2));
+
+    let half = negative.select(F64x::splat(-0.5), F64x::splat(0.5));
+    let general_k = (F64x::splat(INV_LN2) * input + half).cast::<i64>();
+    let one_k = negative.select(I64x::splat(-1), I64x::splat(1));
+    let reduced_k = one_step.select(one_k, general_k);
+    let k = reduce.select(reduced_k, I64x::splat(0));
+
+    let one_hi = negative.select(input + F64x::splat(LN2_HI), input - F64x::splat(LN2_HI));
+    let one_lo = negative.select(F64x::splat(-LN2_LO), F64x::splat(LN2_LO));
+    let general_k_f64 = general_k.cast::<f64>();
+    let general_hi = input - general_k_f64 * F64x::splat(LN2_HI);
+    let general_lo = general_k_f64 * F64x::splat(LN2_LO);
+    let reduced_hi = one_step.select(one_hi, general_hi);
+    let reduced_lo = one_step.select(one_lo, general_lo);
+    let hi_r = reduce.select(reduced_hi, input);
+    let lo_r = reduce.select(reduced_lo, F64x::splat(0.0));
+    let x = hi_r - lo_r;
+
+    let t = x * x;
+    let c = x - t * simd_horner(t, &[P5, P4, P3, P2, P1]);
+    let primary = F64x::splat(1.0) - ((x * c / (c - F64x::splat(2.0))) - x);
+    let y = F64x::splat(1.0) - ((lo_r - (x * c / (F64x::splat(2.0) - c))) - hi_r);
+    let exponent_bits = (k + I64x::splat(0x3ff)).cast::<u64>() << U64x::splat(52);
+    let scaled = y * F64x::from_bits(exponent_bits);
+    k.simd_eq(I64x::splat(0)).select(primary, scaled)
+}
+
+/// Apply [`expm1`] to a slice in place.
+///
+/// The common finite range performs reduction and the Q1..Q5 rational
+/// approximation in independent SIMD lanes. The small scalar reconstruction
+/// is retained per lane because its bit-level cases depend on each lane's
+/// exponent `k`; this keeps the published FDLIBM order without a
+/// lane-width-dependent reduction.
+pub fn expm1_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let absolute_high = (input.to_bits() >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+        let ordinary = absolute_high.simd_ge(U64x::splat(0x3c90_0000))
+            & absolute_high.simd_lt(U64x::splat(0x4043_687a));
+        if ordinary.all() {
+            expm1_lanes(input).copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = expm1(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = expm1(*value);
+    }
+}
+
+#[inline]
+pub(crate) fn expm1_lanes(input: F64x) -> F64x {
+    let bits = input.to_bits();
+    let absolute_high = (bits >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+    let negative = (bits >> U64x::splat(63)).simd_eq(U64x::splat(1));
+    let reduce = absolute_high.simd_gt(U64x::splat(0x3fd6_2e42));
+    let one_step = absolute_high.simd_lt(U64x::splat(0x3ff0_a2b2));
+
+    let half = negative.select(F64x::splat(-0.5), F64x::splat(0.5));
+    let general_k = (F64x::splat(INV_LN2) * input + half).cast::<i64>();
+    let one_k = negative.select(I64x::splat(-1), I64x::splat(1));
+    let reduced_k = one_step.select(one_k, general_k);
+    let k = reduce.select(reduced_k, I64x::splat(0));
+
+    let one_hi = negative.select(input + F64x::splat(LN2_HI), input - F64x::splat(LN2_HI));
+    let one_lo = negative.select(F64x::splat(-LN2_LO), F64x::splat(LN2_LO));
+    let general_k_f64 = general_k.cast::<f64>();
+    let general_hi = input - general_k_f64 * F64x::splat(LN2_HI);
+    let general_lo = general_k_f64 * F64x::splat(LN2_LO);
+    let reduced_hi = one_step.select(one_hi, general_hi);
+    let reduced_lo = one_step.select(one_lo, general_lo);
+    let hi_r = reduce.select(reduced_hi, input);
+    let lo_r = reduce.select(reduced_lo, F64x::splat(0.0));
+    let x = hi_r - lo_r;
+    let c = reduce.select((hi_r - x) - lo_r, F64x::splat(0.0));
+
+    let hfx = F64x::splat(0.5) * x;
+    let hxs = x * hfx;
+    let r1 = F64x::splat(1.0) + hxs * simd_horner(hxs, &[Q5, Q4, Q3, Q2, Q1]);
+    let t = F64x::splat(3.0) - r1 * hfx;
+    let e = hxs * ((r1 - t) / (F64x::splat(6.0) - x * t));
+
+    let xs = x.to_array();
+    let ks = k.to_array();
+    let cs = c.to_array();
+    let es = e.to_array();
+    let squared_halves = hxs.to_array();
+    let mut output = [0.0; SIMD_LANES];
+    for lane in 0..SIMD_LANES {
+        output[lane] = expm1_reconstruct(
+            xs[lane],
+            ks[lane] as i32,
+            cs[lane],
+            es[lane],
+            squared_halves[lane],
+        );
+    }
+    F64x::from_array(output)
+}
+
+/// Apply [`ln`] to a slice in place.
+///
+/// Positive normal finite chunks use the scalar reduction and polynomial
+/// order lane-wise. A chunk containing a signed zero, subnormal, negative,
+/// infinity, or NaN falls back to [`ln`] so the exact special-value behavior
+/// remains centralized in the scalar definition.
+pub fn ln_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let high = input.to_bits() >> U64x::splat(32);
+        let normal_positive =
+            high.simd_ge(U64x::splat(0x0010_0000)) & high.simd_lt(U64x::splat(0x7ff0_0000));
+        if normal_positive.all() {
+            ln_lanes(input).copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = ln(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = ln(*value);
+    }
+}
+
+#[inline]
+fn ln_lanes(input: F64x) -> F64x {
+    let bits = input.to_bits();
+    let high = bits >> U64x::splat(32);
+    let mantissa = high & U64x::splat(0x000f_ffff);
+    let adjustment = (mantissa + U64x::splat(0x9_5f64)) & U64x::splat(0x0010_0000);
+    let mut k = (high >> U64x::splat(20)).cast::<i64>() - I64x::splat(1023);
+    k += (adjustment >> U64x::splat(20)).cast::<i64>();
+    let normalized_high = mantissa | (adjustment ^ U64x::splat(0x3ff0_0000));
+    let x =
+        F64x::from_bits((bits & U64x::splat(0xffff_ffff)) | (normalized_high << U64x::splat(32)));
+    let f = x - F64x::splat(1.0);
+    let dk = k.cast::<f64>();
+    let k_zero = k.simd_eq(I64x::splat(0));
+
+    let s = f / (F64x::splat(2.0) + f);
+    let z = s * s;
+    let w = z * z;
+    let t1 = w * simd_horner(w, &[LG6, LG4, LG2]);
+    let t2 = z * simd_horner(w, &[LG7, LG5, LG3, LG1]);
+    let r = t2 + t1;
+    let branch_i = mantissa.cast::<i64>() - I64x::splat(0x6_147a);
+    let branch_j = I64x::splat(0x6_b851) - mantissa.cast::<i64>();
+    let hfsq = F64x::splat(0.5) * f * f;
+    let positive_k_zero = f - (hfsq - s * (hfsq + r));
+    let positive_k =
+        dk * F64x::splat(LN2_HI) - ((hfsq - (s * (hfsq + r) + dk * F64x::splat(LN2_LO))) - f);
+    let positive = k_zero.select(positive_k_zero, positive_k);
+    let other_k_zero = f - s * (f - r);
+    let other_k = dk * F64x::splat(LN2_HI) - ((s * (f - r) - dk * F64x::splat(LN2_LO)) - f);
+    let other = k_zero.select(other_k_zero, other_k);
+    let main = (branch_i | branch_j)
+        .simd_gt(I64x::splat(0))
+        .select(positive, other);
+
+    let short_r = f * f * (F64x::splat(0.5) - F64x::splat(THIRD) * f);
+    let short_zero = k_zero.select(
+        F64x::splat(0.0),
+        dk * F64x::splat(LN2_HI) + dk * F64x::splat(LN2_LO),
+    );
+    let short_nonzero = k_zero.select(
+        f - short_r,
+        dk * F64x::splat(LN2_HI) - ((short_r - dk * F64x::splat(LN2_LO)) - f),
+    );
+    let short = f
+        .simd_eq(F64x::splat(0.0))
+        .select(short_zero, short_nonzero);
+    ((U64x::splat(0x000f_ffff) & (U64x::splat(2) + mantissa)).simd_lt(U64x::splat(3)))
+        .select(short, main)
+}
+
+/// Apply [`log2`] to a slice in place.
+///
+/// The SIMD path is restricted to positive normal finite chunks and uses
+/// the scalar function's exact split reconstruction. All special-value and
+/// subnormal cases remain scalar.
+pub fn log2_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let high = input.to_bits() >> U64x::splat(32);
+        let normal_positive =
+            high.simd_ge(U64x::splat(0x0010_0000)) & high.simd_lt(U64x::splat(0x7ff0_0000));
+        if normal_positive.all() {
+            log2_lanes(input).copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = log2(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = log2(*value);
+    }
+}
+
+#[inline]
+fn log2_lanes(input: F64x) -> F64x {
+    let bits = input.to_bits();
+    let high = bits >> U64x::splat(32);
+    let adjusted = high + U64x::splat(0x3ff0_0000 - 0x3fe6_a09e);
+    let k = (adjusted >> U64x::splat(20)).cast::<i64>() - I64x::splat(0x3ff);
+    let normalized_high = (adjusted & U64x::splat(0x000f_ffff)) + U64x::splat(0x3fe6_a09e);
+    let x =
+        F64x::from_bits((bits & U64x::splat(0xffff_ffff)) | (normalized_high << U64x::splat(32)));
+
+    let f = x - F64x::splat(1.0);
+    let hfsq = F64x::splat(0.5) * f * f;
+    let s = f / (F64x::splat(2.0) + f);
+    let z = s * s;
+    let w = z * z;
+    let t1 = w * simd_horner(w, &[LG6, LG4, LG2]);
+    let t2 = z * simd_horner(w, &[LG7, LG5, LG3, LG1]);
+    let r = t2 + t1;
+
+    let hi_v = F64x::from_bits((f - hfsq).to_bits() & U64x::splat(0xffff_ffff_0000_0000));
+    let lo_v = f - hi_v - hfsq + s * (hfsq + r);
+    let val_hi = hi_v * F64x::splat(IVLN2_HI);
+    let mut val_lo = (lo_v + hi_v) * F64x::splat(IVLN2_LO) + lo_v * F64x::splat(IVLN2_HI);
+    let y = k.cast::<f64>();
+    let w2 = y + val_hi;
+    val_lo += (y - w2) + val_hi;
+    val_lo + w2
 }
 
 #[cfg(test)]

@@ -1,6 +1,17 @@
 //! Bit-level helpers shared by the kernels. All manipulation goes through
 //! `to_bits`/`from_bits` — safe, explicit, and identical on every target.
 
+use std::simd::Simd;
+
+#[cfg(target_feature = "avx512f")]
+pub(crate) const SIMD_LANES: usize = 8;
+#[cfg(not(target_feature = "avx512f"))]
+pub(crate) const SIMD_LANES: usize = 4;
+
+pub(crate) type F64x = Simd<f64, SIMD_LANES>;
+pub(crate) type I64x = Simd<i64, SIMD_LANES>;
+pub(crate) type U64x = Simd<u64, SIMD_LANES>;
+
 /// High 32 bits of an f64.
 #[inline]
 #[must_use]
@@ -46,6 +57,19 @@ pub(crate) fn horner(x: f64, coefficients: &[f64]) -> f64 {
     let mut acc = 0.0;
     for &c in coefficients {
         acc = acc * x + c;
+    }
+    acc
+}
+
+/// Lane-wise Horner evaluation in the scalar definition's exact operation
+/// order. There is no horizontal reduction: changing the build-tier lane
+/// count changes only how many independent inputs run together.
+#[inline]
+#[must_use]
+pub(crate) fn simd_horner(x: F64x, coefficients: &[f64]) -> F64x {
+    let mut acc = F64x::splat(0.0);
+    for &coefficient in coefficients {
+        acc = acc * x + F64x::splat(coefficient);
     }
     acc
 }

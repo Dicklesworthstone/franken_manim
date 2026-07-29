@@ -14,8 +14,11 @@
 //! Design accuracy bounds (verified downstream against the committed
 //! mpmath vectors): `sinh`, `cosh`, `tanh` < 2 ulp.
 
-use crate::bits::{hi, lo};
-use crate::exp_log::{exp, expm1};
+use crate::bits::{F64x, SIMD_LANES, U64x, hi, lo};
+use crate::exp_log::{exp, exp_lanes, expm1, expm1_lanes};
+use std::simd::Select;
+use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+use std::simd::num::SimdFloat;
 
 const HUGE: f64 = 1.0e300;
 const SHUGE: f64 = 1.0e307;
@@ -153,6 +156,134 @@ pub fn tanh(x: f64) -> f64 {
         z = 1.0 - TINY;
     }
     if jx >= 0 { z } else { -z }
+}
+
+/// Apply [`sinh`] to a slice in place.
+///
+/// Ordinary `|x| < 22` chunks use the same `expm1` reduction as the scalar
+/// definition in independent lanes. Tiny, large, and exceptional chunks
+/// remain scalar so overflow and signed-special behavior stays exact.
+pub fn sinh_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let absolute_high = (input.to_bits() >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+        let ordinary = absolute_high.simd_ge(U64x::splat(0x3e30_0000))
+            & absolute_high.simd_lt(U64x::splat(0x4036_0000));
+        if ordinary.all() {
+            sinh_lanes(input).copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = sinh(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = sinh(*value);
+    }
+}
+
+#[inline]
+fn sinh_lanes(input: F64x) -> F64x {
+    let bits = input.to_bits();
+    let absolute_high = (bits >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+    let negative = (bits >> U64x::splat(63)).simd_eq(U64x::splat(1));
+    let h = negative.select(F64x::splat(-0.5), F64x::splat(0.5));
+    let t = expm1_lanes(input.abs());
+    let small = h * (F64x::splat(2.0) * t - t * t / (t + F64x::splat(1.0)));
+    let large = h * (t + t / (t + F64x::splat(1.0)));
+    absolute_high
+        .simd_lt(U64x::splat(0x3ff0_0000))
+        .select(small, large)
+}
+
+/// Apply [`cosh`] to a slice in place.
+///
+/// SIMD is retained only for chunks wholly inside one scalar formula:
+/// `expm1` below `0.5*ln(2)` or `exp` from there to 22. Mixed-formula,
+/// tiny, large, and exceptional chunks use [`cosh`] lane by lane.
+pub fn cosh_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let absolute_high = (input.to_bits() >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+        let small = absolute_high.simd_ge(U64x::splat(0x3c90_0000))
+            & absolute_high.simd_lt(U64x::splat(0x3fd6_2e43));
+        let medium = absolute_high.simd_ge(U64x::splat(0x3fd6_2e43))
+            & absolute_high.simd_lt(U64x::splat(0x4036_0000));
+        let result = if small.all() {
+            let t = expm1_lanes(input.abs());
+            let w = F64x::splat(1.0) + t;
+            Some(F64x::splat(1.0) + t * t / (w + w))
+        } else if medium.all() {
+            let t = exp_lanes(input.abs());
+            Some(F64x::splat(0.5) * t + F64x::splat(0.5) / t)
+        } else {
+            None
+        };
+        if let Some(result) = result {
+            result.copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = cosh(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = cosh(*value);
+    }
+}
+
+/// Apply [`tanh`] to a slice in place.
+///
+/// Chunks wholly below or above `|x| = 1` use the corresponding scalar
+/// `expm1` formula in independent lanes. Mixed, tiny, saturated, and
+/// exceptional chunks stay scalar.
+pub fn tanh_slice(values: &mut [f64]) {
+    let mut index = 0;
+    while index + SIMD_LANES <= values.len() {
+        let input = F64x::from_slice(&values[index..]);
+        let bits = input.to_bits();
+        let absolute_high = (bits >> U64x::splat(32)) & U64x::splat(0x7fff_ffff);
+        let ordinary = absolute_high.simd_ge(U64x::splat(0x3c80_0000))
+            & absolute_high.simd_lt(U64x::splat(0x4036_0000));
+        let below_one = absolute_high.simd_lt(U64x::splat(0x3ff0_0000));
+        let result = if ordinary.all() && below_one.all() {
+            Some(tanh_lanes(input, false))
+        } else if ordinary.all() && (!below_one).all() {
+            Some(tanh_lanes(input, true))
+        } else {
+            None
+        };
+        if let Some(result) = result {
+            result.copy_to_slice(&mut values[index..index + SIMD_LANES]);
+        } else {
+            for value in &mut values[index..index + SIMD_LANES] {
+                *value = tanh(*value);
+            }
+        }
+        index += SIMD_LANES;
+    }
+    for value in &mut values[index..] {
+        *value = tanh(*value);
+    }
+}
+
+#[inline]
+fn tanh_lanes(input: F64x, at_least_one: bool) -> F64x {
+    let bits = input.to_bits();
+    let negative = (bits >> U64x::splat(63)).simd_eq(U64x::splat(1));
+    let absolute = input.abs();
+    let magnitude = if at_least_one {
+        let t = expm1_lanes(F64x::splat(2.0) * absolute);
+        F64x::splat(1.0) - F64x::splat(2.0) / (t + F64x::splat(2.0))
+    } else {
+        let t = expm1_lanes(F64x::splat(-2.0) * absolute);
+        -t / (t + F64x::splat(2.0))
+    };
+    negative.select(-magnitude, magnitude)
 }
 
 #[cfg(test)]

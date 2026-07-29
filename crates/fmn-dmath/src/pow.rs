@@ -22,6 +22,12 @@
 //! few hundred ulp near the overflow/underflow bounds). All magic
 //! constants are exact bit patterns; each comment gives the published
 //! FDLIBM decimal.
+//!
+//! §17.3 audit ruling: `pow` remains scalar. Its five stages are dominated
+//! by per-lane IEEE/C99 classification and split reconstruction, and the
+//! current high-volume color consumers already use exact transfer tables.
+//! No production caller presents a coherent two-input batch that justifies
+//! eagerly evaluating mutually exclusive branches.
 
 use crate::bits::{from_parts, hi, horner, lo, with_hi, zero_lo};
 use crate::exp_log::scalbn;

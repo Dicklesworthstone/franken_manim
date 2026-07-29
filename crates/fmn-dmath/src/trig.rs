@@ -11,6 +11,13 @@
 //! Design accuracy bounds (verified downstream against mpmath vectors):
 //! * `sin`, `cos`: < 1 ulp over the full finite domain.
 //! * `tan`: < 2 ulp over the full finite domain.
+//!
+//! §17.3 audit ruling: these three entry points remain scalar. Their
+//! representative workload is inseparable from the branchy Cody–Waite /
+//! Payne–Hanek range reducer, while vectorizing only the primary-range
+//! polynomial would benchmark a non-representative subset. A future retained
+//! route needs a measured bulk range-reduction contract, ideally shared by a
+//! paired sine/cosine API, before adding another public surface.
 
 use crate::bits::{hi, zero_lo};
 use crate::rem_pio2::rem_pio2;
