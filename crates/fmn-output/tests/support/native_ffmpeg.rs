@@ -15,6 +15,7 @@ use std::time::Duration;
 
 const VERSION: &str = "ffmpeg version 7.1-fake";
 const MODE_LEAF: &str = ".fmn-native-ffmpeg-mode";
+const TIMEOUT_READY_LEAF: &str = ".fmn-native-ffmpeg-timeout-ready";
 
 fn main() -> ExitCode {
     match run() {
@@ -49,42 +50,48 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     if !private_dir.is_absolute() {
         return Err("ffmpeg fixture TMPDIR is not absolute".into());
     }
-    match fixture_mode(&private_dir)?.as_deref() {
-        Some("timeout") => {
+    let Some((mode, fixture_root)) = fixture_mode(&private_dir)? else {
+        drain_stdin()?;
+        let artifact = artifact_path(&argv)?;
+        append_argv(&private_dir, &argv)?;
+        write_environment(&artifact)?;
+        std::fs::write(artifact, b"FAKEVIDEO")?;
+        return Ok(0);
+    };
+    match mode.as_str() {
+        "timeout" => {
             let mut child = Command::new(std::env::current_exe()?)
                 .arg("--fmn-sleep-child")
                 .spawn()?;
+            std::fs::write(
+                fixture_root.join(TIMEOUT_READY_LEAF),
+                child.id().to_string(),
+            )?;
             let _status = child.wait()?;
             Ok(0)
         }
-        Some("oversize") => {
+        "oversize" => {
             drain_stdin()?;
             let artifact = artifact_path(&argv)?;
             std::fs::write(&artifact, vec![0_u8; 4_096])?;
             Ok(0)
         }
-        Some("fail7") => {
+        "fail7" => {
             drain_stdin()?;
             eprintln!("boom");
             Ok(7)
         }
-        Some(mode) => Err(format!("unknown fixture mode {mode:?}").into()),
-        None => {
-            drain_stdin()?;
-            let artifact = artifact_path(&argv)?;
-            append_argv(&private_dir, &argv)?;
-            write_environment(&artifact)?;
-            std::fs::write(artifact, b"FAKEVIDEO")?;
-            Ok(0)
-        }
+        mode => Err(format!("unknown fixture mode {mode:?}").into()),
     }
 }
 
-fn fixture_mode(private_dir: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {
+fn fixture_mode(
+    private_dir: &Path,
+) -> Result<Option<(String, PathBuf)>, Box<dyn std::error::Error>> {
     for ancestor in private_dir.ancestors() {
         let marker = ancestor.join(MODE_LEAF);
         match std::fs::read_to_string(&marker) {
-            Ok(mode) => return Ok(Some(mode.trim().to_owned())),
+            Ok(mode) => return Ok(Some((mode.trim().to_owned(), ancestor.to_path_buf()))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }

@@ -1635,11 +1635,12 @@ mod private_boundary {
 
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     #[test]
-    fn sandbox_timeout_kills_and_leaves_destination_untouched() {
+    fn sandbox_timeout_separates_setup_from_tree_kill_and_leaves_destination_untouched() {
         let (dir, _gate) = scratch("timeout");
         // The native fixture remains the direct child while its child inherits
-        // the process-group pipes. Returning promptly therefore proves the
-        // complete group was killed.
+        // the process-group pipes. Its readiness marker is written only after
+        // that descendant exists, so the second interval below measures
+        // timeout/kill/reap rather than private-copy and hashing setup.
         set_native_fixture_mode(&dir, "timeout");
         let (tool, runner) = real_tool(&dir);
         let limits = JobLimits {
@@ -1653,15 +1654,32 @@ mod private_boundary {
         blocked_job.width = 3840;
         blocked_job.height = 2160;
         let frames = vec![0u8; WireFormat::Nv12.frame_bytes(blocked_job.width, blocked_job.height)];
-        let started = std::time::Instant::now();
-        let result = boundary.encode(&blocked_job, frames, &caps, &destination);
+        let worker_destination = destination.clone();
+        let setup_started = std::time::Instant::now();
+        let worker = std::thread::spawn(move || {
+            boundary.encode(&blocked_job, frames, &caps, &worker_destination)
+        });
+        let ready = dir.join(".fmn-native-ffmpeg-timeout-ready");
+        while !ready.is_file() {
+            assert!(
+                setup_started.elapsed() < Duration::from_secs(30),
+                "native fixture did not reach post-spawn readiness; setup phase elapsed {:?}",
+                setup_started.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let setup_elapsed = setup_started.elapsed();
+        let supervision_started = std::time::Instant::now();
+        let result = worker.join().expect("native timeout worker");
+        let supervision_elapsed = supervision_started.elapsed();
         assert!(
             matches!(result, Err(BoundaryError::JobTimedOut { .. })),
             "expected a timeout, got {result:?}"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "kill was not prompt"
+            supervision_elapsed < Duration::from_secs(3),
+            "post-spawn timeout/tree-kill/reap was not prompt: {supervision_elapsed:?}; \
+             setup was independently classified as {setup_elapsed:?}"
         );
         assert!(!destination.exists());
     }
