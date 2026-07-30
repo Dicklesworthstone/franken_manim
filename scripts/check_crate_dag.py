@@ -69,7 +69,24 @@ EXPECTED: dict[str, set[str]] = {
     },
     "fmn-runtime": {"fmn-core", "fmn-platform"},
     "fmn-cli": {"fmn-core", "fmn-config", "fmn-cache", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
-    "fmn-conformance": {"fmn-core", "fmn-hash", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-library", "fmn-scene", "fmn-output"},
+    # cache/platform/text/tex: the PG-7 producer measures the real Scribe
+    # cold, cached, and 10k-glyph workloads through the governed host/cache
+    # capabilities rather than a synthetic duplicate (§17.2, fm-inr.2.2).
+    "fmn-conformance": {
+        "fmn-core",
+        "fmn-hash",
+        "fmn-geom",
+        "fmn-mobject",
+        "fmn-anim",
+        "fmn-render",
+        "fmn-library",
+        "fmn-scene",
+        "fmn-output",
+        "fmn-cache",
+        "fmn-platform",
+        "fmn-text",
+        "fmn-tex",
+    },
     "fmn-python": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-anim", "fmn-library", "fmn-scene"},
 }
 
