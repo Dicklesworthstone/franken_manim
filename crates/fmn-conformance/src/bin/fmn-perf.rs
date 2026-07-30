@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use fmn_cache::{Store, StoreConfig};
 use fmn_conformance::perf::{
     BASELINE_SCHEMA, Baseline, EvidenceKind, EvidenceRef, MeasurementBatch, POLICY_SCHEMA,
     SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog,
@@ -10,7 +11,13 @@ use fmn_conformance::perf_pg2::{
     PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
     Pg2Scenario, measure_pg2,
 };
+use fmn_conformance::perf_pg7::{
+    PG7_DEFINITION_SCHEMA, PG7_SAMPLE_COUNT, PG7_WARMUP_ITERATIONS, Pg7Definition, Pg7Scenario,
+    measure_pg7,
+};
 use fmn_hash::sha256;
+use fmn_platform::clock::StdClock;
+use fmn_platform::fs::StdFs;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
@@ -18,6 +25,7 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 const CLI_SCHEMA: &str = "fmn-perf-cli/1";
 const EXIT_OK: u8 = 0;
@@ -44,7 +52,8 @@ fn main() -> ExitCode {
 fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(CliError::usage(
-            "expected catalog, verify-baseline, pg2-definitions, or measure-pg2",
+            "expected catalog, verify-baseline, pg2-definitions, measure-pg2, \
+             pg7-definitions, or measure-pg7",
         ));
     };
     match command {
@@ -59,6 +68,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
                 .ok_or_else(|| CliError::usage("missing path"))?,
         ),
         "pg2-definitions" if arguments.len() == 1 => Ok(pg2_definitions()),
+        "pg7-definitions" if arguments.len() == 1 => pg7_definitions(),
         "measure-pg2" if arguments.len() == 5 => measure_pg2_command(
             arguments
                 .get(1)
@@ -73,12 +83,34 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
                 .get(4)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
         ),
+        "measure-pg7" if arguments.len() == 6 => measure_pg7_command(
+            arguments
+                .get(1)
+                .ok_or_else(|| CliError::usage("missing baseline path"))?,
+            arguments
+                .get(2)
+                .ok_or_else(|| CliError::usage("missing producer commit"))?,
+            arguments
+                .get(3)
+                .ok_or_else(|| CliError::usage("missing cache root"))?,
+            arguments
+                .get(4)
+                .ok_or_else(|| CliError::usage("missing trace output path"))?,
+            arguments
+                .get(5)
+                .ok_or_else(|| CliError::usage("missing raw output path"))?,
+        ),
         "catalog" | "verify-baseline" => Err(CliError::usage(format!(
             "{command} requires exactly one path argument"
         ))),
         "pg2-definitions" => Err(CliError::usage("pg2-definitions does not accept arguments")),
+        "pg7-definitions" => Err(CliError::usage("pg7-definitions does not accept arguments")),
         "measure-pg2" => Err(CliError::usage(
             "measure-pg2 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+        )),
+        "measure-pg7" => Err(CliError::usage(
+            "measure-pg7 requires <baseline.tsv> <producer-commit> \
+             <cache-root-or-dash> <trace.tsv> <raw.tsv>",
         )),
         _ => Err(CliError::usage(format!("unknown command {command:?}"))),
     }
@@ -195,6 +227,34 @@ fn pg2_definitions() -> String {
     output
 }
 
+fn pg7_definitions() -> Result<String, CliError> {
+    let mut output = String::new();
+    for scenario in Pg7Scenario::ALL {
+        let definition =
+            Pg7Definition::new(scenario).map_err(|error| CliError::data(error.to_string()))?;
+        let _ = writeln!(
+            output,
+            "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg7-definition\",\
+             \"definition_schema\":\"{PG7_DEFINITION_SCHEMA}\",\"gate\":\"pg-7\",\
+             \"scenario\":\"{}\",\"benchmark_definition\":\"{}\",\
+             \"config_digest\":\"{}\",\"fixture_input_digest\":\"{}\",\
+             \"expected_result_digest\":\"{}\",\"engine\":\"{}\",\"tier\":\"portable\",\
+             \"thread_profile\":\"single-thread\",\"cache_state\":\"{}\",\
+             \"output_mode\":\"{}\",\"sample_count\":{PG7_SAMPLE_COUNT},\
+             \"warmup_iterations\":{PG7_WARMUP_ITERATIONS}}}",
+            scenario.name(),
+            definition.digest(),
+            definition.config_digest(),
+            definition.fixture_input_digest(),
+            definition.expected_result_digest(),
+            scenario.engine(),
+            scenario.cache_state(),
+            scenario.output_mode(),
+        );
+    }
+    Ok(output)
+}
+
 fn measure_pg2_command(
     baseline_path: &OsStr,
     producer_commit: &OsStr,
@@ -212,7 +272,6 @@ fn measure_pg2_command(
             "trace and raw output paths must be distinct",
         ));
     }
-
     // Validate both repository artifact paths and refuse replacement before
     // the expensive render. The trace is published first, so a later raw-file
     // race can leave only a clearly incomplete trace, never a plausible bundle
@@ -274,6 +333,173 @@ fn measure_pg2_command(
         escape_json(raw_path_text),
         raw_digest,
     ))
+}
+
+fn measure_pg7_command(
+    baseline_path: &OsStr,
+    producer_commit: &OsStr,
+    cache_root: &OsStr,
+    trace_path: &OsStr,
+    raw_path: &OsStr,
+) -> Result<String, CliError> {
+    let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
+    let baseline =
+        Baseline::from_tsv(&baseline_text).map_err(|error| CliError::data(error.to_string()))?;
+    let scenario = Pg7Scenario::parse(&baseline.policy.scenario).ok_or_else(|| {
+        CliError::data(format!(
+            "unsupported PG-7 scenario {:?}",
+            baseline.policy.scenario
+        ))
+    })?;
+    let definition =
+        Pg7Definition::new(scenario).map_err(|error| CliError::data(error.to_string()))?;
+    definition
+        .validate_baseline(&baseline)
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let producer_commit = utf8_argument(producer_commit, "producer commit")?;
+    let cache_root_text = utf8_argument(cache_root, "cache root")?;
+    let trace_path_text = utf8_argument(trace_path, "trace output path")?;
+    let raw_path_text = utf8_argument(raw_path, "raw output path")?;
+    if trace_path_text == raw_path_text {
+        return Err(CliError::data(
+            "trace and raw output paths must be distinct",
+        ));
+    }
+    if cache_root_text != "-"
+        && (cache_root_text == trace_path_text || cache_root_text == raw_path_text)
+    {
+        return Err(CliError::data(
+            "cache root, trace output, and raw output paths must be distinct",
+        ));
+    }
+    match scenario {
+        Pg7Scenario::FormulaCached if cache_root_text == "-" || cache_root_text.is_empty() => {
+            return Err(CliError::data(
+                "formula-cached requires a fresh, nonexistent cache-root path",
+            ));
+        }
+        Pg7Scenario::FormulaCold | Pg7Scenario::Text10kGlyph if cache_root_text != "-" => {
+            return Err(CliError::data(format!(
+                "{scenario} requires '-' for cache-root"
+            )));
+        }
+        _ => {}
+    }
+
+    EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    EvidenceRef::from_bytes(EvidenceKind::RawSamples, raw_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    validate_output_parent(trace_path, "trace output")?;
+    validate_output_parent(raw_path, "raw output")?;
+    refuse_existing(trace_path, "trace output")?;
+    refuse_existing(raw_path, "raw output")?;
+    require_release_perf_front_door()?;
+
+    let store = if scenario == Pg7Scenario::FormulaCached {
+        validate_cache_root(cache_root)?;
+        refuse_existing(cache_root, "cache root")?;
+        Some(
+            Store::open_host(
+                Arc::new(StdFs),
+                Arc::new(StdClock::new()),
+                cache_root_text,
+                StoreConfig::default(),
+            )
+            .map_err(|error| CliError::data(format!("cannot open fresh cache root: {error}")))?,
+        )
+    } else {
+        None
+    };
+    let artifacts = measure_pg7(&baseline, producer_commit, store.as_ref(), trace_path_text)
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw = artifacts
+        .batch
+        .to_tsv()
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw_digest = sha256(raw.as_bytes());
+    let trace_digest = sha256(artifacts.trace_tsv.as_bytes());
+    let valid_samples = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_none())
+        .count();
+    let invalid_samples = artifacts.batch.samples.len() - valid_samples;
+
+    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
+        return Err(CliError::io(format!(
+            "{}; trace output {trace_path_text:?} was already published and was not deleted",
+            error.detail
+        )));
+    }
+
+    Ok(format!(
+        "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg7-measurement\",\
+         \"gate\":\"pg-7\",\"scenario\":\"{}\",\"benchmark_definition\":\"{}\",\
+         \"config_digest\":\"{}\",\"producer_commit\":\"{}\",\
+         \"sample_count\":{},\"valid_samples\":{},\"invalid_samples\":{},\
+         \"bare_metal\":{},\"isolation_qualified\":{},\
+         \"result_digest\":\"{}\",\"cache_state\":\"{}\",\
+         \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"status\":\"measured-not-evaluated\"}}\n",
+        escape_json(&baseline.policy.scenario),
+        artifacts.batch.key.benchmark_definition,
+        artifacts.batch.key.config_digest,
+        producer_commit,
+        artifacts.batch.samples.len(),
+        valid_samples,
+        invalid_samples,
+        artifacts.batch.key.bare_metal,
+        artifacts.batch.key.isolated,
+        artifacts.result_digest,
+        artifacts.batch.key.cache_state,
+        escape_json(trace_path_text),
+        trace_digest,
+        escape_json(raw_path_text),
+        raw_digest,
+    ))
+}
+
+fn validate_cache_root(path: &OsStr) -> Result<(), CliError> {
+    let path = Path::new(path);
+    if path.components().next().is_none()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(CliError::data(
+            "cache root is not a canonical relative path",
+        ));
+    }
+    let artifact_root = Path::new("tests/artifacts/perf");
+    if !path.starts_with(artifact_root) || path == artifact_root {
+        return Err(CliError::data(
+            "cache root must be a fresh child below tests/artifacts/perf/",
+        ));
+    }
+    validate_output_parent(path.as_os_str(), "cache root")
+}
+
+fn require_release_perf_front_door() -> Result<(), CliError> {
+    if cfg!(debug_assertions) {
+        return Err(CliError::data(
+            "measurement requires a release-perf artifact; debug assertions are enabled",
+        ));
+    }
+    let executable = std::env::current_exe()
+        .map_err(|error| CliError::data(format!("cannot identify producer artifact: {error}")))?;
+    if !executable
+        .components()
+        .any(|component| component.as_os_str() == "release-perf")
+    {
+        return Err(CliError::data(format!(
+            "measurement requires the Cargo release-perf artifact path, got {executable:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn utf8_argument<'a>(value: &'a OsStr, label: &str) -> Result<&'a str, CliError> {
@@ -456,11 +682,32 @@ mod tests {
     }
 
     #[test]
+    fn pg7_definition_surface_is_closed_and_line_oriented() {
+        let output = pg7_definitions().unwrap();
+        assert_eq!(output.lines().count(), 3);
+        assert!(output.lines().all(|line| {
+            line.starts_with("{\"schema\":\"fmn-perf-cli/1\"") && line.ends_with('}')
+        }));
+        assert!(output.contains("\"scenario\":\"formula-cold\""));
+        assert!(output.contains("\"scenario\":\"formula-cached\""));
+        assert!(output.contains("\"scenario\":\"text-10k-glyph\""));
+        assert!(!output.contains("\"status\""));
+    }
+
+    #[test]
     fn measure_pg2_refuses_ambiguous_argument_counts_before_io() {
         let arguments = vec![std::ffi::OsString::from("measure-pg2")];
         let error = dispatch(&arguments).unwrap_err();
         assert_eq!(error.exit_code, EXIT_USAGE);
         assert!(error.detail.contains("<baseline.tsv>"));
+    }
+
+    #[test]
+    fn measure_pg7_refuses_ambiguous_argument_counts_before_io() {
+        let arguments = vec![std::ffi::OsString::from("measure-pg7")];
+        let error = dispatch(&arguments).unwrap_err();
+        assert_eq!(error.exit_code, EXIT_USAGE);
+        assert!(error.detail.contains("<cache-root-or-dash>"));
     }
 
     #[test]
@@ -470,5 +717,16 @@ mod tests {
             validate_output_parent(OsStr::new("src/../new-output.tsv"), "test output").unwrap_err();
         assert_eq!(error.kind, "data");
         assert!(error.detail.contains("canonical relative path"));
+    }
+
+    #[test]
+    fn cache_root_check_is_canonical_and_artifact_scoped() {
+        let error = validate_cache_root(OsStr::new("/tmp/pg7-cache")).unwrap_err();
+        assert!(error.detail.contains("canonical relative path"));
+        let error = validate_cache_root(OsStr::new("src/pg7-cache")).unwrap_err();
+        assert!(error.detail.contains("tests/artifacts/perf"));
+        let error = validate_cache_root(OsStr::new("tests/artifacts/perf/missing-parent/cache"))
+            .unwrap_err();
+        assert!(error.detail.contains("cannot inspect cache root parent"));
     }
 }

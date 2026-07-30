@@ -79,12 +79,21 @@ provides NDJSON-only policy, evidence, and producer commands:
   verifies identity, producer commit, and exact digest.
 - `pg2-definitions` reports the exact compiled benchmark-definition and C7/C10
   configuration digests for both canonical raster workloads.
+- `pg7-definitions` reports the exact compiled benchmark-definition,
+  configuration, fixture-input, and result-self-golden digests for all three
+  native-typesetting workloads.
 - `measure-pg2 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` checks
   that the supplied baseline identity names that exact compiled producer, runs
   it, and exclusively creates a content-addressed phase trace followed by the
   canonical raw sample bundle. Both output paths must be distinct canonical
   files below `tests/artifacts/perf/`; their parent directories must already
   exist and may not contain symlinks, and existing paths are never overwritten.
+- `measure-pg7 <baseline.tsv> <producer-commit> <cache-root-or-dash>
+  <trace.tsv> <raw.tsv>` applies the same identity and exclusive-publication
+  rules to PG-7. `formula-cached` requires a fresh, nonexistent cache root
+  below `tests/artifacts/perf/`; the other scenarios require `-`. The producer
+  leaves the owned cache root intact as evidence-supporting state and never
+  cleans it up or reuses it.
 
 Exit `0` means the requested structural/evidence check succeeded; `64` is
 usage error, `65` is malformed, missing, or mismatched data, and `74` is an
@@ -93,9 +102,9 @@ output I/O failure. A measurement record has status
 to run on and cannot turn a target-only baseline into green evidence. Until
 fm-inr.1 lands live pinned-host attestation, PG-2 output forcibly records
 `bare_metal=false` and `isolated=false` even when a supplied context claims
-otherwise. The profile name and fingerprints are retained for calibration,
-but the common evaluator must classify the bundle as host-unqualified or an
-identity mismatch rather than pass it.
+otherwise; PG-7 does the same. The profile name and fingerprints are retained
+for calibration, but the common evaluator must classify the bundle as
+host-unqualified or an identity mismatch rather than pass it.
 
 ## Canonical PG-2 workloads
 
@@ -124,3 +133,43 @@ Zero elapsed time or numeric overflow is retained as an invalid sample, never
 replaced by a plausible throughput. The final frame is canonically hashed
 outside the timed region, and the trace itself is the batch's
 content-addressed `phase-trace` evidence row.
+
+## Canonical PG-7 workloads
+
+The `fmn-perf-pg7-definition/1` bytes bind the source, semantic configuration,
+engine identity, cache state, fixed sample plan, and an exact output
+self-golden. All initialization, priming, cache proof, warmup, and final-result
+checks remain outside the timed regions and are recorded separately in the
+`fmn-perf-pg7-trace/1` evidence.
+
+| Scenario | Timed production path | Required state | Strict target |
+|---|---|---|---|
+| `formula-cold` | `fmn-tex` math-display layout of the fixed synthetic structural isomorph of the G0-4 corpus median | content cache disabled; engine and CPU warmed | < 3 ms |
+| `formula-cached` | `fmn-tex` lookup and bit-exact payload decode for that formula | exact-key miss proven, one-item production `preflight` succeeds, exact stored payload decodes and matches the self-golden, the entry is pinned against in-process eviction, exact-key hit proven again after timing | < 100 µs |
+| `text-10k-glyph` | `fmn-text::layout_text` with the bundled `FontBook` and plain-text defaults | cache absent; deterministic ASCII source produces exactly 10,000 non-whitespace glyphs, one line, and no decorations | < 20 ms |
+
+The formula result digest is SHA-256 over `Typeset::to_bytes`; the native-text
+digest is a versioned canonical hash of every layout, line, glyph, face,
+position, span, and style field. A producer refuses to emit timing evidence if
+either primed or final output differs. The cached path also refuses an already
+warm store: the miss-to-hit transition must be observed in this run, never
+declared by caller metadata.
+
+The formula workload derives reproducibly from G0-4's ratified corpus rules
+v1: math-mode entries are ordered by UTF-8 byte length, construct count, then
+`sha256(mode + NUL + string)`, while occurrence counts supply the weight. The
+lower median is occurrence 6,010 of 12,020; its corpus-pair digest is
+`5d79ab0a3d5eaf9db101f5dcef2630326c1eff6766a31734e1155f2487988a4d`.
+The authored corpus string remains private under G0-4 §15.3. The public timed
+fixture `q^7+z` is a synthetic structural isomorph with the median's five
+UTF-8 bytes and one harvested construct. The definition binds that fixture
+relation, selection rule, rank, median pair digest, rules version, and the
+corpus digest
+`a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`.
+
+Each scenario performs three untimed warmups and retains 24 raw integer
+nanosecond repetitions, requiring 21 valid observations and permitting three
+explicit host-quality failures. Zero elapsed time or a value outside `u64` is
+retained as an invalid sample. A native typesetting error is preserved
+verbatim inside the typed PG-7 workload error, including unsupported-construct
+name and tier; it is never converted into an empty layout or a timing sample.

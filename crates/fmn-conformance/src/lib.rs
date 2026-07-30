@@ -32,6 +32,9 @@
 //! - the canonical PG-2 producer (fm-inr.2.1) — [`perf_pg2`]: fixed fill and
 //!   stroke fixtures, exact benchmark/configuration digests, bounded raw
 //!   samples, and a content-addressed stage trace over the real Lumen path.
+//! - the canonical PG-7 producer (fm-inr.2.2) — [`perf_pg7`]: cold formula,
+//!   cache-proven formula-hit, and exact 10,000-glyph native-text fixtures
+//!   with result self-goldens and bounded integer latency samples.
 //!
 //! The rest of the Gauntlet lands with its owning workstreams; see
 //! COMPREHENSIVE_PLAN §19 for the crate map.
@@ -42,6 +45,7 @@ pub mod golden;
 pub mod npy;
 pub mod perf;
 pub mod perf_pg2;
+pub mod perf_pg7;
 pub mod ratchet;
 pub mod schema;
 pub mod tolerance;
