@@ -3,7 +3,9 @@
 //!
 //! The process tests exercise the D2 mechanism substrate for real: argv-only
 //! spawning, the cleared-environment allowlist, timeout kill, output-cap
-//! kill, and stdin plumbing — all against coreutils, Unix-only (`cfg`).
+//! kill, and stdin plumbing. Unix exercises the host tools directly; Windows
+//! re-enters this native test executable so the exact-image contract is tested
+//! without adding another subprocess capability.
 
 use fmn_platform::fs::{ATOMIC_DIRECTORY_COMPLETE_LEAF, FileSystem, FsNodeKind, StdFs, VirtualFs};
 use fmn_platform::process::{
@@ -11,7 +13,7 @@ use fmn_platform::process::{
     NativeExecutableFormat, ProcessCancellation, ProcessOutcome, ProcessRunner, ProcessSpec,
     ProcessStdinLimits, ProcessTermination, ScriptedRunner, StdFfmpegLocator,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fmn_platform::process::{ProcessError, ProcessMechanism};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -46,29 +48,24 @@ fn locator_scratch(name: &str) -> std::io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn bind_relocated_unix_socket(
-    destination: &Path,
-) -> std::io::Result<std::os::unix::net::UnixListener> {
+fn short_locator_scratch(name: &str) -> std::io::Result<PathBuf> {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     for _ in 0..128 {
         let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let bind_path = PathBuf::from("/tmp").join(format!(
-            "fmn-locator-{}-{sequence}.sock",
+        let dir = PathBuf::from("/tmp").join(format!(
+            "fmn-locator-{name}-{}-{sequence}",
             std::process::id()
         ));
-        match std::os::unix::net::UnixListener::bind(&bind_path) {
-            Ok(listener) => {
-                std::fs::rename(bind_path, destination)?;
-                return Ok(listener);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }
     Err(std::io::Error::new(
-        std::io::ErrorKind::AddrInUse,
-        "could not claim a short Unix-socket pathname",
+        std::io::ErrorKind::AlreadyExists,
+        "could not claim a short locator scratch directory",
     ))
 }
 
@@ -515,7 +512,7 @@ fn ffmpeg_locator_validates_the_complete_search_policy_before_lookup() {
 fn ffmpeg_locator_skips_present_non_executables_in_search_order() {
     use std::os::unix::fs::symlink;
 
-    let root = locator_scratch("nonexec").expect("claim nonexec locator scratch");
+    let root = short_locator_scratch("nonexec").expect("claim short nonexec locator scratch");
     let broken = root.join("broken");
     let directory = root.join("directory");
     let special = root.join("special");
@@ -528,8 +525,8 @@ fn ffmpeg_locator_skips_present_non_executables_in_search_order() {
     std::fs::create_dir(&second).expect("second search directory");
     symlink(root.join("missing-target"), broken.join("ffmpeg")).expect("broken candidate link");
     symlink(&root, directory.join("ffmpeg")).expect("directory candidate link");
-    let _socket =
-        bind_relocated_unix_socket(&special.join("ffmpeg")).expect("special-file candidate socket");
+    let _socket = std::os::unix::net::UnixListener::bind(special.join("ffmpeg"))
+        .expect("special-file candidate socket");
     std::fs::write(first.join("ffmpeg"), native_executable_fixture())
         .expect("non-executable native candidate");
     write_executable(&second.join("ffmpeg"));
@@ -1412,6 +1409,207 @@ mod std_runner {
     }
 }
 
+#[cfg(windows)]
+mod windows_std_runner {
+    use super::*;
+    use fmn_platform::process::StdProcessRunner;
+    use std::io::Read as _;
+
+    const DESCENDANT_MARKER: &str = "FMN_EXACT_IMAGE_DESCENDANT_MARKER";
+    const DESCENDANT_READY: &str = "FMN_EXACT_IMAGE_DESCENDANT_READY";
+    const FIXTURE_MODE: &str = "FMN_EXACT_IMAGE_FIXTURE_MODE";
+    const FIXTURE_TEST: &str = "windows_std_runner::exact_image_fixture_child";
+
+    fn fixture_spec(mode: &str) -> ProcessSpec {
+        ProcessSpec {
+            program: std::env::current_exe().expect("absolute native test executable"),
+            argv: vec![
+                "--exact".to_owned(),
+                FIXTURE_TEST.to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            env: vec![
+                (FIXTURE_MODE.to_owned(), mode.to_owned()),
+                ("FMN_ALLOWED".to_owned(), "yes".to_owned()),
+            ],
+            cwd: None,
+            stdin: None,
+            timeout: Duration::from_secs(10),
+            max_output_bytes: 1 << 20,
+        }
+    }
+
+    #[test]
+    fn exact_image_fixture_child() {
+        let Ok(mode) = std::env::var(FIXTURE_MODE) else {
+            // The ordinary parent test pass discovers this fixture too.
+            return;
+        };
+        match mode.as_str() {
+            "stdio" => {
+                let mut stdin = Vec::new();
+                std::io::stdin()
+                    .read_to_end(&mut stdin)
+                    .expect("read exact-image stdin");
+                assert_eq!(
+                    std::env::var("FMN_ALLOWED").expect("allowlisted environment entry"),
+                    "yes"
+                );
+                assert!(
+                    std::env::var_os("PATH").is_none(),
+                    "the child inherited ambient PATH"
+                );
+                println!("FMN_STDIN={}", String::from_utf8_lossy(&stdin));
+                eprintln!("FMN_STDERR=owned");
+            }
+            "job-parent" => {
+                let marker = std::env::var_os(DESCENDANT_MARKER).expect("descendant marker path");
+                let ready = std::env::var_os(DESCENDANT_READY).expect("descendant ready path");
+                let descendant = std::process::Command::new(
+                    std::env::current_exe().expect("native descendant executable"),
+                )
+                .args(["--exact", FIXTURE_TEST, "--nocapture"])
+                .env_clear()
+                .env(FIXTURE_MODE, "descendant")
+                .env(DESCENDANT_MARKER, marker)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn native job descendant");
+                std::fs::write(ready, descendant.id().to_string())
+                    .expect("record descendant readiness");
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "descendant" => {
+                let marker = std::env::var_os(DESCENDANT_MARKER).expect("descendant marker path");
+                std::thread::sleep(Duration::from_secs(5));
+                std::fs::write(marker, b"leaked").expect("write descendant leak marker");
+            }
+            "sleep" => std::thread::sleep(Duration::from_secs(30)),
+            other => {
+                eprintln!("unknown exact-image fixture mode {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_image_mechanism_environment_and_stdio_are_functional() {
+        assert_eq!(
+            StdProcessRunner.mechanism(),
+            ProcessMechanism::WindowsCreateProcessJobList
+        );
+        assert_eq!(
+            StdProcessRunner.mechanism().identity(),
+            "create_process_w.explicit_application.atomic_job_list"
+        );
+        assert_eq!(StdProcessRunner.mechanism().policy_version(), 1);
+
+        let mut child = fixture_spec("stdio");
+        child.stdin = Some(b"shell text stays data: %PATH% & whoami".to_vec());
+        let outcome = StdProcessRunner.run(&child).expect("run native image");
+        assert!(outcome.success(), "{outcome:?}");
+        let stdout = String::from_utf8_lossy(&outcome.stdout);
+        let stderr = String::from_utf8_lossy(&outcome.stderr);
+        assert!(
+            stdout.contains("FMN_STDIN=shell text stays data: %PATH% & whoami"),
+            "{stdout}"
+        );
+        assert!(stderr.contains("FMN_STDERR=owned"), "{stderr}");
+    }
+
+    #[test]
+    fn executable_text_with_exe_suffix_never_issues_an_interpreter() {
+        let root = locator_scratch("windows_exact_image_text").expect("claim exact-image scratch");
+        let marker = root.join("interpreter-ran");
+        let fixture = root.join("ffmpeg-text-fixture.exe");
+        write_executable_bytes(
+            &fixture,
+            format!("@echo off\r\necho interpreted>\"{}\"\r\n", marker.display()).as_bytes(),
+        );
+        let error = StdProcessRunner
+            .run(&ProcessSpec {
+                program: fixture,
+                argv: Vec::new(),
+                env: Vec::new(),
+                cwd: None,
+                stdin: None,
+                timeout: Duration::from_secs(10),
+                max_output_bytes: 1 << 20,
+            })
+            .expect_err("non-PE executable text must remain a spawn error");
+        assert!(
+            matches!(error, ProcessError::Spawn { .. }),
+            "unexpected executable-text refusal: {error}"
+        );
+        assert!(
+            !marker.exists(),
+            "an interpreter executed rejected executable text"
+        );
+    }
+
+    #[test]
+    fn timeout_terminates_and_reaps_the_job_child() {
+        let mut child = fixture_spec("sleep");
+        child.timeout = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let outcome = StdProcessRunner
+            .run(&child)
+            .expect("supervise sleeping native child");
+        assert_eq!(outcome.termination, ProcessTermination::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "job termination was not prompt: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn timeout_terminates_descendants_in_the_atomic_job() {
+        let root =
+            locator_scratch("windows_exact_image_descendant").expect("claim descendant scratch");
+        let ready = root.join("descendant-ready");
+        let marker = root.join("descendant-leaked");
+        let mut child = fixture_spec("job-parent");
+        child.env.extend([
+            (
+                DESCENDANT_READY.to_owned(),
+                ready.to_string_lossy().into_owned(),
+            ),
+            (
+                DESCENDANT_MARKER.to_owned(),
+                marker.to_string_lossy().into_owned(),
+            ),
+        ]);
+        child.timeout = Duration::from_secs(3);
+        let outcome = StdProcessRunner
+            .run(&child)
+            .expect("supervise native process tree");
+        assert_eq!(outcome.termination, ProcessTermination::TimedOut);
+        assert!(ready.exists(), "the descendant probe never started");
+
+        std::thread::sleep(Duration::from_millis(5_500));
+        assert!(
+            !marker.exists(),
+            "a descendant escaped exact-image Job Object termination"
+        );
+    }
+
+    #[test]
+    fn working_directory_requests_are_refused_before_spawn() {
+        let mut child = fixture_spec("stdio");
+        child.cwd = Some(scratch("windows_exact_image_cwd_refusal"));
+        let error = StdProcessRunner
+            .run(&child)
+            .expect_err("working directory must be refused");
+        assert!(
+            matches!(error, ProcessError::WorkingDirectoryUnsupported { .. }),
+            "unexpected working-directory refusal: {error}"
+        );
+    }
+}
+
 #[test]
 fn relative_program_paths_are_refused_by_contract() {
     // Both runners enforce it — PATH resolution is unreachable through the
@@ -1419,7 +1617,7 @@ fn relative_program_paths_are_refused_by_contract() {
     let s = spec("echo", &["hi"]);
     let err = ScriptedRunner::new().run(&s).unwrap_err();
     assert!(err.to_string().contains("not absolute"), "{err}");
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use fmn_platform::process::StdProcessRunner;
         assert!(StdProcessRunner.run(&s).is_err());

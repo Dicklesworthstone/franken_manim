@@ -5,25 +5,34 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
   schedule:
     # R22's full SIMD build-tier matrix.
     - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
   portable:
     name: check (portable, linux-x86-64)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: target/portable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # rustup resolves the exact toolchain from rust-toolchain.toml; no
       # floating "nightly" ever runs in CI.
@@ -31,7 +40,7 @@ jobs:
         run: rustup show active-toolchain
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -45,11 +54,14 @@ jobs:
   x86-64-v3:
     name: check (x86-64-v3)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: target/x86-64-v3
       RUSTFLAGS: -C target-feature=+avx2,+bmi2,+fma
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
@@ -64,7 +76,7 @@ jobs:
           done
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -79,6 +91,7 @@ jobs:
     name: weekly check (x86-64-v4, qemu)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
       CARGO_TARGET_DIR: target/x86-64-v4
@@ -86,7 +99,9 @@ jobs:
       FMN_SIMD_TIER_GATE: "1"
       RUSTFLAGS: -C target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
@@ -98,7 +113,7 @@ jobs:
           qemu-x86_64 --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -113,17 +128,20 @@ jobs:
     name: weekly check (aarch64-neon)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: target/aarch64-neon
       RUSTFLAGS: -C target-feature=+neon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -133,3 +151,60 @@ jobs:
 
       - name: Run the mandatory gate
         run: bash scripts/check.sh
+
+  exact-image-native:
+    # fm-x4pp is deliberately narrower than fm-sol's future all-workspace
+    # platform skeleton: this job proves the one-tool process capability on
+    # every host/libc combination named by its acceptance contract.
+    name: exact-image native (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-aarch64-musl
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - label: macos-aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - label: windows-x86-64-msvc
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_DIR: target/exact-image-${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain target
+        run: |
+          rustup show active-toolchain
+          rustup target add ${{ matrix.target }}
+
+      - name: Install native musl linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          musl-gcc --version
+
+      - name: Fingerprint native host and target
+        run: |
+          rustc -vV
+          cargo -vV
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/exact-image-${{ matrix.label }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Run native exact-image capability suite
+        run: cargo test --locked -p fmn-platform --test capabilities --target ${{ matrix.target }}
