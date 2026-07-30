@@ -1,9 +1,9 @@
 //! The one external-tool boundary (§14.3, D2, D-23): sandboxed,
 //! fingerprinted, optional ffmpeg.
 //!
-//! Everything here rides fmn-platform's process capability — argv-only
-//! (no shell exists in the API), cleared environment, wall-clock
-//! timeout with kill, capped log capture. This module adds the
+//! Everything here rides fmn-platform's process capability — an argv-only
+//! interface (no caller-supplied shell command), cleared environment,
+//! wall-clock timeout with kill, and capped log capture. This module adds the
 //! boundary-level protocol on top:
 //!
 //! - **Resolution + executable binding.** The tool is canonicalized and
@@ -20,8 +20,11 @@
 //!   session root, and each probe/job atomically claims a child directory
 //!   (mode `0700` on Unix). Recorded filesystem identities gate both later
 //!   creation and cleanup: a collision or replaced path is retained untouched.
-//!   The job directory is the child's `cwd` and `TMPDIR`; its artifact reaches
-//!   the destination only through atomic rename after verification.
+//!   The job directory is the child's `TMPDIR`; every tool and artifact path is
+//!   absolute, so the child inherits the engine's working directory and avoids
+//!   making a requested `cwd` another prerequisite of the standard-library
+//!   `posix_spawn` path. The artifact reaches the destination only through
+//!   atomic rename after verification.
 //! - **Environment allowlist + locale pinning.** The child sees
 //!   exactly `LANG=C`, `LC_ALL=C`, and `TMPDIR=<job dir>`.
 //! - **Hardware encoders enter here and only here.** They are named,
@@ -42,15 +45,15 @@
 //! between the final check and the OS operation. That stronger threat requires
 //! a future host capability rather than an unsafe platform carve-out.
 
-use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fmn_platform::process::{
+    FfmpegExecutable, FfmpegLocatorError, MAX_FFMPEG_EXECUTABLE_BYTES, NativeImageAttestation,
     ProcessCancellation, ProcessError, ProcessOutcome, ProcessRunner, ProcessSpec,
     ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
@@ -93,6 +96,14 @@ pub enum BoundaryError {
         expected_sha256: String,
         /// Current SHA-256, or `None` when the path could not be read.
         actual_sha256: Option<String>,
+    },
+    /// A selected source or exact private copy failed the governed native
+    /// executable-image policy before it could be spawned.
+    ExecutableImageRejected {
+        /// Source or private-copy path that was inspected.
+        path: PathBuf,
+        /// Stable locator/parser or bounded-I/O diagnostic.
+        detail: String,
     },
     /// The verified bytes cannot execute after relocation into the private
     /// session. This rejects installations whose loader contract depends on
@@ -180,6 +191,11 @@ impl std::fmt::Display for BoundaryError {
                 expected_sha256,
                 actual_sha256.as_deref().unwrap_or("unreadable")
             ),
+            Self::ExecutableImageRejected { path, detail } => write!(
+                f,
+                "ffmpeg executable image at {} was rejected before spawn: {detail}",
+                path.display()
+            ),
             Self::UnsupportedRelocatedExecutable { source, detail } => write!(
                 f,
                 "ffmpeg at {} cannot execute as an identity-bound private copy: {detail}; \
@@ -236,8 +252,10 @@ impl From<NegotiationError> for BoundaryError {
 /// An opaque resolved tool plus its owned private-copy session.
 #[derive(Debug, Clone)]
 pub struct FfmpegTool {
+    executable: FfmpegExecutable,
     path: PathBuf,
     sha256_hex: String,
+    native_image: NativeImageAttestation,
     version: String,
     session: Arc<ToolSession>,
 }
@@ -247,18 +265,130 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_LOG_CAP: u64 = 1 << 20;
 const FILE_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
-fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = File::open(path)?;
+fn executable_image_error(path: &Path, error: FfmpegLocatorError) -> BoundaryError {
+    BoundaryError::ExecutableImageRejected {
+        path: path.to_path_buf(),
+        detail: error.to_string(),
+    }
+}
+
+fn sha256_open_file(
+    file: &mut File,
+    path: &Path,
+    expected_bytes: u64,
+) -> Result<String, BoundaryError> {
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+        BoundaryError::ExecutableImageRejected {
+            path: path.to_path_buf(),
+            detail: format!("seek exact executable handle: {error}"),
+        }
+    })?;
     let mut hasher = fmn_hash::sha256::Sha256::new();
     let mut buffer = [0_u8; FILE_HASH_BUFFER_BYTES];
+    let mut total = 0_u64;
     loop {
-        let read = file.read(&mut buffer)?;
+        let read =
+            file.read(&mut buffer)
+                .map_err(|error| BoundaryError::ExecutableImageRejected {
+                    path: path.to_path_buf(),
+                    detail: format!("read exact executable handle: {error}"),
+                })?;
         if read == 0 {
             break;
         }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            BoundaryError::ExecutableImageRejected {
+                path: path.to_path_buf(),
+                detail: "executable byte count overflowed".to_string(),
+            }
+        })?;
+        if total > MAX_FFMPEG_EXECUTABLE_BYTES {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "executable grew beyond the {}-byte limit while hashing",
+                    MAX_FFMPEG_EXECUTABLE_BYTES
+                ),
+            });
+        }
         hasher.update(&buffer[..read]);
     }
+    if total != expected_bytes {
+        return Err(BoundaryError::ExecutableImageRejected {
+            path: path.to_path_buf(),
+            detail: format!(
+                "executable length changed through its opened handle (expected {expected_bytes}, read {total})"
+            ),
+        });
+    }
     Ok(hasher.finalize().to_hex())
+}
+
+fn copy_and_hash_executable(
+    source: &mut File,
+    source_path: &Path,
+    expected_bytes: u64,
+    private: &mut File,
+    private_path: &Path,
+) -> Result<String, BoundaryError> {
+    source.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+        BoundaryError::ExecutableImageRejected {
+            path: source_path.to_path_buf(),
+            detail: format!("seek exact source handle: {error}"),
+        }
+    })?;
+    let mut hasher = fmn_hash::sha256::Sha256::new();
+    let mut buffer = [0_u8; FILE_HASH_BUFFER_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let read =
+            source
+                .read(&mut buffer)
+                .map_err(|error| BoundaryError::ExecutableImageRejected {
+                    path: source_path.to_path_buf(),
+                    detail: format!("read exact source handle: {error}"),
+                })?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            BoundaryError::ExecutableImageRejected {
+                path: source_path.to_path_buf(),
+                detail: "executable byte count overflowed".to_string(),
+            }
+        })?;
+        if total > MAX_FFMPEG_EXECUTABLE_BYTES {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: source_path.to_path_buf(),
+                detail: format!(
+                    "executable grew beyond the {}-byte limit while copying",
+                    MAX_FFMPEG_EXECUTABLE_BYTES
+                ),
+            });
+        }
+        private
+            .write_all(&buffer[..read])
+            .map_err(|error| BoundaryError::Workdir {
+                detail: format!("copy executable to {}: {error}", private_path.display()),
+            })?;
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_bytes {
+        return Err(BoundaryError::ExecutableImageRejected {
+            path: source_path.to_path_buf(),
+            detail: format!(
+                "source length changed through its opened handle (expected {expected_bytes}, copied {total})"
+            ),
+        });
+    }
+    Ok(hasher.finalize().to_hex())
+}
+
+#[derive(Debug)]
+struct BoundFfmpeg {
+    path: PathBuf,
+    file: File,
+    native_image: NativeImageAttestation,
 }
 
 fn environment_allowlist(workdir: &Path) -> Vec<(String, String)> {
@@ -274,7 +404,7 @@ fn probe_spec(tool: &Path, argv: &[&str], workdir: &Path) -> ProcessSpec {
         program: tool.to_path_buf(),
         argv: argv.iter().map(|s| (*s).to_string()).collect(),
         env: environment_allowlist(workdir),
-        cwd: Some(workdir.to_path_buf()),
+        cwd: None,
         stdin: None,
         timeout: PROBE_TIMEOUT,
         max_output_bytes: PROBE_LOG_CAP,
@@ -282,35 +412,34 @@ fn probe_spec(tool: &Path, argv: &[&str], workdir: &Path) -> ProcessSpec {
 }
 
 impl FfmpegTool {
-    /// Resolve and fingerprint the tool at `path`: read + hash the executable
-    /// bytes, claim a private session below `workdir_parent`, and probe
-    /// `-version` from a verified private copy.
+    /// Consume an audited ffmpeg locator token, hash its currently validated
+    /// source handle, claim a private session below `workdir_parent`, and
+    /// probe `-version` from an exact native-image-attested private copy.
     ///
     /// # Errors
-    /// [`BoundaryError::FfmpegUnavailable`] when nothing is there (the
-    /// capability error naming the native alternative);
+    /// [`BoundaryError::ExecutableImageRejected`] when the selected source or
+    /// exact private copy is no longer a bounded host-native image;
     /// [`BoundaryError::UnsupportedRelocatedExecutable`] when the verified
     /// bytes cannot execute from the private hierarchy;
     /// [`BoundaryError::ProbeFailed`] when they execute but do not behave like
     /// ffmpeg; [`BoundaryError::Workdir`] when a private session cannot be
     /// proved.
     pub fn resolve(
-        path: &Path,
+        executable: FfmpegExecutable,
         runner: &dyn ProcessRunner,
         workdir_parent: &Path,
     ) -> Result<Self, BoundaryError> {
-        let path = std::fs::canonicalize(path).map_err(|_| BoundaryError::FfmpegUnavailable {
-            attempted: path.to_path_buf(),
-            alternative: NATIVE_ALTERNATIVE,
-        })?;
-        let sha256_hex = sha256_file(&path).map_err(|_| BoundaryError::FfmpegUnavailable {
-            attempted: path.clone(),
-            alternative: NATIVE_ALTERNATIVE,
-        })?;
+        let path = executable.canonical_path().to_path_buf();
+        let (mut source, native_image) = executable
+            .open_current()
+            .map_err(|error| executable_image_error(&path, error))?;
+        let sha256_hex = sha256_open_file(&mut source, &path, native_image.file_bytes)?;
         let session = ToolSession::create(workdir_parent)?;
         let mut tool = Self {
+            executable,
             path,
             sha256_hex,
+            native_image,
             version: String::new(),
             session,
         };
@@ -371,6 +500,12 @@ impl FfmpegTool {
         &self.sha256_hex
     }
 
+    /// Structural native-image evidence for the resolution-time source.
+    #[must_use]
+    pub const fn native_image(&self) -> NativeImageAttestation {
+        self.native_image
+    }
+
     /// First line of the resolution-time `-version` probe.
     #[must_use]
     pub fn version(&self) -> &str {
@@ -378,29 +513,60 @@ impl FfmpegTool {
     }
 
     fn verify_source_identity(&self) -> Result<(), BoundaryError> {
-        verify_executable_identity(&self.path, &self.sha256_hex)
+        let (mut source, attestation) = self
+            .executable
+            .open_current()
+            .map_err(|error| executable_image_error(&self.path, error))?;
+        if attestation != self.native_image {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: self.path.clone(),
+                detail: format!(
+                    "native-image attestation changed from {:?} to {:?}",
+                    self.native_image, attestation
+                ),
+            });
+        }
+        let actual_sha256 = sha256_open_file(&mut source, &self.path, attestation.file_bytes)?;
+        verify_digest(&self.path, &self.sha256_hex, actual_sha256)
     }
 
     fn bound_path(&self, workdir: &Path) -> PathBuf {
-        let mut leaf = OsString::from("fmn-bound-ffmpeg");
-        if let Some(extension) = self.path.extension() {
-            leaf.push(".");
-            leaf.push(extension);
-        }
+        #[cfg(windows)]
+        let leaf = "fmn-bound-ffmpeg.exe";
+        #[cfg(not(windows))]
+        let leaf = "fmn-bound-ffmpeg";
         workdir.join(leaf)
     }
 
-    fn bind_into(&self, workdir: &OwnedWorkdir) -> Result<PathBuf, BoundaryError> {
+    fn bind_into(&self, workdir: &OwnedWorkdir) -> Result<BoundFfmpeg, BoundaryError> {
+        self.bind_into_after_copy(workdir, |_, _| Ok(()))
+    }
+
+    fn bind_into_after_copy<F>(
+        &self,
+        workdir: &OwnedWorkdir,
+        after_copy: F,
+    ) -> Result<BoundFfmpeg, BoundaryError>
+    where
+        F: FnOnce(&mut File, &Path) -> Result<(), BoundaryError>,
+    {
         workdir.verify_current("bind executable")?;
         let bound = self.bound_path(workdir.path());
-        let mut source =
-            File::open(&self.path).map_err(|_| BoundaryError::ExecutableIdentityChanged {
+        let (mut source, source_image) = self
+            .executable
+            .open_current()
+            .map_err(|error| executable_image_error(&self.path, error))?;
+        if source_image != self.native_image {
+            return Err(BoundaryError::ExecutableImageRejected {
                 path: self.path.clone(),
-                expected_sha256: self.sha256_hex.clone(),
-                actual_sha256: None,
-            })?;
+                detail: format!(
+                    "native-image attestation changed from {:?} to {:?}",
+                    self.native_image, source_image
+                ),
+            });
+        }
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -411,31 +577,70 @@ impl FfmpegTool {
             .map_err(|error| BoundaryError::Workdir {
                 detail: format!("create bound executable {}: {error}", bound.display()),
             })?;
-        std::io::copy(&mut source, &mut private).map_err(|error| BoundaryError::Workdir {
-            detail: format!(
-                "copy executable {} -> {}: {error}",
-                self.path.display(),
-                bound.display()
-            ),
-        })?;
+        let copied_sha256 = copy_and_hash_executable(
+            &mut source,
+            &self.path,
+            source_image.file_bytes,
+            &mut private,
+            &bound,
+        )?;
+        verify_digest(&self.path, &self.sha256_hex, copied_sha256)?;
+        after_copy(&mut private, &bound)?;
         private.flush().map_err(|error| BoundaryError::Workdir {
             detail: format!("flush bound executable {}: {error}", bound.display()),
         })?;
         private.sync_all().map_err(|error| BoundaryError::Workdir {
             detail: format!("sync bound executable {}: {error}", bound.display()),
         })?;
-        drop(private);
         #[cfg(unix)]
-        std::fs::set_permissions(
-            &bound,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o500),
-        )
-        .map_err(|error| BoundaryError::Workdir {
-            detail: format!("protect bound executable {}: {error}", bound.display()),
-        })?;
-        verify_executable_identity(&bound, &self.sha256_hex)?;
+        private
+            .set_permissions(
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o500),
+            )
+            .map_err(|error| BoundaryError::Workdir {
+                detail: format!("protect bound executable {}: {error}", bound.display()),
+            })?;
+        let native_image = self
+            .executable
+            .attest_private_copy(&mut private, &bound)
+            .map_err(|error| executable_image_error(&bound, error))?;
+        if native_image != self.native_image {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: bound,
+                detail: format!(
+                    "private-copy attestation {:?} differs from selected source {:?}",
+                    native_image, self.native_image
+                ),
+            });
+        }
+        let private_sha256 = sha256_open_file(&mut private, &bound, native_image.file_bytes)?;
+        verify_digest(&bound, &self.sha256_hex, private_sha256)?;
+        // Linux refuses exec while any process retains a write-capable handle
+        // to the image (`ETXTBSY`). The exact create-new handle has now been
+        // flushed, synced, permissioned, parsed, and hashed; close it, then
+        // reopen and retain a read-only attested handle across spawn.
+        drop(private);
+        let (mut retained, retained_image) = self
+            .executable
+            .open_private_copy(&bound)
+            .map_err(|error| executable_image_error(&bound, error))?;
+        if retained_image != native_image {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: bound,
+                detail: format!(
+                    "read-only private handle attests as {:?}, create-new handle attested as {:?}",
+                    retained_image, native_image
+                ),
+            });
+        }
+        let retained_sha256 = sha256_open_file(&mut retained, &bound, retained_image.file_bytes)?;
+        verify_digest(&bound, &self.sha256_hex, retained_sha256)?;
         workdir.verify_current("finish executable binding")?;
-        Ok(bound)
+        Ok(BoundFfmpeg {
+            path: bound,
+            file: retained,
+            native_image: retained_image,
+        })
     }
 
     fn run_bound_probe(
@@ -443,12 +648,25 @@ impl FfmpegTool {
         runner: &dyn ProcessRunner,
         argv: &[&str],
     ) -> Result<ProcessOutcome, BoundaryError> {
+        self.run_bound_probe_after_copy(runner, argv, |_, _| Ok(()))
+    }
+
+    fn run_bound_probe_after_copy<F>(
+        &self,
+        runner: &dyn ProcessRunner,
+        argv: &[&str],
+        after_copy: F,
+    ) -> Result<ProcessOutcome, BoundaryError>
+    where
+        F: FnOnce(&mut File, &Path) -> Result<(), BoundaryError>,
+    {
         let workdir = self.session.make_probe_workdir()?;
         let result = (|| {
-            let bound = self.bind_into(&workdir)?;
-            let outcome = runner.run(&probe_spec(&bound, argv, workdir.path()));
+            let mut bound = self.bind_into_after_copy(&workdir, after_copy)?;
+            bound.verify_current(self)?;
+            let outcome = runner.run(&probe_spec(bound.path(), argv, workdir.path()));
             workdir.verify_current("finish executable probe")?;
-            verify_executable_identity(&bound, &self.sha256_hex)?;
+            bound.verify_current(self)?;
             self.verify_source_identity()?;
             outcome.map_err(BoundaryError::from)
         })();
@@ -457,15 +675,58 @@ impl FfmpegTool {
     }
 }
 
-fn verify_executable_identity(path: &Path, expected_sha256: &str) -> Result<(), BoundaryError> {
-    let actual_sha256 = sha256_file(path).ok();
-    if actual_sha256.as_deref() == Some(expected_sha256) {
+impl BoundFfmpeg {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn verify_current(&mut self, tool: &FfmpegTool) -> Result<(), BoundaryError> {
+        let handle_image = tool
+            .executable
+            .attest_private_copy(&mut self.file, &self.path)
+            .map_err(|error| executable_image_error(&self.path, error))?;
+        if handle_image != self.native_image || handle_image != tool.native_image {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: self.path.clone(),
+                detail: format!(
+                    "retained private handle attests as {:?}, expected {:?}",
+                    handle_image, tool.native_image
+                ),
+            });
+        }
+        let handle_sha256 = sha256_open_file(&mut self.file, &self.path, handle_image.file_bytes)?;
+        verify_digest(&self.path, tool.sha256_hex(), handle_sha256)?;
+
+        let (mut current, path_image) = tool
+            .executable
+            .open_private_copy(&self.path)
+            .map_err(|error| executable_image_error(&self.path, error))?;
+        if path_image != self.native_image || path_image != tool.native_image {
+            return Err(BoundaryError::ExecutableImageRejected {
+                path: self.path.clone(),
+                detail: format!(
+                    "private pathname attests as {:?}, expected {:?}",
+                    path_image, tool.native_image
+                ),
+            });
+        }
+        let path_sha256 = sha256_open_file(&mut current, &self.path, path_image.file_bytes)?;
+        verify_digest(&self.path, tool.sha256_hex(), path_sha256)
+    }
+}
+
+fn verify_digest(
+    path: &Path,
+    expected_sha256: &str,
+    actual_sha256: String,
+) -> Result<(), BoundaryError> {
+    if actual_sha256 == expected_sha256 {
         return Ok(());
     }
     Err(BoundaryError::ExecutableIdentityChanged {
         path: path.to_path_buf(),
         expected_sha256: expected_sha256.to_string(),
-        actual_sha256,
+        actual_sha256: Some(actual_sha256),
     })
 }
 
@@ -562,6 +823,9 @@ pub struct Provenance {
     pub tool_path: PathBuf,
     /// SHA-256 shared by the configured tool and private bound copy.
     pub tool_sha256_hex: String,
+    /// Structural native-image evidence observed from the exact retained
+    /// private-copy handle under the versioned parser policy.
+    pub native_image: NativeImageAttestation,
     /// The tool's `-version` first line.
     pub tool_version: String,
     /// Private job-scoped executable path actually passed to the process
@@ -996,8 +1260,15 @@ impl Boundary {
                 hardware_available: caps.hardware(),
             });
         }
+        let audio = audio
+            .map(|input| {
+                std::fs::canonicalize(input).map_err(|error| BoundaryError::Workdir {
+                    detail: format!("resolve audio input {}: {error}", input.display()),
+                })
+            })
+            .transpose()?;
         let workdir = self.make_workdir()?;
-        let bound_tool = match self.tool.bind_into(&workdir) {
+        let mut bound_tool = match self.tool.bind_into(&workdir) {
             Ok(bound_tool) => bound_tool,
             Err(error) => {
                 self.cleanup(&workdir);
@@ -1020,7 +1291,11 @@ impl Boundary {
             self.cleanup(&workdir);
             return Err(error);
         }
-        let spec = self.spec(&bound_tool, argv.clone(), &workdir, None);
+        if let Err(error) = bound_tool.verify_current(&self.tool) {
+            self.cleanup(&workdir);
+            return Err(error);
+        }
+        let spec = self.spec(bound_tool.path(), argv.clone(), &workdir, None);
         let process = match self.runner.start(&spec, cancellation.clone(), stdin_limits) {
             Ok(process) => process,
             Err(error) => {
@@ -1030,7 +1305,7 @@ impl Boundary {
         };
         let post_start = workdir
             .verify_current("finish encode spawn")
-            .and_then(|()| verify_executable_identity(&bound_tool, self.tool.sha256_hex()));
+            .and_then(|()| bound_tool.verify_current(&self.tool));
         if let Err(error) = post_start {
             let _ = process.cancel();
             self.cleanup(&workdir);
@@ -1044,7 +1319,7 @@ impl Boundary {
             bound_tool,
             destination: destination.to_path_buf(),
             video_artifact,
-            audio: audio.map(Path::to_path_buf),
+            audio,
             encoder,
             video_argv: argv,
             process: Some(process),
@@ -1092,7 +1367,7 @@ impl Boundary {
             program: bound_tool.to_path_buf(),
             argv,
             env: Self::env_allowlist(workdir),
-            cwd: Some(workdir.to_path_buf()),
+            cwd: None,
             stdin,
             timeout: self.limits.timeout,
             max_output_bytes: self.limits.max_log_bytes,
@@ -1138,7 +1413,7 @@ impl Boundary {
     /// the artifact it should have produced.
     fn run_publishing(
         &self,
-        bound_tool: &Path,
+        bound_tool: &mut BoundFfmpeg,
         argv: Vec<String>,
         workdir: &OwnedWorkdir,
         artifact: &Path,
@@ -1146,11 +1421,11 @@ impl Boundary {
         encoder: Option<String>,
     ) -> Result<BoundaryReport, BoundaryError> {
         workdir.verify_current("start ffmpeg invocation")?;
-        verify_executable_identity(bound_tool, self.tool.sha256_hex())?;
-        let spec = self.spec(bound_tool, argv.clone(), workdir, None);
+        bound_tool.verify_current(&self.tool)?;
+        let spec = self.spec(bound_tool.path(), argv.clone(), workdir, None);
         let outcome = self.runner.run(&spec);
         workdir.verify_current("finish ffmpeg invocation")?;
-        verify_executable_identity(bound_tool, self.tool.sha256_hex())?;
+        bound_tool.verify_current(&self.tool)?;
         let outcome = outcome?;
         self.check_outcome(&outcome)?;
         workdir.verify_current("publish ffmpeg artifact")?;
@@ -1158,7 +1433,7 @@ impl Boundary {
         Ok(BoundaryReport {
             invocations: vec![invocation_report(
                 &self.tool,
-                bound_tool,
+                bound_tool.path(),
                 encoder,
                 argv,
                 artifact.to_path_buf(),
@@ -1237,12 +1512,13 @@ impl Boundary {
 
     /// Decode any ffmpeg-readable audio source to native s16 PCM WAV.
     ///
-    /// The source is resolved before entering the job-scoped working directory so
-    /// relative caller paths retain their meaning. The decoded WAV is born in
-    /// that directory and reaches `destination` only through the same bounded,
-    /// atomic publication path as encoded video. Certified runs consume the
-    /// resulting PCM through the native decoder; the ffmpeg product itself is
-    /// outside certification by construction.
+    /// The source is resolved before creating the job-scoped working directory
+    /// so relative caller paths retain their meaning without reaching the
+    /// cwd-free child. The decoded WAV is born in that directory and reaches
+    /// `destination` only through the same bounded, atomic publication path as
+    /// encoded video. Certified runs consume the resulting PCM through the
+    /// native decoder; the ffmpeg product itself is outside certification by
+    /// construction.
     ///
     /// # Errors
     /// Every refusal in [`BoundaryError`].
@@ -1255,7 +1531,7 @@ impl Boundary {
             detail: format!("resolve audio input {}: {error}", input.display()),
         })?;
         let workdir = self.make_workdir()?;
-        let bound_tool = match self.tool.bind_into(&workdir) {
+        let mut bound_tool = match self.tool.bind_into(&workdir) {
             Ok(bound_tool) => bound_tool,
             Err(error) => {
                 self.cleanup(&workdir);
@@ -1264,7 +1540,14 @@ impl Boundary {
         };
         let artifact = workdir.join("decoded.wav");
         let argv = transcode_audio_argv(&input, &artifact);
-        let result = self.run_publishing(&bound_tool, argv, &workdir, &artifact, destination, None);
+        let result = self.run_publishing(
+            &mut bound_tool,
+            argv,
+            &workdir,
+            &artifact,
+            destination,
+            None,
+        );
         self.cleanup(&workdir);
         result
     }
@@ -1285,19 +1568,26 @@ impl Boundary {
                 "concat of zero inputs",
             )));
         }
+        let mut listing = String::new();
+        for input in inputs {
+            let input = std::fs::canonicalize(input).map_err(|error| BoundaryError::Workdir {
+                detail: format!("resolve concat input {}: {error}", input.display()),
+            })?;
+            let text = input
+                .to_str()
+                .ok_or(BoundaryError::Negotiation(NegotiationError(
+                    "concat input path is not valid UTF-8",
+                )))?;
+            if text.contains('\'') || text.contains('\n') || text.contains('\r') {
+                return Err(BoundaryError::Negotiation(NegotiationError(
+                    "concat input path contains a quote or line break",
+                )));
+            }
+            listing.push_str(&format!("file '{text}'\n"));
+        }
         let workdir = self.make_workdir()?;
         let result = (|| {
-            let bound_tool = self.tool.bind_into(&workdir)?;
-            let mut listing = String::new();
-            for input in inputs {
-                let text = input.display().to_string();
-                if text.contains('\'') || text.contains('\n') {
-                    return Err(BoundaryError::Negotiation(NegotiationError(
-                        "concat input path contains a quote or newline",
-                    )));
-                }
-                listing.push_str(&format!("file '{text}'\n"));
-            }
+            let mut bound_tool = self.tool.bind_into(&workdir)?;
             let list_file = workdir.join("concat.txt");
             std::fs::write(&list_file, listing).map_err(|e| BoundaryError::Workdir {
                 detail: format!("write {}: {e}", list_file.display()),
@@ -1308,7 +1598,14 @@ impl Boundary {
                 .unwrap_or("mp4");
             let artifact = workdir.join(format!("joined.{ext}"));
             let argv = crate::negotiate::concat_argv(&list_file, &artifact);
-            self.run_publishing(&bound_tool, argv, &workdir, &artifact, destination, None)
+            self.run_publishing(
+                &mut bound_tool,
+                argv,
+                &workdir,
+                &artifact,
+                destination,
+                None,
+            )
         })();
         self.cleanup(&workdir);
         result
@@ -1321,7 +1618,7 @@ pub struct StreamingEncode {
     runner: Arc<dyn ProcessRunner>,
     limits: JobLimits,
     workdir: OwnedWorkdir,
-    bound_tool: PathBuf,
+    bound_tool: BoundFfmpeg,
     destination: PathBuf,
     video_artifact: PathBuf,
     audio: Option<PathBuf>,
@@ -1387,14 +1684,14 @@ impl StreamingEncode {
         })?;
         let outcome = process.finish();
         self.workdir.verify_current("finalize video encode")?;
-        verify_executable_identity(&self.bound_tool, self.tool.sha256_hex())?;
+        self.bound_tool.verify_current(&self.tool)?;
         let outcome = outcome?;
         check_process_outcome(&self.limits, &outcome)?;
         self.workdir.verify_current("verify video artifact")?;
         verify_private_artifact(&self.video_artifact, self.limits.max_artifact_bytes)?;
         let mut invocations = vec![invocation_report(
             &self.tool,
-            &self.bound_tool,
+            self.bound_tool.path(),
             self.encoder.clone(),
             self.video_argv.clone(),
             self.video_artifact.clone(),
@@ -1408,12 +1705,12 @@ impl StreamingEncode {
             ));
             let argv = mux_argv(&self.video_artifact, audio, &muxed);
             self.workdir.verify_current("start audio mux")?;
-            verify_executable_identity(&self.bound_tool, self.tool.sha256_hex())?;
+            self.bound_tool.verify_current(&self.tool)?;
             let spec = ProcessSpec {
-                program: self.bound_tool.clone(),
+                program: self.bound_tool.path().to_path_buf(),
                 argv: argv.clone(),
                 env: Boundary::env_allowlist(&self.workdir),
-                cwd: Some(self.workdir.path().to_path_buf()),
+                cwd: None,
                 stdin: None,
                 timeout: self.limits.timeout,
                 max_output_bytes: self.limits.max_log_bytes,
@@ -1426,23 +1723,21 @@ impl StreamingEncode {
             let post_start = self
                 .workdir
                 .verify_current("finish audio-mux spawn")
-                .and_then(|()| {
-                    verify_executable_identity(&self.bound_tool, self.tool.sha256_hex())
-                });
+                .and_then(|()| self.bound_tool.verify_current(&self.tool));
             if let Err(error) = post_start {
                 let _ = process.cancel();
                 return Err(error);
             }
             let outcome = process.finish();
             self.workdir.verify_current("finalize audio mux")?;
-            verify_executable_identity(&self.bound_tool, self.tool.sha256_hex())?;
+            self.bound_tool.verify_current(&self.tool)?;
             let outcome = outcome?;
             check_process_outcome(&self.limits, &outcome)?;
             self.workdir.verify_current("verify muxed artifact")?;
             verify_private_artifact(&muxed, self.limits.max_artifact_bytes)?;
             invocations.push(invocation_report(
                 &self.tool,
-                &self.bound_tool,
+                self.bound_tool.path(),
                 None,
                 argv,
                 muxed.clone(),
@@ -1575,6 +1870,7 @@ fn invocation_report(
         provenance: Provenance {
             tool_path: tool.path().to_path_buf(),
             tool_sha256_hex: tool.sha256_hex().to_string(),
+            native_image: tool.native_image(),
             tool_version: tool.version().to_string(),
             bound_tool_path: bound_tool.to_path_buf(),
             encoder,
@@ -1617,5 +1913,75 @@ fn check_process_outcome(
 fn cleanup_workdir(limits: &JobLimits, workdir: &OwnedWorkdir) {
     if !limits.keep_workdir {
         workdir.cleanup_recursive();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use fmn_platform::process::{FfmpegLocator as _, ScriptedRunner, StdFfmpegLocator};
+
+    #[test]
+    fn private_copy_path_substitution_is_rejected_before_the_runner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let source_path = std::env::current_exe().expect("current native test executable");
+        let executable = StdFfmpegLocator::default()
+            .locate_ffmpeg(&source_path)
+            .expect("issue an executable token for the native test harness");
+        let canonical_path = executable.canonical_path().to_path_buf();
+        let (mut source, native_image) = executable
+            .open_current()
+            .expect("reopen the native test harness");
+        let sha256_hex = sha256_open_file(&mut source, &canonical_path, native_image.file_bytes)
+            .expect("hash the native test harness");
+        let session =
+            ToolSession::create(&std::env::temp_dir()).expect("claim a private test session");
+        let tool = FfmpegTool {
+            executable,
+            path: canonical_path,
+            sha256_hex,
+            native_image,
+            version: String::new(),
+            session,
+        };
+        let runner = ScriptedRunner::new();
+
+        let error = tool
+            .run_bound_probe_after_copy(&runner, &["-version"], |_private, bound| {
+                let displaced = bound.with_extension("displaced");
+                std::fs::rename(bound, &displaced).map_err(|error| BoundaryError::Workdir {
+                    detail: format!(
+                        "displace exact private-copy pathname {}: {error}",
+                        bound.display()
+                    ),
+                })?;
+                std::fs::write(bound, b"#!/bin/sh\nexit 0\n").map_err(|error| {
+                    BoundaryError::Workdir {
+                        detail: format!(
+                            "install malformed private-copy replacement {}: {error}",
+                            bound.display()
+                        ),
+                    }
+                })?;
+                std::fs::set_permissions(bound, std::fs::Permissions::from_mode(0o500)).map_err(
+                    |error| BoundaryError::Workdir {
+                        detail: format!(
+                            "permission private-copy replacement {}: {error}",
+                            bound.display()
+                        ),
+                    },
+                )
+            })
+            .expect_err("the reopened private pathname must be re-attested before the runner");
+
+        assert!(matches!(
+            error,
+            BoundaryError::ExecutableImageRejected { .. }
+        ));
+        assert!(
+            runner.runs().is_empty(),
+            "private-copy attestation must fail before ProcessRunner::run"
+        );
     }
 }

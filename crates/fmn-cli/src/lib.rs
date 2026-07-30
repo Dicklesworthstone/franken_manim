@@ -1594,7 +1594,7 @@ fn locate_and_probe_ffmpeg(
             };
         }
     };
-    match probe_ffmpeg(runner, executable.canonical_path()) {
+    match probe_ffmpeg(runner, executable) {
         available @ FfmpegReport::Available { .. } => available,
         FfmpegReport::Unavailable {
             reason,
@@ -1646,20 +1646,16 @@ fn planning_output_format(pixel_format: &str) -> fmn_runtime::OutputPixelFormat 
     }
 }
 
-fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) -> FfmpegReport {
-    if !path.is_absolute() {
-        return FfmpegReport::Unavailable {
-            attempted: path.to_path_buf(),
-            reason: "ffmpeg probe requires a canonical absolute identity from fmn-platform"
-                .to_owned(),
-            alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
-        };
-    }
-    let tool = match fmn_output::FfmpegTool::resolve(path, runner, &std::env::temp_dir()) {
+fn probe_ffmpeg(
+    runner: &dyn fmn_platform::process::ProcessRunner,
+    executable: fmn_platform::process::FfmpegExecutable,
+) -> FfmpegReport {
+    let path = executable.canonical_path().to_path_buf();
+    let tool = match fmn_output::FfmpegTool::resolve(executable, runner, &std::env::temp_dir()) {
         Ok(tool) => tool,
         Err(error) => {
             return FfmpegReport::Unavailable {
-                attempted: path.to_path_buf(),
+                attempted: path,
                 reason: error.to_string(),
                 alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
             };
@@ -1670,10 +1666,11 @@ fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) 
             Ok(encoders) => (encoders.hardware(), None),
             Err(
                 error @ (fmn_output::BoundaryError::ExecutableIdentityChanged { .. }
+                | fmn_output::BoundaryError::ExecutableImageRejected { .. }
                 | fmn_output::BoundaryError::Workdir { .. }),
             ) => {
                 return FfmpegReport::Unavailable {
-                    attempted: path.to_path_buf(),
+                    attempted: path,
                     reason: error.to_string(),
                     alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
                 };
@@ -2514,6 +2511,95 @@ mod tests {
         fmn_platform::process::StdFfmpegLocator::default()
     }
 
+    #[cfg(unix)]
+    fn write_native_ffmpeg_fixture(path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bytes = if cfg!(target_os = "macos") {
+            const HEADER_BYTES: usize = 32;
+            const SEGMENT_BYTES: usize = 72;
+            const ENTRY_BYTES: usize = 24;
+
+            let mut bytes = vec![0_u8; HEADER_BYTES + 2 * SEGMENT_BYTES + ENTRY_BYTES + 1];
+            bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+            let cpu = if cfg!(target_arch = "x86_64") {
+                0x0100_0007_u32
+            } else {
+                0x0100_000c_u32
+            };
+            bytes[4..8].copy_from_slice(&cpu.to_le_bytes());
+            let subtype = if cfg!(target_arch = "x86_64") {
+                3_u32
+            } else {
+                0_u32
+            };
+            bytes[8..12].copy_from_slice(&subtype.to_le_bytes());
+            bytes[12..16].copy_from_slice(&2_u32.to_le_bytes());
+            bytes[16..20].copy_from_slice(&3_u32.to_le_bytes());
+            bytes[20..24]
+                .copy_from_slice(&((2 * SEGMENT_BYTES + ENTRY_BYTES) as u32).to_le_bytes());
+            let image_bytes = bytes.len() as u64;
+            let pagezero = &mut bytes[HEADER_BYTES..HEADER_BYTES + SEGMENT_BYTES];
+            pagezero[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+            pagezero[4..8].copy_from_slice(&(SEGMENT_BYTES as u32).to_le_bytes());
+            pagezero[8..18].copy_from_slice(b"__PAGEZERO");
+            pagezero[32..40].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+            let text_offset = HEADER_BYTES + SEGMENT_BYTES;
+            let text = &mut bytes[text_offset..text_offset + SEGMENT_BYTES];
+            text[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+            text[4..8].copy_from_slice(&(SEGMENT_BYTES as u32).to_le_bytes());
+            text[8..14].copy_from_slice(b"__TEXT");
+            text[24..32].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+            text[32..40].copy_from_slice(&image_bytes.to_le_bytes());
+            text[48..56].copy_from_slice(&image_bytes.to_le_bytes());
+            text[56..60].copy_from_slice(&7_u32.to_le_bytes());
+            text[60..64].copy_from_slice(&5_u32.to_le_bytes());
+            let entry_offset = HEADER_BYTES + 2 * SEGMENT_BYTES;
+            let entry = &mut bytes[entry_offset..entry_offset + ENTRY_BYTES];
+            entry[..4].copy_from_slice(&0x8000_0028_u32.to_le_bytes());
+            entry[4..8].copy_from_slice(&(ENTRY_BYTES as u32).to_le_bytes());
+            entry[8..16].copy_from_slice(
+                &((HEADER_BYTES + 2 * SEGMENT_BYTES + ENTRY_BYTES) as u64).to_le_bytes(),
+            );
+            *bytes.last_mut().expect("entry byte") = 0xc3;
+            bytes
+        } else {
+            const HEADER_BYTES: usize = 64;
+            const PROGRAM_BYTES: usize = 56;
+
+            let mut bytes = vec![0_u8; HEADER_BYTES + PROGRAM_BYTES];
+            bytes[..4].copy_from_slice(b"\x7fELF");
+            bytes[4] = 2;
+            bytes[5] = 1;
+            bytes[6] = 1;
+            bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
+            let machine = if cfg!(target_arch = "x86_64") {
+                62_u16
+            } else {
+                183_u16
+            };
+            bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+            bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+            bytes[24..32].copy_from_slice(&0x1000_u64.to_le_bytes());
+            bytes[32..40].copy_from_slice(&(HEADER_BYTES as u64).to_le_bytes());
+            bytes[52..54].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+            bytes[54..56].copy_from_slice(&(PROGRAM_BYTES as u16).to_le_bytes());
+            bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+            let image_bytes = bytes.len() as u64;
+            let program = &mut bytes[HEADER_BYTES..];
+            program[..4].copy_from_slice(&1_u32.to_le_bytes());
+            program[4..8].copy_from_slice(&5_u32.to_le_bytes());
+            program[16..24].copy_from_slice(&0x1000_u64.to_le_bytes());
+            program[32..40].copy_from_slice(&image_bytes.to_le_bytes());
+            program[40..48].copy_from_slice(&image_bytes.to_le_bytes());
+            program[48..56].copy_from_slice(&0x1000_u64.to_le_bytes());
+            bytes
+        };
+        std::fs::write(path, bytes).expect("write native ffmpeg fixture");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark native ffmpeg fixture executable");
+    }
+
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     struct SuccessfulFfmpegProbeRunner;
 
@@ -2631,12 +2717,18 @@ mod tests {
             let stdout = if spec.argv == ["-version"] {
                 b"ffmpeg version cli-fixture\n".to_vec()
             } else if spec.argv == ["-hide_banner", "-encoders"] {
-                let workdir = spec.cwd.as_ref().ok_or_else(|| {
+                let workdir = spec.program.parent().ok_or_else(|| {
                     fmn_platform::process::ProcessError::Plumbing {
                         program: spec.program.clone(),
-                        detail: "encoder probe has no private workdir".to_owned(),
+                        detail: "encoder probe tool has no private parent".to_owned(),
                     }
                 })?;
+                if spec.cwd.is_some() {
+                    return Err(fmn_platform::process::ProcessError::Plumbing {
+                        program: spec.program.clone(),
+                        detail: "encoder probe unexpectedly requested a child cwd".to_owned(),
+                    });
+                }
                 let leaf = workdir
                     .file_name()
                     .and_then(|leaf| leaf.to_str())
@@ -3167,20 +3259,23 @@ mod tests {
         ));
         std::fs::create_dir(&dir).expect("fresh probe fixture directory");
         let source = dir.join("ffmpeg");
-        std::fs::write(&source, b"original executable identity")
-            .expect("write probe fixture executable");
+        write_native_ffmpeg_fixture(&source);
+        use fmn_platform::process::FfmpegLocator as _;
+        let executable = fmn_platform::process::StdFfmpegLocator::default()
+            .locate_ffmpeg(&source)
+            .expect("locate native probe fixture");
         let report = probe_ffmpeg(
             &IdentityChangingProbeRunner {
                 source: source.clone(),
             },
-            &source,
+            executable,
         );
 
         assert!(!report.is_available());
         assert!(matches!(
             report,
             FfmpegReport::Unavailable { ref reason, .. }
-                if reason.contains("executable identity changed")
+                if reason.contains("executable image")
         ));
     }
 
@@ -3193,9 +3288,12 @@ mod tests {
         ));
         std::fs::create_dir(&dir).expect("fresh probe fixture directory");
         let source = dir.join("ffmpeg");
-        std::fs::write(&source, b"original executable identity")
-            .expect("write probe fixture executable");
-        let report = probe_ffmpeg(&WorkdirReplacingProbeRunner, &source);
+        write_native_ffmpeg_fixture(&source);
+        use fmn_platform::process::FfmpegLocator as _;
+        let executable = fmn_platform::process::StdFfmpegLocator::default()
+            .locate_ffmpeg(&source)
+            .expect("locate native probe fixture");
+        let report = probe_ffmpeg(&WorkdirReplacingProbeRunner, executable);
 
         assert!(!report.is_available());
         assert!(matches!(
@@ -3237,8 +3335,6 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn doctor_resolves_the_default_ffmpeg_name_through_the_injected_locator() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -3248,14 +3344,7 @@ mod tests {
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).expect("create locator fixture");
         let source = bin.join("ffmpeg");
-        let native_fixture: &[u8] = if cfg!(target_os = "macos") {
-            b"\xcf\xfa\xed\xfecli locator executable"
-        } else {
-            b"\x7fELFcli locator executable"
-        };
-        std::fs::write(&source, native_fixture).expect("write locator executable");
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755))
-            .expect("mark locator executable");
+        write_native_ffmpeg_fixture(&source);
         let search_path = std::env::join_paths([bin.as_path()]).expect("fixture PATH");
         let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(Some(search_path));
         let canonical = std::fs::canonicalize(&source).expect("canonical source");

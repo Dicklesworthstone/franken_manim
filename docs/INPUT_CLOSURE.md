@@ -36,7 +36,7 @@ items marked *(bytes)* are hashed as raw byte streams.
 | C6 | Assets and fonts: content hash of every asset and font file actually read, keyed by virtual path (bundled fonts included — bundling is not exemption) | bytes, per file |
 | C7 | Execution-engine and backend identities: the semantic renderer version, execution engine (`certified` requires the certified CPU engine), and — in `standard` provenance only — annex device/driver identities | structural |
 | C8 | Locale and timezone as visible to the engine (certified runs pin `C`/UTC; the pin itself is recorded) | structural |
-| C9 | Capability policy: which capability traits were live (fs/process/clock/AssetFetcher implementations by identity, not by pointer) and the ffmpeg fingerprint (path + content hash + version) when the boundary is used | structural |
+| C9 | Capability policy: which capability traits were live (fs/process/clock/AssetFetcher implementations by identity, not by pointer) and the ffmpeg fingerprint (path + content hash + versioned native-image format/architecture attestation + version line) when the boundary is used | structural |
 | C10 | The determinism mode itself (`standard` vs `certified`) and the declared certified configuration (fixed tile dims, fixed in-flight budget, etc.) | structural |
 
 **Explicitly outside the closure (proven inert under §10.5):** thread count,

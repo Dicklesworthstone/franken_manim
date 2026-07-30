@@ -7,8 +7,9 @@
 
 use fmn_platform::fs::{ATOMIC_DIRECTORY_COMPLETE_LEAF, FileSystem, FsNodeKind, StdFs, VirtualFs};
 use fmn_platform::process::{
-    FfmpegLocator, FfmpegLocatorError, ProcessCancellation, ProcessOutcome, ProcessRunner,
-    ProcessSpec, ProcessStdinLimits, ProcessTermination, ScriptedRunner, StdFfmpegLocator,
+    FfmpegLocator, FfmpegLocatorError, MAX_FFMPEG_EXECUTABLE_BYTES, NativeExecutableArchitecture,
+    NativeExecutableFormat, ProcessCancellation, ProcessOutcome, ProcessRunner, ProcessSpec,
+    ProcessStdinLimits, ProcessTermination, ScriptedRunner, StdFfmpegLocator,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -55,18 +56,124 @@ fn write_executable_bytes(path: &Path, bytes: &[u8]) {
 fn native_executable_fixture() -> Vec<u8> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        return b"\x7fELFffmpeg locator fixture".to_vec();
+        const HEADER_BYTES: usize = 64;
+        const PROGRAM_BYTES: usize = 56;
+
+        let mut bytes = vec![0_u8; HEADER_BYTES + PROGRAM_BYTES];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
+        let machine = if cfg!(target_arch = "x86_64") {
+            62_u16
+        } else {
+            183_u16
+        };
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[24..32].copy_from_slice(&0x1000_u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&(HEADER_BYTES as u64).to_le_bytes());
+        bytes[52..54].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+        bytes[54..56].copy_from_slice(&(PROGRAM_BYTES as u16).to_le_bytes());
+        bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        let image_bytes = bytes.len() as u64;
+        let program = &mut bytes[HEADER_BYTES..];
+        program[..4].copy_from_slice(&1_u32.to_le_bytes());
+        program[4..8].copy_from_slice(&5_u32.to_le_bytes());
+        program[16..24].copy_from_slice(&0x1000_u64.to_le_bytes());
+        program[32..40].copy_from_slice(&image_bytes.to_le_bytes());
+        program[40..48].copy_from_slice(&image_bytes.to_le_bytes());
+        program[48..56].copy_from_slice(&0x1000_u64.to_le_bytes());
+        return bytes;
     }
     #[cfg(target_os = "macos")]
     {
-        return b"\xcf\xfa\xed\xfeffmpeg locator fixture".to_vec();
+        const HEADER_BYTES: usize = 32;
+        const SEGMENT_BYTES: usize = 72;
+        const ENTRY_BYTES: usize = 24;
+
+        let mut bytes = vec![0_u8; HEADER_BYTES + 2 * SEGMENT_BYTES + ENTRY_BYTES + 1];
+        bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        let cpu = if cfg!(target_arch = "x86_64") {
+            0x0100_0007_u32
+        } else {
+            0x0100_000c_u32
+        };
+        bytes[4..8].copy_from_slice(&cpu.to_le_bytes());
+        let subtype = if cfg!(target_arch = "x86_64") {
+            3_u32
+        } else {
+            0_u32
+        };
+        bytes[8..12].copy_from_slice(&subtype.to_le_bytes());
+        bytes[12..16].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&3_u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&((2 * SEGMENT_BYTES + ENTRY_BYTES) as u32).to_le_bytes());
+        let image_bytes = bytes.len() as u64;
+        let pagezero = &mut bytes[HEADER_BYTES..HEADER_BYTES + SEGMENT_BYTES];
+        pagezero[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+        pagezero[4..8].copy_from_slice(&(SEGMENT_BYTES as u32).to_le_bytes());
+        pagezero[8..18].copy_from_slice(b"__PAGEZERO");
+        pagezero[32..40].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+        let text_offset = HEADER_BYTES + SEGMENT_BYTES;
+        let text = &mut bytes[text_offset..text_offset + SEGMENT_BYTES];
+        text[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+        text[4..8].copy_from_slice(&(SEGMENT_BYTES as u32).to_le_bytes());
+        text[8..14].copy_from_slice(b"__TEXT");
+        text[24..32].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+        text[32..40].copy_from_slice(&image_bytes.to_le_bytes());
+        text[48..56].copy_from_slice(&image_bytes.to_le_bytes());
+        text[56..60].copy_from_slice(&7_u32.to_le_bytes());
+        text[60..64].copy_from_slice(&5_u32.to_le_bytes());
+        let entry_offset = HEADER_BYTES + 2 * SEGMENT_BYTES;
+        let entry = &mut bytes[entry_offset..entry_offset + ENTRY_BYTES];
+        entry[..4].copy_from_slice(&0x8000_0028_u32.to_le_bytes());
+        entry[4..8].copy_from_slice(&(ENTRY_BYTES as u32).to_le_bytes());
+        entry[8..16].copy_from_slice(
+            &((HEADER_BYTES + 2 * SEGMENT_BYTES + ENTRY_BYTES) as u64).to_le_bytes(),
+        );
+        *bytes.last_mut().expect("entry byte") = 0xc3;
+        return bytes;
     }
     #[cfg(windows)]
     {
-        let mut bytes = vec![0_u8; 0x84];
+        const PE_OFFSET: usize = 0x80;
+        const OPTIONAL_BYTES: usize = 0xf0;
+        const HEADER_BYTES: usize = 0x200;
+        const IMAGE_BYTES: usize = 0x400;
+
+        let mut bytes = vec![0_u8; IMAGE_BYTES];
         bytes[..2].copy_from_slice(b"MZ");
-        bytes[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
-        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x3c..0x40].copy_from_slice(&(PE_OFFSET as u32).to_le_bytes());
+        bytes[PE_OFFSET..PE_OFFSET + 4].copy_from_slice(b"PE\0\0");
+        let coff = PE_OFFSET + 4;
+        let machine = if cfg!(target_arch = "x86_64") {
+            0x8664_u16
+        } else {
+            0xaa64_u16
+        };
+        bytes[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+        bytes[coff + 2..coff + 4].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[coff + 16..coff + 18].copy_from_slice(&(OPTIONAL_BYTES as u16).to_le_bytes());
+        bytes[coff + 18..coff + 20].copy_from_slice(&0x0002_u16.to_le_bytes());
+        let optional = coff + 20;
+        bytes[optional..optional + 2].copy_from_slice(&0x020b_u16.to_le_bytes());
+        bytes[optional + 16..optional + 20].copy_from_slice(&0x1000_u32.to_le_bytes());
+        bytes[optional + 24..optional + 32]
+            .copy_from_slice(&0x0000_0001_4000_0000_u64.to_le_bytes());
+        bytes[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+        bytes[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+        bytes[optional + 56..optional + 60].copy_from_slice(&0x2000_u32.to_le_bytes());
+        bytes[optional + 60..optional + 64].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+        bytes[optional + 68..optional + 70].copy_from_slice(&3_u16.to_le_bytes());
+        let section = optional + OPTIONAL_BYTES;
+        bytes[section..section + 5].copy_from_slice(b".text");
+        bytes[section + 8..section + 12].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[section + 12..section + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+        bytes[section + 16..section + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+        bytes[section + 20..section + 24].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+        bytes[section + 36..section + 40].copy_from_slice(&0x6000_0020_u32.to_le_bytes());
         return bytes;
     }
     #[allow(unreachable_code)]
@@ -93,6 +200,34 @@ fn ffmpeg_locator_canonicalizes_explicit_identity_without_consulting_path() {
             .expect("canonical fixture")
             .as_path()
     );
+    let (mut opened, attestation) = resolved
+        .open_current()
+        .expect("issued identity revalidates through its opened handle");
+    assert_eq!(
+        attestation.architecture,
+        if cfg!(target_arch = "x86_64") {
+            NativeExecutableArchitecture::X86_64
+        } else {
+            NativeExecutableArchitecture::Aarch64
+        }
+    );
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    assert_eq!(attestation.format, NativeExecutableFormat::Elf64);
+    #[cfg(target_os = "macos")]
+    assert_eq!(attestation.format, NativeExecutableFormat::MachO64);
+    #[cfg(windows)]
+    assert_eq!(attestation.format, NativeExecutableFormat::Pe32Plus);
+    assert_eq!(
+        attestation.file_bytes,
+        native_executable_fixture().len() as u64
+    );
+    assert_eq!(attestation.policy_version, 2);
+    assert_eq!(
+        resolved
+            .attest_private_copy(&mut opened, &tool)
+            .expect("same handle remains attestable"),
+        attestation
+    );
 
     #[cfg(unix)]
     {
@@ -103,6 +238,191 @@ fn ffmpeg_locator_canonicalizes_explicit_identity_without_consulting_path() {
             Err(FfmpegLocatorError::NotExecutable { .. })
         ));
     }
+}
+
+#[test]
+fn ffmpeg_locator_token_revalidates_replacement_and_bounds_source_size() {
+    let root = locator_scratch("token_revalidation").expect("claim token scratch");
+    let tool = root.join(if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    });
+    write_executable(&tool);
+    let resolved = StdFfmpegLocator::default()
+        .locate_ffmpeg(&tool)
+        .expect("issue locator token");
+
+    write_executable_bytes(&tool, b"#!/bin/sh\nexit 0\n");
+    assert!(matches!(
+        resolved.open_current(),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let oversized = root.join(if cfg!(windows) {
+        "oversized.exe"
+    } else {
+        "oversized"
+    });
+    let file = std::fs::File::create(&oversized).expect("create sparse oversized candidate");
+    file.set_len(MAX_FFMPEG_EXECUTABLE_BYTES + 1)
+        .expect("size sparse candidate");
+    drop(file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&oversized, std::fs::Permissions::from_mode(0o755))
+            .expect("mark oversized candidate executable");
+    }
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&oversized),
+        Err(FfmpegLocatorError::ExecutableSizeLimit {
+            bytes,
+            max: MAX_FFMPEG_EXECUTABLE_BYTES,
+            ..
+        }) if bytes == MAX_FFMPEG_EXECUTABLE_BYTES + 1
+    ));
+}
+
+#[test]
+fn ffmpeg_locator_rejects_wrong_architecture_and_malformed_native_headers() {
+    let root = locator_scratch("malformed_native").expect("claim malformed-image scratch");
+
+    let mut wrong_arch = native_executable_fixture();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    wrong_arch[18..20].copy_from_slice(
+        &(if cfg!(target_arch = "x86_64") {
+            183_u16
+        } else {
+            62_u16
+        })
+        .to_le_bytes(),
+    );
+    #[cfg(target_os = "macos")]
+    wrong_arch[4..8].copy_from_slice(
+        &(if cfg!(target_arch = "x86_64") {
+            0x0100_000c_u32
+        } else {
+            0x0100_0007_u32
+        })
+        .to_le_bytes(),
+    );
+    #[cfg(windows)]
+    wrong_arch[0x84..0x86].copy_from_slice(
+        &(if cfg!(target_arch = "x86_64") {
+            0xaa64_u16
+        } else {
+            0x8664_u16
+        })
+        .to_le_bytes(),
+    );
+    let wrong_arch_path = root.join("wrong-architecture");
+    write_executable_bytes(&wrong_arch_path, &wrong_arch);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&wrong_arch_path),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let mut malformed = native_executable_fixture();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    malformed[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+    #[cfg(target_os = "macos")]
+    malformed[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+    #[cfg(windows)]
+    malformed[0x94..0x96].copy_from_slice(&u16::MAX.to_le_bytes());
+    let malformed_path = root.join("malformed-native");
+    write_executable_bytes(&malformed_path, &malformed);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&malformed_path),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+}
+
+#[test]
+fn ffmpeg_locator_requires_a_file_backed_executable_entry_point() {
+    let root = locator_scratch("native_entry").expect("claim native-entry scratch");
+
+    let mut non_executable_entry = native_executable_fixture();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    non_executable_entry[64 + 4..64 + 8].copy_from_slice(&4_u32.to_le_bytes());
+    #[cfg(target_os = "macos")]
+    non_executable_entry[32 + 72 + 60..32 + 72 + 64].copy_from_slice(&1_u32.to_le_bytes());
+    #[cfg(windows)]
+    non_executable_entry[0x188 + 36..0x188 + 40].copy_from_slice(&0x4000_0020_u32.to_le_bytes());
+    let non_executable_path = root.join("non-executable-entry");
+    write_executable_bytes(&non_executable_path, &non_executable_entry);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&non_executable_path),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let mut unmapped_entry = native_executable_fixture();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unmapped_entry[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+    #[cfg(target_os = "macos")]
+    unmapped_entry[32 + 2 * 72 + 8..32 + 2 * 72 + 16].copy_from_slice(&u64::MAX.to_le_bytes());
+    #[cfg(windows)]
+    unmapped_entry[0x98 + 16..0x98 + 20].copy_from_slice(&0x3000_u32.to_le_bytes());
+    let unmapped_path = root.join("unmapped-entry");
+    write_executable_bytes(&unmapped_path, &unmapped_entry);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&unmapped_path),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let mut invalid_mapping = native_executable_fixture();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    invalid_mapping[64 + 16..64 + 24].copy_from_slice(&0x1001_u64.to_le_bytes());
+    #[cfg(target_os = "macos")]
+    invalid_mapping[32 + 72 + 32..32 + 72 + 40].copy_from_slice(&0_u64.to_le_bytes());
+    #[cfg(windows)]
+    invalid_mapping[0x98 + 36..0x98 + 40].copy_from_slice(&0x201_u32.to_le_bytes());
+    let invalid_mapping_path = root.join("invalid-mapping");
+    write_executable_bytes(&invalid_mapping_path, &invalid_mapping);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&invalid_mapping_path),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut missing_pagezero = native_executable_fixture();
+        missing_pagezero[32 + 8..32 + 18].fill(0);
+        let missing_pagezero_path = root.join("missing-hard-pagezero");
+        write_executable_bytes(&missing_pagezero_path, &missing_pagezero);
+        assert!(matches!(
+            StdFfmpegLocator::default().locate_ffmpeg(&missing_pagezero_path),
+            Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+        ));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn ffmpeg_locator_rejects_malformed_gnu_property_notes() {
+    const ELF_HEADER_BYTES: usize = 64;
+    const PROGRAM_HEADER_BYTES: usize = 56;
+    const PROPERTY_OFFSET: usize = ELF_HEADER_BYTES + 2 * PROGRAM_HEADER_BYTES;
+
+    let root = locator_scratch("gnu_property").expect("claim GNU-property scratch");
+    let mut malformed = native_executable_fixture();
+    malformed.resize(PROPERTY_OFFSET + 16, 0);
+    malformed[56..58].copy_from_slice(&2_u16.to_le_bytes());
+    let property_header = &mut malformed[ELF_HEADER_BYTES + PROGRAM_HEADER_BYTES..PROPERTY_OFFSET];
+    property_header[..4].copy_from_slice(&0x6474_e553_u32.to_le_bytes());
+    property_header[8..16].copy_from_slice(&(PROPERTY_OFFSET as u64).to_le_bytes());
+    property_header[32..40].copy_from_slice(&16_u64.to_le_bytes());
+    property_header[40..48].copy_from_slice(&16_u64.to_le_bytes());
+    malformed[PROPERTY_OFFSET..PROPERTY_OFFSET + 4].copy_from_slice(&4_u32.to_le_bytes());
+    malformed[PROPERTY_OFFSET + 8..PROPERTY_OFFSET + 12].copy_from_slice(&5_u32.to_le_bytes());
+    malformed[PROPERTY_OFFSET + 12..PROPERTY_OFFSET + 16].copy_from_slice(b"BAD\0");
+
+    let malformed_path = root.join("malformed-gnu-property");
+    write_executable_bytes(&malformed_path, &malformed);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&malformed_path),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
 }
 
 #[test]
@@ -420,31 +740,59 @@ fn windows_ffmpeg_search_uses_only_the_fixed_exe_leaf() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_ffmpeg_locator_accepts_every_supported_mach_o_container_magic() {
-    let root = locator_scratch("mach_o_magics").expect("claim Mach-O locator scratch");
-    let magics = [
-        [0xfe, 0xed, 0xfa, 0xce],
-        [0xce, 0xfa, 0xed, 0xfe],
-        [0xfe, 0xed, 0xfa, 0xcf],
-        [0xcf, 0xfa, 0xed, 0xfe],
-        [0xca, 0xfe, 0xba, 0xbe],
-        [0xbe, 0xba, 0xfe, 0xca],
-        [0xca, 0xfe, 0xba, 0xbf],
-        [0xbf, 0xba, 0xfe, 0xca],
-    ];
-    for (index, magic) in magics.into_iter().enumerate() {
-        let candidate = root.join(format!("ffmpeg-magic-{index}"));
-        write_executable_bytes(&candidate, &magic);
-        assert_eq!(
-            StdFfmpegLocator::default()
-                .locate_ffmpeg(&candidate)
-                .expect("accepted Mach-O container magic")
-                .canonical_path(),
-            std::fs::canonicalize(candidate)
-                .expect("canonical Mach-O fixture")
-                .as_path()
-        );
-    }
+fn macos_ffmpeg_locator_requires_a_complete_host_slice_in_universal_images() {
+    let root = locator_scratch("mach_o_universal").expect("claim Mach-O locator scratch");
+    let thin = native_executable_fixture();
+    let slice_offset = 0x100_usize;
+    let mut universal = vec![0_u8; slice_offset + thin.len()];
+    universal[..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+    universal[4..8].copy_from_slice(&1_u32.to_be_bytes());
+    let cpu = if cfg!(target_arch = "x86_64") {
+        0x0100_0007_u32
+    } else {
+        0x0100_000c_u32
+    };
+    universal[8..12].copy_from_slice(&cpu.to_be_bytes());
+    let subtype = if cfg!(target_arch = "x86_64") {
+        3_u32
+    } else {
+        0_u32
+    };
+    universal[12..16].copy_from_slice(&subtype.to_be_bytes());
+    universal[16..20].copy_from_slice(&(slice_offset as u32).to_be_bytes());
+    universal[20..24].copy_from_slice(&(thin.len() as u32).to_be_bytes());
+    universal[slice_offset..].copy_from_slice(&thin);
+
+    let candidate = root.join("ffmpeg-universal");
+    write_executable_bytes(&candidate, &universal);
+    let resolved = StdFfmpegLocator::default()
+        .locate_ffmpeg(&candidate)
+        .expect("complete universal host slice");
+    let (_file, attestation) = resolved.open_current().expect("attest universal image");
+    assert_eq!(attestation.format, NativeExecutableFormat::MachOUniversal);
+
+    let mut host_slice_free = universal;
+    host_slice_free[8..12].copy_from_slice(
+        &(if cfg!(target_arch = "x86_64") {
+            0x0100_000c_u32
+        } else {
+            0x0100_0007_u32
+        })
+        .to_be_bytes(),
+    );
+    let missing = root.join("ffmpeg-no-host-slice");
+    write_executable_bytes(&missing, &host_slice_free);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&missing),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let legacy = root.join("ffmpeg-thin-32");
+    write_executable_bytes(&legacy, &[0xce, 0xfa, 0xed, 0xfe]);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&legacy),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
 }
 
 #[test]

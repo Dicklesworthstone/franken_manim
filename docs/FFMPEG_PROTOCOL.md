@@ -1,11 +1,13 @@
 # FFMPEG_PROTOCOL.md — v2
 
 The contract of FrankenManim's **one external tool** (§3 D2, §14.3,
-D-23). ffmpeg is the only subprocess the engine will ever invoke —
-encode, mux, transcode — and this document is the protocol every
-invocation obeys. Implementation: `fmn-output::negotiate` (pure argv
-construction) and `fmn-output::ffmpeg` (sandboxed execution) over
-`fmn-platform::process` (the argv-only mechanism).
+D-23). It requires ffmpeg to be the only external subprocess the engine
+invokes — encode, mux, transcode — and this document defines the protocol every
+conforming invocation obeys. Implementation: `fmn-output::negotiate` (pure
+argv construction) and `fmn-output::ffmpeg` (sandboxed execution) over
+`fmn-platform::process` (the argv-only interface). Section 2.1 records the one
+remaining mechanism blocker rather than presenting the incomplete boundary as
+closed.
 
 ## 1. Negotiation, not a fixed pipe
 
@@ -57,19 +59,29 @@ embedded NUL, malformed Windows quoting, and bounded-input overruns reject the
 whole policy before any candidate is inspected. Search order is otherwise
 preserved. A present directory, broken link, non-executable file, or
 interpreter script is skipped; the first regular host-native executable image
-wins. Linux-family hosts require ELF, macOS accepts the declared thin/fat
-Mach-O magics, and Windows validates bounded DOS/PE headers. Other hosts refuse
-discovery until their native image format is explicitly governed. Windows
-search tests exactly `ffmpeg.exe` in each validated directory and never
-consults `PATHEXT`, the application/current/system directories, or
+wins. Structural policy v2 is deeper than a magic-byte check: Linux-family
+hosts require a bounded ELF64 executable/PIE for the host machine with a valid
+program-header table, file-backed executable entry point, interpreter shape,
+and bounded GNU-property notes; macOS requires a bounded executable Mach-O
+64-bit image or universal host slice with complete load-command/segment ranges,
+a hard `__PAGEZERO`, and a file-backed `LC_MAIN`; Windows requires a
+host-machine PE32+ executable with aligned, bounded optional/section tables and
+a file-backed executable code entry, and refuses DLLs. Images above the 1 GiB
+executable bound are refused before hashing or copying. This is a versioned
+container attestation, not a claim of complete OS-loader equivalence. Other
+hosts refuse discovery until their native image format is explicitly governed.
+Windows search tests exactly `ffmpeg.exe` in each validated directory and
+never consults `PATHEXT`, the application/current/system directories, or
 command-interpreter formats.
 
 Symlinks are supported for ordinary package-manager/version-manager layouts,
-but the issued `FfmpegExecutable` contains their canonical target. Retargeting
-the searched symlink afterward therefore cannot redirect the issued path.
-This is still selection-time format validation over a pathname, not a byte
-identity or proof of authorship: fmn-output owns the hash/private-copy binding
-below and must revalidate the exact private copy in the complete D2 boundary.
+but the issued `FfmpegExecutable` contains their canonical target and is the
+only input accepted by fmn-output resolution. Retargeting the searched symlink
+afterward therefore cannot redirect the issued path, and a raw path cannot
+bypass the locator. The token reopens and structurally revalidates the source
+through each exact handle used for hashing/copying. This is not proof of
+authorship: fmn-output owns the hash/private-copy binding below and revalidates
+the exact private copy in the byte-binding portion of the D2 boundary.
 Its resolution probe requires a strict UTF-8 first line that begins exactly
 `ffmpeg version ` and contains no control characters. Native-image shape plus
 that protocol response proves only that the selected bytes speak the governed
@@ -78,20 +90,32 @@ surface; it is not cryptographic authentication of the ffmpeg project.
 Every invocation:
 
 1. **argv-only, private-copy binding.** The configured tool is
-   canonicalized and SHA-256 fingerprinted. Resolution copies those
-   bytes through `create_new` into a private probe directory, verifies
-   the copy, and runs `-version` from that copy. Every later capability
-   probe and job repeats the exact-create/copy/hash operation and passes
-   only the absolute private path to `ProcessSpec`. The private copy is
-   rehashed after execution; the configured pathname never selects what
-   the process mechanism spawns. No shell or ambient `PATH` exists.
+   selected by a typed locator token and SHA-256 fingerprinted through a
+   validated, bounded source handle. Resolution copies and hashes those
+   bytes in one bounded pass through `create_new` into a private probe
+   directory. The exact create-new handle is flushed, synced,
+   permissioned, native-image-attested, and rehashed before it is closed;
+   it is then reopened read-only, re-attested, rehashed, retained across
+   spawn, and checked together with the current private pathname
+   immediately around execution. (Linux refuses execution while a
+   write-capable handle remains open.) Every later capability probe and
+   job repeats this sequence and passes only the fixed absolute private
+   leaf (`fmn-bound-ffmpeg`, or `.exe` on Windows) to `ProcessSpec`.
+   The configured pathname never selects what the process mechanism
+   spawns, and ambient `PATH` never selects it.
 2. **Owned private hierarchy.** Resolution canonicalizes the caller's
    workdir parent and atomically claims one session root. Each probe and
    job then claims an exclusive child (`0700` on Unix). A collision is
    never opened, cleaned, or reused. The recorded filesystem identity of
    the session and each child must still match before later path-based
-   work or cleanup; mismatch retains the path untouched. The child's
-   `cwd` and `TMPDIR`, artifact, and bound executable all live there.
+   work or cleanup; mismatch retains the path untouched. The child's `TMPDIR`,
+   artifact, and bound executable all live there. Every governed path passed to
+   ffmpeg is absolute: external audio and concat inputs are canonicalized
+   before the job directory is created, while private inputs and outputs are
+   constructed beneath that absolute directory. The child can therefore
+   inherit the engine's working directory without interpreting anything
+   relative to it; this avoids making a requested `cwd` another precondition
+   of the pinned standard library's `posix_spawn` path.
 3. **Environment allowlist + locale pinning.** The child environment
    is cleared and rebuilt as exactly `LANG=C`, `LC_ALL=C`,
    `TMPDIR=<job dir>`.
@@ -106,9 +130,11 @@ Every invocation:
    oversized job leaves the destination untouched.
 7. **Provenance.** Every invocation records the canonical configured
    path, the private executable path actually spawned, their enforced
-   shared SHA-256, the `-version` line, resolved encoder, and full argv.
-   The private executable is rehashed after the process exits and before
-   its artifact can publish.
+   shared SHA-256, the versioned native-image format/architecture
+   attestation, the `-version` line, resolved encoder, and full argv.
+   The retained private handle and current private path are both
+   re-attested and rehashed after the process exits and before its
+   artifact can publish.
 
 ### 2.1 Supported executable and filesystem capability
 
@@ -141,6 +167,17 @@ between the last check and the OS spawn/removal operation. Supporting that
 stronger threat model requires an opaque host executable/filesystem capability;
 it is not papered over by a weaker or unsafe platform path.
 
+There is a second, separate safe-standard-library limitation. On supported
+Unix configurations the pinned `Command` implementation prefers
+`posix_spawnp`, whose native-image failure is returned to the caller. When its
+target or runtime preconditions are unavailable, however, it falls back to
+`fork` plus libc `execvp`; `execvp` is permitted to invoke `/bin/sh` after
+`ENOEXEC`. The boundary's native-image parser rejects known scripts and
+malformed containers, but a parser is not an OS-loader equivalence proof.
+Therefore the exact-copy tranche does **not** yet make the global D2 no-shell
+claim. `fm-x4pp` blocks `fm-2sxz` until an audited safe no-interpreter spawn
+capability can refuse unsupported configurations before issuing a process.
+
 ## 3. Optionality
 
 ffmpeg's absence is a **capability error naming the alternative**:
@@ -157,8 +194,9 @@ require the tool. There is no silent format substitution, ever.
   Stage 2 **must not re-encode video**: `-c:v copy` is contract,
   asserted by the fake-ffmpeg suite.
 - **Insert files / partial movies** — concat demuxer with stream
-  copy (`-f concat -safe 0 -i list -c copy`); input paths containing
-  quotes or newlines are refused rather than escaped.
+  copy (`-f concat -safe 0 -i list -c copy`); every input is resolved
+  to an absolute UTF-8 path before list creation, and paths containing
+  quotes or line breaks are refused rather than escaped.
 - **`--subdivide` outputs** — one boundary job per subdivision; the
   protocol is per-invocation and needs nothing special.
 - **`--prerun` counting** — a counting pass invokes the boundary
@@ -190,10 +228,13 @@ The protocol is CI-verified without real encoders, at two layers:
   substitution, relocation refusal, exclusive-directory collision
   handling, and fail-closed cleanup after directory replacement are
   asserted against recorded `ProcessSpec`s — no process spawns.
-- **Sandbox suite** (fake-ffmpeg script + the real `StdProcessRunner`):
-  a scripted stand-in binary asserts the spawn-level behavior —
+- **Sandbox suite** (Cargo-built host-native fake ffmpeg + the real
+  `StdProcessRunner`, under the `ffmpeg-test-fixture` feature): a
+  std-only stand-in binary asserts the spawn-level behavior —
   artifact publication, stdin consumption, timeout kill, oversized-
   artifact refusal, failed-job destination integrity, and that source
   replacement after binding cannot change the executable that runs.
+  Interpreter-script bytes remain only as hostile replacements whose
+  rejection is asserted; no positive boundary fixture executes a shell.
 - **Real-ffmpeg smoke test**, behind `FMN_REAL_FFMPEG=1`, encodes a
   short NV12 clip through the installed tool.
