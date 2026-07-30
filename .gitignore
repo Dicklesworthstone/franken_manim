@@ -20,6 +20,12 @@ a.out
 *.gif
 *.y4m
 *.wav
+# Normative CPython-generated decoder fixtures, locked by codec2.rs.
+!crates/fmn-codec/tests/fixtures/wav/ramp_u8.wav
+!crates/fmn-codec/tests/fixtures/wav/ramp_s16.wav
+!crates/fmn-codec/tests/fixtures/wav/ramp_s24.wav
+!crates/fmn-codec/tests/fixtures/wav/ramp_s32.wav
+!crates/fmn-codec/tests/fixtures/wav/ramp_f32.wav
 /frames/
 *.png.actual
 
