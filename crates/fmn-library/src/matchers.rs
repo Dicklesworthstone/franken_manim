@@ -390,9 +390,9 @@ mod tests {
         // which is the whole reason both are drawn rather than one being set
         // from IBM Plex's U+2713.
         for (name, mark) in [("check", checkmark(GREEN)), ("ex", exmark(RED))] {
-            let path = mark.path().unwrap_or_else(|e| panic!("{name}: {e}"));
+            let path = mark.path().expect("a built mark is a valid path");
             assert!(path.is_closed(), "{name} must be a closed filled shape");
-            let (min, max) = mark.extent().unwrap_or_else(|| panic!("{name}: no extent"));
+            let (min, max) = mark.extent().expect("a built mark has an extent");
             assert!(
                 (max[0] - min[0] - 1.0).abs() < 1e-9,
                 "{name} spans the unit box horizontally, got {}",

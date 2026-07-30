@@ -1,11 +1,11 @@
 # BN-08 — The de-TeX'd natives
 
-**Status:** Partial. Drafted in W7 (fm-y69) with the first native
-constructions — `Brace`/`BraceLabel`/`LineBrace`, `SurroundingRectangle`,
-`BackgroundRectangle`, `Cross`, `Underline`, `Checkmark`, `Exmark`. The
-text-backed members (`DecimalNumber`/`Integer`, the `Matrix` family,
-`BulletedList`, `Title`) land with the Scribe bridge and extend this note in
-place.
+**Status:** Landed in two waves. W7 (fm-y69) landed the geometry half —
+`Brace`/`BraceLabel`/`LineBrace`, `SurroundingRectangle`,
+`BackgroundRectangle`, `Cross`, `Underline`, `Checkmark`, `Exmark`. W7
+(fm-ebl, on the fm-p5d Scribe bridge) landed the text-backed half —
+`DecimalNumber`/`Integer`, the `Matrix` family, `BulletedList`, `Title`,
+and the `interactive.py` control compositions.
 
 > **Numbering.** §16.8 of the plan assigns BN-08 to "de-TeX'd classes
 > (§11.6)", which is this note. A file named `BN-08-animation-contract.md`
@@ -27,7 +27,9 @@ delete — and several of those classes were never well served by it anyway:
 | `Brace`, `BraceLabel`, `BraceText`, `LineBrace` | render `\underbrace{\qquad}`, then stretch the glyph | a **parametric path family** |
 | `Checkmark`, `Exmark` | `\ding{51}` / `\ding{55}` via the `pifont` package | drawn paths |
 | `Cross`, `Underline`, `SurroundingRectangle`, `BackgroundRectangle` | already native, but built on Tex-derived metrics in places | pure geometry over the target's box |
-| `DecimalNumber`, `Integer`, the `Matrix` family, `BulletedList`, `Title` | `Tex`/`TexText` | native text through Scribe *(pending)* |
+| `DecimalNumber`, `Integer`, the `Matrix` family, `BulletedList`, `Title` | `Tex`/`TexText` | native text through Scribe |
+| `Matrix` brackets | `\left[\begin{array}…\right]` through LaTeX | the same source through **fmd-math's extensible-delimiter engine** (ADR-0005) |
+| `interactive.py` controls | `Tex` labels + Pango text | Scribe text + drawn marks; event wiring lives in Proscenium (W9) |
 
 Nothing about the mathematics changes. These classes were never doing
 mathematics; they were borrowing a typesetter to draw a curly bracket.
@@ -94,6 +96,55 @@ authored glyph is not there to be had.
 Both marks are built in the same unit box, so they scale and align
 identically.
 
+## Why the Matrix brackets are not a glyph stretch either
+
+The Reference typesets its brackets the same way it typesets everything
+else — a LaTeX render of `\left[\begin{array}{c}…\end{array}\right]` —
+and then stretches the two halves to the grid's height. FrankenManim feeds
+the *same source* to fmd-math, whose delimiter engine (ADR-0005) is
+three-stage by construction: a natural glyph when it covers the target,
+uniform scaling up to the 1.25× ceiling, and the parametric drawn-path
+construction beyond it. Past the ceiling the bracket is *generated* — the
+same precedent the drawn `Brace` set — so a 12-row matrix's brackets keep
+their proportions instead of thickening into rails. The scaling stages are
+load-bearing and tested at row counts 1 through 8, glyph stage to drawn
+stage, with bracket height equal to grid height plus `v_buff` to 1e-9.
+
+## Why DecimalNumber is a cache and not a typesetter
+
+The Reference's ticking counter re-typesets its string every update and
+then *becomes* the new submobjects in place when the digit count is
+unchanged. FrankenManim makes the reuse explicit: each character is laid
+out **once** (digits never kern in the Reference — it arranges per-glyph
+submobjects with `digit_buff`), cached by character, and `set_value`
+rebuilds the row from the cache, typesetting only characters it has never
+seen. A ticking counter therefore typesets eleven glyphs total, ever.
+Formatting is ported case-for-case, including the ones that are easy to
+get subtly wrong: negative-zero suppression, the `-` → U+2013 en-dash
+substitution with its vertical reseat, comma grouping with the `,` glyph
+dropped half its height, and `min_total_width` zero-padding with CPython's
+re-grouping overshoot (`format(123456, '08,d')` is nine wide, not eight —
+verified against live Python for the whole corpus). `Integer.value()`
+rounds half-to-even (`np.round` semantics); its *display* truncates, as
+the Reference's does.
+
+Two honest scope lines: the complex formatter
+(`hide_zero_components_on_complex`) is not ported, and `unit` is plain
+text — a leading `^` is an alignment marker, never a TeX command; write
+the glyph itself (`°`), which the bundled faces map.
+
+## The small compositions
+
+`BulletedList` is a native bullet glyph (U+2022, which the bundled faces
+*do* map — checked, like the dingbats were) beside Scribe text, arranged
+with the Reference's buff and alignment; `fade_all_but` ports the
+Reference's scaling formula verbatim over the family-recursive style
+surface. `Title` joins its parts into one layout and re-groups the glyph
+children by source-byte span through the native span map, so part *i*
+stays addressable without the Reference's render-twice isolation. The
+`interactive.py` controls are compositions plus their value surface; the
+mouse/keyboard wiring is Proscenium's (W9), not the library's.
+
 ## Migration guidance
 
 - **Metrics differ.** These constructions are ours, so their exact
@@ -104,14 +155,24 @@ identically.
   all of them — need no change.
 - **Scaling behaviour is better defined, and therefore different.** A brace
   much narrower or much wider than its natural size now keeps its curl's
-  proportions. If a scene relied on the Reference's distortion for a visual
-  effect, it will look different — better, but different.
+  proportions, and a tall matrix's brackets keep their weight. If a scene
+  relied on the Reference's distortion for a visual effect, it will look
+  different — better, but different.
 - **Stroke tapers are reproduced.** `Cross` and `Underline` keep their
   variable stroke widths (`[0, 6, 0]` and `[0, 3, 3, 0]`), resized onto the
   path by linear interpolation the way `set_stroke(width=[...])` does. The
   taper is the visual character of those classes, not a detail.
 - **No LaTeX escape hatch.** There is deliberately no way to ask for the old
   rendering. `pifont` is gone; so is every other TeX package.
+- **`DecimalNumber.unit` is text.** A scene passing `unit="^\\circ"` gets
+  the alignment marker and then literal characters — write `unit="°"`
+  instead. Complex numbers need a scene-side pair of `DecimalNumber`s for
+  now.
+- **Rust-side typing is explicit.** The Reference's runtime dispatch in
+  `Matrix` (float → `DecimalNumber`, str → `Tex`) is a constructor choice
+  here: `DecimalMatrix`/`IntegerMatrix`/`TexMatrix`/`MobjectMatrix` own the
+  branches, and the base `Matrix` takes built entries. Out-of-range row and
+  column access returns `Option` rather than raising `IndexError`.
 
 ## Evidence
 
@@ -124,4 +185,16 @@ identically.
   `both_marks_are_closed_shapes_in_the_same_unit_box` holding the pair to a
   matched size.
 - `crates/fmn-library/src/vmobject.rs` — `with_stroke_profile` and
-  `resize_with_interpolation`, the taper mechanism.
+  `resize_with_interpolation`, the taper mechanism; `map_style_deep`, the
+  family-recursive style surface `fade_all_but` rides.
+- `crates/fmn-library/src/numbers.rs` — the glyph cache (`typesets()` is
+  the recycling witness: an update inside the cached alphabet typesets
+  nothing, test-proven) and the formatting corpus.
+- `crates/fmn-library/src/matrix.rs` — the delimiter construction, with
+  bracket height held to grid height plus `v_buff` across the glyph and
+  drawn-path stages at row counts 1–8.
+- `crates/fmn-library/src/special_tex.rs` — the bullet and title
+  compositions; `fade_all_but`'s formula port.
+- `crates/fmn-library/src/controls.rs` — the control compositions and the
+  tracker binding (`add_scalar_control`), with the W9-deferred event hooks
+  named in the module documentation.

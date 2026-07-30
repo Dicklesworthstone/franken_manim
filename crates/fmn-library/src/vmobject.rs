@@ -101,6 +101,20 @@ impl VMobject {
         self
     }
 
+    /// Amend the style of the whole family: self and every descendant,
+    /// the Reference's `set_fill`/`set_stroke`/`set_color` family
+    /// propagation. The style-recursive sibling of [`VMobject::map_points`].
+    #[must_use]
+    pub fn map_style_deep(mut self, f: impl Fn(Style) -> Style + Copy) -> Self {
+        self.style = f(self.style);
+        self.submobjects = self
+            .submobjects
+            .into_iter()
+            .map(|child| child.map_style_deep(f))
+            .collect();
+        self
+    }
+
     /// The Reference's `color=`: stroke and fill together.
     #[must_use]
     pub fn with_color(self, color: Srgb) -> Self {
@@ -174,6 +188,16 @@ impl VMobject {
     #[must_use]
     pub fn with_children(mut self, children: impl IntoIterator<Item = VMobject>) -> Self {
         self.submobjects.extend(children);
+        self
+    }
+
+    /// Replace the detached children by mapping each one (the detached
+    /// hook for the Reference's family operations — `set_color` and
+    /// friends recurse into submobjects; compose with [`map_style`] /
+    /// [`map_points`] to do the same here).
+    #[must_use]
+    pub fn map_children(mut self, mut f: impl FnMut(VMobject) -> VMobject) -> Self {
+        self.submobjects = self.submobjects.into_iter().map(&mut f).collect();
         self
     }
 
@@ -1009,12 +1033,11 @@ mod tests {
         let squashed = circle.clone().map_points(|p| [p[0], p[1] * 0.5, p[2]]);
         assert_eq!(squashed.shape(), ShapeTag::General);
         let moved = circle.shifted([1.0, 0.0, 0.0]);
-        match moved.shape() {
-            ShapeTag::Circle { center, radius } => {
-                assert!((center[0] - 1.0).abs() < 1e-12);
-                assert!((radius - 2.0).abs() < 1e-12);
-            }
-            other => panic!("shift lost the circle: {other:?}"),
-        }
+        assert!(
+            matches!(moved.shape(), ShapeTag::Circle { center, radius }
+                if (center[0] - 1.0).abs() < 1e-12 && (radius - 2.0).abs() < 1e-12),
+            "shift lost the circle: {:?}",
+            moved.shape()
+        );
     }
 }

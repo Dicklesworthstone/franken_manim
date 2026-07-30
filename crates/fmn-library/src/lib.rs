@@ -27,36 +27,74 @@
 //! * **De-TeX'd natives** (BN-08, §11.6/§12.3). Classes the Reference routes
 //!   through LaTeX for want of anything better are built natively here:
 //!   [`brace`] is a parametric path family that is correct at any width
-//!   rather than one glyph stretched, and [`matchers`] carries the shape
-//!   matchers plus the two `pifont` marks as drawn paths.
+//!   rather than one glyph stretched, [`matchers`] carries the shape
+//!   matchers plus the two `pifont` marks as drawn paths, [`numbers`] is
+//!   `DecimalNumber`/`Integer` with glyph-recycling updates, [`matrix`]
+//!   gets its brackets from fmd-math's extensible-delimiter engine,
+//!   [`special_tex`] is `BulletedList`/`Title` composed on Scribe, and
+//!   [`controls`] carries the `interactive.py` control compositions (event
+//!   wiring is Proscenium's, W9).
 //!
-//! Still to land here: the text-backed half of the de-TeX'd natives —
-//! `DecimalNumber`/`Integer`, the `Matrix` family, `BulletedList`, `Title`,
-//! and the `interactive.py` controls — which all wait on the Scribe bridge
-//! that turns a `fmn_text::TextLayout` and a `fmn_tex::Typeset` into
-//! [`vmobject::VMobject`]s; then coordinate systems and plotting (fm-v4l),
-//! 3D solids and fields (fm-2u6), the enhanced graph and data mobjects
-//! (fm-n64), and the drawings shelf (fm-3kr). The boolean-op mobjects
+//! * **The Scribe bridge** (fm-p5d, §11.2–11.5). [`text`] turns a
+//!   `fmn_text::TextLayout` into a `VMobject` family — one child per glyph,
+//!   the `Text[a:b]` / `isolate=` submobject contract intact — and [`tex`]
+//!   turns a `fmn_tex::Typeset` into one child per `Sub` with the span map
+//!   intact. `Text`, `MarkupText`, `Tex`, and `TexText` are the first
+//!   text-bearing mobjects; scale is calibrated the Reference's way (a "0"
+//!   stands `font_size / font_size_for_unit_height` units tall).
+//!
+//! * **Atlas** (fm-v4l, §12.2). [`coords`] owns `CoordinateSystem`, axes,
+//!   number lines, Riemann rectangles, and area helpers; [`planes`] owns the
+//!   2D/3D plane families; [`graphs`] owns parametric, explicit, and implicit
+//!   curves over Chisel's bounded isoline extractor.
+//!
+//! Still to land here: 3D solids and fields (fm-2u6), the enhanced graph and
+//! data mobjects (fm-n64), and the drawings shelf (fm-3kr). The boolean-op mobjects
 //! (`Union`/`Difference`/`Intersection`/`Exclusion`) wait on Chisel's
 //! boolean kernel (fm-8dx) and are tracked by fm-6l6.
 #![forbid(unsafe_code)]
 
 pub mod arc;
 pub mod brace;
+pub mod controls;
+pub mod coords;
+pub mod graphs;
 pub mod line;
 pub mod matchers;
+pub mod matrix;
+pub mod numbers;
+pub mod planes;
 pub mod poly;
+pub mod special_tex;
 pub mod style;
+pub mod tex;
+pub mod text;
 pub mod tip;
 pub mod vmobject;
 
 pub use arc::{AnnularSector, Annulus, Arc, ArcBetweenPoints, Circle, Dot, Ellipse};
 pub use brace::{Brace, BraceLabel, line_brace};
+pub use controls::{
+    Button, Checkbox, ColorSliders, ControlMob, ControlMobject, ControlPanel, ControlPanelMobject,
+    EnableDisableButton, LinearNumberSlider, MotionMobject, ScalarControl, Textbox,
+    add_scalar_control,
+};
+pub use coords::{
+    Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, RiemannConfig, Slider,
+    UnitInterval, create_axis,
+};
+pub use graphs::{FunctionGraph, ImplicitFunction, ParametricCurve};
 pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
 };
+pub use matrix::{DecimalMatrix, IntegerMatrix, Matrix, MatrixMobject, MobjectMatrix, TexMatrix};
+pub use numbers::{DecimalNumber, Integer};
+pub use planes::{ComplexPlane, NumberPlane, ThreeDAxes};
 pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, TipStyle};
+pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
+pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
+pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
 pub use vmobject::VMobject;
