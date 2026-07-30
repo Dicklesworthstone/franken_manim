@@ -69,11 +69,15 @@ EXPECTED: dict[str, set[str]] = {
     },
     "fmn-runtime": {"fmn-core", "fmn-platform"},
     "fmn-cli": {"fmn-core", "fmn-config", "fmn-cache", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
-    # cache/platform/text/tex: the PG-7 producer measures the real Scribe
-    # cold, cached, and 10k-glyph workloads through the governed host/cache
-    # capabilities rather than a synthetic duplicate (§17.2, fm-inr.2.2).
+    # dmath: certified scene-corpus callbacks compute pixel-reaching graph
+    # geometry through the sovereign transcendental funnel (ADR-0014,
+    # fm-t1v.1). cache/platform/text/tex: the PG-7 producer measures the real
+    # Scribe cold, cached, and 10k-glyph workloads through the governed
+    # host/cache capabilities rather than a synthetic duplicate (§17.2,
+    # fm-inr.2.2).
     "fmn-conformance": {
         "fmn-core",
+        "fmn-dmath",
         "fmn-hash",
         "fmn-geom",
         "fmn-mobject",
