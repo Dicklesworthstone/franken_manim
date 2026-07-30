@@ -43,15 +43,21 @@ frames, zero dimensions or frame rate.
 
 Every invocation:
 
-1. **argv-only.** `ProcessSpec` is an absolute program path plus an
-   argument vector. No shell exists in the API; relative paths are
-   refused by the mechanism itself (no ambient `PATH` can choose the
-   executable).
-2. **Job-scoped working directory.** The child's `cwd` and `TMPDIR`
-   point into a job-specific directory, and the artifact is born
-   there. Exclusive creation and stale-directory refusal are the
-   separate `fm-yw7h` boundary-hardening contract and are not implied
-   here.
+1. **argv-only, private-copy binding.** The configured tool is
+   canonicalized and SHA-256 fingerprinted. Resolution copies those
+   bytes through `create_new` into a private probe directory, verifies
+   the copy, and runs `-version` from that copy. Every later capability
+   probe and job repeats the exact-create/copy/hash operation and passes
+   only the absolute private path to `ProcessSpec`. The private copy is
+   rehashed after execution; the configured pathname never selects what
+   the process mechanism spawns. No shell or ambient `PATH` exists.
+2. **Owned private hierarchy.** Resolution canonicalizes the caller's
+   workdir parent and atomically claims one session root. Each probe and
+   job then claims an exclusive child (`0700` on Unix). A collision is
+   never opened, cleaned, or reused. The recorded filesystem identity of
+   the session and each child must still match before later path-based
+   work or cleanup; mismatch retains the path untouched. The child's
+   `cwd` and `TMPDIR`, artifact, and bound executable all live there.
 3. **Environment allowlist + locale pinning.** The child environment
    is cleared and rebuilt as exactly `LANG=C`, `LC_ALL=C`,
    `TMPDIR=<job dir>`.
@@ -64,11 +70,42 @@ Every invocation:
 6. **Atomic publication.** The artifact reaches its destination only
    through `rename` after verification. A failed, timed-out, or
    oversized job leaves the destination untouched.
-7. **Provenance.** The resolved tool path and its resolution-time
-   content hash (SHA-256), `-version` line, resolved encoder, and the
-   full argv are recorded on every job. Spawn-time executable
-   revalidation is tracked separately by `fm-yw7h`; these records do
-   not claim that stronger binding until it lands.
+7. **Provenance.** Every invocation records the canonical configured
+   path, the private executable path actually spawned, their enforced
+   shared SHA-256, the `-version` line, resolved encoder, and full argv.
+   The private executable is rehashed after the process exits and before
+   its artifact can publish.
+
+### 2.1 Supported executable and filesystem capability
+
+The same private-copy form used by jobs is what earns the resolution-time
+version. This deliberately supports self-contained or relocation-safe
+ffmpeg builds. On the currently supported Unix boundary, an installation
+whose loader requires libraries beside the configured executable—for example
+through ELF `$ORIGIN` or Mach-O `@executable_path`—is rejected as
+`UnsupportedRelocatedExecutable` if the private-copy probe cannot run. There
+is no fallback to probing or executing the mutable configured path.
+
+On Unix, missing workdir-parent components and every claimed directory are
+created as mode `0700`. A canonical ancestor writable by group/other is
+accepted only when it has the sticky bit (as `/tmp` normally does).
+Parent-directory (`..`) components are refused before creation. The current
+non-Unix implementation fails earlier with `Workdir`, before any executable
+probe, because safe `std` cannot prove a private directory ACL there. A future
+Windows host capability must also account for application-directory loader
+lookup when it enables private-copy execution. This is separate from the
+process mechanism's own fail-closed requirement for complete process-tree
+cancellation.
+
+Safe `std` does not expose a portable execute-by-handle primitive or
+directory-handle-relative recursive deletion. The caller must supply trusted
+workdir ancestry; within it, the private hierarchy, content hashes, and
+filesystem-identity checks prevent ambient-path substitution and make
+persistent replacement fail closed. A hostile owner of that ancestry or an
+actor already running under the same OS identity can still race a pathname
+between the last check and the OS spawn/removal operation. Supporting that
+stronger threat model requires an opaque host executable/filesystem capability;
+it is not papered over by a weaker or unsafe platform path.
 
 ## 3. Optionality
 
@@ -115,11 +152,14 @@ The protocol is CI-verified without real encoders, at two layers:
 
 - **Contract suite** (`ScriptedRunner`): every negotiation dimension,
   the env allowlist, both mux stages, and the failure modes (timeout,
-  log overflow, nonzero exit, missing/oversized artifact) are
+  log overflow, nonzero exit, missing/oversized artifact), executable
+  substitution, relocation refusal, exclusive-directory collision
+  handling, and fail-closed cleanup after directory replacement are
   asserted against recorded `ProcessSpec`s — no process spawns.
 - **Sandbox suite** (fake-ffmpeg script + the real `StdProcessRunner`):
   a scripted stand-in binary asserts the spawn-level behavior —
   artifact publication, stdin consumption, timeout kill, oversized-
-  artifact refusal, failed-job destination integrity.
+  artifact refusal, failed-job destination integrity, and that source
+  replacement after binding cannot change the executable that runs.
 - **Real-ffmpeg smoke test**, behind `FMN_REAL_FFMPEG=1`, encodes a
   short NV12 clip through the installed tool.

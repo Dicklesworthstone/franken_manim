@@ -4,12 +4,12 @@
 //! FFMPEG_PROTOCOL.md's implementation. [`negotiate`] is the pure
 //! negotiation model and deterministic argv construction (no `vflip`,
 //! no `eq`, structurally); [`ffmpeg`] is the sandboxed execution layer
-//! over fmn-platform's process capability: fingerprinted tool
-//! resolution, job-scoped directories, environment allowlist, artifact
-//! verification, and atomic publication. Exclusive directory creation and
-//! spawn-time identity binding remain the `fm-yw7h` hardening contract.
-//! ffmpeg is optional — its absence is a capability error naming the native
-//! alternative.
+//! over fmn-platform's process capability: opaque fingerprinted tool
+//! resolution proven through a private executable copy, an identity-checked
+//! private session with exclusive job directories, environment allowlisting,
+//! artifact verification, and atomic publication. ffmpeg is optional — its
+//! absence (or inability to run as a relocation-safe private copy) is a
+//! capability error naming the native alternative.
 //!
 //! [`emitter`] is the bounded, preallocated, frame-index-ordered handoff
 //! between Lumen/runtime workers and every sink. [`sound`] is the native

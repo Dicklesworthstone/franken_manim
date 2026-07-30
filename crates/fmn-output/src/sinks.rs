@@ -1332,8 +1332,9 @@ pub struct FfmpegSinkConfig {
     pub audio: Option<PathBuf>,
     /// Published destination.
     pub destination: PathBuf,
-    /// Job-directory root. Exclusive creation and stale-directory refusal are
-    /// the separate `fm-yw7h` boundary-hardening contract.
+    /// Canonical parent used when resolving `tool`; the boundary's owned
+    /// private session and exclusive job directories live below it. A
+    /// different canonical parent is refused.
     pub workdir_root: PathBuf,
     /// Timeout/log/workdir policy. Its artifact limit is tightened to the
     /// smaller of this value and [`SinkLimits::max_artifact_bytes`].
@@ -1432,8 +1433,8 @@ impl FfmpegSink {
 
     /// Completion report handle carrying every boundary invocation.
     ///
-    /// Executable revalidation at spawn time is a separate boundary-hardening
-    /// contract (`fm-yw7h`); this adapter does not upgrade that evidence.
+    /// Each invocation identifies the canonical configured tool and the
+    /// rehashed private executable copy that the process mechanism ran.
     #[must_use]
     pub fn receipt(&self) -> SinkReceipt<FfmpegArtifactReport> {
         self.receipt.clone()
@@ -1463,7 +1464,8 @@ impl FfmpegSink {
                 Arc::clone(&self.runner),
                 self.config.job_limits.clone(),
                 self.config.workdir_root.clone(),
-            );
+            )
+            .map_err(boundary_error)?;
             self.stream = Some(
                 boundary
                     .start_encode(

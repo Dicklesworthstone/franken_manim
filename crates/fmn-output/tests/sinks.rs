@@ -7,27 +7,36 @@ use fmn_codec::{
     decode_png, decode_wav, decode_y4m,
 };
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
+#[cfg(unix)]
 use fmn_output::{
-    ColorDescription, Container, DitherPolicy, EmitterConfig, EncoderCapabilities, EncoderChoice,
-    FfmpegSink, FfmpegSinkConfig, FfmpegTool, FrameSink, GifSink, GifSinkConfig, JobLimits,
-    MixKernel, MixReport, NativeArtifactKind, OrderedEmitter, OutputProfile, PngSink,
-    PngSinkConfig, PngTarget, ReceiptError, SinkAdapterError, SinkLimits, SinkMode, SinkWrite,
-    VideoJob, WavPublicationConfig, WireFormat, Y4mSink, Y4mSinkConfig, publish_wav,
+    ColorDescription, Container, EncoderCapabilities, EncoderChoice, FfmpegSink, FfmpegSinkConfig,
+    FfmpegTool, JobLimits, VideoJob, WireFormat,
+};
+use fmn_output::{
+    DitherPolicy, EmitterConfig, FrameSink, GifSink, GifSinkConfig, MixKernel, MixReport,
+    NativeArtifactKind, OrderedEmitter, OutputProfile, PngSink, PngSinkConfig, PngTarget,
+    ReceiptError, SinkAdapterError, SinkLimits, SinkMode, SinkWrite, WavPublicationConfig, Y4mSink,
+    Y4mSinkConfig, publish_wav,
 };
 use fmn_platform::clock::FakeClock;
 use fmn_platform::fs::{
     ATOMIC_DIRECTORY_COMPLETE_LEAF, AtomicDirectoryWriter, AtomicFileWriter, FileSystem, FsError,
     FsNodeKind, PreparedAtomicDirectory, PreparedAtomicFile, VirtualFs,
 };
+#[cfg(unix)]
 use fmn_platform::process::{
     ProcessCancellation, ProcessError, ProcessOutcome, ProcessRunner, ProcessSpec,
     ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
 use fmn_platform::profile::{ProfilePath, ProfileRecorder};
+#[cfg(unix)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+#[cfg(unix)]
 use std::time::Duration;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1174,577 +1183,596 @@ fn wav_publication_is_native_atomic_and_preflight_bounded() {
     assert_eq!(fs.read(&destination).expect("old WAV"), b"old-wav");
 }
 
-#[derive(Default)]
-struct PublishingRunner {
-    runs: Arc<Mutex<Vec<ProcessSpec>>>,
-    stdin_chunks: Arc<Mutex<Vec<usize>>>,
-    fail_encode: AtomicBool,
-}
+#[cfg(unix)]
+mod ffmpeg_boundary {
+    use super::*;
 
-impl PublishingRunner {
-    fn runs(&self) -> Vec<ProcessSpec> {
-        lock(&self.runs).clone()
+    #[derive(Default)]
+    struct PublishingRunner {
+        runs: Arc<Mutex<Vec<ProcessSpec>>>,
+        stdin_chunks: Arc<Mutex<Vec<usize>>>,
+        fail_encode: AtomicBool,
     }
 
-    fn fail_encode(&self) {
-        self.fail_encode.store(true, Ordering::Relaxed);
+    impl PublishingRunner {
+        fn runs(&self) -> Vec<ProcessSpec> {
+            lock(&self.runs).clone()
+        }
+
+        fn fail_encode(&self) {
+            self.fail_encode.store(true, Ordering::Relaxed);
+        }
+
+        fn stdin_chunks(&self) -> Vec<usize> {
+            lock(&self.stdin_chunks).clone()
+        }
     }
 
-    fn stdin_chunks(&self) -> Vec<usize> {
-        lock(&self.stdin_chunks).clone()
+    impl ProcessRunner for PublishingRunner {
+        fn start(
+            &self,
+            spec: &ProcessSpec,
+            cancellation: ProcessCancellation,
+            stdin_limits: ProcessStdinLimits,
+        ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            Ok(Box::new(PublishingProcess {
+                spec: spec.clone(),
+                input: Vec::new(),
+                runs: Arc::clone(&self.runs),
+                stdin_chunks: Arc::clone(&self.stdin_chunks),
+                fail_encode: self.fail_encode.load(Ordering::Relaxed),
+                cancellation,
+                stdin_limits,
+                stdin_bytes: 0,
+                recorded: false,
+            }))
+        }
     }
-}
 
-impl ProcessRunner for PublishingRunner {
-    fn start(
-        &self,
-        spec: &ProcessSpec,
+    struct PublishingProcess {
+        spec: ProcessSpec,
+        input: Vec<u8>,
+        runs: Arc<Mutex<Vec<ProcessSpec>>>,
+        stdin_chunks: Arc<Mutex<Vec<usize>>>,
+        fail_encode: bool,
         cancellation: ProcessCancellation,
         stdin_limits: ProcessStdinLimits,
-    ) -> Result<Box<dyn RunningProcess>, ProcessError> {
-        Ok(Box::new(PublishingProcess {
-            spec: spec.clone(),
-            input: Vec::new(),
-            runs: Arc::clone(&self.runs),
-            stdin_chunks: Arc::clone(&self.stdin_chunks),
-            fail_encode: self.fail_encode.load(Ordering::Relaxed),
-            cancellation,
-            stdin_limits,
-            stdin_bytes: 0,
-            recorded: false,
-        }))
-    }
-}
-
-struct PublishingProcess {
-    spec: ProcessSpec,
-    input: Vec<u8>,
-    runs: Arc<Mutex<Vec<ProcessSpec>>>,
-    stdin_chunks: Arc<Mutex<Vec<usize>>>,
-    fail_encode: bool,
-    cancellation: ProcessCancellation,
-    stdin_limits: ProcessStdinLimits,
-    stdin_bytes: u64,
-    recorded: bool,
-}
-
-impl PublishingProcess {
-    fn record(&mut self) {
-        if self.recorded {
-            return;
-        }
-        if !self.input.is_empty() {
-            self.spec.stdin = Some(std::mem::take(&mut self.input));
-        }
-        lock(&self.runs).push(self.spec.clone());
-        self.recorded = true;
+        stdin_bytes: u64,
+        recorded: bool,
     }
 
-    fn outcome(&mut self) -> Result<ProcessOutcome, ProcessError> {
-        let is_version = self.spec.argv == ["-version"];
-        let is_encode = !self.input.is_empty();
-        if self.cancellation.is_cancelled() {
-            self.record();
-            return Ok(ProcessOutcome {
-                termination: ProcessTermination::Cancelled,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            });
+    impl PublishingProcess {
+        fn record(&mut self) {
+            if self.recorded {
+                return;
+            }
+            if !self.input.is_empty() {
+                self.spec.stdin = Some(std::mem::take(&mut self.input));
+            }
+            lock(&self.runs).push(self.spec.clone());
+            self.recorded = true;
         }
-        if is_version {
+
+        fn outcome(&mut self) -> Result<ProcessOutcome, ProcessError> {
+            let is_version = self.spec.argv == ["-version"];
+            let is_encode = !self.input.is_empty();
+            if self.cancellation.is_cancelled() {
+                self.record();
+                return Ok(ProcessOutcome {
+                    termination: ProcessTermination::Cancelled,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if is_version {
+                self.record();
+                return Ok(ProcessOutcome {
+                    termination: ProcessTermination::Exited(Some(0)),
+                    stdout: b"ffmpeg version fm-s1o.2-fake\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if self.fail_encode && is_encode {
+                self.record();
+                return Ok(ProcessOutcome {
+                    termination: ProcessTermination::Exited(Some(9)),
+                    stdout: Vec::new(),
+                    stderr: b"deliberate fake encode failure".to_vec(),
+                });
+            }
+            let artifact =
+                self.spec
+                    .argv
+                    .last()
+                    .map(PathBuf::from)
+                    .ok_or_else(|| ProcessError::Plumbing {
+                        program: self.spec.program.clone(),
+                        detail: "fake ffmpeg received no output argument".to_string(),
+                    })?;
+            let bytes: &[u8] = if is_encode {
+                b"video-artifact"
+            } else {
+                b"muxed-artifact"
+            };
+            std::fs::write(&artifact, bytes).map_err(|error| ProcessError::Plumbing {
+                program: self.spec.program.clone(),
+                detail: error.to_string(),
+            })?;
             self.record();
-            return Ok(ProcessOutcome {
+            Ok(ProcessOutcome {
                 termination: ProcessTermination::Exited(Some(0)),
-                stdout: b"ffmpeg version fm-s1o.2-fake\n".to_vec(),
-                stderr: Vec::new(),
-            });
-        }
-        if self.fail_encode && is_encode {
-            self.record();
-            return Ok(ProcessOutcome {
-                termination: ProcessTermination::Exited(Some(9)),
                 stdout: Vec::new(),
-                stderr: b"deliberate fake encode failure".to_vec(),
-            });
+                stderr: b"fake-ffmpeg-log".to_vec(),
+            })
         }
-        let artifact =
-            self.spec
-                .argv
-                .last()
-                .map(PathBuf::from)
-                .ok_or_else(|| ProcessError::Plumbing {
-                    program: self.spec.program.clone(),
-                    detail: "fake ffmpeg received no output argument".to_string(),
-                })?;
-        let bytes: &[u8] = if is_encode {
-            b"video-artifact"
-        } else {
-            b"muxed-artifact"
-        };
-        std::fs::write(&artifact, bytes).map_err(|error| ProcessError::Plumbing {
-            program: self.spec.program.clone(),
-            detail: error.to_string(),
-        })?;
-        self.record();
-        Ok(ProcessOutcome {
-            termination: ProcessTermination::Exited(Some(0)),
-            stdout: Vec::new(),
-            stderr: b"fake-ffmpeg-log".to_vec(),
-        })
     }
-}
 
-impl RunningProcess for PublishingProcess {
-    fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), ProcessError> {
-        if self.cancellation.is_cancelled() {
-            return Err(ProcessError::Plumbing {
-                program: self.spec.program.clone(),
-                detail: "fake ffmpeg was cancelled".to_string(),
-            });
-        }
-        let chunk = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if chunk > self.stdin_limits.max_chunk_bytes {
-            return Err(ProcessError::StdinChunkLimit {
-                program: self.spec.program.clone(),
-                attempted: chunk,
-                max: self.stdin_limits.max_chunk_bytes,
-            });
-        }
-        let attempted =
-            self.stdin_bytes
-                .checked_add(chunk)
-                .ok_or(ProcessError::StdinTotalLimit {
+    impl RunningProcess for PublishingProcess {
+        fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), ProcessError> {
+            if self.cancellation.is_cancelled() {
+                return Err(ProcessError::Plumbing {
                     program: self.spec.program.clone(),
-                    attempted: u64::MAX,
+                    detail: "fake ffmpeg was cancelled".to_string(),
+                });
+            }
+            let chunk = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if chunk > self.stdin_limits.max_chunk_bytes {
+                return Err(ProcessError::StdinChunkLimit {
+                    program: self.spec.program.clone(),
+                    attempted: chunk,
+                    max: self.stdin_limits.max_chunk_bytes,
+                });
+            }
+            let attempted =
+                self.stdin_bytes
+                    .checked_add(chunk)
+                    .ok_or(ProcessError::StdinTotalLimit {
+                        program: self.spec.program.clone(),
+                        attempted: u64::MAX,
+                        max: self.stdin_limits.max_total_bytes,
+                    })?;
+            if attempted > self.stdin_limits.max_total_bytes {
+                return Err(ProcessError::StdinTotalLimit {
+                    program: self.spec.program.clone(),
+                    attempted,
                     max: self.stdin_limits.max_total_bytes,
-                })?;
-        if attempted > self.stdin_limits.max_total_bytes {
-            return Err(ProcessError::StdinTotalLimit {
-                program: self.spec.program.clone(),
-                attempted,
-                max: self.stdin_limits.max_total_bytes,
-            });
+                });
+            }
+            lock(&self.stdin_chunks).push(bytes.len());
+            self.input.extend_from_slice(bytes);
+            self.stdin_bytes = attempted;
+            Ok(())
         }
-        lock(&self.stdin_chunks).push(bytes.len());
-        self.input.extend_from_slice(bytes);
-        self.stdin_bytes = attempted;
-        Ok(())
+
+        fn finish(mut self: Box<Self>) -> Result<ProcessOutcome, ProcessError> {
+            self.outcome()
+        }
+
+        fn cancel(mut self: Box<Self>) -> Result<(), ProcessError> {
+            self.cancellation.cancel();
+            self.record();
+            Ok(())
+        }
     }
 
-    fn finish(mut self: Box<Self>) -> Result<ProcessOutcome, ProcessError> {
-        self.outcome()
+    impl Drop for PublishingProcess {
+        fn drop(&mut self) {
+            self.record();
+        }
     }
 
-    fn cancel(mut self: Box<Self>) -> Result<(), ProcessError> {
-        self.cancellation.cancel();
-        self.record();
-        Ok(())
+    static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "fmn-sinks-test-{}-{}-{tag}",
+            std::process::id(),
+            SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).expect("fresh scratch directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("private scratch permissions");
+        }
+        path
     }
-}
 
-impl Drop for PublishingProcess {
-    fn drop(&mut self) {
-        self.record();
+    fn fake_tool(tag: &str) -> (PathBuf, FfmpegTool, Arc<PublishingRunner>) {
+        let root = scratch(tag);
+        let path = root.join("ffmpeg");
+        let mut fixture = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("fresh fake tool");
+        fixture
+            .write_all(b"fake ffmpeg tool bytes")
+            .expect("write fake tool");
+        fixture.sync_all().expect("sync fake tool");
+        drop(fixture);
+        let runner = Arc::new(PublishingRunner::default());
+        let tool = FfmpegTool::resolve(&path, runner.as_ref(), &root.join("work"))
+            .expect("resolved fake tool");
+        (root, tool, runner)
     }
-}
 
-static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-fn scratch(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "fmn-sinks-test-{}-{}-{tag}",
-        std::process::id(),
-        SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&path).expect("fresh scratch directory");
-    path
-}
-
-fn fake_tool(tag: &str) -> (PathBuf, FfmpegTool, Arc<PublishingRunner>) {
-    let root = scratch(tag);
-    let path = root.join("ffmpeg");
-    let mut fixture = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .expect("fresh fake tool");
-    fixture
-        .write_all(b"fake ffmpeg tool bytes")
-        .expect("write fake tool");
-    fixture.sync_all().expect("sync fake tool");
-    drop(fixture);
-    let runner = Arc::new(PublishingRunner::default());
-    let tool = FfmpegTool::resolve(&path, runner.as_ref()).expect("resolved fake tool");
-    (root, tool, runner)
-}
-
-fn video_job(wire: WireFormat) -> VideoJob {
-    VideoJob {
-        width: 4,
-        height: 2,
-        fps: (30_000, 1_001),
-        wire,
-        color: if wire.has_alpha() {
-            ColorDescription::srgb_full()
-        } else {
-            ColorDescription::video_bt709()
-        },
-        container: Container::Mp4,
-        encoder: EncoderChoice::Auto,
-        crf: Some(18),
+    fn video_job(wire: WireFormat) -> VideoJob {
+        VideoJob {
+            width: 4,
+            height: 2,
+            fps: (30_000, 1_001),
+            wire,
+            color: if wire.has_alpha() {
+                ColorDescription::srgb_full()
+            } else {
+                ColorDescription::video_bt709()
+            },
+            container: Container::Mp4,
+            encoder: EncoderChoice::Auto,
+            crf: Some(18),
+        }
     }
-}
 
-fn ffmpeg_config(
-    tool: FfmpegTool,
-    root: &Path,
-    wire: WireFormat,
-    destination: PathBuf,
-    audio: Option<PathBuf>,
-    profile: Option<OutputProfile>,
-) -> FfmpegSinkConfig {
-    let job_limits = JobLimits {
-        keep_workdir: true,
-        ..JobLimits::default()
-    };
-    FfmpegSinkConfig {
-        tool,
-        capabilities: EncoderCapabilities::parse(
-            "Encoders:\n V..... = Video\n ------\n V....D libx264 fake\n",
-        ),
-        job: video_job(wire),
-        audio,
-        destination,
-        workdir_root: root.join("work"),
-        job_limits,
-        first_sequence: 7,
-        limits: exact_limits(1),
-        profile,
+    fn ffmpeg_config(
+        tool: FfmpegTool,
+        root: &Path,
+        wire: WireFormat,
+        destination: PathBuf,
+        audio: Option<PathBuf>,
+        profile: Option<OutputProfile>,
+    ) -> FfmpegSinkConfig {
+        let job_limits = JobLimits {
+            keep_workdir: true,
+            ..JobLimits::default()
+        };
+        FfmpegSinkConfig {
+            tool,
+            capabilities: EncoderCapabilities::parse(
+                "Encoders:\n V..... = Video\n ------\n V....D libx264 fake\n",
+            ),
+            job: video_job(wire),
+            audio,
+            destination,
+            workdir_root: root.join("work"),
+            job_limits,
+            first_sequence: 7,
+            limits: exact_limits(1),
+            profile,
+        }
     }
-}
 
-#[test]
-fn ffmpeg_sink_packs_every_wire_format_and_returns_exact_provenance() {
-    for (index, wire) in [
-        WireFormat::Rgba8,
-        WireFormat::Bgra8,
-        WireFormat::Nv12,
-        WireFormat::P010,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (root, tool, runner) = fake_tool(&format!("wire-{index}"));
-        let destination = root.join(format!("final-{index}.mp4"));
-        let recorder = ProfileRecorder::enabled();
-        let profile = OutputProfile::new(
-            Arc::new(FakeClock::new()),
-            recorder.clone(),
-            ProfilePath::scene(8).with_play(13),
-        );
-        let sink = FfmpegSink::new(
+    #[test]
+    fn ffmpeg_sink_packs_every_wire_format_and_returns_exact_provenance() {
+        for (index, wire) in [
+            WireFormat::Rgba8,
+            WireFormat::Bgra8,
+            WireFormat::Nv12,
+            WireFormat::P010,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (root, tool, runner) = fake_tool(&format!("wire-{index}"));
+            let destination = root.join(format!("final-{index}.mp4"));
+            let recorder = ProfileRecorder::enabled();
+            let profile = OutputProfile::new(
+                Arc::new(FakeClock::new()),
+                recorder.clone(),
+                ProfilePath::scene(8).with_play(13),
+            );
+            let sink = FfmpegSink::new(
+                runner.clone(),
+                ffmpeg_config(
+                    tool.clone(),
+                    &root,
+                    wire,
+                    destination.clone(),
+                    None,
+                    Some(profile),
+                ),
+            )
+            .expect("ffmpeg sink");
+            let (binding, receipt) = sink.into_binding(format!("ffmpeg-{index}"));
+            let (frame, tight) = padded_frame(wire.frame_format(), 30 + index as u8);
+            let emitter = OrderedEmitter::new(
+                EmitterConfig::new(frame.layout().clone(), 1, 7).expect("emitter config"),
+                vec![binding],
+            )
+            .expect("emitter");
+            let mut reservation = emitter.reserve(7).expect("reservation");
+            reservation
+                .frame_mut()
+                .as_bytes_mut()
+                .copy_from_slice(frame.as_bytes());
+            reservation.publish().expect("publish");
+            emitter.finish().expect("ffmpeg finish");
+
+            let runs = runner.runs();
+            assert_eq!(runs.len(), 2);
+            assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
+            let chunks = runner.stdin_chunks();
+            assert_eq!(chunks.iter().sum::<usize>(), tight.len());
+            assert!(chunks.len() > 1, "frame feed must be row/plane chunked");
+            assert!(
+                chunks.iter().copied().max().unwrap_or(0) < tight.len(),
+                "ffmpeg feed collapsed a frame into one retained payload"
+            );
+            assert_eq!(
+                std::fs::read(&destination).expect("video"),
+                b"video-artifact"
+            );
+            let report = receipt.take().expect("ffmpeg report");
+            assert_eq!(report.frame_count, 1);
+            assert_eq!(report.input_bytes, tight.len() as u64);
+            assert_eq!(report.boundary.destination, destination);
+            assert_eq!(report.boundary.invocations.len(), 1);
+            let invocation = &report.boundary.invocations[0];
+            assert_eq!(invocation.provenance.tool_path, tool.path());
+            assert_eq!(invocation.provenance.tool_sha256_hex, tool.sha256_hex());
+            assert_eq!(invocation.provenance.tool_version, tool.version());
+            assert_eq!(invocation.provenance.bound_tool_path, runs[1].program);
+            assert_ne!(
+                invocation.provenance.bound_tool_path,
+                invocation.provenance.tool_path
+            );
+            assert_eq!(invocation.provenance.encoder.as_deref(), Some("libx264"));
+            assert_eq!(invocation.stderr, b"fake-ffmpeg-log");
+
+            let ndjson = recorder.snapshot().to_ndjson();
+            assert!(ndjson.contains("\"phase\":\"emit\""), "{ndjson}");
+            assert!(ndjson.contains("\"phase\":\"encode\""), "{ndjson}");
+            assert!(ndjson.contains("\"phase\":\"ffmpeg_feed\""), "{ndjson}");
+        }
+    }
+
+    #[test]
+    fn ffmpeg_audio_mux_is_two_stage_and_requires_an_absolute_audio_path() {
+        let (root, tool, runner) = fake_tool("audio");
+        let destination = root.join("final.mp4");
+        let audio = root.join("audio.wav");
+        std::fs::write(&audio, b"native wav fixture").expect("audio fixture");
+        let mut sink = FfmpegSink::new(
             runner.clone(),
             ffmpeg_config(
                 tool.clone(),
                 &root,
-                wire,
+                WireFormat::Rgba8,
+                destination.clone(),
+                Some(audio.clone()),
+                None,
+            ),
+        )
+        .expect("audio mux sink");
+        let receipt = sink.receipt();
+        let (frame, tight) = padded_frame(PixelFormat::Rgba8, 10);
+        write_direct(&mut sink, 7, &frame);
+        sink.finish().expect("two-stage mux");
+        assert_eq!(
+            std::fs::read(&destination).expect("muxed"),
+            b"muxed-artifact"
+        );
+        let runs = runner.runs();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
+        assert!(runs[2].stdin.is_none());
+        assert_eq!(runs[1].program, runs[2].program);
+        assert!(
+            runs[2]
+                .argv
+                .iter()
+                .any(|argument| argument == &audio.display().to_string())
+        );
+        assert!(runs[2].argv.windows(2).any(|pair| pair == ["-c:v", "copy"]));
+        let report = receipt.take().expect("mux report");
+        assert_eq!(report.boundary.destination, destination);
+        assert_eq!(report.boundary.invocations.len(), 2);
+        assert!(
+            report.boundary.invocations[0]
+                .provenance
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["-f", "rawvideo"])
+        );
+        assert!(
+            report.boundary.invocations[1]
+                .provenance
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["-c:v", "copy"])
+        );
+
+        let error = FfmpegSink::new(
+            runner,
+            ffmpeg_config(
+                tool,
+                &root,
+                WireFormat::Rgba8,
+                root.join("relative-refused.mp4"),
+                Some(PathBuf::from("audio.wav")),
+                None,
+            ),
+        )
+        .err()
+        .expect("relative audio path refused");
+        assert_eq!(
+            error,
+            SinkAdapterError::InvalidConfig("ffmpeg audio path must be absolute")
+        );
+    }
+
+    #[test]
+    fn ffmpeg_abort_cancels_the_live_process_without_replacing_the_destination() {
+        let (root, tool, runner) = fake_tool("abort");
+        let destination = root.join("existing.mp4");
+        std::fs::write(&destination, b"old-video").expect("old video");
+        let mut sink = FfmpegSink::new(
+            runner.clone(),
+            ffmpeg_config(
+                tool,
+                &root,
+                WireFormat::P010,
                 destination.clone(),
                 None,
-                Some(profile),
+                None,
             ),
         )
         .expect("ffmpeg sink");
-        let (binding, receipt) = sink.into_binding(format!("ffmpeg-{index}"));
-        let (frame, tight) = padded_frame(wire.frame_format(), 30 + index as u8);
-        let emitter = OrderedEmitter::new(
-            EmitterConfig::new(frame.layout().clone(), 1, 7).expect("emitter config"),
-            vec![binding],
-        )
-        .expect("emitter");
-        let mut reservation = emitter.reserve(7).expect("reservation");
-        reservation
-            .frame_mut()
-            .as_bytes_mut()
-            .copy_from_slice(frame.as_bytes());
-        reservation.publish().expect("publish");
-        emitter.finish().expect("ffmpeg finish");
-
+        let receipt = sink.receipt();
+        let (frame, tight) = padded_frame(PixelFormat::P010, 8);
+        write_direct(&mut sink, 7, &frame);
+        sink.abort();
         let runs = runner.runs();
-        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.len(), 2, "version probe and cancelled encode");
         assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
-        let chunks = runner.stdin_chunks();
-        assert_eq!(chunks.iter().sum::<usize>(), tight.len());
-        assert!(chunks.len() > 1, "frame feed must be row/plane chunked");
-        assert!(
-            chunks.iter().copied().max().unwrap_or(0) < tight.len(),
-            "ffmpeg feed collapsed a frame into one retained payload"
-        );
         assert_eq!(
-            std::fs::read(&destination).expect("video"),
-            b"video-artifact"
+            std::fs::read(&destination).expect("existing destination"),
+            b"old-video"
         );
-        let report = receipt.take().expect("ffmpeg report");
-        assert_eq!(report.frame_count, 1);
-        assert_eq!(report.input_bytes, tight.len() as u64);
-        assert_eq!(report.boundary.destination, destination);
-        assert_eq!(report.boundary.invocations.len(), 1);
-        let invocation = &report.boundary.invocations[0];
-        assert_eq!(invocation.provenance.tool_path, tool.path);
-        assert_eq!(invocation.provenance.tool_sha256_hex, tool.sha256_hex);
-        assert_eq!(invocation.provenance.tool_version, tool.version);
-        assert_eq!(invocation.provenance.encoder.as_deref(), Some("libx264"));
-        assert_eq!(invocation.stderr, b"fake-ffmpeg-log");
-
-        let ndjson = recorder.snapshot().to_ndjson();
-        assert!(ndjson.contains("\"phase\":\"emit\""), "{ndjson}");
-        assert!(ndjson.contains("\"phase\":\"encode\""), "{ndjson}");
-        assert!(ndjson.contains("\"phase\":\"ffmpeg_feed\""), "{ndjson}");
+        assert!(matches!(receipt.take(), Err(ReceiptError::Aborted)));
     }
-}
 
-#[test]
-fn ffmpeg_audio_mux_is_two_stage_and_requires_an_absolute_audio_path() {
-    let (root, tool, runner) = fake_tool("audio");
-    let destination = root.join("final.mp4");
-    let audio = root.join("audio.wav");
-    std::fs::write(&audio, b"native wav fixture").expect("audio fixture");
-    let mut sink = FfmpegSink::new(
-        runner.clone(),
-        ffmpeg_config(
-            tool.clone(),
-            &root,
-            WireFormat::Rgba8,
-            destination.clone(),
-            Some(audio.clone()),
-            None,
-        ),
-    )
-    .expect("audio mux sink");
-    let receipt = sink.receipt();
-    let (frame, tight) = padded_frame(PixelFormat::Rgba8, 10);
-    write_direct(&mut sink, 7, &frame);
-    sink.finish().expect("two-stage mux");
-    assert_eq!(
-        std::fs::read(&destination).expect("muxed"),
-        b"muxed-artifact"
-    );
-    let runs = runner.runs();
-    assert_eq!(runs.len(), 3);
-    assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
-    assert!(runs[2].stdin.is_none());
-    assert!(
-        runs[2]
-            .argv
-            .iter()
-            .any(|argument| argument == &audio.display().to_string())
-    );
-    assert!(runs[2].argv.windows(2).any(|pair| pair == ["-c:v", "copy"]));
-    let report = receipt.take().expect("mux report");
-    assert_eq!(report.boundary.destination, destination);
-    assert_eq!(report.boundary.invocations.len(), 2);
-    assert!(
-        report.boundary.invocations[0]
-            .provenance
-            .argv
-            .windows(2)
-            .any(|pair| pair == ["-f", "rawvideo"])
-    );
-    assert!(
-        report.boundary.invocations[1]
-            .provenance
-            .argv
-            .windows(2)
-            .any(|pair| pair == ["-c:v", "copy"])
-    );
-
-    let error = FfmpegSink::new(
-        runner,
-        ffmpeg_config(
-            tool,
-            &root,
-            WireFormat::Rgba8,
-            root.join("relative-refused.mp4"),
-            Some(PathBuf::from("audio.wav")),
-            None,
-        ),
-    )
-    .err()
-    .expect("relative audio path refused");
-    assert_eq!(
-        error,
-        SinkAdapterError::InvalidConfig("ffmpeg audio path must be absolute")
-    );
-}
-
-#[test]
-fn ffmpeg_abort_cancels_the_live_process_without_replacing_the_destination() {
-    let (root, tool, runner) = fake_tool("abort");
-    let destination = root.join("existing.mp4");
-    std::fs::write(&destination, b"old-video").expect("old video");
-    let mut sink = FfmpegSink::new(
-        runner.clone(),
-        ffmpeg_config(
-            tool,
-            &root,
-            WireFormat::P010,
-            destination.clone(),
-            None,
-            None,
-        ),
-    )
-    .expect("ffmpeg sink");
-    let receipt = sink.receipt();
-    let (frame, tight) = padded_frame(PixelFormat::P010, 8);
-    write_direct(&mut sink, 7, &frame);
-    sink.abort();
-    let runs = runner.runs();
-    assert_eq!(runs.len(), 2, "version probe and cancelled encode");
-    assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
-    assert_eq!(
-        std::fs::read(&destination).expect("existing destination"),
-        b"old-video"
-    );
-    assert!(matches!(receipt.take(), Err(ReceiptError::Aborted)));
-}
-
-#[test]
-fn ffmpeg_failure_is_receipted_and_never_replaces_the_destination() {
-    let (root, tool, runner) = fake_tool("failure");
-    let destination = root.join("existing.mp4");
-    std::fs::write(&destination, b"old-video").expect("old video");
-    runner.fail_encode();
-    let mut sink = FfmpegSink::new(
-        runner.clone(),
-        ffmpeg_config(
-            tool,
-            &root,
-            WireFormat::Rgba8,
-            destination.clone(),
-            None,
-            None,
-        ),
-    )
-    .expect("ffmpeg sink");
-    let receipt = sink.receipt();
-    let (frame, _) = padded_frame(PixelFormat::Rgba8, 8);
-    write_direct(&mut sink, 7, &frame);
-    let error = sink.finish().expect_err("fake encode failure");
-    assert!(error.message().contains("deliberate fake encode failure"));
-    assert_eq!(runner.runs().len(), 2);
-    assert_eq!(
-        std::fs::read(&destination).expect("existing destination"),
-        b"old-video"
-    );
-    assert!(matches!(receipt.take(), Err(ReceiptError::Failed(_))));
-}
-
-#[test]
-fn ffmpeg_sink_refuses_empty_gap_overrun_and_payload_budgets_before_spawn() {
-    let (root, tool, runner) = fake_tool("negative");
-    let destination = root.join("negative.mp4");
-    let config = ffmpeg_config(
-        tool.clone(),
-        &root,
-        WireFormat::Rgba8,
-        destination.clone(),
-        None,
-        None,
-    );
-    let mut empty = FfmpegSink::new(runner.clone(), config).expect("empty sink");
-    assert!(
-        empty
-            .finish()
-            .expect_err("empty")
-            .message()
-            .contains("empty")
-    );
-    assert_eq!(runner.runs().len(), 1);
-
-    let (frame, _) = padded_frame(PixelFormat::Rgba8, 5);
-    let mut gap = FfmpegSink::new(
-        runner.clone(),
-        ffmpeg_config(
-            tool.clone(),
-            &root,
-            WireFormat::Rgba8,
-            destination.clone(),
-            None,
-            None,
-        ),
-    )
-    .expect("gap sink");
-    assert!(
-        gap.write_frame(8, &frame)
-            .expect_err("gap")
-            .message()
-            .contains("expected frame 7")
-    );
-
-    let mut unavailable = ffmpeg_config(
-        tool.clone(),
-        &root,
-        WireFormat::Rgba8,
-        destination.clone(),
-        None,
-        None,
-    );
-    unavailable.job.encoder = EncoderChoice::Named("h264_nvenc".to_string());
-    unavailable.job.crf = None;
-    let error = FfmpegSink::new(runner.clone(), unavailable)
-        .err()
-        .expect("unavailable encoder");
-    assert_eq!(error.code(), "sink.ffmpeg");
-    assert!(error.to_string().contains("h264_nvenc"));
-    assert_eq!(runner.runs().len(), 1, "encoder refusal must not spawn");
-
-    let mut config = ffmpeg_config(tool, &root, WireFormat::Rgba8, destination, None, None);
-    config.limits = SinkLimits::new(1, 31, 1 << 20, 1 << 20).expect("small resident budget");
-    assert_eq!(
-        FfmpegSink::new(runner.clone(), config)
-            .err()
-            .expect("resident budget"),
-        SinkAdapterError::ResidentBytesExceeded {
-            attempted: 32,
-            max: 31,
-        }
-    );
-    assert_eq!(runner.runs().len(), 1, "no encode process ran");
-}
-
-#[test]
-fn fake_runner_contract_keeps_time_and_log_limits_explicit() {
-    let (root, tool, runner) = fake_tool("limits");
-    let mut config = ffmpeg_config(
-        tool,
-        &root,
-        WireFormat::Nv12,
-        root.join("limits.mp4"),
-        None,
-        None,
-    );
-    config.job_limits.timeout = Duration::from_secs(17);
-    config.job_limits.max_log_bytes = 4_096;
-    let mut sink = FfmpegSink::new(runner.clone(), config).expect("sink");
-    let (frame, _) = padded_frame(PixelFormat::Nv12, 4);
-    write_direct(&mut sink, 7, &frame);
-    sink.finish().expect("finish");
-    let runs = runner.runs();
-    assert_eq!(runs[1].timeout, Duration::from_secs(17));
-    assert_eq!(runs[1].max_output_bytes, 4_096);
-    assert_eq!(
-        runs[1].env,
-        vec![
-            ("LANG".to_string(), "C".to_string()),
-            ("LC_ALL".to_string(), "C".to_string()),
-            (
-                "TMPDIR".to_string(),
-                runs[1]
-                    .cwd
-                    .as_ref()
-                    .expect("private cwd")
-                    .display()
-                    .to_string()
+    #[test]
+    fn ffmpeg_failure_is_receipted_and_never_replaces_the_destination() {
+        let (root, tool, runner) = fake_tool("failure");
+        let destination = root.join("existing.mp4");
+        std::fs::write(&destination, b"old-video").expect("old video");
+        runner.fail_encode();
+        let mut sink = FfmpegSink::new(
+            runner.clone(),
+            ffmpeg_config(
+                tool,
+                &root,
+                WireFormat::Rgba8,
+                destination.clone(),
+                None,
+                None,
             ),
-        ]
-    );
+        )
+        .expect("ffmpeg sink");
+        let receipt = sink.receipt();
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, 8);
+        write_direct(&mut sink, 7, &frame);
+        let error = sink.finish().expect_err("fake encode failure");
+        assert!(error.message().contains("deliberate fake encode failure"));
+        assert_eq!(runner.runs().len(), 2);
+        assert_eq!(
+            std::fs::read(&destination).expect("existing destination"),
+            b"old-video"
+        );
+        assert!(matches!(receipt.take(), Err(ReceiptError::Failed(_))));
+    }
+
+    #[test]
+    fn ffmpeg_sink_refuses_empty_gap_overrun_and_payload_budgets_before_spawn() {
+        let (root, tool, runner) = fake_tool("negative");
+        let destination = root.join("negative.mp4");
+        let config = ffmpeg_config(
+            tool.clone(),
+            &root,
+            WireFormat::Rgba8,
+            destination.clone(),
+            None,
+            None,
+        );
+        let mut empty = FfmpegSink::new(runner.clone(), config).expect("empty sink");
+        assert!(
+            empty
+                .finish()
+                .expect_err("empty")
+                .message()
+                .contains("empty")
+        );
+        assert_eq!(runner.runs().len(), 1);
+
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, 5);
+        let mut gap = FfmpegSink::new(
+            runner.clone(),
+            ffmpeg_config(
+                tool.clone(),
+                &root,
+                WireFormat::Rgba8,
+                destination.clone(),
+                None,
+                None,
+            ),
+        )
+        .expect("gap sink");
+        assert!(
+            gap.write_frame(8, &frame)
+                .expect_err("gap")
+                .message()
+                .contains("expected frame 7")
+        );
+
+        let mut unavailable = ffmpeg_config(
+            tool.clone(),
+            &root,
+            WireFormat::Rgba8,
+            destination.clone(),
+            None,
+            None,
+        );
+        unavailable.job.encoder = EncoderChoice::Named("h264_nvenc".to_string());
+        unavailable.job.crf = None;
+        let error = FfmpegSink::new(runner.clone(), unavailable)
+            .err()
+            .expect("unavailable encoder");
+        assert_eq!(error.code(), "sink.ffmpeg");
+        assert!(error.to_string().contains("h264_nvenc"));
+        assert_eq!(runner.runs().len(), 1, "encoder refusal must not spawn");
+
+        let mut config = ffmpeg_config(tool, &root, WireFormat::Rgba8, destination, None, None);
+        config.limits = SinkLimits::new(1, 31, 1 << 20, 1 << 20).expect("small resident budget");
+        assert_eq!(
+            FfmpegSink::new(runner.clone(), config)
+                .err()
+                .expect("resident budget"),
+            SinkAdapterError::ResidentBytesExceeded {
+                attempted: 32,
+                max: 31,
+            }
+        );
+        assert_eq!(runner.runs().len(), 1, "no encode process ran");
+    }
+
+    #[test]
+    fn fake_runner_contract_keeps_time_and_log_limits_explicit() {
+        let (root, tool, runner) = fake_tool("limits");
+        let mut config = ffmpeg_config(
+            tool,
+            &root,
+            WireFormat::Nv12,
+            root.join("limits.mp4"),
+            None,
+            None,
+        );
+        config.job_limits.timeout = Duration::from_secs(17);
+        config.job_limits.max_log_bytes = 4_096;
+        let mut sink = FfmpegSink::new(runner.clone(), config).expect("sink");
+        let (frame, _) = padded_frame(PixelFormat::Nv12, 4);
+        write_direct(&mut sink, 7, &frame);
+        sink.finish().expect("finish");
+        let runs = runner.runs();
+        assert_eq!(runs[1].timeout, Duration::from_secs(17));
+        assert_eq!(runs[1].max_output_bytes, 4_096);
+        assert_eq!(
+            runs[1].env,
+            vec![
+                ("LANG".to_string(), "C".to_string()),
+                ("LC_ALL".to_string(), "C".to_string()),
+                (
+                    "TMPDIR".to_string(),
+                    runs[1]
+                        .cwd
+                        .as_ref()
+                        .expect("private cwd")
+                        .display()
+                        .to_string()
+                ),
+            ]
+        );
+    }
 }

@@ -1625,7 +1625,7 @@ fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) 
             alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
         };
     }
-    let tool = match fmn_output::FfmpegTool::resolve(path, runner) {
+    let tool = match fmn_output::FfmpegTool::resolve(path, runner, &std::env::temp_dir()) {
         Ok(tool) => tool,
         Err(error) => {
             return FfmpegReport::Unavailable {
@@ -1638,12 +1638,22 @@ fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) 
     let (hardware_encoders, hardware_encoder_probe_error) =
         match fmn_output::EncoderCapabilities::probe(&tool, runner) {
             Ok(encoders) => (encoders.hardware(), None),
+            Err(
+                error @ (fmn_output::BoundaryError::ExecutableIdentityChanged { .. }
+                | fmn_output::BoundaryError::Workdir { .. }),
+            ) => {
+                return FfmpegReport::Unavailable {
+                    attempted: path.to_path_buf(),
+                    reason: error.to_string(),
+                    alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
+                };
+            }
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
     FfmpegReport::Available {
-        path: tool.path,
-        sha256: tool.sha256_hex,
-        version: tool.version,
+        path: tool.path().to_path_buf(),
+        sha256: tool.sha256_hex().to_owned(),
+        version: tool.version().to_owned(),
         hardware_encoders,
         hardware_encoder_probe_error,
     }
@@ -2466,6 +2476,125 @@ mod tests {
     use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
     use fmn_platform::fs::VirtualFs;
 
+    #[cfg(unix)]
+    struct IdentityChangingProbeRunner {
+        source: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl fmn_platform::process::ProcessRunner for IdentityChangingProbeRunner {
+        fn start(
+            &self,
+            spec: &fmn_platform::process::ProcessSpec,
+            _cancellation: fmn_platform::process::ProcessCancellation,
+            _stdin_limits: fmn_platform::process::ProcessStdinLimits,
+        ) -> Result<
+            Box<dyn fmn_platform::process::RunningProcess>,
+            fmn_platform::process::ProcessError,
+        > {
+            Err(fmn_platform::process::ProcessError::NotScripted {
+                program: spec.program.clone(),
+            })
+        }
+
+        fn run(
+            &self,
+            spec: &fmn_platform::process::ProcessSpec,
+        ) -> Result<fmn_platform::process::ProcessOutcome, fmn_platform::process::ProcessError>
+        {
+            let stdout = if spec.argv == ["-version"] {
+                b"ffmpeg version cli-fixture\n".to_vec()
+            } else if spec.argv == ["-hide_banner", "-encoders"] {
+                std::fs::write(&self.source, b"changed executable identity").map_err(|error| {
+                    fmn_platform::process::ProcessError::Plumbing {
+                        program: spec.program.clone(),
+                        detail: format!("replace fixture executable: {error}"),
+                    }
+                })?;
+                b"Encoders:\n ------\n V....D libx264 fixture\n".to_vec()
+            } else {
+                return Err(fmn_platform::process::ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                });
+            };
+            Ok(fmn_platform::process::ProcessOutcome {
+                termination: fmn_platform::process::ProcessTermination::Exited(Some(0)),
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    struct WorkdirReplacingProbeRunner;
+
+    #[cfg(unix)]
+    impl fmn_platform::process::ProcessRunner for WorkdirReplacingProbeRunner {
+        fn start(
+            &self,
+            spec: &fmn_platform::process::ProcessSpec,
+            _cancellation: fmn_platform::process::ProcessCancellation,
+            _stdin_limits: fmn_platform::process::ProcessStdinLimits,
+        ) -> Result<
+            Box<dyn fmn_platform::process::RunningProcess>,
+            fmn_platform::process::ProcessError,
+        > {
+            Err(fmn_platform::process::ProcessError::NotScripted {
+                program: spec.program.clone(),
+            })
+        }
+
+        fn run(
+            &self,
+            spec: &fmn_platform::process::ProcessSpec,
+        ) -> Result<fmn_platform::process::ProcessOutcome, fmn_platform::process::ProcessError>
+        {
+            let stdout = if spec.argv == ["-version"] {
+                b"ffmpeg version cli-fixture\n".to_vec()
+            } else if spec.argv == ["-hide_banner", "-encoders"] {
+                let workdir = spec.cwd.as_ref().ok_or_else(|| {
+                    fmn_platform::process::ProcessError::Plumbing {
+                        program: spec.program.clone(),
+                        detail: "encoder probe has no private workdir".to_owned(),
+                    }
+                })?;
+                let leaf = workdir
+                    .file_name()
+                    .and_then(|leaf| leaf.to_str())
+                    .unwrap_or("probe");
+                let displaced = workdir.with_file_name(format!("{leaf}-displaced"));
+                std::fs::rename(workdir, &displaced).map_err(|error| {
+                    fmn_platform::process::ProcessError::Plumbing {
+                        program: spec.program.clone(),
+                        detail: format!("displace encoder-probe workdir: {error}"),
+                    }
+                })?;
+                std::fs::create_dir(workdir).map_err(|error| {
+                    fmn_platform::process::ProcessError::Plumbing {
+                        program: spec.program.clone(),
+                        detail: format!("replace encoder-probe workdir: {error}"),
+                    }
+                })?;
+                std::fs::write(workdir.join("foreign"), b"not ours").map_err(|error| {
+                    fmn_platform::process::ProcessError::Plumbing {
+                        program: spec.program.clone(),
+                        detail: format!("mark replacement encoder-probe workdir: {error}"),
+                    }
+                })?;
+                b"Encoders:\n ------\n V....D libx264 fixture\n".to_vec()
+            } else {
+                return Err(fmn_platform::process::ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                });
+            };
+            Ok(fmn_platform::process::ProcessOutcome {
+                termination: fmn_platform::process::ProcessTermination::Exited(Some(0)),
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+    }
+
     fn render(invocation: Invocation) -> RenderCommand {
         match invocation {
             Invocation::Render(command) => command,
@@ -2945,6 +3074,56 @@ mod tests {
             assert!(line.starts_with("{\"schema\":\"fmn.doctor\",\"version\":1,"));
             assert!(line.ends_with('}'));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_marks_encoder_probe_identity_change_unavailable() {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let dir = std::env::temp_dir().join(format!(
+            "fmn-cli-ffmpeg-identity-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).expect("fresh probe fixture directory");
+        let source = dir.join("ffmpeg");
+        std::fs::write(&source, b"original executable identity")
+            .expect("write probe fixture executable");
+        let report = probe_ffmpeg(
+            &IdentityChangingProbeRunner {
+                source: source.clone(),
+            },
+            &source,
+        );
+
+        assert!(!report.is_available());
+        assert!(matches!(
+            report,
+            FfmpegReport::Unavailable { ref reason, .. }
+                if reason.contains("executable identity changed")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_marks_encoder_probe_workdir_replacement_unavailable() {
+        let dir = std::env::temp_dir().join(format!(
+            "fmn-cli-ffmpeg-workdir-identity-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("fresh probe fixture directory");
+        let source = dir.join("ffmpeg");
+        std::fs::write(&source, b"original executable identity")
+            .expect("write probe fixture executable");
+        let report = probe_ffmpeg(&WorkdirReplacingProbeRunner, &source);
+
+        assert!(!report.is_available());
+        assert!(matches!(
+            report,
+            FfmpegReport::Unavailable { ref reason, .. }
+                if reason.contains("claimed directory identity changed")
+        ));
     }
 
     #[test]
