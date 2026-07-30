@@ -29,6 +29,9 @@
 //!   median/MAD summaries, versioned observed baselines, and explicit
 //!   pass/alert/block/inconclusive verdicts. It never turns an unpinned or
 //!   unobserved run into passing PG evidence.
+//! - the canonical PG-2 producer (fm-inr.2.1) — [`perf_pg2`]: fixed fill and
+//!   stroke fixtures, exact benchmark/configuration digests, bounded raw
+//!   samples, and a content-addressed stage trace over the real Lumen path.
 //!
 //! The rest of the Gauntlet lands with its owning workstreams; see
 //! COMPREHENSIVE_PLAN §19 for the crate map.
@@ -38,6 +41,7 @@ pub mod closure;
 pub mod golden;
 pub mod npy;
 pub mod perf;
+pub mod perf_pg2;
 pub mod ratchet;
 pub mod schema;
 pub mod tolerance;

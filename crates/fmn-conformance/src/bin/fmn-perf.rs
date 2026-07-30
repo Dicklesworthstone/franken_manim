@@ -1,16 +1,22 @@
-//! Dependency-free robot front door for performance policy and evidence.
+//! Governed robot front door for performance policy, evidence, and producers.
 
 #![forbid(unsafe_code)]
 
 use fmn_conformance::perf::{
-    BASELINE_SCHEMA, Baseline, MeasurementBatch, POLICY_SCHEMA, SAMPLES_SCHEMA,
-    parse_policy_catalog, render_policy_catalog,
+    BASELINE_SCHEMA, Baseline, EvidenceKind, EvidenceRef, MeasurementBatch, POLICY_SCHEMA,
+    SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog,
+};
+use fmn_conformance::perf_pg2::{
+    PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
+    Pg2Scenario, measure_pg2,
 };
 use fmn_hash::sha256;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 const CLI_SCHEMA: &str = "fmn-perf-cli/1";
@@ -38,7 +44,7 @@ fn main() -> ExitCode {
 fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(CliError::usage(
-            "expected `catalog <PERF_GATES.tsv>` or `verify-baseline <baseline.tsv>`",
+            "expected catalog, verify-baseline, pg2-definitions, or measure-pg2",
         ));
     };
     match command {
@@ -52,9 +58,28 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing path"))?,
         ),
+        "pg2-definitions" if arguments.len() == 1 => Ok(pg2_definitions()),
+        "measure-pg2" if arguments.len() == 5 => measure_pg2_command(
+            arguments
+                .get(1)
+                .ok_or_else(|| CliError::usage("missing baseline path"))?,
+            arguments
+                .get(2)
+                .ok_or_else(|| CliError::usage("missing producer commit"))?,
+            arguments
+                .get(3)
+                .ok_or_else(|| CliError::usage("missing trace output path"))?,
+            arguments
+                .get(4)
+                .ok_or_else(|| CliError::usage("missing raw output path"))?,
+        ),
         "catalog" | "verify-baseline" => Err(CliError::usage(format!(
             "{command} requires exactly one path argument"
         ))),
+        "pg2-definitions" => Err(CliError::usage("pg2-definitions does not accept arguments")),
+        "measure-pg2" => Err(CliError::usage(
+            "measure-pg2 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+        )),
         _ => Err(CliError::usage(format!("unknown command {command:?}"))),
     }
 }
@@ -143,6 +168,170 @@ fn verify_baseline(path: &OsStr) -> Result<String, CliError> {
     ))
 }
 
+fn pg2_definitions() -> String {
+    let mut output = String::new();
+    for scenario in Pg2Scenario::ALL {
+        let definition = Pg2Definition::new(scenario);
+        let _ = writeln!(
+            output,
+            "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg2-definition\",\
+             \"definition_schema\":\"{PG2_DEFINITION_SCHEMA}\",\"gate\":\"pg-2\",\
+             \"scenario\":\"{}\",\"benchmark_definition\":\"{}\",\
+             \"config_digest\":\"{}\",\"expected_frame_digest\":\"{}\",\
+             \"engine\":\"fast-cpu\",\"tier\":\"{}\",\
+             \"thread_profile\":\"fixed-8\",\"threads\":{PG2_THREADS},\
+             \"sample_count\":{PG2_SAMPLE_COUNT},\
+             \"warmup_iterations\":{PG2_WARMUP_ITERATIONS},\
+             \"iterations_per_sample\":{},\"work_units_per_iteration\":{}}}",
+            scenario.name(),
+            definition.digest(),
+            definition.config_digest(),
+            definition.expected_frame_digest(),
+            fmn_render::Tier::COMPILED.name(),
+            definition.iterations_per_sample(),
+            definition.work_units_per_iteration(),
+        );
+    }
+    output
+}
+
+fn measure_pg2_command(
+    baseline_path: &OsStr,
+    producer_commit: &OsStr,
+    trace_path: &OsStr,
+    raw_path: &OsStr,
+) -> Result<String, CliError> {
+    let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
+    let baseline =
+        Baseline::from_tsv(&baseline_text).map_err(|error| CliError::data(error.to_string()))?;
+    let producer_commit = utf8_argument(producer_commit, "producer commit")?;
+    let trace_path_text = utf8_argument(trace_path, "trace output path")?;
+    let raw_path_text = utf8_argument(raw_path, "raw output path")?;
+    if trace_path_text == raw_path_text {
+        return Err(CliError::data(
+            "trace and raw output paths must be distinct",
+        ));
+    }
+
+    // Validate both repository artifact paths and refuse replacement before
+    // the expensive render. The trace is published first, so a later raw-file
+    // race can leave only a clearly incomplete trace, never a plausible bundle
+    // naming bytes that were not written.
+    EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    EvidenceRef::from_bytes(EvidenceKind::RawSamples, raw_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    validate_output_parent(trace_path, "trace output")?;
+    validate_output_parent(raw_path, "raw output")?;
+    refuse_existing(trace_path, "trace output")?;
+    refuse_existing(raw_path, "raw output")?;
+
+    let artifacts = measure_pg2(&baseline, producer_commit, trace_path_text)
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw = artifacts
+        .batch
+        .to_tsv()
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw_digest = sha256(raw.as_bytes());
+    let trace_digest = sha256(artifacts.trace_tsv.as_bytes());
+    let valid_samples = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_none())
+        .count();
+    let invalid_samples = artifacts.batch.samples.len() - valid_samples;
+
+    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
+        return Err(CliError::io(format!(
+            "{}; trace output {trace_path_text:?} was already published and was not deleted",
+            error.detail
+        )));
+    }
+
+    Ok(format!(
+        "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg2-measurement\",\
+         \"gate\":\"pg-2\",\"scenario\":\"{}\",\"benchmark_definition\":\"{}\",\
+         \"config_digest\":\"{}\",\"producer_commit\":\"{}\",\
+         \"sample_count\":{},\"valid_samples\":{},\"invalid_samples\":{},\
+         \"bare_metal\":{},\"isolation_qualified\":{},\
+         \"frame_digest\":\"{}\",\"trace_path\":\"{}\",\
+         \"trace_digest\":\"{}\",\"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"status\":\"measured-not-evaluated\"}}\n",
+        escape_json(&baseline.policy.scenario),
+        artifacts.batch.key.benchmark_definition,
+        artifacts.batch.key.config_digest,
+        producer_commit,
+        artifacts.batch.samples.len(),
+        valid_samples,
+        invalid_samples,
+        artifacts.batch.key.bare_metal,
+        artifacts.batch.key.isolated,
+        artifacts.frame_digest,
+        escape_json(trace_path_text),
+        trace_digest,
+        escape_json(raw_path_text),
+        raw_digest,
+    ))
+}
+
+fn utf8_argument<'a>(value: &'a OsStr, label: &str) -> Result<&'a str, CliError> {
+    value
+        .to_str()
+        .ok_or_else(|| CliError::data(format!("{label} is not UTF-8")))
+}
+
+fn refuse_existing(path: &OsStr, label: &str) -> Result<(), CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(CliError::data(format!(
+            "{label} already exists; refusing to overwrite it"
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CliError::io(format!("cannot inspect {label}: {error}"))),
+    }
+}
+
+fn validate_output_parent(path: &OsStr, label: &str) -> Result<(), CliError> {
+    let parent = Path::new(path)
+        .parent()
+        .ok_or_else(|| CliError::data(format!("{label} has no parent directory")))?;
+    let mut cursor = PathBuf::new();
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            return Err(CliError::data(format!(
+                "{label} parent is not a canonical relative path"
+            )));
+        };
+        cursor.push(name);
+        let metadata = fs::symlink_metadata(&cursor)
+            .map_err(|error| CliError::io(format!("cannot inspect {label} parent: {error}")))?;
+        if metadata.file_type().is_symlink() {
+            return Err(CliError::data(format!(
+                "{label} parent contains a symbolic link at {cursor:?}"
+            )));
+        }
+        if !metadata.is_dir() {
+            return Err(CliError::data(format!(
+                "{label} parent component is not a directory: {cursor:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn write_new(path: &OsStr, bytes: &[u8], label: &str) -> Result<(), CliError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| CliError::io(format!("cannot create {label}: {error}")))?;
+    file.write_all(bytes)
+        .map_err(|error| CliError::io(format!("cannot write {label}: {error}")))?;
+    file.sync_all()
+        .map_err(|error| CliError::io(format!("cannot sync {label}: {error}")))
+}
+
 fn read_utf8(path: &OsStr, label: &'static str, limit: u64) -> Result<String, CliError> {
     let file = fs::File::open(path)
         .map_err(|error| CliError::data(format!("cannot read {label}: {error}")))?;
@@ -179,6 +368,14 @@ impl CliError {
         Self {
             exit_code: EXIT_DATA,
             kind: "data",
+            detail: detail.into(),
+        }
+    }
+
+    fn io(detail: impl Into<String>) -> Self {
+        Self {
+            exit_code: EXIT_IO,
+            kind: "io",
             detail: detail.into(),
         }
     }
@@ -244,5 +441,34 @@ mod tests {
         }));
         assert!(output.contains("\"kind\":\"catalog\""));
         assert!(output.contains("\"gate\":\"pg-a\""));
+    }
+
+    #[test]
+    fn pg2_definition_surface_is_closed_and_line_oriented() {
+        let output = pg2_definitions();
+        assert_eq!(output.lines().count(), 2);
+        assert!(output.lines().all(|line| {
+            line.starts_with("{\"schema\":\"fmn-perf-cli/1\"") && line.ends_with('}')
+        }));
+        assert!(output.contains("\"scenario\":\"fill-canonical\""));
+        assert!(output.contains("\"scenario\":\"stroke-canonical\""));
+        assert!(!output.contains("\"status\""));
+    }
+
+    #[test]
+    fn measure_pg2_refuses_ambiguous_argument_counts_before_io() {
+        let arguments = vec![std::ffi::OsString::from("measure-pg2")];
+        let error = dispatch(&arguments).unwrap_err();
+        assert_eq!(error.exit_code, EXIT_USAGE);
+        assert!(error.detail.contains("<baseline.tsv>"));
+    }
+
+    #[test]
+    fn output_parent_check_requires_canonical_existing_directories() {
+        validate_output_parent(OsStr::new("src/new-output.tsv"), "test output").unwrap();
+        let error =
+            validate_output_parent(OsStr::new("src/../new-output.tsv"), "test output").unwrap_err();
+        assert_eq!(error.kind, "data");
+        assert!(error.detail.contains("canonical relative path"));
     }
 }

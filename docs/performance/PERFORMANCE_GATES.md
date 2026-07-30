@@ -69,7 +69,7 @@ report `inconclusive`.
 ## Robot verifier
 
 `cargo run --profile release-perf -p fmn-conformance --bin fmn-perf -- ...`
-provides two dependency-free, NDJSON-only checks:
+provides NDJSON-only policy, evidence, and producer commands:
 
 - `catalog docs/performance/PERF_GATES.tsv` validates the complete policy
   catalog and reports its canonical digest and rows.
@@ -77,8 +77,50 @@ provides two dependency-free, NDJSON-only checks:
   loads its declared repository-relative raw-sample source, requires the
   canonical `fmn-perf-samples/1` schema, recomputes its robust statistics, and
   verifies identity, producer commit, and exact digest.
+- `pg2-definitions` reports the exact compiled benchmark-definition and C7/C10
+  configuration digests for both canonical raster workloads.
+- `measure-pg2 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` checks
+  that the supplied baseline identity names that exact compiled producer, runs
+  it, and exclusively creates a content-addressed phase trace followed by the
+  canonical raw sample bundle. Both output paths must be distinct canonical
+  files below `tests/artifacts/perf/`; their parent directories must already
+  exist and may not contain symlinks, and existing paths are never overwritten.
 
 Exit `0` means the requested structural/evidence check succeeded; `64` is
 usage error, `65` is malformed, missing, or mismatched data, and `74` is an
-output I/O failure. This verifier does not manufacture a benchmark observation
-and cannot turn the target catalog into green evidence.
+output I/O failure. A measurement record has status
+`measured-not-evaluated`: the producer does not certify the machine it happens
+to run on and cannot turn a target-only baseline into green evidence. Until
+fm-inr.1 lands live pinned-host attestation, PG-2 output forcibly records
+`bare_metal=false` and `isolated=false` even when a supplied context claims
+otherwise. The profile name and fingerprints are retained for calibration,
+but the common evaluator must classify the bundle as host-unqualified or an
+identity mismatch rather than pass it.
+
+## Canonical PG-2 workloads
+
+The `fmn-perf-pg2-definition/1` bytes state every workload axis required by
+plan §17.2. Both execute Lumen's fast CPU engine at the artifact's compiled
+SIMD tier, fixed at eight threads, adaptive AA, 128 px macrotiles, 16 px fine
+tiles, and pooled raw RGBA16F output. Fixture construction, render-plan sync,
+monotone-table construction, binning, output allocation/prime, warmup, and
+every timed raster repetition are distinguished in the
+`fmn-perf-pg2-trace/1` evidence. Each definition also binds an exact raw-frame
+self-golden. The producer checks the primed frame before timing and refuses
+output if the rendered workload drifts; it checks the final frame again so
+nondeterminism during the repetitions cannot masquerade as throughput.
+
+| Scenario | Viewport and geometry | Overdraw / style | Throughput denominator |
+|---|---|---|---|
+| `fill-canonical` | 512×512; 32 closed rectangles, four flat quadratic-line segments each | 32 translucent layers; alpha 0.08 | one output pixel evaluated against one fill layer |
+| `stroke-canonical` | 512×256; one 64-quadratic chain with alternating 56 px control and 20 px endpoint offsets | opaque six-pixel miter stroke | one output pixel |
+
+Each run performs three untimed warmups and retains 24 repetitions: 21 valid
+observations required by policy plus room for the three explicit invalid
+observations the policy permits. Fill times one frame per repetition; stroke
+times four to keep timer quantization below the work being measured. Integer
+conversion produces `mpx-per-second-milli` without floating-point rounding.
+Zero elapsed time or numeric overflow is retained as an invalid sample, never
+replaced by a plausible throughput. The final frame is canonically hashed
+outside the timed region, and the trace itself is the batch's
+content-addressed `phase-trace` evidence row.
