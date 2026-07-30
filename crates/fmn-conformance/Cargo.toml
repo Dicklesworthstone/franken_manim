@@ -23,6 +23,9 @@ fmn-cache.workspace = true
 fmn-platform.workspace = true
 fmn-text.workspace = true
 fmn-tex.workspace = true
+# Certified-path transcendentals route through fmn-dmath (ADR-0010; the
+# edge is ADR-0014's precedent) — the scene corpus's graph closures.
+fmn-dmath.workspace = true
 # The Gauntlet consumes the pinned math engine to compute the public
 # coverage ratchet (§11.5, fm-mol).
 fmd-math.workspace = true
@@ -34,6 +37,11 @@ fmd-math.workspace = true
 fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-runtime.workspace = true
+# The §16.5 fuzz campaign's targets (tests/fuzz_campaign.rs): the pinned font
+# parser and the config YAML subset. Same posture as above — the campaign is a
+# Gauntlet consumer, not a shipped edge.
+fmd-font.workspace = true
+fmn-config.workspace = true
 
 [lints]
 workspace = true
