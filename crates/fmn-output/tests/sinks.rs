@@ -25,8 +25,8 @@ use fmn_platform::fs::{
 };
 #[cfg(unix)]
 use fmn_platform::process::{
-    ProcessCancellation, ProcessError, ProcessOutcome, ProcessRunner, ProcessSpec,
-    ProcessStdinLimits, ProcessTermination, RunningProcess,
+    ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+    ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
 use fmn_platform::profile::{ProfilePath, ProfileRecorder};
 #[cfg(unix)]
@@ -1209,6 +1209,10 @@ mod ffmpeg_boundary {
     }
 
     impl ProcessRunner for PublishingRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            ProcessMechanism::Scripted
+        }
+
         fn start(
             &self,
             spec: &ProcessSpec,
@@ -1611,6 +1615,11 @@ mod ffmpeg_boundary {
             assert_eq!(invocation.provenance.native_image, tool.native_image());
             assert_eq!(invocation.provenance.tool_version, tool.version());
             assert_eq!(invocation.provenance.bound_tool_path, runs[1].program);
+            assert_eq!(
+                invocation.provenance.process_mechanism,
+                "scripted.process_runner"
+            );
+            assert_eq!(invocation.provenance.process_policy_version, 1);
             assert_ne!(
                 invocation.provenance.bound_tool_path,
                 invocation.provenance.tool_path

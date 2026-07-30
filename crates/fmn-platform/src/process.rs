@@ -3,13 +3,12 @@
 //! ffmpeg is the only program the engine will ever spawn, and every rule of
 //! the D2 security protocol that belongs to the *mechanism* lives here:
 //!
-//! - **argv-only interface.** [`ProcessSpec`] is a program path plus an
-//!   argument vector. Callers cannot express shell strings, splitting, or
-//!   interpolation. The pinned safe standard-library implementation may still
-//!   fall back from `posix_spawnp` to libc `execvp` on some Unix
-//!   target/runtime combinations; `fm-x4pp` tracks the required
-//!   no-interpreter host capability, so this interface alone is not claimed as
-//!   the global D2 no-shell proof.
+//! - **Exact-image, argv-only interface.** [`ProcessSpec`] is an absolute
+//!   native-image path plus an argument vector. [`StdProcessRunner`] delegates
+//!   to asupersync's audited exact-image primitive: Unix uses `posix_spawn`
+//!   with the absolute path (never `posix_spawnp`, `execvp`, or an ENOEXEC
+//!   shell fallback), while Windows uses an explicit `CreateProcessW`
+//!   application plus atomic Job Object assignment.
 //! - **Environment allowlist.** The child's environment is cleared and
 //!   rebuilt from [`ProcessSpec::env`] alone; nothing ambient leaks in.
 //! - **Timeout.** [`ProcessSpec::timeout`] bounds wall-clock runtime; on
@@ -29,11 +28,11 @@
 //!   target-specific native-image check, and returns a canonical absolute
 //!   [`FfmpegExecutable`] for the output boundary to fingerprint.
 //!
-//! - **Process-tree cancellation.** On supported Unix targets, every child
-//!   leads a fresh process group and every terminal path kills that complete
-//!   group through the pinned nightly's safe standard-library API. Targets
-//!   without an equivalent safe mechanism are refused before spawn rather than
-//!   silently weakening D2.
+//! - **Process-tree cancellation.** On Linux and macOS every child leads a
+//!   fresh process group; on Windows every child starts atomically inside a
+//!   kill-on-close Job Object. Every terminal path kills that complete tree.
+//!   Targets without an audited exact-image mechanism are refused before spawn
+//!   rather than silently weakening D2.
 //!   Higher layers (job-scoped temp dirs and their `fm-yw7h` hardening,
 //!   atomic publication, provenance fingerprinting) belong to the W8
 //!   boundary, not the mechanism.
@@ -1724,6 +1723,76 @@ fn metadata_is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
+/// Stable identity of the process primitive selected by a [`ProcessRunner`].
+///
+/// Successful production invocations record both [`Self::identity`] and
+/// [`Self::policy_version`] in C9 provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessMechanism {
+    /// Absolute-path POSIX spawn into a new process group.
+    PosixSpawnAbsoluteProcessGroup,
+    /// Explicit Win32 application spawn with atomic Job Object assignment.
+    WindowsCreateProcessJobList,
+    /// Deterministic in-memory test double; no host process is issued.
+    Scripted,
+    /// The host has no audited exact-image implementation and will fail closed.
+    ExactImageUnavailable,
+}
+
+impl ProcessMechanism {
+    /// Stable machine-readable mechanism identity.
+    #[must_use]
+    pub const fn identity(self) -> &'static str {
+        match self {
+            Self::PosixSpawnAbsoluteProcessGroup => "posix_spawn.absolute_path.new_process_group",
+            Self::WindowsCreateProcessJobList => {
+                "create_process_w.explicit_application.atomic_job_list"
+            }
+            Self::Scripted => "scripted.process_runner",
+            Self::ExactImageUnavailable => "exact_image.unavailable",
+        }
+    }
+
+    /// Version of the mechanism's executable-selection and containment policy.
+    #[must_use]
+    pub const fn policy_version(self) -> u32 {
+        match self {
+            Self::PosixSpawnAbsoluteProcessGroup
+            | Self::WindowsCreateProcessJobList
+            | Self::ExactImageUnavailable => asupersync::process::EXACT_IMAGE_SPAWN_POLICY_VERSION,
+            Self::Scripted => 1,
+        }
+    }
+}
+
+fn exact_image_mechanism(
+    mechanism: asupersync::process::ExactImageSpawnMechanism,
+) -> ProcessMechanism {
+    match mechanism {
+        asupersync::process::ExactImageSpawnMechanism::PosixSpawnAbsoluteProcessGroup => {
+            ProcessMechanism::PosixSpawnAbsoluteProcessGroup
+        }
+        asupersync::process::ExactImageSpawnMechanism::WindowsCreateProcessJobList => {
+            ProcessMechanism::WindowsCreateProcessJobList
+        }
+    }
+}
+
+const fn host_exact_image_mechanism() -> ProcessMechanism {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        ProcessMechanism::PosixSpawnAbsoluteProcessGroup
+    }
+    #[cfg(windows)]
+    {
+        ProcessMechanism::WindowsCreateProcessJobList
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        ProcessMechanism::ExactImageUnavailable
+    }
+}
+
 /// A complete, self-contained description of one subprocess invocation.
 #[derive(Clone, Debug)]
 pub struct ProcessSpec {
@@ -1733,10 +1802,10 @@ pub struct ProcessSpec {
     pub argv: Vec<String>,
     /// The child's entire environment: cleared, then exactly these pairs.
     pub env: Vec<(String, String)>,
-    /// Working directory, or inherit. The ffmpeg boundary currently inherits:
-    /// all governed paths are absolute, and avoiding a child-directory request
-    /// removes one reason the pinned Unix standard library can leave its
-    /// `posix_spawn` path.
+    /// Working directory request. The exact-image host runner requires this to
+    /// be `None`: all governed paths are absolute and the private directory is
+    /// conveyed through the explicit environment instead of ambient process
+    /// mutation.
     pub cwd: Option<PathBuf>,
     /// Bytes written to the child's stdin by [`ProcessRunner::run`] (then
     /// closed); `None` for a null stdin. [`ProcessRunner::start`] requires
@@ -1840,7 +1909,7 @@ pub enum ProcessError {
         /// The program that failed to spawn.
         program: PathBuf,
         /// The underlying error.
-        err: std::io::Error,
+        err: asupersync::process::ProcessError,
     },
     /// I/O plumbing to the child failed mid-run.
     Plumbing {
@@ -1862,12 +1931,16 @@ pub enum ProcessError {
         /// The offending program path.
         program: PathBuf,
     },
-    /// The host target cannot provide process-tree cancellation through the
-    /// pinned safe standard-library surface. D2 requires a refusal, not a
-    /// direct-child-only downgrade.
-    ProcessTreeCancellationUnsupported {
-        /// The program that was not spawned.
+    /// Exact-image spawning deliberately has no current-directory mutation.
+    ///
+    /// The ffmpeg boundary uses absolute paths and an explicit private
+    /// `TMPDIR`, so accepting an ambient working-directory request would only
+    /// widen the process primitive.
+    WorkingDirectoryUnsupported {
+        /// The program whose invalid request was refused.
         program: PathBuf,
+        /// The requested working directory.
+        cwd: PathBuf,
     },
     /// A streaming start was supplied preloaded stdin bytes.
     ///
@@ -1919,11 +1992,13 @@ impl fmt::Display for ProcessError {
                     program.display()
                 )
             }
-            Self::ProcessTreeCancellationUnsupported { program } => write!(
+            Self::WorkingDirectoryUnsupported { program, cwd } => write!(
                 f,
-                "cannot spawn {}: this target has no safe process-tree \
-                 cancellation mechanism required by D2",
-                program.display()
+                "cannot spawn {} with working directory {}: the exact-image \
+                 process capability accepts absolute paths and an explicit \
+                 environment only",
+                program.display(),
+                cwd.display()
             ),
             Self::StreamingInputPreloaded { program } => write!(
                 f,
@@ -1989,6 +2064,12 @@ pub trait RunningProcess: Send {
 
 /// The process capability.
 pub trait ProcessRunner: Send + Sync {
+    /// Stable identity and policy version of the mechanism this runner uses.
+    ///
+    /// The value must remain stable for the runner's lifetime and must match
+    /// every successfully started process.
+    fn mechanism(&self) -> ProcessMechanism;
+
     /// Start a long-lived process whose stdin is supplied incrementally.
     ///
     /// `spec.stdin` must be `None`; the returned session is the only stdin
@@ -2043,44 +2124,16 @@ fn require_absolute(spec: &ProcessSpec) -> Result<(), ProcessError> {
     }
 }
 
-/// The host implementation over `std::process::Command`.
+/// Host implementation over asupersync's audited exact-image primitive.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdProcessRunner;
 
-#[cfg(all(unix, not(target_os = "espidf")))]
-fn configure_process_tree(
-    command: &mut std::process::Command,
-    _program: &std::path::Path,
-) -> Result<(), ProcessError> {
-    use std::os::unix::process::CommandExt as _;
-
-    command.process_group(0);
-    Ok(())
-}
-
-#[cfg(not(all(unix, not(target_os = "espidf"))))]
-fn configure_process_tree(
-    _command: &mut std::process::Command,
-    program: &std::path::Path,
-) -> Result<(), ProcessError> {
-    Err(ProcessError::ProcessTreeCancellationUnsupported {
-        program: program.to_path_buf(),
-    })
-}
-
-#[cfg(all(unix, not(target_os = "espidf")))]
-fn kill_process_tree(child: &mut std::process::Child) -> std::io::Result<()> {
-    use std::os::unix::process::ChildExt as _;
-
-    child.kill_process_group()
-}
-
-#[cfg(not(all(unix, not(target_os = "espidf"))))]
-fn kill_process_tree(_child: &mut std::process::Child) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "safe process-tree cancellation is unavailable",
-    ))
+fn kill_process_tree(child: &mut asupersync::process::ExactImageChild) -> std::io::Result<()> {
+    match child.kill_process_tree() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Drain one output pipe on its own thread, capturing up to `cap` bytes and
@@ -2115,6 +2168,10 @@ fn drain(
 }
 
 impl ProcessRunner for StdProcessRunner {
+    fn mechanism(&self) -> ProcessMechanism {
+        host_exact_image_mechanism()
+    }
+
     fn start(
         &self,
         spec: &ProcessSpec,
@@ -2127,42 +2184,55 @@ impl ProcessRunner for StdProcessRunner {
                 program: spec.program.clone(),
             });
         }
-        // The program is an absolute, caller-resolved path (checked above),
-        // never a PATH lookup or user-composed string.
-        // The trusted absolute executable capability is resolved and fingerprinted
-        // by the ffmpeg boundary before it reaches this runner.
-        let mut cmd = std::process::Command::new(&spec.program); // ubs:ignore
-        cmd.args(&spec.argv)
-            .env_clear()
-            .envs(spec.env.iter().map(|(k, v)| (k, v)))
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::piped());
-        configure_process_tree(&mut cmd, &spec.program)?;
         if let Some(cwd) = &spec.cwd {
-            cmd.current_dir(cwd);
+            return Err(ProcessError::WorkingDirectoryUnsupported {
+                program: spec.program.clone(),
+                cwd: cwd.clone(),
+            });
         }
-        let mut child = cmd.spawn().map_err(|err| ProcessError::Spawn {
+
+        // The trusted absolute executable capability is resolved,
+        // native-image-attested, and fingerprinted by the ffmpeg boundary
+        // before it reaches this runner. ExactImageCommand never performs PATH
+        // lookup, shell fallback, or environment inheritance.
+        let mut command = asupersync::process::ExactImageCommand::new(&spec.program);
+        command
+            .args(&spec.argv)
+            .envs(spec.env.iter().map(|(key, value)| (key, value)));
+        let mut child = command.spawn().map_err(|err| ProcessError::Spawn {
             program: spec.program.clone(),
             err,
         })?;
+        let actual_mechanism = exact_image_mechanism(child.mechanism());
+        if actual_mechanism != self.mechanism() {
+            let _ = kill_process_tree(&mut child);
+            let _ = child.wait();
+            return Err(ProcessError::Plumbing {
+                program: spec.program.clone(),
+                detail: format!(
+                    "exact-image mechanism mismatch: runner declared {}, child used {}",
+                    self.mechanism().identity(),
+                    actual_mechanism.identity()
+                ),
+            });
+        }
 
         let plumbing = |detail: &str| ProcessError::Plumbing {
             program: spec.program.clone(),
             detail: detail.to_string(),
         };
-        let Some(stdin) = child.stdin.take() else {
+        let Some(stdin) = child.take_stdin() else {
             let _ = kill_process_tree(&mut child);
             let _ = child.wait();
             return Err(plumbing("no stdin pipe"));
         };
         let overflow = Arc::new(AtomicBool::new(false));
-        let Some(stdout) = child.stdout.take() else {
+        let Some(stdout) = child.take_stdout() else {
             let _ = kill_process_tree(&mut child);
             let _ = child.wait();
             return Err(plumbing("no stdout pipe"));
         };
-        let Some(stderr) = child.stderr.take() else {
+        let Some(stderr) = child.take_stderr() else {
             let _ = kill_process_tree(&mut child);
             let _ = child.wait();
             return Err(plumbing("no stderr pipe"));
@@ -2199,7 +2269,7 @@ impl ProcessRunner for StdProcessRunner {
 }
 
 fn supervise_child(
-    mut child: std::process::Child,
+    mut child: asupersync::process::ExactImageChild,
     program: &std::path::Path,
     timeout: Duration,
     cancellation: ProcessCancellation,
@@ -2209,32 +2279,22 @@ fn supervise_child(
 ) -> Result<ProcessOutcome, ProcessError> {
     let start = Instant::now();
     let termination = loop {
-        // Reaping the group leader makes std's safe group-signal handle a
-        // no-op. Once both inherited pipes close, kill the isolated group
-        // before reaping. For an already-exited leader this preserves its
-        // status while terminating redirected descendants; a leader that
-        // closed both supervision pipes early is failed closed.
+        // Reaping the group leader can disarm group-based tree cleanup. Once
+        // both inherited pipes close, kill the isolated tree before reaping.
+        // For an already-exited leader this preserves its status while
+        // terminating redirected descendants.
         if stdout_thread.is_finished() && stderr_thread.is_finished() {
-            match kill_process_tree(&mut child) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    // No member remains in the isolated group.
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ProcessError::Plumbing {
-                        program: program.to_path_buf(),
-                        detail: format!("process-tree completion kill failed: {error}"),
-                    });
-                }
+            if let Err(error) = kill_process_tree(&mut child) {
+                return Err(ProcessError::Plumbing {
+                    program: program.to_path_buf(),
+                    detail: format!("process-tree completion kill failed: {error}"),
+                });
             }
             match child.try_wait() {
                 Ok(Some(status)) => break ProcessTermination::Exited(status.code()),
                 Ok(None) => {}
                 Err(error) => {
                     let _ = kill_process_tree(&mut child);
-                    let _ = child.wait();
                     return Err(ProcessError::Plumbing {
                         program: program.to_path_buf(),
                         detail: format!(
@@ -2255,8 +2315,6 @@ fn supervise_child(
         };
         if let Some(terminal) = terminal {
             if let Err(err) = kill_process_tree(&mut child) {
-                let _ = child.kill();
-                let _ = child.wait();
                 return Err(ProcessError::Plumbing {
                     program: program.to_path_buf(),
                     detail: format!("process-tree kill failed: {err}"),
@@ -2269,7 +2327,10 @@ fn supervise_child(
     // Reap after a terminal kill so no zombie outlives the session. A
     // pipe-closed completion observed through `try_wait` was already reaped.
     if !matches!(termination, ProcessTermination::Exited(_)) {
-        let _ = child.wait();
+        child.wait().map_err(|error| ProcessError::Plumbing {
+            program: program.to_path_buf(),
+            detail: format!("process-tree reap failed: {error}"),
+        })?;
     }
     let plumbing = |detail: &str| ProcessError::Plumbing {
         program: program.to_path_buf(),
@@ -2297,7 +2358,7 @@ fn supervise_child(
 
 struct StdRunningProcess {
     program: PathBuf,
-    stdin: Option<std::process::ChildStdin>,
+    stdin: Option<asupersync::process::ExactImageChildStdin>,
     outcome_rx: mpsc::Receiver<Result<ProcessOutcome, ProcessError>>,
     supervisor: Option<std::thread::JoinHandle<()>>,
     cancellation: ProcessCancellation,
@@ -2420,6 +2481,10 @@ impl ScriptedRunner {
 }
 
 impl ProcessRunner for ScriptedRunner {
+    fn mechanism(&self) -> ProcessMechanism {
+        ProcessMechanism::Scripted
+    }
+
     fn start(
         &self,
         spec: &ProcessSpec,

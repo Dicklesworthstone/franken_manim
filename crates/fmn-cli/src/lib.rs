@@ -2605,6 +2605,10 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     impl fmn_platform::process::ProcessRunner for SuccessfulFfmpegProbeRunner {
+        fn mechanism(&self) -> fmn_platform::process::ProcessMechanism {
+            fmn_platform::process::ProcessMechanism::Scripted
+        }
+
         fn start(
             &self,
             spec: &fmn_platform::process::ProcessSpec,
@@ -2648,6 +2652,10 @@ mod tests {
 
     #[cfg(unix)]
     impl fmn_platform::process::ProcessRunner for IdentityChangingProbeRunner {
+        fn mechanism(&self) -> fmn_platform::process::ProcessMechanism {
+            fmn_platform::process::ProcessMechanism::Scripted
+        }
+
         fn start(
             &self,
             spec: &fmn_platform::process::ProcessSpec,
@@ -2695,6 +2703,10 @@ mod tests {
 
     #[cfg(unix)]
     impl fmn_platform::process::ProcessRunner for WorkdirReplacingProbeRunner {
+        fn mechanism(&self) -> fmn_platform::process::ProcessMechanism {
+            fmn_platform::process::ProcessMechanism::Scripted
+        }
+
         fn start(
             &self,
             spec: &fmn_platform::process::ProcessSpec,

@@ -20,7 +20,8 @@ use fmn_output::{Boundary, BoundaryError, EncoderCapabilities, FfmpegTool, JobLi
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat, negotiate};
 #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
 use fmn_platform::process::{
-    ProcessCancellation, ProcessError, ProcessSpec, ProcessStdinLimits, RunningProcess,
+    ProcessCancellation, ProcessError, ProcessMechanism, ProcessSpec, ProcessStdinLimits,
+    RunningProcess,
 };
 #[cfg(unix)]
 use fmn_platform::process::{
@@ -1313,6 +1314,10 @@ mod private_boundary {
 
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     impl ProcessRunner for SourceSwappingRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            StdProcessRunner.mechanism()
+        }
+
         fn start(
             &self,
             spec: &ProcessSpec,
@@ -1343,6 +1348,10 @@ mod private_boundary {
 
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     impl ProcessRunner for TransientSourceSwappingRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            StdProcessRunner.mechanism()
+        }
+
         fn start(
             &self,
             spec: &ProcessSpec,
@@ -1598,6 +1607,11 @@ mod private_boundary {
         assert_eq!(provenance.tool_path, source_identity);
         assert_eq!(provenance.tool_sha256_hex, source_sha256);
         assert_ne!(provenance.bound_tool_path, provenance.tool_path);
+        assert_eq!(
+            provenance.process_mechanism,
+            "posix_spawn.absolute_path.new_process_group"
+        );
+        assert_eq!(provenance.process_policy_version, 1);
         assert_eq!(
             std::fs::read(&provenance.bound_tool_path).unwrap(),
             original

@@ -38,6 +38,7 @@
     feature(portable_simd)
 )]
 #![cfg_attr(test, feature(test))]
+#![cfg_attr(windows, feature(windows_by_handle))]
 #![forbid(unsafe_code)]
 
 pub mod emitter;

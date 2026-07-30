@@ -11,6 +11,8 @@ use fmn_platform::process::{
     NativeExecutableFormat, ProcessCancellation, ProcessOutcome, ProcessRunner, ProcessSpec,
     ProcessStdinLimits, ProcessTermination, ScriptedRunner, StdFfmpegLocator,
 };
+#[cfg(unix)]
+use fmn_platform::process::{ProcessError, ProcessMechanism};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +42,33 @@ fn locator_scratch(name: &str) -> std::io::Result<PathBuf> {
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         "could not claim a unique ffmpeg locator scratch directory",
+    ))
+}
+
+#[cfg(unix)]
+fn bind_relocated_unix_socket(
+    destination: &Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    for _ in 0..128 {
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bind_path = PathBuf::from("/tmp").join(format!(
+            "fmn-locator-{}-{sequence}.sock",
+            std::process::id()
+        ));
+        match std::os::unix::net::UnixListener::bind(&bind_path) {
+            Ok(listener) => {
+                std::fs::rename(bind_path, destination)?;
+                return Ok(listener);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        "could not claim a short Unix-socket pathname",
     ))
 }
 
@@ -485,7 +514,6 @@ fn ffmpeg_locator_validates_the_complete_search_policy_before_lookup() {
 #[test]
 fn ffmpeg_locator_skips_present_non_executables_in_search_order() {
     use std::os::unix::fs::symlink;
-    use std::os::unix::net::UnixListener;
 
     let root = locator_scratch("nonexec").expect("claim nonexec locator scratch");
     let broken = root.join("broken");
@@ -501,7 +529,7 @@ fn ffmpeg_locator_skips_present_non_executables_in_search_order() {
     symlink(root.join("missing-target"), broken.join("ffmpeg")).expect("broken candidate link");
     symlink(&root, directory.join("ffmpeg")).expect("directory candidate link");
     let _socket =
-        UnixListener::bind(special.join("ffmpeg")).expect("special-file candidate socket");
+        bind_relocated_unix_socket(&special.join("ffmpeg")).expect("special-file candidate socket");
     std::fs::write(first.join("ffmpeg"), native_executable_fixture())
         .expect("non-executable native candidate");
     write_executable(&second.join("ffmpeg"));
@@ -1146,6 +1174,20 @@ mod std_runner {
     use std::sync::mpsc;
     use std::thread;
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_mechanism_identity_and_policy_are_stable() {
+        assert_eq!(
+            StdProcessRunner.mechanism(),
+            ProcessMechanism::PosixSpawnAbsoluteProcessGroup
+        );
+        assert_eq!(
+            StdProcessRunner.mechanism().identity(),
+            "posix_spawn.absolute_path.new_process_group"
+        );
+        assert_eq!(StdProcessRunner.mechanism().policy_version(), 1);
+    }
+
     #[test]
     fn argv_only_echo_succeeds() {
         let out = StdProcessRunner
@@ -1281,6 +1323,36 @@ mod std_runner {
             .run(&spec("/nonexistent/fmn-no-such-program", &[]))
             .unwrap_err();
         assert!(err.to_string().contains("fmn-no-such-program"));
+    }
+
+    #[test]
+    fn executable_text_without_shebang_never_issues_an_interpreter() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = scratch("exact_image_no_shebang").join("ffmpeg-text-fixture");
+        std::fs::write(&path, "printf 'FMN_INTERPRETER_FALLBACK_RAN\\n'\nexit 91\n")
+            .expect("write executable-text fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark executable-text fixture executable");
+
+        let error = StdProcessRunner
+            .run(&spec(path.to_str().expect("UTF-8 fixture path"), &[]))
+            .expect_err("ENOEXEC must remain a spawn error");
+        assert!(
+            matches!(error, ProcessError::Spawn { .. }),
+            "unexpected no-shebang refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn working_directory_requests_are_refused_before_spawn() {
+        let mut s = spec("/usr/bin/true", &[]);
+        s.cwd = Some(scratch("exact_image_cwd_refusal"));
+        let error = StdProcessRunner.run(&s).expect_err("cwd must be refused");
+        assert!(
+            matches!(error, ProcessError::WorkingDirectoryUnsupported { .. }),
+            "unexpected cwd refusal: {error}"
+        );
     }
 
     #[test]

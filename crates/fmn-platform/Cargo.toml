@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Filesystem/process/clock/AssetFetcher capability traits plus HardwareTopology introspection (§17.4)."
 
 [dependencies]
+asupersync.workspace = true
 fmn-core.workspace = true
 
 [lints]

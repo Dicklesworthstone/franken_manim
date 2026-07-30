@@ -11,8 +11,9 @@
 //!   copy—not from the configured pathname. Every later probe and job repeats
 //!   that exact-create/copy/hash operation, rehashes the private executable
 //!   after use, and records both paths, the hash, version, encoder, and full
-//!   argv in [`Provenance`]. Installations that cannot execute after
-//!   relocation are rejected explicitly.
+//!   argv in [`Provenance`], together with the selected exact-image process
+//!   mechanism and its policy version. Installations that cannot execute
+//!   after relocation are rejected explicitly.
 //! - **Optionality as a capability error.** An absent ffmpeg yields
 //!   [`BoundaryError::FfmpegUnavailable`] naming the native
 //!   alternatives — never a silent format substitution.
@@ -22,9 +23,8 @@
 //!   creation and cleanup: a collision or replaced path is retained untouched.
 //!   The job directory is the child's `TMPDIR`; every tool and artifact path is
 //!   absolute, so the child inherits the engine's working directory and avoids
-//!   making a requested `cwd` another prerequisite of the standard-library
-//!   `posix_spawn` path. The artifact reaches the destination only through
-//!   atomic rename after verification.
+//!   widening the exact-image capability with a requested `cwd`. The artifact
+//!   reaches the destination only through atomic rename after verification.
 //! - **Environment allowlist + locale pinning.** The child sees
 //!   exactly `LANG=C`, `LC_ALL=C`, and `TMPDIR=<job dir>`.
 //! - **Hardware encoders enter here and only here.** They are named,
@@ -54,8 +54,8 @@ use std::time::Duration;
 
 use fmn_platform::process::{
     FfmpegExecutable, FfmpegLocatorError, MAX_FFMPEG_EXECUTABLE_BYTES, NativeImageAttestation,
-    ProcessCancellation, ProcessError, ProcessOutcome, ProcessRunner, ProcessSpec,
-    ProcessStdinLimits, ProcessTermination, RunningProcess,
+    ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+    ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
 
 use crate::negotiate::{NegotiationError, VideoJob, encode_argv, mux_argv, transcode_audio_argv};
@@ -831,6 +831,11 @@ pub struct Provenance {
     /// Private job-scoped executable path actually passed to the process
     /// mechanism.
     pub bound_tool_path: PathBuf,
+    /// Stable identity of the exact process mechanism selected for this run.
+    pub process_mechanism: String,
+    /// Version of that mechanism's executable-selection and containment
+    /// policy.
+    pub process_policy_version: u32,
     /// The resolved encoder (`None` for muxer-level modes like GIF and
     /// stream-copy jobs).
     pub encoder: Option<String>,
@@ -1434,6 +1439,7 @@ impl Boundary {
             invocations: vec![invocation_report(
                 &self.tool,
                 bound_tool.path(),
+                self.runner.mechanism(),
                 encoder,
                 argv,
                 artifact.to_path_buf(),
@@ -1692,6 +1698,7 @@ impl StreamingEncode {
         let mut invocations = vec![invocation_report(
             &self.tool,
             self.bound_tool.path(),
+            self.runner.mechanism(),
             self.encoder.clone(),
             self.video_argv.clone(),
             self.video_artifact.clone(),
@@ -1738,6 +1745,7 @@ impl StreamingEncode {
             invocations.push(invocation_report(
                 &self.tool,
                 self.bound_tool.path(),
+                self.runner.mechanism(),
                 None,
                 argv,
                 muxed.clone(),
@@ -1861,6 +1869,7 @@ fn verify_private_artifact(path: &Path, max_bytes: u64) -> Result<(), BoundaryEr
 fn invocation_report(
     tool: &FfmpegTool,
     bound_tool: &Path,
+    mechanism: ProcessMechanism,
     encoder: Option<String>,
     argv: Vec<String>,
     artifact: PathBuf,
@@ -1873,6 +1882,8 @@ fn invocation_report(
             native_image: tool.native_image(),
             tool_version: tool.version().to_string(),
             bound_tool_path: bound_tool.to_path_buf(),
+            process_mechanism: mechanism.identity().to_string(),
+            process_policy_version: mechanism.policy_version(),
             encoder,
             argv,
         },
