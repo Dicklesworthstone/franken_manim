@@ -29,7 +29,7 @@ franken_markdown	4e5066c62818dfce75ccd940a7a54f600e1fe6a8	workspace since fm-ydw
 franken_networkx	9d710b1c33e99412c94de7fa4de2f7ce4954110f	enhanced-tier Graph mobjects; never blocks core gates
 frankenpandas	da85cf65df48965e027b2f5aa21b7d0ce6a7e29c	enhanced-tier Data mobjects; never blocks core gates
 frankentorch	523aaf827faf538aa541126ee222fcd7af348410	the only GPU gateway; includes checked Metal compute, native CAMetalLayer presentation, and the governed block-runtime patch consumed by the standard-only Accelerator Annex
-asupersync	e464a484cb65c1a55be0d9c925e6e9c20318edcb	batch farms + scheduler lab; never in the frame loop
+asupersync	33398129845d0017adfbbf8a481e2504c01336c7	batch farms + scheduler lab plus the exact-image host process primitive; never in the frame loop
 
 [patches]
 # repo	commit	notes
