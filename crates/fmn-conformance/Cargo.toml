@@ -37,11 +37,6 @@ fmd-math.workspace = true
 fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-runtime.workspace = true
-# The §16.5 fuzz campaign's targets (tests/fuzz_campaign.rs): the pinned font
-# parser and the config YAML subset. Same posture as above — the campaign is a
-# Gauntlet consumer, not a shipped edge.
-fmd-font.workspace = true
-fmn-config.workspace = true
 
 [lints]
 workspace = true

@@ -574,6 +574,7 @@ dependencies = [
  "fmn-cache",
  "fmn-codec",
  "fmn-core",
+ "fmn-dmath",
  "fmn-frame",
  "fmn-geom",
  "fmn-hash",
