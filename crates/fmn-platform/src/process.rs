@@ -18,6 +18,12 @@
 //!   session with explicit per-chunk and cumulative limits. The OS pipe
 //!   supplies backpressure, cooperative cancellation interrupts a blocked
 //!   write, and every terminal path reaps the child.
+//! - **Audited ffmpeg discovery.** [`FfmpegLocator`] is deliberately not a
+//!   generic executable finder. Its host implementation snapshots one explicit
+//!   `PATH` value, rejects the complete search policy when any entry is empty,
+//!   relative, or otherwise ambiguous, rejects interpreter scripts through a
+//!   target-specific native-image check, and returns a canonical absolute
+//!   [`FfmpegExecutable`] for the output boundary to fingerprint.
 //!
 //! - **Process-tree cancellation.** On supported Unix targets, every child
 //!   leads a fresh process group and every terminal path kills that complete
@@ -29,12 +35,619 @@
 //!   boundary, not the mechanism.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::Write as _;
-use std::path::PathBuf;
+use std::io::{self, Read as _, Write as _};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+
+/// The one executable identity discovery may return.
+///
+/// The path is canonical, absolute, UTF-8 representable for versioned
+/// provenance, and names a regular host-native executable image at selection
+/// time. fmn-output still owns byte hashing, private-copy binding, and protocol
+/// probing: this type closes ambient search, interpreter scripts, and symlink
+/// retargeting, not every safe-`std` pathname race.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfmpegExecutable {
+    canonical_path: PathBuf,
+}
+
+impl FfmpegExecutable {
+    /// The canonical absolute path that fmn-output must fingerprint.
+    #[must_use]
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+}
+
+/// Typed failures from the ffmpeg-only executable locator.
+#[derive(Debug)]
+pub enum FfmpegLocatorError {
+    /// A relative configured value was not the one fixed search name.
+    UnsupportedConfiguredName {
+        /// The refused configured value.
+        configured: PathBuf,
+    },
+    /// No explicit search-path snapshot was supplied.
+    SearchPathUnavailable,
+    /// Search semantics are unavailable on this target.
+    SearchUnsupported {
+        /// The target operating-system identity.
+        platform: &'static str,
+    },
+    /// The raw search list is structurally malformed.
+    MalformedSearchPath {
+        /// Stable reason that does not lossily echo hostile bytes.
+        reason: &'static str,
+    },
+    /// One search entry was empty (and therefore must not mean the cwd).
+    EmptySearchEntry {
+        /// Zero-based entry position.
+        index: usize,
+    },
+    /// One search entry could not be represented in versioned provenance.
+    NonUtf8SearchEntry {
+        /// Zero-based entry position.
+        index: usize,
+    },
+    /// One search entry contained terminal/control characters.
+    ControlSearchEntry {
+        /// Zero-based entry position.
+        index: usize,
+    },
+    /// The hostile-input resource bound was exceeded.
+    SearchPathLimit {
+        /// Stable bounded resource.
+        resource: &'static str,
+        /// Observed size.
+        got: usize,
+        /// Accepted maximum.
+        max: usize,
+    },
+    /// One search entry was not absolute.
+    RelativeSearchEntry {
+        /// Zero-based entry position.
+        index: usize,
+        /// The refused entry.
+        entry: PathBuf,
+    },
+    /// One search entry contained lexical parent traversal.
+    ParentTraversalSearchEntry {
+        /// Zero-based entry position.
+        index: usize,
+        /// The refused entry.
+        entry: PathBuf,
+    },
+    /// A candidate could not be inspected or canonicalized.
+    CandidateIo {
+        /// Candidate path at the failing operation.
+        candidate: PathBuf,
+        /// Stable operation identity.
+        operation: &'static str,
+        /// Host I/O diagnostic.
+        err: io::Error,
+    },
+    /// Canonicalization returned an identity unsuitable for provenance.
+    InvalidCanonicalIdentity {
+        /// The canonical path.
+        path: PathBuf,
+        /// Stable reason.
+        reason: &'static str,
+    },
+    /// An explicitly configured path was not a regular executable file.
+    NotExecutable {
+        /// The inspected canonical path.
+        path: PathBuf,
+    },
+    /// An explicitly configured file was not a host-native executable image.
+    UnsupportedExecutableFormat {
+        /// The inspected canonical path.
+        path: PathBuf,
+    },
+    /// Host-native executable-image validation is unsupported on this target.
+    NativeImageUnsupported {
+        /// The target operating-system identity.
+        platform: &'static str,
+    },
+    /// No host-native executable ffmpeg candidate existed in the search list.
+    NotFound,
+}
+
+impl fmt::Display for FfmpegLocatorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedConfiguredName { configured } => write!(
+                f,
+                "relative ffmpeg configuration {:?} is not the fixed ffmpeg search name",
+                configured.as_os_str()
+            ),
+            Self::SearchPathUnavailable => {
+                f.write_str("ffmpeg search requested without an explicit PATH snapshot")
+            }
+            Self::SearchUnsupported { platform } => {
+                write!(f, "ffmpeg PATH search is unsupported on {platform}")
+            }
+            Self::MalformedSearchPath { reason } => {
+                write!(f, "ffmpeg search PATH is malformed: {reason}")
+            }
+            Self::EmptySearchEntry { index } => write!(
+                f,
+                "ffmpeg search PATH entry {index} is empty; cwd lookup is forbidden"
+            ),
+            Self::NonUtf8SearchEntry { index } => write!(
+                f,
+                "ffmpeg search PATH entry {index} is not valid UTF-8; lossy executable provenance is forbidden"
+            ),
+            Self::ControlSearchEntry { index } => write!(
+                f,
+                "ffmpeg search PATH entry {index} contains a control character"
+            ),
+            Self::SearchPathLimit { resource, got, max } => write!(
+                f,
+                "ffmpeg search PATH {resource} {got} exceeds the limit {max}"
+            ),
+            Self::RelativeSearchEntry { index, .. } => {
+                write!(f, "ffmpeg search PATH entry {index} is relative")
+            }
+            Self::ParentTraversalSearchEntry { index, .. } => write!(
+                f,
+                "ffmpeg search PATH entry {index} contains parent traversal"
+            ),
+            Self::CandidateIo {
+                candidate,
+                operation,
+                err,
+            } => write!(
+                f,
+                "cannot {operation} ffmpeg candidate {:?}: {err}",
+                candidate.as_os_str()
+            ),
+            Self::InvalidCanonicalIdentity { path, reason } => {
+                write!(
+                    f,
+                    "invalid canonical ffmpeg identity {:?}: {reason}",
+                    path.as_os_str()
+                )
+            }
+            Self::NotExecutable { path } => write!(
+                f,
+                "configured ffmpeg path {:?} is not a regular executable file",
+                path.as_os_str()
+            ),
+            Self::UnsupportedExecutableFormat { path } => write!(
+                f,
+                "configured ffmpeg path {:?} is not a host-native executable image; interpreter scripts are forbidden",
+                path.as_os_str()
+            ),
+            Self::NativeImageUnsupported { platform } => write!(
+                f,
+                "host-native ffmpeg executable-image validation is unsupported on {platform}"
+            ),
+            Self::NotFound => f.write_str(
+                "no regular host-native executable ffmpeg was found in the validated PATH snapshot",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FfmpegLocatorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CandidateIo { err, .. } => Some(err),
+            _ => None,
+        }
+    }
+}
+
+/// The ffmpeg-only discovery capability.
+///
+/// There is intentionally no requested-program argument and no generic
+/// executable-locator sibling. Implementations either canonicalize an explicit
+/// absolute configuration or resolve the one fixed ffmpeg basename.
+pub trait FfmpegLocator: Send + Sync {
+    /// Resolve one configured ffmpeg value to a canonical absolute identity.
+    ///
+    /// # Errors
+    ///
+    /// [`FfmpegLocatorError`] when the configuration or complete search policy
+    /// is invalid, or no regular executable candidate is available.
+    fn locate_ffmpeg(&self, configured: &Path) -> Result<FfmpegExecutable, FfmpegLocatorError>;
+}
+
+/// Host ffmpeg discovery over a snapshotted, explicitly supplied `PATH`.
+#[derive(Clone, Debug, Default)]
+pub struct StdFfmpegLocator {
+    search_path: Option<OsString>,
+}
+
+impl StdFfmpegLocator {
+    /// Construct the host locator from an explicit native path-list value.
+    #[must_use]
+    pub fn from_search_path(search_path: Option<OsString>) -> Self {
+        Self { search_path }
+    }
+
+    /// Snapshot the host's `PATH` at the outer composition boundary.
+    ///
+    /// This is the only ambient read in executable discovery. The resulting
+    /// capability owns the bytes, so later environment mutation cannot change
+    /// its search policy.
+    #[must_use]
+    pub fn from_host_path() -> Self {
+        Self::from_search_path(std::env::var_os("PATH"))
+    }
+
+    fn validated_search_directories(&self) -> Result<Vec<PathBuf>, FfmpegLocatorError> {
+        let raw = self
+            .search_path
+            .as_deref()
+            .ok_or(FfmpegLocatorError::SearchPathUnavailable)?;
+        validate_raw_search_path(raw)?;
+
+        let mut directories = Vec::new();
+        for (index, entry) in std::env::split_paths(raw).enumerate() {
+            if index >= MAX_FFMPEG_SEARCH_ENTRIES {
+                return Err(FfmpegLocatorError::SearchPathLimit {
+                    resource: "entry count",
+                    got: index.saturating_add(1),
+                    max: MAX_FFMPEG_SEARCH_ENTRIES,
+                });
+            }
+            if entry.as_os_str().is_empty() {
+                return Err(FfmpegLocatorError::EmptySearchEntry { index });
+            }
+            let Some(entry_text) = entry.to_str() else {
+                return Err(FfmpegLocatorError::NonUtf8SearchEntry { index });
+            };
+            if entry_text.chars().any(char::is_control) {
+                return Err(FfmpegLocatorError::ControlSearchEntry { index });
+            }
+            if !entry.is_absolute() {
+                return Err(FfmpegLocatorError::RelativeSearchEntry { index, entry });
+            }
+            if entry
+                .components()
+                .any(|component| component == Component::ParentDir)
+            {
+                return Err(FfmpegLocatorError::ParentTraversalSearchEntry { index, entry });
+            }
+            directories.push(entry);
+        }
+        Ok(directories)
+    }
+}
+
+impl FfmpegLocator for StdFfmpegLocator {
+    fn locate_ffmpeg(&self, configured: &Path) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+        if configured.is_absolute() {
+            return resolve_ffmpeg_candidate(configured.to_path_buf(), false)?.ok_or_else(|| {
+                FfmpegLocatorError::NotExecutable {
+                    path: configured.to_path_buf(),
+                }
+            });
+        }
+        if !is_default_ffmpeg_name(configured) {
+            return Err(FfmpegLocatorError::UnsupportedConfiguredName {
+                configured: configured.to_path_buf(),
+            });
+        }
+
+        // Validate the complete list before touching a single candidate. A
+        // successful early entry must not launder forbidden later policy.
+        let directories = self.validated_search_directories()?;
+        for directory in directories {
+            let candidate = directory.join(ffmpeg_search_leaf());
+            if let Some(executable) = resolve_ffmpeg_candidate(candidate, true)? {
+                return Ok(executable);
+            }
+        }
+        Err(FfmpegLocatorError::NotFound)
+    }
+}
+
+const MAX_FFMPEG_SEARCH_UNITS: usize = 64 * 1024;
+const MAX_FFMPEG_SEARCH_ENTRIES: usize = 256;
+
+#[cfg(any(unix, windows))]
+fn validate_raw_search_path(raw: &OsStr) -> Result<(), FfmpegLocatorError> {
+    let units = os_str_units(raw);
+    if units > MAX_FFMPEG_SEARCH_UNITS {
+        return Err(FfmpegLocatorError::SearchPathLimit {
+            resource: "size",
+            got: units,
+            max: MAX_FFMPEG_SEARCH_UNITS,
+        });
+    }
+    if os_str_contains_nul(raw) {
+        return Err(FfmpegLocatorError::MalformedSearchPath {
+            reason: "contains a NUL code point",
+        });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        if raw
+            .encode_wide()
+            .filter(|unit| *unit == u16::from(b'"'))
+            .count()
+            % 2
+            != 0
+        {
+            return Err(FfmpegLocatorError::MalformedSearchPath {
+                reason: "contains an unbalanced double quote",
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_raw_search_path(_raw: &OsStr) -> Result<(), FfmpegLocatorError> {
+    Err(FfmpegLocatorError::SearchUnsupported {
+        platform: std::env::consts::OS,
+    })
+}
+
+#[cfg(unix)]
+fn os_str_contains_nul(value: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    value.as_bytes().contains(&0)
+}
+
+#[cfg(unix)]
+fn os_str_units(value: &OsStr) -> usize {
+    use std::os::unix::ffi::OsStrExt as _;
+    value.as_bytes().len()
+}
+
+#[cfg(windows)]
+fn os_str_contains_nul(value: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    value.encode_wide().any(|unit| unit == 0)
+}
+
+#[cfg(windows)]
+fn os_str_units(value: &OsStr) -> usize {
+    use std::os::windows::ffi::OsStrExt as _;
+    value.encode_wide().count()
+}
+
+#[cfg(windows)]
+fn is_default_ffmpeg_name(configured: &Path) -> bool {
+    let mut components = configured.components();
+    let Some(Component::Normal(name)) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && name.to_str().is_some_and(|name| {
+            name.eq_ignore_ascii_case("ffmpeg") || name.eq_ignore_ascii_case("ffmpeg.exe")
+        })
+}
+
+#[cfg(not(windows))]
+fn is_default_ffmpeg_name(configured: &Path) -> bool {
+    configured == Path::new("ffmpeg")
+}
+
+#[cfg(windows)]
+fn ffmpeg_search_leaf() -> &'static OsStr {
+    OsStr::new("ffmpeg.exe")
+}
+
+#[cfg(not(windows))]
+fn ffmpeg_search_leaf() -> &'static OsStr {
+    OsStr::new("ffmpeg")
+}
+
+fn resolve_ffmpeg_candidate(
+    candidate: PathBuf,
+    searched: bool,
+) -> Result<Option<FfmpegExecutable>, FfmpegLocatorError> {
+    let canonical = match std::fs::canonicalize(&candidate) {
+        Ok(canonical) => canonical,
+        Err(err)
+            if searched
+                && matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(FfmpegLocatorError::CandidateIo {
+                candidate,
+                operation: "canonicalize",
+                err,
+            });
+        }
+    };
+    if !canonical.is_absolute() {
+        return Err(FfmpegLocatorError::InvalidCanonicalIdentity {
+            path: canonical,
+            reason: "path is not absolute",
+        });
+    }
+    if canonical.to_str().is_none() {
+        return Err(FfmpegLocatorError::InvalidCanonicalIdentity {
+            path: canonical,
+            reason: "path is not valid UTF-8",
+        });
+    }
+    if canonical
+        .to_str()
+        .is_some_and(|path| path.chars().any(char::is_control))
+    {
+        return Err(FfmpegLocatorError::InvalidCanonicalIdentity {
+            path: canonical,
+            reason: "path contains a control character",
+        });
+    }
+    // Reject special files before open: opening a FIFO can block indefinitely.
+    // Safe `std` cannot make the later pathname open atomic with this check, so
+    // a same-identity actor can still race it; the opened handle is rechecked
+    // before any header bytes are trusted.
+    let preopen_metadata =
+        std::fs::metadata(&canonical).map_err(|err| FfmpegLocatorError::CandidateIo {
+            candidate: canonical.clone(),
+            operation: "inspect",
+            err,
+        })?;
+    if !preopen_metadata.is_file() || !metadata_is_executable(&preopen_metadata) {
+        if searched {
+            return Ok(None);
+        }
+        return Err(FfmpegLocatorError::NotExecutable { path: canonical });
+    }
+
+    // Metadata and the executable-container header below are derived from the
+    // same opened file, so a race cannot mix those two observations.
+    let mut file =
+        std::fs::File::open(&canonical).map_err(|err| FfmpegLocatorError::CandidateIo {
+            candidate: canonical.clone(),
+            operation: "open",
+            err,
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|err| FfmpegLocatorError::CandidateIo {
+            candidate: canonical.clone(),
+            operation: "inspect",
+            err,
+        })?;
+    if !metadata.is_file() || !metadata_is_executable(&metadata) {
+        if searched {
+            return Ok(None);
+        }
+        return Err(FfmpegLocatorError::NotExecutable { path: canonical });
+    }
+    if !is_host_native_image(&mut file, metadata.len(), &canonical)? {
+        if searched {
+            return Ok(None);
+        }
+        return Err(FfmpegLocatorError::UnsupportedExecutableFormat { path: canonical });
+    }
+    Ok(Some(FfmpegExecutable {
+        canonical_path: canonical,
+    }))
+}
+
+fn read_exact_or_short(
+    file: &mut std::fs::File,
+    buffer: &mut [u8],
+    path: &Path,
+) -> Result<bool, FfmpegLocatorError> {
+    match file.read_exact(buffer) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(err) => Err(FfmpegLocatorError::CandidateIo {
+            candidate: path.to_path_buf(),
+            operation: "read executable header",
+            err,
+        }),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn is_host_native_image(
+    file: &mut std::fs::File,
+    _file_len: u64,
+    path: &Path,
+) -> Result<bool, FfmpegLocatorError> {
+    let mut magic = [0_u8; 4];
+    Ok(read_exact_or_short(file, &mut magic, path)? && magic == *b"\x7fELF")
+}
+
+#[cfg(target_os = "macos")]
+fn is_host_native_image(
+    file: &mut std::fs::File,
+    _file_len: u64,
+    path: &Path,
+) -> Result<bool, FfmpegLocatorError> {
+    let mut magic = [0_u8; 4];
+    if !read_exact_or_short(file, &mut magic, path)? {
+        return Ok(false);
+    }
+    Ok(matches!(
+        magic,
+        [0xfe, 0xed, 0xfa, 0xce]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+            | [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+            | [0xca, 0xfe, 0xba, 0xbf]
+            | [0xbf, 0xba, 0xfe, 0xca]
+    ))
+}
+
+#[cfg(windows)]
+fn is_host_native_image(
+    file: &mut std::fs::File,
+    file_len: u64,
+    path: &Path,
+) -> Result<bool, FfmpegLocatorError> {
+    use std::io::Seek as _;
+
+    const DOS_HEADER_BYTES: usize = 64;
+    const MAX_PE_HEADER_OFFSET: u64 = 1024 * 1024;
+
+    let mut dos_header = [0_u8; DOS_HEADER_BYTES];
+    if !read_exact_or_short(file, &mut dos_header, path)? || dos_header[..2] != *b"MZ" {
+        return Ok(false);
+    }
+    let pe_offset = u64::from(u32::from_le_bytes([
+        dos_header[0x3c],
+        dos_header[0x3d],
+        dos_header[0x3e],
+        dos_header[0x3f],
+    ]));
+    let Some(pe_end) = pe_offset.checked_add(4) else {
+        return Ok(false);
+    };
+    if pe_offset > MAX_PE_HEADER_OFFSET || pe_end > file_len {
+        return Ok(false);
+    }
+    file.seek(io::SeekFrom::Start(pe_offset))
+        .map_err(|err| FfmpegLocatorError::CandidateIo {
+            candidate: path.to_path_buf(),
+            operation: "seek executable header",
+            err,
+        })?;
+    let mut pe_signature = [0_u8; 4];
+    Ok(read_exact_or_short(file, &mut pe_signature, path)?
+        && matches!(pe_signature, [b'P', b'E', 0, 0]))
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
+fn is_host_native_image(
+    _file: &mut std::fs::File,
+    _file_len: u64,
+    _path: &Path,
+) -> Result<bool, FfmpegLocatorError> {
+    Err(FfmpegLocatorError::NativeImageUnsupported {
+        platform: std::env::consts::OS,
+    })
+}
+
+#[cfg(unix)]
+fn metadata_is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn metadata_is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
 
 /// A complete, self-contained description of one subprocess invocation.
 #[derive(Clone, Debug)]

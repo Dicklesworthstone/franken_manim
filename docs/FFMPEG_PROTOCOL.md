@@ -41,6 +41,40 @@ frames, zero dimensions or frame rate.
 
 ## 2. The D2 invocation protocol
 
+### 2.0 Audited executable discovery
+
+Executable discovery is an fmn-platform capability, not process-runner
+behavior. The host snapshots one explicit native `PATH` value when it
+constructs `FfmpegLocator`; neither the locator nor any consumer rereads the
+environment. An absolute configured path bypasses `PATH` and is canonicalized
+exactly as supplied. A relative configuration may be only the fixed bare
+`ffmpeg` name (`ffmpeg.exe` is also accepted on Windows).
+
+Before searching, the locator validates the complete path list. Empty entries
+(which conventional lookup can reinterpret as the current directory),
+relative entries, parent traversal, non-UTF-8 or control-bearing entries,
+embedded NUL, malformed Windows quoting, and bounded-input overruns reject the
+whole policy before any candidate is inspected. Search order is otherwise
+preserved. A present directory, broken link, non-executable file, or
+interpreter script is skipped; the first regular host-native executable image
+wins. Linux-family hosts require ELF, macOS accepts the declared thin/fat
+Mach-O magics, and Windows validates bounded DOS/PE headers. Other hosts refuse
+discovery until their native image format is explicitly governed. Windows
+search tests exactly `ffmpeg.exe` in each validated directory and never
+consults `PATHEXT`, the application/current/system directories, or
+command-interpreter formats.
+
+Symlinks are supported for ordinary package-manager/version-manager layouts,
+but the issued `FfmpegExecutable` contains their canonical target. Retargeting
+the searched symlink afterward therefore cannot redirect the issued path.
+This is still selection-time format validation over a pathname, not a byte
+identity or proof of authorship: fmn-output owns the hash/private-copy binding
+below and must revalidate the exact private copy in the complete D2 boundary.
+Its resolution probe requires a strict UTF-8 first line that begins exactly
+`ffmpeg version ` and contains no control characters. Native-image shape plus
+that protocol response proves only that the selected bytes speak the governed
+surface; it is not cryptographic authentication of the ffmpeg project.
+
 Every invocation:
 
 1. **argv-only, private-copy binding.** The configured tool is

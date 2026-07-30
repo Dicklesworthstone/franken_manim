@@ -334,16 +334,28 @@ impl FfmpegTool {
                 ),
             });
         }
-        let version = String::from_utf8_lossy(&outcome.stdout)
-            .lines()
+        let first_line = outcome
+            .stdout
+            .split(|byte| *byte == b'\n')
             .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+            .unwrap_or_default();
+        let first_line = std::str::from_utf8(first_line)
+            .map_err(|_| BoundaryError::ProbeFailed("-version output is not valid UTF-8"))?;
+        let version = first_line.strip_suffix('\r').unwrap_or(first_line);
         if version.is_empty() {
             return Err(BoundaryError::ProbeFailed("-version produced no output"));
         }
-        tool.version = version;
+        if !version.starts_with("ffmpeg version ") {
+            return Err(BoundaryError::ProbeFailed(
+                "-version first line is not an ffmpeg version banner",
+            ));
+        }
+        if version.chars().any(char::is_control) {
+            return Err(BoundaryError::ProbeFailed(
+                "-version first line contains a control character",
+            ));
+        }
+        tool.version = version.to_owned();
         Ok(tool)
     }
 

@@ -1419,10 +1419,10 @@ fn strict_path_text<'a>(path: &'a Path, label: &str) -> Result<&'a str, CliError
 /// as unavailable records; only configuration or plan derivation failures
 /// abort collection.
 ///
-/// The ffmpeg path must already be absolute. Resolving a bare executable name
-/// through ambient `PATH` would bypass the capability/input-closure doctrine,
-/// so it remains an explicit unavailable state until the platform layer owns
-/// an audited executable locator.
+/// ffmpeg discovery is delegated to the injected ffmpeg-only platform
+/// capability. That capability may canonicalize an explicit absolute path or
+/// search its snapshotted, fully validated `PATH`; this function never reads
+/// ambient executable-search state.
 ///
 /// # Errors
 ///
@@ -1430,6 +1430,7 @@ fn strict_path_text<'a>(path: &'a Path, label: &str) -> Result<&'a str, CliError
 pub fn collect_doctor_snapshot(
     fs: &dyn FileSystem,
     runner: &dyn fmn_platform::process::ProcessRunner,
+    locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &DoctorCommand,
 ) -> Result<DoctorSnapshot, CliError> {
     let config = resolve_common_config(fs, &command.common)?;
@@ -1543,7 +1544,7 @@ pub fn collect_doctor_snapshot(
     };
 
     let ffmpeg_path = PathBuf::from(&config.file_writer.ffmpeg_bin);
-    let ffmpeg = probe_ffmpeg(runner, &ffmpeg_path);
+    let ffmpeg = locate_and_probe_ffmpeg(locator, runner, &ffmpeg_path);
     let cache = cache_report_from_resolution(
         fs,
         fmn_cache::resolve_host_cache_root(&config.directories.cache),
@@ -1576,6 +1577,35 @@ pub fn collect_doctor_snapshot(
         math_packs,
         certification: certification_report(),
     })
+}
+
+fn locate_and_probe_ffmpeg(
+    locator: &dyn fmn_platform::process::FfmpegLocator,
+    runner: &dyn fmn_platform::process::ProcessRunner,
+    configured: &Path,
+) -> FfmpegReport {
+    let executable = match locator.locate_ffmpeg(configured) {
+        Ok(executable) => executable,
+        Err(error) => {
+            return FfmpegReport::Unavailable {
+                attempted: configured.to_path_buf(),
+                reason: error.to_string(),
+                alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
+            };
+        }
+    };
+    match probe_ffmpeg(runner, executable.canonical_path()) {
+        available @ FfmpegReport::Available { .. } => available,
+        FfmpegReport::Unavailable {
+            reason,
+            alternative,
+            ..
+        } => FfmpegReport::Unavailable {
+            attempted: configured.to_path_buf(),
+            reason,
+            alternative,
+        },
+    }
 }
 
 fn cache_report_from_resolution(
@@ -1620,7 +1650,7 @@ fn probe_ffmpeg(runner: &dyn fmn_platform::process::ProcessRunner, path: &Path) 
     if !path.is_absolute() {
         return FfmpegReport::Unavailable {
             attempted: path.to_path_buf(),
-            reason: "configured ffmpeg name is relative; an audited absolute-path locator is not yet available"
+            reason: "ffmpeg probe requires a canonical absolute identity from fmn-platform"
                 .to_owned(),
             alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
         };
@@ -1990,8 +2020,8 @@ impl DoctorSnapshot {
             } => {
                 let _ = writeln!(
                     out,
-                    "ffmpeg: unavailable at {} ({reason})",
-                    attempted.display()
+                    "ffmpeg: unavailable at {:?} ({reason})",
+                    attempted.as_os_str()
                 );
                 let _ = writeln!(out, "alternative: {alternative}");
             }
@@ -2069,6 +2099,7 @@ pub fn run_with_capabilities<I, S>(
     args: I,
     fs: &dyn FileSystem,
     runner: &dyn fmn_platform::process::ProcessRunner,
+    locator: &dyn fmn_platform::process::FfmpegLocator,
 ) -> RunOutput
 where
     I: IntoIterator<Item = S>,
@@ -2099,7 +2130,8 @@ where
         } else {
             format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
         }),
-        Invocation::Doctor(command) => match collect_doctor_snapshot(fs, runner, &command) {
+        Invocation::Doctor(command) => match collect_doctor_snapshot(fs, runner, locator, &command)
+        {
             Ok(snapshot) => {
                 let stdout = if command.common.robot {
                     match snapshot.to_ndjson() {
@@ -2230,10 +2262,12 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    let locator = fmn_platform::process::StdFfmpegLocator::from_host_path();
     run_with_capabilities(
         args,
         &fmn_platform::fs::StdFs,
         &fmn_platform::process::StdProcessRunner,
+        &locator,
     )
 }
 
@@ -2475,6 +2509,51 @@ mod tests {
     use super::*;
     use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
     use fmn_platform::fs::VirtualFs;
+
+    fn no_ffmpeg_locator() -> fmn_platform::process::StdFfmpegLocator {
+        fmn_platform::process::StdFfmpegLocator::default()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    struct SuccessfulFfmpegProbeRunner;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    impl fmn_platform::process::ProcessRunner for SuccessfulFfmpegProbeRunner {
+        fn start(
+            &self,
+            spec: &fmn_platform::process::ProcessSpec,
+            _cancellation: fmn_platform::process::ProcessCancellation,
+            _stdin_limits: fmn_platform::process::ProcessStdinLimits,
+        ) -> Result<
+            Box<dyn fmn_platform::process::RunningProcess>,
+            fmn_platform::process::ProcessError,
+        > {
+            Err(fmn_platform::process::ProcessError::NotScripted {
+                program: spec.program.clone(),
+            })
+        }
+
+        fn run(
+            &self,
+            spec: &fmn_platform::process::ProcessSpec,
+        ) -> Result<fmn_platform::process::ProcessOutcome, fmn_platform::process::ProcessError>
+        {
+            let stdout = if spec.argv == ["-version"] {
+                b"ffmpeg version cli-locator-fixture\n".to_vec()
+            } else if spec.argv == ["-hide_banner", "-encoders"] {
+                b"Encoders:\n ------\n V....D h264_nvenc fixture\n".to_vec()
+            } else {
+                return Err(fmn_platform::process::ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                });
+            };
+            Ok(fmn_platform::process::ProcessOutcome {
+                termination: fmn_platform::process::ProcessTermination::Exited(Some(0)),
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+    }
 
     #[cfg(unix)]
     struct IdentityChangingProbeRunner {
@@ -3130,8 +3209,12 @@ mod tests {
     fn production_doctor_reports_degraded_capabilities_without_guessing() {
         let fs = VirtualFs::new();
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output =
-            run_with_capabilities(["doctor", "--robot", "--cache-dir", "/cache"], &fs, &runner);
+        let output = run_with_capabilities(
+            ["doctor", "--robot", "--cache-dir", "/cache"],
+            &fs,
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(output.code, 0);
         assert!(output.stderr.is_empty());
         assert_eq!(output.stdout.lines().count(), 7);
@@ -3149,6 +3232,59 @@ mod tests {
         );
         assert!(output.stdout.contains("\"kind\":\"fonts\""));
         assert!(output.stdout.contains("\"complete\":false"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn doctor_resolves_the_default_ffmpeg_name_through_the_injected_locator() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fmn-cli-ffmpeg-locator-{}-{sequence}",
+            std::process::id()
+        ));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).expect("create locator fixture");
+        let source = bin.join("ffmpeg");
+        let native_fixture: &[u8] = if cfg!(target_os = "macos") {
+            b"\xcf\xfa\xed\xfecli locator executable"
+        } else {
+            b"\x7fELFcli locator executable"
+        };
+        std::fs::write(&source, native_fixture).expect("write locator executable");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755))
+            .expect("mark locator executable");
+        let search_path = std::env::join_paths([bin.as_path()]).expect("fixture PATH");
+        let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(Some(search_path));
+        let canonical = std::fs::canonicalize(&source).expect("canonical source");
+        let canonical = canonical.to_str().expect("fixture path is UTF-8");
+        let fs = VirtualFs::new();
+
+        let output = run_with_capabilities(
+            ["doctor", "--robot", "--cache-dir", "/cache"],
+            &fs,
+            &SuccessfulFfmpegProbeRunner,
+            &locator,
+        );
+
+        assert_eq!(output.code, 0);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains(&format!(
+            "\"kind\":\"ffmpeg\",\"available\":true,\"path\":{}",
+            json_string(canonical)
+        )));
+        assert!(
+            output
+                .stdout
+                .contains("\"ffmpeg_version\":\"ffmpeg version cli-locator-fixture\"")
+        );
+        assert!(
+            output
+                .stdout
+                .contains("\"hardware_encoders\":[\"h264_nvenc\"]")
+        );
     }
 
     #[test]
@@ -3170,8 +3306,8 @@ mod tests {
             },
             require_ffmpeg: false,
         };
-        let snapshot =
-            collect_doctor_snapshot(&fs, &runner, &command).expect("doctor snapshot resolves");
+        let snapshot = collect_doctor_snapshot(&fs, &runner, &no_ffmpeg_locator(), &command)
+            .expect("doctor snapshot resolves");
         assert!(matches!(
             snapshot.cache,
             CacheReport::Configured { ref root, .. } if root == &expected
@@ -3255,6 +3391,7 @@ mod tests {
             ["--clear-cache", "--cache-dir", root_text, "--robot"],
             &virtual_fs,
             &runner,
+            &no_ffmpeg_locator(),
         );
         assert_eq!(refused.code, exit_code("capability"));
         assert!(refused.stderr.is_empty());
@@ -3317,6 +3454,7 @@ mod tests {
             ["doctor", "--robot", "--cache-dir", relative_text],
             &virtual_fs,
             &runner,
+            &no_ffmpeg_locator(),
         );
         assert_eq!(doctor.code, 0);
         let absolute_text = absolute.to_str().expect("test path is UTF-8");
@@ -3375,6 +3513,7 @@ mod tests {
             ["doctor", "--robot", "--config_file", "/cfg/metal.yml"],
             &fs,
             &runner,
+            &no_ffmpeg_locator(),
         );
         assert_eq!(output.code, 4);
         assert!(output.stderr.is_empty());
@@ -3389,6 +3528,7 @@ mod tests {
             ["doctor", "--robot", "--config_file", "/cfg/invalid.yml"],
             &fs,
             &runner,
+            &no_ffmpeg_locator(),
         );
         assert_eq!(output.code, 3);
         assert!(output.stderr.is_empty());
@@ -3410,6 +3550,7 @@ mod tests {
             ["doctor", "--robot", "--config_file", "/cfg/odd-nv12.yml"],
             &fs,
             &runner,
+            &no_ffmpeg_locator(),
         );
         assert_eq!(output.code, 3);
         assert!(output.stderr.is_empty());
@@ -3421,7 +3562,12 @@ mod tests {
     fn required_ffmpeg_returns_capability_after_the_robot_report() {
         let fs = VirtualFs::new();
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output = run_with_capabilities(["doctor", "--robot", "--require-ffmpeg"], &fs, &runner);
+        let output = run_with_capabilities(
+            ["doctor", "--robot", "--require-ffmpeg"],
+            &fs,
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(output.code, 4);
         assert!(output.stderr.is_empty());
         assert_eq!(output.stdout.lines().count(), 8);
@@ -3434,7 +3580,8 @@ mod tests {
     fn batch_dispatch_reports_the_compiled_feature_state() {
         let fs = VirtualFs::new();
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output = run_with_capabilities(["batch", "--robot"], &fs, &runner);
+        let output =
+            run_with_capabilities(["batch", "--robot"], &fs, &runner, &no_ffmpeg_locator());
         assert_eq!(output.code, 4);
         assert!(output.stderr.is_empty());
         if cfg!(feature = "batch") {
@@ -3452,14 +3599,20 @@ mod tests {
     fn robot_errors_never_mix_human_stderr_or_decoration() {
         let fs = VirtualFs::new();
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output = run_with_capabilities(["--robot", "-l", "-m"], &fs, &runner);
+        let output =
+            run_with_capabilities(["--robot", "-l", "-m"], &fs, &runner, &no_ffmpeg_locator());
         assert_eq!(output.code, 2);
         assert!(output.stderr.is_empty());
         assert_eq!(output.stdout.lines().count(), 1);
         assert!(output.stdout.starts_with("{\"schema\":\"fmn.cli\""));
         assert!(output.stdout.contains("\"rule\":\"quality-exclusive\""));
 
-        let output = run_with_capabilities(["doctor", "--", "--robot"], &fs, &runner);
+        let output = run_with_capabilities(
+            ["doctor", "--", "--robot"],
+            &fs,
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(output.code, 2);
         assert!(output.stdout.is_empty());
         assert!(output.stderr.starts_with("fmn: "));
@@ -3470,7 +3623,7 @@ mod tests {
         let fs = VirtualFs::new();
         let runner = fmn_platform::process::ScriptedRunner::new();
 
-        let help = run_with_capabilities(["--help"], &fs, &runner);
+        let help = run_with_capabilities(["--help"], &fs, &runner, &no_ffmpeg_locator());
         assert_eq!(help.code, 0);
         assert!(help.stderr.is_empty());
         assert!(
@@ -3479,7 +3632,8 @@ mod tests {
         );
         assert!(help.stdout.contains("--format"));
 
-        let explicit_render_help = run_with_capabilities(["render", "--help"], &fs, &runner);
+        let explicit_render_help =
+            run_with_capabilities(["render", "--help"], &fs, &runner, &no_ffmpeg_locator());
         assert_eq!(explicit_render_help.code, 0);
         assert!(
             explicit_render_help
@@ -3487,7 +3641,7 @@ mod tests {
                 .starts_with("Usage: fmn render [OPTIONS] [FILE] [SCENE ...]\n")
         );
 
-        let help = run_with_capabilities(["doctor", "--help"], &fs, &runner);
+        let help = run_with_capabilities(["doctor", "--help"], &fs, &runner, &no_ffmpeg_locator());
         assert_eq!(help.code, 0);
         assert!(help.stderr.is_empty());
         assert!(help.stdout.starts_with("Usage: fmn doctor [OPTIONS]\n"));
@@ -3499,7 +3653,8 @@ mod tests {
                 .is_some_and(|line| { line.contains("[FILE]") || line.contains("[SCENE") })
         );
 
-        let version = run_with_capabilities(["--robot", "--version"], &fs, &runner);
+        let version =
+            run_with_capabilities(["--robot", "--version"], &fs, &runner, &no_ffmpeg_locator());
         assert_eq!(version.code, 0);
         assert!(version.stderr.is_empty());
         assert_eq!(
@@ -3510,7 +3665,12 @@ mod tests {
             )
         );
 
-        let robot_help = run_with_capabilities(["doctor", "--robot", "--help"], &fs, &runner);
+        let robot_help = run_with_capabilities(
+            ["doctor", "--robot", "--help"],
+            &fs,
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(robot_help.code, 0);
         assert!(robot_help.stderr.is_empty());
         assert!(robot_help.stdout.contains("\"kind\":\"exit_code\""));

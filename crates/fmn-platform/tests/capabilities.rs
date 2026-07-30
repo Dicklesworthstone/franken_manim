@@ -7,9 +7,10 @@
 
 use fmn_platform::fs::{ATOMIC_DIRECTORY_COMPLETE_LEAF, FileSystem, FsNodeKind, StdFs, VirtualFs};
 use fmn_platform::process::{
-    ProcessCancellation, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStdinLimits,
-    ProcessTermination, ScriptedRunner,
+    FfmpegLocator, FfmpegLocatorError, ProcessCancellation, ProcessOutcome, ProcessRunner,
+    ProcessSpec, ProcessStdinLimits, ProcessTermination, ScriptedRunner, StdFfmpegLocator,
 };
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,432 @@ fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("caps_{name}"));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+fn locator_scratch(name: &str) -> std::io::Result<PathBuf> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    for _ in 0..128 {
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "ffmpeg_locator_{name}_{}_{sequence}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not claim a unique ffmpeg locator scratch directory",
+    ))
+}
+
+fn write_executable_bytes(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).expect("write executable fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark fixture executable");
+    }
+}
+
+fn native_executable_fixture() -> Vec<u8> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        return b"\x7fELFffmpeg locator fixture".to_vec();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return b"\xcf\xfa\xed\xfeffmpeg locator fixture".to_vec();
+    }
+    #[cfg(windows)]
+    {
+        let mut bytes = vec![0_u8; 0x84];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        return bytes;
+    }
+    #[allow(unreachable_code)]
+    b"unsupported host executable fixture".to_vec()
+}
+
+fn write_executable(path: &Path) {
+    write_executable_bytes(path, &native_executable_fixture());
+}
+
+#[test]
+fn ffmpeg_locator_canonicalizes_explicit_identity_without_consulting_path() {
+    let root = locator_scratch("explicit").expect("claim explicit locator scratch");
+    let tool = root.join("custom-tool-name");
+    write_executable(&tool);
+    let locator = StdFfmpegLocator::from_search_path(Some(OsString::from(":relative")));
+
+    let resolved = locator
+        .locate_ffmpeg(&tool)
+        .expect("absolute configuration bypasses PATH");
+    assert_eq!(
+        resolved.canonical_path(),
+        std::fs::canonicalize(&tool)
+            .expect("canonical fixture")
+            .as_path()
+    );
+
+    #[cfg(unix)]
+    {
+        let not_executable = root.join("not-executable");
+        std::fs::write(&not_executable, b"plain file").expect("write plain file");
+        assert!(matches!(
+            locator.locate_ffmpeg(&not_executable),
+            Err(FfmpegLocatorError::NotExecutable { .. })
+        ));
+    }
+}
+
+#[test]
+fn ffmpeg_locator_validates_the_complete_search_policy_before_lookup() {
+    let root = locator_scratch("policy").expect("claim policy locator scratch");
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).expect("create search directory");
+    write_executable(&bin.join(if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }));
+
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::SearchPathUnavailable)
+    ));
+
+    let empty_cases = [
+        (
+            std::env::join_paths([Path::new(""), bin.as_path()]).expect("leading-empty PATH"),
+            0,
+        ),
+        (
+            std::env::join_paths([bin.as_path(), Path::new("")]).expect("trailing-empty PATH"),
+            1,
+        ),
+        (
+            std::env::join_paths([bin.as_path(), Path::new(""), bin.as_path()])
+                .expect("middle-empty PATH"),
+            1,
+        ),
+    ];
+    for (search_path, expected_index) in empty_cases {
+        assert!(matches!(
+            StdFfmpegLocator::from_search_path(Some(search_path))
+                .locate_ffmpeg(Path::new("ffmpeg")),
+            Err(FfmpegLocatorError::EmptySearchEntry { index })
+                if index == expected_index
+        ));
+    }
+
+    let relative =
+        std::env::join_paths([bin.as_path(), Path::new("relative")]).expect("relative-entry PATH");
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(relative)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::RelativeSearchEntry { index: 1, .. })
+    ));
+
+    let parent_traversal = root.join("elsewhere").join("..");
+    let parent = std::env::join_paths([bin.as_path(), parent_traversal.as_path()])
+        .expect("parent-entry PATH");
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(parent)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::ParentTraversalSearchEntry { index: 1, .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn ffmpeg_locator_skips_present_non_executables_in_search_order() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    let root = locator_scratch("nonexec").expect("claim nonexec locator scratch");
+    let broken = root.join("broken");
+    let directory = root.join("directory");
+    let special = root.join("special");
+    let first = root.join("first");
+    let second = root.join("second");
+    std::fs::create_dir(&broken).expect("broken-link search directory");
+    std::fs::create_dir(&directory).expect("directory-target search directory");
+    std::fs::create_dir(&special).expect("special-file search directory");
+    std::fs::create_dir(&first).expect("first search directory");
+    std::fs::create_dir(&second).expect("second search directory");
+    symlink(root.join("missing-target"), broken.join("ffmpeg")).expect("broken candidate link");
+    symlink(&root, directory.join("ffmpeg")).expect("directory candidate link");
+    let _socket =
+        UnixListener::bind(special.join("ffmpeg")).expect("special-file candidate socket");
+    std::fs::write(first.join("ffmpeg"), native_executable_fixture())
+        .expect("non-executable native candidate");
+    write_executable(&second.join("ffmpeg"));
+    let search_path = std::env::join_paths([
+        broken.as_path(),
+        directory.as_path(),
+        special.as_path(),
+        first.as_path(),
+        second.as_path(),
+    ])
+    .expect("ordered PATH");
+    let locator = StdFfmpegLocator::from_search_path(Some(search_path));
+
+    let resolved = locator
+        .locate_ffmpeg(Path::new("ffmpeg"))
+        .expect("later executable candidate");
+    assert_eq!(
+        resolved.canonical_path(),
+        std::fs::canonicalize(second.join("ffmpeg"))
+            .expect("canonical second candidate")
+            .as_path()
+    );
+
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(first.join("ffmpeg"), std::fs::Permissions::from_mode(0o755))
+        .expect("promote first candidate");
+    assert_eq!(
+        locator
+            .locate_ffmpeg(Path::new("ffmpeg"))
+            .expect("source-order candidate")
+            .canonical_path(),
+        std::fs::canonicalize(first.join("ffmpeg"))
+            .expect("canonical first candidate")
+            .as_path(),
+        "the first valid candidate must win"
+    );
+    assert!(matches!(
+        locator.locate_ffmpeg(Path::new("ffprobe")),
+        Err(FfmpegLocatorError::UnsupportedConfiguredName { .. })
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ffmpeg_locator_refuses_interpreter_wrappers_and_skips_them_during_search() {
+    let root = locator_scratch("wrapper").expect("claim wrapper locator scratch");
+    let wrapper_bin = root.join("wrapper-bin");
+    let native_bin = root.join("native-bin");
+    std::fs::create_dir(&wrapper_bin).expect("create wrapper search directory");
+    std::fs::create_dir(&native_bin).expect("create native search directory");
+    let wrapper = wrapper_bin.join("ffmpeg");
+    write_executable_bytes(&wrapper, b"#!/bin/sh\nprintf 'ffmpeg version wrapper\\n'\n");
+    let native = native_bin.join("ffmpeg");
+    write_executable(&native);
+
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&wrapper),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let search_path = std::env::join_paths([wrapper_bin.as_path(), native_bin.as_path()])
+        .expect("ordered wrapper/native PATH");
+    let resolved = StdFfmpegLocator::from_search_path(Some(search_path))
+        .locate_ffmpeg(Path::new("ffmpeg"))
+        .expect("search skips an interpreter wrapper");
+    assert_eq!(
+        resolved.canonical_path(),
+        std::fs::canonicalize(native)
+            .expect("canonical native fixture")
+            .as_path()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ffmpeg_locator_canonicalizes_symlinks_and_resists_later_retargeting() {
+    use std::os::unix::fs::symlink;
+
+    let root = locator_scratch("symlink").expect("claim symlink locator scratch");
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).expect("search directory");
+    let first = root.join("ffmpeg-first");
+    let second = root.join("ffmpeg-second");
+    write_executable(&first);
+    write_executable(&second);
+    let searched = bin.join("ffmpeg");
+    symlink(&first, &searched).expect("first ffmpeg symlink");
+    let search_path = std::env::join_paths([bin.as_path()]).expect("search PATH");
+    let locator = StdFfmpegLocator::from_search_path(Some(search_path));
+
+    let first_resolution = locator
+        .locate_ffmpeg(Path::new("ffmpeg"))
+        .expect("resolve first target");
+    let displaced = bin.join("ffmpeg-original-link");
+    std::fs::rename(&searched, &displaced).expect("displace original symlink");
+    symlink(&second, &searched).expect("retarget ffmpeg symlink");
+
+    assert_eq!(
+        first_resolution.canonical_path(),
+        std::fs::canonicalize(&first)
+            .expect("canonical first target")
+            .as_path(),
+        "retargeting the search symlink must not change an issued identity"
+    );
+    assert_eq!(
+        locator
+            .locate_ffmpeg(Path::new("ffmpeg"))
+            .expect("resolve replacement target")
+            .canonical_path(),
+        std::fs::canonicalize(&second)
+            .expect("canonical second target")
+            .as_path()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ffmpeg_locator_rejects_hostile_bytes_and_never_interprets_shell_text() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let with_nul = OsString::from_vec(b"/tmp/fmn\0hostile".to_vec());
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(with_nul)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::MalformedSearchPath { .. })
+    ));
+
+    let non_utf8 = OsString::from_vec(b"/tmp/fmn-\xff".to_vec());
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(non_utf8)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::NonUtf8SearchEntry { index: 0 })
+    ));
+
+    let with_control = OsString::from("/tmp/fmn-\n-hostile");
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(with_control)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::ControlSearchEntry { index: 0 })
+    ));
+
+    let oversized = OsString::from(format!("/tmp/{}", "x".repeat(70 * 1024)));
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(oversized)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::SearchPathLimit {
+            resource: "size",
+            ..
+        })
+    ));
+
+    let root = locator_scratch("shell_text").expect("claim hostile locator scratch");
+    let marker = root.join("shell-was-interpreted");
+    let hostile = OsString::from(format!("{};touch {}", root.display(), marker.display()));
+    assert!(matches!(
+        StdFfmpegLocator::from_search_path(Some(hostile)).locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::NotFound)
+    ));
+    assert!(
+        !marker.exists(),
+        "PATH bytes must be filesystem text, never a shell program"
+    );
+
+    let control_target = root.join("ffmpeg\ncontrol");
+    write_executable(&control_target);
+    assert!(matches!(
+        StdFfmpegLocator::default().locate_ffmpeg(&control_target),
+        Err(FfmpegLocatorError::InvalidCanonicalIdentity { .. })
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_ffmpeg_search_uses_only_the_fixed_exe_leaf() {
+    let root = locator_scratch("windows_name").expect("claim Windows locator scratch");
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).expect("search directory");
+    let tool = bin.join("ffmpeg.exe");
+    write_executable(&tool);
+    let search_path = std::env::join_paths([bin.as_path()]).expect("search PATH");
+    let locator = StdFfmpegLocator::from_search_path(Some(search_path));
+
+    for configured in ["ffmpeg", "FFMPEG", "ffmpeg.exe", "FFMPEG.EXE"] {
+        assert_eq!(
+            locator
+                .locate_ffmpeg(Path::new(configured))
+                .expect("fixed Windows name")
+                .canonical_path(),
+            std::fs::canonicalize(&tool)
+                .expect("canonical ffmpeg.exe")
+                .as_path()
+        );
+    }
+    assert!(matches!(
+        locator.locate_ffmpeg(Path::new("ffmpeg.com")),
+        Err(FfmpegLocatorError::UnsupportedConfiguredName { .. })
+    ));
+
+    let malformed = StdFfmpegLocator::from_search_path(Some(OsString::from("\"C:\\bin")));
+    assert!(matches!(
+        malformed.locate_ffmpeg(Path::new("ffmpeg")),
+        Err(FfmpegLocatorError::MalformedSearchPath { .. })
+    ));
+
+    for extension in ["bat", "cmd"] {
+        let wrapper = root.join(format!("custom-wrapper.{extension}"));
+        write_executable_bytes(&wrapper, b"@echo off\r\necho ffmpeg version wrapper\r\n");
+        assert!(matches!(
+            locator.locate_ffmpeg(&wrapper),
+            Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+        ));
+    }
+
+    let truncated = root.join("truncated-mz.exe");
+    write_executable_bytes(&truncated, b"MZ");
+    assert!(matches!(
+        locator.locate_ffmpeg(&truncated),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let out_of_file = root.join("out-of-file-pe.exe");
+    let mut out_of_file_bytes = vec![0_u8; 64];
+    out_of_file_bytes[..2].copy_from_slice(b"MZ");
+    out_of_file_bytes[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+    write_executable_bytes(&out_of_file, &out_of_file_bytes);
+    assert!(matches!(
+        locator.locate_ffmpeg(&out_of_file),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+
+    let bad_signature = root.join("bad-pe-signature.exe");
+    let mut bad_signature_bytes = native_executable_fixture();
+    bad_signature_bytes[0x80..0x84].copy_from_slice(b"PX\0\0");
+    write_executable_bytes(&bad_signature, &bad_signature_bytes);
+    assert!(matches!(
+        locator.locate_ffmpeg(&bad_signature),
+        Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_ffmpeg_locator_accepts_every_supported_mach_o_container_magic() {
+    let root = locator_scratch("mach_o_magics").expect("claim Mach-O locator scratch");
+    let magics = [
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+        [0xbe, 0xba, 0xfe, 0xca],
+        [0xca, 0xfe, 0xba, 0xbf],
+        [0xbf, 0xba, 0xfe, 0xca],
+    ];
+    for (index, magic) in magics.into_iter().enumerate() {
+        let candidate = root.join(format!("ffmpeg-magic-{index}"));
+        write_executable_bytes(&candidate, &magic);
+        assert_eq!(
+            StdFfmpegLocator::default()
+                .locate_ffmpeg(&candidate)
+                .expect("accepted Mach-O container magic")
+                .canonical_path(),
+            std::fs::canonicalize(candidate)
+                .expect("canonical Mach-O fixture")
+                .as_path()
+        );
+    }
 }
 
 #[test]

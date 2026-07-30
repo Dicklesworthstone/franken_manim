@@ -444,6 +444,96 @@ mod private_boundary {
     }
 
     #[test]
+    fn successful_non_ffmpeg_version_banner_is_refused() {
+        let (dir, _gate) = scratch("wrong-version-banner");
+        let tool_path = dir.join("custom-tool-name");
+        std::fs::write(&tool_path, FAKE_TOOL_BYTES).unwrap();
+        let mut runner = ScriptedRunner::new();
+        runner.script(
+            probe_bound_tool(&dir, 0),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: b" ffmpeg version leading-space-spoof\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let error = FfmpegTool::resolve(&tool_path, &runner, &dir)
+            .expect_err("an exit-zero non-ffmpeg banner must not issue a tool");
+        assert!(matches!(
+            error,
+            BoundaryError::ProbeFailed("-version first line is not an ffmpeg version banner")
+        ));
+        assert_eq!(runner.runs().len(), 1);
+    }
+
+    #[test]
+    fn version_banner_requires_strict_utf8_only_on_the_first_line() {
+        let (dir, _gate) = scratch("version-banner-utf8");
+        let tool_path = dir.join("custom-tool-name");
+        std::fs::write(&tool_path, FAKE_TOOL_BYTES).unwrap();
+        let mut runner = ScriptedRunner::new();
+        runner.script(
+            probe_bound_tool(&dir, 0),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: b"ffmpeg version strict-first-line\ntrailing-\xff".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let tool = FfmpegTool::resolve(&tool_path, &runner, &dir)
+            .expect("only the provenance-bearing first line must be UTF-8");
+        assert_eq!(tool.version(), "ffmpeg version strict-first-line");
+    }
+
+    #[test]
+    fn non_utf8_version_banner_is_refused() {
+        let (dir, _gate) = scratch("non-utf8-version-banner");
+        let tool_path = dir.join("custom-tool-name");
+        std::fs::write(&tool_path, FAKE_TOOL_BYTES).unwrap();
+        let mut runner = ScriptedRunner::new();
+        runner.script(
+            probe_bound_tool(&dir, 0),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: b"ffmpeg version hostile-\xff\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let error = FfmpegTool::resolve(&tool_path, &runner, &dir)
+            .expect_err("a non-UTF-8 provenance banner must be refused");
+        assert!(matches!(
+            error,
+            BoundaryError::ProbeFailed("-version output is not valid UTF-8")
+        ));
+    }
+
+    #[test]
+    fn control_bearing_version_banner_is_refused() {
+        let (dir, _gate) = scratch("control-version-banner");
+        let tool_path = dir.join("custom-tool-name");
+        std::fs::write(&tool_path, FAKE_TOOL_BYTES).unwrap();
+        let mut runner = ScriptedRunner::new();
+        runner.script(
+            probe_bound_tool(&dir, 0),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: b"ffmpeg version hostile-\x1b[2J\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let error = FfmpegTool::resolve(&tool_path, &runner, &dir)
+            .expect_err("a control-bearing provenance banner must be refused");
+        assert!(matches!(
+            error,
+            BoundaryError::ProbeFailed("-version first line contains a control character")
+        ));
+    }
+
+    #[test]
     fn non_relocatable_ffmpeg_is_a_named_capability_refusal() {
         let (dir, _gate) = scratch("non-relocatable");
         let tool_path = dir.join("ffmpeg");
