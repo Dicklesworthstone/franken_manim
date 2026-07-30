@@ -231,7 +231,7 @@ fn the_blocker_actually_blocks() {
     // past any plausible engine-arithmetic drift, and large enough to move
     // all three metrics.
     let row = certified.layout().width() as usize * 8;
-    for bytes in altered.plane_mut(0)[..row].chunks_exact_mut(2) {
+    for bytes in altered.plane_mut(0)[..row].as_chunks_mut::<2>().0 {
         bytes.copy_from_slice(&0x3C00_u16.to_le_bytes());
     }
 
