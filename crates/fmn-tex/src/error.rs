@@ -22,6 +22,13 @@ pub enum TexError {
         /// The content id that failed.
         content_id: &'static str,
     },
+    /// A submobject primitive index outside the typeset's primitive
+    /// lists — a consumer wiring bug, reported precisely (fm-p5d's
+    /// [`crate::TexEngine::resolve_prim`]).
+    BadPrim {
+        /// Which index and how many primitives exist.
+        what: String,
+    },
     /// The bundled faces failed to load (build corruption).
     Faces {
         /// The underlying failure.
@@ -40,6 +47,7 @@ impl fmt::Display for TexError {
         match self {
             Self::Math(e) => e.fmt(f),
             Self::Pack(e) => e.fmt(f),
+            Self::BadPrim { what } => write!(f, "submobject primitive out of range: {what}"),
             Self::UnknownPack { content_id } => write!(
                 f,
                 "pack content id {content_id:?} names no fmd-math pack (registry/pack drift)"

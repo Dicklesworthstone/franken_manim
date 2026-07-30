@@ -31,8 +31,8 @@
 //! construction time).
 
 use crate::error::TexError;
-use crate::typeset::{TYPESET_FORMAT_VERSION, Typeset};
-use fmd_math::{MacroSet, Style};
+use crate::typeset::{Prim, TYPESET_FORMAT_VERSION, Typeset};
+use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
 use fmn_config::{Config, PackRegistry};
 
@@ -207,6 +207,53 @@ impl TexEngine {
                 .map_err(TexError::Math)?,
         };
         Ok(Typeset::new(source.to_owned(), layout))
+    }
+
+    /// Resolve one submobject primitive into its closed quadratic
+    /// contours — the span-preserving form of
+    /// [`fmd_math::paths::resolve_paths`], which flattens the whole layout
+    /// and would destroy the per-`Sub` grouping `TransformMatchingTex`
+    /// consumes. The library tier builds one VMobject per `Sub` from
+    /// these contours (fm-p5d); glyph resolution reuses the engine's
+    /// pinned size/upm transform verbatim (a synthetic one-primitive
+    /// layout through `resolve_paths`), rules arrive as rectangle
+    /// contours, and drawn paths pass through positioned.
+    ///
+    /// The output is in ems, y-up, baseline at 0 — the same frame as the
+    /// layout itself.
+    ///
+    /// # Errors
+    ///
+    /// [`TexError::BadPrim`] if `prim` indexes outside the typeset's
+    /// primitive lists (a consumer wiring bug, named); [`TexError::Math`]
+    /// if a glyph's outline fails to decode.
+    pub fn resolve_prim(
+        &self,
+        typeset: &Typeset,
+        prim: Prim,
+    ) -> Result<Vec<PathContour>, TexError> {
+        let layout = &typeset.layout;
+        let single = match prim {
+            Prim::Glyph(i) => Layout {
+                glyphs: vec![layout.glyphs.get(i).cloned().ok_or(TexError::BadPrim {
+                    what: format!("glyph {i} of {}", layout.glyphs.len()),
+                })?],
+                ..Layout::default()
+            },
+            Prim::Rule(i) => Layout {
+                rules: vec![layout.rules.get(i).cloned().ok_or(TexError::BadPrim {
+                    what: format!("rule {i} of {}", layout.rules.len()),
+                })?],
+                ..Layout::default()
+            },
+            Prim::Path(i) => Layout {
+                paths: vec![layout.paths.get(i).cloned().ok_or(TexError::BadPrim {
+                    what: format!("path {i} of {}", layout.paths.len()),
+                })?],
+                ..Layout::default()
+            },
+        };
+        fmd_math::paths::resolve_paths(&self.math, &single).map_err(TexError::Math)
     }
 
     /// Warm the cache for a batch of strings, in parallel, before the

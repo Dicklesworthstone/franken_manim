@@ -42,5 +42,7 @@ pub use engine::{Mode, TexEngine};
 pub use error::TexError;
 pub use typeset::{Prim, Sub, TYPESET_FORMAT_VERSION, Typeset};
 
-// The math surface consumers need alongside the engine.
-pub use fmd_math::{MacroSet, Span, Style};
+// The math surface consumers need alongside the engine: placed-layout
+// types for the library tier's per-`Sub` resolution (fm-p5d), plus the
+// canonical-dump golden format.
+pub use fmd_math::{Layout, MacroSet, PathContour, PathSeg, Span, Style, paths};
