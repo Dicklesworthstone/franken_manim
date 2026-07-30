@@ -79,3 +79,15 @@ all = { level = "warn", priority = -1 }
 
 [profile.release]
 lto = "thin"
+
+# Production-shaped symbols for the pinned performance rig (plan §17.2).
+# Ordinary release artifacts keep their own policy; profiles and flame
+# artifacts use this named profile so two runs cannot silently compare
+# differently optimized binaries.
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false

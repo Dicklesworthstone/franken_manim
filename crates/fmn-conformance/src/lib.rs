@@ -24,6 +24,12 @@
 //!   table, and the docs. Drift between a generated artifact and the schema
 //!   fails the build.
 //!
+//! - the performance-gate decision core (§17.2, fm-inr) — [`perf`]:
+//!   comparable-run identities, raw valid/invalid repetitions, robust
+//!   median/MAD summaries, versioned observed baselines, and explicit
+//!   pass/alert/block/inconclusive verdicts. It never turns an unpinned or
+//!   unobserved run into passing PG evidence.
+//!
 //! The rest of the Gauntlet lands with its owning workstreams; see
 //! COMPREHENSIVE_PLAN §19 for the crate map.
 #![forbid(unsafe_code)]
@@ -31,6 +37,7 @@
 pub mod closure;
 pub mod golden;
 pub mod npy;
+pub mod perf;
 pub mod ratchet;
 pub mod schema;
 pub mod tolerance;
