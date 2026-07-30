@@ -16,8 +16,10 @@
 //! The one error-bounded cubic→quadratic converter is the ingress for API and
 //! smoothing cubics (fm-6cf); TrueType quadratics pass through losslessly.
 //! [`boolean`] is the permanent certified flatten-and-clip path boolean
-//! (§7.4). Still to land: the SVG document processor (fm-6nm), and isolines +
-//! ear-clip (fm-81u).
+//! (§7.4). [`isolines`] is the adaptive quadtree isoline extractor
+//! `ImplicitFunction` rides (§7.7), and [`earclip`] the deterministic
+//! hole-support triangulator for booleans' flatten fallback and mesh export
+//! (§7.8, fm-81u). Still to land: the SVG document processor (fm-6nm).
 #![forbid(unsafe_code)]
 
 pub mod arclength;
@@ -25,6 +27,8 @@ pub mod bezier;
 pub mod boolean;
 pub mod cubic;
 pub mod distance;
+pub mod earclip;
+pub mod isolines;
 pub mod quadpath;
 pub mod rotation;
 pub mod smoothing;
@@ -37,6 +41,14 @@ pub use arclength::{ArcLengthTable, CachedArcLength};
 pub use boolean::{
     BooleanError, BooleanLimits, BooleanOperand, BooleanOperation, BooleanOptions, BooleanPhase,
     BooleanResult, BooleanRoute, BooleanStats, FillRule, path_boolean, path_boolean_flattened,
+};
+pub use earclip::{
+    EarClipError, EarClipOptions, MAX_EARCLIP_VERTICES, RingRole, triangulate,
+    triangulate_with_options,
+};
+pub use isolines::{
+    IsolineConfig, IsolineError, IsolineStats, MAX_ISOLINE_EVALUATIONS, MAX_ISOLINE_LEAVES,
+    plot_isoline, plot_isoline_with_stats,
 };
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
 pub use rotation::{EulerAngles, EulerSeq, Quat};
