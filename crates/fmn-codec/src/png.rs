@@ -1052,6 +1052,22 @@ pub fn encode_rgba8_segmented(
     encode_rgba8_segmented_parallel(width, height, rgba, level, 1)
 }
 
+/// Thread fan-out clamp (W5 wasm tier 1, fm-l97).
+///
+/// Segmented encode output is byte-identical at every worker count by
+/// construction (fixed segment boundaries, concatenation in index order), so
+/// on `wasm32-unknown-unknown` — where `std::thread::scope`'s spawn panics,
+/// no thread existing to spawn — any request collapses to the serial loop
+/// with no effect on the bytes. Native builds honor the request unchanged.
+#[inline]
+const fn effective_workers(requested: usize) -> usize {
+    if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        requested
+    }
+}
+
 /// Encode one canonical segmented frame, fanning its fixed DEFLATE segments
 /// across `threads` workers.
 ///
@@ -1073,7 +1089,7 @@ pub fn encode_rgba8_segmented_parallel(
     let filtered = filtered_stream(width, height, rgba);
     let mut idat = crate::deflate::zlib_header(level).to_vec();
     let count = filtered.len().div_ceil(SEQUENCE_SEGMENT_BYTES).max(1);
-    let workers = threads.max(1).min(count);
+    let workers = effective_workers(threads).max(1).min(count);
     if workers == 1 {
         for i in 0..count {
             let start = i * SEQUENCE_SEGMENT_BYTES;
@@ -1139,7 +1155,7 @@ pub fn encode_png_sequence(
     level: CompressionLevel,
     threads: usize,
 ) -> Vec<Vec<u8>> {
-    let workers = threads.max(1).min(frames.len().max(1));
+    let workers = effective_workers(threads).max(1).min(frames.len().max(1));
     if workers <= 1 {
         return frames
             .iter()

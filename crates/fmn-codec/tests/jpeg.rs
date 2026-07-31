@@ -63,7 +63,9 @@ fn assert_close(name: &str, rgba: &[u8], reference_rgb: &[u8], tolerance: i32) {
 fn decode_conformance_against_libjpeg_references() {
     let limits = JpegLimits::default();
     for (name, jpg, reference) in CORPUS {
-        let d = decode_jpeg(jpg, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let d = decode_jpeg(jpg, &limits)
+            .map_err(|e| format!("{name}: {e}"))
+            .expect("corpus fixture decodes");
         // Subsampled chroma tolerates slightly more at sharp edges.
         let tolerance = if name.contains("444") || name.contains("gray") {
             2
@@ -180,4 +182,57 @@ fn hostile_inputs_are_typed_refusals() {
         mutated[i] ^= 0x40;
         let _ = decode_jpeg(&mutated, &limits);
     }
+}
+
+/// Regression for the W10 fuzz campaign's first catch (fm-t1v): hostile
+/// table selectors. DHT/DQT validate their own ids, but the SOS scan
+/// component selectors and the SOF quantization selector indexed the
+/// four-slot table arrays unchecked — an out-of-range nibble was an
+/// out-of-bounds read, not a typed refusal.
+#[test]
+fn hostile_table_selectors_are_typed_refusals() {
+    let limits = JpegLimits::default();
+    let good = CORPUS[0].1;
+
+    // Find a marker's segment payload start (past marker + length).
+    let find_segment = |marker: u8| -> Option<usize> {
+        let mut pos = 2usize;
+        while pos + 4 <= good.len() {
+            if good[pos] != 0xFF {
+                return None;
+            }
+            let m = good[pos + 1];
+            let len = usize::from(u16::from_be_bytes([good[pos + 2], good[pos + 3]]));
+            if m == marker {
+                return Some(pos + 4);
+            }
+            if m == 0xDA {
+                return None; // SOS: scan data follows, stop walking
+            }
+            pos += 2 + len;
+        }
+        None
+    };
+
+    // SOF: first component's quantization selector → 14.
+    let sof = find_segment(0xC0).expect("baseline fixture has SOF0");
+    // payload: precision(1) height(2) width(2) ncomp(1) then id/hv/tq…
+    let tq_at = sof + 6 + 2;
+    let mut mutated = good.to_vec();
+    mutated[tq_at] = 0x0E;
+    assert_eq!(
+        decode_jpeg(&mutated, &limits),
+        Err(JpegError::BadTable("frame quantization selector"))
+    );
+
+    // SOS: first scan component's DC/AC selectors → 14/14.
+    let sos = find_segment(0xDA).expect("baseline fixture has SOS");
+    // payload: ns(1) then id/tables per component…
+    let tables_at = sos + 2;
+    let mut mutated = good.to_vec();
+    mutated[tables_at] = 0xEE;
+    assert_eq!(
+        decode_jpeg(&mutated, &limits),
+        Err(JpegError::BadTable("scan table selector"))
+    );
 }

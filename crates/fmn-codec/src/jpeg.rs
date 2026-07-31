@@ -516,11 +516,18 @@ fn parse_sof(seg: &[u8], progressive: bool, limits: &JpegLimits) -> Result<Frame
         }
         hmax = hmax.max(h);
         vmax = vmax.max(v);
+        let quant_id = seg[at + 2] & 0x0f;
+        // The selector indexes the four-slot DQT array; an out-of-range
+        // one is a malformed frame — a typed refusal, never an
+        // out-of-bounds read at IDCT time.
+        if quant_id > 3 {
+            return Err(JpegError::BadTable("frame quantization selector"));
+        }
         components.push(Component {
             id: seg[at],
             h,
             v,
-            quant_id: seg[at + 2] & 0x0f,
+            quant_id,
             blocks_w: 0,
             blocks_h: 0,
             coefs: Vec::new(),
@@ -590,10 +597,17 @@ fn decode_scan(
             .iter()
             .position(|c| c.id == id)
             .ok_or(JpegError::BadScan("unknown component id"))?;
+        let (dc_id, ac_id) = (usize::from(tables >> 4), usize::from(tables & 0x0f));
+        // The selectors index the four-slot DHT arrays; DHT validates its
+        // own ids, so an out-of-range selector here is a malformed scan —
+        // a typed refusal, never an out-of-bounds read downstream.
+        if dc_id > 3 || ac_id > 3 {
+            return Err(JpegError::BadTable("scan table selector"));
+        }
         scomps.push(ScanComp {
             comp_index,
-            dc_id: usize::from(tables >> 4),
-            ac_id: usize::from(tables & 0x0f),
+            dc_id,
+            ac_id,
             pred: 0,
         });
     }
