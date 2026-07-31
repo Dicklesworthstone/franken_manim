@@ -347,6 +347,22 @@ fn test_item_line_ends(code: &str, depth: &mut usize, started: &mut bool) -> boo
     (*started && *depth == 0) || (!*started && code.trim_end().ends_with(';'))
 }
 
+/// Whether an associated-call match names one of the certified funnels.
+///
+/// Associated needles deliberately match every path rather than only the
+/// literal primitive names: `type Float = f64; Float::sin(x)` reaches the same
+/// platform intrinsic as `f64::sin(x)`. Direct `fmn_dmath` calls are the
+/// contract, and fmn-geom's private `scalar` module is its audited local facade.
+fn approved_associated_funnel(label: &str, text: &str, offset: usize) -> bool {
+    let prefix = &text[..offset];
+    let segment = prefix
+        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '#')))
+        .next()
+        .unwrap_or_default();
+    matches!(segment, "fmn_dmath" | "r#fmn_dmath")
+        || (label == "fmn-geom" && matches!(segment, "scalar" | "r#scalar"))
+}
+
 /// Scan one file's **non-test** region for `needles`, returning the lines read.
 ///
 /// Test code is excluded on purpose: a test computing an expected value with
@@ -427,6 +443,17 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
                 if offset + needle.len() <= carry_len {
                     continue;
                 }
+                if needle.starts_with("::") {
+                    let after = &combined[offset + needle.len()..];
+                    if after
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c == '_' || c.is_alphanumeric())
+                        || approved_associated_funnel(label, &combined, offset)
+                    {
+                        continue;
+                    }
+                }
                 let line = combined_lines.get(offset).copied().unwrap_or(i + 1);
                 if !seen.insert((line, name.clone())) {
                     continue;
@@ -451,15 +478,14 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
     scanned
 }
 
-/// The needles for property 1: a method call and both path forms.
+/// The needles for property 1: ordinary/raw method and associated-call forms.
 fn transcendental_needles() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for name in FORBIDDEN {
         out.push((format!(".{name}("), (*name).to_string()));
-        out.push((format!("f64::{name}"), format!("f64::{name}")));
-        out.push((format!("f32::{name}"), format!("f32::{name}")));
-        out.push((format!("<f64>::{name}"), format!("<f64>::{name}")));
-        out.push((format!("<f32>::{name}"), format!("<f32>::{name}")));
+        out.push((format!(".r#{name}("), format!("r#{name}")));
+        out.push((format!("::{name}"), format!("associated::{name}")));
+        out.push((format!("::r#{name}"), format!("associated::r#{name}")));
     }
     out
 }
@@ -469,24 +495,13 @@ fn transcendental_needles() -> Vec<(String, String)> {
 /// source the first time it ran.
 fn fma_needles() -> Vec<(String, String)> {
     let dot = concat!(".mul", "_add(");
+    let name = concat!("mul", "_add");
+    let raw_name = concat!("r#mul", "_add");
     vec![
         (dot.to_string(), "mul_add".to_string()),
-        (
-            concat!("f64::mul", "_add").to_string(),
-            "f64::mul_add".to_string(),
-        ),
-        (
-            concat!("f32::mul", "_add").to_string(),
-            "f32::mul_add".to_string(),
-        ),
-        (
-            concat!("<f64>::mul", "_add").to_string(),
-            "<f64>::mul_add".to_string(),
-        ),
-        (
-            concat!("<f32>::mul", "_add").to_string(),
-            "<f32>::mul_add".to_string(),
-        ),
+        (format!(".{raw_name}("), raw_name.to_string()),
+        (format!("::{name}"), format!("associated::{name}")),
+        (format!("::{raw_name}"), format!("associated::{raw_name}")),
     ]
 }
 
@@ -581,6 +596,13 @@ let h = u.powi(3);
 let i = fmn_dmath::sin(v);
 let pair = r.sin_cos();
 let qualified = <f64>::acos(q);
+let raw_method = raw.r#sin();
+let raw_qualified = f64::r#cos(raw);
+type FloatAlias = f64;
+let alias_associated = FloatAlias::exp2(raw);
+let alias_fully_qualified = <FloatAlias>::log2(raw);
+let alias_function_item = FloatAlias::hypot;
+let alias_prefix_boundary = FloatAlias::sin_cos(raw);
 let comment_between_call_tokens = z.cosh /* retained comment */ ();
 let gamma = aa.gamma();
 let ln_gamma = bb.ln_gamma();
@@ -592,6 +614,8 @@ let split_transcendental = ee
 let split_fma = ff
     .mul_add
     (gg, hh);
+let raw_fma = raw.r#mul_add(aa, bb);
+let raw_fma_qualified = f64::r#mul_add(raw, aa, bb);
 // this comment mentions .sin() and f64::cbrt and must not count
 /// nor must this doc comment's `.exp()`
 let string_only = \".log(\";
@@ -627,8 +651,9 @@ let after_test_only_cfg = q.exp_m1();
     names.dedup();
     // Four claims in one comparison:
     //  * the method and path forms are both caught, including fully qualified
-    //    `<f64>::` syntax, whitespace left by an intervening comment, and a
-    //    method name whose call parentheses begin on the next source line;
+    //    and aliased primitive paths, raw identifiers, whitespace left by an
+    //    intervening comment, and a method name whose call parentheses begin
+    //    on the next source line;
     //  * comments, strings, `sqrt`, `to_radians` and a qualified
     //    `fmn_dmath::` call are all legal and must not appear;
     //  * `powi`, `sin_cos`, and the four pinned-nightly libc-backed functions
@@ -642,8 +667,14 @@ let after_test_only_cfg = q.exp_m1();
     assert_eq!(
         names,
         [
-            "<f64>::acos",
             "asinh",
+            "associated::acos",
+            "associated::cos",
+            "associated::exp2",
+            "associated::hypot",
+            "associated::log2",
+            "associated::r#cos",
+            "associated::sin_cos",
             "atan2",
             "atanh",
             "cbrt",
@@ -651,12 +682,12 @@ let after_test_only_cfg = q.exp_m1();
             "erf",
             "erfc",
             "exp_m1",
-            "f64::cos",
             "gamma",
             "ln_1p",
             "ln_gamma",
             "powf",
             "powi",
+            "r#sin",
             "sin",
             "sin_cos",
             "tanh"
@@ -671,7 +702,13 @@ let after_test_only_cfg = q.exp_m1();
     fma_names.sort_unstable();
     assert_eq!(
         fma_names,
-        ["<f64>::mul_add", "mul_add", "mul_add"],
+        [
+            "associated::mul_add",
+            "associated::r#mul_add",
+            "mul_add",
+            "mul_add",
+            "r#mul_add"
+        ],
         "the FMA needles missed a hand-written contraction"
     );
 
