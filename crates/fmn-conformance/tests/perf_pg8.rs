@@ -4,8 +4,8 @@ use fmn_conformance::perf::{
 };
 use fmn_conformance::perf_pg8::{
     PG8_FRAMES_PER_REPETITION, PG8_MAX_INVALID_SAMPLES, PG8_MIN_VALID_SAMPLES, PG8_MOBJECTS,
-    PG8_SAMPLE_COUNT, PG8_TRACE_SCHEMA, PG8_WARMUP_ITERATIONS, Pg8Definition, Pg8Measurement,
-    Pg8Observation, Pg8Scenario, assemble_pg8, measure_pg8,
+    PG8_RESULT_STATE_BYTES, PG8_SAMPLE_COUNT, PG8_TRACE_SCHEMA, PG8_WARMUP_ITERATIONS,
+    Pg8Definition, Pg8Measurement, Pg8Observation, Pg8Scenario, assemble_pg8, measure_pg8,
 };
 use fmn_hash::sha256;
 use manimlib::perf_harness::{self, Pg8Class};
@@ -245,6 +245,113 @@ fn assembler_refuses_bad_trace_path_before_measurement_content() {
     )
     .expect_err("trace path must fail before measurement validation");
     assert!(error.to_string().contains("artifact path"), "{error}");
+}
+
+#[test]
+fn assembler_refuses_wrong_state_size_before_hashing() {
+    let scenario = Pg8Scenario::NativeBuiltins;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let mut measurement = intentionally_drifted_measurement();
+    measurement.result_state.clear();
+    let error = assemble_pg8(
+        &baseline,
+        COMMIT,
+        &measurement,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("the fixed fixture state size must be checked before hashing");
+    assert!(error.to_string().contains("result_state"), "{error}");
+}
+
+#[test]
+fn assembler_refuses_bad_invalid_reason_before_state_hashing() {
+    let scenario = Pg8Scenario::NativeBuiltins;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let mut measurement = intentionally_drifted_measurement();
+    measurement.result_state.resize(PG8_RESULT_STATE_BYTES, 0);
+    for observation in measurement.observations.iter_mut().take(1) {
+        observation.invalid_reason = Some("x".repeat(1_025));
+    }
+    let error = assemble_pg8(
+        &baseline,
+        COMMIT,
+        &measurement,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("invalid observation detail must be checked before state hashing");
+    assert!(error.to_string().contains("invalid_reason"), "{error}");
+}
+
+#[test]
+fn assembler_refuses_non_native_twin_timing_before_state_hashing() {
+    let scenario = Pg8Scenario::DynamicSubclass;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let mut measurement = intentionally_drifted_measurement();
+    measurement.result_state.resize(PG8_RESULT_STATE_BYTES, 0);
+    measurement.reference_state = None;
+    let error = assemble_pg8(
+        &baseline,
+        COMMIT,
+        &measurement,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("non-native observations must not carry pure-Rust twin timings");
+    assert!(
+        error.to_string().contains("pure-Rust twin timing"),
+        "{error}"
+    );
+}
+
+#[test]
+fn assembler_refuses_wrong_twin_state_shape_before_state_hashing() {
+    let native = Pg8Scenario::NativeBuiltins;
+    let native_baseline =
+        Baseline::targeted(1, policy(native), key(native), COMMIT).expect("target baseline");
+    let mut native_measurement = intentionally_drifted_measurement();
+    native_measurement
+        .result_state
+        .resize(PG8_RESULT_STATE_BYTES, 0);
+    native_measurement.reference_state = Some(Vec::new());
+    let native_error = assemble_pg8(
+        &native_baseline,
+        COMMIT,
+        &native_measurement,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("the native twin state size must be checked before state hashing");
+    assert!(
+        native_error.to_string().contains("reference_state"),
+        "{native_error}"
+    );
+
+    let callback = Pg8Scenario::DynamicSubclass;
+    let callback_baseline =
+        Baseline::targeted(1, policy(callback), key(callback), COMMIT).expect("target baseline");
+    let mut callback_measurement = intentionally_drifted_measurement();
+    callback_measurement
+        .result_state
+        .resize(PG8_RESULT_STATE_BYTES, 0);
+    callback_measurement
+        .observations
+        .iter_mut()
+        .for_each(|observation| observation.reference_ns = None);
+    callback_measurement.reference_state = Some(vec![0; PG8_RESULT_STATE_BYTES]);
+    let callback_error = assemble_pg8(
+        &callback_baseline,
+        COMMIT,
+        &callback_measurement,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("callback scenarios must not carry a pure-Rust twin state");
+    assert!(
+        callback_error
+            .to_string()
+            .contains("must not carry a pure-Rust twin state"),
+        "{callback_error}"
+    );
 }
 
 #[test]

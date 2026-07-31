@@ -680,9 +680,13 @@ impl Sample {
         }
     }
 
+    pub(crate) fn validate_invalid_reason(reason: &str) -> Result<(), PerfError> {
+        validate_detail("invalid_reason", reason)
+    }
+
     fn validate(&self) -> Result<(), PerfError> {
         if let Some(reason) = &self.invalid_reason {
-            validate_detail("invalid_reason", reason)?;
+            Self::validate_invalid_reason(reason)?;
         }
         Ok(())
     }

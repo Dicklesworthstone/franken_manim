@@ -51,6 +51,10 @@ pub const PG8_FRAMES_PER_REPETITION: usize = 60;
 pub const PG8_MOBJECTS: usize = 64;
 /// Records per mobject.
 pub const PG8_POINTS_PER_MOBJECT: usize = 4;
+const PG8_LANES_PER_RECORD: usize = 3 + 4;
+/// Exact byte length of every fixed-workload bridge and twin result state.
+pub const PG8_RESULT_STATE_BYTES: usize =
+    PG8_MOBJECTS * PG8_POINTS_PER_MOBJECT * PG8_LANES_PER_RECORD * std::mem::size_of::<f32>();
 /// Repetition frame delta: `1 / PG8_DT_DENOMINATOR` seconds.
 pub const PG8_DT_DENOMINATOR: u64 = 30;
 
@@ -387,13 +391,7 @@ pub fn assemble_pg8(
     // hashing or otherwise inspecting that measurement content.
     let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
 
-    if measurement.observations.len() != PG8_SAMPLE_COUNT {
-        return Err(Pg8Error::SamplePlan(format!(
-            "{} requires {PG8_SAMPLE_COUNT} retained repetitions, got {}",
-            scenario,
-            measurement.observations.len()
-        )));
-    }
+    validate_measurement_shape(scenario, measurement)?;
     let result_digest = sha256(&measurement.result_state);
     // ubs:ignore - public self-golden digest, not an authentication secret.
     if result_digest != definition.expected_result_digest() {
@@ -442,6 +440,50 @@ pub fn assemble_pg8(
         trace_tsv,
         result_digest,
     })
+}
+
+fn validate_measurement_shape(
+    scenario: Pg8Scenario,
+    measurement: &Pg8Measurement,
+) -> Result<(), Pg8Error> {
+    if measurement.observations.len() != PG8_SAMPLE_COUNT {
+        return Err(Pg8Error::SamplePlan(format!(
+            "{} requires {PG8_SAMPLE_COUNT} retained repetitions, got {}",
+            scenario,
+            measurement.observations.len()
+        )));
+    }
+    for (index, observation) in measurement.observations.iter().enumerate() {
+        if let Some(reason) = &observation.invalid_reason {
+            Sample::validate_invalid_reason(reason)?;
+        }
+        if scenario != Pg8Scenario::NativeBuiltins && observation.reference_ns.is_some() {
+            return Err(Pg8Error::SamplePlan(format!(
+                "{scenario} observation {index} must not carry pure-Rust twin timing"
+            )));
+        }
+    }
+    if measurement.result_state.len() != PG8_RESULT_STATE_BYTES {
+        return Err(Pg8Error::SamplePlan(format!(
+            "{scenario} result_state must be exactly {PG8_RESULT_STATE_BYTES} bytes, got {}",
+            measurement.result_state.len()
+        )));
+    }
+    match (scenario, &measurement.reference_state) {
+        (Pg8Scenario::NativeBuiltins, Some(twin)) if twin.len() != PG8_RESULT_STATE_BYTES => {
+            Err(Pg8Error::SamplePlan(format!(
+                "native-builtins reference_state must be exactly {PG8_RESULT_STATE_BYTES} bytes, got {}",
+                twin.len()
+            )))
+        }
+        (Pg8Scenario::NativeBuiltins, None) => Err(Pg8Error::SamplePlan(
+            "native-builtins requires the pure-Rust twin state".to_owned(),
+        )),
+        (Pg8Scenario::NativeBuiltins, Some(_)) | (_, None) => Ok(()),
+        (_, Some(_)) => Err(Pg8Error::SamplePlan(format!(
+            "{scenario} must not carry a pure-Rust twin state"
+        ))),
+    }
 }
 
 /// Build, time, and assemble the PG-8 workload named by `baseline`.
