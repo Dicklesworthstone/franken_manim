@@ -40,6 +40,22 @@ use std::fmt::Write as _;
 /// A schema file that could not be read as one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
+    /// A whole schema document exceeded a resource or encoding boundary.
+    Document {
+        /// The file carrying the invalid document.
+        file: &'static str,
+        /// The bounded reason for refusal.
+        detail: String,
+    },
+    /// A line did not use the canonical sectioned-TSV syntax.
+    Syntax {
+        /// The file carrying the invalid line.
+        file: &'static str,
+        /// 1-based line number.
+        line: usize,
+        /// The bounded reason for refusal.
+        detail: String,
+    },
     /// A row carried the wrong number of tab-separated fields.
     Arity {
         /// The file the row came from.
@@ -59,6 +75,21 @@ pub enum SchemaError {
         file: &'static str,
         /// 1-based line number.
         line: usize,
+    },
+    /// Two rows or headers declared the same semantic identity.
+    DuplicateIdentity {
+        /// File containing the duplicate.
+        file: &'static str,
+        /// 1-based line of the duplicate.
+        line: usize,
+        /// Section containing the duplicate.
+        section: &'static str,
+        /// Identity that was repeated.
+        key: String,
+        /// File containing the first declaration.
+        previous_file: &'static str,
+        /// 1-based line of the first declaration.
+        previous_line: usize,
     },
     /// A field that must parse as a number or an enumerated word did not.
     Field {
@@ -100,6 +131,8 @@ pub enum SchemaError {
 impl fmt::Display for SchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Document { file, detail } => write!(f, "{file}: {detail}"),
+            Self::Syntax { file, line, detail } => write!(f, "{file}:{line}: {detail}"),
             Self::Arity {
                 file,
                 line,
@@ -113,6 +146,17 @@ impl fmt::Display for SchemaError {
             Self::Sectionless { file, line } => {
                 write!(f, "{file}:{line}: row before any [section] header")
             }
+            Self::DuplicateIdentity {
+                file,
+                line,
+                section,
+                key,
+                previous_file,
+                previous_line,
+            } => write!(
+                f,
+                "{file}:{line}: [{section}] identity {key:?} duplicates {previous_file}:{previous_line}"
+            ),
             Self::Field {
                 file,
                 line,
@@ -153,35 +197,194 @@ struct Sections {
     map: BTreeMap<String, Vec<Row>>,
 }
 
+const MAX_SCHEMA_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SCHEMA_LINE_BYTES: usize = 16 * 1024;
+const MAX_SCHEMA_ROWS: usize = 100_000;
+const MAX_SCHEMA_SECTION_BYTES: usize = 64;
+const MAX_SCHEMA_FIELDS_PER_ROW: usize = 16;
+const EXTRACTED_SECTIONS: &[&str] = &["meta", "symbols", "params", "flags", "config"];
+const EXTRACTED_META_KEYS: &[&str] = &[
+    "schema_version",
+    "reference_commit",
+    "generator",
+    "wildcard_exports",
+];
+const OVERLAY_SECTIONS: &[&str] = &[
+    "meta",
+    "canonical",
+    "param_canonical",
+    "optional_config",
+    "config_binding",
+    "status",
+    "flag_binding",
+    "native_flags",
+    "subcommands",
+    "exit_codes",
+    "flag_interaction",
+];
+const OVERLAY_META_KEYS: &[&str] = &["overlay_version"];
+
 impl Sections {
-    fn parse(file: &'static str, text: &str) -> Result<Self, SchemaError> {
+    fn parse(
+        file: &'static str,
+        text: &str,
+        allowed_sections: &[&str],
+    ) -> Result<Self, SchemaError> {
+        if text.len() > MAX_SCHEMA_DOCUMENT_BYTES {
+            return Err(SchemaError::Document {
+                file,
+                detail: format!(
+                    "document exceeds the {MAX_SCHEMA_DOCUMENT_BYTES}-byte format limit"
+                ),
+            });
+        }
+        if text.as_bytes().contains(&b'\r') {
+            return Err(SchemaError::Document {
+                file,
+                detail: "CR line endings are not canonical".to_owned(),
+            });
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err(SchemaError::Document {
+                file,
+                detail: "document must end with a newline".to_owned(),
+            });
+        }
         let mut out = Self {
             file,
             map: BTreeMap::new(),
         };
         let mut current: Option<String> = None;
+        let mut section_lines = BTreeMap::new();
+        let mut row_count = 0_usize;
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
-            let trimmed = raw.trim_end();
-            if trimmed.trim().is_empty() || trimmed.trim_start().starts_with('#') {
+            if raw.len() > MAX_SCHEMA_LINE_BYTES {
+                return Err(SchemaError::Syntax {
+                    file,
+                    line,
+                    detail: format!("line exceeds {MAX_SCHEMA_LINE_BYTES} bytes"),
+                });
+            }
+            if raw.is_empty() {
                 continue;
             }
-            if let Some(name) = trimmed
-                .trim()
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-            {
+            if raw.trim().is_empty() {
+                return Err(SchemaError::Syntax {
+                    file,
+                    line,
+                    detail: "whitespace-only rows are not canonical".to_owned(),
+                });
+            }
+            if raw.starts_with('#') {
+                if raw.trim_end() != raw {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: "comment has trailing whitespace".to_owned(),
+                    });
+                }
+                continue;
+            }
+            if raw.trim() != raw {
+                return Err(SchemaError::Syntax {
+                    file,
+                    line,
+                    detail: "surrounding whitespace is not canonical".to_owned(),
+                });
+            }
+            if raw.starts_with('[') {
+                let name = raw
+                    .strip_prefix('[')
+                    .and_then(|value| value.strip_suffix(']'))
+                    .ok_or_else(|| SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: "malformed section header".to_owned(),
+                    })?;
+                if name.is_empty()
+                    || name.len() > MAX_SCHEMA_SECTION_BYTES
+                    || !name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+                {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: "section name is not canonical lowercase ASCII".to_owned(),
+                    });
+                }
+                if !allowed_sections.contains(&name) {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: format!("unknown section [{name}]"),
+                    });
+                }
+                if let Some(&previous_line) = section_lines.get(name) {
+                    return Err(SchemaError::DuplicateIdentity {
+                        file,
+                        line,
+                        section: "section",
+                        key: name.to_owned(),
+                        previous_file: file,
+                        previous_line,
+                    });
+                }
                 current = Some(name.to_owned());
-                out.map.entry(name.to_owned()).or_default();
+                section_lines.insert(name.to_owned(), line);
+                out.map.insert(name.to_owned(), Vec::new());
                 continue;
             }
             let Some(section) = current.clone() else {
                 return Err(SchemaError::Sectionless { file, line });
             };
-            out.map.entry(section).or_default().push(Row {
-                line,
-                fields: trimmed.split('\t').map(str::to_owned).collect(),
-            });
+            if row_count == MAX_SCHEMA_ROWS {
+                return Err(SchemaError::Syntax {
+                    file,
+                    line,
+                    detail: format!("data row count exceeds {MAX_SCHEMA_ROWS}"),
+                });
+            }
+            row_count += 1;
+            let mut fields = Vec::new();
+            for field in raw.split('\t') {
+                if fields.len() == MAX_SCHEMA_FIELDS_PER_ROW {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: format!(
+                            "row exceeds {MAX_SCHEMA_FIELDS_PER_ROW} tab-separated fields"
+                        ),
+                    });
+                }
+                if field.is_empty() {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: "empty TSV fields must use the `-` placeholder".to_owned(),
+                    });
+                }
+                if field.trim() != field {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: "TSV fields must not have surrounding whitespace".to_owned(),
+                    });
+                }
+                if field.bytes().any(|byte| byte.is_ascii_control()) {
+                    return Err(SchemaError::Syntax {
+                        file,
+                        line,
+                        detail: "TSV fields must not contain ASCII control bytes".to_owned(),
+                    });
+                }
+                fields.push(field.to_owned());
+            }
+            out.map
+                .entry(section)
+                .or_default()
+                .push(Row { line, fields });
         }
         Ok(out)
     }
@@ -209,12 +412,39 @@ impl Sections {
     }
 
     /// `key\tvalue` rows of a `[meta]`-shaped section.
-    fn meta(&self, section: &str) -> BTreeMap<String, String> {
-        self.rows(section)
-            .iter()
-            .filter(|r| r.fields.len() == 2)
-            .map(|r| (r.fields[0].clone(), r.fields[1].clone()))
-            .collect()
+    fn meta(
+        &self,
+        section: &'static str,
+        expected_keys: &[&str],
+    ) -> Result<BTreeMap<String, String>, SchemaError> {
+        let mut values = BTreeMap::new();
+        let mut identities = BTreeMap::new();
+        for row in self.typed(section, 2)? {
+            if !expected_keys.contains(&row.fields[0].as_str()) {
+                return Err(SchemaError::Syntax {
+                    file: self.file,
+                    line: row.line,
+                    detail: format!("unknown [{section}] key {:?}", row.fields[0]),
+                });
+            }
+            record_identity(
+                &mut identities,
+                self.file,
+                row.line,
+                section,
+                row.fields[0].clone(),
+            )?;
+            values.insert(row.fields[0].clone(), row.fields[1].clone());
+        }
+        for expected in expected_keys {
+            if !values.contains_key(*expected) {
+                return Err(SchemaError::Document {
+                    file: self.file,
+                    detail: format!("[{section}] is missing required key {expected:?}"),
+                });
+            }
+        }
+        Ok(values)
     }
 }
 
@@ -224,6 +454,74 @@ const NONE: &str = "-";
 
 fn opt(field: &str) -> Option<&str> {
     if field == NONE { None } else { Some(field) }
+}
+
+fn binary_bool(
+    file: &'static str,
+    line: usize,
+    column: &'static str,
+    field: &str,
+) -> Result<bool, SchemaError> {
+    match field {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(SchemaError::Field {
+            file,
+            line,
+            column,
+            found: field.to_owned(),
+        }),
+    }
+}
+
+fn canonical_unsigned<T>(
+    file: &'static str,
+    line: usize,
+    column: &'static str,
+    field: &str,
+) -> Result<T, SchemaError>
+where
+    T: std::str::FromStr,
+{
+    let canonical = field == "0"
+        || (!field.starts_with('0') && field.bytes().all(|byte| byte.is_ascii_digit()));
+    if !canonical {
+        return Err(SchemaError::Field {
+            file,
+            line,
+            column,
+            found: field.to_owned(),
+        });
+    }
+    field.parse().map_err(|_| SchemaError::Field {
+        file,
+        line,
+        column,
+        found: field.to_owned(),
+    })
+}
+
+type IdentityLocations = BTreeMap<String, (&'static str, usize)>;
+
+fn record_identity(
+    identities: &mut IdentityLocations,
+    file: &'static str,
+    line: usize,
+    section: &'static str,
+    key: String,
+) -> Result<(), SchemaError> {
+    if let Some(&(previous_file, previous_line)) = identities.get(&key) {
+        return Err(SchemaError::DuplicateIdentity {
+            file,
+            line,
+            section,
+            key,
+            previous_file,
+            previous_line,
+        });
+    }
+    identities.insert(key, (file, line));
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -739,10 +1037,70 @@ impl Schema {
     /// [`SchemaError`] naming the file and line for a malformed row, or the
     /// dangling key for an overlay that has gone stale against the pin.
     pub fn parse(extracted: &str, overlay: &str) -> Result<Self, SchemaError> {
-        let ex = Sections::parse("API_SCHEMA.tsv", extracted)?;
-        let ov = Sections::parse("API_OVERLAY.tsv", overlay)?;
+        let ex = Sections::parse("API_SCHEMA.tsv", extracted, EXTRACTED_SECTIONS)?;
+        let ov = Sections::parse("API_OVERLAY.tsv", overlay, OVERLAY_SECTIONS)?;
+        let meta = ex.meta("meta", EXTRACTED_META_KEYS)?;
+        let overlay_meta = ov.meta("meta", OVERLAY_META_KEYS)?;
+        if meta["schema_version"] != "1" {
+            return Err(SchemaError::Document {
+                file: ex.file,
+                detail: format!(
+                    "unsupported schema_version {:?}; expected \"1\"",
+                    meta["schema_version"]
+                ),
+            });
+        }
+        if overlay_meta["overlay_version"] != "1" {
+            return Err(SchemaError::Document {
+                file: ov.file,
+                detail: format!(
+                    "unsupported overlay_version {:?}; expected \"1\"",
+                    overlay_meta["overlay_version"]
+                ),
+            });
+        }
+        if meta["generator"] != "scripts/gen_api_schema.py" {
+            return Err(SchemaError::Document {
+                file: ex.file,
+                detail: format!(
+                    "unexpected generator {:?}; expected \"scripts/gen_api_schema.py\"",
+                    meta["generator"]
+                ),
+            });
+        }
+        let reference_commit = &meta["reference_commit"];
+        if reference_commit.len() != 40
+            || !reference_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(SchemaError::Document {
+                file: ex.file,
+                detail: "reference_commit must be an exact 40-character lowercase hex identity"
+                    .to_owned(),
+            });
+        }
+        let wildcard_exports_text = &meta["wildcard_exports"];
+        let wildcard_exports_canonical = wildcard_exports_text == "0"
+            || (!wildcard_exports_text.starts_with('0')
+                && wildcard_exports_text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit()));
+        if !wildcard_exports_canonical {
+            return Err(SchemaError::Document {
+                file: ex.file,
+                detail: "wildcard_exports must be a canonical nonnegative integer".to_owned(),
+            });
+        }
+        let wildcard_exports =
+            wildcard_exports_text
+                .parse::<usize>()
+                .map_err(|_| SchemaError::Document {
+                    file: ex.file,
+                    detail: "wildcard_exports exceeds the supported integer range".to_owned(),
+                })?;
         let mut schema = Self {
-            meta: ex.meta("meta"),
+            meta,
             ..Self::default()
         };
 
@@ -758,8 +1116,24 @@ impl Schema {
                     found: f[2].clone(),
                 })?,
                 origin: f[3].clone(),
-                exported: f[4] == "1",
+                exported: binary_bool(ex.file, row.line, "exported", &f[4])?,
                 detail: opt(&f[5]).map(str::to_owned),
+            });
+        }
+
+        let actual_exports = schema
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| symbol.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if actual_exports != wildcard_exports {
+            return Err(SchemaError::Document {
+                file: ex.file,
+                detail: format!(
+                    "wildcard_exports declares {wildcard_exports}, but [symbols] contains {actual_exports} unique exported names"
+                ),
             });
         }
 
@@ -767,12 +1141,7 @@ impl Schema {
             let f = &row.fields;
             schema.params.push(Param {
                 owner: f[0].clone(),
-                ordinal: f[1].parse().map_err(|_| SchemaError::Field {
-                    file: ex.file,
-                    line: row.line,
-                    column: "ordinal",
-                    found: f[1].clone(),
-                })?,
+                ordinal: canonical_unsigned(ex.file, row.line, "ordinal", &f[1])?,
                 name: f[2].clone(),
                 kind: ParamKind::parse(&f[3]).ok_or_else(|| SchemaError::Field {
                     file: ex.file,
@@ -785,8 +1154,16 @@ impl Schema {
             });
         }
 
+        let mut flag_identities = BTreeMap::new();
         for row in ex.typed("flags", 7)? {
             let f = &row.fields;
+            record_identity(
+                &mut flag_identities,
+                ex.file,
+                row.line,
+                "flags",
+                f[0].clone(),
+            )?;
             schema.flags.push(Flag {
                 options: f[0].clone(),
                 dest: opt(&f[1]).map(str::to_owned),
@@ -798,8 +1175,16 @@ impl Schema {
             });
         }
 
+        let mut config_identities = BTreeMap::new();
         for row in ex.typed("config", 4)? {
             let f = &row.fields;
+            record_identity(
+                &mut config_identities,
+                ex.file,
+                row.line,
+                "config",
+                f[0].clone(),
+            )?;
             schema.config.push(ConfigKey {
                 path: f[0].clone(),
                 kind: ValueKind::parse(&f[1]).ok_or_else(|| SchemaError::Field {
@@ -809,13 +1194,14 @@ impl Schema {
                     found: f[1].clone(),
                 })?,
                 default: opt(&f[2]).map(str::to_owned),
-                in_reference: f[3] == "1",
+                in_reference: binary_bool(ex.file, row.line, "reference", &f[3])?,
             });
         }
 
         let symbol_keys: std::collections::BTreeSet<String> =
             schema.symbols.iter().map(Symbol::key).collect();
 
+        let mut canonical_identities = BTreeMap::new();
         for row in ov.typed("canonical", 4)? {
             let f = &row.fields;
             if !symbol_keys.contains(&f[0]) {
@@ -824,6 +1210,13 @@ impl Schema {
                     key: f[0].clone(),
                 });
             }
+            record_identity(
+                &mut canonical_identities,
+                ov.file,
+                row.line,
+                "canonical",
+                f[0].clone(),
+            )?;
             schema.renames.insert(
                 f[0].clone(),
                 Rename {
@@ -835,6 +1228,7 @@ impl Schema {
             );
         }
 
+        let mut param_canonical_identities = BTreeMap::new();
         for row in ov.typed("param_canonical", 4)? {
             let f = &row.fields;
             let known = schema
@@ -847,6 +1241,13 @@ impl Schema {
                     key: format!("{}#{}", f[0], f[1]),
                 });
             }
+            record_identity(
+                &mut param_canonical_identities,
+                ov.file,
+                row.line,
+                "param_canonical",
+                format!("{}#{}", f[0], f[1]),
+            )?;
             schema.param_renames.push(ParamRename {
                 owner: f[0].clone(),
                 reference_name: f[1].clone(),
@@ -857,6 +1258,13 @@ impl Schema {
 
         for row in ov.typed("optional_config", 3)? {
             let f = &row.fields;
+            record_identity(
+                &mut config_identities,
+                ov.file,
+                row.line,
+                "optional_config",
+                f[0].clone(),
+            )?;
             schema.config.push(ConfigKey {
                 path: f[0].clone(),
                 kind: ValueKind::parse(&f[1]).ok_or_else(|| SchemaError::Field {
@@ -866,12 +1274,20 @@ impl Schema {
                     found: f[1].clone(),
                 })?,
                 default: None,
-                in_reference: f[2] == "1",
+                in_reference: binary_bool(ov.file, row.line, "reference", &f[2])?,
             });
         }
 
+        let mut binding_identities = BTreeMap::new();
         for row in ov.typed("config_binding", 4)? {
             let f = &row.fields;
+            record_identity(
+                &mut binding_identities,
+                ov.file,
+                row.line,
+                "config_binding",
+                f[0].clone(),
+            )?;
             schema.bindings.push(Binding {
                 path: f[0].clone(),
                 struct_name: f[1].clone(),
@@ -880,6 +1296,7 @@ impl Schema {
             });
         }
 
+        let mut status_identities = BTreeMap::new();
         for row in ov.typed("status", 3)? {
             let f = &row.fields;
             if !symbol_keys.contains(&f[0]) {
@@ -888,6 +1305,13 @@ impl Schema {
                     key: f[0].clone(),
                 });
             }
+            record_identity(
+                &mut status_identities,
+                ov.file,
+                row.line,
+                "status",
+                f[0].clone(),
+            )?;
             let status = Status::parse(&f[1]).ok_or_else(|| SchemaError::Field {
                 file: ov.file,
                 line: row.line,
@@ -971,12 +1395,7 @@ impl Schema {
         for row in ov.typed("exit_codes", 3)? {
             let f = &row.fields;
             schema.exit_codes.push(ExitCode {
-                code: f[0].parse().map_err(|_| SchemaError::Field {
-                    file: ov.file,
-                    line: row.line,
-                    column: "code",
-                    found: f[0].clone(),
-                })?,
+                code: canonical_unsigned(ov.file, row.line, "code", &f[0])?,
                 name: f[1].clone(),
                 meaning: f[2].clone(),
             });
@@ -2023,7 +2442,11 @@ pub fn generate_docs_md(schema: &Schema) -> String {
 mod tests {
     use super::*;
 
-    const EXTRACT: &str = "[meta]\nreference_commit\tabc123\n\n\
+    const TEST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const EXTRACT: &str = "[meta]\nschema_version\t1\n\
+        reference_commit\t0123456789abcdef0123456789abcdef01234567\n\
+        generator\tscripts/gen_api_schema.py\n\
+        wildcard_exports\t1\n\n\
         [symbols]\nm\tA\tclass\tdefined\t1\tobject\n\
         m\tA.foo_listner\tmethod\tdefined\t0\t-\n\n\
         [params]\nm:A.foo_listner\t0\tself\tpositional_or_keyword\t-\t-\n\n\
@@ -2048,7 +2471,7 @@ mod tests {
     #[test]
     fn the_two_layers_merge_into_one_effective_schema() {
         let s = schema();
-        assert_eq!(s.reference_commit(), "abc123");
+        assert_eq!(s.reference_commit(), TEST_COMMIT);
         assert_eq!(s.symbols.len(), 2);
         assert_eq!(s.flags.len(), 1);
         assert_eq!(s.flag_bindings.len(), 1);
@@ -2112,6 +2535,226 @@ mod tests {
             "got {err}"
         );
         assert!(err.to_string().contains("gen_api_schema.py"));
+    }
+
+    #[test]
+    fn section_headers_are_closed_unique_and_canonical() {
+        let unknown = OVERLAY.replace("[status]", "[statuz]");
+        let error = Schema::parse(EXTRACT, &unknown).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Syntax { detail, .. } if detail.contains("unknown section [statuz]")),
+            "got {error}"
+        );
+
+        let repeated = format!("{OVERLAY}\n[status]\n");
+        let error = Schema::parse(EXTRACT, &repeated).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SchemaError::DuplicateIdentity {
+                    section: "section",
+                    key,
+                    ..
+                } if key == "status"
+            ),
+            "got {error}"
+        );
+
+        let indented = OVERLAY.replace("[status]", " [status]");
+        let error = Schema::parse(EXTRACT, &indented).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Syntax { detail, .. } if detail.contains("surrounding whitespace")),
+            "got {error}"
+        );
+
+        let crlf = OVERLAY.replace('\n', "\r\n");
+        let error = Schema::parse(EXTRACT, &crlf).unwrap_err();
+        assert!(matches!(error, SchemaError::Document { .. }), "got {error}");
+
+        let no_final_newline = OVERLAY.trim_end_matches('\n');
+        let error = Schema::parse(EXTRACT, no_final_newline).unwrap_err();
+        assert!(matches!(error, SchemaError::Document { .. }), "got {error}");
+
+        let padded_field = OVERLAY.replace("m:A\timproved", "m:A\t improved");
+        let error = Schema::parse(EXTRACT, &padded_field).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Syntax { detail, .. } if detail.contains("TSV fields")),
+            "got {error}"
+        );
+
+        let wide_row = OVERLAY.replace(
+            "[flag_interaction]\n",
+            "[flag_interaction]\na\tb\tc\td\te\tf\tg\th\ti\tj\tk\tl\tm\tn\to\tp\tq\n",
+        );
+        let error = Schema::parse(EXTRACT, &wide_row).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Syntax { detail, .. } if detail.contains("16 tab-separated fields")),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn document_and_line_resource_limits_are_enforced_first() {
+        let oversized_document = "x".repeat(MAX_SCHEMA_DOCUMENT_BYTES + 1);
+        let error =
+            Sections::parse("API_SCHEMA.tsv", &oversized_document, EXTRACTED_SECTIONS).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Document { detail, .. } if detail.contains("format limit")),
+            "got {error}"
+        );
+
+        let oversized_line = format!("[meta]\n{}\n", "x".repeat(MAX_SCHEMA_LINE_BYTES + 1));
+        let error =
+            Sections::parse("API_SCHEMA.tsv", &oversized_line, EXTRACTED_SECTIONS).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Syntax { detail, .. } if detail.contains("line exceeds")),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn metadata_is_closed_complete_versioned_and_self_consistent() {
+        let unknown = EXTRACT.replace("schema_version\t1", "schema_version\t1\nfuture_mode\tmaybe");
+        let error = Schema::parse(&unknown, OVERLAY).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Syntax { detail, .. } if detail.contains("unknown [meta] key")),
+            "got {error}"
+        );
+
+        let missing = EXTRACT.replace("generator\tscripts/gen_api_schema.py\n", "");
+        let error = Schema::parse(&missing, OVERLAY).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Document { detail, .. } if detail.contains("missing required key")),
+            "got {error}"
+        );
+
+        let future = OVERLAY.replace("overlay_version\t1", "overlay_version\t2");
+        let error = Schema::parse(EXTRACT, &future).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Document { detail, .. } if detail.contains("unsupported overlay_version")),
+            "got {error}"
+        );
+
+        let truncated_pin = EXTRACT.replace(TEST_COMMIT, "abc123");
+        let error = Schema::parse(&truncated_pin, OVERLAY).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Document { detail, .. } if detail.contains("40-character lowercase hex")),
+            "got {error}"
+        );
+
+        let wrong_count = EXTRACT.replace("wildcard_exports\t1", "wildcard_exports\t2");
+        let error = Schema::parse(&wrong_count, OVERLAY).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Document { detail, .. } if detail.contains("[symbols] contains 1")),
+            "got {error}"
+        );
+
+        let noncanonical_count = EXTRACT.replace("wildcard_exports\t1", "wildcard_exports\t01");
+        let error = Schema::parse(&noncanonical_count, OVERLAY).unwrap_err();
+        assert!(
+            matches!(&error, SchemaError::Document { detail, .. } if detail.contains("canonical nonnegative integer")),
+            "got {error}"
+        );
+
+        let nonbinary = EXTRACT.replace("camera.fps\tint\t30\t1", "camera.fps\tint\t30\tyes");
+        let error = Schema::parse(&nonbinary, OVERLAY).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SchemaError::Field {
+                    column: "reference",
+                    ..
+                }
+            ),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn metadata_and_authored_rulings_cannot_overwrite_earlier_rows() {
+        let duplicate_meta = EXTRACT.replace(
+            &format!("reference_commit\t{TEST_COMMIT}"),
+            &format!("reference_commit\t{TEST_COMMIT}\nreference_commit\tdef456"),
+        );
+        let duplicate_canonical = OVERLAY.replace(
+            "m:A.foo_listner\tfoo_listener\tC-9\t-",
+            "m:A.foo_listner\tfoo_listener\tC-9\t-\n\
+             m:A.foo_listner\tother_listener\tC-9\tBN-duplicate",
+        );
+        let duplicate_status = OVERLAY.replace(
+            "m:A\timproved\tBN-01",
+            "m:A\timproved\tBN-01\nm:A\tsame\tBN-duplicate",
+        );
+        for (file, overlay, section) in [
+            (duplicate_meta.as_str(), OVERLAY, "meta"),
+            (EXTRACT, duplicate_canonical.as_str(), "canonical"),
+            (EXTRACT, duplicate_status.as_str(), "status"),
+        ] {
+            let error = Schema::parse(file, overlay).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    SchemaError::DuplicateIdentity {
+                        section: found,
+                        ..
+                    } if found == &section
+                ),
+                "{section}: got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyed_extracted_and_cross_layer_identities_are_unique() {
+        let duplicate_flag = EXTRACT.replace(
+            "-w,--write\twrite\tstore_true\t-\tFalse\t-\twrite it",
+            "-w,--write\twrite\tstore_true\t-\tFalse\t-\twrite it\n\
+             -w,--write\twrite-again\tstore_true\t-\tFalse\t-\tduplicate",
+        );
+        let error = Schema::parse(&duplicate_flag, OVERLAY).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SchemaError::DuplicateIdentity {
+                    section: "flags",
+                    ..
+                }
+            ),
+            "got {error}"
+        );
+
+        let duplicate_extracted_config = EXTRACT.replace(
+            "camera.fps\tint\t30\t1",
+            "camera.fps\tint\t30\t1\ncamera.fps\tint\t60\t1",
+        );
+        let error = Schema::parse(&duplicate_extracted_config, OVERLAY).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SchemaError::DuplicateIdentity {
+                    section: "config",
+                    ..
+                }
+            ),
+            "got {error}"
+        );
+
+        let duplicate_config = OVERLAY.replace(
+            "[config_binding]",
+            "[optional_config]\ncamera.fps\tint\t1\n\n[config_binding]",
+        );
+        let error = Schema::parse(EXTRACT, &duplicate_config).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SchemaError::DuplicateIdentity {
+                    section: "optional_config",
+                    previous_file: "API_SCHEMA.tsv",
+                    ..
+                }
+            ),
+            "got {error}"
+        );
     }
 
     #[test]
@@ -2194,17 +2837,16 @@ mod tests {
     fn a_row_with_the_wrong_arity_names_its_line() {
         let broken = EXTRACT.replace("m\tA\tclass\tdefined\t1\tobject", "m\tA\tclass");
         let err = Schema::parse(&broken, OVERLAY).unwrap_err();
-        match err {
-            SchemaError::Arity {
-                line,
-                expected,
-                found,
-                ..
-            } => {
-                assert_eq!((expected, found), (6, 3));
-                assert!(line > 0);
-            }
-            other => panic!("expected an arity error, got {other}"),
+        assert!(matches!(err, SchemaError::Arity { .. }), "got {err}");
+        if let SchemaError::Arity {
+            line,
+            expected,
+            found,
+            ..
+        } = err
+        {
+            assert_eq!((expected, found), (6, 3));
+            assert!(line > 0);
         }
     }
 
@@ -2256,7 +2898,7 @@ mod tests {
             generate_cli_rs(&s),
             generate_docs_md(&s),
         ] {
-            assert!(artifact.contains("abc123"), "artifact lost the pin");
+            assert!(artifact.contains(TEST_COMMIT), "artifact lost the pin");
             assert!(
                 artifact.contains("never hand-edit"),
                 "artifact lost its banner"
