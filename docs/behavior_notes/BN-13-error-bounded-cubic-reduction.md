@@ -33,6 +33,10 @@ shared-anchor encoding; otherwise fidelity wins over the old shortcut.
 - Rust importers can call
   `QuadPath::add_cubic_bezier_curve_to_with_tolerance` when their output scale
   differs from the canonical frame.
+- Rust `CubicBezier::build` and its `TryFrom<CubicBezier>` conversions are
+  fallible. Handle `GeomError` explicitly; there is no infallible
+  `From<CubicBezier> for Mobject`, because a rejected conversion must not
+  publish a point-like partial object.
 - The Reference's old two-quad values remain available only as conformance
   observations; they are not production output goldens.
 
@@ -50,5 +54,7 @@ source makes curve quality a system property instead of a call-site accident.
   corpus.
 - `crates/fmn-geom/tests/invariant_fixtures.rs`: QuadPath routing, stationary
   endpoint encoding, compatibility-knob behavior, and smoothing invariants.
+- `crates/fmn-library/src/poly.rs`: the fallible `CubicBezier` builder,
+  `TryFrom` surface, and non-finite/resource-guard refusal regressions.
 - `docs/g0/G0-2-look-study-ratification.md`, finding L8 and decision (f).
 - `crates/fmn-geom/benches/cubic_converter.rs`: ingestion-path microbenchmark.

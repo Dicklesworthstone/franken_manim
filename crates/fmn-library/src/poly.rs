@@ -13,7 +13,7 @@ use fmn_core::constants::{
     RIGHT, UL, UR,
 };
 use fmn_core::types::Vec3;
-use fmn_geom::{QuadPath, space_ops};
+use fmn_geom::{GeomError, QuadPath, space_ops};
 use fmn_mobject::Mobject;
 use fmn_mobject::ShapeTag;
 
@@ -58,19 +58,34 @@ impl CubicBezier {
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError`] when the cubic-to-quadratic converter refuses the input
+    /// or cannot satisfy its bounded default tolerance. No partial
+    /// [`VMobject`] is published on failure.
+    pub fn build(self) -> Result<VMobject, GeomError> {
         let [a0, h0, h1, a1] = self.control;
         let mut path = QuadPath::new();
         path.start_new_path(a0);
-        let _ = path.add_cubic_bezier_curve_to(h0, h1, a1);
-        VMobject::from_path(&path).with_style(self.style)
+        path.add_cubic_bezier_curve_to(h0, h1, a1)?;
+        Ok(VMobject::from_path(&path).with_style(self.style))
     }
 }
 
-impl From<CubicBezier> for Mobject {
-    fn from(c: CubicBezier) -> Self {
-        c.build().into()
+impl TryFrom<CubicBezier> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(cubic: CubicBezier) -> Result<Self, Self::Error> {
+        cubic.build()
+    }
+}
+
+impl TryFrom<CubicBezier> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(cubic: CubicBezier) -> Result<Self, Self::Error> {
+        cubic.build().map(Into::into)
     }
 }
 
@@ -780,10 +795,43 @@ mod tests {
 
     #[test]
     fn cubic_bezier_lands_on_its_anchors() {
-        let curve =
-            CubicBezier::new([0.0; 3], [1.0, 2.0, 0.0], [3.0, 2.0, 0.0], [4.0, 0.0, 0.0]).build();
+        let cubic = CubicBezier::new([0.0; 3], [1.0, 2.0, 0.0], [3.0, 2.0, 0.0], [4.0, 0.0, 0.0]);
+        let curve = VMobject::try_from(cubic).expect("finite cubic is within the default budget");
         assert_eq!(curve.points()[0], [0.0; 3]);
         assert_eq!(*curve.points().last().unwrap(), [4.0, 0.0, 0.0]);
+        let _: Mobject =
+            Mobject::try_from(cubic).expect("fallible detached conversion keeps valid cubics");
+    }
+
+    #[test]
+    fn cubic_bezier_rejects_non_finite_controls_without_partial_output() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let cubic = CubicBezier::new(
+                [0.0; 3],
+                [1.0, invalid, 0.0],
+                [3.0, 2.0, 0.0],
+                [4.0, 0.0, 0.0],
+            );
+            assert_eq!(
+                cubic.build().expect_err("non-finite cubic must be refused"),
+                GeomError::ToleranceUnreachable { needed: usize::MAX }
+            );
+            assert_eq!(
+                Mobject::try_from(cubic)
+                    .err()
+                    .expect("conversion must expose the same refusal"),
+                GeomError::ToleranceUnreachable { needed: usize::MAX }
+            );
+        }
+    }
+
+    #[test]
+    fn cubic_bezier_surfaces_the_converter_resource_guard() {
+        let cubic = CubicBezier::new([0.0; 3], [0.0; 3], [1.0e300, 0.0, 0.0], [0.0; 3]);
+        assert!(matches!(
+            cubic.build(),
+            Err(GeomError::ToleranceUnreachable { .. })
+        ));
     }
 
     #[test]

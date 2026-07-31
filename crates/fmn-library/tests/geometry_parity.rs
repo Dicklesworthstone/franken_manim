@@ -195,7 +195,8 @@ fn build(case: &Case) -> VMobject {
             case.point("h1"),
             case.point("a1"),
         )
-        .build(),
+        .build()
+        .expect("finite parity cubic is within the default converter budget"),
         other => panic!("{}: unhandled kind `{other}`", case.name),
     }
 }

@@ -396,7 +396,8 @@ fn polygon_and_cubic(corpus: &Corpus) -> Built {
         [1.7, 0.6, 0.0],
     )
     .color(PURPLE_B)
-    .build();
+    .build()
+    .expect("primitive-corpus cubic is finite and within the converter budget");
     stage_of(v_group([polygon, cubic]))
 }
 
