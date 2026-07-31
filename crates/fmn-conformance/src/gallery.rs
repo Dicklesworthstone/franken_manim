@@ -106,7 +106,15 @@ impl<'a> RgbaView<'a> {
                 "zero dimension ({width}x{height})"
             )));
         }
-        let expected = width as usize * height as usize * 4;
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or_else(|| {
+                GalleryError::InvalidImage(format!(
+                    "dimensions {width}x{height} overflow the addressable RGBA8 byte length"
+                ))
+            })?;
         if pixels.len() != expected {
             return Err(GalleryError::InvalidImage(format!(
                 "{} bytes for {width}x{height} RGBA8, expected {expected}",

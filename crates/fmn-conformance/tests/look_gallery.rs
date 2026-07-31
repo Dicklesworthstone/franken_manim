@@ -232,6 +232,24 @@ fn mismatched_dimensions_are_a_named_error() {
     );
 }
 
+#[test]
+fn image_views_refuse_dimension_products_that_overflow_rgba8_length() {
+    let error = RgbaView::new(1 << 31, 1 << 31, &[])
+        .expect_err("overflowing dimensions must fail without inspecting a wrapped length");
+    assert!(
+        error
+            .to_string()
+            .contains("overflow the addressable RGBA8 byte length"),
+        "unexpected error: {error}"
+    );
+
+    let error = RgbaView::new(2, 3, &[0; 23])
+        .expect_err("ordinary wrong lengths must retain their named refusal");
+    assert!(error.to_string().contains("expected 24"));
+
+    assert!(RgbaView::new(2, 3, &[0; 24]).is_ok());
+}
+
 // ---------------------------------------------------------- manifest rules
 
 #[test]
