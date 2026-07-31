@@ -300,6 +300,8 @@ pub enum GalleryError {
     /// `record_verdict` was given a change note containing a tab or newline,
     /// which would corrupt the TSV.
     InvalidChangeNote,
+    /// `record_verdict` cannot advance an already maximal manifest revision.
+    RevisionOverflow,
     /// A committed FrankenManim render named by the manifest is missing from
     /// the checkout. This is the "missing pair" the tests fail on.
     MissingRender {
@@ -331,6 +333,12 @@ impl fmt::Display for GalleryError {
             Self::UnknownPanel(panel) => write!(f, "unknown gallery panel {panel:?}"),
             Self::InvalidChangeNote => {
                 write!(f, "change note must not contain tabs or newlines")
+            }
+            Self::RevisionOverflow => {
+                write!(
+                    f,
+                    "look-gallery manifest revision cannot advance past u64::MAX"
+                )
             }
             Self::MissingRender { panel, path } => write!(
                 f,
@@ -764,7 +772,8 @@ impl GalleryManifest {
     /// # Errors
     /// [`GalleryError::UnknownPanel`] if the panel is not in the manifest;
     /// [`GalleryError::InvalidChangeNote`] if the note contains a tab or
-    /// newline (or is empty).
+    /// newline (or is empty); [`GalleryError::RevisionOverflow`] if the
+    /// manifest revision is already `u64::MAX`.
     pub fn record_verdict(
         &mut self,
         panel: &str,
@@ -774,15 +783,20 @@ impl GalleryManifest {
         if changed.is_empty() || changed.contains(['\t', '\n', '\r']) {
             return Err(GalleryError::InvalidChangeNote);
         }
-        let row = self
+        let row_index = self
             .rows
-            .iter_mut()
-            .find(|row| row.panel == panel)
+            .iter()
+            .position(|row| row.panel == panel)
             .ok_or_else(|| GalleryError::UnknownPanel(panel.to_string()))?;
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GalleryError::RevisionOverflow)?;
+        let row = &mut self.rows[row_index];
         let from = row.verdict;
         row.verdict = verdict;
         row.changed = changed.to_string();
-        self.revision += 1;
+        self.revision = next_revision;
         Ok(VerdictChange {
             panel: panel.to_string(),
             from: Some(from),

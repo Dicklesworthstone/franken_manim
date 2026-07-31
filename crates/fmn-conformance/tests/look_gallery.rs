@@ -8,7 +8,7 @@
 //! without them simply skips the measurement and says so.
 
 use fmn_conformance::gallery::{
-    GalleryManifest, PairMetrics, RgbaView, Verdict, compare_pair, render_pairs,
+    GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, compare_pair, render_pairs,
 };
 use std::path::{Path, PathBuf};
 
@@ -410,6 +410,29 @@ fn verdict_transitions_are_recorded_and_regressions_found() {
         .record_verdict("glow", Verdict::Regression, "tab\tin note")
         .expect_err("a tab would corrupt the TSV");
     assert!(err.to_string().contains("tabs or newlines"), "{err}");
+}
+
+#[test]
+fn verdict_updates_refuse_revision_rollover_without_partial_mutation() {
+    let text = "# fmn-look-gallery v1\n# revision: 18446744073709551615\n\
+        panel\ta/b.png\tc/d.png\tat-least-as-good\toriginal note\n";
+    let mut manifest = GalleryManifest::parse(text).expect("maximum u64 revision is valid v1");
+    let before = manifest.clone();
+
+    let error = manifest
+        .record_verdict("panel", Verdict::Regression, "replacement note")
+        .expect_err("the monotone revision must not roll over");
+    assert!(matches!(error, GalleryError::RevisionOverflow));
+    assert_eq!(
+        manifest, before,
+        "a refused revision advance must not mutate the verdict or note"
+    );
+
+    let error = manifest
+        .record_verdict("missing", Verdict::Regression, "replacement note")
+        .expect_err("unknown-panel refusal retains precedence");
+    assert!(matches!(error, GalleryError::UnknownPanel(panel) if panel == "missing"));
+    assert_eq!(manifest, before);
 }
 
 #[test]
