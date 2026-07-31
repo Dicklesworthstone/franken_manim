@@ -64,6 +64,7 @@ const MAX_BASELINE_BYTES: usize = 64 * 1024;
 const MAX_TOKEN_BYTES: usize = 160;
 const MAX_DETAIL_BYTES: usize = 1_024;
 const MAX_EVIDENCE_PATH_BYTES: usize = 512;
+const MAX_DIAGNOSTIC_VALUE_BYTES: usize = 160;
 const BPS_DENOMINATOR: u128 = 10_000;
 const NONE: &str = "-";
 
@@ -471,16 +472,22 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
         let policy = GatePolicy {
             gate: GateId::parse(gate).ok_or_else(|| PerfError::Catalog {
                 line,
-                detail: format!("unknown gate {gate:?}"),
+                detail: format!("unknown gate {}", bounded_debug(gate)),
             })?,
-            scenario: scenario.to_owned(),
+            scenario: {
+                validate_token("scenario", scenario).map_err(|error| PerfError::Catalog {
+                    line,
+                    detail: error.to_string(),
+                })?;
+                scenario.to_owned()
+            },
             unit: MetricUnit::parse(unit).ok_or_else(|| PerfError::Catalog {
                 line,
-                detail: format!("unknown metric unit {unit:?}"),
+                detail: format!("unknown metric unit {}", bounded_debug(unit)),
             })?,
             direction: Direction::parse(direction).ok_or_else(|| PerfError::Catalog {
                 line,
-                detail: format!("unknown direction {direction:?}"),
+                detail: format!("unknown direction {}", bounded_debug(direction)),
             })?,
             target: parse_optional_u64(target)
                 .map_err(|detail| PerfError::Catalog { line, detail })?,
@@ -491,17 +498,18 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
             block_regression_bps: parse_number(block_regression_bps, "block_regression_bps", line)?,
             enforcement: Enforcement::parse(enforcement).ok_or_else(|| PerfError::Catalog {
                 line,
-                detail: format!("unknown enforcement {enforcement:?}"),
+                detail: format!("unknown enforcement {}", bounded_debug(enforcement)),
             })?,
             scope: GateScope::parse(scope).ok_or_else(|| PerfError::Catalog {
                 line,
-                detail: format!("unknown scope {scope:?}"),
+                detail: format!("unknown scope {}", bounded_debug(scope)),
             })?,
             require_regression_profile: require_regression_profile.parse().map_err(|_| {
                 PerfError::Catalog {
                     line,
                     detail: format!(
-                        "bad require_regression_profile {require_regression_profile:?}"
+                        "bad require_regression_profile {}",
+                        bounded_debug(require_regression_profile)
                     ),
                 }
             })?,
@@ -1083,11 +1091,15 @@ impl MeasurementBatch {
         let schema = next_raw_header(&mut lines, "schema")?;
         if schema != SAMPLES_SCHEMA {
             return Err(PerfError::Samples(format!(
-                "unsupported raw bundle schema {schema:?}"
+                "unsupported raw bundle schema {}",
+                bounded_debug(schema)
             )));
         }
-        let profile_id = next_raw_header(&mut lines, "profile_id")?.to_owned();
-        let build_profile = next_raw_header(&mut lines, "build_profile")?.to_owned();
+        let profile_id = own_raw_token(next_raw_header(&mut lines, "profile_id")?, "profile_id")?;
+        let build_profile = own_raw_token(
+            next_raw_header(&mut lines, "build_profile")?,
+            "build_profile",
+        )?;
         let host_fingerprint = parse_raw_digest(
             next_raw_header(&mut lines, "host_fingerprint")?,
             "host_fingerprint",
@@ -1106,14 +1118,17 @@ impl MeasurementBatch {
         )?;
         let gate_text = next_raw_header(&mut lines, "gate")?;
         let gate = GateId::parse(gate_text)
-            .ok_or_else(|| PerfError::Samples(format!("bad gate {gate_text:?}")))?;
-        let scenario = next_raw_header(&mut lines, "scenario")?.to_owned();
+            .ok_or_else(|| PerfError::Samples(format!("bad gate {}", bounded_debug(gate_text))))?;
+        let scenario = own_raw_token(next_raw_header(&mut lines, "scenario")?, "scenario")?;
         let unit_text = next_raw_header(&mut lines, "unit")?;
         let unit = MetricUnit::parse(unit_text)
-            .ok_or_else(|| PerfError::Samples(format!("bad unit {unit_text:?}")))?;
-        let engine = next_raw_header(&mut lines, "engine")?.to_owned();
-        let tier = next_raw_header(&mut lines, "tier")?.to_owned();
-        let thread_profile = next_raw_header(&mut lines, "thread_profile")?.to_owned();
+            .ok_or_else(|| PerfError::Samples(format!("bad unit {}", bounded_debug(unit_text))))?;
+        let engine = own_raw_token(next_raw_header(&mut lines, "engine")?, "engine")?;
+        let tier = own_raw_token(next_raw_header(&mut lines, "tier")?, "tier")?;
+        let thread_profile = own_raw_token(
+            next_raw_header(&mut lines, "thread_profile")?,
+            "thread_profile",
+        )?;
         let execution_plan_digest = parse_raw_digest(
             next_raw_header(&mut lines, "execution_plan_digest")?,
             "execution_plan_digest",
@@ -1122,8 +1137,10 @@ impl MeasurementBatch {
             next_raw_header(&mut lines, "config_digest")?,
             "config_digest",
         )?;
-        let cache_state = next_raw_header(&mut lines, "cache_state")?.to_owned();
-        let output_mode = next_raw_header(&mut lines, "output_mode")?.to_owned();
+        let cache_state =
+            own_raw_token(next_raw_header(&mut lines, "cache_state")?, "cache_state")?;
+        let output_mode =
+            own_raw_token(next_raw_header(&mut lines, "output_mode")?, "output_mode")?;
         let external_tool_fingerprint = parse_optional_raw_digest(
             next_raw_header(&mut lines, "external_tool_fingerprint")?,
             "external_tool_fingerprint",
@@ -1131,7 +1148,9 @@ impl MeasurementBatch {
         let bare_metal =
             parse_raw_number(next_raw_header(&mut lines, "bare_metal")?, "bare_metal")?;
         let isolated = parse_raw_number(next_raw_header(&mut lines, "isolated")?, "isolated")?;
-        let producer_commit = next_raw_header(&mut lines, "producer_commit")?.to_owned();
+        let producer_commit_text = next_raw_header(&mut lines, "producer_commit")?;
+        validate_producer_commit(producer_commit_text)?;
+        let producer_commit = producer_commit_text.to_owned();
         let sample_count: usize =
             parse_raw_number(next_raw_header(&mut lines, "sample_count")?, "sample_count")?;
         let evidence_count: usize = parse_raw_number(
@@ -1164,16 +1183,22 @@ impl MeasurementBatch {
                 || parse_raw_number::<usize>(index, "sample index")? != expected_index
             {
                 return Err(PerfError::Samples(format!(
-                    "expected sample index {expected_index}, found {index:?}"
+                    "expected sample index {expected_index}, found {}",
+                    bounded_debug(index)
                 )));
             }
             let value = parse_raw_number(value, "sample value")?;
             let sample = match (status, reason) {
                 ("valid", NONE) => Sample::valid(value),
-                ("invalid", reason) => Sample::invalid(value, reason),
+                ("invalid", reason) => {
+                    Sample::validate_invalid_reason(reason)?;
+                    Sample::invalid(value, reason)
+                }
                 _ => {
                     return Err(PerfError::Samples(format!(
-                        "sample {expected_index} has bad status/reason {status:?}/{reason:?}"
+                        "sample {expected_index} has bad status/reason {}/{}",
+                        bounded_debug(status),
+                        bounded_debug(reason)
                     )));
                 }
             };
@@ -1195,11 +1220,14 @@ impl MeasurementBatch {
                 || parse_raw_number::<usize>(index, "evidence index")? != expected_index
             {
                 return Err(PerfError::Evidence(format!(
-                    "expected evidence index {expected_index}, found {index:?}"
+                    "expected evidence index {expected_index}, found {}",
+                    bounded_debug(index)
                 )));
             }
-            let kind = EvidenceKind::parse(kind)
-                .ok_or_else(|| PerfError::Evidence(format!("bad evidence kind {kind:?}")))?;
+            let kind = EvidenceKind::parse(kind).ok_or_else(|| {
+                PerfError::Evidence(format!("bad evidence kind {}", bounded_debug(kind)))
+            })?;
+            validate_evidence_path(path)?;
             evidence.push(EvidenceRef {
                 kind,
                 path: path.to_owned(),
@@ -1208,7 +1236,8 @@ impl MeasurementBatch {
         }
         if let Some(extra) = lines.next() {
             return Err(PerfError::Samples(format!(
-                "unexpected trailing raw-bundle record {extra:?}"
+                "unexpected trailing raw-bundle record {}",
+                bounded_debug(extra)
             )));
         }
         let batch = Self {
@@ -1804,8 +1833,8 @@ impl Baseline {
         };
         if get("schema")? != BASELINE_SCHEMA {
             return Err(PerfError::Baseline(format!(
-                "unsupported schema {:?}",
-                get("schema")?
+                "unsupported schema {}",
+                bounded_debug(&get("schema")?)
             )));
         }
         let gate = GateId::parse(&get("gate")?)
@@ -2191,12 +2220,14 @@ fn parse_baseline_fields(text: &str) -> Result<BTreeMap<String, String>, PerfErr
         };
         if !allowed.contains(key) {
             return Err(PerfError::Baseline(format!(
-                "line {line} has unknown key {key:?}"
+                "line {line} has unknown key {}",
+                bounded_debug(key)
             )));
         }
         if fields.insert(key.to_owned(), value.to_owned()).is_some() {
             return Err(PerfError::Baseline(format!(
-                "line {line} duplicates key {key:?}"
+                "line {line} duplicates key {}",
+                bounded_debug(key)
             )));
         }
     }
@@ -2234,6 +2265,23 @@ fn split_exact_tsv_fields<const N: usize>(line: &str) -> Result<[&str; N], usize
     Ok(exact)
 }
 
+fn bounded_debug(value: &str) -> String {
+    if value.len() <= MAX_DIAGNOSTIC_VALUE_BYTES {
+        return format!("{value:?}");
+    }
+
+    let mut end = MAX_DIAGNOSTIC_VALUE_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{:?}... <{} bytes total>", &value[..end], value.len())
+}
+
+fn own_raw_token(value: &str, name: &'static str) -> Result<String, PerfError> {
+    validate_token(name, value)?;
+    Ok(value.to_owned())
+}
+
 fn next_raw_header<'a, I>(lines: &mut I, expected: &'static str) -> Result<&'a str, PerfError>
 where
     I: Iterator<Item = &'a str>,
@@ -2248,7 +2296,8 @@ where
     };
     if name != expected || value.contains('\t') {
         return Err(PerfError::Samples(format!(
-            "expected raw-bundle header {expected:?}, found {line:?}"
+            "expected raw-bundle header {expected:?}, found {}",
+            bounded_debug(line)
         )));
     }
     Ok(value)
@@ -2260,7 +2309,7 @@ where
 {
     value
         .parse()
-        .map_err(|_| PerfError::Samples(format!("bad raw-bundle {name} {value:?}")))
+        .map_err(|_| PerfError::Samples(format!("bad raw-bundle {name} {}", bounded_debug(value))))
 }
 
 fn parse_raw_digest(value: &str, name: &'static str) -> Result<Digest, PerfError> {
@@ -2282,7 +2331,7 @@ where
 {
     value.parse().map_err(|_| PerfError::Catalog {
         line,
-        detail: format!("bad {name} {value:?}"),
+        detail: format!("bad {name} {}", bounded_debug(value)),
     })
 }
 
@@ -2293,7 +2342,7 @@ fn parse_optional_u64(value: &str) -> Result<Option<u64>, String> {
         value
             .parse()
             .map(Some)
-            .map_err(|_| format!("bad target {value:?}"))
+            .map_err(|_| format!("bad target {}", bounded_debug(value)))
     }
 }
 
@@ -2361,7 +2410,8 @@ pub fn validate_producer_commit(value: &str) -> Result<(), PerfError> {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     {
         return Err(PerfError::Identity(format!(
-            "producer_commit must be 40 lowercase hex characters, got {value:?}"
+            "producer_commit must be 40 lowercase hex characters, got {}",
+            bounded_debug(value)
         )));
     }
     Ok(())
@@ -2375,13 +2425,15 @@ fn validate_evidence_path(value: &str) -> Result<(), PerfError> {
         || value.chars().any(char::is_control)
     {
         return Err(PerfError::Evidence(format!(
-            "artifact path must be a canonical file below tests/artifacts/perf/: {value:?}"
+            "artifact path must be a canonical file below tests/artifacts/perf/: {}",
+            bounded_debug(value)
         )));
     }
     for component in value.split('/') {
         if component.is_empty() || matches!(component, "." | "..") {
             return Err(PerfError::Evidence(format!(
-                "artifact path has an unsafe component: {value:?}"
+                "artifact path has an unsafe component: {}",
+                bounded_debug(value)
             )));
         }
     }
@@ -2794,6 +2846,87 @@ mod tests {
                 .to_string()
                 .contains("evidence 0 has 1029 fields, expected 5")
         );
+    }
+
+    #[test]
+    fn malformed_raw_bundle_values_are_validated_before_owning_and_reported_boundedly() {
+        let megabyte = "x".repeat(1024 * 1024);
+
+        let schema_error = MeasurementBatch::from_tsv(&format!("schema\t{megabyte}\n"))
+            .expect_err("an oversized schema value must fail closed")
+            .to_string();
+        assert!(schema_error.len() < 512, "{schema_error}");
+        assert!(schema_error.contains("1048576 bytes total"));
+
+        let raw = measured(320_000).to_tsv().expect("fixture must serialize");
+        let profile_line = raw
+            .lines()
+            .find(|line| line.starts_with("profile_id\t"))
+            .expect("fixture must contain profile_id");
+        let oversized_profile = format!("profile_id\t{megabyte}");
+        let malformed = raw.replacen(profile_line, &oversized_profile, 1);
+        let profile_error = MeasurementBatch::from_tsv(&malformed)
+            .expect_err("an oversized profile token must fail before ownership")
+            .to_string();
+        assert!(profile_error.len() < 256, "{profile_error}");
+        assert!(profile_error.contains("profile_id length"));
+        assert!(profile_error.contains("1048576"));
+
+        let sample = raw
+            .lines()
+            .find(|line| line.starts_with("sample\t0\t"))
+            .expect("fixture must contain its first sample");
+        let oversized_reason = format!("sample\t0\t319998\tinvalid\t{megabyte}");
+        let malformed = raw.replacen(sample, &oversized_reason, 1);
+        let reason_error = MeasurementBatch::from_tsv(&malformed)
+            .expect_err("an oversized invalid reason must fail before ownership")
+            .to_string();
+        assert!(reason_error.len() < 256, "{reason_error}");
+        assert!(reason_error.contains("invalid_reason must be nonempty"));
+
+        let oversized_value = format!("sample\t0\t{megabyte}\tvalid\t-");
+        let malformed = raw.replacen(sample, &oversized_value, 1);
+        let number_error = MeasurementBatch::from_tsv(&malformed)
+            .expect_err("an oversized numeric field must have a bounded diagnostic")
+            .to_string();
+        assert!(number_error.len() < 512, "{number_error}");
+        assert!(number_error.contains("1048576 bytes total"));
+
+        let mut with_evidence = measured(320_000);
+        with_evidence.evidence = vec![source(EvidenceKind::PhaseTrace, "trace.tsv")];
+        let evidence_raw = with_evidence
+            .to_tsv()
+            .expect("evidence fixture must serialize");
+        let evidence = evidence_raw
+            .lines()
+            .find(|line| line.starts_with("evidence\t0\t"))
+            .expect("fixture must contain its evidence record");
+        let oversized_path = format!(
+            "evidence\t0\tphase-trace\ttests/artifacts/perf/{megabyte}\t{}",
+            sha256(b"trace")
+        );
+        let malformed = evidence_raw.replacen(evidence, &oversized_path, 1);
+        let path_error = MeasurementBatch::from_tsv(&malformed)
+            .expect_err("an oversized evidence path must fail before ownership")
+            .to_string();
+        assert!(path_error.len() < 512, "{path_error}");
+        assert!(path_error.contains("1048597 bytes total"));
+
+        let trailing_error = MeasurementBatch::from_tsv(&format!("{raw}{megabyte}\n"))
+            .expect_err("an oversized trailing record must have a bounded diagnostic")
+            .to_string();
+        assert!(trailing_error.len() < 512, "{trailing_error}");
+        assert!(trailing_error.contains("1048576 bytes total"));
+    }
+
+    #[test]
+    fn bounded_diagnostic_preview_preserves_short_text_and_utf8_boundaries() {
+        assert_eq!(bounded_debug("bad\nvalue"), r#""bad\nvalue""#);
+
+        let multibyte = "💥".repeat(100);
+        let preview = bounded_debug(&multibyte);
+        assert!(preview.len() < 512, "{preview}");
+        assert!(preview.contains("400 bytes total"));
     }
 
     #[test]
