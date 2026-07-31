@@ -15,7 +15,9 @@
 //! advances with `RATCHET_UPDATE=1` (regenerating baseline, trend, and
 //! dashboard in one stroke).
 
-use fmn_conformance::ratchet::{Baseline, Pending, ratchet_violations, render_dashboard};
+use fmn_conformance::ratchet::{
+    Baseline, Pending, parse_trend_tsv, ratchet_violations, render_dashboard,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -25,47 +27,49 @@ fn repo_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn repo_file(name: &str) -> String {
+fn repo_file(name: &str) -> Result<String, String> {
     let path = repo_path(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
-fn suite_lock_franken_markdown_rev() -> String {
-    let lock = repo_file("SUITE.lock");
+fn suite_lock_franken_markdown_rev() -> Result<String, String> {
+    let lock = repo_file("SUITE.lock")?;
     for line in lock.lines() {
         let line = line.trim();
         if let Some((rev, _)) = line
             .strip_prefix("franken_markdown\t")
             .and_then(|rest| rest.split_once('\t'))
         {
-            return rev.trim().to_owned();
+            return Ok(rev.trim().to_owned());
         }
     }
-    panic!("SUITE.lock must pin franken_markdown");
+    Err("SUITE.lock must pin franken_markdown".to_owned())
 }
 
-fn committed_baseline() -> Baseline {
-    Baseline::from_tsv(&repo_file("docs/ratchet/baseline.tsv"))
-        .unwrap_or_else(|| panic!("docs/ratchet/baseline.tsv is malformed"))
+fn committed_baseline() -> Result<Baseline, String> {
+    Baseline::from_tsv(&repo_file("docs/ratchet/baseline.tsv")?)
+        .map_err(|error| format!("docs/ratchet/baseline.tsv is malformed: {error}"))
 }
 
 // ── Always-on: the pin coupling ─────────────────────────────────────────
 
 #[test]
-fn baseline_names_the_current_franken_markdown_pin() {
-    let baseline = committed_baseline();
-    let pin = suite_lock_franken_markdown_rev();
+fn baseline_names_the_current_franken_markdown_pin() -> Result<(), String> {
+    let baseline = committed_baseline()?;
+    let pin = suite_lock_franken_markdown_rev()?;
     assert_eq!(
         baseline.franken_markdown_rev, pin,
         "SUITE.lock moved franken_markdown without a ratchet re-run: \
          recompute with the corpus and RATCHET_UPDATE=1 (docs/ratchet/dashboard.md)"
     );
+    Ok(())
 }
 
 #[test]
-fn dashboard_headline_matches_the_baseline() {
-    let baseline = committed_baseline();
-    let dashboard = repo_file("docs/ratchet/dashboard.md");
+fn dashboard_headline_matches_the_baseline() -> Result<(), String> {
+    let baseline = committed_baseline()?;
+    let dashboard = repo_file("docs/ratchet/dashboard.md")?;
     let [po, pu, lo, lu] = baseline.percentages();
     for needle in [
         format!("| **Parse** | {po:.3} % | {pu:.3} % |"),
@@ -77,12 +81,14 @@ fn dashboard_headline_matches_the_baseline() {
             "dashboard drifted from the baseline (missing `{needle}`); re-bless"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn trend_is_monotone_and_ends_at_the_baseline() {
-    let baseline = committed_baseline();
-    let trend = parse_trend(&repo_file("docs/ratchet/trend.tsv"));
+fn trend_is_monotone_and_ends_at_the_baseline() -> Result<(), String> {
+    let baseline = committed_baseline()?;
+    let trend = parse_trend_tsv(&repo_file("docs/ratchet/trend.tsv")?)
+        .map_err(|error| format!("docs/ratchet/trend.tsv is malformed: {error}"))?;
     assert!(
         !trend.is_empty(),
         "the trend log carries at least the first bless"
@@ -93,15 +99,18 @@ fn trend_is_monotone_and_ends_at_the_baseline() {
             "the committed trend itself must be monotone"
         );
     }
-    let last = trend.last().unwrap_or_else(|| unreachable!());
+    let last = trend
+        .last()
+        .ok_or_else(|| "the trend log must carry at least the first bless".to_owned())?;
     assert_eq!(last, &baseline, "the trend's last row is the baseline");
+    Ok(())
 }
 
 // ── Always-on: the per-construct named-error audit ──────────────────────
 
 #[test]
-fn every_non_tier1_construct_fails_with_its_named_tiered_error() {
-    let table = repo_file("docs/g0/g0-4-corpus/construct_table.tsv");
+fn every_non_tier1_construct_fails_with_its_named_tiered_error() -> Result<(), String> {
+    let table = repo_file("docs/g0/g0-4-corpus/construct_table.tsv")?;
     let mut audited = 0_usize;
     for line in table.lines() {
         if line.starts_with('#') || line.trim().is_empty() || line.starts_with("rank\t") {
@@ -137,6 +146,7 @@ fn every_non_tier1_construct_fails_with_its_named_tiered_error() {
         audited >= 25,
         "the T2 command audit covers the table ({audited})"
     );
+    Ok(())
 }
 
 /// A minimal source string exercising a construct from the table.
@@ -156,7 +166,7 @@ const TRACK_EXT: &str = "franken_manim fm-kg9";
 const TRACK_FONTS: &str = "franken_markdown br-…-4vjj (Noto math-alphanumeric subset)";
 
 #[test]
-fn recompute_and_enforce_the_ratchet() {
+fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     let corpus_path = std::env::var("FMN_TEX_CORPUS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| repo_path("corpus/tex_corpus.jsonl"));
@@ -166,14 +176,14 @@ fn recompute_and_enforce_the_ratchet() {
              test still enforces re-runs at pin bumps)",
             corpus_path.display()
         );
-        return;
+        return Ok(());
     };
-    let engine = fmd_math::Engine::bundled().unwrap_or_else(|e| panic!("bundled faces: {e}"));
-    let committed = committed_baseline();
+    let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
+    let committed = committed_baseline()?;
     let mut current = Baseline {
         rules_version: committed.rules_version,
         corpus_hash: committed.corpus_hash.clone(),
-        franken_markdown_rev: suite_lock_franken_markdown_rev(),
+        franken_markdown_rev: suite_lock_franken_markdown_rev()?,
         unique_total: 0,
         occurrence_total: 0,
         parse_unique: 0,
@@ -188,7 +198,7 @@ fn recompute_and_enforce_the_ratchet() {
             continue;
         }
         let entry =
-            parse_entry(line).unwrap_or_else(|| panic!("corpus line {}: bad JSON", lineno + 1));
+            parse_entry(line).ok_or_else(|| format!("corpus line {}: bad JSON", lineno + 1))?;
         current.unique_total += 1;
         current.occurrence_total += entry.count;
         let parse_result = if entry.mode == "text" {
@@ -253,31 +263,36 @@ fn recompute_and_enforce_the_ratchet() {
     );
     let advanced = current != committed;
     if std::env::var("RATCHET_UPDATE").is_ok() {
-        bless(&current, &parse_pending, &layout_pending);
+        bless(&current, &parse_pending, &layout_pending)?;
         eprintln!("ratchet blessed at {}", current.franken_markdown_rev);
     } else if advanced {
-        panic!(
+        return Err(
             "coverage advanced (or the pin moved) — bless deliberately with \
              RATCHET_UPDATE=1 so the public artifacts move in the same commit"
+                .to_owned(),
         );
     }
     let [po, pu, lo, lu] = current.percentages();
     eprintln!("ratchet: parse {po:.3}%/{pu:.3}% · layout {lo:.3}%/{lu:.3}%");
+    Ok(())
 }
 
 fn bless(
     current: &Baseline,
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
-) {
+) -> Result<(), String> {
     let dir = repo_path("docs/ratchet");
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+    std::fs::create_dir_all(&dir).map_err(|error| format!("mkdir: {error}"))?;
     // Trend: append (or start) — keyed by rev; re-blessing the same rev
     // replaces its row.
     let trend_path = dir.join("trend.tsv");
-    let mut trend = std::fs::read_to_string(&trend_path)
-        .map(|t| parse_trend(&t))
-        .unwrap_or_default();
+    let mut trend = match std::fs::read_to_string(&trend_path) {
+        Ok(text) => parse_trend_tsv(&text)
+            .map_err(|error| format!("existing trend is malformed: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("cannot read existing trend: {error}")),
+    };
     trend.retain(|b| b.franken_markdown_rev != current.franken_markdown_rev);
     trend.push(current.clone());
     let mut trend_out = String::from(
@@ -298,9 +313,9 @@ fn bless(
             b.layout_occurrences,
         ));
     }
-    std::fs::write(&trend_path, trend_out).unwrap_or_else(|e| panic!("trend: {e}"));
+    std::fs::write(&trend_path, trend_out).map_err(|error| format!("trend: {error}"))?;
     std::fs::write(dir.join("baseline.tsv"), current.to_tsv())
-        .unwrap_or_else(|e| panic!("baseline: {e}"));
+        .map_err(|error| format!("baseline: {error}"))?;
     let to_pending = |m: &BTreeMap<String, u64>| -> Vec<Pending> {
         let mut v: Vec<Pending> = m
             .iter()
@@ -324,7 +339,8 @@ fn bless(
         &trend,
     );
     std::fs::write(dir.join("dashboard.md"), dashboard)
-        .unwrap_or_else(|e| panic!("dashboard: {e}"));
+        .map_err(|error| format!("dashboard: {error}"))?;
+    Ok(())
 }
 
 fn track_of(construct: &str) -> &'static str {
@@ -345,29 +361,6 @@ fn track_of(construct: &str) -> &'static str {
     } else {
         TRACK_T2
     }
-}
-
-fn parse_trend(text: &str) -> Vec<Baseline> {
-    text.lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\t').collect();
-            if f.len() < 9 {
-                return None;
-            }
-            Some(Baseline {
-                franken_markdown_rev: f[0].to_owned(),
-                rules_version: f[1].parse().ok()?,
-                corpus_hash: f[2].to_owned(),
-                unique_total: f[3].parse().ok()?,
-                occurrence_total: f[4].parse().ok()?,
-                parse_unique: f[5].parse().ok()?,
-                parse_occurrences: f[6].parse().ok()?,
-                layout_unique: f[7].parse().ok()?,
-                layout_occurrences: f[8].parse().ok()?,
-            })
-        })
-        .collect()
 }
 
 // ── A minimal JSON-object reader for the corpus lines (governed closure:
