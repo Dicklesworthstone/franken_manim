@@ -86,6 +86,20 @@ fn compiled_definition_accepts_only_its_exact_baseline_identity() {
 }
 
 #[test]
+fn producer_refuses_bad_commit_before_profile_or_workload() {
+    let scenario = Pg2Scenario::FillCanonical;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let error = measure_pg2(
+        &baseline,
+        "not-a-commit",
+        "tests/artifacts/perf/pg2-preflight/trace.tsv",
+    )
+    .expect_err("producer commit must fail before profile or workload setup");
+    assert!(error.to_string().contains("producer_commit"), "{error}");
+}
+
+#[test]
 fn injected_pg2_slowdown_blocks_through_the_common_verifier() {
     for scenario in Pg2Scenario::ALL {
         let baseline_batch = batch(scenario, 400_000);

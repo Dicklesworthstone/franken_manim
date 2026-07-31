@@ -937,7 +937,7 @@ pub struct MeasurementBatch {
 impl MeasurementBatch {
     fn validate_intrinsic(&self) -> Result<(), PerfError> {
         self.key.validate()?;
-        validate_commit(&self.producer_commit)?;
+        validate_producer_commit(&self.producer_commit)?;
         if self.samples.len() > MAX_SAMPLES {
             return Err(PerfError::Samples(format!(
                 "{} repetitions exceed the {MAX_SAMPLES} resource limit",
@@ -1332,7 +1332,7 @@ impl Baseline {
         }
         self.policy.validate()?;
         self.key.validate()?;
-        validate_commit(&self.producer_commit)?;
+        validate_producer_commit(&self.producer_commit)?;
         if self.key.gate != self.policy.gate
             || self.key.scenario != self.policy.scenario
             || self.key.unit != self.policy.unit
@@ -2322,7 +2322,15 @@ fn validate_detail(name: &'static str, value: &str) -> Result<(), PerfError> {
     Ok(())
 }
 
-fn validate_commit(value: &str) -> Result<(), PerfError> {
+/// Validate the canonical producer-commit provenance field.
+///
+/// Producers call this before profile checks or workload setup so malformed
+/// provenance cannot consume timing work or create persistent scratch state.
+///
+/// # Errors
+/// Returns an identity error unless `value` is exactly 40 lowercase
+/// hexadecimal characters.
+pub fn validate_producer_commit(value: &str) -> Result<(), PerfError> {
     if value.len() != 40
         || !value
             .bytes()

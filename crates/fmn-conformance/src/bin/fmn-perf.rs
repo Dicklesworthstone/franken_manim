@@ -6,6 +6,7 @@ use fmn_cache::{Store, StoreConfig};
 use fmn_conformance::perf::{
     BASELINE_SCHEMA, Baseline, EvidenceKind, EvidenceRef, MeasurementBatch, POLICY_SCHEMA,
     SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog, require_compiled_cargo_profile,
+    validate_producer_commit,
 };
 use fmn_conformance::perf_pg2::{
     PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
@@ -264,7 +265,7 @@ fn measure_pg2_command(
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
         Baseline::from_tsv(&baseline_text).map_err(|error| CliError::data(error.to_string()))?;
-    let producer_commit = utf8_argument(producer_commit, "producer commit")?;
+    let producer_commit = producer_commit_argument(producer_commit)?;
     let trace_path_text = utf8_argument(trace_path, "trace output path")?;
     let raw_path_text = utf8_argument(raw_path, "raw output path")?;
     if trace_path_text == raw_path_text {
@@ -356,7 +357,7 @@ fn measure_pg7_command(
     definition
         .validate_baseline(&baseline)
         .map_err(|error| CliError::data(error.to_string()))?;
-    let producer_commit = utf8_argument(producer_commit, "producer commit")?;
+    let producer_commit = producer_commit_argument(producer_commit)?;
     let cache_root_text = utf8_argument(cache_root, "cache root")?;
     let trace_path_text = utf8_argument(trace_path, "trace output path")?;
     let raw_path_text = utf8_argument(raw_path, "raw output path")?;
@@ -492,6 +493,12 @@ fn utf8_argument<'a>(value: &'a OsStr, label: &str) -> Result<&'a str, CliError>
     value
         .to_str()
         .ok_or_else(|| CliError::data(format!("{label} is not UTF-8")))
+}
+
+fn producer_commit_argument(value: &OsStr) -> Result<&str, CliError> {
+    let value = utf8_argument(value, "producer commit")?;
+    validate_producer_commit(value).map_err(|error| CliError::data(error.to_string()))?;
+    Ok(value)
 }
 
 fn refuse_existing(path: &OsStr, label: &str) -> Result<(), CliError> {
@@ -650,6 +657,18 @@ mod tests {
         if let Err(error) = result {
             assert!(error.detail.contains(compiled_profile));
         }
+    }
+
+    #[test]
+    fn producer_commit_argument_is_validated_before_measurement_setup() {
+        let error = producer_commit_argument(OsStr::new("not-a-commit")).unwrap_err();
+        assert_eq!(error.kind, "data");
+        assert!(error.detail.contains("producer_commit"));
+        assert_eq!(
+            producer_commit_argument(OsStr::new("0123456789abcdef0123456789abcdef01234567"))
+                .unwrap(),
+            "0123456789abcdef0123456789abcdef01234567"
+        );
     }
 
     #[test]

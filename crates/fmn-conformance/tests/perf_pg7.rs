@@ -100,6 +100,21 @@ fn compiled_definitions_accept_only_their_exact_baseline_identity() {
 }
 
 #[test]
+fn producer_refuses_bad_commit_before_profile_or_cache_setup() {
+    let scenario = Pg7Scenario::FormulaCached;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let error = measure_pg7(
+        &baseline,
+        "not-a-commit",
+        None,
+        "tests/artifacts/perf/pg7-preflight/trace.tsv",
+    )
+    .expect_err("producer commit must fail before profile or cache setup");
+    assert!(error.to_string().contains("producer_commit"), "{error}");
+}
+
+#[test]
 fn injected_pg7_slowdown_blocks_through_the_common_verifier() {
     for scenario in Pg7Scenario::ALL {
         let baseline_batch = batch(scenario, 50_000);

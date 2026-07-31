@@ -8,7 +8,7 @@
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
-    require_compiled_cargo_profile,
+    require_compiled_cargo_profile, validate_producer_commit,
 };
 use fmn_core::color::LinearRgba;
 use fmn_hash::{Digest, Sha256, sha256};
@@ -350,10 +350,11 @@ pub fn measure_pg2(
     })?;
     let definition = Pg2Definition::new(scenario);
     definition.validate_baseline(baseline)?;
+    validate_producer_commit(producer_commit)?;
     require_release_perf_artifact()?;
 
-    // Validate the producer commit and complete key before doing expensive
-    // work. `MeasurementBatch::to_tsv` is the one canonical validator.
+    // Validate the complete batch identity before doing expensive work.
+    // `MeasurementBatch::to_tsv` is the one canonical aggregate validator.
     let mut batch = MeasurementBatch {
         key: calibration_key(baseline),
         producer_commit: producer_commit.to_owned(),

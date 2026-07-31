@@ -163,6 +163,29 @@ fn producer_refuses_baseline_drift_before_profile_or_sampler() {
 }
 
 #[test]
+fn producer_refuses_bad_commit_before_profile_or_sampler() {
+    let scenario = Pg8Scenario::NativeBuiltins;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let sampler_called = std::cell::Cell::new(false);
+    let sampler = |_| {
+        sampler_called.set(true);
+        Err(fmn_conformance::perf_pg8::Pg8Error::Harness(
+            "sampler must not run".to_owned(),
+        ))
+    };
+    let error = measure_pg8(
+        &baseline,
+        "not-a-commit",
+        &sampler,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("producer commit must fail before profile or sampling");
+    assert!(!sampler_called.get(), "sampler ran before commit preflight");
+    assert!(error.to_string().contains("producer_commit"), "{error}");
+}
+
+#[test]
 fn injected_pg8_slowdown_blocks_through_the_common_verifier() {
     for scenario in Pg8Scenario::ALL {
         let baseline_batch = batch(scenario, target(scenario) / 2);

@@ -10,7 +10,7 @@
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
-    require_compiled_cargo_profile,
+    require_compiled_cargo_profile, validate_producer_commit,
 };
 use fmd_math::Style;
 use fmn_cache::{NamespacePolicy, Store};
@@ -394,6 +394,7 @@ pub fn measure_pg7(
     })?;
     let definition = Pg7Definition::new(scenario)?;
     definition.validate_baseline(baseline)?;
+    validate_producer_commit(producer_commit)?;
     require_release_perf_artifact()?;
     match (scenario, cache) {
         (Pg7Scenario::FormulaCached, None) => {

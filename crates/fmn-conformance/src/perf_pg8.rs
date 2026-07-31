@@ -25,7 +25,7 @@
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
-    require_compiled_cargo_profile,
+    require_compiled_cargo_profile, validate_producer_commit,
 };
 use fmn_hash::{Digest, Sha256, sha256};
 use std::fmt;
@@ -462,6 +462,7 @@ pub fn measure_pg8(
     })?;
     let definition = Pg8Definition::new(scenario);
     definition.validate_baseline(baseline)?;
+    validate_producer_commit(producer_commit)?;
     require_release_perf_artifact()?;
     let measurement = sampler(scenario)?;
     assemble_pg8(baseline, producer_commit, &measurement, trace_path)
