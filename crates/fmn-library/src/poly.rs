@@ -167,14 +167,19 @@ impl Polygon {
         if verts.len() < 3 {
             return self.build();
         }
-        let radius = radius.unwrap_or_else(|| {
-            let min_edge = verts
-                .windows(2)
-                .filter(|w| space_ops::get_norm(sub(w[0], w[1])) > 1e-8)
-                .map(|w| space_ops::get_norm(sub(w[0], w[1])))
-                .fold(f64::INFINITY, f64::min);
-            0.25 * min_edge
-        });
+        let radius = match radius {
+            Some(radius) => radius,
+            None => {
+                let min_edge = (0..verts.len())
+                    .map(|i| space_ops::get_norm(sub(verts[(i + 1) % verts.len()], verts[i])))
+                    .filter(|edge| edge.is_finite() && *edge > 1e-8)
+                    .reduce(f64::min);
+                let Some(min_edge) = min_edge else {
+                    return self.build();
+                };
+                0.25 * min_edge
+            }
+        };
 
         // One arc per corner, over the cyclic vertex triples.
         let n = verts.len();
@@ -747,6 +752,34 @@ mod tests {
             .iter()
             .any(|p| close(p[0], 0.5) && close(p[1], 0.0));
         assert!(has_cut, "expected a cut-back corner point");
+    }
+
+    #[test]
+    fn round_corners_includes_the_closing_edge_in_its_default_radius() {
+        let rounded =
+            Polygon::new([[0.0; 3], [10.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).round_corners(None);
+        let has_quarter_unit_cut = rounded
+            .points()
+            .iter()
+            .any(|p| close(p[0], 0.25) && close(p[1], 0.0));
+        assert!(
+            has_quarter_unit_cut,
+            "the one-unit closing edge must set the default radius"
+        );
+    }
+
+    #[test]
+    fn round_corners_keeps_an_all_coincident_polygon_finite() {
+        let rounded = Polygon::new([[1.0, 2.0, 0.0]; 3]).round_corners(None);
+        assert!(!rounded.points().is_empty());
+        assert!(
+            rounded
+                .points()
+                .iter()
+                .flatten()
+                .all(|coordinate| coordinate.is_finite()),
+            "default rounding must not turn an absent edge length into infinity"
+        );
     }
 
     #[test]
