@@ -1498,7 +1498,10 @@ fn length(point: Point) -> f64 {
     if scale == 0.0 {
         0.0
     } else {
-        scale * fmn_dmath::sqrt((point[0] / scale).powi(2) + (point[1] / scale).powi(2))
+        scale
+            * fmn_dmath::sqrt(
+                fmn_dmath::powi(point[0] / scale, 2) + fmn_dmath::powi(point[1] / scale, 2),
+            )
     }
 }
 

@@ -17,7 +17,7 @@ pub fn linear(t: f64) -> f64 {
 #[must_use]
 pub fn smooth(t: f64) -> f64 {
     let s = 1.0 - t;
-    t.powi(3) * (10.0 * s * s + 5.0 * s * t + t * t)
+    fmn_dmath::powi(t, 3) * (10.0 * s * s + 5.0 * s * t + t * t)
 }
 
 /// The first half of [`smooth`], rescaled: starts gently, ends fast.
@@ -171,7 +171,12 @@ fn bernstein(points: &[f64], t: f64) -> f64 {
     points
         .iter()
         .enumerate()
-        .map(|(k, p)| (1.0 - t).powi((n - k) as i32) * t.powi(k as i32) * choose(n, k) as f64 * p)
+        .map(|(k, p)| {
+            fmn_dmath::powi(1.0 - t, (n - k) as i32)
+                * fmn_dmath::powi(t, k as i32)
+                * choose(n, k) as f64
+                * p
+        })
         .sum()
 }
 

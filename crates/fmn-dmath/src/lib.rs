@@ -50,7 +50,7 @@ pub use cbrt::{cbrt, cbrt_slice};
 pub use exp_log::{exp, exp_slice, expm1, expm1_slice, ln, ln_slice, log2, log2_slice};
 pub use hyper::{cosh, cosh_slice, sinh, sinh_slice, tanh, tanh_slice};
 pub use inverse_trig::{acos, asin, atan, atan2};
-pub use pow::pow;
+pub use pow::{pow, powi};
 pub use trig::{cos, sin, tan};
 
 /// `sqrt` — delegated to the hardware instruction on purpose: IEEE 754
@@ -97,6 +97,7 @@ pub struct Transcendentals {
     pub ln: fn(f64) -> f64,
     pub log2: fn(f64) -> f64,
     pub pow: fn(f64, f64) -> f64,
+    pub powi: fn(f64, i32) -> f64,
     pub sqrt: fn(f64) -> f64,
     pub cbrt: fn(f64) -> f64,
     pub sinh: fn(f64) -> f64,
@@ -118,6 +119,7 @@ pub const CERTIFIED: Transcendentals = Transcendentals {
     ln,
     log2,
     pow,
+    powi,
     sqrt,
     cbrt,
     sinh,
@@ -139,6 +141,7 @@ pub const FAST: Transcendentals = Transcendentals {
     ln: f64::ln,
     log2: f64::log2,
     pow: f64::powf,
+    powi: f64::powi,
     sqrt,
     cbrt: f64::cbrt,
     sinh: f64::sinh,

@@ -1964,10 +1964,12 @@ fn projected_half_widths_for(
         .pixel(camera.pixel_shape());
     [
         plus.map_or(0.0, |pixel| {
-            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+            (fmn_dmath::powi(pixel[0] - center[0], 2) + fmn_dmath::powi(pixel[1] - center[1], 2))
+                .sqrt()
         }),
         minus.map_or(0.0, |pixel| {
-            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+            (fmn_dmath::powi(pixel[0] - center[0], 2) + fmn_dmath::powi(pixel[1] - center[1], 2))
+                .sqrt()
         }),
     ]
 }
@@ -2007,10 +2009,12 @@ fn projected_width_toward(
         .pixel(camera.pixel_shape());
     let widths = [
         plus.map_or(0.0, |pixel| {
-            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+            (fmn_dmath::powi(pixel[0] - center[0], 2) + fmn_dmath::powi(pixel[1] - center[1], 2))
+                .sqrt()
         }),
         minus.map_or(0.0, |pixel| {
-            ((pixel[0] - center[0]).powi(2) + (pixel[1] - center[1]).powi(2)).sqrt()
+            (fmn_dmath::powi(pixel[0] - center[0], 2) + fmn_dmath::powi(pixel[1] - center[1], 2))
+                .sqrt()
         }),
     ];
     let query = [point[0] - center[0], point[1] - center[1]];

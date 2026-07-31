@@ -59,13 +59,16 @@ const EXEMPT_CRATES: &[&str] = &["fmn-dmath", "fmn-python"];
 /// The transcendental methods a certified crate may not call on a float.
 ///
 /// `sqrt` is absent because IEEE 754 requires it correctly rounded, so it is
-/// already identical everywhere. `powi`, `to_degrees`, `to_radians` and `recip`
-/// are absent because they lower to multiplication and division — IEEE basic
+/// already identical everywhere. `to_degrees`, `to_radians` and `recip` are
+/// absent because they lower to multiplication and division — IEEE basic
 /// operations, which is property 4 rather than a violation of property 1.
+/// `powi` is present because the pinned nightly lowers it through the
+/// unspecified-precision `powif64`/`powif32` intrinsics, not a source-visible
+/// fixed-order multiplication sequence.
 const FORBIDDEN: &[&str] = &[
     "sin", "cos", "sin_cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
     "asinh", "acosh", "atanh", "exp", "exp2", "exp_m1", "ln", "ln_1p", "log", "log2", "log10",
-    "powf", "cbrt", "hypot",
+    "powi", "powf", "cbrt", "hypot", "gamma", "ln_gamma", "erf", "erfc",
 ];
 
 /// The workspace root.
@@ -350,6 +353,10 @@ let g = t.sqrt();
 let h = u.powi(3);
 let i = fmn_dmath::sin(v);
 let pair = r.sin_cos();
+let gamma = aa.gamma();
+let ln_gamma = bb.ln_gamma();
+let erf = cc.erf();
+let erfc = dd.erfc();
 // this comment mentions .sin() and f64::cbrt and must not count
 /// nor must this doc comment's `.exp()`
 let j = k.to_radians();
@@ -377,18 +384,20 @@ mod tests {
     //  * the method and path forms are both caught, and reported under distinct
     //    names — `f64::cos(y)` contains no `.cos(`, so it appears once, which is
     //    what makes a failure message point at the right line;
-    //  * comments, `sqrt`, `powi`, `to_radians` and a qualified `fmn_dmath::`
-    //    call are all legal and must not appear;
-    //  * `sin_cos` is covered as a combined libm entry point, and `tanh` IS
-    //    caught even though a `//`-bearing string literal precedes it on the
-    //    same line — the false-negative class `code_of` now closes;
+    //  * comments, `sqrt`, `to_radians` and a qualified `fmn_dmath::` call are
+    //    all legal and must not appear;
+    //  * `powi`, `sin_cos`, and the four pinned-nightly libc-backed functions
+    //    are covered, and `tanh` IS caught even though a `//`-bearing string
+    //    literal precedes it on the same line — the false-negative class
+    //    `code_of` now closes;
     //  * `acos` is NOT caught, because it sits inside the `#[cfg(test)] mod`,
     //    while everything after the `#[cfg(test)] use` on line 1 still is —
     //    the coverage hole `bezier.rs` exposed.
     assert_eq!(
         names,
         [
-            "atan2", "cbrt", "f64::cos", "powf", "sin", "sin_cos", "tanh"
+            "atan2", "cbrt", "erf", "erfc", "f64::cos", "gamma", "ln_gamma", "powf", "powi", "sin",
+            "sin_cos", "tanh"
         ],
         "the transcendental needles do not catch what they must, or catch what \
          they must not"

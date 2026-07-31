@@ -91,6 +91,12 @@ pub fn pow(x: f32, y: f32) -> f32 {
     crate::pow(f64::from(x), f64::from(y)) as f32
 }
 
+/// `powi` for f32 — see [`crate::powi`].
+#[must_use]
+pub fn powi(x: f32, n: i32) -> f32 {
+    crate::powi(f64::from(x), n) as f32
+}
+
 /// `sqrt` for f32 — hardware, correctly rounded (IEEE 754).
 #[must_use]
 pub fn sqrt(x: f32) -> f32 {

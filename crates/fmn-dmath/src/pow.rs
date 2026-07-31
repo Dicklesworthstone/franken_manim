@@ -1,5 +1,6 @@
 //! `pow` — a faithful port of FDLIBM `e_pow`, plus the C99 `pow(1, y)`
-//! amendment, bit-identical on every certified target.
+//! amendment — and fixed-order integer `powi`, bit-identical on every
+//! certified target.
 //!
 //! Method (FDLIBM stages, kept in order):
 //! 1. IEEE/C99 special cases: `x^0`, `1^y`, NaN propagation, the
@@ -82,6 +83,31 @@ const IVLN2_L: f64 = f64::from_bits(0x3E54_AE0B_F85D_DF44); // 1.925962991126617
 
 /// Nearest double to 1/3 (FDLIBM's literal 0.3333333333333333333333).
 const THIRD: f64 = f64::from_bits(0x3FD5_5555_5555_5555);
+
+/// `x^n` with an owned, fixed multiplication order.
+///
+/// The standard library's `f64::powi` lowers through an
+/// unspecified-precision intrinsic on the pinned nightly. This definition uses
+/// exponentiation by squaring, consumes exponent bits least-significant first,
+/// and performs one reciprocal after the positive power for a negative
+/// exponent. `i32::MIN` is handled without signed overflow through
+/// [`i32::unsigned_abs`].
+#[must_use]
+pub fn powi(mut x: f64, n: i32) -> f64 {
+    let reciprocal = n < 0;
+    let mut exponent = n.unsigned_abs();
+    let mut result = 1.0;
+    while exponent != 0 {
+        if exponent & 1 != 0 {
+            result *= x;
+        }
+        exponent >>= 1;
+        if exponent != 0 {
+            x *= x;
+        }
+    }
+    if reciprocal { 1.0 / result } else { result }
+}
 
 /// x^y — FDLIBM `e_pow` with the C99 `pow(1, y) = 1` amendment.
 ///
@@ -354,6 +380,22 @@ pub fn pow(x: f64, y: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powi_has_fixed_order_and_complete_integer_domain() {
+        let x = f64::from_bits(0x3ff0_0000_0000_0001);
+        assert_eq!(powi(x, 3).to_bits(), (x * (x * x)).to_bits());
+        assert_eq!(powi(x, 5).to_bits(), (x * ((x * x) * (x * x))).to_bits());
+
+        assert_eq!(powi(f64::NAN, 0).to_bits(), 1.0f64.to_bits());
+        assert!(powi(f64::NAN, 1).is_nan());
+        assert_eq!(powi(-2.0, 3).to_bits(), (-8.0f64).to_bits());
+        assert_eq!(powi(-2.0, -3).to_bits(), (-0.125f64).to_bits());
+        assert_eq!(powi(-0.0, 3).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(powi(-0.0, -3).to_bits(), f64::NEG_INFINITY.to_bits());
+        assert_eq!(powi(1.0, i32::MIN).to_bits(), 1.0f64.to_bits());
+        assert_eq!(powi(-1.0, i32::MIN).to_bits(), 1.0f64.to_bits());
+    }
 
     /// Monotone integer image of a double (±0 collapse to 0).
     fn ord(x: f64) -> i128 {

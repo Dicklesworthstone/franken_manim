@@ -385,8 +385,8 @@ pub fn global_ssim_luma(reference: &[f64], candidate: &[f64]) -> f64 {
     candidate_variance /= divisor;
     covariance /= divisor;
 
-    let c1 = (0.01 * 255.0_f64).powi(2);
-    let c2 = (0.03 * 255.0_f64).powi(2);
+    let c1 = fmn_dmath::powi(0.01 * 255.0, 2);
+    let c2 = fmn_dmath::powi(0.03 * 255.0, 2);
     ((2.0 * reference_mean * candidate_mean + c1) * (2.0 * covariance + c2))
         / ((reference_mean * reference_mean + candidate_mean * candidate_mean + c1)
             * (reference_variance + candidate_variance + c2))

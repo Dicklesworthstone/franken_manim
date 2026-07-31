@@ -100,7 +100,7 @@ pub fn solve_cubic_real(a3: f64, a2: f64, a1: f64, a0: f64, out: &mut [f64; 3]) 
     } else {
         // One real root: Cardano. `P ≥ 0` makes the discriminant non-negative, so
         // there is nothing to clamp and no complex arithmetic to carry.
-        let disc = (big_q / 2.0) * (big_q / 2.0) + (big_p / 3.0).powi(3);
+        let disc = (big_q / 2.0) * (big_q / 2.0) + fmn_dmath::powi(big_p / 3.0, 3);
         let s = disc.max(0.0).sqrt();
         out[0] = scalar::cbrt(-big_q / 2.0 + s) + scalar::cbrt(-big_q / 2.0 - s) - shift;
         1
