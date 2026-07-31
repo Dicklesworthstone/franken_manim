@@ -17,6 +17,7 @@ pub mod protocol;
 pub mod scrub;
 pub mod supervisor;
 pub mod tui;
+pub mod ui;
 pub mod worker;
 
 pub use host::{
@@ -44,6 +45,9 @@ pub use supervisor::{
     SupervisorReply, WorkerArtifact, WorkerChannel, WorkerLauncher,
 };
 pub use tui::{TerminalPreview, TerminalProtocol, TuiError, TuiLimits};
+pub use ui::{
+    STUDIO_UI_VERSION, STUDIO_UI_VERSION_HEADER, UiAsset, studio_index_html, ui_asset, ui_assets,
+};
 pub use worker::{ServiceError, WorkerServeError, WorkerServeOutcome, WorkerService, serve_worker};
 
 #[cfg(feature = "metal")]

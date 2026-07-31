@@ -29,6 +29,7 @@ use crate::protocol::{
     StudioDataKind, SupervisorRequest, WorkerResponse,
 };
 use crate::supervisor::{Supervisor, SupervisorError, SupervisorReply};
+use crate::ui;
 
 /// Multipart boundary used by the permanent browser preview floor.
 pub const MULTIPART_BOUNDARY: &str = "fmn-frame";
@@ -36,28 +37,6 @@ pub const MULTIPART_BOUNDARY: &str = "fmn-frame";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_HEX_BYTES: usize = TOKEN_BYTES * 2;
 const MAX_REQUEST_LINE_BYTES: usize = 4096;
-
-const STUDIO_JS: &str = r#""use strict";
-const query = new URLSearchParams(window.location.search);
-const capability = query.get("cap");
-if (!capability) throw new Error("missing Studio capability");
-const headers = {"X-FMN-Capability": capability};
-document.getElementById("preview").src =
-  "/stream?cap=" + encodeURIComponent(capability);
-document.getElementById("inspect").addEventListener("click", async () => {
-  const response = await fetch("/api/inspect", {headers});
-  document.getElementById("result").textContent = await response.text();
-});
-document.getElementById("seek").addEventListener("click", async () => {
-  const frame = document.getElementById("frame").value;
-  const response = await fetch("/api/scrub", {
-    method: "POST",
-    headers: {...headers, "Content-Type": "application/x-www-form-urlencoded"},
-    body: "frame=" + encodeURIComponent(frame) + "&commit=true"
-  });
-  document.getElementById("result").textContent = await response.text();
-});
-"#;
 
 /// A 256-bit bearer capability.
 #[derive(Clone)]
@@ -744,16 +723,14 @@ impl HostHandler {
         match (request.method, request.path.as_str()) {
             (Method::Get, "/") => {
                 let token = lock(&self.auth).token.expose_hex();
-                let body = format!(
-                    "<!doctype html><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><title>FrankenManim Studio</title><h1>FrankenManim Studio</h1><img id=\"preview\" alt=\"Live preview\"><p><input id=\"frame\" type=\"number\" min=\"0\" value=\"0\"><button id=\"seek\">Seek</button><button id=\"inspect\">Inspect</button></p><pre id=\"result\"></pre><script src=\"/studio.js?cap={token}\"></script>"
-                );
-                write_html_response(stream, body.as_bytes())
+                write_html_response(stream, ui::studio_index_html(&token).as_bytes())
             }
-            (Method::Get, "/studio.js") => write_static_response(
-                stream,
-                "text/javascript; charset=utf-8",
-                STUDIO_JS.as_bytes(),
-            ),
+            (Method::Get, "/studio.js") => {
+                let asset = ui::ui_asset("/studio.js").ok_or(HostError::Configuration(
+                    "the embedded studio.js asset is missing from the binary",
+                ))?;
+                write_static_response(stream, asset.content_type, asset.bytes)
+            }
             (Method::Get, "/stream") => self.stream_frames(stream, now),
             (Method::Post, "/api/scrub") => self.scrub(stream, &request),
             (Method::Post, "/api/event") => self.event(stream, &request),
@@ -1369,6 +1346,7 @@ fn write_html_response(stream: &mut impl Write, body: &[u8]) -> Result<(), HostE
                 "default-src 'none'; img-src 'self'; script-src 'self'; connect-src 'self'",
             ),
             ("Referrer-Policy", "no-referrer"),
+            (ui::STUDIO_UI_VERSION_HEADER, ui::STUDIO_UI_VERSION),
         ],
     )
 }
@@ -1384,7 +1362,10 @@ fn write_static_response(
         "OK",
         content_type,
         body,
-        &[("Referrer-Policy", "no-referrer")],
+        &[
+            ("Referrer-Policy", "no-referrer"),
+            (ui::STUDIO_UI_VERSION_HEADER, ui::STUDIO_UI_VERSION),
+        ],
     )
 }
 
