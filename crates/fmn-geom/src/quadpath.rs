@@ -804,7 +804,13 @@ impl QuadPath {
             return Ok(self);
         }
         let subpaths: Vec<Vec<Vec3>> = self.subpaths().into_iter().map(|s| s.to_vec()).collect();
-        self.clear_points();
+        // Build transactionally: true smoothing can refuse a tolerance or
+        // resource budget, and that refusal must not erase the live path.
+        let mut rebuilt = Self {
+            points: Vec::with_capacity(self.points.len()),
+            tolerance_for_point_equality: self.tolerance_for_point_equality,
+            long_lines: self.long_lines,
+        };
         for subpath in subpaths {
             let anchors: Vec<Vec3> = subpath.iter().step_by(2).copied().collect();
             let mut new_subpath = subpath.clone();
@@ -841,8 +847,9 @@ impl QuadPath {
                     new_subpath[i] = space_ops::midpoint(new_subpath[i - 1], new_subpath[i + 1]);
                 }
             }
-            self.add_subpath(&new_subpath)?;
+            rebuilt.add_subpath(&new_subpath)?;
         }
+        self.points = rebuilt.points;
         Ok(self)
     }
 

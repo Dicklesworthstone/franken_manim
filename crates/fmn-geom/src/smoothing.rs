@@ -15,6 +15,47 @@ use crate::space_ops;
 use crate::vec;
 use fmn_core::types::Vec3;
 
+/// Maximum dimension of the temporary dense system used for a closed spline.
+///
+/// A closed path with `a` anchors (including the repeated endpoint) has
+/// `2 * (a - 1)` unknown handles. Capping that dimension at 256 admits up to
+/// 129 anchors while bounding the current three dense solves to a fixed work
+/// budget. The future fsci-linalg migration may raise this only together with
+/// an equally explicit resource contract.
+pub const MAX_CLOSED_SMOOTHING_DIMENSION: usize = 256;
+
+/// Maximum number of `f64` cells in a closed-smoothing dense matrix.
+///
+/// The solver retains the matrix and one per-coordinate clone concurrently,
+/// so this 65,536-cell ceiling bounds their raw payload to 1 MiB in total,
+/// before row-vector metadata.
+pub const MAX_CLOSED_SMOOTHING_MATRIX_CELLS: usize =
+    MAX_CLOSED_SMOOTHING_DIMENSION * MAX_CLOSED_SMOOTHING_DIMENSION;
+
+fn smoothing_dimension(anchor_count: usize) -> Result<usize, GeomError> {
+    anchor_count
+        .saturating_sub(1)
+        .checked_mul(2)
+        .ok_or(GeomError::SmoothingSizeOverflow {
+            anchors: anchor_count,
+        })
+}
+
+fn validate_closed_smoothing_budget(
+    anchor_count: usize,
+    dimension: usize,
+) -> Result<usize, GeomError> {
+    let cells = dimension
+        .checked_mul(dimension)
+        .ok_or(GeomError::SmoothingSizeOverflow {
+            anchors: anchor_count,
+        })?;
+    if dimension > MAX_CLOSED_SMOOTHING_DIMENSION || cells > MAX_CLOSED_SMOOTHING_MATRIX_CELLS {
+        return Err(GeomError::ClosedSmoothingBudgetExceeded { dimension, cells });
+    }
+    Ok(cells)
+}
+
 /// `approx_smooth_quadratic_bezier_handles`: local (solver-free) handles that
 /// make each quadratic part of a parabola through its neighbor anchors.
 /// Returns one handle per gap (`anchors.len() - 1`), or a single point for a
@@ -76,8 +117,11 @@ pub fn smooth_cubic_handles(anchors: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>), 
     if n_pts < 2 {
         return Ok((Vec::new(), Vec::new()));
     }
-    let num_handles = n_pts - 1;
-    let n = 2 * num_handles;
+    let n = smoothing_dimension(n_pts)?;
+    let closed = vec::np_isclose_all(anchors[0], anchors[n_pts - 1]);
+    if closed {
+        validate_closed_smoothing_budget(n_pts, n)?;
+    }
     let (l, u) = (2usize, 1usize);
 
     // LAPACK band storage: ab[u + i - j][j] = A[i][j].
@@ -111,11 +155,6 @@ pub fn smooth_cubic_handles(anchors: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>), 
     }
     b[0] = anchors[0];
     b[n - 1] = anchors[n_pts - 1];
-
-    let closed = {
-        // np.allclose(points[0], points[-1]) with numpy defaults.
-        vec::np_isclose_all(anchors[0], anchors[n_pts - 1])
-    };
 
     let mut solution = vec![[0.0f64; 3]; n];
     if closed {
@@ -379,6 +418,101 @@ fn solve_dense(m: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), GeomError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AnchorMode, QuadPath};
+
+    fn zigzag_anchors(count: usize, closed: bool) -> Vec<Vec3> {
+        assert!(count >= 2);
+        let mut anchors: Vec<Vec3> = (0..count)
+            .map(|index| [index as f64, (index % 2) as f64, 0.0])
+            .collect();
+        if closed {
+            anchors[count - 1] = anchors[0];
+        }
+        anchors
+    }
+
+    #[test]
+    fn closed_smoothing_budget_checks_dimension_cells_and_overflow() {
+        let exact_anchors = MAX_CLOSED_SMOOTHING_DIMENSION / 2 + 1;
+        let exact_dimension = smoothing_dimension(exact_anchors).unwrap();
+        assert_eq!(exact_dimension, MAX_CLOSED_SMOOTHING_DIMENSION);
+        assert_eq!(
+            validate_closed_smoothing_budget(exact_anchors, exact_dimension),
+            Ok(MAX_CLOSED_SMOOTHING_MATRIX_CELLS)
+        );
+
+        let over_anchors = exact_anchors + 1;
+        let over_dimension = smoothing_dimension(over_anchors).unwrap();
+        let over_cells = over_dimension * over_dimension;
+        assert_eq!(
+            validate_closed_smoothing_budget(over_anchors, over_dimension),
+            Err(GeomError::ClosedSmoothingBudgetExceeded {
+                dimension: over_dimension,
+                cells: over_cells,
+            })
+        );
+
+        assert_eq!(
+            smoothing_dimension(usize::MAX),
+            Err(GeomError::SmoothingSizeOverflow {
+                anchors: usize::MAX,
+            })
+        );
+        let square_overflow_anchors = usize::MAX / 2;
+        let square_overflow_dimension = smoothing_dimension(square_overflow_anchors).unwrap();
+        assert_eq!(
+            validate_closed_smoothing_budget(square_overflow_anchors, square_overflow_dimension),
+            Err(GeomError::SmoothingSizeOverflow {
+                anchors: square_overflow_anchors,
+            })
+        );
+    }
+
+    #[test]
+    fn closed_smoothing_admits_the_boundary_and_refuses_one_over() {
+        let exact_anchors = MAX_CLOSED_SMOOTHING_DIMENSION / 2 + 1;
+        let exact = zigzag_anchors(exact_anchors, true);
+        let (h1, h2) = smooth_cubic_handles(&exact).unwrap();
+        assert_eq!(h1.len(), exact_anchors - 1);
+        assert_eq!(h2.len(), exact_anchors - 1);
+
+        let over_anchors = exact_anchors + 1;
+        let over_dimension = 2 * (over_anchors - 1);
+        let expected = GeomError::ClosedSmoothingBudgetExceeded {
+            dimension: over_dimension,
+            cells: over_dimension * over_dimension,
+        };
+        let closed = zigzag_anchors(over_anchors, true);
+        assert_eq!(smooth_cubic_handles(&closed).unwrap_err(), expected);
+        assert_eq!(
+            smooth_quadratic_path(&closed, cubic::DEFAULT_TOLERANCE_SCENE).unwrap_err(),
+            expected
+        );
+
+        let open = zigzag_anchors(over_anchors, false);
+        let (h1, h2) = smooth_cubic_handles(&open).unwrap();
+        assert_eq!(h1.len(), over_anchors - 1);
+        assert_eq!(h2.len(), over_anchors - 1);
+    }
+
+    #[test]
+    fn quadpath_propagates_closed_smoothing_refusal_without_mutation() {
+        let anchor_count = MAX_CLOSED_SMOOTHING_DIMENSION / 2 + 2;
+        let anchors = zigzag_anchors(anchor_count, true);
+        let mut path = QuadPath::new();
+        path.set_points_as_corners(&anchors).unwrap();
+        let before = path.points().to_vec();
+
+        let dimension = 2 * (anchor_count - 1);
+        assert_eq!(
+            path.change_anchor_mode(AnchorMode::TrueSmooth).unwrap_err(),
+            GeomError::ClosedSmoothingBudgetExceeded {
+                dimension,
+                cells: dimension * dimension,
+            }
+        );
+        assert_eq!(path.points(), before);
+    }
 
     #[test]
     fn two_anchor_handles_sit_at_thirds() {

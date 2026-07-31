@@ -52,6 +52,7 @@ pub use isolines::{
 };
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
 pub use rotation::{EulerAngles, EulerSeq, Quat};
+pub use smoothing::{MAX_CLOSED_SMOOTHING_DIMENSION, MAX_CLOSED_SMOOTHING_MATRIX_CELLS};
 pub use space_ops::{
     MAX_COMPASS_DIRECTIONS, MAX_THICK_DIAGONAL_CELLS, MAX_THICK_DIAGONAL_DIMENSION, SpaceOpsError,
     rotation_matrix,
@@ -80,6 +81,20 @@ pub enum GeomError {
     },
     /// A smoothing solve hit a singular system.
     SingularSystem,
+    /// Sizing a smoothing system from the supplied anchor count overflowed
+    /// `usize` before allocation.
+    SmoothingSizeOverflow {
+        /// Number of anchors supplied to the smoothing operation.
+        anchors: usize,
+    },
+    /// A closed smoothing solve would exceed the fixed dense-workspace
+    /// budget.
+    ClosedSmoothingBudgetExceeded {
+        /// Width and height of the requested dense system.
+        dimension: usize,
+        /// Number of `f64` cells in the requested dense system.
+        cells: usize,
+    },
     /// A conversion tolerance that was not a positive, finite number.
     ///
     /// This and [`GeomError::ToleranceUnreachable`] are the converter's
@@ -109,6 +124,16 @@ impl std::fmt::Display for GeomError {
                 "need exactly one more anchor than handles (got {anchors} anchors, {handles} handles)"
             ),
             Self::SingularSystem => write!(f, "smoothing solve hit a singular linear system"),
+            Self::SmoothingSizeOverflow { anchors } => write!(
+                f,
+                "smoothing system dimensions overflow usize for {anchors} anchors"
+            ),
+            Self::ClosedSmoothingBudgetExceeded { dimension, cells } => write!(
+                f,
+                "closed smoothing needs a {dimension} by {dimension} system ({cells} cells), above the {}-dimension/{}-cell budget",
+                smoothing::MAX_CLOSED_SMOOTHING_DIMENSION,
+                smoothing::MAX_CLOSED_SMOOTHING_MATRIX_CELLS
+            ),
             Self::InvalidTolerance => {
                 write!(f, "conversion tolerance must be a positive, finite number")
             }
