@@ -433,9 +433,13 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
         if trimmed.trim().is_empty() || trimmed.trim_start().starts_with('#') {
             continue;
         }
-        let fields: Vec<_> = trimmed.split('\t').collect();
         if !schema_seen {
-            if fields.as_slice() != ["schema", POLICY_SCHEMA] {
+            let fields =
+                split_exact_tsv_fields::<2>(trimmed).map_err(|field_count| PerfError::Catalog {
+                    line,
+                    detail: format!("schema row has {field_count} fields, expected 2"),
+                })?;
+            if fields != ["schema", POLICY_SCHEMA] {
                 return Err(PerfError::Catalog {
                     line,
                     detail: format!("first data row must be `schema\\t{POLICY_SCHEMA}`"),
@@ -444,6 +448,11 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
             schema_seen = true;
             continue;
         }
+        let fields =
+            split_exact_tsv_fields::<13>(trimmed).map_err(|field_count| PerfError::Catalog {
+                line,
+                detail: format!("policy row has {field_count} fields, expected 13"),
+            })?;
         let [
             gate,
             scenario,
@@ -458,19 +467,13 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
             enforcement,
             scope,
             require_regression_profile,
-        ] = fields.as_slice()
-        else {
-            return Err(PerfError::Catalog {
-                line,
-                detail: format!("policy row has {} fields, expected 13", fields.len()),
-            });
-        };
+        ] = fields;
         let policy = GatePolicy {
             gate: GateId::parse(gate).ok_or_else(|| PerfError::Catalog {
                 line,
                 detail: format!("unknown gate {gate:?}"),
             })?,
-            scenario: (*scenario).to_owned(),
+            scenario: scenario.to_owned(),
             unit: MetricUnit::parse(unit).ok_or_else(|| PerfError::Catalog {
                 line,
                 detail: format!("unknown metric unit {unit:?}"),
@@ -1151,13 +1154,13 @@ impl MeasurementBatch {
             let line = lines
                 .next()
                 .ok_or_else(|| PerfError::Samples(format!("missing sample {expected_index}")))?;
-            let fields: Vec<_> = line.split('\t').collect();
-            let [record, index, value, status, reason] = fields.as_slice() else {
-                return Err(PerfError::Samples(format!(
-                    "sample {expected_index} is not a five-field record"
-                )));
-            };
-            if *record != "sample"
+            let fields = split_exact_tsv_fields::<5>(line).map_err(|field_count| {
+                PerfError::Samples(format!(
+                    "sample {expected_index} has {field_count} fields, expected 5"
+                ))
+            })?;
+            let [record, index, value, status, reason] = fields;
+            if record != "sample"
                 || parse_raw_number::<usize>(index, "sample index")? != expected_index
             {
                 return Err(PerfError::Samples(format!(
@@ -1165,7 +1168,7 @@ impl MeasurementBatch {
                 )));
             }
             let value = parse_raw_number(value, "sample value")?;
-            let sample = match (*status, *reason) {
+            let sample = match (status, reason) {
                 ("valid", NONE) => Sample::valid(value),
                 ("invalid", reason) => Sample::invalid(value, reason),
                 _ => {
@@ -1182,13 +1185,13 @@ impl MeasurementBatch {
             let line = lines.next().ok_or_else(|| {
                 PerfError::Evidence(format!("missing evidence record {expected_index}"))
             })?;
-            let fields: Vec<_> = line.split('\t').collect();
-            let [record, index, kind, path, digest] = fields.as_slice() else {
-                return Err(PerfError::Evidence(format!(
-                    "evidence {expected_index} is not a five-field record"
-                )));
-            };
-            if *record != "evidence"
+            let fields = split_exact_tsv_fields::<5>(line).map_err(|field_count| {
+                PerfError::Evidence(format!(
+                    "evidence {expected_index} has {field_count} fields, expected 5"
+                ))
+            })?;
+            let [record, index, kind, path, digest] = fields;
+            if record != "evidence"
                 || parse_raw_number::<usize>(index, "evidence index")? != expected_index
             {
                 return Err(PerfError::Evidence(format!(
@@ -1199,7 +1202,7 @@ impl MeasurementBatch {
                 .ok_or_else(|| PerfError::Evidence(format!("bad evidence kind {kind:?}")))?;
             evidence.push(EvidenceRef {
                 kind,
-                path: (*path).to_owned(),
+                path: path.to_owned(),
                 digest: parse_raw_digest(digest, "evidence digest")?,
             });
         }
@@ -2214,6 +2217,23 @@ where
         .map_err(|_| PerfError::Baseline(format!("bad {name}")))
 }
 
+fn split_exact_tsv_fields<const N: usize>(line: &str) -> Result<[&str; N], usize> {
+    let field_count = line.split('\t').count();
+    if field_count != N {
+        return Err(field_count);
+    }
+
+    let mut fields = line.split('\t');
+    let mut exact = [""; N];
+    for field in &mut exact {
+        let Some(value) = fields.next() else {
+            return Err(field_count);
+        };
+        *field = value;
+    }
+    Ok(exact)
+}
+
 fn next_raw_header<'a, I>(lines: &mut I, expected: &'static str) -> Result<&'a str, PerfError>
 where
     I: Iterator<Item = &'a str>,
@@ -2720,6 +2740,63 @@ mod tests {
     }
 
     #[test]
+    fn raw_bundle_fixed_width_rows_refuse_short_and_long_records() {
+        let raw = measured(320_000).to_tsv().expect("fixture must serialize");
+        let sample = raw
+            .lines()
+            .find(|line| line.starts_with("sample\t0\t"))
+            .expect("fixture must contain its first sample");
+
+        let short_sample = raw.replacen(sample, "sample\t0\t1", 1);
+        let error = MeasurementBatch::from_tsv(&short_sample)
+            .expect_err("a short sample record must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("sample 0 has 3 fields, expected 5")
+        );
+
+        let long_sample = format!("{sample}{}", "\textra".repeat(1_024));
+        let long_raw = raw.replacen(sample, &long_sample, 1);
+        let error = MeasurementBatch::from_tsv(&long_raw)
+            .expect_err("a long sample record must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("sample 0 has 1029 fields, expected 5")
+        );
+
+        let mut with_evidence = measured(320_000);
+        with_evidence.evidence = vec![source(EvidenceKind::PhaseTrace, "trace.tsv")];
+        let raw = with_evidence
+            .to_tsv()
+            .expect("evidence fixture must serialize");
+        let evidence = raw
+            .lines()
+            .find(|line| line.starts_with("evidence\t0\t"))
+            .expect("fixture must contain its evidence record");
+
+        let short_evidence = raw.replacen(evidence, "evidence\t0\tphase-trace", 1);
+        let error = MeasurementBatch::from_tsv(&short_evidence)
+            .expect_err("a short evidence record must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("evidence 0 has 3 fields, expected 5")
+        );
+
+        let long_evidence = format!("{evidence}{}", "\textra".repeat(1_024));
+        let long_raw = raw.replacen(evidence, &long_evidence, 1);
+        let error = MeasurementBatch::from_tsv(&long_raw)
+            .expect_err("a long evidence record must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("evidence 0 has 1029 fields, expected 5")
+        );
+    }
+
+    #[test]
     fn an_unobserved_target_is_inconclusive_not_green() {
         let baseline = Baseline::targeted(1, policy(), key(), COMMIT).unwrap();
         let run = measured(310_000);
@@ -3083,6 +3160,22 @@ mod tests {
         let rendered = render_policy_catalog(&policies);
         let parsed = parse_policy_catalog(&rendered).unwrap();
         assert_eq!(render_policy_catalog(&parsed), rendered);
+
+        let short = format!("schema\t{POLICY_SCHEMA}\npg-1\tshort\n");
+        let error = parse_policy_catalog(&short)
+            .expect_err("a short fixed-width policy row must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "performance policy catalog:2: policy row has 2 fields, expected 13"
+        );
+
+        let long = format!("schema\t{POLICY_SCHEMA}\n{}x\n", "x\t".repeat(13));
+        let error = parse_policy_catalog(&long)
+            .expect_err("a long fixed-width policy row must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "performance policy catalog:2: policy row has 14 fields, expected 13"
+        );
     }
 
     #[test]
