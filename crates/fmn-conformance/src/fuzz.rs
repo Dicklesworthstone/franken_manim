@@ -785,18 +785,62 @@ pub fn render_manifest(rows: &[ManifestRow], pending: &[(String, String)]) -> St
     out
 }
 
+fn split_manifest_row(line: &str) -> Option<[&str; 7]> {
+    let mut fields = line.split('\t');
+    let exact = [
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+    ];
+    fields.next().is_none().then_some(exact)
+}
+
+fn manifest_u64(value: &str, lineno: usize, field: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("line {lineno}: {field} must be an unsigned decimal integer"))
+}
+
+fn manifest_classes(value: &str, lineno: usize) -> Result<Vec<String>, String> {
+    let mut classes: Vec<String> = Vec::new();
+    for class in value.split(',') {
+        if class.is_empty() || class.trim() != class {
+            return Err(format!(
+                "line {lineno}: outcome classes must be nonempty and carry no surrounding whitespace"
+            ));
+        }
+        if let Some(previous) = classes.last() {
+            if previous.as_str() == class {
+                return Err(format!(
+                    "line {lineno}: outcome classes must not contain duplicates"
+                ));
+            }
+            if previous.as_str() > class {
+                return Err(format!(
+                    "line {lineno}: outcome classes must be strictly sorted"
+                ));
+            }
+        }
+        classes.push(class.to_owned());
+    }
+    Ok(classes)
+}
+
 /// Parse a `MANIFEST.tsv`. Errors are precise (line-numbered strings) —
 /// the manifest is itself a small untrusted input.
 pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
     let mut lines = text.lines();
     let header = lines.next().unwrap_or("");
     if header != MANIFEST_HEADER {
-        return Err(format!(
-            "line 1: expected {MANIFEST_HEADER:?}, found {header:?}"
-        ));
+        return Err(format!("line 1: expected {MANIFEST_HEADER:?}"));
     }
     let mut rows = Vec::new();
     let mut pending = Vec::new();
+    let mut seen_targets: BTreeMap<&str, ()> = BTreeMap::new();
     for (ix, line) in lines.enumerate() {
         let lineno = ix + 2;
         if line.is_empty() {
@@ -813,40 +857,42 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
         if line.starts_with('#') {
             continue;
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() != 7 {
+        let Some(
+            [
+                target,
+                seed,
+                ci_cases,
+                full_cases,
+                max_input_bytes,
+                max_output_bytes,
+                outcome_classes,
+            ],
+        ) = split_manifest_row(line)
+        else {
             return Err(format!(
-                "line {lineno}: expected 7 tab-separated columns, found {}",
-                cols.len()
+                "line {lineno}: expected exactly 7 tab-separated columns"
             ));
-        }
-        let num = |ix: usize, what: &str| -> Result<u64, String> {
-            cols[ix]
-                .parse::<u64>()
-                .map_err(|_| format!("line {lineno}: bad {what} value {:?}", cols[ix]))
         };
-        let max_output_bytes = if cols[5] == "-" {
+        if target.is_empty() {
+            return Err(format!("line {lineno}: target must not be empty"));
+        }
+        if seen_targets.insert(target, ()).is_some() {
+            return Err(format!("line {lineno}: duplicate target row"));
+        }
+        let max_output_bytes = if max_output_bytes == "-" {
             None
         } else {
-            Some(num(5, "max_output_bytes")?)
+            Some(manifest_u64(max_output_bytes, lineno, "max_output_bytes")?)
         };
-        let classes: Vec<String> = cols[6]
-            .split(',')
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if classes.is_empty() {
-            return Err(format!("line {lineno}: no outcome classes recorded"));
-        }
+        let classes = manifest_classes(outcome_classes, lineno)?;
         rows.push(ManifestRow {
-            target: cols[0].to_owned(),
-            seed: num(1, "seed")?,
-            ci_cases: u32::try_from(num(2, "ci_cases")?)
+            target: target.to_owned(),
+            seed: manifest_u64(seed, lineno, "seed")?,
+            ci_cases: u32::try_from(manifest_u64(ci_cases, lineno, "ci_cases")?)
                 .map_err(|_| format!("line {lineno}: ci_cases out of range"))?,
-            full_cases: u32::try_from(num(3, "full_cases")?)
+            full_cases: u32::try_from(manifest_u64(full_cases, lineno, "full_cases")?)
                 .map_err(|_| format!("line {lineno}: full_cases out of range"))?,
-            max_input_bytes: num(4, "max_input_bytes")?,
+            max_input_bytes: manifest_u64(max_input_bytes, lineno, "max_input_bytes")?,
             max_output_bytes,
             classes,
         });
@@ -966,6 +1012,65 @@ mod tests {
         assert!(parse_manifest("# fmn-fuzz-manifest v1\na\tb\n").is_err());
         let err = parse_manifest("# fmn-fuzz-manifest v1\nt\t0\tx\t1\t2\t-\taccepted\n");
         assert!(err.is_err());
+
+        let valid_row =
+            |target: &str, classes: &str| format!("{target}\t0\t1\t2\t3\t-\t{classes}\n");
+        let document = |body: &str| format!("{MANIFEST_HEADER}\n{body}");
+
+        let duplicate = document(&format!(
+            "{}{}",
+            valid_row("tex_math", "accepted,malformed"),
+            valid_row("tex_math", "accepted,malformed")
+        ));
+        assert!(
+            parse_manifest(&duplicate)
+                .expect_err("duplicate target must be refused")
+                .contains("duplicate target")
+        );
+
+        for (classes, expected) in [
+            ("malformed,accepted", "strictly sorted"),
+            ("accepted,accepted", "duplicates"),
+            ("accepted,,malformed", "nonempty"),
+            ("accepted, malformed", "whitespace"),
+        ] {
+            let error = parse_manifest(&document(&valid_row("tex_math", classes)))
+                .expect_err("noncanonical classes must be refused");
+            assert!(
+                error.contains(expected),
+                "{classes:?}: expected {expected:?}, got {error:?}"
+            );
+        }
+
+        let oversized_header = format!("{}\n", "x".repeat(1_000_000));
+        let error = parse_manifest(&oversized_header).expect_err("wrong header must be refused");
+        assert!(
+            error.len() < 256,
+            "header diagnostic is {} bytes",
+            error.len()
+        );
+
+        let mut excessive_separators = document(&valid_row("tex_math", "accepted"));
+        excessive_separators.extend(std::iter::repeat_n('\t', 1_000_000));
+        let error =
+            parse_manifest(&excessive_separators).expect_err("separator-heavy row must be refused");
+        assert!(
+            error.len() < 256,
+            "field-count diagnostic is {} bytes",
+            error.len()
+        );
+
+        let oversized_number = document(&format!(
+            "tex_math\t{}\t1\t2\t3\t-\taccepted\n",
+            "9".repeat(1_000_000)
+        ));
+        let error =
+            parse_manifest(&oversized_number).expect_err("oversized number must be refused");
+        assert!(
+            error.len() < 256,
+            "numeric diagnostic is {} bytes",
+            error.len()
+        );
     }
 
     #[test]
