@@ -210,6 +210,20 @@ impl VMobject {
         self
     }
 
+    /// Transform the uniform inventory in place (group constructors
+    /// overriding one or two fields, e.g. `VGroup3D`).
+    #[must_use]
+    pub fn map_uniforms(mut self, f: impl FnOnce(Uniforms) -> Uniforms) -> Self {
+        self.uniforms = f(self.uniforms);
+        self
+    }
+
+    /// Read the uniform inventory.
+    #[must_use]
+    pub fn uniforms(&self) -> Uniforms {
+        self.uniforms
+    }
+
     /// Set the joint type uniform (`joint_type=`).
     #[must_use]
     pub fn with_joint_type(mut self, joint_type: JointType) -> Self {
@@ -328,6 +342,19 @@ impl VMobject {
             .map(|child| child.map_points(f))
             .collect();
         self.shape = ShapeTag::General;
+        self
+    }
+
+    /// `reverse_points`: reverse the shared-anchor point run (anchors and
+    /// handles swap roles, winding flips), recursively over children.
+    #[must_use]
+    pub fn reversed_points(mut self) -> Self {
+        self.points.reverse();
+        self.submobjects = self
+            .submobjects
+            .into_iter()
+            .map(VMobject::reversed_points)
+            .collect();
         self
     }
 

@@ -9,11 +9,13 @@ description = "Menagerie + Atlas"
 [dependencies]
 fmn-dmath.workspace = true
 fmn-core.workspace = true
+fmn-codec.workspace = true
 fmn-geom.workspace = true
 fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-text.workspace = true
 fmn-tex.workspace = true
+fsci-integrate.workspace = true
 
 [lints]
 workspace = true

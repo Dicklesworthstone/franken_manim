@@ -48,7 +48,32 @@
 //!   2D/3D plane families; [`graphs`] owns parametric, explicit, and implicit
 //!   curves over Chisel's bounded isoline extractor.
 //!
-//! Still to land here: 3D solids and fields (fm-2u6), the enhanced graph and
+//! * **Clouds, images, and models** (fm-2u6, §12.4). [`pointcloud`] owns the
+//!   `PMobject`/`PGroup` collections and the DotCloud lineage — `DotCloud`,
+//!   `TrueDot`, `GlowDots`, `GlowDot` — with G0-2's kept glow falloff
+//!   `(1-r/R)²`; [`image`] owns `ImageMobject` over fmn-codec's owned
+//!   PNG/JPEG decode; [`obj_model`] owns `ThreeDModel` and the owned,
+//!   budget-checked OBJ-subset reader that displaces trimesh/pywavefront.
+//!
+//! * **The 3D solids** (fm-2u6, §12.4). [`solids`] owns the sampled
+//!   [`solids::Surface`] value — the Reference's UV-grid semantics
+//!   exactly (u-major layout, unclamped epsilon forward differences, the
+//!   six-index triangle pattern) — the `three_dimensions.py` census
+//!   (`Sphere`…`Prismify`), the wireframe [`solids::SurfaceMesh`], and the
+//!   textured family (`TexturedSurface`, `TexturedGeometry` with the C-4
+//!   ruling: real area-weighted normals, the dead triple-read not
+//!   replicated).
+//!
+//! * **The fields** (fm-2u6 part 2, §12.4). [`fields`] owns `VectorField`
+//!   (tanh length compression on fmn-dmath, colors via the owned 3b1b
+//!   colormap anchors), `TimeVaryingVectorField`, and `StreamLines` on
+//!   fsci-integrate's adaptive RK45 with dense output — seeded from the
+//!   single RNG's named `streamlines` substream and re-spaced at even true
+//!   arc length — plus `AnimatedStreamLines` and the stateful tracers
+//!   (`TracedPath`, `TracingTail`, `AnimatedBoundary`), whose dt-updater
+//!   bindings register with the §9.5 purity classifier.
+//!
+//! Still to land here: the enhanced graph and
 //! data mobjects (fm-n64), and the drawings shelf (fm-3kr). The boolean-op mobjects
 //! (`Union`/`Difference`/`Intersection`/`Exclusion`) wait on Chisel's
 //! boolean kernel (fm-8dx) and are tracked by fm-6l6.
@@ -58,13 +83,18 @@ pub mod arc;
 pub mod brace;
 pub mod controls;
 pub mod coords;
+pub mod fields;
 pub mod graphs;
+pub mod image;
 pub mod line;
 pub mod matchers;
 pub mod matrix;
 pub mod numbers;
+pub mod obj_model;
 pub mod planes;
+pub mod pointcloud;
 pub mod poly;
+pub mod solids;
 pub mod special_tex;
 pub mod style;
 pub mod tex;
@@ -83,10 +113,20 @@ pub use coords::{
     Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, RiemannConfig, Slider,
     UnitInterval, create_axis,
 };
+pub use fields::{
+    AnimatedBoundary, AnimatedStreamLines, FieldError, IntegratorTune, STREAM_LINES_SUBSTREAM,
+    StreamLineMeta, StreamLineStyle, StreamLines, StreamLinesMobject, StreamSolution,
+    StrokeProfile, TimeVaryingVectorField, TracedPath, TracingTail, VectorField,
+    VectorFieldMobject, VectorFieldStyle, VectorGeometry, colormap_gradient, colormap_gradient_at,
+    get_sample_coords, grid_sample_points, move_along_vector_field, move_points_along_vector_field,
+    move_submobjects_along_vector_field, ode_solution_points, resample_even_arc,
+    taper_by_true_length, vectorize,
+};
 pub use graphs::{
     DEFAULT_MAX_SAMPLES, FunctionGraph, GraphError, ImplicitFunction, ParametricCurve,
     SamplingBudget, SamplingError,
 };
+pub use image::{DEFAULT_IMAGE_HEIGHT, ImageError, ImageMobject};
 pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
@@ -96,8 +136,23 @@ pub use matrix::{
     MobjectMatrix, TexMatrix,
 };
 pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
+pub use obj_model::{
+    DEFAULT_MODEL_HEIGHT, MODEL_SHADING, ObjCorner, ObjError, ObjLimits, ObjMesh, ThreeDModel,
+};
 pub use planes::{ComplexPlane, NumberPlane, ThreeDAxes};
+pub use pointcloud::{
+    DEFAULT_BUFF_RATIO, DEFAULT_DOT_CLOUD_RADIUS, DEFAULT_GLOW_DOT_RADIUS, DEFAULT_GRID_HEIGHT,
+    DOT_CLOUD_AA_WIDTH, DOT_CLOUD_SHADING, DotCloud, GLOW_DOT_FACTOR, GlowLayer, PMobject,
+    glow_dot, glow_dots, glow_falloff, glow_layers, p_group, rim_coverage, true_dot,
+};
 pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, TipStyle};
+pub use solids::{
+    CUBE_SHADING, Cone, Cube, Cylinder, Disk3D, Dodecahedron, Line3D, MESH_NORMAL_NUDGE,
+    MESH_RESOLUTION, MeshError, ParametricSurface, Prism, Prismify, SGroup, SURFACE_COLOR,
+    SURFACE_EPSILON, SURFACE_NORMAL_NUDGE, SURFACE_RESOLUTION, SURFACE_SHADING, Sphere, Square3D,
+    Surface, SurfaceMesh, SurfaceSpec, TexturedGeometry, TexturedSurface, Torus, VCube, VGroup3D,
+    VPrism, compute_triangle_indices, surface_schema, textured_surface_schema,
+};
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
 pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
