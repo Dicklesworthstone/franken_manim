@@ -42,6 +42,12 @@ fn fixtures() -> FixtureCorpus {
     FixtureCorpus::load(&root).expect("fixture manifest loads")
 }
 
+fn fixture_manifest_scratch() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("oracle_manifest_strictness");
+    std::fs::create_dir_all(&root).expect("fixture manifest scratch directory");
+    root
+}
+
 // =====================================================================
 // 1. Analytic ground truths — arc length vs closed forms
 // =====================================================================
@@ -529,6 +535,77 @@ fn integer_pixel_translation_translates_the_frame() {
 // =====================================================================
 // 3. Structural fixtures against the Reference
 // =====================================================================
+
+#[test]
+fn fixture_manifest_is_canonical_and_shape_bound() {
+    const HEADER: &str = "# fmn npy fixture manifest v1";
+    const HASH: &str = "acdf740923ae14f4f8a6ac7b161be06e7b6d023a8376ea205d38205f05cb7a1f";
+
+    let root = fixture_manifest_scratch();
+    let manifest_path = root.join("MANIFEST.tsv");
+    let malformed = [
+        (
+            "missing header",
+            format!("partial_quad.npy\t<f8\t3x3\t{HASH}\tformula\n"),
+        ),
+        (
+            "missing provenance field",
+            format!("{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\n"),
+        ),
+        (
+            "extra field",
+            format!("{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\tformula\textra\n"),
+        ),
+        (
+            "duplicate fixture",
+            format!(
+                "{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\tfirst\n\
+                 partial_quad.npy\t<f8\t3x3\t{HASH}\tsecond\n"
+            ),
+        ),
+    ];
+    for (case, text) in malformed {
+        std::fs::write(&manifest_path, text).expect("write malformed manifest");
+        let error = FixtureCorpus::load(&root).expect_err(case);
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.len() < 256,
+            "{case}: diagnostic must stay bounded, got {} bytes",
+            diagnostic.len()
+        );
+    }
+
+    let mut excessive_separators = format!("{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\tformula");
+    excessive_separators.extend(std::iter::repeat_n('\t', 1_000_000));
+    std::fs::write(&manifest_path, excessive_separators)
+        .expect("write noncanonical separator-heavy row");
+    let diagnostic = FixtureCorpus::load(&root)
+        .expect_err("separator-heavy row must be refused")
+        .to_string();
+    assert!(
+        diagnostic.len() < 256,
+        "separator-heavy diagnostic must stay bounded, got {} bytes",
+        diagnostic.len()
+    );
+
+    let committed_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/npy");
+    let fixture_bytes =
+        std::fs::read(committed_root.join("partial_quad.npy")).expect("committed fixture bytes");
+    std::fs::write(root.join("partial_quad.npy"), fixture_bytes).expect("write scratch fixture");
+    std::fs::write(
+        &manifest_path,
+        format!("{HEADER}\npartial_quad.npy\t<f8\t99x3\t{HASH}\tshape binding\n"),
+    )
+    .expect("write mismatched-shape manifest");
+    let error = FixtureCorpus::load(&root)
+        .expect("well-formed manifest")
+        .array("partial_quad.npy")
+        .expect_err("declared shape must bind the decoded fixture");
+    assert!(
+        error.to_string().contains("decoded shape [3, 3]"),
+        "shape mismatch must name the decoded shape: {error}"
+    );
+}
 
 #[test]
 fn arc_half_fixture_matches_fmn_geom() {

@@ -578,6 +578,30 @@ pub struct FixtureCorpus {
     manifest: BTreeMap<String, ManifestRow>,
 }
 
+const FIXTURE_MANIFEST_HEADER: &str = "# fmn npy fixture manifest v1";
+
+fn split_fixture_manifest_row(line: &str) -> Option<[&str; 5]> {
+    let mut fields = line.split('\t');
+    let exact = [
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+    ];
+    fields.next().is_none().then_some(exact)
+}
+
+fn shape_matches(declared: &str, actual: &[usize]) -> bool {
+    let mut dimensions = declared.split('x');
+    actual.iter().all(|actual_dimension| {
+        dimensions
+            .next()
+            .and_then(|declared_dimension| declared_dimension.parse::<usize>().ok())
+            == Some(*actual_dimension)
+    }) && dimensions.next().is_none()
+}
+
 impl FixtureCorpus {
     /// Load the manifest rooted at `root` (the directory holding
     /// MANIFEST.tsv).
@@ -591,23 +615,49 @@ impl FixtureCorpus {
                 "MANIFEST.tsv unreadable (regenerate with scripts/gen_npy_fixtures.py): {e}"
             ))
         })?;
+        let mut lines = text.lines().enumerate();
+        let Some((_, header)) = lines.next() else {
+            return Err(OracleError::Fixture(
+                "MANIFEST.tsv is empty; expected the v1 header".to_string(),
+            ));
+        };
+        if header != FIXTURE_MANIFEST_HEADER {
+            return Err(OracleError::Fixture(format!(
+                "MANIFEST.tsv line 1 must be {FIXTURE_MANIFEST_HEADER:?}"
+            )));
+        }
+
         let mut manifest = BTreeMap::new();
-        for line in text.lines() {
+        for (index, line) in lines {
+            let line_number = index + 1;
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() < 4 {
+            let Some([name, dtype, shape, sha256, formula]) = split_fixture_manifest_row(line)
+            else {
                 return Err(OracleError::Fixture(format!(
-                    "manifest row too short: {line:?}"
+                    "MANIFEST.tsv line {line_number} must contain exactly 5 tab-separated fields"
+                )));
+            };
+            if [name, dtype, shape, sha256, formula]
+                .iter()
+                .any(|field| field.is_empty())
+            {
+                return Err(OracleError::Fixture(format!(
+                    "MANIFEST.tsv line {line_number} contains an empty field"
+                )));
+            }
+            if manifest.contains_key(name) {
+                return Err(OracleError::Fixture(format!(
+                    "MANIFEST.tsv line {line_number} duplicates an earlier fixture name"
                 )));
             }
             manifest.insert(
-                fields[0].to_string(),
+                name.to_string(),
                 ManifestRow {
-                    dtype: fields[1].to_string(),
-                    shape: fields[2].to_string(),
-                    sha256: fields[3].to_string(),
+                    dtype: dtype.to_string(),
+                    shape: shape.to_string(),
+                    sha256: sha256.to_string(),
                 },
             );
         }
@@ -629,11 +679,11 @@ impl FixtureCorpus {
         self.manifest.is_empty()
     }
 
-    /// Read one fixture, verifying its manifest hash and dtype first.
+    /// Read one fixture, verifying its manifest hash, dtype, and shape.
     ///
     /// # Errors
     /// [`OracleError::Fixture`] on a missing row, an unreadable file, a
-    /// hash mismatch, or a decode failure.
+    /// hash, dtype, or shape mismatch, or a decode failure.
     pub fn array(&self, name: &str) -> Result<NpyArray, OracleError> {
         let row = self
             .manifest
@@ -655,6 +705,12 @@ impl FixtureCorpus {
                 "{name}: dtype {} does not match manifest {}",
                 array.data.dtype().descr(),
                 row.dtype
+            )));
+        }
+        if !shape_matches(&row.shape, &array.shape) {
+            return Err(OracleError::Fixture(format!(
+                "{name}: decoded shape {:?} does not match the manifest declaration",
+                array.shape
             )));
         }
         Ok(array)
