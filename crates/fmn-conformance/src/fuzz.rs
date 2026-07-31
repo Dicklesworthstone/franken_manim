@@ -222,7 +222,7 @@ impl fmt::Display for Violation {
 /// mutators and budget assertions. Concrete targets live with the campaign
 /// (`tests/fuzz_campaign.rs`); the driver here is target-agnostic.
 pub trait Target {
-    /// The manifest/corpus name: lowercase `[a-z0-9-]`, stable forever.
+    /// The manifest/corpus name: lowercase `[a-z0-9_-]`, stable forever.
     fn name(&self) -> &'static str;
 
     /// The declared resource bounds.
@@ -723,6 +723,16 @@ fn create_dir_all(path: &Path) -> Result<(), io::Error> {
 /// The manifest's format version tag; the first line of `MANIFEST.tsv`.
 pub const MANIFEST_HEADER: &str = "# fmn-fuzz-manifest v1";
 
+const MANIFEST_COLUMNS: &str =
+    "# columns: target\tseed\tci_cases\tfull_cases\tmax_input_bytes\tmax_output_bytes\toutcome_classes";
+const MAX_MANIFEST_BYTES: usize = 1 << 20;
+const MAX_MANIFEST_LINE_BYTES: usize = 16 << 10;
+const MAX_MANIFEST_FIELD_BYTES: usize = 4096;
+const MAX_MANIFEST_LABEL_BYTES: usize = 128;
+const MAX_MANIFEST_ROWS: usize = 4096;
+const MAX_MANIFEST_PENDING: usize = 4096;
+const MAX_MANIFEST_CLASSES: usize = 256;
+
 /// One manifest row: the versioned record of one target's campaign.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestRow {
@@ -749,20 +759,23 @@ pub struct ManifestRow {
 pub struct Manifest {
     /// Committed rows.
     pub rows: Vec<ManifestRow>,
-    /// Pending target names from `# pending: <name> — <note>` comments.
-    pub pending: Vec<String>,
+    /// Pending target names and notes from canonical
+    /// `# pending: <name> — <note>` records.
+    pub pending: Vec<(String, String)>,
 }
 
-/// Serialize a manifest deterministically (rows sorted by target).
+/// Serialize a manifest deterministically (pending records and rows sorted
+/// by target).
 #[must_use]
 pub fn render_manifest(rows: &[ManifestRow], pending: &[(String, String)]) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
     out.push('\n');
-    out.push_str(
-        "# columns: target\tseed\tci_cases\tfull_cases\tmax_input_bytes\tmax_output_bytes\toutcome_classes\n",
-    );
-    for (name, note) in pending {
+    out.push_str(MANIFEST_COLUMNS);
+    out.push('\n');
+    let mut pending = pending.to_vec();
+    pending.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, note) in &pending {
         out.push_str(&format!("# pending: {name} — {note}\n"));
     }
     let mut rows = rows.to_vec();
@@ -799,18 +812,99 @@ fn split_manifest_row(line: &str) -> Option<[&str; 7]> {
     fields.next().is_none().then_some(exact)
 }
 
+fn validate_manifest_line(line: &str, lineno: usize) -> Result<(), String> {
+    if line.len() > MAX_MANIFEST_LINE_BYTES {
+        return Err(format!(
+            "line {lineno}: exceeds the {MAX_MANIFEST_LINE_BYTES}-byte limit"
+        ));
+    }
+    if line
+        .as_bytes()
+        .last()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        return Err(format!(
+            "line {lineno}: trailing horizontal whitespace is not canonical"
+        ));
+    }
+    if line.chars().any(|ch| ch.is_control() && ch != '\t') {
+        return Err(format!(
+            "line {lineno}: control characters are not permitted"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_field(value: &str, lineno: usize, field: &str) -> Result<(), String> {
+    if value.len() > MAX_MANIFEST_FIELD_BYTES {
+        return Err(format!(
+            "line {lineno}: {field} exceeds the {MAX_MANIFEST_FIELD_BYTES}-byte field limit"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_label(
+    value: &str,
+    lineno: usize,
+    field: &str,
+    allow_underscore: bool,
+) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("line {lineno}: {field} must not be empty"));
+    }
+    if value.len() > MAX_MANIFEST_LABEL_BYTES {
+        return Err(format!(
+            "line {lineno}: {field} exceeds the {MAX_MANIFEST_LABEL_BYTES}-byte label limit"
+        ));
+    }
+    let valid = value.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || byte == b'-'
+            || (allow_underscore && byte == b'_')
+    });
+    if !valid {
+        let alphabet = if allow_underscore {
+            "[a-z0-9_-]"
+        } else {
+            "[a-z0-9-]"
+        };
+        return Err(format!(
+            "line {lineno}: {field} must use only lowercase {alphabet} characters"
+        ));
+    }
+    Ok(())
+}
+
 fn manifest_u64(value: &str, lineno: usize, field: &str) -> Result<u64, String> {
+    validate_manifest_field(value, lineno, field)?;
+    let canonical = !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'));
+    if !canonical {
+        return Err(format!(
+            "line {lineno}: {field} must be a canonical unsigned decimal integer"
+        ));
+    }
     value
         .parse::<u64>()
-        .map_err(|_| format!("line {lineno}: {field} must be an unsigned decimal integer"))
+        .map_err(|_| format!("line {lineno}: {field} is out of range for u64"))
 }
 
 fn manifest_classes(value: &str, lineno: usize) -> Result<Vec<String>, String> {
+    validate_manifest_field(value, lineno, "outcome_classes")?;
     let mut classes: Vec<String> = Vec::new();
     for class in value.split(',') {
         if class.is_empty() || class.trim() != class {
             return Err(format!(
                 "line {lineno}: outcome classes must be nonempty and carry no surrounding whitespace"
+            ));
+        }
+        validate_manifest_label(class, lineno, "outcome class", false)?;
+        if classes.len() == MAX_MANIFEST_CLASSES {
+            return Err(format!(
+                "line {lineno}: outcome_classes exceeds the {MAX_MANIFEST_CLASSES}-class limit"
             ));
         }
         if let Some(previous) = classes.last() {
@@ -833,29 +927,86 @@ fn manifest_classes(value: &str, lineno: usize) -> Result<Vec<String>, String> {
 /// Parse a `MANIFEST.tsv`. Errors are precise (line-numbered strings) —
 /// the manifest is itself a small untrusted input.
 pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
-    let mut lines = text.lines();
+    if text.len() > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit"
+        ));
+    }
+    if !text.ends_with('\n') {
+        return Err("manifest must end with a final LF newline".to_owned());
+    }
+    if text.contains('\r') {
+        return Err("manifest must use LF line endings".to_owned());
+    }
+
+    let mut lines = text[..text.len() - 1].split('\n');
     let header = lines.next().unwrap_or("");
+    validate_manifest_line(header, 1)?;
     if header != MANIFEST_HEADER {
         return Err(format!("line 1: expected {MANIFEST_HEADER:?}"));
     }
+    let columns = lines.next().unwrap_or("");
+    validate_manifest_line(columns, 2)?;
+    if columns != MANIFEST_COLUMNS {
+        return Err(format!("line 2: expected {MANIFEST_COLUMNS:?}"));
+    }
+
     let mut rows = Vec::new();
     let mut pending = Vec::new();
-    let mut seen_targets: BTreeMap<&str, ()> = BTreeMap::new();
+    let mut seen_targets = std::collections::BTreeSet::new();
+    let mut seen_pending = std::collections::BTreeSet::new();
+    let mut previous_target = None;
+    let mut previous_pending = None;
+    let mut rows_started = false;
     for (ix, line) in lines.enumerate() {
-        let lineno = ix + 2;
+        let lineno = ix + 3;
+        validate_manifest_line(line, lineno)?;
         if line.is_empty() {
-            continue;
+            return Err(format!("line {lineno}: blank lines are not canonical"));
         }
         if let Some(rest) = line.strip_prefix("# pending: ") {
-            let name = rest.split([' ', '\t']).next().unwrap_or("").to_owned();
-            if name.is_empty() {
-                return Err(format!("line {lineno}: pending note names no target"));
+            if rows_started {
+                return Err(format!(
+                    "line {lineno}: pending records must precede target rows"
+                ));
             }
-            pending.push(name);
+            if pending.len() == MAX_MANIFEST_PENDING {
+                return Err(format!(
+                    "line {lineno}: manifest exceeds the {MAX_MANIFEST_PENDING}-pending-record limit"
+                ));
+            }
+            let Some((name, note)) = rest.split_once(" — ") else {
+                return Err(format!(
+                    "line {lineno}: pending record must be '# pending: <target> — <note>'"
+                ));
+            };
+            validate_manifest_label(name, lineno, "pending target", true)?;
+            validate_manifest_field(note, lineno, "pending note")?;
+            if note.is_empty() || note.trim() != note || note.contains('\t') {
+                return Err(format!(
+                    "line {lineno}: pending note must be nonempty and unpadded"
+                ));
+            }
+            if !seen_pending.insert(name) {
+                return Err(format!("line {lineno}: duplicate pending target"));
+            }
+            if previous_pending.is_some_and(|previous| previous >= name) {
+                return Err(format!(
+                    "line {lineno}: pending targets must be strictly sorted"
+                ));
+            }
+            previous_pending = Some(name);
+            pending.push((name.to_owned(), note.to_owned()));
             continue;
         }
         if line.starts_with('#') {
-            continue;
+            return Err(format!("line {lineno}: unknown manifest comment"));
+        }
+        rows_started = true;
+        if rows.len() == MAX_MANIFEST_ROWS {
+            return Err(format!(
+                "line {lineno}: manifest exceeds the {MAX_MANIFEST_ROWS}-row limit"
+            ));
         }
         let Some(
             [
@@ -873,26 +1024,62 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 "line {lineno}: expected exactly 7 tab-separated columns"
             ));
         };
-        if target.is_empty() {
-            return Err(format!("line {lineno}: target must not be empty"));
+        for (field, value) in [
+            ("target", target),
+            ("seed", seed),
+            ("ci_cases", ci_cases),
+            ("full_cases", full_cases),
+            ("max_input_bytes", max_input_bytes),
+            ("max_output_bytes", max_output_bytes),
+            ("outcome_classes", outcome_classes),
+        ] {
+            validate_manifest_field(value, lineno, field)?;
         }
-        if seen_targets.insert(target, ()).is_some() {
+        validate_manifest_label(target, lineno, "target", true)?;
+        if !seen_targets.insert(target) {
             return Err(format!("line {lineno}: duplicate target row"));
         }
+        if previous_target.is_some_and(|previous| previous >= target) {
+            return Err(format!(
+                "line {lineno}: target rows must be strictly sorted"
+            ));
+        }
+        if seen_pending.contains(target) {
+            return Err(format!(
+                "line {lineno}: target cannot be both pending and committed"
+            ));
+        }
+        previous_target = Some(target);
         let max_output_bytes = if max_output_bytes == "-" {
             None
         } else {
             Some(manifest_u64(max_output_bytes, lineno, "max_output_bytes")?)
         };
         let classes = manifest_classes(outcome_classes, lineno)?;
+        let ci_cases = u32::try_from(manifest_u64(ci_cases, lineno, "ci_cases")?)
+            .map_err(|_| format!("line {lineno}: ci_cases out of range"))?;
+        let full_cases = u32::try_from(manifest_u64(full_cases, lineno, "full_cases")?)
+            .map_err(|_| format!("line {lineno}: full_cases out of range"))?;
+        let max_input_bytes = manifest_u64(max_input_bytes, lineno, "max_input_bytes")?;
+        if ci_cases == 0 {
+            return Err(format!("line {lineno}: ci_cases must be positive"));
+        }
+        if full_cases < ci_cases {
+            return Err(format!(
+                "line {lineno}: full_cases must be at least ci_cases"
+            ));
+        }
+        if max_input_bytes == 0 {
+            return Err(format!(
+                "line {lineno}: max_input_bytes must be positive"
+            ));
+        }
         rows.push(ManifestRow {
             target: target.to_owned(),
             seed: manifest_u64(seed, lineno, "seed")?,
-            ci_cases: u32::try_from(manifest_u64(ci_cases, lineno, "ci_cases")?)
-                .map_err(|_| format!("line {lineno}: ci_cases out of range"))?,
-            full_cases: u32::try_from(manifest_u64(full_cases, lineno, "full_cases")?)
-                .map_err(|_| format!("line {lineno}: full_cases out of range"))?,
-            max_input_bytes: manifest_u64(max_input_bytes, lineno, "max_input_bytes")?,
+            ci_cases,
+            full_cases,
+            max_input_bytes,
             max_output_bytes,
             classes,
         });
@@ -989,10 +1176,16 @@ mod tests {
                 classes: vec!["accepted".to_owned(), "unframed".to_owned()],
             },
         ];
-        let pending = vec![(
-            "svg_document_processor".to_owned(),
-            "lands with fm-6nm".to_owned(),
-        )];
+        let pending = vec![
+            (
+                "zeta_future".to_owned(),
+                "lands after the codec tranche".to_owned(),
+            ),
+            (
+                "alpha_future".to_owned(),
+                "lands with the parser tranche".to_owned(),
+            ),
+        ];
         let text = render_manifest(&rows, &pending);
         let parsed = parse_manifest(&text).expect("manifest parses");
         assert_eq!(parsed.rows, {
@@ -1000,22 +1193,74 @@ mod tests {
             sorted.sort_by(|a, b| a.target.cmp(&b.target));
             sorted
         });
-        assert_eq!(parsed.pending, vec!["svg_document_processor".to_owned()]);
+        assert_eq!(parsed.pending, {
+            let mut sorted = pending.clone();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            sorted
+        });
         // Rendering is idempotent — the checked-in file is byte-stable.
-        assert_eq!(render_manifest(&parsed.rows, &pending), text);
+        assert_eq!(render_manifest(&parsed.rows, &parsed.pending), text);
     }
 
     #[test]
-    fn manifest_rejects_bad_input_precisely() {
-        assert!(parse_manifest("").is_err());
-        assert!(parse_manifest("# fmn-fuzz-manifest v1\n").is_err());
-        assert!(parse_manifest("# fmn-fuzz-manifest v1\na\tb\n").is_err());
-        let err = parse_manifest("# fmn-fuzz-manifest v1\nt\t0\tx\t1\t2\t-\taccepted\n");
-        assert!(err.is_err());
-
+    fn manifest_rejects_noncanonical_structure() {
         let valid_row =
             |target: &str, classes: &str| format!("{target}\t0\t1\t2\t3\t-\t{classes}\n");
-        let document = |body: &str| format!("{MANIFEST_HEADER}\n{body}");
+        let document = |body: &str| format!("{MANIFEST_HEADER}\n{MANIFEST_COLUMNS}\n{body}");
+
+        assert!(parse_manifest("").is_err());
+        assert!(parse_manifest("# fmn-fuzz-manifest v1\n").is_err());
+        assert!(
+            parse_manifest(&format!("{MANIFEST_HEADER}\n# columns: wrong\n"))
+                .expect_err("altered columns metadata must be refused")
+                .contains("line 2")
+        );
+
+        let valid = document(&valid_row("tex_math", "accepted,malformed"));
+        assert!(parse_manifest(&valid).is_ok());
+        assert!(
+            parse_manifest(valid.trim_end_matches('\n'))
+                .expect_err("missing final LF must be refused")
+                .contains("final LF")
+        );
+        assert!(
+            parse_manifest(&valid.replace('\n', "\r\n"))
+                .expect_err("CRLF must be refused")
+                .contains("LF line endings")
+        );
+        assert!(
+            parse_manifest(&document(&format!(
+                "\n{}",
+                valid_row("tex_math", "accepted")
+            )))
+            .expect_err("blank lines must be refused")
+            .contains("blank lines")
+        );
+        assert!(
+            parse_manifest(&document(&format!(
+                "# arbitrary\n{}",
+                valid_row("tex_math", "accepted")
+            )))
+            .expect_err("unknown comments must be refused")
+            .contains("unknown manifest comment")
+        );
+        assert!(
+            parse_manifest(&document(&format!(
+                "{}{}",
+                valid_row("zeta", "accepted"),
+                valid_row("alpha", "accepted")
+            )))
+            .expect_err("unsorted rows must be refused")
+            .contains("strictly sorted")
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_ambiguous_identities_and_values() {
+        let valid_row =
+            |target: &str, classes: &str| format!("{target}\t0\t1\t2\t3\t-\t{classes}\n");
+        let pending = |target: &str, note: &str| format!("# pending: {target} — {note}\n");
+        let document = |body: &str| format!("{MANIFEST_HEADER}\n{MANIFEST_COLUMNS}\n{body}");
 
         let duplicate = document(&format!(
             "{}{}",
@@ -1027,12 +1272,18 @@ mod tests {
                 .expect_err("duplicate target must be refused")
                 .contains("duplicate target")
         );
+        assert!(
+            parse_manifest(&document(&valid_row("Tex_math", "accepted")))
+                .expect_err("noncanonical target label must be refused")
+                .contains("[a-z0-9_-]")
+        );
 
         for (classes, expected) in [
             ("malformed,accepted", "strictly sorted"),
             ("accepted,accepted", "duplicates"),
             ("accepted,,malformed", "nonempty"),
             ("accepted, malformed", "whitespace"),
+            ("accepted,bad_class", "[a-z0-9-]"),
         ] {
             let error = parse_manifest(&document(&valid_row("tex_math", classes)))
                 .expect_err("noncanonical classes must be refused");
@@ -1042,6 +1293,141 @@ mod tests {
             );
         }
 
+        let duplicate_pending = document(&format!(
+            "{}{}{}",
+            pending("future_target", "first note"),
+            pending("future_target", "second note"),
+            valid_row("tex_math", "accepted")
+        ));
+        assert!(
+            parse_manifest(&duplicate_pending)
+                .expect_err("duplicate pending identity must be refused")
+                .contains("duplicate pending target")
+        );
+
+        let unsorted_pending = document(&format!(
+            "{}{}{}",
+            pending("zeta_future", "later"),
+            pending("alpha_future", "earlier"),
+            valid_row("tex_math", "accepted")
+        ));
+        assert!(
+            parse_manifest(&unsorted_pending)
+                .expect_err("unsorted pending identities must be refused")
+                .contains("strictly sorted")
+        );
+
+        let conflicting = document(&format!(
+            "{}{}",
+            pending("tex_math", "not landed"),
+            valid_row("tex_math", "accepted")
+        ));
+        assert!(
+            parse_manifest(&conflicting)
+                .expect_err("pending/committed identity conflict must be refused")
+                .contains("both pending and committed")
+        );
+
+        let pending_after_row = document(&format!(
+            "{}{}",
+            valid_row("alpha", "accepted"),
+            pending("zeta_future", "not landed")
+        ));
+        assert!(
+            parse_manifest(&pending_after_row)
+                .expect_err("pending records after rows must be refused")
+                .contains("must precede")
+        );
+        assert!(
+            parse_manifest(&document(&format!(
+                "# pending: future_target — \n{}",
+                valid_row("tex_math", "accepted")
+            )))
+            .expect_err("empty pending note must be refused")
+            .contains("nonempty")
+        );
+
+        for (row, expected) in [
+            ("tex_math\t00\t1\t2\t3\t-\taccepted\n", "canonical"),
+            ("tex_math\t+1\t1\t2\t3\t-\taccepted\n", "canonical"),
+            ("tex_math\t0\t0\t2\t3\t-\taccepted\n", "positive"),
+            ("tex_math\t0\t3\t2\t3\t-\taccepted\n", "at least"),
+            ("tex_math\t0\t1\t2\t0\t-\taccepted\n", "positive"),
+        ] {
+            let error = parse_manifest(&document(row))
+                .expect_err("noncanonical campaign values must be refused");
+            assert!(
+                error.contains(expected),
+                "expected {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_enforces_resource_bounds_and_bounded_diagnostics() {
+        let valid_row =
+            |target: &str, classes: &str| format!("{target}\t0\t1\t2\t3\t-\t{classes}\n");
+        let document = |body: &str| format!("{MANIFEST_HEADER}\n{MANIFEST_COLUMNS}\n{body}");
+
+        let oversized_document = format!("{}\n", "x".repeat(MAX_MANIFEST_BYTES));
+        assert!(
+            parse_manifest(&oversized_document)
+                .expect_err("oversized document must be refused")
+                .contains("byte limit")
+        );
+
+        let oversized_line = document(&format!(
+            "#{}\n{}",
+            "x".repeat(MAX_MANIFEST_LINE_BYTES),
+            valid_row("tex_math", "accepted")
+        ));
+        assert!(
+            parse_manifest(&oversized_line)
+                .expect_err("oversized line must be refused")
+                .contains("byte limit")
+        );
+
+        let oversized_field = document(&valid_row(
+            "tex_math",
+            &"a".repeat(MAX_MANIFEST_FIELD_BYTES + 1),
+        ));
+        assert!(
+            parse_manifest(&oversized_field)
+                .expect_err("oversized field must be refused")
+                .contains("field limit")
+        );
+
+        let excessive_classes = (0..=MAX_MANIFEST_CLASSES)
+            .map(|ix| format!("c{ix:03}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            parse_manifest(&document(&valid_row("tex_math", &excessive_classes)))
+                .expect_err("excessive class count must be refused")
+                .contains("class limit")
+        );
+
+        let mut excessive_rows = String::new();
+        for ix in 0..=MAX_MANIFEST_ROWS {
+            excessive_rows.push_str(&valid_row(&format!("t{ix:04}"), "accepted"));
+        }
+        assert!(
+            parse_manifest(&document(&excessive_rows))
+                .expect_err("excessive row count must be refused")
+                .contains("row limit")
+        );
+
+        let mut excessive_pending = String::new();
+        for ix in 0..=MAX_MANIFEST_PENDING {
+            excessive_pending.push_str(&format!("# pending: p{ix:04} — note\n"));
+        }
+        excessive_pending.push_str(&valid_row("zeta", "accepted"));
+        assert!(
+            parse_manifest(&document(&excessive_pending))
+                .expect_err("excessive pending count must be refused")
+                .contains("pending-record limit")
+        );
+
         let oversized_header = format!("{}\n", "x".repeat(1_000_000));
         let error = parse_manifest(&oversized_header).expect_err("wrong header must be refused");
         assert!(
@@ -1050,8 +1436,7 @@ mod tests {
             error.len()
         );
 
-        let mut excessive_separators = document(&valid_row("tex_math", "accepted"));
-        excessive_separators.extend(std::iter::repeat_n('\t', 1_000_000));
+        let excessive_separators = document(&format!("{}\n", "\t".repeat(1_000_000)));
         let error =
             parse_manifest(&excessive_separators).expect_err("separator-heavy row must be refused");
         assert!(

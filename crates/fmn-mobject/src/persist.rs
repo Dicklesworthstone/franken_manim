@@ -16,7 +16,11 @@
 //!   for the replay journal and the self-goldens.
 //! - **Corruption detection and size limits on read**: the container's
 //!   trailing SHA-256 and [`fmn_hash::Limits`], enforced by
-//!   [`fmn_hash::Reader::open`] before any payload is touched.
+//!   [`fmn_hash::Reader::open`] before any payload is touched, then the
+//!   decoded-allocation budget ([`SnapshotLimits`], fm-vek.7): every
+//!   fixed-width count is preflighted against both the remaining encoded
+//!   bytes and the aggregate decoded-bytes ceiling before the destination
+//!   storage it names is reserved.
 //!
 //! The honesty clause, stated where it binds (§8.7, §13.4): **updater
 //! callables never serialize.** A durable snapshot records each updater's
