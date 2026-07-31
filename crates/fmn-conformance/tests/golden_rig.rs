@@ -159,3 +159,72 @@ fn corrupt_lock_is_a_named_error_not_a_pass() {
         other => panic!("expected corrupt-lock error, got {other:?}"),
     }
 }
+
+#[test]
+fn lock_identity_and_rows_are_strictly_parsed_with_bounded_refusals() {
+    let dir = scratch("strict_format");
+    let store = GoldenStore::new(&dir, "strict", Scope::Certified).expect("store");
+    let lock = store.lock_path();
+    let exact_header = "# fmn-golden-lock v1 suite=strict key=certified";
+    let sha = "00".repeat(32);
+
+    let assert_corrupt = |text: &str, expected_line: usize, needle: &str| {
+        std::fs::write(&lock, text).expect("write malformed lock");
+        match store.load_entries() {
+            Err(GoldenError::Corrupt { line, detail, .. }) => {
+                assert_eq!(line, expected_line, "unexpected refusal: {detail}");
+                assert!(
+                    detail.contains(needle),
+                    "expected {needle:?} in refusal: {detail}"
+                );
+                assert!(
+                    detail.len() < 200,
+                    "refusal copied malformed input: {detail}"
+                );
+            }
+            other => panic!("expected corrupt-lock error, got {other:?}"),
+        }
+    };
+
+    assert_corrupt(
+        "# fmn-golden-lock v10 suite=strict key=certified\n",
+        1,
+        "expected header",
+    );
+    assert_corrupt(
+        "# fmn-golden-lock v1 suite=other key=certified\n",
+        1,
+        "expected header",
+    );
+    assert_corrupt(
+        "# fmn-golden-lock v1 suite=strict key=other\n",
+        1,
+        "expected header",
+    );
+    assert_corrupt(
+        &format!("{exact_header}\nartifact\t1\t{sha}\t\n"),
+        2,
+        "expected 3 tab-separated fields, found 4",
+    );
+    assert_corrupt(
+        &format!("{exact_header}\nartifact\t1\t{sha} \n"),
+        2,
+        "invalid sha256 field",
+    );
+
+    let mut delimiter_heavy = format!("{exact_header}\nartifact\t1\t{sha}");
+    delimiter_heavy.extend(std::iter::repeat_n('\t', 1_000_000));
+    delimiter_heavy.push('\n');
+    assert_corrupt(
+        &delimiter_heavy,
+        2,
+        "expected 3 tab-separated fields, found 1000003",
+    );
+
+    std::fs::write(&lock, format!("{exact_header}\nartifact\t1\t{sha}\n"))
+        .expect("write canonical lock");
+    let entries = store.load_entries().expect("canonical lock parses");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["artifact"].len, 1);
+    assert_eq!(entries["artifact"].sha256_hex, sha);
+}

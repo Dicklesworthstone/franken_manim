@@ -203,6 +203,14 @@ fn valid_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
+/// Split one lock row without allocating a field vector for malformed input
+/// carrying an arbitrary number of tab separators.
+fn split_lock_row(line: &str) -> Option<[&str; 3]> {
+    let mut fields = line.split('\t');
+    let exact = [fields.next()?, fields.next()?, fields.next()?];
+    fields.next().is_none().then_some(exact)
+}
+
 /// A suite of bit-locked artifacts rooted at one directory.
 #[derive(Clone, Debug)]
 pub struct GoldenStore {
@@ -212,6 +220,10 @@ pub struct GoldenStore {
 }
 
 impl GoldenStore {
+    fn lock_header(&self) -> String {
+        format!("{LOCK_HEADER_PREFIX} suite={} key={}", self.suite, self.key)
+    }
+
     /// Open (or designate) a golden store. `dir` is the directory holding the
     /// lock files (conventionally a committed `goldens/` under the crate);
     /// `suite` names the lock-file family.
@@ -321,13 +333,17 @@ impl GoldenStore {
             Err(err) => return Err(GoldenError::Io { path, err }),
         };
         let mut lines = text.lines().enumerate();
+        let expected_header = self.lock_header();
         match lines.next() {
-            Some((_, first)) if first.starts_with(LOCK_HEADER_PREFIX) => {}
+            Some((_, first)) if first == expected_header => {}
             Some((_, first)) => {
                 return Err(GoldenError::Corrupt {
                     path,
                     line: 1,
-                    detail: format!("expected header {LOCK_HEADER_PREFIX:?}, found {first:?}"),
+                    detail: format!(
+                        "expected header {expected_header:?}, found {} bytes",
+                        first.len()
+                    ),
                 });
             }
             None => {
@@ -340,29 +356,30 @@ impl GoldenStore {
         }
         let mut entries = BTreeMap::new();
         for (idx, line) in lines {
-            let line = line.trim_end();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let fields: Vec<&str> = line.split('\t').collect();
-            let [name, len, hex] = fields.as_slice() else {
+            let Some([name, len, hex]) = split_lock_row(line) else {
                 return Err(GoldenError::Corrupt {
                     path,
                     line: idx + 1,
-                    detail: format!("expected 3 tab-separated fields, found {}", fields.len()),
+                    detail: format!(
+                        "expected 3 tab-separated fields, found {}",
+                        line.split('\t').count()
+                    ),
                 });
             };
             if !valid_name(name) {
                 return Err(GoldenError::Corrupt {
                     path,
                     line: idx + 1,
-                    detail: format!("invalid artifact name {name:?}"),
+                    detail: format!("invalid artifact name ({} bytes)", name.len()),
                 });
             }
             let len: u64 = len.parse().map_err(|_| GoldenError::Corrupt {
                 path: path.clone(),
                 line: idx + 1,
-                detail: format!("invalid length field {len:?}"),
+                detail: format!("invalid length field ({} bytes)", len.len()),
             })?;
             if hex.len() != 64
                 || !hex
@@ -372,7 +389,10 @@ impl GoldenStore {
                 return Err(GoldenError::Corrupt {
                     path,
                     line: idx + 1,
-                    detail: format!("invalid sha256 field {hex:?}"),
+                    detail: format!(
+                        "invalid sha256 field ({} bytes; expected 64 lowercase hex digits)",
+                        hex.len()
+                    ),
                 });
             }
             if entries
@@ -388,7 +408,7 @@ impl GoldenStore {
                 return Err(GoldenError::Corrupt {
                     path,
                     line: idx + 1,
-                    detail: format!("duplicate artifact name {name:?}"),
+                    detail: format!("duplicate artifact name ({} bytes)", name.len()),
                 });
             }
         }
@@ -404,8 +424,8 @@ impl GoldenStore {
             create_dir_all(parent)?;
         }
         let mut out = String::new();
-        out.push_str(LOCK_HEADER_PREFIX);
-        out.push_str(&format!(" suite={} key={}\n", self.suite, self.key));
+        out.push_str(&self.lock_header());
+        out.push('\n');
         for (name, entry) in entries {
             out.push_str(&format!("{name}\t{}\t{}\n", entry.len, entry.sha256_hex));
         }
