@@ -579,6 +579,15 @@ impl Timeline {
         self.clear_checkpoints();
     }
 
+    /// Decompose into the authored steps and label anchors (fm-oee's
+    /// bundle exporter drives the public segment drivers itself so it can
+    /// snapshot every segment boundary; callers [`Timeline::compile`]
+    /// first for the schedule, then consume the timeline with this).
+    #[must_use]
+    pub fn into_steps(self) -> (Vec<Step>, Vec<(String, usize)>) {
+        (self.steps, self.labels)
+    }
+
     /// The segment indices with a recorded checkpoint (diagnostic; the
     /// Studio's scrub bar shows these as the cheap seek targets).
     #[must_use]

@@ -46,6 +46,7 @@
 #![forbid(unsafe_code)]
 
 pub mod animation;
+pub mod bundle;
 pub mod clock;
 pub mod composition;
 pub mod creation;
@@ -53,6 +54,7 @@ pub mod fading;
 pub mod frame;
 pub mod growing;
 pub mod indication;
+pub mod ladder;
 pub mod movement;
 pub mod purity;
 pub mod rotation;
@@ -65,6 +67,10 @@ pub use animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, DEFAULT_ANIMATION_LAG_RATIO,
     DEFAULT_ANIMATION_RUN_TIME, IntoAnimation, MethodAnimation, RateFunc, prepare_animation,
     sub_alpha, time_spanned_alpha,
+};
+pub use bundle::{
+    PATH_STRAIGHT_TAG, bundle_sub_alpha, interpolate_between, path_from_tag, path_tag,
+    rate_from_tag, rate_tag,
 };
 pub use clock::{ClockError, FrameSample, FrameSegment, RationalFrameClock, RationalTime};
 pub use composition::{
@@ -88,6 +94,7 @@ pub use indication::{
     INDICATION_YELLOW, VShowPassingFlash, WiggleOutThenIn, apply_wave, indicate,
     show_creation_then_destruction, turn_inside_out,
 };
+pub use ladder::{DeclaredOp, DeclaredUpdater, LadderError, sawtooth, triangle};
 pub use movement::{Homotopy, MoveAlongPath, PhaseFlow, complex_homotopy, smoothed_homotopy};
 pub use purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
