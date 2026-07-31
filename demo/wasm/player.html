@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrankenManim — W5 wasm tier-2 timeline player (fm-oee)</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; gap: 12px; padding: 24px;
+    background: #101014; color: #e8e8ee;
+    font: 14px/1.5 system-ui, sans-serif;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  button {
+    background: #1c1c24; color: inherit; border: 1px solid #3a3a48;
+    border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer;
+  }
+  input[type="range"] { width: 280px; }
+  canvas {
+    background: #000; border: 1px solid #2a2a36; border-radius: 8px;
+    max-width: 100%; image-rendering: pixelated;
+  }
+  #status { color: #9a9ab0; min-height: 1.5em; }
+  .err { color: #ff7a7a; }
+</style>
+</head>
+<body>
+  <h1>FrankenManim — FMTL/1 timeline player (W5 tier 2)</h1>
+  <div class="controls">
+    <label>Frame <input id="scrub" type="range" min="0" max="0" value="0"></label>
+    <button id="play">Play</button>
+    <span id="frameLabel">0 / 0</span>
+  </div>
+  <div class="controls" id="labels"></div>
+  <canvas id="canvas" width="640" height="360"></canvas>
+  <div id="status">loading wasm…</div>
+
+<script type="module">
+  import init, { FmnPlayer } from "./pkg/fmn_wasm.js";
+
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+  const status = document.getElementById("status");
+  const scrub = document.getElementById("scrub");
+  const frameLabel = document.getElementById("frameLabel");
+  const playBtn = document.getElementById("play");
+  const labels = document.getElementById("labels");
+
+  let player = null;
+  let scratch = null;   // reused across renders: the render_into zero-copy path
+  let playing = false;
+  let rafId = 0;
+
+  function show(index) {
+    if (!player) return;
+    const i = Math.min(index, player.frame_count - 1);
+    player.seek_frame(i);
+    player.render_into(i, scratch);
+    const image = new ImageData(
+      new Uint8ClampedArray(scratch.buffer, 0, player.width * player.height * 4),
+      player.width, player.height);
+    ctx.putImageData(image, 0, 0);
+    frameLabel.textContent = `${i} / ${player.frame_count - 1}`;
+    scrub.value = String(i);
+  }
+
+  function stop() { playing = false; playBtn.textContent = "Play"; cancelAnimationFrame(rafId); }
+
+  function tick() {
+    if (!playing || !player) return;
+    const next = (Number(scrub.value) + 1) % player.frame_count;
+    show(next);
+    rafId = requestAnimationFrame(tick);
+  }
+
+  try {
+    await init();
+    const response = await fetch("./bundle.fmtl");
+    if (!response.ok) throw new Error(`bundle.fmtl: HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    player = FmnPlayer.from_bundle(bytes);   // EngineMismatch/PlanInconsistent refuse here
+    player.set_viewport(canvas.width, canvas.height);
+    scratch = new Uint8Array(player.width * player.height * 4);
+    scrub.max = String(player.frame_count - 1);
+    status.textContent =
+      `FMTL/1: ${player.frame_count} frames @ ${player.fps} fps ` +
+      `(${player.duration_seconds.toFixed(2)}s), engine ${player.engine_version}`;
+    for (const name of player.labels()) {
+      const btn = document.createElement("button");
+      btn.textContent = name;
+      btn.addEventListener("click", () => { stop(); show(player.frame_of_label(name)); });
+      labels.appendChild(btn);
+    }
+    scrub.addEventListener("input", () => { stop(); show(Number(scrub.value)); });
+    playBtn.addEventListener("click", () => {
+      if (playing) { stop(); } else { playing = true; playBtn.textContent = "Stop"; tick(); }
+    });
+    show(0);
+  } catch (e) {
+    status.innerHTML =
+      `<span class="err">player init failed: ${e}. Did you build demo/wasm/pkg and ` +
+      `export the bundle (cargo run -p fmn-wasm --example export_bundle)? See README.md.</span>`;
+  }
+</script>
+</body>
+</html>
