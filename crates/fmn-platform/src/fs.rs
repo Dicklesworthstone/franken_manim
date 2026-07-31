@@ -56,6 +56,11 @@ fn open_unique_temp(prefix: &str, path: &Path) -> Result<(PathBuf, std::fs::File
     ))
 }
 
+// On wasm32 std's File is a non-Drop stub, so the explicit close-ordering
+// drops below trip clippy::drop_non_drop there; the ordering still matters
+// on native (close before remove/rename, Windows above all), so the lint is
+// scoped off for the stub target only.
+#[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
 fn write_unique_temp(prefix: &str, path: &Path, bytes: &[u8]) -> Result<PathBuf, FsError> {
     let (tmp, mut file) = open_unique_temp(prefix, path)?;
     if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
@@ -511,6 +516,8 @@ impl AtomicFileWriter for StdAtomicFileWriter {
             .map_err(|error| io_error(&self.temporary, error))
     }
 
+    // wasm32: see write_unique_temp for the scoped drop_non_drop allow.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
     fn prepare(mut self: Box<Self>) -> Result<Box<dyn PreparedAtomicFile>, FsError> {
         let file = self.file.take().ok_or_else(|| {
             io_error(
@@ -814,6 +821,17 @@ struct VirtualFsState {
     directories: BTreeSet<PathBuf>,
 }
 
+/// The in-memory filesystem: a `path → bytes` regular-file map plus explicit
+/// directories. Deterministic by construction (`BTreeMap`/`BTreeSet`
+/// ordering); shared mutability behind one `RwLock` so compound filesystem
+/// operations remain atomic and a populated instance can be handed to
+/// consumers as `&dyn FileSystem`.
+///
+/// Two consumers: the deterministic lab (journaled tests substitute it for
+/// the host fs) and the W5 wasm tier-1 build (fm-l97), where it IS the
+/// filesystem capability — the browser sandbox has no host fs, assets arrive
+/// as bytes (fetch/upload/OPFS at the host boundary), and the engine's reads
+/// and writes all land here.
 #[derive(Debug, Default)]
 pub struct VirtualFs {
     state: RwLock<VirtualFsState>,

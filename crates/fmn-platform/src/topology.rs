@@ -302,15 +302,28 @@ impl HardwareTopology {
     /// hosts (and a sysfs read failure) fall back to
     /// [`HardwareTopology::fallback`] over `available_parallelism` — the
     /// planner always gets *a* topology, just a flat one.
+    ///
+    /// wasm32 (W5 tier 1, fm-l97): the browser sandbox is single-threaded —
+    /// no shared memory, no atomics, no cross-origin isolation (that is the
+    /// documented tier-2 question) — so the planner is handed exactly one
+    /// logical CPU, always. SIMD128 is not a §17.3 build tier (R22 caps the
+    /// tier set at four), so the flat portable fallback is the honest shape.
     #[must_use]
     pub fn current() -> Self {
-        let logical = std::thread::available_parallelism()
-            .map(|n| u32::try_from(n.get()).unwrap_or(1))
-            .unwrap_or(1);
-        if cfg!(target_os = "linux") {
-            Self::detect_linux(&crate::fs::StdFs).unwrap_or_else(|_| Self::fallback(logical))
-        } else {
-            Self::fallback(logical)
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::fallback(1)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let logical = std::thread::available_parallelism()
+                .map(|n| u32::try_from(n.get()).unwrap_or(1))
+                .unwrap_or(1);
+            if cfg!(target_os = "linux") {
+                Self::detect_linux(&crate::fs::StdFs).unwrap_or_else(|_| Self::fallback(logical))
+            } else {
+                Self::fallback(logical)
+            }
         }
     }
 
