@@ -8,7 +8,8 @@
 //! directory) lives in `torture.rs`.
 
 use fmn_cache::{
-    CacheError, CacheKey, EvictOutcome, KeyBuilder, Namespace, NamespacePolicy, Store, StoreConfig,
+    CacheError, CacheKey, EvictOutcome, KeyBuilder, Namespace, NamespacePolicy, RootRefusalCode,
+    Store, StoreConfig,
 };
 use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer, sha256};
 use fmn_platform::clock::{Clock, FakeClock};
@@ -887,8 +888,9 @@ fn an_existing_nonempty_unowned_root_is_never_claimed() {
         ROOT,
         StoreConfig::default(),
     ) {
-        Err(CacheError::RootRefused { reason, .. }) => {
-            assert!(reason.contains("ownership marker"));
+        Err(CacheError::RootRefused { code, reason, .. }) => {
+            assert_eq!(code, RootRefusalCode::OwnershipMissing);
+            assert!(reason.contains("ownership manifest"));
         }
         other => panic!("expected RootRefused, got {other:?}"),
     }
@@ -898,6 +900,40 @@ fn an_existing_nonempty_unowned_root_is_never_claimed() {
     );
     assert!(!fs.exists(&Path::new(ROOT).join("STORE_OWNER")));
     assert!(!fs.exists(&Path::new(ROOT).join("STORE_FORMAT")));
+}
+
+#[test]
+fn a_generation_change_refuses_stale_mutation_and_drop_flush() {
+    let (fs, _clock, store) = fresh();
+    let namespace = ns(&store, None);
+    let cache_key = key("generation-bound");
+    namespace.put(&cache_key, b"old generation").unwrap();
+    assert_eq!(
+        namespace.get(&cache_key).unwrap().as_deref(),
+        Some(&b"old generation"[..])
+    );
+
+    let owner_path = Path::new(ROOT).join("STORE_OWNER");
+    let marker = String::from_utf8(fs.read(&owner_path).unwrap()).unwrap();
+    let generation_start = marker.rfind(' ').expect("generation separator") + 1;
+    let mut replacement = marker;
+    replacement.replace_range(generation_start..generation_start + 64, &"0".repeat(64));
+    fs.write_atomic(&owner_path, replacement.as_bytes())
+        .unwrap();
+
+    match namespace.put(&key("new"), b"must not publish") {
+        Err(CacheError::RootRefused { code, .. }) => {
+            assert_eq!(code, RootRefusalCode::GenerationChanged);
+        }
+        other => panic!("expected generation refusal, got {other:?}"),
+    }
+    let index_before_drop = fs.read(&index_path()).unwrap();
+    drop(namespace);
+    assert_eq!(
+        fs.read(&index_path()).unwrap(),
+        index_before_drop,
+        "a stale best-effort Drop cannot flush into the new generation"
+    );
 }
 
 #[test]

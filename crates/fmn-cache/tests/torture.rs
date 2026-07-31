@@ -9,7 +9,7 @@
 
 use fmn_cache::{
     CacheClearAuthorization, CacheClearOutcome, CacheError, CacheKey, EvictOutcome, KeyBuilder,
-    NamespacePolicy, Store, StoreConfig,
+    NamespacePolicy, RootRefusalCode, Store, StoreConfig,
 };
 use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, sha256};
 use fmn_platform::clock::StdClock;
@@ -77,7 +77,7 @@ fn payload(i: usize) -> Vec<u8> {
 }
 
 #[test]
-fn clear_retains_owned_root_and_stale_handles_only_recreate_fresh_content() {
+fn clear_rotates_the_generation_and_stale_handles_cannot_recreate_content() {
     let root = scratch("clear_lifecycle");
     let sibling = root.with_extension("sibling");
     std::fs::write(&sibling, b"keep").expect("sibling sentinel");
@@ -87,6 +87,7 @@ fn clear_retains_owned_root_and_stale_handles_only_recreate_fresh_content() {
         .expect("namespace");
     let k = key(7);
     namespace.put(&k, &payload(7)).expect("seed cache");
+    let owner_before = std::fs::read(root.join("STORE_OWNER")).expect("old owner manifest");
 
     let authorization = CacheClearAuthorization::authorize(&root).expect("owned root authorizes");
     assert_eq!(authorization.root(), root);
@@ -96,26 +97,37 @@ fn clear_retains_owned_root_and_stale_handles_only_recreate_fresh_content() {
     );
     assert!(root.join("STORE_OWNER").is_file());
     assert!(root.join("STORE_FORMAT").is_file());
+    assert_ne!(
+        std::fs::read(root.join("STORE_OWNER")).expect("new owner manifest"),
+        owner_before,
+        "clear rotates the root generation"
+    );
     assert_eq!(std::fs::read(&sibling).expect("sibling survives"), b"keep");
     assert_eq!(namespace.get(&k).expect("stale read is a miss"), None);
 
-    namespace
-        .put(&k, b"recreated")
-        .expect("stale handle recreates only fresh ns content");
+    match namespace.put(&k, b"must not recreate") {
+        Err(CacheError::RootRefused { code, .. }) => {
+            assert_eq!(code, RootRefusalCode::GenerationChanged);
+        }
+        other => panic!("expected stale-generation refusal, got {other:?}"),
+    }
+    drop(namespace);
+    assert!(
+        !root.join("ns").exists(),
+        "stale Drop cannot recreate the cleared namespace tree"
+    );
     let reopened = open(&root);
     let fresh = reopened
         .namespace("shared", 1, NamespacePolicy::default())
         .expect("fresh namespace");
-    assert_eq!(
-        fresh.get(&k).expect("fresh read").as_deref(),
-        Some(&b"recreated"[..])
-    );
+    assert_eq!(fresh.get(&k).expect("fresh read"), None);
 }
 
 #[test]
 fn clear_migrates_an_owned_old_format_even_when_namespaces_are_absent() {
     let root = scratch("clear_empty_old_format");
     drop(open(&root));
+    let owner_before = std::fs::read(root.join("STORE_OWNER")).expect("old owner manifest");
     std::fs::write(root.join("STORE_FORMAT"), b"fmn-cache 999\n").expect("write old format");
     assert!(matches!(
         open_result(&root),
@@ -132,6 +144,11 @@ fn clear_migrates_an_owned_old_format_even_when_namespaces_are_absent() {
     assert_eq!(
         std::fs::read(root.join("STORE_FORMAT")).expect("read refreshed format"),
         b"fmn-cache 1\n"
+    );
+    assert_ne!(
+        std::fs::read(root.join("STORE_OWNER")).expect("read rotated owner manifest"),
+        owner_before,
+        "format migration rotates the root generation"
     );
     drop(open(&root));
 }
@@ -318,11 +335,132 @@ fn clear_revalidates_the_owner_marker_before_renaming_namespaces() {
 
     let authorization = CacheClearAuthorization::authorize(&root).expect("authorization");
     std::fs::write(root.join("STORE_OWNER"), b"foreign owner\n").expect("replace owner marker");
-    assert!(matches!(
-        authorization.clear(),
-        Err(CacheError::RootRefused { .. })
-    ));
+    match authorization.clear() {
+        Err(CacheError::RootRefused { code, .. }) => {
+            assert_eq!(code, RootRefusalCode::MarkerInvalid);
+        }
+        other => panic!("expected marker refusal, got {other:?}"),
+    }
     assert!(root.join("ns").is_dir(), "namespace tree must survive");
+}
+
+#[test]
+fn clear_classifies_a_valid_generation_replacement_without_touching_namespaces() {
+    let root = scratch("owner_generation_revalidation");
+    let store = open(&root);
+    let namespace = store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("namespace");
+    namespace.put(&key(45), &payload(45)).expect("seed cache");
+    drop(namespace);
+    drop(store);
+
+    let authorization = CacheClearAuthorization::authorize(&root).expect("authorization");
+    let owner_path = root.join("STORE_OWNER");
+    let marker = String::from_utf8(std::fs::read(&owner_path).expect("owner manifest"))
+        .expect("owner manifest UTF-8");
+    let generation_start = marker.rfind(' ').expect("generation separator") + 1;
+    let mut replacement = marker;
+    replacement.replace_range(generation_start..generation_start + 64, &"0".repeat(64));
+    std::fs::write(&owner_path, replacement).expect("replace generation");
+
+    match authorization.clear() {
+        Err(CacheError::RootRefused { code, .. }) => {
+            assert_eq!(code, RootRefusalCode::GenerationChanged);
+        }
+        other => panic!("expected generation refusal, got {other:?}"),
+    }
+    assert!(root.join("ns").is_dir(), "namespace tree must survive");
+}
+
+#[test]
+fn replacing_the_owned_root_invalidates_stale_mutation_maintenance_and_drop() {
+    let root = scratch("root_generation_replacement");
+    let stale_store = open(&root);
+    let stale = stale_store
+        .namespace(
+            "shared",
+            1,
+            NamespacePolicy {
+                ceiling_bytes: Some(0),
+            },
+        )
+        .expect("stale namespace");
+    stale.put(&key(41), &payload(41)).expect("seed old root");
+
+    let parked = scratch("root_generation_replacement_parked");
+    std::fs::rename(&root, &parked).expect("park the complete old root");
+    let fresh_store = open(&root);
+    let fresh = fresh_store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("fresh namespace");
+    fresh.put(&key(42), &payload(42)).expect("seed new root");
+    let fresh_index = std::fs::read(root.join("ns/shared/v1/index")).expect("fresh index");
+
+    for result in [
+        stale.put(&key(43), &payload(43)),
+        stale.evict_to_ceiling().map(|_| ()),
+    ] {
+        match result {
+            Err(CacheError::RootRefused { code, .. }) => {
+                assert_eq!(code, RootRefusalCode::GenerationChanged);
+            }
+            other => panic!("expected stale-root generation refusal, got {other:?}"),
+        }
+    }
+    drop(stale);
+    assert_eq!(
+        std::fs::read(root.join("ns/shared/v1/index")).expect("index after stale Drop"),
+        fresh_index,
+        "stale Drop cannot merge old-root access state into the replacement root"
+    );
+    assert_eq!(
+        fresh
+            .get(&key(42))
+            .expect("fresh value survives")
+            .as_deref(),
+        Some(payload(42).as_slice())
+    );
+    assert_eq!(fresh.get(&key(41)).expect("old value stays parked"), None);
+}
+
+#[test]
+fn oversized_lifecycle_markers_are_bounded_typed_refusals() {
+    let root = scratch("oversized_owner_manifest");
+    let store = open(&root);
+    let namespace = store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("namespace");
+    std::fs::write(root.join("STORE_OWNER"), vec![b'x'; 257])
+        .expect("replace owner with oversized marker");
+
+    for result in [
+        namespace.put(&key(44), &payload(44)),
+        CacheClearAuthorization::authorize(&root).map(|_| ()),
+    ] {
+        match result {
+            Err(CacheError::RootRefused { code, .. }) => {
+                assert_eq!(code, RootRefusalCode::MarkerTooLarge);
+            }
+            other => panic!("expected bounded-marker refusal, got {other:?}"),
+        }
+    }
+
+    let format_root = scratch("oversized_format_stamp");
+    drop(open(&format_root));
+    std::fs::write(format_root.join("STORE_FORMAT"), vec![b'x'; 65])
+        .expect("replace format with oversized marker");
+    for result in [
+        open_result(&format_root).map(|_| ()),
+        CacheClearAuthorization::authorize(&format_root).map(|_| ()),
+    ] {
+        match result {
+            Err(CacheError::RootRefused { code, .. }) => {
+                assert_eq!(code, RootRefusalCode::MarkerTooLarge);
+            }
+            other => panic!("expected bounded-format refusal, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -402,10 +540,12 @@ fn clear_authorization_refuses_dangerous_and_foreign_roots() {
     )
     .expect("copy format marker");
     std::fs::write(copied_to.join("important.txt"), b"keep").expect("copied-root sentinel");
-    assert!(matches!(
-        CacheClearAuthorization::authorize(&copied_to),
-        Err(CacheError::RootRefused { .. })
-    ));
+    match CacheClearAuthorization::authorize(&copied_to) {
+        Err(CacheError::RootRefused { code, .. }) => {
+            assert_eq!(code, RootRefusalCode::OwnershipMismatch);
+        }
+        other => panic!("expected copied-owner refusal, got {other:?}"),
+    }
     assert_eq!(
         std::fs::read(copied_to.join("important.txt")).expect("copied-root sentinel survives"),
         b"keep"
@@ -504,10 +644,12 @@ fn store_reopen_refuses_a_linked_ownership_marker() {
     std::fs::copy(&parked, &victim).expect("prepare matching external bytes");
     std::os::unix::fs::symlink(&victim, &owner).expect("link owner marker");
 
-    assert!(
-        matches!(open_result(&root), Err(CacheError::Storage(_))),
-        "opening must classify the marker rather than follow it"
-    );
+    match open_result(&root) {
+        Err(CacheError::RootRefused { code, .. }) => {
+            assert_eq!(code, RootRefusalCode::WrongNodeKind);
+        }
+        other => panic!("opening must classify the marker rather than follow it: {other:?}"),
+    }
     assert_eq!(
         std::fs::read(&victim).expect("victim survives"),
         std::fs::read(&parked).expect("parked marker")

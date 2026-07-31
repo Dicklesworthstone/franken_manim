@@ -63,20 +63,22 @@
 //! recompute ([`Namespace::get_or_compute`] swallows storage trouble); nothing
 //! in this crate can fail a render. `--clear-cache`
 //! ([`CacheClearAuthorization`]) retains the path-bound owned root and
-//! atomically quarantines only its managed namespace tree: concurrent readers
-//! see misses and concurrent writers recreate what they need at the original
-//! `ns` path.
+//! atomically quarantines only its managed namespace tree, then rotates the
+//! owner generation. Concurrent readers see misses; handles from the retired
+//! generation cannot mutate, maintain, or flush bookkeeping into the fresh
+//! root.
 //!
 //! Root authorization and ordinary traversal protect against dangerous
 //! configuration, static symlinks/reparse points, copied markers, and races
-//! among cooperating FrankenManim processes. Portable safe `std` does not
-//! provide the same handle-relative read/write/rename/remove primitives on
-//! every supported platform, so a hostile same-user process can still replace
-//! an owned-root ancestor or a checked component between classification and
-//! the following path-based operation. Checks are performed immediately before
-//! each operation, recursive deletion is required not to follow link-like
-//! children, and clear keeps its deletion boundary to `ns`; stronger stable
-//! root identity and generation binding are tracked separately.
+//! among cooperating FrankenManim processes. Each Store carries a path-bound,
+//! generation-bearing root context, and every mutation or maintenance pass
+//! revalidates its bounded owner manifest immediately before path traversal.
+//! Portable safe `std` does not provide the same handle-relative
+//! read/write/rename/remove primitives on every supported platform, so this
+//! does **not** claim immunity from a hostile same-user process replacing an
+//! owned-root ancestor or checked component between validation and the next
+//! path-based operation. Recursive deletion is required not to follow
+//! link-like children, and clear keeps its deletion boundary to `ns`.
 //!
 //! LRU bookkeeping uses a logical sequence counter — never wall time — so
 //! eviction order is reproducible in the deterministic lab; the only clock
@@ -95,6 +97,58 @@ pub use store::{
 
 use fmn_platform::fs::FsError;
 use std::fmt;
+
+/// Stable machine-readable reason for [`CacheError::RootRefused`].
+///
+/// The accompanying human-readable `reason` may gain detail; callers that
+/// need policy decisions or robot output match this code instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootRefusalCode {
+    /// The configured path is not an admissible absolute cache leaf.
+    InvalidPath,
+    /// The path names a filesystem root, home, current directory, or an
+    /// ancestor of one of those protected locations.
+    ProtectedPath,
+    /// A host-only lifecycle operation was attempted through another
+    /// filesystem capability.
+    CapabilityRequired,
+    /// A root or marker has the wrong filesystem node kind.
+    WrongNodeKind,
+    /// An existing root has no ownership manifest.
+    OwnershipMissing,
+    /// The ownership manifest belongs to another canonical path.
+    OwnershipMismatch,
+    /// An ownership or format marker is malformed.
+    MarkerInvalid,
+    /// A lifecycle marker exceeds its fixed read budget.
+    MarkerTooLarge,
+    /// The canonical root identity changed across a lifecycle check.
+    IdentityChanged,
+    /// A live handle's owner generation is no longer current.
+    GenerationChanged,
+    /// A bounded lifecycle-name reservation could not be obtained.
+    LifecycleCollision,
+}
+
+impl RootRefusalCode {
+    /// Stable lowercase spelling for robot diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidPath => "invalid_path",
+            Self::ProtectedPath => "protected_path",
+            Self::CapabilityRequired => "capability_required",
+            Self::WrongNodeKind => "wrong_node_kind",
+            Self::OwnershipMissing => "ownership_missing",
+            Self::OwnershipMismatch => "ownership_mismatch",
+            Self::MarkerInvalid => "marker_invalid",
+            Self::MarkerTooLarge => "marker_too_large",
+            Self::IdentityChanged => "identity_changed",
+            Self::GenerationChanged => "generation_changed",
+            Self::LifecycleCollision => "lifecycle_collision",
+        }
+    }
+}
 
 /// Stable diagnostic details for [`CacheError::KeyConflict`].
 #[derive(Debug)]
@@ -134,6 +188,8 @@ pub enum CacheError {
     RootRefused {
         /// The configured or resolved root.
         root: std::path::PathBuf,
+        /// Stable refusal class for programmatic consumers.
+        code: RootRefusalCode,
         /// The fail-closed reason.
         reason: String,
     },
@@ -168,8 +224,13 @@ impl fmt::Display for CacheError {
                 f,
                 "unsupported cache store format {found:?}; clear the cache to migrate"
             ),
-            Self::RootRefused { root, reason } => {
-                write!(f, "refusing cache root {}: {reason}", root.display())
+            Self::RootRefused { root, code, reason } => {
+                write!(
+                    f,
+                    "refusing cache root {} [{}]: {reason}",
+                    root.display(),
+                    code.as_str()
+                )
             }
             Self::RootResolution(err) => write!(f, "cache root resolution failed: {err}"),
             Self::EntryTooLarge { limit, needed } => {

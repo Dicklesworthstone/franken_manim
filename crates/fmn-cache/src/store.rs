@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! <root>/
-//!   STORE_OWNER                 path-bound ownership marker
+//!   STORE_OWNER                 path + generation ownership manifest
 //!   STORE_FORMAT                  the store-format stamp ("fmn-cache 1")
 //!   ns/<name>/v<version>/         one versioned namespace
 //!     objects/<hh>/<hex…>         entries, sharded by the first digest byte
@@ -39,7 +39,7 @@
 
 use crate::entry::{self, EntryKind};
 use crate::key::CacheKey;
-use crate::{CacheError, KeyConflict};
+use crate::{CacheError, KeyConflict, RootRefusalCode};
 use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer, sha256};
 use fmn_platform::clock::Clock;
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
@@ -50,7 +50,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -62,11 +62,16 @@ use std::time::{Duration, SystemTime};
 const FORMAT_STAMP: &str = "fmn-cache 1";
 /// The stamp's file name under the store root.
 const FORMAT_FILE: &str = "STORE_FORMAT";
-/// Stable ownership-marker prefix, independent of the replaceable store
-/// format. The suffix binds the marker to the canonical absolute host path.
-const OWNER_PREFIX: &str = "franken-manim cache root 1 ";
-/// The ownership marker's file name under the store root.
+/// Stable ownership-manifest prefix, independent of the replaceable store
+/// format. The two fields bind the canonical absolute host path and one live
+/// store generation.
+const OWNER_PREFIX: &str = "franken-manim cache root 2 ";
+/// The ownership manifest's file name under the store root.
 const OWNER_FILE: &str = "STORE_OWNER";
+/// Owner manifests and format stamps are fixed, tiny lifecycle documents.
+/// Host reads stop after one byte beyond these limits.
+const OWNER_MANIFEST_MAX_BYTES: usize = 256;
+const FORMAT_STAMP_MAX_BYTES: usize = 64;
 /// Dedicated application leaf below the host's per-user cache directory.
 ///
 /// This deliberately does not reuse the Reference's `manim` leaf: a Python
@@ -82,6 +87,10 @@ const LOCK_SCHEMA: Schema = Schema::new(*b"FMNC", 4, 1, 0);
 /// Process-wide store-instance counter, distinguishing lock tokens from two
 /// stores (or two openings) in one process.
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+/// Process-local input to fresh owner generations. Wall time and process id
+/// provide cross-process separation; this counter makes same-process calls
+/// distinct even when the clock resolution is coarse.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Process-local uniquifier for clear-quarantine directory names.
 static NEXT_CLEAR: AtomicU64 = AtomicU64::new(1);
 /// Bound collision work so a hostile directory full of guessed names cannot
@@ -332,9 +341,10 @@ fn lock_poisoned<T>(err: PoisonError<T>) -> T {
     err.into_inner()
 }
 
-fn root_refused(root: &Path, reason: impl Into<String>) -> CacheError {
+fn root_refused(root: &Path, code: RootRefusalCode, reason: impl Into<String>) -> CacheError {
     CacheError::RootRefused {
         root: root.to_path_buf(),
+        code,
         reason: reason.into(),
     }
 }
@@ -454,6 +464,7 @@ fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheE
             Some(kind) => {
                 return Err(root_refused(
                     root,
+                    RootRefusalCode::WrongNodeKind,
                     format!(
                         "capability root component {} is {kind:?}, not a real directory",
                         directory.display()
@@ -467,6 +478,7 @@ fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheE
                     Some(kind) => {
                         return Err(root_refused(
                             root,
+                            RootRefusalCode::WrongNodeKind,
                             format!(
                                 "capability root component {} became {kind:?}",
                                 directory.display()
@@ -476,6 +488,7 @@ fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheE
                     None => {
                         return Err(root_refused(
                             root,
+                            RootRefusalCode::IdentityChanged,
                             format!(
                                 "capability root component {} remained absent",
                                 directory.display()
@@ -499,6 +512,7 @@ fn ensure_platform_cache_parent(fs: &dyn FileSystem, root: &Path) -> Result<(), 
     let parent = root.parent().ok_or_else(|| {
         root_refused(
             root,
+            RootRefusalCode::InvalidPath,
             "the resolved platform cache root must name a dedicated leaf",
         )
     })?;
@@ -633,24 +647,173 @@ fn list_managed_directory(
     Ok(checked)
 }
 
-fn owner_stamp(root: &Path) -> Vec<u8> {
-    let digest = sha256(root.as_os_str().as_encoded_bytes());
-    format!("{OWNER_PREFIX}{}\n", digest.to_hex()).into_bytes()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OwnerManifest {
+    path: Digest,
+    generation: Digest,
 }
 
-fn verify_stamp(
+impl OwnerManifest {
+    fn fresh(root: &Path) -> Self {
+        let mut material =
+            Vec::with_capacity(root.as_os_str().as_encoded_bytes().len().saturating_add(32));
+        material.extend_from_slice(root.as_os_str().as_encoded_bytes());
+        material.push(0);
+        material.extend_from_slice(&std::process::id().to_le_bytes());
+        material.extend_from_slice(
+            &SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+                .to_le_bytes(),
+        );
+        material.extend_from_slice(
+            &NEXT_GENERATION
+                .fetch_add(1, Ordering::Relaxed)
+                .to_le_bytes(),
+        );
+        Self {
+            path: sha256(root.as_os_str().as_encoded_bytes()),
+            generation: sha256(&material),
+        }
+    }
+
+    fn encode(self) -> Vec<u8> {
+        format!(
+            "{OWNER_PREFIX}{} {}\n",
+            self.path.to_hex(),
+            self.generation.to_hex()
+        )
+        .into_bytes()
+    }
+}
+
+fn parse_owner_manifest(root: &Path, bytes: &[u8]) -> Result<OwnerManifest, CacheError> {
+    if bytes.len() > OWNER_MANIFEST_MAX_BYTES {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::MarkerTooLarge,
+            format!("ownership manifest exceeds the {OWNER_MANIFEST_MAX_BYTES}-byte limit"),
+        ));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest is not UTF-8",
+        )
+    })?;
+    let line = text.strip_suffix('\n').ok_or_else(|| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest is not canonically newline-terminated",
+        )
+    })?;
+    let fields = line.strip_prefix(OWNER_PREFIX).ok_or_else(|| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest has an unsupported schema",
+        )
+    })?;
+    let (path, generation) = fields.split_once(' ').ok_or_else(|| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest is missing its generation",
+        )
+    })?;
+    let canonical_digest = |field: &str| {
+        field.len() == 64
+            && field
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !canonical_digest(path) || !canonical_digest(generation) {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest fields are not canonical digests",
+        ));
+    }
+    let path = Digest::from_hex(path).map_err(|_| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest path digest is malformed",
+        )
+    })?;
+    let generation = Digest::from_hex(generation).map_err(|_| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "ownership manifest generation is malformed",
+        )
+    })?;
+    let expected_path = sha256(root.as_os_str().as_encoded_bytes());
+    if path != expected_path {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::OwnershipMismatch,
+            "ownership manifest is bound to a different canonical path",
+        ));
+    }
+    Ok(OwnerManifest { path, generation })
+}
+
+fn read_managed_file_bounded(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, CacheError> {
+    let bytes = read_managed_file(fs, root, path)?;
+    if bytes.len() > max_bytes {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::MarkerTooLarge,
+            format!("{label} exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_lifecycle_marker_for_open(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, CacheError> {
+    if !fs.grants_host_destructive_lifecycle() {
+        return read_managed_file_bounded(fs, root, path, max_bytes, label);
+    }
+    match host_node_kind_no_follow(path)? {
+        Some(FsNodeKind::RegularFile) => read_host_file_bounded(path, root, label, max_bytes),
+        Some(_) => Err(root_refused(
+            root,
+            RootRefusalCode::WrongNodeKind,
+            format!("{label} is not a regular file"),
+        )),
+        None => Err(managed_not_found(path)),
+    }
+}
+
+fn verify_fixed_marker(
     fs: &dyn FileSystem,
     path: &Path,
     expected: &[u8],
     root: &Path,
     label: &str,
 ) -> Result<(), CacheError> {
-    let found = read_managed_file(fs, root, path)?;
+    let found = read_lifecycle_marker_for_open(fs, root, path, expected.len(), label)?;
     if found == expected {
         Ok(())
     } else {
         Err(root_refused(
             root,
+            RootRefusalCode::MarkerInvalid,
             format!("{label} is foreign or bound to a different path"),
         ))
     }
@@ -672,15 +835,20 @@ fn ensure_owned_root(
     fs: &dyn FileSystem,
     root: &Path,
     state: RootOpenState,
-) -> Result<(), CacheError> {
+) -> Result<OwnerManifest, CacheError> {
     if !root.is_absolute() {
-        return Err(root_refused(root, "the store root must be absolute"));
+        return Err(root_refused(
+            root,
+            RootRefusalCode::InvalidPath,
+            "the store root must be absolute",
+        ));
     }
     let root_existed = match fs.node_kind_no_follow(root)? {
         Some(FsNodeKind::Directory) => true,
         Some(kind) => {
             return Err(root_refused(
                 root,
+                RootRefusalCode::WrongNodeKind,
                 format!("store root is {kind:?}, not a real directory"),
             ));
         }
@@ -688,25 +856,30 @@ fn ensure_owned_root(
             ensure_capability_root(fs, root)?;
             false
         }
-        None => return Err(root_refused(root, "store root disappeared while opening")),
+        None => {
+            return Err(root_refused(
+                root,
+                RootRefusalCode::IdentityChanged,
+                "store root disappeared while opening",
+            ));
+        }
     };
     let owner_path = root.join(OWNER_FILE);
-    let expected_owner = owner_stamp(root);
-    match read_managed_file(fs, root, &owner_path) {
-        Ok(found) => {
-            if found != expected_owner {
-                return Err(root_refused(
-                    root,
-                    "ownership marker is foreign or bound to a different path",
-                ));
-            }
-        }
+    let owner = match read_lifecycle_marker_for_open(
+        fs,
+        root,
+        &owner_path,
+        OWNER_MANIFEST_MAX_BYTES,
+        "ownership manifest",
+    ) {
+        Ok(found) => parse_owner_manifest(root, &found)?,
         Err(CacheError::Storage(FsError::NotFound { .. })) => {
             match state {
                 RootOpenState::Existing => {
                     return Err(root_refused(
                         root,
-                        "an existing directory has no ownership marker",
+                        RootRefusalCode::OwnershipMissing,
+                        "an existing directory has no ownership manifest",
                     ));
                 }
                 RootOpenState::CreatedHostLeaf => {}
@@ -714,36 +887,56 @@ fn ensure_owned_root(
                     if root_existed {
                         return Err(root_refused(
                             root,
-                            "an existing directory has no ownership marker",
+                            RootRefusalCode::OwnershipMissing,
+                            "an existing directory has no ownership manifest",
                         ));
                     }
                 }
             }
-            if !create_managed_file(fs, root, &owner_path, &expected_owner)? {
-                // Another claimant won. Its complete published bytes, not our
-                // intent, decide whether this is the same owned root.
-                verify_stamp(fs, &owner_path, &expected_owner, root, "ownership marker")?;
+            let candidate = OwnerManifest::fresh(root);
+            if create_managed_file(fs, root, &owner_path, &candidate.encode())? {
+                candidate
+            } else {
+                // Another claimant won. Its complete published manifest, not
+                // our candidate generation, is the shared root identity.
+                let winner = read_lifecycle_marker_for_open(
+                    fs,
+                    root,
+                    &owner_path,
+                    OWNER_MANIFEST_MAX_BYTES,
+                    "ownership manifest",
+                )?;
+                parse_owner_manifest(root, &winner)?
             }
         }
         Err(err) => return Err(err),
-    }
+    };
 
     let format_path = root.join(FORMAT_FILE);
     let expected_format = format!("{FORMAT_STAMP}\n");
-    match read_managed_file(fs, root, &format_path).and_then(|bytes| {
+    match read_lifecycle_marker_for_open(
+        fs,
+        root,
+        &format_path,
+        FORMAT_STAMP_MAX_BYTES,
+        "format stamp",
+    )
+    .and_then(|bytes| {
         String::from_utf8(bytes).map_err(|_| {
-            CacheError::Storage(FsError::NotUtf8 {
-                path: format_path.clone(),
-            })
+            root_refused(
+                root,
+                RootRefusalCode::MarkerInvalid,
+                "format stamp is not UTF-8",
+            )
         })
     }) {
-        Ok(found) if found.trim_end() == FORMAT_STAMP => Ok(()),
+        Ok(found) if found.trim_end() == FORMAT_STAMP => {}
         Ok(found) => Err(CacheError::FormatUnsupported {
             found: found.trim_end().to_owned(),
-        }),
+        })?,
         Err(CacheError::Storage(FsError::NotFound { .. })) => {
             if !create_managed_file(fs, root, &format_path, expected_format.as_bytes())? {
-                verify_stamp(
+                verify_fixed_marker(
                     fs,
                     &format_path,
                     expected_format.as_bytes(),
@@ -751,17 +944,21 @@ fn ensure_owned_root(
                     "format stamp",
                 )?;
             }
-            Ok(())
         }
-        Err(err) => Err(err),
+        Err(err) => return Err(err),
     }
+    Ok(owner)
 }
 
 fn validate_existing_host_store_root(root: &Path, cwd: &Path) -> Result<PathBuf, CacheError> {
     reject_symlink_components(root)?;
     let canonical_root = fs::canonicalize(root).map_err(|err| host_io(root, err))?;
     if host_node_kind_no_follow(&canonical_root)? != Some(FsNodeKind::Directory) {
-        return Err(root_refused(root, "root is not a real directory"));
+        return Err(root_refused(
+            root,
+            RootRefusalCode::WrongNodeKind,
+            "root is not a real directory",
+        ));
     }
     reject_protected_host_root(&canonical_root, root, cwd)?;
     Ok(canonical_root)
@@ -769,7 +966,11 @@ fn validate_existing_host_store_root(root: &Path, cwd: &Path) -> Result<PathBuf,
 
 fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), CacheError> {
     if !root.is_absolute() {
-        return Err(root_refused(root, "the store root must be absolute"));
+        return Err(root_refused(
+            root,
+            RootRefusalCode::InvalidPath,
+            "the store root must be absolute",
+        ));
     }
     if root
         .components()
@@ -777,6 +978,7 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
     {
         return Err(root_refused(
             root,
+            RootRefusalCode::InvalidPath,
             "parent-directory components are not accepted in a store root",
         ));
     }
@@ -786,13 +988,18 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
             .map(|root| (root, RootOpenState::Existing)),
         None => {
             let parent = root.parent().ok_or_else(|| {
-                root_refused(root, "a store root must have an existing parent directory")
+                root_refused(
+                    root,
+                    RootRefusalCode::InvalidPath,
+                    "a store root must have an existing parent directory",
+                )
             })?;
             match host_node_kind_no_follow(parent)? {
                 Some(_) => {}
                 None => {
                     return Err(root_refused(
                         root,
+                        RootRefusalCode::InvalidPath,
                         "a store root's immediate parent must already exist",
                     ));
                 }
@@ -803,6 +1010,7 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
                     return Err(root_refused(
                         root,
+                        RootRefusalCode::IdentityChanged,
                         "a store root's immediate parent must already exist",
                     ));
                 }
@@ -811,11 +1019,16 @@ fn prepare_host_store_root(root: &Path) -> Result<(PathBuf, RootOpenState), Cach
             if host_node_kind_no_follow(&canonical_parent)? != Some(FsNodeKind::Directory) {
                 return Err(root_refused(
                     root,
+                    RootRefusalCode::WrongNodeKind,
                     "a store root's parent is not a real directory",
                 ));
             }
             let leaf = root.file_name().ok_or_else(|| {
-                root_refused(root, "a store root must name a dedicated leaf directory")
+                root_refused(
+                    root,
+                    RootRefusalCode::InvalidPath,
+                    "a store root must name a dedicated leaf directory",
+                )
             })?;
             let canonical_root = canonical_parent.join(leaf);
             reject_protected_host_root(&canonical_root, root, &cwd)?;
@@ -845,7 +1058,7 @@ enum ClearState {
     Absent,
     Owned {
         canonical_root: PathBuf,
-        owner: Vec<u8>,
+        owner: OwnerManifest,
     },
 }
 
@@ -853,9 +1066,9 @@ enum ClearState {
 ///
 /// Authorization is intentionally host-only: it binds the configured path to
 /// its canonical identity, rejects symlinked components and protected roots,
-/// and verifies the path-bound ownership marker plus a format stamp. Clearing
-/// retains the root and both stamps; only the managed `ns` subtree is atomically
-/// quarantined and recursively removed.
+/// and verifies the path-and-generation ownership manifest plus a format
+/// stamp. Clearing retains the root, rotates its generation, and atomically
+/// quarantines only the managed `ns` subtree before recursive removal.
 #[derive(Debug)]
 pub struct CacheClearAuthorization {
     configured_root: PathBuf,
@@ -897,9 +1110,10 @@ impl CacheClearAuthorization {
     /// Consume this authorization and clear only the managed namespace tree.
     ///
     /// The root is revalidated immediately before the linearization point.
-    /// `ns` is then renamed to a unique sibling inside the retained root; all
-    /// stale Store handles still address the original `ns` path and can only
-    /// recreate fresh cache content, never write into the quarantined tree.
+    /// `ns` is then renamed to a unique sibling inside the retained root and
+    /// the owner generation is rotated. Stale Store and Namespace handles
+    /// fail their next mutation or maintenance check instead of writing into
+    /// the post-clear root.
     pub fn clear(self) -> Result<CacheClearOutcome, CacheError> {
         let ClearState::Owned {
             canonical_root,
@@ -910,10 +1124,18 @@ impl CacheClearAuthorization {
         };
         let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
         let (current_root, current_owner) = validate_host_owned_root(&self.configured_root, &cwd)?;
-        if current_root != canonical_root || current_owner != owner {
+        if current_root != canonical_root {
             return Err(root_refused(
                 &self.configured_root,
+                RootRefusalCode::IdentityChanged,
                 "root identity changed after clear authorization",
+            ));
+        }
+        if current_owner.generation != owner.generation {
+            return Err(root_refused(
+                &self.configured_root,
+                RootRefusalCode::GenerationChanged,
+                "owner generation changed after clear authorization",
             ));
         }
 
@@ -937,6 +1159,7 @@ impl CacheClearAuthorization {
         let quarantine = quarantine.ok_or_else(|| {
             root_refused(
                 &self.configured_root,
+                RootRefusalCode::LifecycleCollision,
                 format!(
                     "could not reserve a quarantine directory after \
                      {MAX_QUARANTINE_ATTEMPTS} collision attempts"
@@ -944,10 +1167,18 @@ impl CacheClearAuthorization {
             )
         })?;
         let (final_root, final_owner) = validate_host_owned_root(&self.configured_root, &cwd)?;
-        if final_root != canonical_root || final_owner != owner {
+        if final_root != canonical_root {
             return Err(root_refused(
                 &self.configured_root,
+                RootRefusalCode::IdentityChanged,
                 "root identity changed while reserving the clear quarantine",
+            ));
+        }
+        if final_owner.generation != owner.generation {
+            return Err(root_refused(
+                &self.configured_root,
+                RootRefusalCode::GenerationChanged,
+                "owner generation changed while reserving the clear quarantine",
             ));
         }
         let quarantined_namespaces = quarantine.join("ns");
@@ -965,7 +1196,7 @@ impl CacheClearAuthorization {
                         ),
                     )
                 })?;
-                refresh_host_format_stamp(&canonical_root)?;
+                rotate_host_generation_and_format(&canonical_root, owner)?;
                 return Ok(CacheClearOutcome::AlreadyAbsent);
             }
             Err(err) => {
@@ -974,25 +1205,43 @@ impl CacheClearAuthorization {
             }
         }
 
+        rotate_host_generation_and_format(&canonical_root, owner)?;
         fs::remove_dir_all(&quarantine).map_err(|err| host_io(&quarantine, err))?;
-        refresh_host_format_stamp(&canonical_root)?;
         Ok(CacheClearOutcome::Cleared)
     }
 }
 
-fn refresh_host_format_stamp(root: &Path) -> Result<(), CacheError> {
-    fmn_platform::fs::StdFs
-        .write_atomic(
-            &root.join(FORMAT_FILE),
-            format!("{FORMAT_STAMP}\n").as_bytes(),
-        )
-        .map_err(CacheError::Storage)
+fn rotate_host_generation_and_format(
+    root: &Path,
+    expected: OwnerManifest,
+) -> Result<OwnerManifest, CacheError> {
+    let current = read_host_owner_manifest(root, root)?;
+    if current != expected {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::GenerationChanged,
+            "owner generation changed before lifecycle rotation",
+        ));
+    }
+    let next = OwnerManifest::fresh(root);
+    let fs = fmn_platform::fs::StdFs;
+    // The owner manifest is the generation commit point. Refresh the format
+    // first so observing `next` always implies the current format stamp.
+    fs.write_atomic(
+        &root.join(FORMAT_FILE),
+        format!("{FORMAT_STAMP}\n").as_bytes(),
+    )
+    .map_err(CacheError::Storage)?;
+    fs.write_atomic(&root.join(OWNER_FILE), &next.encode())
+        .map_err(CacheError::Storage)?;
+    Ok(next)
 }
 
 fn absolute_without_parent_components(path: &Path, cwd: &Path) -> Result<PathBuf, CacheError> {
     if !path.is_absolute() {
         return Err(root_refused(
             path,
+            RootRefusalCode::InvalidPath,
             format!(
                 "destructive cache targets must be absolute (current directory: {})",
                 cwd.display()
@@ -1005,6 +1254,7 @@ fn absolute_without_parent_components(path: &Path, cwd: &Path) -> Result<PathBuf
     {
         return Err(root_refused(
             path,
+            RootRefusalCode::InvalidPath,
             "parent-directory components are not accepted for destructive targets",
         ));
     }
@@ -1014,37 +1264,84 @@ fn absolute_without_parent_components(path: &Path, cwd: &Path) -> Result<PathBuf
 fn validate_host_owned_root(
     configured_root: &Path,
     cwd: &Path,
-) -> Result<(PathBuf, Vec<u8>), CacheError> {
+) -> Result<(PathBuf, OwnerManifest), CacheError> {
     reject_symlink_components(configured_root)?;
     let canonical_root =
         fs::canonicalize(configured_root).map_err(|err| host_io(configured_root, err))?;
     if host_node_kind_no_follow(&canonical_root)? != Some(FsNodeKind::Directory) {
         return Err(root_refused(
             configured_root,
+            RootRefusalCode::WrongNodeKind,
             "root is not a real directory",
         ));
     }
     reject_protected_host_root(&canonical_root, configured_root, cwd)?;
     let owner_path = canonical_root.join(OWNER_FILE);
-    reject_symlink_leaf(&owner_path, configured_root, "ownership marker")?;
-    let owner = fs::read(&owner_path).map_err(|err| host_io(&owner_path, err))?;
-    let expected = owner_stamp(&canonical_root);
-    if owner != expected {
-        return Err(root_refused(
-            configured_root,
-            "ownership marker is absent, foreign, or bound to another path",
-        ));
-    }
+    reject_symlink_leaf(&owner_path, configured_root, "ownership manifest")?;
+    let owner = read_host_owner_manifest(&canonical_root, configured_root)?;
     let format_path = canonical_root.join(FORMAT_FILE);
     reject_symlink_leaf(&format_path, configured_root, "format stamp")?;
-    let format = fs::read_to_string(&format_path).map_err(|err| host_io(&format_path, err))?;
+    let format = read_host_file_bounded(
+        &format_path,
+        configured_root,
+        "format stamp",
+        FORMAT_STAMP_MAX_BYTES,
+    )?;
+    let format = std::str::from_utf8(&format).map_err(|_| {
+        root_refused(
+            configured_root,
+            RootRefusalCode::MarkerInvalid,
+            "format stamp is not UTF-8",
+        )
+    })?;
     if !format.trim_end().starts_with("fmn-cache ") {
         return Err(root_refused(
             configured_root,
+            RootRefusalCode::MarkerInvalid,
             "format stamp is absent or foreign",
         ));
     }
     Ok((canonical_root, owner))
+}
+
+fn read_host_owner_manifest(
+    canonical_root: &Path,
+    diagnostic_root: &Path,
+) -> Result<OwnerManifest, CacheError> {
+    let path = canonical_root.join(OWNER_FILE);
+    reject_symlink_leaf(&path, diagnostic_root, "ownership manifest")?;
+    let bytes = read_host_file_bounded(
+        &path,
+        diagnostic_root,
+        "ownership manifest",
+        OWNER_MANIFEST_MAX_BYTES,
+    )?;
+    parse_owner_manifest(canonical_root, &bytes)
+}
+
+fn read_host_file_bounded(
+    path: &Path,
+    root: &Path,
+    label: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CacheError> {
+    let file = fs::File::open(path).map_err(|err| host_io(path, err))?;
+    let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+    file.take(
+        u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .read_to_end(&mut bytes)
+    .map_err(|err| host_io(path, err))?;
+    if bytes.len() > max_bytes {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::MarkerTooLarge,
+            format!("{label} exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn reject_protected_host_root(
@@ -1055,6 +1352,7 @@ fn reject_protected_host_root(
     if canonical_root.parent().is_none() {
         return Err(root_refused(
             configured_root,
+            RootRefusalCode::ProtectedPath,
             "filesystem roots are never cache roots",
         ));
     }
@@ -1062,12 +1360,14 @@ fn reject_protected_host_root(
     if canonical_cwd.starts_with(canonical_root) {
         return Err(root_refused(
             configured_root,
+            RootRefusalCode::ProtectedPath,
             "root is the current directory or one of its ancestors",
         ));
     }
     let home = host_home().ok_or_else(|| {
         root_refused(
             configured_root,
+            RootRefusalCode::ProtectedPath,
             "home directory is unavailable; destructive authorization fails closed",
         )
     })?;
@@ -1075,6 +1375,7 @@ fn reject_protected_host_root(
     if canonical_home.starts_with(canonical_root) {
         return Err(root_refused(
             configured_root,
+            RootRefusalCode::ProtectedPath,
             "root is the home directory or one of its ancestors",
         ));
     }
@@ -1089,6 +1390,7 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
             Some(FsNodeKind::Link) => {
                 return Err(root_refused(
                     path,
+                    RootRefusalCode::WrongNodeKind,
                     "root contains a symlinked path component or reparse point",
                 ));
             }
@@ -1102,8 +1404,16 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
 fn reject_symlink_leaf(path: &Path, root: &Path, label: &str) -> Result<(), CacheError> {
     match host_node_kind_no_follow(path)? {
         Some(FsNodeKind::RegularFile) => Ok(()),
-        Some(_) => Err(root_refused(root, format!("{label} is not a regular file"))),
-        None => Err(root_refused(root, format!("{label} is absent"))),
+        Some(_) => Err(root_refused(
+            root,
+            RootRefusalCode::WrongNodeKind,
+            format!("{label} is not a regular file"),
+        )),
+        None => Err(root_refused(
+            root,
+            RootRefusalCode::OwnershipMissing,
+            format!("{label} is absent"),
+        )),
     }
 }
 
@@ -1301,10 +1611,81 @@ impl AccessLog {
     }
 }
 
+#[derive(Debug)]
+struct RootContext {
+    path: PathBuf,
+    owner: OwnerManifest,
+}
+
+impl RootContext {
+    fn validate_generation(&self, fs: &dyn FileSystem) -> Result<(), CacheError> {
+        if fs.grants_host_destructive_lifecycle() {
+            reject_symlink_components(&self.path)?;
+            if host_node_kind_no_follow(&self.path)? != Some(FsNodeKind::Directory) {
+                return Err(root_refused(
+                    &self.path,
+                    RootRefusalCode::IdentityChanged,
+                    "owned host root is no longer the opened directory",
+                ));
+            }
+            let current = read_host_owner_manifest(&self.path, &self.path)?;
+            return self.validate_current(current);
+        }
+        match fs.node_kind_no_follow(&self.path)? {
+            Some(FsNodeKind::Directory) => {}
+            Some(_) => {
+                return Err(root_refused(
+                    &self.path,
+                    RootRefusalCode::IdentityChanged,
+                    "owned root is no longer the opened directory",
+                ));
+            }
+            None => {
+                return Err(root_refused(
+                    &self.path,
+                    RootRefusalCode::IdentityChanged,
+                    "owned root disappeared after opening",
+                ));
+            }
+        }
+        let owner_path = self.path.join(OWNER_FILE);
+        let bytes = match fs.node_kind_no_follow(&owner_path)? {
+            Some(FsNodeKind::RegularFile) => fs.read(&owner_path)?,
+            Some(_) => {
+                return Err(root_refused(
+                    &self.path,
+                    RootRefusalCode::WrongNodeKind,
+                    "ownership manifest is no longer a regular file",
+                ));
+            }
+            None => {
+                return Err(root_refused(
+                    &self.path,
+                    RootRefusalCode::OwnershipMissing,
+                    "ownership manifest disappeared after opening",
+                ));
+            }
+        };
+        let current = parse_owner_manifest(&self.path, &bytes)?;
+        self.validate_current(current)
+    }
+
+    fn validate_current(&self, current: OwnerManifest) -> Result<(), CacheError> {
+        if current.generation != self.owner.generation {
+            return Err(root_refused(
+                &self.path,
+                RootRefusalCode::GenerationChanged,
+                "owner generation changed after this handle opened",
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct StoreInner {
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
-    root: PathBuf,
+    root: RootContext,
     config: StoreConfig,
     /// Serial limits for entry envelopes, derived from `max_entry_bytes`.
     entry_limits: Limits,
@@ -1316,32 +1697,37 @@ struct StoreInner {
 
 impl StoreInner {
     fn validate_existing_directory_prefix(&self, path: &Path) -> Result<(), CacheError> {
+        self.root.validate_generation(self.fs.as_ref())?;
         ensure_managed_directory(
             self.fs.as_ref(),
-            &self.root,
+            &self.root.path,
             path,
             DirectoryMode::ExistingPrefix,
         )
     }
 
     fn read_file(&self, path: &Path) -> Result<Vec<u8>, CacheError> {
-        read_managed_file(self.fs.as_ref(), &self.root, path)
+        read_managed_file(self.fs.as_ref(), &self.root.path, path)
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
-        write_managed_file(self.fs.as_ref(), &self.root, path, bytes)
+        self.root.validate_generation(self.fs.as_ref())?;
+        write_managed_file(self.fs.as_ref(), &self.root.path, path, bytes)
     }
 
     fn create_file(&self, path: &Path, bytes: &[u8]) -> Result<bool, CacheError> {
-        create_managed_file(self.fs.as_ref(), &self.root, path, bytes)
+        self.root.validate_generation(self.fs.as_ref())?;
+        create_managed_file(self.fs.as_ref(), &self.root.path, path, bytes)
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), CacheError> {
-        remove_managed_file(self.fs.as_ref(), &self.root, path)
+        self.root.validate_generation(self.fs.as_ref())?;
+        remove_managed_file(self.fs.as_ref(), &self.root.path, path)
     }
 
     fn list_directory(&self, path: &Path) -> Result<Vec<ManagedDirEntry>, CacheError> {
-        list_managed_directory(self.fs.as_ref(), &self.root, path)
+        self.root.validate_generation(self.fs.as_ref())?;
+        list_managed_directory(self.fs.as_ref(), &self.root.path, path)
     }
 }
 
@@ -1355,7 +1741,7 @@ pub struct Store {
 impl fmt::Debug for Store {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Store")
-            .field("root", &self.inner.root)
+            .field("root", &self.inner.root.path)
             .field("config", &self.inner.config)
             .finish_non_exhaustive()
     }
@@ -1388,6 +1774,7 @@ impl Store {
         if !fs.grants_host_destructive_lifecycle() {
             return Err(root_refused(
                 &root,
+                RootRefusalCode::CapabilityRequired,
                 "host cache configuration requires the ambient host filesystem capability",
             ));
         }
@@ -1424,7 +1811,7 @@ impl Store {
         } else {
             (requested_root, RootOpenState::CapabilityManaged)
         };
-        ensure_owned_root(fs.as_ref(), &root, state)?;
+        let owner = ensure_owned_root(fs.as_ref(), &root, state)?;
 
         let entry_limits = Limits {
             max_field: config.max_entry_bytes,
@@ -1436,7 +1823,7 @@ impl Store {
             inner: Arc::new(StoreInner {
                 fs,
                 clock,
-                root,
+                root: RootContext { path: root, owner },
                 config,
                 entry_limits,
                 instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
@@ -1448,7 +1835,7 @@ impl Store {
     /// The store root.
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.inner.root
+        &self.inner.root.path
     }
 
     /// Open a versioned namespace. The name is validated (the traversal
@@ -1469,6 +1856,7 @@ impl Store {
         let dir = self
             .inner
             .root
+            .path
             .join("ns")
             .join(name)
             .join(format!("v{version}"));
@@ -2268,8 +2656,9 @@ mod tests {
             configured.to_str().unwrap(),
             StoreConfig::default(),
         ) {
-            Err(CacheError::RootRefused { root, reason }) => {
+            Err(CacheError::RootRefused { root, code, reason }) => {
                 assert_eq!(root, configured);
+                assert_eq!(code, RootRefusalCode::CapabilityRequired);
                 assert!(reason.contains("ambient host filesystem capability"));
             }
             other => panic!("expected host-capability refusal, got {other:?}"),
