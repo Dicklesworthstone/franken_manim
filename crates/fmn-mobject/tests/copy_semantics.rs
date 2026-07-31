@@ -27,7 +27,7 @@ struct Case {
     expects: Vec<(String, Vec<String>)>,
 }
 
-fn parse_cases() -> Vec<Case> {
+fn parse_cases() -> Result<Vec<Case>, String> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/copy_semantics.txt");
     let text = std::fs::read_to_string(path).expect("fixture file present");
     let mut cases = Vec::new();
@@ -79,11 +79,13 @@ fn parse_cases() -> Vec<Case> {
                 ));
             }
             "END" => cases.push(current.take().expect("END closes CASE")),
-            other => panic!("unknown fixture tag {other}"),
+            other => return Err(format!("unknown fixture tag {other}")),
         }
     }
-    assert!(!cases.is_empty(), "fixture corpus parsed");
-    cases
+    if cases.is_empty() {
+        return Err("fixture corpus is empty".to_owned());
+    }
+    Ok(cases)
 }
 
 /// Rebuild the case's tree; returns the family in fixture (DFS) order.
@@ -120,8 +122,8 @@ fn fact(v: &[String]) -> bool {
 // -------------------------------------------------- the fixture corpus run
 
 #[test]
-fn fixture_corpus_copy_facts() {
-    for case in parse_cases() {
+fn fixture_corpus_copy_facts() -> Result<(), String> {
+    for case in parse_cases()? {
         match case.name.as_str() {
             "save_then_generate" | "generate_then_save" | "restore_roundtrip" => continue,
             _ => {}
@@ -249,15 +251,16 @@ fn fixture_corpus_copy_facts() {
                     // shared original.
                     assert_eq!(map.get(external), None, "{}", case.name);
                 }
-                other => panic!("unhandled fact {other} in {}", case.name),
+                other => return Err(format!("unhandled fact {other} in {}", case.name)),
             }
         }
     }
+    Ok(())
 }
 
 #[test]
-fn fixture_link_topology_save_then_generate() {
-    let case = parse_cases()
+fn fixture_link_topology_save_then_generate() -> Result<(), String> {
+    let case = parse_cases()?
         .into_iter()
         .find(|c| c.name == "save_then_generate")
         .expect("case present");
@@ -276,16 +279,17 @@ fn fixture_link_topology_save_then_generate() {
                 assert_eq!(stage.target(saved), None);
             }
             "family_size" | "order_preserved" => {}
-            other => panic!("unhandled fact {other}"),
+            other => return Err(format!("unhandled fact {other}")),
         }
     }
     assert_eq!(stage.target(mobs[0]), Some(target));
     assert_eq!(stage.saved_state(mobs[0]), Some(saved));
+    Ok(())
 }
 
 #[test]
-fn fixture_link_topology_generate_then_save() {
-    let case = parse_cases()
+fn fixture_link_topology_generate_then_save() -> Result<(), String> {
+    let case = parse_cases()?
         .into_iter()
         .find(|c| c.name == "generate_then_save")
         .expect("case present");
@@ -304,14 +308,16 @@ fn fixture_link_topology_generate_then_save() {
                 assert_eq!(stage.saved_state(target), None);
             }
             "family_size" | "order_preserved" => {}
-            other => panic!("unhandled fact {other}"),
+            other => return Err(format!("unhandled fact {other}")),
         }
     }
+    Ok(())
 }
 
 #[test]
 fn fixture_restore_roundtrip() {
     let case = parse_cases()
+        .expect("fixture corpus parses")
         .into_iter()
         .find(|c| c.name == "restore_roundtrip")
         .expect("case present");
@@ -396,7 +402,7 @@ fn fixture_restore_roundtrip() {
 /// property, over the whole random corpus).
 #[test]
 fn property_no_copy_references_original_family() {
-    for case in parse_cases() {
+    for case in parse_cases().expect("fixture corpus parses") {
         if case.nodes.is_empty() {
             continue;
         }
@@ -461,6 +467,136 @@ fn diamond_sharing_preserved() {
         stage.get(shared_copy).unwrap().parents(),
         &[left_copy, right_copy],
         "diamond sharing preserved in the copy"
+    );
+}
+
+/// The two-scene policy transfers content by the same family-copy contract as
+/// `copy_family_mapped`: one copy per DAG member, complete entry state, and no
+/// source-stage ownership links.
+#[test]
+fn cross_stage_copy_preserves_diamond_sharing_and_entry_state() {
+    let mut source = Stage::new();
+    let root = source.add(Mobject::new());
+    let left = source.add(Mobject::new());
+    let right = source.add(Mobject::new());
+    let shared = source.add_value_tracker(2.5);
+    source.attach(root, left).unwrap();
+    source.attach(root, right).unwrap();
+    source.attach(left, shared).unwrap();
+    source.attach(right, shared).unwrap();
+    source.shift(shared, [3.0, -2.0, 0.5]);
+    source.set_z_index(shared, 17, false);
+    source
+        .get_mut(shared)
+        .unwrap()
+        .uniforms_mut()
+        .anti_alias_width = 2.75;
+    let updater = source
+        .add_updater(shared, |_, _| {}, false)
+        .expect("source updater");
+    source.suspend_updating(shared, false);
+    source.set_animating_status(shared, true, false);
+    source.generate_target(shared).expect("source target");
+    source.save_state(shared).expect("source saved state");
+    source.pin(shared).expect("source proxy pin");
+    source.add_to_scene(root).expect("source root");
+
+    let expected_placement = source.placement(shared).expect("source placement");
+    let expected_uniforms = *source.get(shared).unwrap().uniforms();
+    assert!(source.target(shared).is_some());
+    assert!(source.saved_state(shared).is_some());
+
+    let mut target = Stage::new();
+    let copied_root = source
+        .copy_into(root, &mut target)
+        .expect("cross-stage copy");
+    let copied_children = target.get(copied_root).unwrap().submobjects();
+    let (copied_left, copied_right) = (copied_children[0], copied_children[1]);
+    let copied_shared = target.get(copied_left).unwrap().submobjects()[0];
+
+    assert_eq!(
+        target.family(copied_root).len(),
+        4,
+        "one copy per DAG member"
+    );
+    assert_eq!(
+        target.get(copied_right).unwrap().submobjects(),
+        &[copied_shared],
+        "both branches retain the shared child"
+    );
+    assert_eq!(
+        target.get(copied_shared).unwrap().parents(),
+        &[copied_left, copied_right]
+    );
+    assert_eq!(target.tracker_value(copied_shared), Some(2.5));
+    assert_eq!(target.placement(copied_shared), Some(expected_placement));
+    assert_eq!(
+        *target.get(copied_shared).unwrap().uniforms(),
+        expected_uniforms
+    );
+    assert_eq!(target.z_index(copied_shared), 17);
+    assert_eq!(target.updater_ids(copied_shared), vec![updater]);
+    assert!(target.is_updating_suspended(copied_shared));
+    assert!(target.is_animating(copied_shared));
+
+    assert_eq!(target.target(copied_shared), None, "target link is cleared");
+    assert_eq!(
+        target.saved_state(copied_shared),
+        None,
+        "saved-state link is cleared"
+    );
+    assert_eq!(target.get(copied_shared).unwrap().pins(), 0);
+    assert!(
+        target.roots().is_empty(),
+        "scene membership is not transferred"
+    );
+
+    source
+        .set_tracker_value(shared, 9.0)
+        .expect("mutate source tracker");
+    assert_eq!(
+        target.tracker_value(copied_shared),
+        Some(2.5),
+        "record and tracker state are independent"
+    );
+
+    let next = target
+        .add_updater(copied_root, |_, _| {}, false)
+        .expect("destination updater allocation");
+    assert_ne!(
+        next, updater,
+        "imported updater ids must not collide with later destination ids"
+    );
+}
+
+#[test]
+fn cross_stage_copy_handles_a_deep_family_iteratively() {
+    const DEPTH: usize = 1_024;
+
+    let mut source = Stage::new();
+    let nodes: Vec<Mob> = (0..DEPTH).map(|_| source.add(Mobject::new())).collect();
+    for pair in nodes.windows(2).rev() {
+        source.attach(pair[0], pair[1]).expect("chain edge");
+    }
+
+    let mut target = Stage::new();
+    let mut copied = source
+        .copy_into(nodes[0], &mut target)
+        .expect("iterative deep copy");
+    for _ in 1..DEPTH {
+        let children = target
+            .get(copied)
+            .expect("copied chain member")
+            .submobjects();
+        assert_eq!(children.len(), 1);
+        copied = children[0];
+    }
+    assert!(
+        target
+            .get(copied)
+            .expect("copied chain leaf")
+            .submobjects()
+            .is_empty()
     );
 }
 
@@ -693,4 +829,20 @@ fn copy_of_stale_handle_is_refused() {
         Some(StageError::StaleHandle)
     );
     assert_eq!(stage.save_state(mob).err(), Some(StageError::StaleHandle));
+
+    let mut target = Stage::new();
+    let sentinel = target.add(Mobject::from_points(&[[1.0; 3]]));
+    target.add_to_scene(sentinel).expect("target root");
+    let before = target.snapshot_bytes().expect("target snapshot");
+    assert_eq!(
+        stage.copy_into(mob, &mut target).err(),
+        Some(StageError::StaleHandle)
+    );
+    assert_eq!(
+        target
+            .snapshot_bytes()
+            .expect("target snapshot after refusal"),
+        before,
+        "a stale source must be rejected before the destination changes"
+    );
 }

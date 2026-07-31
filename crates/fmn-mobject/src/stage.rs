@@ -200,6 +200,46 @@ impl Entry {
         }
     }
 
+    /// Materialize this entry under the §8.3 copy-category rules, retaining
+    /// graph edges temporarily so the family installer can remap internal
+    /// handles and discard external ones in one second pass.
+    fn detached_copy(&self) -> Self {
+        let buffer = self.buffer.deep_clone();
+        // A copy has the same points, so it has the same semantic shape — but
+        // a deep clone starts its own revision counters. Re-stamp a trusted
+        // hint against the new buffer; never resurrect one invalidated by a
+        // writable point view.
+        let hint_was_live = self.shape.point_revision.is_some()
+            && self.shape.point_revision == self.buffer.field_revision("point")
+            && !self.buffer.writable_view_affects("point");
+        let shape = ShapeSlot {
+            tag: self.shape.tag,
+            point_revision: hint_was_live
+                .then(|| buffer.field_revision("point"))
+                .flatten(),
+        };
+        Self {
+            buffer,
+            placement: self.placement,
+            placement_revision: 0,
+            submobjects: self.submobjects.clone(),
+            parents: self.parents.clone(),
+            updaters: self.updaters.clone(),
+            updating_suspended: self.updating_suspended,
+            is_animating: self.is_animating,
+            tracker: self.tracker,
+            target: None,
+            saved_state: None,
+            pins: 0,
+            pending_delete: false,
+            uniforms: self.uniforms,
+            z_index: self.z_index,
+            shape,
+            family_cache: RefCell::new(None),
+            bbox: RefCell::new(BboxCache::default()),
+        }
+    }
+
     /// The per-object uniform inventory (read access — §8.4 API surface).
     #[must_use]
     pub fn uniforms(&self) -> &Uniforms {
@@ -909,6 +949,60 @@ impl Stage {
     // member is copied exactly once and the sharing is preserved, where the
     // Reference's per-child recursion would silently duplicate them.
 
+    /// Build every detached entry before changing the destination. Besides
+    /// keeping stale-source refusal atomic, this separates source traversal
+    /// from destination allocation so cross-stage copies never recurse.
+    fn detached_family_entries(&self, mob: Mob) -> Result<Vec<(Mob, Entry)>, StageError> {
+        self.try_get(mob)?;
+        self.family(mob)
+            .into_iter()
+            .map(|old| self.try_get(old).map(|entry| (old, entry.detached_copy())))
+            .collect()
+    }
+
+    /// Allocate a prebuilt detached family, then remap every internal edge.
+    /// No fallible operation remains after allocation begins.
+    fn install_detached_family(target: &mut Self, entries: Vec<(Mob, Entry)>) -> CopyMap {
+        // Imported updater identities share callable identity just like a
+        // same-stage copy. Keep future destination registrations above every
+        // imported token so the stage-local allocator cannot collide.
+        if let Some(next_imported_id) = entries
+            .iter()
+            .flat_map(|(_, entry)| entry.updaters.iter())
+            .map(|slot| slot.id.raw().saturating_add(1))
+            .max()
+        {
+            target.next_updater_id = target.next_updater_id.max(next_imported_id);
+        }
+
+        let mut pairs: Vec<(Mob, Mob)> = Vec::with_capacity(entries.len());
+        let mut map: HashMap<Mob, Mob> = HashMap::with_capacity(entries.len());
+        for (old, entry) in entries {
+            let new = target.alloc(entry);
+            pairs.push((old, new));
+            map.insert(old, new);
+        }
+        for &(_, new) in &pairs {
+            let entry = target.get_mut(new).expect("just allocated");
+            for edges in [&mut entry.submobjects, &mut entry.parents] {
+                let mut seen: Vec<Mob> = Vec::new();
+                edges.retain_mut(|edge| match map.get(edge) {
+                    Some(mapped) => {
+                        *edge = *mapped;
+                        if seen.contains(mapped) {
+                            false
+                        } else {
+                            seen.push(*mapped);
+                            true
+                        }
+                    }
+                    None => false,
+                });
+            }
+        }
+        CopyMap { pairs }
+    }
+
     /// manim `copy()` (§8.3): deep-copy the family subtree; family-internal
     /// references remap; family-external edges drop (the copy is a detached
     /// family); updater callables shared by reference; record data
@@ -922,71 +1016,8 @@ impl Stage {
     /// fm-aqv) walks to remap `__dict__` attribute aliases exactly as the
     /// Reference's `copy()` does with `family.index(value)`.
     pub fn copy_family_mapped(&mut self, mob: Mob) -> Result<CopyMap, StageError> {
-        if !self.contains(mob) {
-            return Err(StageError::StaleHandle);
-        }
-        let family = self.family(mob);
-        let mut pairs: Vec<(Mob, Mob)> = Vec::with_capacity(family.len());
-        let mut map: HashMap<Mob, Mob> = HashMap::with_capacity(family.len());
-        for &old in &family {
-            let entry = self.get(old).expect("family members resolve");
-            let buffer = entry.buffer.deep_clone();
-            // A copy has the same points, so it has the same semantic
-            // shape — but a deep clone starts its own revision counters,
-            // so the tag is re-stamped against the new buffer rather than
-            // arriving stale-by-accident.
-            let hint_was_live = entry.shape.point_revision.is_some()
-                && entry.shape.point_revision == entry.buffer.field_revision("point")
-                && !entry.buffer.writable_view_affects("point");
-            let shape = ShapeSlot {
-                tag: entry.shape.tag,
-                point_revision: hint_was_live
-                    .then(|| buffer.field_revision("point"))
-                    .flatten(),
-            };
-            let new_entry = Entry {
-                buffer,
-                placement: entry.placement,
-                placement_revision: 0,
-                submobjects: entry.submobjects.clone(), // remapped below
-                parents: entry.parents.clone(),         // remapped below
-                updaters: entry.updaters.clone(),       // by reference
-                updating_suspended: entry.updating_suspended,
-                is_animating: entry.is_animating,
-                tracker: entry.tracker,
-                target: None,      // stash_mobject_pointers: cleared
-                saved_state: None, // stash_mobject_pointers: cleared
-                pins: 0,
-                pending_delete: false,
-                uniforms: entry.uniforms, // copy semantics: independent state
-                z_index: entry.z_index,
-                shape,
-                family_cache: RefCell::new(None),
-                bbox: RefCell::new(BboxCache::default()),
-            };
-            let new = self.alloc(new_entry);
-            pairs.push((old, new));
-            map.insert(old, new);
-        }
-        for &(_, new) in &pairs {
-            let entry = self.get_mut(new).expect("just allocated");
-            for edges in [&mut entry.submobjects, &mut entry.parents] {
-                let mut seen: Vec<Mob> = Vec::new();
-                edges.retain_mut(|m| match map.get(m) {
-                    Some(mapped) => {
-                        *m = *mapped;
-                        if seen.contains(mapped) {
-                            false
-                        } else {
-                            seen.push(*mapped);
-                            true
-                        }
-                    }
-                    None => false,
-                });
-            }
-        }
-        Ok(CopyMap { pairs })
+        let entries = self.detached_family_entries(mob)?;
+        Ok(Self::install_detached_family(self, entries))
     }
 
     // ------------------------------------------- target / saved state (§8.3)
@@ -1132,30 +1163,13 @@ impl Stage {
         Ok(())
     }
 
-    /// Cross-stage transfer under the two-scene policy: content moves by
-    /// copy, never by handle.
+    /// Cross-stage transfer under the two-scene policy: content moves by the
+    /// same copy-category rules as [`Stage::copy_family_mapped`], never by
+    /// handle. The family is traversed iteratively and each DAG member is
+    /// installed exactly once, preserving internal sharing.
     pub fn copy_into(&self, mob: Mob, target: &mut Stage) -> Result<Mob, StageError> {
-        let entry = self.try_get(mob)?;
-        let children = entry.submobjects.clone();
-        let hint_was_live = entry.shape.point_revision.is_some()
-            && entry.shape.point_revision == entry.buffer.field_revision("point")
-            && !entry.buffer.writable_view_affects("point");
-        let mut copied = Entry::from_data(entry.buffer.deep_clone());
-        copied.placement = entry.placement;
-        copied.shape = ShapeSlot {
-            tag: entry.shape.tag,
-            point_revision: hint_was_live
-                .then(|| copied.buffer.field_revision("point"))
-                .flatten(),
-        };
-        let new = target.alloc(copied);
-        for child in children {
-            let new_child = self.copy_into(child, target)?;
-            target
-                .attach(new, new_child)
-                .expect("fresh handles are live and acyclic");
-        }
-        Ok(new)
+        let entries = self.detached_family_entries(mob)?;
+        Ok(Self::install_detached_family(target, entries).root())
     }
 
     // ----------------------------------------------------------- updaters
