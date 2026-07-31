@@ -473,7 +473,8 @@ impl Affine {
     }
 
     fn rotate(degrees: f64) -> Self {
-        let (sin, cos) = degrees.to_radians().sin_cos();
+        let radians = degrees.to_radians();
+        let (sin, cos) = (scalar::sin(radians), scalar::cos(radians));
         Self {
             a: cos,
             b: sin,
@@ -1761,7 +1762,8 @@ fn arc_to(
     }
     rx = rx.abs();
     ry = ry.abs();
-    let (sin_phi, cos_phi) = rotation_deg.to_radians().sin_cos();
+    let rotation = rotation_deg.to_radians();
+    let (sin_phi, cos_phi) = (scalar::sin(rotation), scalar::cos(rotation));
     let dx = (from.0 - to.0) / 2.0;
     let dy = (from.1 - to.1) / 2.0;
     // F.6.5.1: the primed (ellipse-aligned) coordinates of the start point.
@@ -1815,8 +1817,8 @@ fn arc_to(
         let t0 = theta1 + delta * (i as f64 / segments as f64);
         let t1 = theta1 + delta * ((i + 1) as f64 / segments as f64);
         let k = 4.0 / 3.0 * scalar::tan((t1 - t0) / 4.0);
-        let (s0, c0) = t0.sin_cos();
-        let (s1, c1) = t1.sin_cos();
+        let (s0, c0) = (scalar::sin(t0), scalar::cos(t0));
+        let (s1, c1) = (scalar::sin(t1), scalar::cos(t1));
         let p0 = map(c0, s0);
         let p1 = map(c0 - k * s0, s0 + k * c0);
         let p2 = map(c1 + k * s1, s1 - k * c1);

@@ -250,7 +250,7 @@ fn brace_angle(direction: Vec3) -> f64 {
 }
 
 fn rotate_z(p: Vec3, angle: f64) -> Vec3 {
-    let (s, c) = angle.sin_cos();
+    let (s, c) = (fmn_dmath::sin(angle), fmn_dmath::cos(angle));
     [p[0] * c - p[1] * s, p[0] * s + p[1] * c, p[2]]
 }
 
