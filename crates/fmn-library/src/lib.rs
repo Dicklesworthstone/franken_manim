@@ -76,7 +76,7 @@ pub use arc::{AnnularSector, Annulus, Arc, ArcBetweenPoints, Circle, Dot, Ellips
 pub use brace::{Brace, BraceLabel, line_brace};
 pub use controls::{
     Button, Checkbox, ColorSliders, ControlMob, ControlMobject, ControlPanel, ControlPanelMobject,
-    EnableDisableButton, LinearNumberSlider, MotionMobject, ScalarControl, Textbox,
+    EnableDisableButton, LinearNumberSlider, MotionMobject, ScalarControl, SliderError, Textbox,
     add_scalar_control,
 };
 pub use coords::{

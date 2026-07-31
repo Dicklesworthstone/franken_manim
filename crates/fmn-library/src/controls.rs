@@ -684,6 +684,61 @@ impl From<Checkbox> for Mobject {
 // LinearNumberSlider
 // ---------------------------------------------------------------------------
 
+/// A refused slider configuration, input value, projection, or readout update.
+#[derive(Debug)]
+pub enum SliderError {
+    /// Bounds must be finite, ordered, and have a representable span.
+    InvalidRange,
+    /// The snap step must be positive, finite, and usable over the range.
+    InvalidStep,
+    /// Constructor and mutator values must be finite.
+    NonFiniteValue,
+    /// Projection points must have three finite coordinates.
+    NonFinitePoint,
+    /// The configured axis cannot support finite projection arithmetic.
+    InvalidAxis,
+    /// The optional number readout could not be rebuilt.
+    Text(TextMobjectError),
+}
+
+impl core::fmt::Display for SliderError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidRange => {
+                write!(
+                    f,
+                    "slider bounds must be finite, ordered, and representable"
+                )
+            }
+            Self::InvalidStep => {
+                write!(
+                    f,
+                    "slider step must be positive, finite, and usable over the range"
+                )
+            }
+            Self::NonFiniteValue => write!(f, "slider values must be finite"),
+            Self::NonFinitePoint => write!(f, "slider projection points must be finite"),
+            Self::InvalidAxis => write!(f, "slider axis must support finite projection"),
+            Self::Text(e) => write!(f, "slider readout update failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SliderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Text(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<TextMobjectError> for SliderError {
+    fn from(e: TextMobjectError) -> Self {
+        Self::Text(e)
+    }
+}
+
 /// `LinearNumberSlider(value=0, min_value=-10, max_value=10, step=1)` — a
 /// rounded bar, a round handle, and an invisible axis the handle rides,
 /// plus an optional [`DecimalNumber`] readout above the bar.
@@ -714,8 +769,12 @@ impl LinearNumberSlider {
     /// The handle parks at the axis midpoint at construction (the
     /// Reference's `slider.move_to(slider_axis)` quirk — see the module
     /// docs); for the default range the midpoint IS value 0's fraction.
-    #[must_use]
-    pub fn new(value: f64) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError::NonFiniteValue`] when `value` is not finite.
+    pub fn new(value: f64) -> Result<Self, SliderError> {
+        Self::validate_value(value)?;
         let mut slider = Self {
             value,
             min_value: -10.0,
@@ -735,28 +794,43 @@ impl LinearNumberSlider {
             num_decimal_places: 2,
         };
         slider.rebuild_geometry();
-        slider
+        Ok(slider)
     }
 
     /// `min_value=`.
-    #[must_use]
-    pub fn min_value(mut self, min_value: f64) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError`] when the resulting range or existing step
+    /// cannot support finite slider arithmetic.
+    pub fn min_value(mut self, min_value: f64) -> Result<Self, SliderError> {
+        Self::validate_configuration_values(min_value, self.max_value, self.step)?;
         self.min_value = min_value;
-        self
+        Ok(self)
     }
 
     /// `max_value=`.
-    #[must_use]
-    pub fn max_value(mut self, max_value: f64) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError`] when the resulting range or existing step
+    /// cannot support finite slider arithmetic.
+    pub fn max_value(mut self, max_value: f64) -> Result<Self, SliderError> {
+        Self::validate_configuration_values(self.min_value, max_value, self.step)?;
         self.max_value = max_value;
-        self
+        Ok(self)
     }
 
     /// `step=`.
-    #[must_use]
-    pub fn step(mut self, step: f64) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError::InvalidStep`] unless the step is positive,
+    /// finite, and usable over the configured range.
+    pub fn step(mut self, step: f64) -> Result<Self, SliderError> {
+        Self::validate_configuration_values(self.min_value, self.max_value, step)?;
         self.step = step;
-        self
+        Ok(self)
     }
 
     /// Bar width (`rounded_rect_kwargs["width"]`).
@@ -789,12 +863,16 @@ impl LinearNumberSlider {
     /// `set_value` calls can re-typeset.
     ///
     /// # Errors
-    /// [`TextMobjectError`] if the initial number fails to typeset.
+    ///
+    /// Returns [`SliderError`] when the configuration is invalid or the
+    /// initial number fails to typeset.
     pub fn with_value_readout(
         mut self,
         book: Rc<FontBook>,
         num_decimal_places: usize,
-    ) -> Result<Self, TextMobjectError> {
+    ) -> Result<Self, SliderError> {
+        self.validate_configuration()?;
+        Self::validate_value(self.value)?;
         self.num_decimal_places = num_decimal_places;
         let readout = DecimalNumber::new(self.value)
             .num_decimal_places(num_decimal_places)
@@ -828,16 +906,29 @@ impl LinearNumberSlider {
     /// the readout.
     ///
     /// # Errors
-    /// [`TextMobjectError`] if the readout fails to re-typeset. The
-    /// geometry (value and handle) is updated first and stays correct on
-    /// error.
-    pub fn set_value(&mut self, value: f64) -> Result<(), TextMobjectError> {
+    ///
+    /// Returns [`SliderError`] before mutation when the configuration or
+    /// value is invalid, or when the optional readout cannot be rebuilt.
+    /// Readout, value, and handle commit atomically.
+    pub fn set_value(&mut self, value: f64) -> Result<(), SliderError> {
+        self.validate_configuration()?;
+        Self::validate_value(value)?;
         let clamped = value.clamp(self.min_value, self.max_value);
-        self.value = clamped;
         let center = self.handle_point(clamped);
-        self.handle = self.build_handle(center);
-        if let (Some(readout), Some(book)) = (&mut self.readout, &self.readout_book) {
-            readout.set_value(clamped, book)?;
+        let handle = self.build_handle(center);
+        let next_readout = if let (Some(readout), Some(book)) = (&self.readout, &self.readout_book)
+        {
+            let mut candidate = readout.clone();
+            candidate.set_value(clamped, book)?;
+            Some(candidate)
+        } else {
+            None
+        };
+
+        self.value = clamped;
+        self.handle = handle;
+        if let Some(readout) = next_readout {
+            self.readout = Some(readout);
         }
         Ok(())
     }
@@ -846,11 +937,24 @@ impl LinearNumberSlider {
     /// into a value, and snap DOWN to the nearest step (the Reference's
     /// `int()` truncation). This is the pure half of the omitted drag
     /// handler; the drag itself is W9EVENTS.
-    #[must_use]
-    pub fn value_from_point(&self, point: Vec3) -> f64 {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError`] when the slider configuration, point, or
+    /// derived projection arithmetic is not finite.
+    pub fn value_from_point(&self, point: Vec3) -> Result<f64, SliderError> {
+        self.validate_configuration()?;
+        if !point.into_iter().all(f64::is_finite) {
+            return Err(SliderError::NonFinitePoint);
+        }
+        self.validate_axis()?;
+
         let (start, end) = self.axis_ends;
         let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
         let len2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if !len2.is_finite() {
+            return Err(SliderError::InvalidAxis);
+        }
         let prop = if len2 == 0.0 {
             0.0
         } else {
@@ -859,14 +963,25 @@ impl LinearNumberSlider {
                 point[1] - start[1],
                 point[2] - start[2],
             ];
-            ((w[0] * d[0] + w[1] * d[1] + w[2] * d[2]) / len2).clamp(0.0, 1.0)
+            let projected = (w[0] * d[0] + w[1] * d[1] + w[2] * d[2]) / len2;
+            if projected.is_nan() {
+                return Err(SliderError::InvalidAxis);
+            }
+            projected.clamp(0.0, 1.0)
         };
         let value = self.min_value + prop * (self.max_value - self.min_value);
-        if self.step <= 0.0 {
-            return value;
+        if !value.is_finite() {
+            return Err(SliderError::InvalidRange);
         }
         let steps = ((value - self.min_value) / self.step).trunc();
-        self.min_value + steps * self.step
+        if !steps.is_finite() {
+            return Err(SliderError::InvalidStep);
+        }
+        let snapped = self.min_value + steps * self.step;
+        if !snapped.is_finite() {
+            return Err(SliderError::InvalidStep);
+        }
+        Ok(snapped.clamp(self.min_value, self.max_value))
     }
 
     /// The bar.
@@ -907,6 +1022,49 @@ impl LinearNumberSlider {
             );
         }
         v_group(children)
+    }
+
+    fn validate_value(value: f64) -> Result<(), SliderError> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(SliderError::NonFiniteValue)
+        }
+    }
+
+    fn validate_configuration_values(
+        min_value: f64,
+        max_value: f64,
+        step: f64,
+    ) -> Result<(), SliderError> {
+        if !min_value.is_finite() || !max_value.is_finite() || min_value > max_value {
+            return Err(SliderError::InvalidRange);
+        }
+        let span = max_value - min_value;
+        if !span.is_finite() {
+            return Err(SliderError::InvalidRange);
+        }
+        if !step.is_finite() || step <= 0.0 || (span != 0.0 && !(span / step).is_finite()) {
+            return Err(SliderError::InvalidStep);
+        }
+        Ok(())
+    }
+
+    fn validate_configuration(&self) -> Result<(), SliderError> {
+        Self::validate_configuration_values(self.min_value, self.max_value, self.step)
+    }
+
+    fn validate_axis(&self) -> Result<(), SliderError> {
+        let (start, end) = self.axis_ends;
+        if !start.into_iter().chain(end).all(f64::is_finite)
+            || !end
+                .into_iter()
+                .zip(start)
+                .all(|(end, start)| (end - start).is_finite())
+        {
+            return Err(SliderError::InvalidAxis);
+        }
+        Ok(())
     }
 
     /// The value's fraction of the axis, guarded against a degenerate range.
@@ -978,8 +1136,9 @@ impl ScalarControl for LinearNumberSlider {
 
     fn at_value(&self, value: f64) -> Self {
         let mut copy = self.clone();
-        // Geometry always lands; a readout re-typeset failure leaves the
-        // previous glyphs (the value itself is already stored).
+        // The Stage tracker has no error channel. The atomic mutator keeps
+        // this last valid snapshot intact if a hostile tracker value or a
+        // readout failure reaches the redraw closure.
         let _ = copy.set_value(value);
         copy
     }
@@ -1014,32 +1173,35 @@ pub struct ColorSliders {
     color_box: VMobject,
 }
 
-impl Default for ColorSliders {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ColorSliders {
     /// The Reference's defaults: R/G/B at 255, A at 1.
-    #[must_use]
-    pub fn new() -> Self {
-        let rgb = |color: Srgb| {
-            LinearNumberSlider::new(255.0)
-                .min_value(0.0)
-                .max_value(255.0)
-                .step(1.0)
-                .handle_color(color)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError`] if the locked component-slider
+    /// configuration stops satisfying the slider contract.
+    pub fn new() -> Result<Self, SliderError> {
+        let rgb = |color: Srgb| -> Result<LinearNumberSlider, SliderError> {
+            let slider = LinearNumberSlider::new(255.0)?
+                .min_value(0.0)?
+                .max_value(255.0)?
+                .step(1.0)?;
+            Ok(slider.handle_color(color))
         };
-        let alpha = LinearNumberSlider::new(1.0)
-            .min_value(0.0)
-            .max_value(1.0)
-            .step(0.04)
+        let alpha = LinearNumberSlider::new(1.0)?
+            .min_value(0.0)?
+            .max_value(1.0)?
+            .step(0.04)?
             // set_color_by_gradient(BLACK, WHITE) — approximated by the
             // gradient's midpoint (module docs).
             .handle_color(GREY_C);
         let mut group = Self {
-            sliders: [rgb(RED), rgb(GREEN), rgb(fmn_core::constants::BLUE), alpha],
+            sliders: [
+                rgb(RED)?,
+                rgb(GREEN)?,
+                rgb(fmn_core::constants::BLUE)?,
+                alpha,
+            ],
             rect_width: 2.0,
             rect_height: 0.5,
             grid_colors: vec![GREY_A, GREY_C],
@@ -1048,7 +1210,7 @@ impl ColorSliders {
             color_box: VMobject::new(),
         };
         group.color_box = group.build_color_box();
-        group
+        Ok(group)
     }
 
     /// The slider spacing (`sliders_buff=MED_LARGE_BUFF`).
@@ -1061,13 +1223,17 @@ impl ColorSliders {
     /// `set_value(r, g, b, a)`: set all four sliders and refill the swatch.
     ///
     /// # Errors
-    /// [`TextMobjectError`] if a slider readout fails to re-typeset.
-    pub fn set_value(&mut self, r: f64, g: f64, b: f64, a: f64) -> Result<(), TextMobjectError> {
-        self.sliders[0].set_value(r)?;
-        self.sliders[1].set_value(g)?;
-        self.sliders[2].set_value(b)?;
-        self.sliders[3].set_value(a)?;
-        self.color_box = self.build_color_box();
+    ///
+    /// Returns [`SliderError`] if any component value or readout update is
+    /// refused. All four sliders and the swatch commit atomically.
+    pub fn set_value(&mut self, r: f64, g: f64, b: f64, a: f64) -> Result<(), SliderError> {
+        let mut candidate = self.clone();
+        candidate.sliders[0].set_value(r)?;
+        candidate.sliders[1].set_value(g)?;
+        candidate.sliders[2].set_value(b)?;
+        candidate.sliders[3].set_value(a)?;
+        candidate.color_box = candidate.build_color_box();
+        *self = candidate;
         Ok(())
     }
 
@@ -1708,7 +1874,7 @@ mod tests {
 
     #[test]
     fn slider_default_composition() {
-        let slider = LinearNumberSlider::new(0.0);
+        let slider = LinearNumberSlider::new(0.0).expect("valid slider");
         let comp = slider.composition();
         assert_eq!(comp.children().len(), 3, "[bar, handle, axis]");
 
@@ -1730,7 +1896,7 @@ mod tests {
 
     #[test]
     fn slider_set_value_moves_handle_to_value_fraction() {
-        let mut slider = LinearNumberSlider::new(0.0);
+        let mut slider = LinearNumberSlider::new(0.0).expect("valid slider");
         // Bar spans x in [-1, 1]; fraction (v+10)/20 maps linearly.
         slider.set_value(10.0).expect("in range");
         assert_vec3_close(slider.handle().center_point(), [1.0, 0.0, 0.0], 1e-9, "max");
@@ -1748,7 +1914,7 @@ mod tests {
 
     #[test]
     fn slider_set_value_clamps_instead_of_panicking() {
-        let mut slider = LinearNumberSlider::new(0.0);
+        let mut slider = LinearNumberSlider::new(0.0).expect("valid slider");
         slider.set_value(100.0).expect("clamped, not panicked");
         assert_eq!(slider.value(), 10.0);
         assert_vec3_close(
@@ -1762,23 +1928,178 @@ mod tests {
     }
 
     #[test]
+    fn slider_refuses_non_finite_values_before_mutation() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                LinearNumberSlider::new(value),
+                Err(SliderError::NonFiniteValue)
+            ));
+        }
+
+        let mut slider = LinearNumberSlider::new(0.0).expect("valid slider");
+        let before_handle = slider.handle().clone();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                slider.set_value(value),
+                Err(SliderError::NonFiniteValue)
+            ));
+            assert_eq!(slider.value(), 0.0);
+            assert_eq!(slider.handle(), &before_handle);
+        }
+    }
+
+    #[test]
+    fn slider_builders_refuse_invalid_ranges_and_steps() {
+        for min in [11.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                LinearNumberSlider::new(0.0)
+                    .expect("valid slider")
+                    .min_value(min),
+                Err(SliderError::InvalidRange)
+            ));
+        }
+        for max in [-11.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                LinearNumberSlider::new(0.0)
+                    .expect("valid slider")
+                    .max_value(max),
+                Err(SliderError::InvalidRange)
+            ));
+        }
+        for step in [
+            0.0,
+            -1.0,
+            f64::from_bits(1),
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(matches!(
+                LinearNumberSlider::new(0.0)
+                    .expect("valid slider")
+                    .step(step),
+                Err(SliderError::InvalidStep)
+            ));
+        }
+
+        let wide = LinearNumberSlider::new(0.0)
+            .expect("valid slider")
+            .min_value(-f64::MAX)
+            .expect("one extreme bound still has a finite span");
+        assert!(matches!(
+            wide.max_value(f64::MAX),
+            Err(SliderError::InvalidRange)
+        ));
+    }
+
+    #[test]
     fn slider_value_from_point_projects_and_snaps() {
-        let slider = LinearNumberSlider::new(0.0);
+        let slider = LinearNumberSlider::new(0.0).expect("valid slider");
         // y is ignored: the point is projected onto the axis.
-        assert_eq!(slider.value_from_point([-1.0, 0.3, 0.0]), -10.0);
-        assert_eq!(slider.value_from_point([0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(
+            slider
+                .value_from_point([-1.0, 0.3, 0.0])
+                .expect("finite point"),
+            -10.0
+        );
+        assert_eq!(
+            slider
+                .value_from_point([0.0, 0.0, 0.0])
+                .expect("finite point"),
+            0.0
+        );
         // prop 0.775 → value 5.5 → snapped down to step 1 → 5.
-        assert_eq!(slider.value_from_point([0.55, 0.0, 0.0]), 5.0);
+        assert_eq!(
+            slider
+                .value_from_point([0.55, 0.0, 0.0])
+                .expect("finite point"),
+            5.0
+        );
         // Off the ends, clamped to the axis.
-        assert_eq!(slider.value_from_point([5.0, 0.0, 0.0]), 10.0);
-        assert_eq!(slider.value_from_point([-5.0, 0.0, 0.0]), -10.0);
+        assert_eq!(
+            slider
+                .value_from_point([5.0, 0.0, 0.0])
+                .expect("finite point"),
+            10.0
+        );
+        assert_eq!(
+            slider
+                .value_from_point([-5.0, 0.0, 0.0])
+                .expect("finite point"),
+            -10.0
+        );
+    }
+
+    #[test]
+    fn slider_projection_refuses_invalid_inputs_and_preserves_degenerate_axes() {
+        let slider = LinearNumberSlider::new(0.0).expect("valid slider");
+        for point in [
+            [f64::NAN, 0.0, 0.0],
+            [0.0, f64::INFINITY, 0.0],
+            [0.0, 0.0, f64::NEG_INFINITY],
+        ] {
+            assert!(matches!(
+                slider.value_from_point(point),
+                Err(SliderError::NonFinitePoint)
+            ));
+        }
+
+        let zero_axis = LinearNumberSlider::new(0.0)
+            .expect("valid slider")
+            .bar_width(0.0);
+        assert_eq!(
+            zero_axis
+                .value_from_point([100.0, 5.0, 0.0])
+                .expect("zero-width axes are defined"),
+            -10.0
+        );
+
+        let mut invalid_range = slider.clone();
+        invalid_range.min_value = 1.0;
+        invalid_range.max_value = -1.0;
+        assert!(matches!(
+            invalid_range.value_from_point(ORIGIN),
+            Err(SliderError::InvalidRange)
+        ));
+
+        let mut invalid_step = slider;
+        invalid_step.step = 0.0;
+        assert!(matches!(
+            invalid_step.value_from_point(ORIGIN),
+            Err(SliderError::InvalidStep)
+        ));
+    }
+
+    #[test]
+    fn slider_equal_bounds_are_valid_and_stable() {
+        let mut slider = LinearNumberSlider::new(5.0)
+            .expect("valid slider")
+            .min_value(5.0)
+            .expect("ordered lower bound")
+            .max_value(5.0)
+            .expect("equal bounds are valid");
+        slider.set_value(-100.0).expect("finite value clamps");
+        assert_eq!(slider.value(), 5.0);
+        assert_eq!(
+            slider
+                .value_from_point([1.0, 2.0, 3.0])
+                .expect("zero-span ranges are defined"),
+            5.0
+        );
+        assert!(
+            slider
+                .handle()
+                .center_point()
+                .into_iter()
+                .all(f64::is_finite)
+        );
     }
 
     #[test]
     fn slider_handle_parks_at_axis_midpoint_at_construction() {
         // The Reference quirk: value 5 on [-10, 10] still constructs with
         // the handle at the axis midpoint; the first set_value fixes it.
-        let mut slider = LinearNumberSlider::new(5.0);
+        let mut slider = LinearNumberSlider::new(5.0).expect("valid slider");
         assert_vec3_close(slider.handle().center_point(), ORIGIN, 1e-9, "parked");
         slider.set_value(5.0).expect("in range");
         assert_vec3_close(
@@ -1790,9 +2111,41 @@ mod tests {
     }
 
     #[test]
+    fn slider_readout_failure_is_atomic() {
+        let book = Rc::new(book());
+        let constrained = DecimalNumber::new(0.0)
+            .num_decimal_places(0)
+            .character_limit(1)
+            .build(&book)
+            .expect("one displayed digit fits");
+        let mut slider = LinearNumberSlider::new(0.0).expect("valid slider");
+        slider.readout = Some(constrained);
+        slider.readout_book = Some(Rc::clone(&book));
+        slider.num_decimal_places = 0;
+
+        let before_handle = slider.handle().clone();
+        let before_readout = slider.readout().expect("installed readout").vmob().clone();
+        assert!(matches!(
+            slider.set_value(10.0),
+            Err(SliderError::Text(TextMobjectError::ResourceLimit { .. }))
+        ));
+        assert_eq!(slider.value(), 0.0);
+        assert_eq!(slider.handle(), &before_handle);
+        assert_eq!(
+            slider.readout().expect("readout remains installed").value(),
+            0.0
+        );
+        assert_eq!(
+            slider.readout().expect("readout remains installed").vmob(),
+            &before_readout
+        );
+    }
+
+    #[test]
     fn slider_readout_tracks_the_value() {
         let book = Rc::new(book());
         let mut slider = LinearNumberSlider::new(0.0)
+            .expect("valid slider")
             .with_value_readout(Rc::clone(&book), 2)
             .expect("readout typesets");
         assert_eq!(slider.composition().children().len(), 4, "readout trails");
@@ -1823,7 +2176,7 @@ mod tests {
 
     #[test]
     fn color_sliders_defaults_and_structure() {
-        let sliders = ColorSliders::new();
+        let sliders = ColorSliders::new().expect("locked sliders are valid");
         assert_eq!(sliders.value(), [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(sliders.picked_color(), WHITE);
         assert_eq!(sliders.picked_opacity(), 1.0);
@@ -1851,7 +2204,7 @@ mod tests {
 
     #[test]
     fn color_sliders_checkerboard() {
-        let sliders = ColorSliders::new();
+        let sliders = ColorSliders::new().expect("locked sliders are valid");
         let background = sliders.background();
         // rows = 5, cols = 20 → bumped to 21: 105 squares.
         assert_eq!(background.children().len(), 105);
@@ -1872,7 +2225,7 @@ mod tests {
 
     #[test]
     fn color_sliders_set_value_updates_swatch() {
-        let mut sliders = ColorSliders::new();
+        let mut sliders = ColorSliders::new().expect("locked sliders are valid");
         sliders.set_value(0.0, 0.0, 0.0, 1.0).expect("in range");
         assert_eq!(sliders.picked_color(), fmn_core::constants::BLACK);
         assert_eq!(
@@ -1892,6 +2245,19 @@ mod tests {
         );
         assert_eq!(sliders.picked_opacity(), 0.5);
         assert_eq!(sliders.color_box().style().fill_opacity, 0.5);
+    }
+
+    #[test]
+    fn color_slider_updates_are_atomic_on_invalid_component_values() {
+        let mut sliders = ColorSliders::new().expect("locked sliders are valid");
+        let before = sliders.value();
+        let before_box = sliders.color_box().clone();
+        assert!(matches!(
+            sliders.set_value(0.0, f64::NAN, 0.0, 1.0),
+            Err(SliderError::NonFiniteValue)
+        ));
+        assert_eq!(sliders.value(), before);
+        assert_eq!(sliders.color_box(), &before_box);
     }
 
     // ------------------------------------------------------------ Textbox
@@ -2080,7 +2446,8 @@ mod tests {
     #[test]
     fn slider_tracks_the_stage_value() {
         let mut stage = Stage::new();
-        let control = add_scalar_control(&mut stage, &LinearNumberSlider::new(0.0));
+        let slider = LinearNumberSlider::new(0.0).expect("valid slider");
+        let control = add_scalar_control(&mut stage, &slider);
         stage.add_to_scene(control.container).expect("fresh handle");
 
         // Tracker to max: the next tick parks the handle at x = 1.
