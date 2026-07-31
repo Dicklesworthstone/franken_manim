@@ -395,6 +395,10 @@ pub fn measure_pg7(
     let definition = Pg7Definition::new(scenario)?;
     definition.validate_baseline(baseline)?;
     validate_producer_commit(producer_commit)?;
+    let trace_path = trace_path.into();
+    // Reject an impossible publication target before any cache or clock work.
+    // The final evidence reference is rebuilt from the real trace bytes.
+    let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
     require_release_perf_artifact()?;
     match (scenario, cache) {
         (Pg7Scenario::FormulaCached, None) => {

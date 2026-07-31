@@ -351,6 +351,10 @@ pub fn measure_pg2(
     let definition = Pg2Definition::new(scenario);
     definition.validate_baseline(baseline)?;
     validate_producer_commit(producer_commit)?;
+    let trace_path = trace_path.into();
+    // Reject an impossible publication target before any clock or workload
+    // work. The final evidence reference is rebuilt from the real trace bytes.
+    let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
     require_release_perf_artifact()?;
 
     // Validate the complete batch identity before doing expensive work.

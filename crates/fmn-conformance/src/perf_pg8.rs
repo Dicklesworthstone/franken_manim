@@ -463,6 +463,10 @@ pub fn measure_pg8(
     let definition = Pg8Definition::new(scenario);
     definition.validate_baseline(baseline)?;
     validate_producer_commit(producer_commit)?;
+    let trace_path = trace_path.into();
+    // Reject an impossible publication target before the bridge sampler runs.
+    // `assemble_pg8` rebuilds the final reference from the real trace bytes.
+    let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
     require_release_perf_artifact()?;
     let measurement = sampler(scenario)?;
     assemble_pg8(baseline, producer_commit, &measurement, trace_path)

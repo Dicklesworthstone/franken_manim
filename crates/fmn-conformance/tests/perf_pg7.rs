@@ -115,6 +115,16 @@ fn producer_refuses_bad_commit_before_profile_or_cache_setup() {
 }
 
 #[test]
+fn producer_refuses_bad_trace_path_before_profile_or_workload() {
+    let scenario = Pg7Scenario::FormulaCold;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let error = measure_pg7(&baseline, COMMIT, None, "outside.tsv")
+        .expect_err("trace path must fail before profile or workload setup");
+    assert!(error.to_string().contains("artifact path"), "{error}");
+}
+
+#[test]
 fn injected_pg7_slowdown_blocks_through_the_common_verifier() {
     for scenario in Pg7Scenario::ALL {
         let baseline_batch = batch(scenario, 50_000);
