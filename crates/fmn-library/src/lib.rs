@@ -103,4 +103,4 @@ pub use style::{Style, VStyle};
 pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
-pub use vmobject::VMobject;
+pub use vmobject::{DashError, MAX_DASHES, VMobject};

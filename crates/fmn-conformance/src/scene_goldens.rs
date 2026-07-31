@@ -341,7 +341,8 @@ fn line_family(corpus: &Corpus) -> Built {
         .dash_length(0.12)
         .positive_space_ratio(0.6)
         .color(TEAL_B)
-        .build();
+        .build()
+        .expect("the locked line-family dash configuration is valid");
     let arrow = Arrow::new([-1.4, -0.2, 0.0], [-0.2, -0.2, 0.0])
         .buff(0.0)
         .color(YELLOW_C)

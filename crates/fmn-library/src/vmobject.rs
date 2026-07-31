@@ -22,6 +22,81 @@ use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag};
 
 use crate::style::Style;
 
+/// Maximum number of dash children one construction may publish.
+///
+/// This matches the library's other explicit geometry multiplicity caps:
+/// large enough for authored scenes, small enough that a scalar parameter
+/// cannot turn one mobject into an effectively unbounded family.
+pub const MAX_DASHES: usize = 4_096;
+
+/// A dashed-path configuration refused before arc-length work or iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashError {
+    /// Dash length must be positive and finite.
+    InvalidDashLength,
+    /// The drawn fraction of a period must be finite and in `(0, 1]`.
+    InvalidPositiveSpaceRatio,
+    /// Pattern offsets must be finite.
+    InvalidDashOffset,
+    /// The source path did not have a finite true length.
+    NonFiniteSourceLength,
+    /// Deriving a count overflowed finite host-representable arithmetic.
+    DashCountOverflow,
+    /// The requested or derived child count exceeds [`MAX_DASHES`].
+    TooManyDashes {
+        /// Requested number of dash children.
+        requested: usize,
+        /// Declared maximum.
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for DashError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDashLength => write!(f, "dash length must be positive and finite"),
+            Self::InvalidPositiveSpaceRatio => {
+                write!(f, "positive-space ratio must be finite and in (0, 1]")
+            }
+            Self::InvalidDashOffset => write!(f, "dash offset must be finite"),
+            Self::NonFiniteSourceLength => write!(f, "source path length must be finite"),
+            Self::DashCountOverflow => write!(f, "derived dash count overflowed"),
+            Self::TooManyDashes { requested, max } => {
+                write!(f, "requested {requested} dashes, above the {max} cap")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DashError {}
+
+pub(crate) fn validate_dash_length(length: f64) -> Result<(), DashError> {
+    if length.is_finite() && length > 0.0 {
+        Ok(())
+    } else {
+        Err(DashError::InvalidDashLength)
+    }
+}
+
+pub(crate) fn validate_positive_space_ratio(ratio: f64) -> Result<(), DashError> {
+    if ratio.is_finite() && ratio > 0.0 && ratio <= 1.0 {
+        Ok(())
+    } else {
+        Err(DashError::InvalidPositiveSpaceRatio)
+    }
+}
+
+pub(crate) fn validate_dash_count(count: usize) -> Result<(), DashError> {
+    if count <= MAX_DASHES {
+        Ok(())
+    } else {
+        Err(DashError::TooManyDashes {
+            requested: count,
+            max: MAX_DASHES,
+        })
+    }
+}
+
 /// A detached vectorized mobject.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VMobject {
@@ -719,22 +794,33 @@ pub fn curves_as_submobjects(source: &VMobject) -> VMobject {
 /// `positive_space_ratio` is the fraction of each period that is dash;
 /// `dash_offset` shifts the pattern along the path, both as in the
 /// Reference.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`DashError`] when the requested child count exceeds
+/// [`MAX_DASHES`], the drawn fraction is outside `(0, 1]`, or the offset is
+/// non-finite. Validation happens before arc-length work or child iteration.
 pub fn dashed_vmobject(
     source: &VMobject,
     num_dashes: usize,
     positive_space_ratio: f64,
     dash_offset: f64,
-) -> VMobject {
+) -> Result<VMobject, DashError> {
+    validate_dash_count(num_dashes)?;
+    validate_positive_space_ratio(positive_space_ratio)?;
+    if !dash_offset.is_finite() {
+        return Err(DashError::InvalidDashOffset);
+    }
+
     let mut group = VMobject::new().with_style(source.style());
     if num_dashes == 0 {
-        return group;
+        return Ok(group);
     }
     let Ok(path) = source.path() else {
-        return group;
+        return Ok(group);
     };
     if !path.has_points() {
-        return group;
+        return Ok(group);
     }
 
     // The Reference's period arithmetic (vectorized_mobject.py), kept: the
@@ -750,7 +836,7 @@ pub fn dashed_vmobject(
             group = group.with_child(VMobject::from_points(points).with_style(source.style()));
         }
     }
-    group
+    Ok(group)
 }
 
 /// The true-length restriction of `path` to `[a, b]`, as a point run.
@@ -952,7 +1038,7 @@ mod tests {
         // On a circle every curve is the same length, so index-space and
         // length-space agree and the dashes are evenly spaced either way.
         let circle = Circle::new().radius(1.0).build();
-        let dashed = dashed_vmobject(&circle, 8, 0.5, 0.0);
+        let dashed = dashed_vmobject(&circle, 8, 0.5, 0.0).expect("valid dash pattern");
         assert_eq!(dashed.children().len(), 8);
         let lengths: Vec<f64> = dashed
             .children()
@@ -984,7 +1070,7 @@ mod tests {
             [6.0, 0.0, 0.0],
         ];
         let source = VMobject::from_points(points);
-        let dashed = dashed_vmobject(&source, 4, 0.5, 0.0);
+        let dashed = dashed_vmobject(&source, 4, 0.5, 0.0).expect("valid dash pattern");
         assert_eq!(dashed.children().len(), 4);
         let lengths: Vec<f64> = dashed
             .children()
@@ -1000,11 +1086,58 @@ mod tests {
     #[test]
     fn zero_dashes_and_empty_sources_are_defined() {
         let circle = Circle::new().build();
-        assert!(dashed_vmobject(&circle, 0, 0.5, 0.0).children().is_empty());
+        assert!(
+            dashed_vmobject(&circle, 0, 0.5, 0.0)
+                .expect("zero is a defined empty pattern")
+                .children()
+                .is_empty()
+        );
         let empty = VMobject::new();
-        assert!(dashed_vmobject(&empty, 4, 0.5, 0.0).children().is_empty());
+        assert!(
+            dashed_vmobject(&empty, 4, 0.5, 0.0)
+                .expect("an empty source is a defined empty pattern")
+                .children()
+                .is_empty()
+        );
         assert!(curves_as_submobjects(&empty).children().is_empty());
         assert!(v_highlight(&empty, 0, 5.0, RED).children().is_empty());
+    }
+
+    #[test]
+    fn dash_contract_checks_parameters_and_the_exact_count_boundary() {
+        let empty = VMobject::new();
+        assert!(
+            dashed_vmobject(&empty, MAX_DASHES, 0.5, 0.0)
+                .expect("the declared boundary is admitted")
+                .children()
+                .is_empty()
+        );
+        assert_eq!(
+            dashed_vmobject(&empty, MAX_DASHES + 1, 0.5, 0.0),
+            Err(DashError::TooManyDashes {
+                requested: MAX_DASHES + 1,
+                max: MAX_DASHES,
+            })
+        );
+        assert_eq!(
+            dashed_vmobject(&empty, usize::MAX, 0.5, 0.0),
+            Err(DashError::TooManyDashes {
+                requested: usize::MAX,
+                max: MAX_DASHES,
+            })
+        );
+        for ratio in [0.0, -1.0, 1.1, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                dashed_vmobject(&empty, 1, ratio, 0.0),
+                Err(DashError::InvalidPositiveSpaceRatio)
+            );
+        }
+        for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                dashed_vmobject(&empty, 1, 0.5, offset),
+                Err(DashError::InvalidDashOffset)
+            );
+        }
     }
 
     #[test]

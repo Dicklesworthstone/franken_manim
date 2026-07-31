@@ -276,6 +276,8 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
             .dash_length(0.16)
             .positive_space_ratio(0.55)
             .color(color)
+            .build()
+            .expect("the locked runtime dash configuration is valid")
             .into(),
         10 | 21 => Arrow::new([-0.58, 0.0, 0.0], [0.58, 0.0, 0.0])
             .buff(0.0)

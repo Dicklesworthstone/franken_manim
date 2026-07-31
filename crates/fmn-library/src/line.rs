@@ -22,7 +22,10 @@ use fmn_mobject::{Mobject, ShapeTag};
 use crate::poly::ArrowTip;
 use crate::style::Style;
 use crate::tip::{TipEnd, attach_tip};
-use crate::vmobject::{VMobject, dashed_vmobject};
+use crate::vmobject::{
+    DashError, VMobject, dashed_vmobject, validate_dash_count, validate_dash_length,
+    validate_positive_space_ratio,
+};
 
 /// The Reference's `DEFAULT_DASH_LENGTH`.
 pub const DEFAULT_DASH_LENGTH: f64 = 0.05;
@@ -257,29 +260,58 @@ impl DashedLine {
     }
 
     /// The Reference's `calculate_num_dashes`, over the true length.
-    #[must_use]
-    pub fn num_dashes(&self) -> usize {
-        if self.positive_space_ratio <= 0.0 || self.dash_length <= 0.0 {
-            return 1;
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DashError`] for invalid dash parameters, a non-finite source
+    /// length, an unrepresentable derived count, or a count above
+    /// [`crate::MAX_DASHES`].
+    pub fn num_dashes(&self) -> Result<usize, DashError> {
+        validate_dash_length(self.dash_length)?;
+        validate_positive_space_ratio(self.positive_space_ratio)?;
+        let source = self.line.build();
+        self.num_dashes_for(&source)
+    }
+
+    fn num_dashes_for(&self, source: &VMobject) -> Result<usize, DashError> {
         let full_period = self.dash_length / self.positive_space_ratio;
-        let length = line_arc_length(&self.line.build());
-        ((length / full_period).ceil() as usize).max(1)
+        if !full_period.is_finite() || full_period <= 0.0 {
+            return Err(DashError::DashCountOverflow);
+        }
+        let length = line_arc_length(source);
+        if !length.is_finite() {
+            return Err(DashError::NonFiniteSourceLength);
+        }
+        let count = (length / full_period).ceil().max(1.0);
+        if !count.is_finite() || count > usize::MAX as f64 {
+            return Err(DashError::DashCountOverflow);
+        }
+        let count = count as usize;
+        validate_dash_count(count)?;
+        Ok(count)
     }
 
     /// Build the detached mobject: a group of dashes, with no path of its
     /// own (the Reference clears the parent's points too).
-    #[must_use]
-    pub fn build(self) -> VMobject {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DashError`] when the dash parameters or derived child count
+    /// violate the bounded dashed-path contract.
+    pub fn build(self) -> Result<VMobject, DashError> {
+        validate_dash_length(self.dash_length)?;
+        validate_positive_space_ratio(self.positive_space_ratio)?;
         let source = self.line.build();
-        let n = self.num_dashes();
+        let n = self.num_dashes_for(&source)?;
         dashed_vmobject(&source, n, self.positive_space_ratio, 0.0)
     }
 }
 
-impl From<DashedLine> for Mobject {
-    fn from(d: DashedLine) -> Self {
-        d.build().into()
+impl TryFrom<DashedLine> for Mobject {
+    type Error = DashError;
+
+    fn try_from(d: DashedLine) -> Result<Self, Self::Error> {
+        d.build().map(Into::into)
     }
 }
 
@@ -866,8 +898,8 @@ mod tests {
             .dash_length(0.05)
             .positive_space_ratio(0.5);
         // length 1, full period 0.1 → 10 dashes.
-        assert_eq!(dashed.num_dashes(), 10);
-        let built = dashed.build();
+        assert_eq!(dashed.num_dashes().expect("valid dash count"), 10);
+        let built = dashed.build().expect("valid dashed line");
         assert_eq!(built.children().len(), 10);
         assert!(built.points().is_empty(), "the parent keeps no path");
         let lengths: Vec<f64> = built
@@ -885,7 +917,8 @@ mod tests {
         let built = DashedLine::new([0.0; 3], [4.0, 0.0, 0.0])
             .path_arc(TAU / 3.0)
             .dash_length(0.2)
-            .build();
+            .build()
+            .expect("valid curved dashed line");
         let lengths: Vec<f64> = built
             .children()
             .iter()
@@ -895,6 +928,36 @@ mod tests {
         for l in &lengths {
             assert!((l - first).abs() < 1e-6, "uneven dashes: {lengths:?}");
         }
+    }
+
+    #[test]
+    fn dashed_line_refuses_invalid_and_unbounded_multiplicities() {
+        for length in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                DashedLine::new([0.0; 3], [1.0, 0.0, 0.0])
+                    .dash_length(length)
+                    .num_dashes(),
+                Err(DashError::InvalidDashLength)
+            );
+        }
+        for ratio in [0.0, -0.5, 1.1, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                DashedLine::new([0.0; 3], [1.0, 0.0, 0.0])
+                    .positive_space_ratio(ratio)
+                    .num_dashes(),
+                Err(DashError::InvalidPositiveSpaceRatio)
+            );
+        }
+        assert_eq!(
+            DashedLine::new([0.0; 3], [1.0, 0.0, 0.0])
+                .dash_length(f64::from_bits(1))
+                .num_dashes(),
+            Err(DashError::DashCountOverflow)
+        );
+        assert_eq!(
+            DashedLine::new([f64::NAN, 0.0, 0.0], [1.0, 0.0, 0.0]).num_dashes(),
+            Err(DashError::NonFiniteSourceLength)
+        );
     }
 
     #[test]

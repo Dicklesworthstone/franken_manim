@@ -63,7 +63,7 @@ use crate::poly::{ArrowTip, Rectangle};
 use crate::style::Style;
 use crate::text::{Text, TextMobjectError, text_style};
 use crate::tip::{TipEnd, attach_tip};
-use crate::vmobject::{VMobject, v_group};
+use crate::vmobject::{DashError, VMobject, v_group};
 
 /// The Reference's `coordinate_systems.EPSILON` — the tangent secant step.
 pub const EPSILON: f64 = 1e-8;
@@ -117,6 +117,8 @@ pub enum CoordsError {
     Sampling(SamplingError),
     /// A native number or label failed to typeset.
     Text(TextMobjectError),
+    /// A dashed projection line exceeded or violated the dash contract.
+    Dash(DashError),
 }
 
 impl std::fmt::Display for CoordsError {
@@ -130,6 +132,7 @@ impl std::fmt::Display for CoordsError {
             }
             Self::Sampling(e) => write!(f, "coordinate sampling failed: {e}"),
             Self::Text(e) => write!(f, "coordinate label failed: {e}"),
+            Self::Dash(e) => write!(f, "coordinate dash construction failed: {e}"),
         }
     }
 }
@@ -139,6 +142,7 @@ impl std::error::Error for CoordsError {
         match self {
             Self::Sampling(e) => Some(e),
             Self::Text(e) => Some(e),
+            Self::Dash(e) => Some(e),
             Self::InvalidSampleType(_) => None,
         }
     }
@@ -153,6 +157,12 @@ impl From<SamplingError> for CoordsError {
 impl From<TextMobjectError> for CoordsError {
     fn from(e: TextMobjectError) -> Self {
         Self::Text(e)
+    }
+}
+
+impl From<DashError> for CoordsError {
+    fn from(e: DashError) -> Self {
+        Self::Dash(e)
     }
 }
 
@@ -1279,23 +1289,39 @@ impl Axes {
 
     /// `get_line_from_axis_to_point(index, point, line_func=DashedLine,
     /// color=GREY_A, stroke_width=2)`.
-    #[must_use]
-    pub fn get_line_from_axis_to_point(&self, index: usize, point: Vec3) -> VMobject {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoordsError::Dash`] when the projected line cannot satisfy
+    /// the bounded dashed-path contract.
+    pub fn get_line_from_axis_to_point(
+        &self,
+        index: usize,
+        point: Vec3,
+    ) -> Result<VMobject, CoordsError> {
         let axis = self.axis(index);
-        DashedLine::new(axis.projection(point), point)
+        Ok(DashedLine::new(axis.projection(point), point)
             .style(Style::default().stroke(GREY_A, 2.0, 1.0))
-            .build()
+            .build()?)
     }
 
     /// `get_v_line`: from the x-axis to the point.
-    #[must_use]
-    pub fn get_v_line(&self, point: Vec3) -> VMobject {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoordsError::Dash`] when the line cannot satisfy the bounded
+    /// dashed-path contract.
+    pub fn get_v_line(&self, point: Vec3) -> Result<VMobject, CoordsError> {
         self.get_line_from_axis_to_point(0, point)
     }
 
     /// `get_h_line`: from the y-axis to the point.
-    #[must_use]
-    pub fn get_h_line(&self, point: Vec3) -> VMobject {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoordsError::Dash`] when the line cannot satisfy the bounded
+    /// dashed-path contract.
+    pub fn get_h_line(&self, point: Vec3) -> Result<VMobject, CoordsError> {
         self.get_line_from_axis_to_point(1, point)
     }
 
@@ -2230,8 +2256,8 @@ mod tests {
     fn v_and_h_lines_project_onto_the_axes() {
         let axes = Axes::new().build(&book()).expect("build axes");
         let point = [3.0, 2.0, 0.0];
-        let v = axes.get_v_line(point);
-        let h = axes.get_h_line(point);
+        let v = axes.get_v_line(point).expect("valid vertical dash line");
+        let h = axes.get_h_line(point).expect("valid horizontal dash line");
         // Each starts at the projection on its axis and runs to the point.
         // A DashedLine's own point run is empty (the dashes are children),
         // so measure the family extent; the last dash stops short of the
