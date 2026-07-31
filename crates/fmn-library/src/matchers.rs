@@ -45,8 +45,7 @@ use crate::vmobject::VMobject;
 /// `SurroundingRectangle(mobject, buff=SMALL_BUFF, color=YELLOW)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurroundingRectangle {
-    min: Vec3,
-    max: Vec3,
+    extent: Option<(Vec3, Vec3)>,
     buff: f64,
     style: Style,
 }
@@ -59,10 +58,8 @@ impl SurroundingRectangle {
     /// at `(0, 0)` would be a silent lie about where the caller's content is.
     #[must_use]
     pub fn new(target: &VMobject) -> Self {
-        let (min, max) = target.extent().unwrap_or(([0.0; 3], [0.0; 3]));
         Self {
-            min,
-            max,
+            extent: target.extent(),
             buff: SMALL_BUFF,
             style: Style::default()
                 .stroke(fmn_core::constants::YELLOW, DEFAULT_STROKE, 1.0)
@@ -80,10 +77,7 @@ impl SurroundingRectangle {
     /// Re-target an existing rectangle (Reference `surround`).
     #[must_use]
     pub fn surround(mut self, target: &VMobject) -> Self {
-        if let Some((min, max)) = target.extent() {
-            self.min = min;
-            self.max = max;
-        }
+        self.extent = target.extent();
         self
     }
 
@@ -104,12 +98,15 @@ impl SurroundingRectangle {
     /// Build the rectangle.
     #[must_use]
     pub fn build(self) -> VMobject {
-        let w = (self.max[0] - self.min[0]) + 2.0 * self.buff;
-        let h = (self.max[1] - self.min[1]) + 2.0 * self.buff;
+        let Some((min, max)) = self.extent else {
+            return VMobject::new().with_style(self.style);
+        };
+        let w = (max[0] - min[0]) + 2.0 * self.buff;
+        let h = (max[1] - min[1]) + 2.0 * self.buff;
         let centre = [
-            0.5 * (self.min[0] + self.max[0]),
-            0.5 * (self.min[1] + self.max[1]),
-            0.5 * (self.min[2] + self.max[2]),
+            0.5 * (min[0] + max[0]),
+            0.5 * (min[1] + max[1]),
+            0.5 * (min[2] + max[2]),
         ];
         crate::poly::Rectangle::new()
             .width(w)
@@ -324,6 +321,27 @@ mod tests {
         let first = SurroundingRectangle::new(&box_of(1.0, 1.0)).buff(0.3);
         let moved = first.surround(&box_of(4.0, 2.0));
         let (min, max) = moved.build().extent().expect("extent");
+        assert!((max[0] - min[0] - (4.0 + 0.6)).abs() < 1e-9);
+        assert!((max[1] - min[1] - (2.0 + 0.6)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_surrounds_have_no_geometry_and_can_be_retargeted() {
+        let empty = VMobject::new();
+        let initial = SurroundingRectangle::new(&empty).build();
+        assert!(initial.points().is_empty());
+        assert!(initial.children().is_empty());
+
+        let cleared = SurroundingRectangle::new(&box_of(2.0, 1.0))
+            .surround(&empty)
+            .build();
+        assert!(cleared.points().is_empty());
+
+        let restored = SurroundingRectangle::new(&empty)
+            .buff(0.3)
+            .surround(&box_of(4.0, 2.0))
+            .build();
+        let (min, max) = restored.extent().expect("retargeted extent");
         assert!((max[0] - min[0] - (4.0 + 0.6)).abs() < 1e-9);
         assert!((max[1] - min[1] - (2.0 + 0.6)).abs() < 1e-9);
     }
