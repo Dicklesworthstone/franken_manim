@@ -380,6 +380,12 @@ pub fn assemble_pg8(
     })?;
     let definition = Pg8Definition::new(scenario);
     definition.validate_baseline(baseline)?;
+    validate_producer_commit(producer_commit)?;
+    let trace_path = trace_path.into();
+    // Direct assembly callers may supply arbitrarily large retained state.
+    // Refuse malformed provenance and an impossible publication target before
+    // hashing or otherwise inspecting that measurement content.
+    let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
 
     if measurement.observations.len() != PG8_SAMPLE_COUNT {
         return Err(Pg8Error::SamplePlan(format!(

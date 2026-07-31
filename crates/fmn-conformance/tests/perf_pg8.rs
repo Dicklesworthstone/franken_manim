@@ -113,6 +113,20 @@ fn real_sampler(
     })
 }
 
+fn intentionally_drifted_measurement() -> Pg8Measurement {
+    Pg8Measurement {
+        observations: (0..PG8_SAMPLE_COUNT)
+            .map(|_| Pg8Observation {
+                elapsed_ns: 1,
+                reference_ns: Some(1),
+                invalid_reason: None,
+            })
+            .collect(),
+        result_state: b"intentionally drifted state".to_vec(),
+        reference_state: None,
+    }
+}
+
 #[test]
 fn compiled_definitions_accept_only_their_exact_baseline_identity() {
     for scenario in Pg8Scenario::ALL {
@@ -200,6 +214,36 @@ fn producer_refuses_bad_trace_path_before_profile_or_sampler() {
     let error = measure_pg8(&baseline, COMMIT, &sampler, "outside.tsv")
         .expect_err("trace path must fail before profile or sampling");
     assert!(!sampler_called.get(), "sampler ran before path preflight");
+    assert!(error.to_string().contains("artifact path"), "{error}");
+}
+
+#[test]
+fn assembler_refuses_bad_commit_before_measurement_content() {
+    let scenario = Pg8Scenario::NativeBuiltins;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let error = assemble_pg8(
+        &baseline,
+        "not-a-commit",
+        &intentionally_drifted_measurement(),
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    )
+    .expect_err("producer commit must fail before measurement validation");
+    assert!(error.to_string().contains("producer_commit"), "{error}");
+}
+
+#[test]
+fn assembler_refuses_bad_trace_path_before_measurement_content() {
+    let scenario = Pg8Scenario::NativeBuiltins;
+    let baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    let error = assemble_pg8(
+        &baseline,
+        COMMIT,
+        &intentionally_drifted_measurement(),
+        "outside.tsv",
+    )
+    .expect_err("trace path must fail before measurement validation");
     assert!(error.to_string().contains("artifact path"), "{error}");
 }
 
