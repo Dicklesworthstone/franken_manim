@@ -8,6 +8,7 @@
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
+    require_compiled_cargo_profile,
 };
 use fmn_core::color::LinearRgba;
 use fmn_hash::{Digest, Sha256, sha256};
@@ -19,7 +20,6 @@ use fmn_render::{
 use std::fmt;
 use std::fmt::Write as _;
 use std::hint::black_box;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Stable fixture-definition schema.
@@ -442,27 +442,7 @@ fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
 }
 
 fn require_release_perf_artifact() -> Result<(), Pg2Error> {
-    if cfg!(debug_assertions) {
-        return Err(Pg2Error::Identity(
-            "measurement requires a release-perf artifact; debug assertions are enabled".to_owned(),
-        ));
-    }
-    let executable = std::env::current_exe().map_err(|error| {
-        Pg2Error::Identity(format!(
-            "cannot identify the running producer artifact: {error}"
-        ))
-    })?;
-    if !path_is_release_perf(&executable) {
-        return Err(Pg2Error::Identity(format!(
-            "measurement requires the Cargo release-perf artifact path, got {executable:?}"
-        )));
-    }
-    Ok(())
-}
-
-fn path_is_release_perf(path: &Path) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == BUILD_PROFILE)
+    require_compiled_cargo_profile(BUILD_PROFILE).map_err(Pg2Error::from)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -863,20 +843,16 @@ mod tests {
     }
 
     #[test]
-    fn artifact_path_check_does_not_confuse_ordinary_release() {
-        assert!(path_is_release_perf(Path::new(
-            "/target/release-perf/fmn-perf"
-        )));
-        assert!(path_is_release_perf(Path::new(
-            "/target/release-perf/deps/fmn_perf-test"
-        )));
-        assert!(!path_is_release_perf(Path::new("/target/release/fmn-perf")));
-        assert!(!path_is_release_perf(Path::new(
-            "/tmp/release-perf-spoof/fmn-perf"
-        )));
-        assert!(!path_is_release_perf(Path::new(
-            "/tmp/release-perf/fmn-perf"
-        )));
+    fn artifact_profile_check_uses_the_compiled_identity() {
+        let result = require_release_perf_artifact();
+        if crate::perf::COMPILED_CARGO_PROFILE == BUILD_PROFILE {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert!(matches!(
+                result,
+                Err(Pg2Error::Perf(PerfError::Identity(_)))
+            ));
+        }
     }
 
     #[test]

@@ -160,3 +160,8 @@ spikes/g0-5-python-ext/py/*.so
 # and in the capture archive, recorded in docs/look_gallery/CAPTURE_INVENTORY.md,
 # never committed.
 /gallery/reference_captures/
+
+# fm-ntp fuzz harness (ADR-0003): build dir + crash artifacts stay local;
+# the corpus and Cargo.lock are committed and governed.
+/fuzz/target
+/fuzz/artifacts

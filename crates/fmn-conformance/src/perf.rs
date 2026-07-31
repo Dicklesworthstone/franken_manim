@@ -33,6 +33,28 @@ pub const SAMPLES_SCHEMA: &str = "fmn-perf-samples/1";
 /// Stable robot-facing report schema.
 pub const REPORT_SCHEMA: &str = "fmn-perf-report/1";
 
+/// Cargo profile selected when this `fmn-conformance` artifact was compiled.
+///
+/// The package build script derives this from Cargo-controlled `OUT_DIR`
+/// structure. Runtime executable placement is deliberately irrelevant: moving
+/// an ordinary release binary below a directory named `release-perf` cannot
+/// change the embedded identity.
+pub const COMPILED_CARGO_PROFILE: &str = env!("FMN_CONFORMANCE_CARGO_PROFILE");
+
+/// Require an exact compile-time Cargo profile before collecting timing data.
+///
+/// # Errors
+/// [`PerfError::Identity`] when the compiled profile differs from `expected`.
+pub fn require_compiled_cargo_profile(expected: &str) -> Result<(), PerfError> {
+    if COMPILED_CARGO_PROFILE == expected {
+        Ok(())
+    } else {
+        Err(PerfError::Identity(format!(
+            "measurement requires Cargo profile {expected:?}, but this artifact was compiled with {COMPILED_CARGO_PROFILE:?}"
+        )))
+    }
+}
+
 const MAX_SAMPLES: usize = 65_536;
 const MAX_EVIDENCE: usize = 4_096;
 const MAX_RAW_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
@@ -2506,6 +2528,41 @@ mod tests {
     use fmn_hash::sha256;
 
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn compiled_cargo_profile_is_an_exact_portable_identity() {
+        assert!(!COMPILED_CARGO_PROFILE.is_empty());
+        assert!(COMPILED_CARGO_PROFILE.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        }));
+        assert_eq!(
+            require_compiled_cargo_profile(COMPILED_CARGO_PROFILE),
+            Ok(())
+        );
+        let other = if COMPILED_CARGO_PROFILE == "release-perf" {
+            "dev"
+        } else {
+            "release-perf"
+        };
+        assert_eq!(
+            require_compiled_cargo_profile(other),
+            Err(PerfError::Identity(format!(
+                "measurement requires Cargo profile {other:?}, but this artifact was compiled with {COMPILED_CARGO_PROFILE:?}"
+            )))
+        );
+    }
+
+    #[test]
+    #[ignore = "run explicitly under each Cargo profile with FMN_TEST_EXPECT_COMPILED_PROFILE"]
+    fn compiled_cargo_profile_matrix_probe() {
+        let expected = std::env::var("FMN_TEST_EXPECT_COMPILED_PROFILE")
+            .expect("profile-matrix probe requires its expected profile");
+        assert_eq!(COMPILED_CARGO_PROFILE, expected);
+        assert_eq!(
+            require_compiled_cargo_profile("release-perf").is_ok(),
+            expected == "release-perf"
+        );
+    }
 
     fn policy() -> GatePolicy {
         GatePolicy {
