@@ -12,14 +12,14 @@ use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{Limits, SerialError, Writer, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{
-    JointType, Mob, Mobject, PersistError, SNAPSHOT_SCHEMA, SceneState, Snapshot, Stage,
-    StageError, UpdaterFn, UpdaterKindTag, UpdaterManifest,
+    JointType, Mob, Mobject, PersistError, SNAPSHOT_SCHEMA, SceneState, Snapshot, SnapshotLimits,
+    Stage, StageError, UpdaterFn, UpdaterKindTag, UpdaterManifest,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
-    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     #[allow(clippy::cast_possible_truncation)]
     let flat: Vec<f32> = points
         .iter()
@@ -154,8 +154,11 @@ fn oversized_schema_counts_are_typed_refusals_not_truncated_lengths() {
     let mut stage = Stage::new();
     let mob = stage.add(Mobject::new());
     let too_wide = usize::from(u16::MAX) + 1;
-    stage.get_mut(mob).unwrap().buffer =
-        RecordBuffer::new(RecordSchema::new(&[("too_wide", too_wide)], &[], &[]), 0);
+    stage.get_mut(mob).unwrap().buffer = RecordBuffer::new(
+        RecordSchema::new(&[("too_wide", too_wide)], &[], &[]).unwrap(),
+        0,
+    )
+    .unwrap();
 
     assert_eq!(
         stage.snapshot_bytes().expect_err("u16 width must not wrap"),
@@ -475,4 +478,231 @@ fn cross_stage_decode_rebinds_handles() {
     assert_eq!(restored_points, points);
     // And the re-bound handles are live in the new stage.
     assert!(target.contains(family[1]));
+}
+
+// ------------------------------------------- fm-vek.7: decode budget hardening
+
+/// A tiny canonical container whose counts are extreme or truncated: the
+/// decoder must refuse from the count preflight, before reserving the
+/// destination storage the count names.
+#[test]
+fn decode_preflights_extreme_counts_in_tiny_containers() {
+    let stage = Stage::new();
+
+    // u32::MAX slots claimed by a four-byte payload.
+    let mut w = Writer::new(SNAPSHOT_SCHEMA);
+    w.put_u32(u32::MAX);
+    let bytes = w.finish().unwrap();
+    let error = Snapshot::from_bytes(&bytes, &stage)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PersistError::Serial(SerialError::UnexpectedEof { .. })
+        ),
+        "u32::MAX slot count must be an EOF refusal, got {error:?}"
+    );
+
+    // One empty slot, then a u32::MAX free-slot ledger the bytes cannot carry.
+    let mut w = Writer::new(SNAPSHOT_SCHEMA);
+    w.put_u32(1).put_u32(7).put_bool(false).put_u32(u32::MAX);
+    let bytes = w.finish().unwrap();
+    let error = Snapshot::from_bytes(&bytes, &stage)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PersistError::Serial(SerialError::UnexpectedEof { .. })
+        ),
+        "u32::MAX free count must be an EOF refusal, got {error:?}"
+    );
+
+    // One live slot whose record field table is truncated at the count.
+    let mut w = Writer::new(SNAPSHOT_SCHEMA);
+    w.put_u32(1).put_u32(0).put_bool(true).put_u16(u16::MAX);
+    let bytes = w.finish().unwrap();
+    let error = Snapshot::from_bytes(&bytes, &stage)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PersistError::Serial(SerialError::UnexpectedEof { .. })
+        ),
+        "u16::MAX field count must be an EOF refusal, got {error:?}"
+    );
+
+    // The same extreme count, but with an explicit budget so tight the
+    // aggregate decoded-allocation charge refuses it first — the typed
+    // budget channel.
+    let mut w = Writer::new(SNAPSHOT_SCHEMA);
+    w.put_u32(2)
+        .put_u32(0)
+        .put_bool(false)
+        .put_u32(0)
+        .put_bool(false);
+    w.put_u32(0).put_u32(0).put_u64(1); // free, roots, updater cursor
+    let bytes = w.finish().unwrap();
+    let error = Snapshot::from_bytes_with_limits(
+        &bytes,
+        &stage,
+        SnapshotLimits {
+            max_total_decoded_bytes: 1,
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PersistError::AllocationLimit {
+                limit: 1,
+                what: "arena slot table",
+                ..
+            }
+        ),
+        "the slot-table charge must be the typed budget refusal, got {error:?}"
+    );
+}
+
+/// The budget is one aggregate account: the exact ceiling admits the
+/// decode, one byte below it refuses with the typed error.
+#[test]
+fn decode_budget_boundary_success_and_one_byte_refusal() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+    stage.add_to_scene(mob).unwrap();
+    let bytes = stage.snapshot_bytes().unwrap();
+
+    // Find the exact ceiling empirically: the smallest 64-byte step that
+    // admits the decode, then binary-search the boundary inside the step.
+    let mut step = 64_usize;
+    while Snapshot::from_bytes_with_limits(
+        &bytes,
+        &stage,
+        SnapshotLimits {
+            max_total_decoded_bytes: step,
+        },
+    )
+    .is_err()
+    {
+        step *= 2;
+        assert!(step <= SnapshotLimits::DEFAULT.max_total_decoded_bytes);
+    }
+    let (mut lo, mut hi) = (0, step); // zero always refuses; hi admits
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if Snapshot::from_bytes_with_limits(
+            &bytes,
+            &stage,
+            SnapshotLimits {
+                max_total_decoded_bytes: mid,
+            },
+        )
+        .is_ok()
+        {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    // Boundary success: the exact ceiling decodes to the same canonical bytes.
+    let decoded = Snapshot::from_bytes_with_limits(
+        &bytes,
+        &stage,
+        SnapshotLimits {
+            max_total_decoded_bytes: hi,
+        },
+    )
+    .unwrap();
+    assert_eq!(decoded.snapshot.to_bytes().unwrap(), bytes);
+    // One byte under: the typed budget refusal, naming a structure.
+    let error = Snapshot::from_bytes_with_limits(
+        &bytes,
+        &stage,
+        SnapshotLimits {
+            max_total_decoded_bytes: hi - 1,
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PersistError::AllocationLimit { limit, .. } if limit == hi - 1
+        ),
+        "one byte under the ceiling must be the typed refusal, got {error:?}"
+    );
+}
+
+/// A large, valid, mostly-empty arena decodes under the default budget and
+/// re-encodes to identical canonical bytes.
+#[test]
+fn large_valid_sparse_arena_decodes_under_the_default_budget() {
+    const SLOTS: usize = 50_000;
+    let mut stage = Stage::new();
+    let mobs: Vec<Mob> = (0..SLOTS).map(|_| stage.add(Mobject::new())).collect();
+    // Keep every eighth mobject live in the scene; delete the rest so the
+    // arena is large and sparse (empty slots + a long free ledger).
+    for (index, &mob) in mobs.iter().enumerate() {
+        if index % 8 == 0 {
+            stage.add_to_scene(mob).unwrap();
+        } else {
+            stage.delete(mob).unwrap();
+        }
+    }
+    let bytes = stage.snapshot_bytes().unwrap();
+    let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+    // Canonical bytes survive the budget-checked decode exactly…
+    assert_eq!(decoded.snapshot.to_bytes().unwrap(), bytes);
+    // …and the decoded arena restores: every kept mobject is a live root.
+    // Handles re-bind at decode, so decode against the restore target.
+    let mut restored = Stage::new();
+    let rebound = Snapshot::from_bytes(&bytes, &restored).unwrap();
+    restored.restore(&rebound.snapshot);
+    assert_eq!(restored.roots().len(), SLOTS / 8);
+}
+
+/// The scene-state envelope decodes its nested snapshot document by
+/// borrowing, not cloning: a hostile nested count is refused by the same
+/// preflight, through the envelope path.
+#[test]
+fn scene_state_decode_preflights_the_nested_snapshot() {
+    let stage = Stage::new();
+    let mut inner = Writer::new(SNAPSHOT_SCHEMA);
+    inner.put_u32(u32::MAX);
+    let inner_bytes = inner.finish().unwrap();
+
+    let mut w = Writer::new(fmn_mobject::SCENE_STATE_SCHEMA);
+    w.put_f64(0.0).put_u64(0);
+    w.put_u64(0).put_u64(0).put_u64(0).put_u64(0);
+    w.put_bytes(&inner_bytes);
+    let bytes = w.finish().unwrap();
+
+    let error = SceneState::from_bytes(&bytes, &stage)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PersistError::Serial(SerialError::UnexpectedEof { .. })
+        ),
+        "nested u32::MAX slot count must be an EOF refusal, got {error:?}"
+    );
+
+    // And a well-formed envelope still round-trips through the same path.
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[0.0, 1.0, 2.0]]));
+    stage.add_to_scene(mob).unwrap();
+    let rng = Pcg64Dxsm::from_seed(42);
+    let state = SceneState::capture(&stage, 7, &rng);
+    let bytes = state.to_bytes().unwrap();
+    let decoded = SceneState::from_bytes(&bytes, &stage).unwrap();
+    assert_eq!(decoded.play_count, 7);
+    assert_eq!(
+        decoded.snapshot.to_bytes().unwrap(),
+        state.snapshot.to_bytes().unwrap()
+    );
 }

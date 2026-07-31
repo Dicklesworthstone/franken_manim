@@ -716,7 +716,8 @@ fn become_shape_and_schema_refusals() {
     );
 
     // Schema mismatch: same shape, different record layout.
-    let custom = RecordBuffer::new(RecordSchema::new(&[("weird", 2)], &[], &[]), 1);
+    let custom =
+        RecordBuffer::new(RecordSchema::new(&[("weird", 2)], &[], &[]).unwrap(), 1).unwrap();
     let odd = stage.add(Mobject::new());
     stage.get_mut(odd).unwrap().buffer = custom;
     assert_eq!(

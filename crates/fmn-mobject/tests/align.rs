@@ -16,7 +16,7 @@ fn base(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
 fn vmob(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
-    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     #[allow(clippy::cast_possible_truncation)]
     let flat: Vec<f32> = points
         .iter()
@@ -321,11 +321,11 @@ fn mixed_schema_pair_is_refused() {
 
 #[test]
 fn resize_preserving_order_exact_indices() {
-    let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 3);
+    let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 3).unwrap();
     for (i, x) in [1.0f32, 2.0, 3.0].iter().enumerate() {
         buffer.write(i, "point", &[*x, 0.0, 0.0]);
     }
-    buffer.resize_preserving_order(7);
+    buffer.resize_preserving_order(7).unwrap();
     // indices = arange(7) * 3 // 7 = [0, 0, 0, 1, 1, 2, 2]
     let xs: Vec<f32> = buffer
         .read_column("point")
@@ -337,7 +337,7 @@ fn resize_preserving_order_exact_indices() {
         .collect();
     assert_eq!(xs, vec![1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
     // Shrinking picks the proportional prefix representatives.
-    buffer.resize_preserving_order(2);
+    buffer.resize_preserving_order(2).unwrap();
     let xs: Vec<f32> = buffer
         .read_column("point")
         .unwrap()
@@ -352,8 +352,8 @@ fn resize_preserving_order_exact_indices() {
 
 #[test]
 fn resize_preserving_order_empty_zero_fills() {
-    let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 0);
-    buffer.resize_preserving_order(3);
+    let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 0).unwrap();
+    buffer.resize_preserving_order(3).unwrap();
     assert_eq!(buffer.len(), 3);
     assert!(
         buffer

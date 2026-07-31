@@ -163,7 +163,7 @@ fn s8_view_protocol() {
 
     // V1/V3: copy-on-resize detaches; the old generation lives on.
     let pinned = view.read(0, "point").unwrap();
-    entry.buffer.resize(8);
+    entry.buffer.resize(8).unwrap();
     assert!(!view.is_attached_to(&entry.buffer));
     entry.buffer.write(0, "point", &[1.0, 2.0, 3.0]);
     assert_eq!(view.read(0, "point").unwrap(), pinned);

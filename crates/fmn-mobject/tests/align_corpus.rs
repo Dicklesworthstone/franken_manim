@@ -50,7 +50,7 @@ fn build_vmob(stage: &mut Stage, subpaths: usize, variant: usize) -> Mob {
     let points = path.points().to_vec();
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
-    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     #[allow(clippy::cast_possible_truncation)]
     let flat: Vec<f32> = points
         .iter()
@@ -67,7 +67,7 @@ fn build_family(stage: &mut Stage, children: usize, subpaths: usize, variant: us
         return build_vmob(stage, subpaths, variant);
     }
     let root = stage.add(Mobject::new());
-    stage.get_mut(root).unwrap().buffer = RecordBuffer::new(RecordSchema::vmobject(), 0);
+    stage.get_mut(root).unwrap().buffer = RecordBuffer::new(RecordSchema::vmobject(), 0).unwrap();
     for c in 0..children {
         let child = build_vmob(stage, 1 + (subpaths + c) % 3, variant + c + 1);
         stage.attach(root, child).unwrap();

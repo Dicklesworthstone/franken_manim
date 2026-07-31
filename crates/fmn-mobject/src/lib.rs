@@ -48,11 +48,11 @@ pub use mobject::Mobject;
 pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{
     DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,
-    SceneState, UpdaterIdentity, UpdaterKindTag, UpdaterManifest,
+    SceneState, SnapshotLimits, UpdaterIdentity, UpdaterKindTag, UpdaterManifest,
 };
 pub use placement::Placement;
 pub use positional::PosTarget;
-pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordSchema, RecordView};
+pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordError, RecordSchema, RecordView};
 pub use shape::ShapeTag;
 pub use stage::{CopyMap, Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
 pub use uniforms::{JointType, Uniforms};
@@ -104,6 +104,10 @@ pub enum StageError {
     /// identical points, so the caller has to decide (`Line` rebuilds its
     /// path from the new ends instead).
     DegenerateEndpoints,
+    /// A record sizing proof refused the operation (fm-vek.2) — the
+    /// target record count and schema stride cannot be addressed. The
+    /// buffer is untouched.
+    Record(RecordError),
 }
 
 impl std::fmt::Display for StageError {
@@ -148,6 +152,9 @@ impl std::fmt::Display for StageError {
             }
             Self::DegenerateEndpoints => {
                 write!(f, "cannot position endpoints of a closed or empty path")
+            }
+            Self::Record(err) => {
+                write!(f, "record sizing refused: {err}")
             }
         }
     }

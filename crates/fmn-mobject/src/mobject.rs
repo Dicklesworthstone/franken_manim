@@ -48,7 +48,10 @@ impl Mobject {
     /// An empty mobject (no records, no children).
     #[must_use]
     pub fn new() -> Self {
-        Self::from_buffer(RecordBuffer::new(RecordSchema::mobject(), 0))
+        Self::from_buffer(
+            RecordBuffer::new(RecordSchema::mobject(), 0)
+                .expect("an empty mobject schema buffer cannot overflow"),
+        )
     }
 
     /// A mobject over an already-built record buffer, with default
@@ -68,7 +71,10 @@ impl Mobject {
     /// in, record f32 stored, per §6.1).
     #[must_use]
     pub fn from_points(points: &[Vec3]) -> Self {
-        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), points.len());
+        // A slice of 24-byte Vec3s holds at most isize::MAX/24 records, so
+        // seven f32 lanes per record always fit one allocation.
+        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), points.len())
+            .expect("record sizing bounded by the input slice");
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
         }

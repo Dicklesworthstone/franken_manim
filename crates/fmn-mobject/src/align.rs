@@ -257,11 +257,13 @@ impl Stage {
                 self.get_mut(a)
                     .expect("checked live")
                     .buffer
-                    .resize_preserving_order(max_len);
+                    .resize_preserving_order(max_len)
+                    .map_err(StageError::Record)?;
                 self.get_mut(b)
                     .expect("checked live")
                     .buffer
-                    .resize_preserving_order(max_len);
+                    .resize_preserving_order(max_len)
+                    .map_err(StageError::Record)?;
                 Ok(())
             }
             _ => Err(StageError::SchemaMismatch),
@@ -314,7 +316,10 @@ impl Stage {
             let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
             entry.set_placement(source_placement);
             if entry.buffer.len() != src_len {
-                entry.buffer.resize_preserving_order(src_len);
+                entry
+                    .buffer
+                    .resize_preserving_order(src_len)
+                    .map_err(StageError::Record)?;
             }
             // `self.data["joint_angle"] = vmobject.data["joint_angle"]`
             // happens before the full-range short-circuit, so it lands in

@@ -45,6 +45,57 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+/// Errors from record sizing (fm-vek.2). Every construction and resize
+/// path proves its lane and byte counts with checked arithmetic *before*
+/// allocating or mutating, and refuses with these typed errors instead of
+/// wrapping `usize` or aborting on an impossible capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordError {
+    /// The declared field widths summed past `usize::MAX` lanes.
+    StrideOverflow,
+    /// `len * stride` lanes — or their four-byte size — exceeds what a
+    /// single allocation can address (`usize::MAX`, and the `isize::MAX`
+    /// byte capacity ceiling every Rust allocation obeys).
+    SizeOverflow {
+        /// Requested record count.
+        len: usize,
+        /// Lanes per record.
+        stride: usize,
+    },
+}
+
+impl std::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StrideOverflow => write!(f, "record field widths overflow usize"),
+            Self::SizeOverflow { len, stride } => write!(
+                f,
+                "record buffer of {len} records x {stride} lanes exceeds addressable size"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RecordError {}
+
+/// The lane count for `len` records of `stride` lanes, refusing anything
+/// whose allocation could not exist (fm-vek.2): the lane product must fit
+/// `usize`, and the four-byte cell count must fit the `isize::MAX` byte
+/// ceiling `Vec` enforces — checked here so the refusal is a typed error,
+/// not a capacity abort.
+fn checked_lanes(len: usize, stride: usize) -> Result<usize, RecordError> {
+    let lanes = len
+        .checked_mul(stride)
+        .ok_or(RecordError::SizeOverflow { len, stride })?;
+    let bytes = lanes
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(RecordError::SizeOverflow { len, stride })?;
+    if bytes > isize::MAX as usize {
+        return Err(RecordError::SizeOverflow { len, stride });
+    }
+    Ok(lanes)
+}
+
 /// One field of the interleaved record (name + f32 lane count).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSpec {
@@ -68,8 +119,16 @@ pub struct RecordSchema {
 impl RecordSchema {
     /// A schema from `(name, width)` pairs, with explicit aligned and
     /// pointlike key sets.
-    #[must_use]
-    pub fn new(fields: &[(&str, usize)], aligned_keys: &[&str], pointlike_keys: &[&str]) -> Self {
+    ///
+    /// # Errors
+    /// [`RecordError::StrideOverflow`] when the field widths sum past
+    /// `usize::MAX` lanes (fm-vek.2: the stride is API surface — NumPy's
+    /// itemsize derives from it — so it is proved, not assumed).
+    pub fn new(
+        fields: &[(&str, usize)],
+        aligned_keys: &[&str],
+        pointlike_keys: &[&str],
+    ) -> Result<Self, RecordError> {
         let fields: Vec<FieldSpec> = fields
             .iter()
             .map(|(name, width)| FieldSpec {
@@ -77,13 +136,17 @@ impl RecordSchema {
                 width: *width,
             })
             .collect();
-        let stride = fields.iter().map(|f| f.width).sum();
-        Self {
+        let stride = fields.iter().try_fold(0usize, |stride, field| {
+            stride
+                .checked_add(field.width)
+                .ok_or(RecordError::StrideOverflow)
+        })?;
+        Ok(Self {
             fields,
             stride,
             aligned_keys: aligned_keys.iter().map(|k| (*k).to_string()).collect(),
             pointlike_keys: pointlike_keys.iter().map(|k| (*k).to_string()).collect(),
-        }
+        })
     }
 
     /// The Reference's `Mobject.data_dtype`:
@@ -92,6 +155,7 @@ impl RecordSchema {
     #[must_use]
     pub fn mobject() -> Self {
         Self::new(&[("point", 3), ("rgba", 4)], &["point"], &["point"])
+            .expect("the built-in mobject schema is seven lanes")
     }
 
     /// The Reference's `VMobject.data_dtype`, field for field.
@@ -110,6 +174,7 @@ impl RecordSchema {
             &["point"],
             &["point"],
         )
+        .expect("the built-in vmobject schema is seventeen lanes")
     }
 
     /// f32 lanes per record. `stride * 4` is the NumPy itemsize.
@@ -238,16 +303,21 @@ pub struct RecordBuffer {
 }
 
 impl RecordBuffer {
-    #[must_use]
-    pub fn new(schema: RecordSchema, len: usize) -> Self {
+    /// A zeroed buffer of `len` records over `schema`.
+    ///
+    /// # Errors
+    /// [`RecordError::SizeOverflow`] when `len * stride` — or its byte
+    /// size — exceeds what one allocation can address (fm-vek.2).
+    pub fn new(schema: RecordSchema, len: usize) -> Result<Self, RecordError> {
         let stride = schema.stride();
         let n_fields = schema.fields().len();
-        Self {
+        let lanes = checked_lanes(len, stride)?;
+        Ok(Self {
             schema: Arc::new(schema),
-            storage: Storage::new(vec![0.0; len * stride].into_boxed_slice(), n_fields),
+            storage: Storage::new(vec![0.0; lanes].into_boxed_slice(), n_fields),
             len,
             locked: HashSet::new(),
-        }
+        })
     }
 
     /// Number of records.
@@ -496,9 +566,16 @@ impl RecordBuffer {
     /// Copy-on-resize (V1/V3): fresh generation, prefix copied, growth
     /// **null-padded** (the family-alignment padding primitive);
     /// outstanding views keep the old generation.
-    pub fn resize(&mut self, new_len: usize) {
+    ///
+    /// # Errors
+    /// [`RecordError::SizeOverflow`] when the target size cannot be
+    /// addressed. The failure is **atomic** (fm-vek.2): the sizing proof
+    /// runs before anything is allocated or swapped, so a refused resize
+    /// leaves the buffer, its revisions, and every live view untouched.
+    pub fn resize(&mut self, new_len: usize) -> Result<(), RecordError> {
         let stride = self.schema.stride();
-        let mut cells = vec![0.0f32; new_len * stride];
+        let lanes = checked_lanes(new_len, stride)?;
+        let mut cells = vec![0.0f32; lanes];
         {
             let old = self.storage.cells.read().expect("storage lock poisoned");
             let keep = old.len().min(cells.len());
@@ -506,6 +583,7 @@ impl RecordBuffer {
         }
         self.swap_in(cells);
         self.len = new_len;
+        Ok(())
     }
 
     /// `resize_with_interpolation`, ported from
@@ -515,17 +593,23 @@ impl RecordBuffer {
     /// (`cont_indices = linspace(0, len-1, new_len)`). Applies to every
     /// lane of every field, which equals the Reference's per-field
     /// application over the whole dtype.
-    pub fn resize_with_interpolation(&mut self, new_len: usize) {
+    ///
+    /// # Errors
+    /// [`RecordError::SizeOverflow`] when the target size cannot be
+    /// addressed; atomic like [`RecordBuffer::resize`] — a refusal mutates
+    /// no observable state and invalidates no view.
+    pub fn resize_with_interpolation(&mut self, new_len: usize) -> Result<(), RecordError> {
         if new_len == self.len {
-            return;
+            return Ok(());
         }
         let stride = self.schema.stride();
+        let lanes = checked_lanes(new_len, stride)?;
         let old = self.storage.copy_cells();
         let is_constant = self.len > 0
             && old
                 .chunks_exact(stride)
                 .all(|record| record == &old[..stride]);
-        let mut cells = vec![0.0f32; new_len * stride];
+        let mut cells = vec![0.0f32; lanes];
         if self.len == 1 || is_constant {
             for record in cells.chunks_exact_mut(stride) {
                 record.copy_from_slice(&old[..stride]);
@@ -552,6 +636,7 @@ impl RecordBuffer {
         }
         self.swap_in(cells);
         self.len = new_len;
+        Ok(())
     }
 
     /// `resize_preserving_order` (`utils/iterables.py`): record `i` of the
@@ -560,12 +645,18 @@ impl RecordBuffer {
     /// resize primitive (§9.4). An empty buffer zero-fills (NumPy
     /// `np.resize` of an empty array). Same copy-on-resize generation rules
     /// as [`RecordBuffer::resize`] (V1/V3).
-    pub fn resize_preserving_order(&mut self, new_len: usize) {
+    ///
+    /// # Errors
+    /// [`RecordError::SizeOverflow`] when the target size cannot be
+    /// addressed; atomic like [`RecordBuffer::resize`] — a refusal mutates
+    /// no observable state and invalidates no view.
+    pub fn resize_preserving_order(&mut self, new_len: usize) -> Result<(), RecordError> {
         if new_len == self.len {
-            return;
+            return Ok(());
         }
         let stride = self.schema.stride();
-        let mut cells = vec![0.0f32; new_len * stride];
+        let lanes = checked_lanes(new_len, stride)?;
+        let mut cells = vec![0.0f32; lanes];
         if self.len > 0 {
             let old = self.storage.copy_cells();
             for (i, record) in cells.chunks_exact_mut(stride).enumerate() {
@@ -575,6 +666,7 @@ impl RecordBuffer {
         }
         self.swap_in(cells);
         self.len = new_len;
+        Ok(())
     }
 
     fn swap_in(&mut self, cells: Vec<f32>) {

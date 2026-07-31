@@ -380,7 +380,10 @@ impl Stage {
         };
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
         entry.set_placement(Placement::IDENTITY);
-        entry.buffer.resize_preserving_order(points.len());
+        entry
+            .buffer
+            .resize_preserving_order(points.len())
+            .map_err(StageError::Record)?;
         #[allow(clippy::cast_possible_truncation)]
         let flat: Vec<f32> = points
             .iter()
@@ -655,7 +658,10 @@ impl Stage {
             return;
         };
         if entry.buffer.len() != len {
-            entry.buffer.resize_preserving_order(len);
+            // An impossible target size (fm-vek.2) degrades to the same
+            // silent no-op as the writes below, exactly like the other
+            // infallible plumbing paths.
+            let _ = entry.buffer.resize_preserving_order(len);
         }
         for (field, column) in columns {
             if entry.buffer.read_column(&field).as_deref() != Some(column.as_slice()) {

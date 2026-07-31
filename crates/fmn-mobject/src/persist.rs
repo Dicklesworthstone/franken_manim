@@ -71,6 +71,17 @@ pub enum PersistError {
     /// A shape-tag discriminant this build does not know. A newer writer
     /// is the likely cause, and guessing would fabricate geometry.
     UnknownShapeTag(u8),
+    /// The decoded-allocation budget (fm-vek.7, [`SnapshotLimits`]) refused
+    /// a count *before* any reservation: the document asked for more
+    /// destination or transient storage than the aggregate limit allows.
+    AllocationLimit {
+        /// The aggregate decoded-bytes ceiling in force.
+        limit: usize,
+        /// Aggregate bytes the decode would have charged.
+        needed: usize,
+        /// Which destination/transient structure tripped the budget.
+        what: &'static str,
+    },
 }
 
 impl std::fmt::Display for PersistError {
@@ -81,6 +92,17 @@ impl std::fmt::Display for PersistError {
             Self::UnknownShapeTag(code) => {
                 write!(f, "snapshot carries unknown shape-tag discriminant {code}")
             }
+            Self::AllocationLimit {
+                limit,
+                needed,
+                what,
+            } => {
+                write!(
+                    f,
+                    "snapshot decode budget exceeded by {what}: \
+                     {needed} bytes charged against a {limit}-byte limit"
+                )
+            }
         }
     }
 }
@@ -89,7 +111,7 @@ impl std::error::Error for PersistError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serial(e) => Some(e),
-            Self::Malformed(_) | Self::UnknownShapeTag(_) => None,
+            Self::Malformed(_) | Self::UnknownShapeTag(_) | Self::AllocationLimit { .. } => None,
         }
     }
 }
@@ -98,6 +120,107 @@ impl From<SerialError> for PersistError {
     fn from(e: SerialError) -> Self {
         Self::Serial(e)
     }
+}
+
+/// Decode-time allocation budget for [`Snapshot::from_bytes`] (fm-vek.7).
+///
+/// The encoded container is already capped by [`Limits::DEFAULT`]
+/// (256 MiB), but decoding *amplifies*: a five-byte empty-slot record
+/// becomes a full slot-table entry, and every fixed-width count names
+/// destination storage the decoder is asked to materialize. This budget
+/// charges each destination and transient allocation against one explicit
+/// aggregate ceiling *before* the reservation happens, so a hostile or
+/// corrupt count is a typed refusal ([`PersistError::AllocationLimit`]),
+/// never a multi-GiB speculative allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotLimits {
+    /// Maximum aggregate bytes of decoded destination + transient storage
+    /// one snapshot decode may charge.
+    pub max_total_decoded_bytes: usize,
+}
+
+impl SnapshotLimits {
+    /// The default budget: four times the encoded container cap. Record
+    /// payloads (the dominant term in any real scene) decode at
+    /// essentially 1:1 against their encoding, so 4x leaves every
+    /// runtime-reachable arena — including large sparse ones — far under
+    /// the ceiling, while a `u32::MAX` slot count or a five-byte-per-slot
+    /// empty-slot bomb trips it orders of magnitude before the allocation
+    /// it named.
+    pub const DEFAULT: Self = Self {
+        max_total_decoded_bytes: 4 * Limits::DEFAULT.max_total,
+    };
+}
+
+impl Default for SnapshotLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The running account of decoded destination + transient bytes: every
+/// reservation charges here *before* it happens.
+struct DecodeBudget {
+    limit: usize,
+    charged: usize,
+}
+
+impl DecodeBudget {
+    fn new(limit: usize) -> Self {
+        Self { limit, charged: 0 }
+    }
+
+    fn charge(&mut self, bytes: usize, what: &'static str) -> Result<(), PersistError> {
+        let charged = self.charged.saturating_add(bytes);
+        if charged > self.limit {
+            return Err(PersistError::AllocationLimit {
+                limit: self.limit,
+                needed: charged,
+                what,
+            });
+        }
+        self.charged = charged;
+        Ok(())
+    }
+
+    /// Reserve exactly `additional` elements, the budget already charged;
+    /// an allocator refusal surfaces as the same typed budget error rather
+    /// than an abort.
+    fn reserve<T>(
+        &self,
+        vec: &mut Vec<T>,
+        additional: usize,
+        what: &'static str,
+    ) -> Result<(), PersistError> {
+        vec.try_reserve_exact(additional)
+            .map_err(|_| PersistError::AllocationLimit {
+                limit: self.limit,
+                needed: self.charged,
+                what,
+            })
+    }
+}
+
+/// Preflight one fixed-width count against *both* feasibility channels
+/// (fm-vek.7): the encoded bytes it would take to actually carry that
+/// many items, and the decoded-storage budget for the destination vector.
+/// Runs before any reservation or iteration over the count.
+fn preflight_count(
+    r: &Reader<'_>,
+    budget: &mut DecodeBudget,
+    count: usize,
+    encoded_each: usize,
+    decoded_each: usize,
+    what: &'static str,
+) -> Result<(), PersistError> {
+    let need = count.saturating_mul(encoded_each);
+    if need > r.remaining() {
+        return Err(PersistError::Serial(SerialError::UnexpectedEof {
+            need,
+            remaining: r.remaining(),
+        }));
+    }
+    budget.charge(count.saturating_mul(decoded_each), what)
 }
 
 /// An updater's serializable kind.
@@ -465,7 +588,12 @@ fn get_shape(r: &mut Reader<'_>) -> Result<ShapeSlot, PersistError> {
     })
 }
 
-fn preflight_record_payload(r: &Reader<'_>, len: usize, stride: usize) -> Result<(), PersistError> {
+fn preflight_record_payload(
+    r: &Reader<'_>,
+    len: usize,
+    stride: usize,
+    budget: &mut DecodeBudget,
+) -> Result<(), PersistError> {
     let needed = len
         .checked_mul(stride)
         .and_then(|lanes| lanes.checked_mul(std::mem::size_of::<f32>()))
@@ -485,7 +613,9 @@ fn preflight_record_payload(r: &Reader<'_>, len: usize, stride: usize) -> Result
             remaining: r.remaining(),
         }));
     }
-    Ok(())
+    // The destination RecordBuffer's cells decode at 1:1 against the
+    // payload just proved feasible; charge them before construction.
+    budget.charge(needed, "record buffer cells")
 }
 
 fn live_snapshot_entry(slots: &[(u32, Option<SnapshotEntry>)], mob: Mob) -> Option<&SnapshotEntry> {
@@ -509,7 +639,20 @@ fn links_are_unique(links: &[Mob]) -> bool {
 /// This pass is deliberately iterative: persisted family depth is input, not
 /// a reason to consume the process stack. Its auxiliary storage is linear in
 /// the already-decoded slot and edge inventories.
-fn validate_decoded_arena(snapshot: &Snapshot) -> Result<(), PersistError> {
+fn validate_decoded_arena(
+    snapshot: &Snapshot,
+    budget: &mut DecodeBudget,
+) -> Result<(), PersistError> {
+    // The validation pass's transient storage (the free-slot bitmap, the
+    // indegree table, the traversal stack) is linear in the slot count;
+    // charge it like every other destination structure (fm-vek.7).
+    budget.charge(
+        snapshot
+            .slots
+            .len()
+            .saturating_mul(1 + std::mem::size_of::<u32>() + std::mem::size_of::<usize>()),
+        "arena validation indexes",
+    )?;
     let mut free_seen = vec![false; snapshot.slots.len()];
     for &raw_index in &snapshot.free {
         let index = raw_index as usize;
@@ -570,6 +713,20 @@ fn validate_decoded_arena(snapshot: &Snapshot) -> Result<(), PersistError> {
         {
             return Err(PersistError::Malformed("family link is not live"));
         }
+        // The reverse-edge index is linear in the parent-link inventory;
+        // charge and reserve it fallibly before extending (fm-vek.7).
+        budget.charge(
+            entry
+                .parents
+                .len()
+                .saturating_mul(std::mem::size_of::<(u32, u32)>()),
+            "family reverse-edge index",
+        )?;
+        budget.reserve(
+            &mut reverse_edges,
+            entry.parents.len(),
+            "family reverse-edge index",
+        )?;
         child_edge_count = child_edge_count
             .checked_add(entry.submobjects.len())
             .ok_or(PersistError::Malformed("family edge count overflows"))?;
@@ -707,9 +864,26 @@ impl Snapshot {
     ///
     /// # Errors
     /// [`PersistError::Serial`] (container), [`PersistError::Malformed`]
-    /// (payload invariants).
+    /// (payload invariants), [`PersistError::AllocationLimit`] (the
+    /// [`SnapshotLimits::DEFAULT`] decoded-allocation budget).
     pub fn from_bytes(bytes: &[u8], stage: &Stage) -> Result<DecodedSnapshot, PersistError> {
+        Self::from_bytes_with_limits(bytes, stage, SnapshotLimits::DEFAULT)
+    }
+
+    /// [`Snapshot::from_bytes`] under an explicit decoded-allocation
+    /// budget (fm-vek.7): every fixed-width count is preflighted against
+    /// both the remaining encoded bytes and `limits` before the
+    /// destination storage it names is reserved.
+    ///
+    /// # Errors
+    /// As [`Snapshot::from_bytes`].
+    pub fn from_bytes_with_limits(
+        bytes: &[u8],
+        stage: &Stage,
+        limits: SnapshotLimits,
+    ) -> Result<DecodedSnapshot, PersistError> {
         let stage_id = stage.stage_id();
+        let mut budget = DecodeBudget::new(limits.max_total_decoded_bytes);
         let mut r = Reader::open(
             bytes,
             SNAPSHOT_SCHEMA,
@@ -732,65 +906,134 @@ impl Snapshot {
         };
 
         let slot_count = r.get_u32()? as usize;
-        let mut slots = Vec::with_capacity(slot_count.min(65_536));
+        // Each slot costs at least five encoded bytes (generation + live
+        // flag); a count the payload cannot carry is refused here, before
+        // the slot table it names is reserved (fm-vek.7).
+        preflight_count(
+            &r,
+            &mut budget,
+            slot_count,
+            5,
+            std::mem::size_of::<(u32, Option<SnapshotEntry>)>(),
+            "arena slot table",
+        )?;
+        let mut slots: Vec<(u32, Option<SnapshotEntry>)> = Vec::new();
+        budget.reserve(&mut slots, slot_count, "arena slot table")?;
         let mut manifest = UpdaterManifest::default();
         for slot_index in 0..slot_count {
             let generation = r.get_u32()?;
             let entry = if r.get_bool()? {
                 // --- buffer
                 let n_fields = r.get_u16()? as usize;
-                let mut fields: Vec<(String, usize)> = Vec::with_capacity(n_fields);
+                // At least ten encoded bytes each (u64 name-length prefix
+                // + u16 width).
+                preflight_count(
+                    &r,
+                    &mut budget,
+                    n_fields,
+                    10,
+                    std::mem::size_of::<(String, usize)>(),
+                    "record field table",
+                )?;
+                let mut fields: Vec<(String, usize)> = Vec::new();
+                budget.reserve(&mut fields, n_fields, "record field table")?;
                 for _ in 0..n_fields {
                     let name = r.get_str()?.to_owned();
+                    budget.charge(name.len(), "record field names")?;
                     let width = r.get_u16()? as usize;
                     if width == 0 {
                         return Err(PersistError::Malformed("zero-width record field"));
                     }
                     fields.push((name, width));
                 }
-                let get_names = |r: &mut Reader<'_>| -> Result<Vec<String>, PersistError> {
+                let get_names = |r: &mut Reader<'_>,
+                                 budget: &mut DecodeBudget,
+                                 what: &'static str|
+                 -> Result<Vec<String>, PersistError> {
                     let n = r.get_u16()? as usize;
-                    let mut names = Vec::with_capacity(n);
+                    // u64 length prefix per name.
+                    preflight_count(r, budget, n, 8, std::mem::size_of::<String>(), what)?;
+                    let mut names = Vec::new();
+                    budget.reserve(&mut names, n, what)?;
                     for _ in 0..n {
-                        names.push(r.get_str()?.to_owned());
+                        let name = r.get_str()?.to_owned();
+                        budget.charge(name.len(), what)?;
+                        names.push(name);
                     }
                     Ok(names)
                 };
-                let aligned = get_names(&mut r)?;
-                let pointlike = get_names(&mut r)?;
+                let aligned = get_names(&mut r, &mut budget, "aligned key names")?;
+                let pointlike = get_names(&mut r, &mut budget, "pointlike key names")?;
                 let len = r.get_u32()? as usize;
                 let field_refs: Vec<(&str, usize)> =
                     fields.iter().map(|(n, w)| (n.as_str(), *w)).collect();
                 let aligned_refs: Vec<&str> = aligned.iter().map(String::as_str).collect();
                 let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
-                let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs);
-                preflight_record_payload(&r, len, schema.stride())?;
-                let mut buffer = RecordBuffer::new(schema, len);
+                let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs)
+                    .map_err(|_| PersistError::Malformed("record schema stride overflows usize"))?;
+                preflight_record_payload(&r, len, schema.stride(), &mut budget)?;
+                let mut buffer = RecordBuffer::new(schema, len)
+                    .map_err(|_| PersistError::Malformed("record buffer sizing overflows usize"))?;
                 for (name, width) in &fields {
+                    // `len * stride` lanes were just proved to fit the
+                    // container cap, so this per-field product cannot wrap.
                     let lanes = len * width;
-                    let mut column = Vec::with_capacity(lanes);
+                    budget.charge(
+                        lanes.saturating_mul(std::mem::size_of::<f32>()),
+                        "record column staging",
+                    )?;
+                    let mut column = Vec::new();
+                    budget.reserve(&mut column, lanes, "record column staging")?;
                     for _ in 0..lanes {
                         column.push(r.get_f32()?);
                     }
                     buffer.write_range(name, 0, &column);
                 }
-                let locked = get_names(&mut r)?;
+                let locked = get_names(&mut r, &mut budget, "locked key names")?;
                 if !locked.is_empty() {
                     buffer.lock_data(locked.iter().map(String::as_str));
                 }
                 // --- graph + state
                 let n_sub = r.get_u32()? as usize;
-                let mut submobjects = Vec::with_capacity(n_sub.min(65_536));
+                preflight_count(
+                    &r,
+                    &mut budget,
+                    n_sub,
+                    8,
+                    std::mem::size_of::<Mob>(),
+                    "family submobject links",
+                )?;
+                let mut submobjects = Vec::new();
+                budget.reserve(&mut submobjects, n_sub, "family submobject links")?;
                 for _ in 0..n_sub {
                     submobjects.push(get_mob(&mut r)?);
                 }
                 let n_par = r.get_u32()? as usize;
-                let mut parents = Vec::with_capacity(n_par.min(65_536));
+                preflight_count(
+                    &r,
+                    &mut budget,
+                    n_par,
+                    8,
+                    std::mem::size_of::<Mob>(),
+                    "family parent links",
+                )?;
+                let mut parents = Vec::new();
+                budget.reserve(&mut parents, n_par, "family parent links")?;
                 for _ in 0..n_par {
                     parents.push(get_mob(&mut r)?);
                 }
                 let n_upd = r.get_u32()? as usize;
-                let mut ids = Vec::with_capacity(n_upd.min(65_536));
+                // u64 identity + u8 kind per updater on the wire.
+                preflight_count(
+                    &r,
+                    &mut budget,
+                    n_upd,
+                    9,
+                    std::mem::size_of::<(u64, UpdaterKindTag)>(),
+                    "updater identities",
+                )?;
+                let mut ids = Vec::new();
+                budget.reserve(&mut ids, n_upd, "updater identities")?;
                 for _ in 0..n_upd {
                     let id = r.get_u64()?;
                     if id == 0 {
@@ -892,12 +1135,30 @@ impl Snapshot {
             slots.push((generation, entry));
         }
         let n_free = r.get_u32()? as usize;
-        let mut free = Vec::with_capacity(n_free.min(65_536));
+        preflight_count(
+            &r,
+            &mut budget,
+            n_free,
+            4,
+            std::mem::size_of::<u32>(),
+            "free slot ledger",
+        )?;
+        let mut free = Vec::new();
+        budget.reserve(&mut free, n_free, "free slot ledger")?;
         for _ in 0..n_free {
             free.push(r.get_u32()?);
         }
         let n_roots = r.get_u32()? as usize;
-        let mut roots = Vec::with_capacity(n_roots.min(65_536));
+        preflight_count(
+            &r,
+            &mut budget,
+            n_roots,
+            8,
+            std::mem::size_of::<Mob>(),
+            "scene root table",
+        )?;
+        let mut roots = Vec::new();
+        budget.reserve(&mut roots, n_roots, "scene root table")?;
         for _ in 0..n_roots {
             roots.push(get_mob(&mut r)?);
         }
@@ -969,7 +1230,7 @@ impl Snapshot {
             free,
             roots,
         };
-        validate_decoded_arena(&snapshot)?;
+        validate_decoded_arena(&snapshot, &mut budget)?;
         Ok(DecodedSnapshot {
             snapshot,
             updaters: manifest,
@@ -1074,9 +1335,12 @@ impl SceneState {
         let play_count = r.get_u64()?;
         let state = [r.get_u64()?, r.get_u64()?];
         let inc = [r.get_u64()?, r.get_u64()?];
-        let snapshot_bytes = r.get_bytes()?.to_vec();
+        // The nested snapshot document is borrowed straight out of the
+        // envelope — no transit clone (fm-vek.7); its own decode re-opens
+        // it as a container and budgets what it materializes.
+        let snapshot_bytes = r.get_bytes()?;
         r.finish()?;
-        let decoded = Snapshot::from_bytes(&snapshot_bytes, stage)?;
+        let decoded = Snapshot::from_bytes(snapshot_bytes, stage)?;
         Ok(DecodedSceneState {
             time,
             play_count,
