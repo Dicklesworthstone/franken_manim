@@ -8,11 +8,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use fmn_core::rng::Pcg64Dxsm;
-use fmn_hash::{SerialError, sha256};
+use fmn_hash::{Limits, SerialError, Writer, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{
-    JointType, Mob, Mobject, PersistError, SceneState, Snapshot, Stage, UpdaterFn, UpdaterKindTag,
-    UpdaterManifest,
+    JointType, Mob, Mobject, PersistError, SNAPSHOT_SCHEMA, SceneState, Snapshot, Stage, UpdaterFn,
+    UpdaterKindTag, UpdaterManifest,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
@@ -163,6 +163,57 @@ fn oversized_schema_counts_are_typed_refusals_not_truncated_lengths() {
             needed: too_wide,
         }
     );
+}
+
+fn snapshot_with_declared_record_payload(field_count: u16, field_width: u16, len: u32) -> Vec<u8> {
+    let mut writer = Writer::new(SNAPSHOT_SCHEMA);
+    writer
+        .put_u32(1)
+        .put_u32(0)
+        .put_bool(true)
+        .put_u16(field_count);
+    for _ in 0..field_count {
+        writer.put_str("field").put_u16(field_width);
+    }
+    writer.put_u16(0).put_u16(0).put_u32(len);
+    writer.finish().unwrap()
+}
+
+#[test]
+fn declared_record_payload_is_preflighted_before_buffer_allocation() {
+    let stage = Stage::new();
+
+    let truncated = snapshot_with_declared_record_payload(1, 3, 1_000_000);
+    let error = Snapshot::from_bytes(&truncated, &stage)
+        .map(|_| ())
+        .expect_err("missing column bytes must be refused before allocation");
+    assert!(
+        matches!(
+            error,
+            PersistError::Serial(SerialError::UnexpectedEof {
+                need: 12_000_000,
+                remaining: 0,
+            })
+        ),
+        "expected exact payload EOF, got {error:?}"
+    );
+
+    for bytes in [
+        snapshot_with_declared_record_payload(1, 3, u32::MAX),
+        snapshot_with_declared_record_payload(u16::MAX, u16::MAX, u32::MAX),
+    ] {
+        let error = Snapshot::from_bytes(&bytes, &stage)
+            .map(|_| ())
+            .expect_err("an impossible record payload must be refused before allocation");
+        assert!(
+            matches!(
+                &error,
+                PersistError::Serial(SerialError::SizeLimit { limit, needed })
+                    if *limit == Limits::DEFAULT.max_total && *needed > *limit
+            ),
+            "expected a record-payload SizeLimit, got {error:?}"
+        );
+    }
 }
 
 #[test]

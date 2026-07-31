@@ -465,6 +465,29 @@ fn get_shape(r: &mut Reader<'_>) -> Result<ShapeSlot, PersistError> {
     })
 }
 
+fn preflight_record_payload(r: &Reader<'_>, len: usize, stride: usize) -> Result<(), PersistError> {
+    let needed = len
+        .checked_mul(stride)
+        .and_then(|lanes| lanes.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or(PersistError::Serial(SerialError::SizeLimit {
+            limit: Limits::DEFAULT.max_total,
+            needed: usize::MAX,
+        }))?;
+    if needed > Limits::DEFAULT.max_total {
+        return Err(PersistError::Serial(SerialError::SizeLimit {
+            limit: Limits::DEFAULT.max_total,
+            needed,
+        }));
+    }
+    if needed > r.remaining() {
+        return Err(PersistError::Serial(SerialError::UnexpectedEof {
+            need: needed,
+            remaining: r.remaining(),
+        }));
+    }
+    Ok(())
+}
+
 impl Snapshot {
     /// Serialize into the versioned canonical container.
     ///
@@ -586,6 +609,7 @@ impl Snapshot {
                 let aligned_refs: Vec<&str> = aligned.iter().map(String::as_str).collect();
                 let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
                 let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs);
+                preflight_record_payload(&r, len, schema.stride())?;
                 let mut buffer = RecordBuffer::new(schema, len);
                 for (name, width) in &fields {
                     let lanes = len * width;
