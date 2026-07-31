@@ -16,9 +16,12 @@
 //!   paths derive **only** from validated namespace names and digest hex —
 //!   arbitrary key bytes never touch a path, which is the traversal
 //!   protection: there is no key that can name a path outside the store root.
-//! - **Atomic writes.** Every entry and every index lands via the capability's
-//!   `write_atomic` (write-temp + rename): a reader sees the old bytes, the
-//!   new bytes, or absence — never a torn intermediate, even under `kill -9`.
+//! - **Atomic writes.** Entries land once through the capability's
+//!   create-if-absent publication; indexes land via `write_atomic`
+//!   (write-temp + rename). A reader sees complete bytes or absence — never a
+//!   torn intermediate, even under `kill -9`. Re-publishing the same keyed
+//!   payload is idempotent; a different payload at an existing key is a typed
+//!   [`CacheError::KeyConflict`] and cannot replace the incumbent.
 //!   Before any cache read, write, listing, or lifecycle removal, every
 //!   component from the owned root down is classified without following its
 //!   leaf; links, Windows reparse points, devices, and wrong-kind nodes fail
@@ -34,12 +37,14 @@
 //!   directory is `ns/<name>/v<version>`. Bumping the version is a clean
 //!   invalidation — a cold directory — without touching unrelated namespaces;
 //!   [`Namespace::purge_stale_versions`] reclaims the abandoned ones.
-//! - **Cross-process safety.** Entry writes are atomic and content-addressed
-//!   (two writers racing on one address write identical bytes), so ordinary
-//!   put/get needs no lock at all. Maintenance (eviction) takes an advisory
-//!   lock file with wall-clock staleness breaking; the LRU index is an
-//!   advisory hint that eviction reconciles against the disk truth, so a lost
-//!   index is a rebuild, never corruption.
+//! - **Cross-process safety.** Entry writes are atomic, immutable, and
+//!   digest-addressed: keyed entries derive their address from canonical key
+//!   material, while blobs derive it from their content. The first complete
+//!   publication for an address wins; later writers verify that winner instead
+//!   of replacing it. Ordinary put/get therefore needs no lock. Maintenance
+//!   (eviction) takes an advisory lock file with wall-clock staleness breaking;
+//!   the LRU index is an advisory hint that eviction reconciles against the
+//!   disk truth, so a lost index is a rebuild, never corruption.
 //! - **Defined eviction.** LRU-class by logical access sequence with
 //!   **pinning** for in-use entries ([`Namespace::pin`]) and a config-visible
 //!   size ceiling per namespace ([`NamespacePolicy`]). A `None` ceiling is the
@@ -89,6 +94,21 @@ pub use store::{
 use fmn_platform::fs::FsError;
 use std::fmt;
 
+/// Stable diagnostic details for [`CacheError::KeyConflict`].
+#[derive(Debug)]
+pub struct KeyConflict {
+    /// Namespace containing the keyed object.
+    pub namespace: String,
+    /// Namespace schema version.
+    pub version: u32,
+    /// Canonical key digest naming the immutable object.
+    pub key: fmn_hash::Digest,
+    /// Hash of the payload already published at `key`.
+    pub incumbent_payload: fmn_hash::Digest,
+    /// Hash of the payload the losing producer offered.
+    pub offered_payload: fmn_hash::Digest,
+}
+
 /// A cache failure. Per the never-fatal doctrine, consumers treat every one of
 /// these as "skip the cache" — [`Namespace::get_or_compute`] does so
 /// structurally — but each is precise for diagnostics.
@@ -126,6 +146,9 @@ pub enum CacheError {
         /// The payload size that was offered.
         needed: usize,
     },
+    /// Two producers offered different payloads for one immutable keyed
+    /// address. The incumbent remains unchanged.
+    KeyConflict(Box<KeyConflict>),
     /// The filesystem capability failed.
     Storage(FsError),
     /// Canonical serialization failed (an over-limit field in key material or
@@ -153,6 +176,16 @@ impl fmt::Display for CacheError {
                     "cache entry too large: {needed} bytes over the {limit}-byte ceiling"
                 )
             }
+            Self::KeyConflict(conflict) => write!(
+                f,
+                "conflicting cache producers for namespace {:?} v{}, key {}: \
+                 immutable payload {} is already published, offered {}",
+                conflict.namespace,
+                conflict.version,
+                conflict.key.to_hex(),
+                conflict.incumbent_payload.to_hex(),
+                conflict.offered_payload.to_hex()
+            ),
             Self::Storage(err) => write!(f, "cache storage failure: {err}"),
             Self::Encode(err) => write!(f, "cache serialization failure: {err}"),
         }

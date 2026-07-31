@@ -85,6 +85,35 @@ fn keyed_round_trip_and_miss() {
 }
 
 #[test]
+fn keyed_objects_are_immutable_and_identical_republication_is_idempotent() {
+    let (_fs, _clock, store) = fresh();
+    let n = ns(&store, None);
+    let k = key("one-producer-key");
+    let incumbent = b"first producer";
+    let offered = b"second producer";
+
+    n.put(&k, incumbent).expect("first publication wins");
+    n.put(&k, incumbent)
+        .expect("identical losing publication is idempotent");
+
+    match n.put(&k, offered) {
+        Err(CacheError::KeyConflict(conflict)) => {
+            assert_eq!(conflict.namespace, "t");
+            assert_eq!(conflict.version, 1);
+            assert_eq!(conflict.key, *k.digest());
+            assert_eq!(conflict.incumbent_payload, sha256(incumbent));
+            assert_eq!(conflict.offered_payload, sha256(offered));
+        }
+        other => panic!("expected typed immutable-key conflict, got {other:?}"),
+    }
+    assert_eq!(
+        n.get(&k).expect("read incumbent").as_deref(),
+        Some(incumbent.as_slice()),
+        "conflicting producer cannot replace the first publication"
+    );
+}
+
+#[test]
 fn blob_round_trip_is_self_addressed() {
     let (_fs, _clock, store) = fresh();
     let n = ns(&store, None);
@@ -256,9 +285,9 @@ fn a_cache_that_cannot_write_never_fails_the_consumer() {
 // Atomicity under simulated crashes (kill -9 mid-write)
 // ---------------------------------------------------------------------------
 
-/// Simulates a writer killed mid-`write_atomic`, at both crash points the
-/// temp-then-rename protocol allows: before anything persists, or with an
-/// orphaned temp left in the shard directory (the rename never happened).
+/// Simulates a writer killed during atomic publication, at both crash points
+/// the capability allows: before anything persists, or with an orphaned temp
+/// left in the shard directory (publication never happened).
 struct CrashingFs {
     inner: VirtualFs,
     crash_writes: AtomicBool,
@@ -295,6 +324,20 @@ impl FileSystem for CrashingFs {
         self.inner.write_atomic(path, bytes)
     }
     fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+        if self.crash_writes.load(Ordering::Relaxed) {
+            if self.leave_orphan.load(Ordering::Relaxed)
+                && let Some(parent) = path.parent()
+            {
+                self.inner.insert(
+                    parent.join(".fmn-new.12345.orphan"),
+                    bytes[..bytes.len() / 2].to_vec(),
+                );
+            }
+            return Err(FsError::Io {
+                path: path.to_path_buf(),
+                err: std::io::Error::other("simulated kill -9 during no-clobber publication"),
+            });
+        }
         self.inner.create_new(path, bytes)
     }
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
@@ -332,10 +375,13 @@ fn a_killed_writer_leaves_a_consistent_store() {
     let stable = key("stable");
     n.put(&stable, b"old value").unwrap();
 
-    // Crash point A: nothing persisted. The old entry is untouched, the new
-    // key is a miss, and the put reported its failure.
+    // The existing immutable entry cannot be replaced. Crash point A then
+    // leaves a fresh key absent and reports the publication failure.
+    assert!(matches!(
+        n.put(&stable, b"new value"),
+        Err(CacheError::KeyConflict(_))
+    ));
     fs.crash_writes.store(true, Ordering::Relaxed);
-    assert!(n.put(&stable, b"new value").is_err());
     assert!(n.put(&key("fresh"), b"v").is_err());
     fs.crash_writes.store(false, Ordering::Relaxed);
     assert_eq!(n.get(&stable).unwrap().as_deref(), Some(&b"old value"[..]));

@@ -3,17 +3,19 @@
 //! many threads — writers, readers, and maintainers — with the invariant that
 //! **no observer ever sees corruption**: every get is a verified value or a
 //! miss, every raw object file on disk is a complete, checksummed envelope
-//! (write-temp + rename means torn intermediates are structurally
-//! impossible), and eviction racing writers never breaks either side.
+//! (no-clobber publication makes torn intermediates structurally impossible),
+//! conflicting producers cannot replace an immutable keyed object, and
+//! eviction racing writers never breaks either side.
 
 use fmn_cache::{
     CacheClearAuthorization, CacheClearOutcome, CacheError, CacheKey, EvictOutcome, KeyBuilder,
     NamespacePolicy, Store, StoreConfig,
 };
-use fmn_hash::{Limits, Reader, Schema, UnknownPolicy};
+use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, sha256};
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
@@ -817,7 +819,7 @@ fn two_stores_many_threads_no_observer_ever_sees_corruption() {
     }
 
     // Post-conditions. Every raw object file on disk is a complete, valid
-    // envelope — write-temp + rename left nothing torn, eviction left no
+    // envelope — no-clobber publication left nothing torn, eviction left no
     // half-deleted state.
     let objects_dir = root.join("ns/shared/v1/objects");
     let fs = StdFs;
@@ -855,75 +857,65 @@ fn two_stores_many_threads_no_observer_ever_sees_corruption() {
     }
 }
 
+const CONFLICT_CHILD_ROOT: &str = "FMN_CACHE_CONFLICT_CHILD_ROOT";
+const CONFLICT_CHILD_ROLE: &str = "FMN_CACHE_CONFLICT_CHILD_ROLE";
+
 #[test]
-fn same_key_racing_writers_last_wins_and_readers_see_whole_values() {
-    const ROUNDS: usize = 200;
+fn keyed_conflict_subprocess_entry() {
+    let Some(root) = std::env::var_os(CONFLICT_CHILD_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let role = std::env::var(CONFLICT_CHILD_ROLE).expect("child role");
+    let namespace = open(&root)
+        .namespace("race", 1, NamespacePolicy::default())
+        .expect("child namespace");
+    let cache_key = key(0);
 
-    let root = scratch("same_key");
-    let store_a = open(&root);
-    let store_b = open(&root);
-    let ns_a = Arc::new(
-        store_a
-            .namespace("race", 1, NamespacePolicy::default())
-            .unwrap(),
+    match role.as_str() {
+        "incumbent" => namespace
+            .put(&cache_key, &payload(1))
+            .expect("first process publishes the immutable object"),
+        "conflicting" => match namespace.put(&cache_key, &payload(2)) {
+            Err(CacheError::KeyConflict(conflict)) => {
+                assert_eq!(conflict.namespace, "race");
+                assert_eq!(conflict.version, 1);
+                assert_eq!(conflict.key, *cache_key.digest());
+                assert_eq!(conflict.incumbent_payload, sha256(&payload(1)));
+                assert_eq!(conflict.offered_payload, sha256(&payload(2)));
+            }
+            other => panic!("expected cross-process key conflict, got {other:?}"),
+        },
+        other => panic!("unknown conflict-child role {other:?}"),
+    }
+}
+
+fn run_conflict_child(root: &std::path::Path, role: &str) {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", "keyed_conflict_subprocess_entry", "--nocapture"])
+        .env(CONFLICT_CHILD_ROOT, root)
+        .env(CONFLICT_CHILD_ROLE, role)
+        .output()
+        .expect("run keyed-conflict child");
+    assert!(
+        output.status.success(),
+        "{role} child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let ns_b = Arc::new(
-        store_b
-            .namespace("race", 1, NamespacePolicy::default())
-            .unwrap(),
+}
+
+#[test]
+fn different_processes_cannot_replace_one_keyed_object() {
+    let root = scratch("same_key_processes");
+    run_conflict_child(&root, "incumbent");
+    run_conflict_child(&root, "conflicting");
+
+    let namespace = open(&root)
+        .namespace("race", 1, NamespacePolicy::default())
+        .expect("reopened namespace");
+    assert_eq!(
+        namespace.get(&key(0)).expect("final get").as_deref(),
+        Some(payload(1).as_slice()),
+        "the first process remains the immutable winner"
     );
-
-    let k = key(0);
-    let value_a = payload(1);
-    let value_b = payload(2);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let barrier = Arc::new(Barrier::new(3));
-
-    let wa = {
-        let ns = Arc::clone(&ns_a);
-        let (k, v, barrier) = (k, value_a.clone(), Arc::clone(&barrier));
-        std::thread::spawn(move || {
-            barrier.wait();
-            for _ in 0..ROUNDS {
-                ns.put(&k, &v).expect("put a");
-            }
-        })
-    };
-    let wb = {
-        let ns = Arc::clone(&ns_b);
-        let (k, v, barrier) = (k, value_b.clone(), Arc::clone(&barrier));
-        std::thread::spawn(move || {
-            barrier.wait();
-            for _ in 0..ROUNDS {
-                ns.put(&k, &v).expect("put b");
-            }
-        })
-    };
-    let reader = {
-        let ns = Arc::clone(&ns_a);
-        let (k, va, vb) = (k, value_a.clone(), value_b.clone());
-        let (barrier, stop) = (Arc::clone(&barrier), Arc::clone(&stop));
-        std::thread::spawn(move || {
-            barrier.wait();
-            while !stop.load(Ordering::Relaxed) {
-                match ns.get(&k) {
-                    Ok(Some(v)) => {
-                        assert!(v == va || v == vb, "reader saw a torn or mixed value");
-                    }
-                    Ok(None) => {}
-                    Err(err) => panic!("reader hit a hard error: {err}"),
-                }
-            }
-        })
-    };
-
-    wa.join().expect("writer a");
-    wb.join().expect("writer b");
-    stop.store(true, Ordering::Relaxed);
-    reader.join().expect("reader");
-
-    // Last writer won with a complete value.
-    let last = ns_b.get(&k).expect("final get").expect("present");
-    assert!(last == value_a || last == value_b);
 }

@@ -25,17 +25,21 @@
 //!
 //! # Concurrency model
 //!
-//! Entry writes are atomic and content-addressed: two processes racing on the
-//! same address write byte-identical files through rename, so put/get take no
-//! lock. The LRU index is advisory (last-writer-wins, merged on flush,
-//! reconciled against disk truth by eviction; a lost or stale index degrades
-//! LRU accuracy, never correctness). Only maintenance — eviction — takes the
-//! per-namespace lock file, and a crashed holder is broken by wall-clock
-//! staleness; a maintainer that cannot get the lock skips, it never blocks.
+//! Entry writes are atomic, immutable, and digest-addressed: canonical keys
+//! address keyed entries, while payload digests address blobs. The first
+//! create-if-absent publication for an address wins, and every losing writer
+//! verifies the complete incumbent. Identical payloads are idempotent;
+//! different keyed payloads are a typed producer conflict and never replace
+//! one another, so put/get take no lock. The LRU index is advisory
+//! (last-writer-wins, merged on flush, reconciled against disk truth by
+//! eviction; a lost or stale index degrades LRU accuracy, never correctness).
+//! Only maintenance — eviction — takes the per-namespace lock file, and a
+//! crashed holder is broken by wall-clock staleness; a maintainer that cannot
+//! get the lock skips, it never blocks.
 
-use crate::CacheError;
 use crate::entry::{self, EntryKind};
 use crate::key::CacheKey;
+use crate::{CacheError, KeyConflict};
 use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer, sha256};
 use fmn_platform::clock::Clock;
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
@@ -1586,13 +1590,16 @@ impl Namespace {
         self.get_at(key.digest(), EntryKind::Keyed)
     }
 
-    /// Store a keyed entry (write-temp + rename; concurrent writers of the
-    /// same key write identical bytes).
+    /// Store a keyed entry through create-if-absent publication. Re-publishing
+    /// an identical payload is idempotent; a different payload at the same
+    /// key is refused without replacing the incumbent.
     ///
     /// # Errors
     /// [`CacheError::EntryTooLarge`] over the per-entry ceiling,
-    /// [`CacheError::Encode`], or [`CacheError::Storage`]. All are safely
-    /// ignorable — an unwritten cache entry is a future recompute.
+    /// [`CacheError::KeyConflict`] when another producer has already published
+    /// different bytes, [`CacheError::Encode`], or [`CacheError::Storage`].
+    /// All are safely ignorable — an unwritten cache entry is a future
+    /// recompute.
     pub fn put(&self, key: &CacheKey, payload: &[u8]) -> Result<(), CacheError> {
         self.put_at(key.digest(), EntryKind::Keyed, payload)
     }
@@ -1626,7 +1633,10 @@ impl Namespace {
     /// assets live here: the address doubles as the integrity statement.
     ///
     /// # Errors
-    /// As [`Namespace::put`].
+    /// [`CacheError::EntryTooLarge`] over the per-entry ceiling,
+    /// [`CacheError::Encode`], or [`CacheError::Storage`]. A verified payload
+    /// mismatch at the same content digest is reported as storage corruption,
+    /// not as a keyed-producer conflict.
     pub fn put_blob(&self, payload: &[u8]) -> Result<Digest, CacheError> {
         let digest = sha256(payload);
         self.put_at(&digest, EntryKind::Blob, payload)?;
@@ -1676,8 +1686,49 @@ impl Namespace {
             });
         }
         let doc = entry::encode(kind, digest, payload, self.inner.entry_limits)?;
-        let size = doc.len() as u64;
-        self.inner.write_file(&self.object_path(digest), &doc)?;
+        let path = self.object_path(digest);
+        let size = if self.inner.create_file(&path, &doc)? {
+            doc.len() as u64
+        } else {
+            // A complete incumbent won create-if-absent publication. Verify
+            // its envelope, address, kind, and payload before treating this
+            // losing write as idempotent.
+            let incumbent = self.inner.read_file(&path)?;
+            let incumbent_payload =
+                entry::decode(&incumbent, kind, digest, self.inner.entry_limits).map_err(
+                    |err| {
+                        CacheError::Storage(FsError::Io {
+                            path: path.clone(),
+                            err: io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "immutable cache object could not be verified after a \
+                                     create collision: {err:?}"
+                                ),
+                            ),
+                        })
+                    },
+                )?;
+            if incumbent_payload != payload {
+                if kind == EntryKind::Keyed {
+                    return Err(CacheError::KeyConflict(Box::new(KeyConflict {
+                        namespace: self.name.clone(),
+                        version: self.version,
+                        key: *digest,
+                        incumbent_payload: sha256(&incumbent_payload),
+                        offered_payload: sha256(payload),
+                    })));
+                }
+                return Err(CacheError::Storage(FsError::Io {
+                    path,
+                    err: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "content-addressed blob collision carried different verified payloads",
+                    ),
+                }));
+            }
+            incumbent.len() as u64
+        };
         self.touch(digest, size);
         // Durable bookkeeping rides the (cold) write path; read bumps stay
         // in memory until some flush point.
