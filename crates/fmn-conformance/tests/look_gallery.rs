@@ -327,6 +327,35 @@ fn corrupt_manifests_are_named_errors() {
         "# fmn-look-gallery v1\n# revision: 1\npanel\ta/b.png\tc/d.png\tregression\t\n";
     let err = GalleryManifest::parse(empty_note).expect_err("empty change note must refuse");
     assert!(err.to_string().contains("empty change note"), "{err}");
+
+    let duplicate_revision = "# fmn-look-gallery v1\n# revision: 1\n# revision: 2\n";
+    let err = GalleryManifest::parse(duplicate_revision)
+        .expect_err("a manifest must have one authoritative revision line");
+    assert!(
+        matches!(
+            err,
+            GalleryError::Corrupt { line: 3, ref detail }
+                if detail.contains("duplicate revision line")
+        ),
+        "unexpected duplicate-revision refusal: {err}"
+    );
+
+    let mut over_fielded = String::from(
+        "# fmn-look-gallery v1\n# revision: 1\npanel\ta/b.png\tc/d.png\tregression\tnote",
+    );
+    over_fielded.extend(std::iter::repeat_n('\t', 1_000_000));
+    over_fielded.push('\n');
+    let err = GalleryManifest::parse(&over_fielded)
+        .expect_err("a delimiter-heavy malformed row must be refused");
+    assert!(
+        err.to_string()
+            .contains("expected 5 tab-separated fields, found 1000005"),
+        "unexpected over-fielded refusal: {err}"
+    );
+    assert!(
+        err.to_string().len() < 200,
+        "the refusal must not copy the malformed row into its diagnostic"
+    );
 }
 
 // ------------------------------------------------------- verdict workflow

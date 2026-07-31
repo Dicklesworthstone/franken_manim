@@ -613,6 +613,20 @@ fn valid_repo_path(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
+/// Split one manifest row without allocating a field vector for malformed
+/// input carrying an arbitrary number of tab separators.
+fn split_gallery_row(line: &str) -> Option<[&str; 5]> {
+    let mut fields = line.split('\t');
+    let exact = [
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+    ];
+    fields.next().is_none().then_some(exact)
+}
+
 impl GalleryManifest {
     /// Parse manifest text in format v1.
     ///
@@ -647,6 +661,11 @@ impl GalleryManifest {
                 continue;
             }
             if let Some(rest) = line.strip_prefix("# revision:") {
+                if revision.is_some() {
+                    return Err(corrupt(
+                        "duplicate revision line: format v1 requires exactly one".to_string(),
+                    ));
+                }
                 revision = Some(rest.trim().parse::<u64>().map_err(|_| {
                     corrupt(format!("revision is not a non-negative integer: {rest:?}"))
                 })?);
@@ -655,15 +674,13 @@ impl GalleryManifest {
             if line.starts_with('#') {
                 continue;
             }
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() != 5 {
+            let Some([panel, reference, render, verdict, changed]) = split_gallery_row(line) else {
+                let field_count = line.split('\t').count();
                 return Err(corrupt(format!(
                     "expected 5 tab-separated fields, found {}",
-                    fields.len()
+                    field_count
                 )));
-            }
-            let (panel, reference, render, verdict, changed) =
-                (fields[0], fields[1], fields[2], fields[3], fields[4]);
+            };
             if !valid_panel(panel) {
                 return Err(corrupt(format!(
                     "invalid panel id {panel:?}: use only [a-z0-9._-], not starting with '.'"
