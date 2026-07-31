@@ -21,8 +21,9 @@
 //!   `forbid(unsafe_code)` a `Vec` grows only by allocating, so the count is
 //!   exact and there is no allocator shim anywhere in the proof.
 //! - **The worker pool** ([`crate::engine::WorkerPool`], owned here): one
-//!   scratch slot per (kernel, tile width), created on first checkout and
-//!   returned when the render finishes. Steady state creates none.
+//!   scratch slot per requested worker and (kernel, tile width), sized
+//!   synchronously before fan-out and returned when the render finishes.
+//!   Steady state creates none, independent of worker-start order.
 //!
 //! The zero-allocation assertion therefore rides the engine's own counters:
 //! render the same scene N+1 frames through one arena and frames 2..=N+1
@@ -54,9 +55,9 @@ pub struct AllocStats {
     /// frames once the working set has stabilized — the observable form of
     /// "the arena buffer is allocated exactly once".
     pub arena_buffer_bytes: usize,
-    /// Worker scratch slots the pool currently holds: one per (kernel, tile
-    /// width) pair ever checked out, bounded in practice by the worker-team
-    /// size the execution plan admits.
+    /// Worker scratch slots the pool currently holds: one per requested worker
+    /// and (kernel, tile width), bounded in practice by the largest worker team
+    /// the execution plan admits.
     pub pool_slots: usize,
 }
 

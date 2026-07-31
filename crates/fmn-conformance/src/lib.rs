@@ -32,6 +32,10 @@
 //! - the canonical PG-2 producer (fm-inr.2.1) — [`perf_pg2`]: fixed fill and
 //!   stroke fixtures, exact benchmark/configuration digests, bounded raw
 //!   samples, and a content-addressed stage trace over the real Lumen path.
+//! - the canonical PG-6 allocation producer (fm-inr.3.1) — [`perf_pg6`]: one
+//!   warm frame plus one arena/output-buffer reuse frame for every committed
+//!   scene-golden case, with exact engine-owned allocation samples and retained
+//!   frame identities.
 //! - the canonical PG-7 producer (fm-inr.2.2) — [`perf_pg7`]: cold formula,
 //!   cache-proven formula-hit, and exact 10,000-glyph native-text fixtures
 //!   with result self-goldens and bounded integer latency samples.
@@ -91,6 +95,7 @@ pub mod npy;
 pub mod oracles;
 pub mod perf;
 pub mod perf_pg2;
+pub mod perf_pg6;
 pub mod perf_pg7;
 pub mod perf_pg8;
 pub mod ratchet;

@@ -30,7 +30,9 @@
 //! - **LIFECYCLE DRILL** — construct → snapshot → transform → snapshot
 //!   with geometry assertions (the `scene_goldens` lifecycle form), plus
 //!   a journal round-trip: bytes out, bytes in, identical content hash,
-//!   and `plan_replay` reusing exactly the non-barrier prefix.
+//!   and `plan_replay` reusing exactly the non-barrier prefix; PG-6 also
+//!   warms and reuses the real frame arena/output buffer for a registered
+//!   corpus scene and requires an equal digest with zero measured allocations.
 //! - **LOG ASSERTIONS** — the preflight typeset fires before frame zero
 //!   with the typeset count recorded; the segment purity classification
 //!   is recorded for play (pure) and wait (stateful); the engine identity
@@ -55,6 +57,7 @@ use fmn_conformance::e2e::{
     RunOutcome, Runner, ScenarioClass, ScenarioError, ScenarioSpec, Status, Surface, Tier,
 };
 use fmn_conformance::golden::Scope;
+use fmn_conformance::perf_pg6::{PG6_THREADS, Pg6Definition, pg6_identity};
 use fmn_conformance::scene_goldens::{self, TILING};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, WHITE};
@@ -73,8 +76,11 @@ use fmn_output::sinks::{
 use fmn_output::{FrameSink, SinkWrite};
 use fmn_platform::fs::FileSystem;
 use fmn_platform::topology::HardwareTopology;
+use fmn_render::FrameArena;
 use fmn_render::bin::{Binning, ScreenMap, Viewport};
-use fmn_render::engine::{EngineIdentity, EngineKind, FrameConfig, FrameJob, encode_frame};
+use fmn_render::engine::{
+    EngineIdentity, EngineKind, FrameConfig, FrameJob, encode_frame, frame_digest,
+};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
 use fmn_runtime::{
@@ -1186,6 +1192,77 @@ fn lifecycle_journal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         .with_counter("journal_mismatch_detected", 1))
 }
 
+/// PG-6's user-visible evidence surface, registered end to end: a committed
+/// corpus scene passes through the same warm/reuse arena lifecycle as the
+/// release-perf producer, and the scenario log retains the observable proof.
+fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let definition = Pg6Definition::new();
+    definition
+        .validate_corpus_lock()
+        .map_err(|error| fail(format!("PG-6 corpus identity: {error}")))?;
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("PG-6 registered scene is missing"))?;
+    let built = (case.build)(scene_goldens::corpus());
+    let config = scene_goldens::frame_config();
+    let mut plan = RenderPlan::new();
+    plan.sync(&built.stage, 0);
+    let mono = MonoTable::build(&plan, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    binning
+        .prune_occluded(&plan)
+        .map_err(|error| fail(format!("PG-6 binning: {error}")))?;
+
+    let mut arena = FrameArena::new();
+    let (mut frame, warm_digest, warm_allocations) = {
+        let job =
+            FrameJob::with_identity_in(&mut arena, &plan, &mono, &binning, config, pg6_identity())
+                .map_err(|error| fail(format!("PG-6 warm job: {error}")))?;
+        let frame = job
+            .render(PG6_THREADS)
+            .map_err(|error| fail(format!("PG-6 warm render: {error}")))?;
+        let digest =
+            frame_digest(&frame).map_err(|error| fail(format!("PG-6 warm digest: {error}")))?;
+        (frame, digest, job.allocation_stats().heap_allocs_this_frame)
+    };
+    let (measured_digest, measured) = {
+        let job =
+            FrameJob::with_identity_in(&mut arena, &plan, &mono, &binning, config, pg6_identity())
+                .map_err(|error| fail(format!("PG-6 measured job: {error}")))?;
+        job.render_into(PG6_THREADS, &mut frame)
+            .map_err(|error| fail(format!("PG-6 measured render: {error}")))?;
+        let digest =
+            frame_digest(&frame).map_err(|error| fail(format!("PG-6 measured digest: {error}")))?;
+        (digest, job.allocation_stats())
+    };
+    let digest_equal = warm_digest == measured_digest;
+    let allocation_free = measured.heap_allocs_this_frame == 0;
+    ctx.record_asset(
+        "pg6.primitive-steady-allocations.definition",
+        definition.to_tsv().as_bytes(),
+    );
+    ctx.event(
+        LogEvent::new("performance.pg6.allocations")
+            .field("scene", case.name)
+            .field("warm_digest", warm_digest.to_string())
+            .field("measured_digest", measured_digest.to_string())
+            .field("warm_allocations", warm_allocations)
+            .field("measured_allocations", measured.heap_allocs_this_frame)
+            .field("arena_bytes", measured.arena_buffer_bytes)
+            .field("pool_slots", measured.pool_slots),
+    );
+    ctx.counter("pg6_digest_equal", u64::from(digest_equal));
+    ctx.counter("pg6_measured_allocations", measured.heap_allocs_this_frame);
+    if !digest_equal || !allocation_free {
+        return Err(fail(format!(
+            "PG-6 arena reuse drifted: digest_equal={digest_equal}, measured_allocations={}",
+            measured.heap_allocs_this_frame
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("pg6_digest_equal", 1)
+        .with_counter("pg6_measured_allocations", 0))
+}
+
 // ---------------------------------------------------------------------------
 // Log-machinery scenarios
 // ---------------------------------------------------------------------------
@@ -1654,6 +1731,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::str_eq("roundtrip_equal", "true"),
                 FieldPred::u64_ge("replay_reuse", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.pg6_arena_reuse_zero_allocations.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(pg6_allocation_reuse_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("pg6_digest_equal", 1),
+            counter_eq("pg6_measured_allocations", 0),
+        ],
+        vec![LogExpect::span_present(
+            "performance.pg6.allocations",
+            vec![
+                FieldPred::str_eq("scene", "circle_tex_label.v1"),
+                FieldPred::u64_eq("measured_allocations", 0),
             ],
         )],
     ));

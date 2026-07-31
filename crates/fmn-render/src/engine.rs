@@ -1683,6 +1683,15 @@ impl<'a> FrameJob<'a> {
         }
 
         let tile = self.binning.tiling().fine_tile.max(1) as usize;
+        // Size the requested team before any worker can begin draining the
+        // queue. Lazy creation inside spawned closures made warm-up depend on
+        // scheduling: one fast worker could finish and return its slot before
+        // a late closure checked out, leaving a later frame to grow the pool.
+        // Synchronous preparation makes frame-one sizing deterministic and
+        // every subsequent checkout allocation-free for the same geometry.
+        self.arena()
+            .workers
+            .prepare::<K>(tile, self.cols as usize, threads.max(1));
         let stride = dst.layout().stride(0);
         let band_bytes = stride * tile;
         let plane = dst.plane_mut(0);
@@ -2326,8 +2335,9 @@ impl<K: PixelKernel> Worker<K> {
 /// `tile_classes` is resized on checkout when the column count differs.
 ///
 /// Sizing is by use, which is sizing by the execution plan one level down:
-/// a render team of `t` threads checks out exactly `t` slots on the first
-/// frame, and the pool never grows past the largest team it has served.
+/// a render team of `t` threads synchronously installs exactly `t` slots on
+/// the first frame, and the pool never grows past the largest team it has
+/// served for that kernel and tile width.
 pub(crate) struct WorkerPool {
     certified_scalar: KernelSlots<CertifiedScalar>,
     certified_tier: KernelSlots<CertifiedBuildTier>,
@@ -2395,6 +2405,41 @@ impl WorkerPool {
             + idle(&self.fast_tier)
     }
 
+    /// Synchronously size one kernel/tile sub-pool for the requested render
+    /// team before fan-out.
+    ///
+    /// Doing this outside the spawned closures is what makes the warm-up
+    /// independent of which worker the scheduler starts first. Existing slots
+    /// are also brought to the current column count here, so checkout cannot
+    /// discover a late `tile_classes` growth after the warm frame.
+    fn prepare<K: PixelKernel>(&self, tile: usize, cols: usize, workers: usize) {
+        let sub = K::sub_pool(self);
+        let mut slots = sub.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut matching = 0usize;
+        for worker in slots.iter_mut().filter(|worker| worker.tile == tile) {
+            matching += 1;
+            if worker.tile_classes.len() != cols {
+                if worker.tile_classes.capacity() < cols {
+                    self.allocs
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                worker.tile_classes.resize(cols, CoverageClass::Empty);
+            }
+        }
+        while matching < workers {
+            self.allocs.fetch_add(
+                Worker::<K>::SCRATCH_ALLOCATIONS,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if slots.len() == slots.capacity() {
+                self.allocs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            slots.push(Worker::<K>::new(tile, cols));
+            matching += 1;
+        }
+    }
+
     /// Take a worker for `tile`, creating one on first use; `cols` re-sizes
     /// the per-tile class row if the grid changed under a reused slot.
     fn checkout<K: PixelKernel>(&self, tile: usize, cols: usize) -> PooledWorker<'_, K> {
@@ -2422,6 +2467,7 @@ impl WorkerPool {
         }
         PooledWorker {
             pool: sub,
+            allocs: &self.allocs,
             worker: Some(worker),
         }
     }
@@ -2430,6 +2476,7 @@ impl WorkerPool {
 /// A checked-out worker; returns to its sub-pool on drop.
 struct PooledWorker<'a, K: PixelKernel> {
     pool: &'a KernelSlots<K>,
+    allocs: &'a std::sync::atomic::AtomicU64,
     worker: Option<Worker<K>>,
 }
 
@@ -2452,11 +2499,16 @@ impl<K: PixelKernel> std::ops::DerefMut for PooledWorker<'_, K> {
 impl<K: PixelKernel> Drop for PooledWorker<'_, K> {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
-            self.pool
+            let mut slots = self
+                .pool
                 .slots
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(worker);
+                .unwrap_or_else(PoisonError::into_inner);
+            if slots.len() == slots.capacity() {
+                self.allocs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            slots.push(worker);
         }
     }
 }
@@ -3010,7 +3062,10 @@ mod tests {
                         stats.heap_allocs_this_frame > 0,
                         "frame 1 is the warm-up: it must size the arena"
                     );
-                    assert!(stats.pool_slots > 0, "the worker pool must hold slots");
+                    assert_eq!(
+                        stats.pool_slots, 4,
+                        "warm-up must size the requested worker team before fan-out"
+                    );
                     warm = Some(stats);
                     first_digest = Some(digest);
                 }
@@ -3037,6 +3092,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Even a one-band frame must warm the whole requested team. Without
+    /// synchronous preparation, the first worker can finish that single band
+    /// and return its slot before later closures start, making the next frame's
+    /// allocation count depend on scheduler timing.
+    #[test]
+    fn one_band_warmup_sizes_the_requested_team_before_fanout() {
+        let stage = Stage::new();
+        let cfg = FrameConfig::new(
+            Viewport {
+                width: 16,
+                height: 16,
+            },
+            ScreenMap::default(),
+            LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        let tiling = Tiling {
+            macro_tile: 16,
+            fine_tile: 16,
+        };
+        let (plan, mono, binning) = derive(&stage, cfg, tiling);
+        let mut arena = FrameArena::new();
+        let mut buffer = FrameBuffer::new(cfg.layout().expect("layout"));
+
+        let warm = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+            .expect("matching warm frame artifacts");
+        warm.render_into(4, &mut buffer)
+            .expect("the warm frame renders");
+        let warm_stats = warm.allocation_stats();
+        assert_eq!(warm_stats.pool_slots, 4);
+        assert!(warm_stats.heap_allocs_this_frame > 0);
+        drop(warm);
+
+        let measured = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+            .expect("matching measured frame artifacts");
+        measured
+            .render_into(4, &mut buffer)
+            .expect("the measured frame renders");
+        let measured_stats = measured.allocation_stats();
+        assert_eq!(measured_stats.pool_slots, 4);
+        assert_eq!(measured_stats.heap_allocs_this_frame, 0);
     }
 
     /// The brute-force reference: the same tiling and the same classification,

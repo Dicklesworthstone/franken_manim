@@ -57,10 +57,14 @@ Existing repository evidence remains distinct:
 - W1's Python Reference report is calibration-only shared-host evidence, not a
   PG-1 denominator.
 - PG-5's `{1,4,16}` certified corpus is already a blocking per-commit proof.
+- PG-6's primitive steady-state allocation producer covers the complete
+  committed scene-golden corpus. Peak RSS and the one-hour leak soak still
+  require their own lifecycle-owned producers and remain inconclusive when
+  their evidence is absent.
 - the ignored native Metal probes are PG-A measurement producers, not
   committed pinned-profile baselines.
-- Studio's edit-to-frame report and the frame-pool structural tests are inputs
-  to PG-4/PG-6; neither alone closes the whole gate.
+- Studio's edit-to-frame report remains an input to PG-4, not a whole-gate
+  result.
 
 Pinned profile fingerprints, raw observed baseline bundles, and runnable
 scenario producers land separately. Until then, target-only baselines must
@@ -79,6 +83,9 @@ provides NDJSON-only policy, evidence, and producer commands:
   verifies identity, producer commit, and exact digest.
 - `pg2-definitions` reports the exact compiled benchmark-definition and C7/C10
   configuration digests for both canonical raster workloads.
+- `pg6-definitions` reports the exact compiled corpus-lock, benchmark,
+  configuration, and frame-result self-golden identities for the primitive
+  steady-state allocation workload.
 - `pg7-definitions` reports the exact compiled benchmark-definition,
   configuration, fixture-input, and result-self-golden digests for all three
   native-typesetting workloads.
@@ -88,6 +95,11 @@ provides NDJSON-only policy, evidence, and producer commands:
   canonical raw sample bundle. Both output paths must be distinct canonical
   files below `tests/artifacts/perf/`; their parent directories must already
   exist and may not contain symlinks, and existing paths are never overwritten.
+- `measure-pg6 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` applies
+  the same identity and exclusive-publication rules to the allocation corpus.
+  It renders one warm frame and one caller-buffer/arena reuse frame for every
+  committed scene, retaining both frame digests and the engine-owned allocation
+  ledger for each measured frame.
 - `measure-pg7 <baseline.tsv> <producer-commit> <cache-root-or-dash>
   <trace.tsv> <raw.tsv>` applies the same identity and exclusive-publication
   rules to PG-7. `formula-cached` requires a fresh, nonexistent cache root
@@ -102,8 +114,8 @@ output I/O failure. A measurement record has status
 to run on and cannot turn a target-only baseline into green evidence. Until
 fm-inr.1 lands live pinned-host attestation, PG-2 output forcibly records
 `bare_metal=false` and `isolated=false` even when a supplied context claims
-otherwise; PG-7 does the same. The profile name and fingerprints are retained
-for calibration, but the common evaluator must classify the bundle as
+otherwise; PG-6 and PG-7 do the same. The profile name and fingerprints are
+retained for calibration, but the common evaluator must classify the bundle as
 host-unqualified or an identity mismatch rather than pass it.
 
 ## Canonical PG-2 workloads
@@ -133,6 +145,33 @@ Zero elapsed time or numeric overflow is retained as an invalid sample, never
 replaced by a plausible throughput. The final frame is canonically hashed
 outside the timed region, and the trace itself is the batch's
 content-addressed `phase-trace` evidence row.
+
+## Canonical PG-6 allocation workload
+
+The `fmn-perf-pg6-definition/1` bytes bind all 27 committed
+`scene_goldens` cases in corpus order, the certified lock-file digest, the
+320×180 semantic configuration, certified CPU at the artifact's crate-wide
+compiled tier, fixed four-thread scheduling, raw RGBA16F output, and the exact
+aggregate frame-result self-golden. This is the
+`primitive-steady-allocations` policy row only; it neither estimates nor
+substitutes for `gallery-4k-3d-peak` or `one-hour-soak-leak`.
+
+For each scene the producer creates a fresh `FrameArena`, renders one excluded
+warm frame to size every typed bump pool and worker scratch slot, then creates a
+second `FrameJob` over the same arena and renders into the same frame buffer.
+The second job's `heap_allocs_this_frame` counter is retained as one valid
+`allocations` sample. The engine owns that counter: every typed-pool capacity
+growth and new/outgrown worker slot is counted at its allocation point, without
+an allocator shim. The exact policy requires every sample to equal zero, so a
+single nonzero scene blocks even when the median remains zero.
+
+The `fmn-perf-pg6-trace/1` artifact retains, per scene, the warm and measured
+frame digests, warm allocation count, measured allocation count, reserved arena
+bytes, and worker-pool slot count. Warm and measured frame digests must be equal,
+and the ordered corpus aggregate must match the compiled self-golden before the
+producer emits evidence. The measured batch still forces host qualification to
+false until fm-inr.1 supplies live attestation; this makes the output useful for
+calibration without inventing a closeable whole-PG-6 verdict.
 
 ## Canonical PG-7 workloads
 
