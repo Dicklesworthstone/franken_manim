@@ -363,6 +363,12 @@ fn test_item_line_ends(code: &str, depth: &mut usize, started: &mut bool) -> boo
 /// So the attribute now skips **the item it introduces** and nothing more: a
 /// `use`/statement form runs to its `;`, and a block form (`mod`, `fn`, `impl`)
 /// runs until its braces balance.
+///
+/// Production lines are searched through a rolling whitespace-free window.
+/// Rust permits a method name and its call parentheses on different physical
+/// lines, so matching each line independently would leave `.ln_1p\n()` and
+/// `.mul_add\n()` as silent holes. The window retains only the longest needle's
+/// prefix budget and resets across a skipped test item.
 fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Offence>) -> usize {
     let Ok(text) = std::fs::read_to_string(path) else {
         return 0;
@@ -371,12 +377,22 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
     let mut scanned = 0;
     let mut skip_depth: Option<usize> = None;
     let mut skip_started = false;
+    let carry_limit = needles
+        .iter()
+        .map(|(needle, _)| needle.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let mut carry = String::new();
+    let mut carry_lines = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let source_lines: Vec<_> = text.lines().collect();
 
-    for (i, (line, code)) in text.lines().zip(code_text.lines()).enumerate() {
-        let trimmed = line.trim_start();
-
+    for (i, code) in code_text.lines().enumerate() {
         // Inside a `#[cfg(test)]` item: consume it, then resume.
         if let Some(depth) = skip_depth.as_mut() {
+            carry.clear();
+            carry_lines.clear();
             if test_item_line_ends(code, depth, &mut skip_started) {
                 skip_depth = None;
                 skip_started = false;
@@ -385,6 +401,8 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
         }
 
         if let Some(attribute_end) = test_only_cfg_end(code) {
+            carry.clear();
+            carry_lines.clear();
             let mut depth = 0;
             skip_started = false;
             let item_on_attribute_line = &code[attribute_end..];
@@ -398,16 +416,37 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
 
         scanned += 1;
         let searchable: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let carry_len = carry.len();
+        let mut combined = String::with_capacity(carry_len + searchable.len());
+        combined.push_str(&carry);
+        combined.push_str(&searchable);
+        let mut combined_lines = carry_lines.clone();
+        combined_lines.resize(combined.len(), i + 1);
         for (needle, name) in needles {
-            if searchable.contains(needle.as_str()) {
+            for (offset, _) in combined.match_indices(needle.as_str()) {
+                if offset + needle.len() <= carry_len {
+                    continue;
+                }
+                let line = combined_lines.get(offset).copied().unwrap_or(i + 1);
+                if !seen.insert((line, name.clone())) {
+                    continue;
+                }
                 out.push(Offence {
                     path: format!("{label}/{}", path.file_name().unwrap().to_string_lossy()),
-                    line: i + 1,
-                    text: trimmed.to_string(),
+                    line,
+                    text: source_lines
+                        .get(line.saturating_sub(1))
+                        .map_or_else(String::new, |source| source.trim_start().to_owned()),
                     needle: name.clone(),
                 });
             }
         }
+        let mut carry_start = combined.len().saturating_sub(carry_limit);
+        while !combined.is_char_boundary(carry_start) {
+            carry_start += 1;
+        }
+        carry = combined[carry_start..].to_owned();
+        carry_lines = combined_lines[carry_start..].to_vec();
     }
     scanned
 }
@@ -547,6 +586,12 @@ let gamma = aa.gamma();
 let ln_gamma = bb.ln_gamma();
 let erf = cc.erf();
 let erfc = dd.erfc();
+let split_transcendental = ee
+    .ln_1p
+    ();
+let split_fma = ff
+    .mul_add
+    (gg, hh);
 // this comment mentions .sin() and f64::cbrt and must not count
 /// nor must this doc comment's `.exp()`
 let string_only = \".log(\";
@@ -582,7 +627,8 @@ let after_test_only_cfg = q.exp_m1();
     names.dedup();
     // Four claims in one comparison:
     //  * the method and path forms are both caught, including fully qualified
-    //    `<f64>::` syntax and whitespace left by an intervening comment;
+    //    `<f64>::` syntax, whitespace left by an intervening comment, and a
+    //    method name whose call parentheses begin on the next source line;
     //  * comments, strings, `sqrt`, `to_radians` and a qualified
     //    `fmn_dmath::` call are all legal and must not appear;
     //  * `powi`, `sin_cos`, and the four pinned-nightly libc-backed functions
@@ -607,6 +653,7 @@ let after_test_only_cfg = q.exp_m1();
             "exp_m1",
             "f64::cos",
             "gamma",
+            "ln_1p",
             "ln_gamma",
             "powf",
             "powi",
@@ -624,7 +671,7 @@ let after_test_only_cfg = q.exp_m1();
     fma_names.sort_unstable();
     assert_eq!(
         fma_names,
-        ["<f64>::mul_add", "mul_add"],
+        ["<f64>::mul_add", "mul_add", "mul_add"],
         "the FMA needles missed a hand-written contraction"
     );
 
