@@ -723,8 +723,7 @@ fn create_dir_all(path: &Path) -> Result<(), io::Error> {
 /// The manifest's format version tag; the first line of `MANIFEST.tsv`.
 pub const MANIFEST_HEADER: &str = "# fmn-fuzz-manifest v1";
 
-const MANIFEST_COLUMNS: &str =
-    "# columns: target\tseed\tci_cases\tfull_cases\tmax_input_bytes\tmax_output_bytes\toutcome_classes";
+const MANIFEST_COLUMNS: &str = "# columns: target\tseed\tci_cases\tfull_cases\tmax_input_bytes\tmax_output_bytes\toutcome_classes";
 const MAX_MANIFEST_BYTES: usize = 1 << 20;
 const MAX_MANIFEST_LINE_BYTES: usize = 16 << 10;
 const MAX_MANIFEST_FIELD_BYTES: usize = 4096;
@@ -1070,9 +1069,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             ));
         }
         if max_input_bytes == 0 {
-            return Err(format!(
-                "line {lineno}: max_input_bytes must be positive"
-            ));
+            return Err(format!("line {lineno}: max_input_bytes must be positive"));
         }
         rows.push(ManifestRow {
             target: target.to_owned(),
@@ -1340,11 +1337,11 @@ mod tests {
         );
         assert!(
             parse_manifest(&document(&format!(
-                "# pending: future_target — \n{}",
+                "# pending: future_target — \tnote\n{}",
                 valid_row("tex_math", "accepted")
             )))
-            .expect_err("empty pending note must be refused")
-            .contains("nonempty")
+            .expect_err("padded pending note must be refused")
+            .contains("unpadded")
         );
 
         for (row, expected) in [
