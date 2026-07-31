@@ -661,7 +661,7 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/performance/PERF_GATES.tsv");
         let output = catalog(path.as_os_str()).unwrap();
-        assert_eq!(output.lines().count(), 19);
+        assert_eq!(output.lines().count(), 22);
         assert!(output.lines().all(|line| {
             line.starts_with("{\"schema\":\"fmn-perf-cli/1\"") && line.ends_with('}')
         }));

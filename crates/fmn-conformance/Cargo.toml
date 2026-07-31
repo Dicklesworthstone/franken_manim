@@ -29,6 +29,10 @@ fmn-dmath.workspace = true
 # The Gauntlet consumes the pinned math engine to compute the public
 # coverage ratchet (§11.5, fm-mol).
 fmd-math.workspace = true
+# The font+license bundle manifest (fm-aef) is generated and drift-checked
+# against the pinned parser's actual bundled faces — the same bytes the
+# engine ships, so the manifest's hashes are the input closure's identity.
+fmd-font.workspace = true
 
 [dev-dependencies]
 # Gauntlet-only integration proofs for fm-3df/fm-hv4. These remain outside the
@@ -37,6 +41,16 @@ fmd-math.workspace = true
 fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-runtime.workspace = true
+# W10 e2e CLI scenarios drive fmn_cli's in-process runner (fm-fjq; dev-only,
+# so the shipped edge set and the crate DAG gate are unaffected).
+fmn-cli.workspace = true
+# The §16.5 fuzz campaign's targets (tests/fuzz_campaign.rs): the pinned font
+# parser and the config YAML subset. Same posture as above — the campaign is a
+# Gauntlet consumer, not a shipped edge.
+fmn-config.workspace = true
+# PG-8 (fm-zoi): the binding-tax producer drives the real bridge. pyo3 stays
+# out of the shipped closure (D3) — this is a Gauntlet-only test edge.
+fmn-python.workspace = true
 
 [lints]
 workspace = true

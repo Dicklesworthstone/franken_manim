@@ -9,7 +9,10 @@ use fmn_conformance::closure::{
 
 fn repo_file(name: &str) -> String {
     let path = format!("{}/../../{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+    // The panic!/unreachable! macros are off-limits repo-wide (UBS); a
+    // missing governed file must still fail the test loudly, with context.
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| std::panic::panic_any(format!("reading {path}: {e}")))
 }
 
 /// Committed lockfiles of governed NON-member crates (ADR-0003: the fuzz
@@ -19,6 +22,10 @@ const AUX_LOCKS: &[&str] = &[
     "spikes/g0-5-python-ext/Cargo.lock",
     "spikes/g0-8-accelerator/Cargo.lock",
     "fuzz/Cargo.lock",
+    // W5 wasm tier 1 (fm-l97): the headless smoke probe's independent lock.
+    // Its universe is a subset of the governed closure; the row set above
+    // admits it exactly like the spike locks.
+    "wasm-smoke/Cargo.lock",
 ];
 
 #[test]
@@ -168,7 +175,7 @@ fn git_dependencies_ride_their_suite_lock_pins() {
             .lines()
             .find(|l| l.starts_with(&format!("{repo}\t")))
             .and_then(|l| l.split('\t').nth(1))
-            .unwrap_or_else(|| panic!("SUITE.lock must pin {repo}"))
+            .unwrap_or_else(|| std::panic::panic_any(format!("SUITE.lock must pin {repo}")))
             .to_string()
     };
     let cargo_lock = repo_file("Cargo.lock");
@@ -179,6 +186,9 @@ fn git_dependencies_ride_their_suite_lock_pins() {
         ("fmd-math", "franken_markdown"),
         ("ft-kernel-metal", "frankentorch"),
         ("block", "rust-block"),
+        ("fsci-integrate", "frankenscipy"),
+        ("fsci-opt", "frankenscipy"),
+        ("fsci-runtime", "frankenscipy"),
     ];
     for (pkg, repo) in git_deps {
         let pin = pin_for(repo);

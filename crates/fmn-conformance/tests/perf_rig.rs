@@ -9,7 +9,7 @@ const POLICY_CATALOG: &str = include_str!("../../../docs/performance/PERF_GATES.
 #[test]
 fn committed_policy_catalog_is_complete_and_canonically_round_trips() {
     let policies = parse_policy_catalog(POLICY_CATALOG).expect("committed policy catalog");
-    assert_eq!(policies.len(), 18);
+    assert_eq!(policies.len(), 21);
 
     let rendered = render_policy_catalog(&policies);
     let reparsed = parse_policy_catalog(&rendered).expect("rendered policy catalog");
@@ -46,6 +46,13 @@ fn committed_policy_catalog_is_complete_and_canonically_round_trips() {
         policy.gate == GateId::Pg8
             && policy.scope == GateScope::PythonOnly
             && policy.target == Some(1_100_000)
+    }));
+    assert!(policies.iter().any(|policy| {
+        policy.gate == GateId::Pg8
+            && policy.scenario == "per-frame-callback"
+            && policy.unit == MetricUnit::Nanoseconds
+            && policy.scope == GateScope::PythonOnly
+            && policy.target == Some(108_999_999)
     }));
     assert!(policies.iter().all(|policy| {
         (policy.gate == GateId::Pg8) == (policy.scope == GateScope::PythonOnly)

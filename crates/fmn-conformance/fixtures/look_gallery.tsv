@@ -1,0 +1,8 @@
+# fmn-look-gallery v1
+# revision: 1
+# columns: panel	reference	render	verdict	changed
+glow	gallery/reference_captures/glow.png	docs/g0/g0-2-renders/fmn-glow.png	at-least-as-good	fm-t1v seed 2026-07-30: G1 verdict sheet (docs/gates/G1-core-2d-evidence.md); falloff character matches G0-2 L7; registration close, disc reads slightly larger because radius and visible extent are different quantities
+gradient_fills	gallery/reference_captures/gradient_fills.png	docs/g0/g0-2-renders/fmn-gradient-fills.png	different-but-fine	fm-t1v seed 2026-07-30: G1 marshal recommendation, owner sign-off pending in docs/gates/G1-core-2d-evidence.md; Behavior-Noted BN-06 fill; smooth true-arclength MVC field vs Reference per-vertex triangle-fan seam
+joints_and_caps	gallery/reference_captures/joints_and_caps.png	docs/g0/g0-2-renders/fmn-joints-and-caps.png	different-but-fine	fm-t1v seed 2026-07-30: G1 verdict sheet; Behavior-Noted BN-06 strokes; four corner kinds become one round join with no notch (G0-2 L6)
+lighting_3d	gallery/reference_captures/lighting_3d.png	docs/g0/g0-2-renders/fmn-lighting-3d.png	at-least-as-good	fm-t1v seed 2026-07-30: G1 verdict sheet; whole-frame normalized RMSE 0.00212857 and SSIM distortion 0.000145104 registered as smoke alarms
+self_intersections	gallery/reference_captures/self_intersections.png	docs/g0/g0-2-renders/fmn-self-intersections.png	at-least-as-good	fm-t1v seed 2026-07-30: G1 verdict sheet; the Reference double-composites the winding-2 star core through the signed-alpha trick, ours renders the uniform nonzero fill
