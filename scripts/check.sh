@@ -17,6 +17,13 @@ cargo check -p fmn-cli --features batch --all-targets
 echo "==> cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets"
 cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets
 
+# W5 wasm tier 1 (fm-l97, §10.7): the recorded wasm32 gate. The named crates
+# are the render axis the browser build compiles; this must stay green for
+# the fmn-wasm surface to have a foundation. Requires the
+# wasm32-unknown-unknown rustup target.
+echo "==> cargo check --target wasm32-unknown-unknown (W5 wasm tier-1 axis)"
+cargo check --target wasm32-unknown-unknown -p fmn-render -p fmn-scene -p fmn-geom -p fmn-mobject -p fmn-anim -p fmn-core
+
 echo "==> cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
 
@@ -46,5 +53,17 @@ fi
 
 echo "==> crate-DAG check (workspace graph vs plan §19)"
 python3 scripts/check_crate_dag.py
+
+# W5 wasm tier 1 headless smoke: instantiate the compiled probe in a real JS
+# wasm VM and prove the render path executes there deterministically, the
+# browser clock capability reads the host clocks, the process capability
+# fails closed, and the topology is single-CPU. Skipped (loudly) only where
+# no JS runtime exists; CI has node.
+if command -v node >/dev/null 2>&1; then
+    echo "==> wasm32 headless smoke (node)"
+    ./wasm-smoke/run.sh
+else
+    echo "==> wasm32 headless smoke SKIPPED: no node on PATH (wasm-smoke/run.sh needs node or bun)"
+fi
 
 echo "OK: all gates green"

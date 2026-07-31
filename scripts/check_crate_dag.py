@@ -41,7 +41,7 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-render": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-frame", "fmn-codec", "fmn-hash", "fmn-cache"},
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},
-    "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex"},  # dmath: tip/arc trigonometry (ADR-0014)
+    "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex", "fmn-codec"},  # dmath: tip/arc trigonometry (ADR-0014); codec: ImageMobject decode (§10.6, fm-2u6)
     "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash"},  # hash: journal serialization + digests (§13.4, fm-y7u)
     # hash: canonical supervisor/worker IPC; cache: supervisor-owned
     # checkpoints and journals survive scene-worker replacement (§13.3,
@@ -92,6 +92,24 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-tex",
     },
     "fmn-python": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-anim", "fmn-library", "fmn-scene"},
+    # W5 tier-1 wasm surface (fm-l97, §10.7): the browser leaf. dmath is a
+    # direct dependency because scene construction evaluates parametric
+    # transcendentals and ADR-0014 forbids routing around the sovereign
+    # funnel; frame owns the certified Rgba16F→Rgba8 transfer the canvas
+    # path consumes. Neither is reimplemented here. hash: the tier-2 player
+    # (fm-oee) decodes the FMTL/1 timeline bundle, a §6.7 canonical
+    # container — the format layer itself, never a reimplemented parser.
+    "fmn-wasm": {
+        "fmn-core",
+        "fmn-dmath",
+        "fmn-geom",
+        "fmn-mobject",
+        "fmn-anim",
+        "fmn-render",
+        "fmn-scene",
+        "fmn-frame",
+        "fmn-hash",
+    },
 }
 
 LAYER = {name: i for i, name in enumerate(EXPECTED)}

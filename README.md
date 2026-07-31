@@ -218,6 +218,34 @@ fmn batch render_all.toml
 fmn doctor
 ```
 
+## The browser demo (W5 wasm tier 1)
+
+The frame renderer compiles to `wasm32-unknown-unknown` and draws to a
+`<canvas>` (single-threaded; not in the certified matrix, but standard-mode
+determinism holds):
+
+```bash
+wasm-pack build --target web --out-dir ../../demo/wasm/pkg crates/fmn-wasm
+python3 -m http.server 8080 --directory demo/wasm   # open http://localhost:8080/
+```
+
+See `demo/wasm/README.md` for the `cargo` + `wasm-bindgen` CLI fallback and
+the R19 artifact-size budget (`crates/fmn-wasm/SIZE_BUDGET.tsv`).
+
+## The timeline player (W5 wasm tier 2)
+
+`demo/wasm/player.html` plays a **serialized timeline bundle** (FMTL/1,
+`docs/FMNT1_TIMELINE_BUNDLE.md`) with no scene code in the browser:
+`FmnPlayer` decodes the bundle, reconstructs pure segments from their
+begin/end snapshots through the contract's record-lerp law (stateful
+segments replay recorded snapshots), and renders through the same tier-1
+path — with scrub, seek, and label jumps:
+
+```bash
+cargo run -p fmn-wasm --example export_bundle   # writes demo/wasm/bundle.fmtl
+python3 -m http.server 8080 --directory demo/wasm   # open http://localhost:8080/player.html
+```
+
 ## Installation
 
 **1. Install script (recommended).** Detects your platform, fetches the signed release binary (with the right SIMD build tier), and installs `fmn`:

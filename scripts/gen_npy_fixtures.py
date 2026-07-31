@@ -18,8 +18,17 @@ Outputs (committed under crates/fmn-conformance/fixtures/npy/):
   arc_quarter_n4.npy    quadratic_bezier_points_for_arc(TAU/4, 4)   (9, 3) f64
   arc_full_n8.npy       quadratic_bezier_points_for_arc(TAU, 8)     (17, 3) f64
   arc_neg_third_n2.npy  quadratic_bezier_points_for_arc(-TAU/3, 2)  (5, 3) f64
+  arc_half_n8.npy       quadratic_bezier_points_for_arc(TAU/2, 8)   (17, 3) f64
   partial_quad.npy      partial_quadratic_bezier_points(q, .25, .75) (3, 3) f64
+  partial_quad_first_half.npy   partial_...(q, 0.0, 0.5)            (3, 3) f64
+  partial_quad_second_half.npy  partial_...(q, 0.5, 1.0)            (3, 3) f64
+  quad_eval.npy         bezier(q)(t) at t = 0, 1/8, ..., 1          (9, 3) f64
+  integer_interpolate.npy  integer_interpolate(0, 10, a) pairs      (5, 2) f64
   MANIFEST.tsv          name, dtype, shape, sha256 + provenance header
+
+The quad_eval/partial_quad/integer_interpolate rows are the §16.3
+"positional API results" (fm-t1v): pure functions of the curve
+parameters whose formulas intentionally coincide with ours.
 
 The Rust side (tests/npy_interchange.rs) hardcodes the same case parameters,
 recomputes with fmn-geom, and compares point-for-point; the manifest hashes
@@ -74,11 +83,50 @@ def fixtures():
         np.asarray(bz.quadratic_bezier_points_for_arc(-TAU / 3.0, 2), dtype=np.float64),
     )
     yield (
+        "arc_half_n8",
+        "quadratic_bezier_points_for_arc(TAU/2, n_components=8)",
+        np.asarray(bz.quadratic_bezier_points_for_arc(TAU / 2.0, 8), dtype=np.float64),
+    )
+    yield (
         "partial_quad",
         "partial_quadratic_bezier_points(PARTIAL_QUAD, 0.25, 0.75)",
         np.asarray(
             bz.partial_quadratic_bezier_points(PARTIAL_QUAD, 0.25, 0.75),
             dtype=np.float64,
+        ),
+    )
+    yield (
+        "partial_quad_first_half",
+        "partial_quadratic_bezier_points(PARTIAL_QUAD, 0.0, 0.5)",
+        np.asarray(
+            bz.partial_quadratic_bezier_points(PARTIAL_QUAD, 0.0, 0.5),
+            dtype=np.float64,
+        ),
+    )
+    yield (
+        "partial_quad_second_half",
+        "partial_quadratic_bezier_points(PARTIAL_QUAD, 0.5, 1.0)",
+        np.asarray(
+            bz.partial_quadratic_bezier_points(PARTIAL_QUAD, 0.5, 1.0),
+            dtype=np.float64,
+        ),
+    )
+    # Positional API results (§16.3): evaluate one quadratic along its
+    # parameter, and the integer/residue split the Reference uses to
+    # walk a curve list.
+    quad_fn = bz.bezier(PARTIAL_QUAD)
+    ts = np.arange(9, dtype=np.float64) / 8.0
+    yield (
+        "quad_eval",
+        "bezier(PARTIAL_QUAD)(t) for t in {0, 1/8, ..., 1}",
+        np.asarray([quad_fn(t) for t in ts], dtype=np.float64),
+    )
+    alphas = [0.05, 0.25, 0.5, 0.75, 0.95]
+    yield (
+        "integer_interpolate",
+        "integer_interpolate(0, 10, a) for a in {0.05, 0.25, 0.5, 0.75, 0.95}",
+        np.asarray(
+            [bz.integer_interpolate(0, 10, a) for a in alphas], dtype=np.float64
         ),
     )
 
@@ -91,6 +139,7 @@ def ref_commit() -> str:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=15,
             ).stdout.strip()
         )
     except Exception:
@@ -101,7 +150,9 @@ def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     rows = []
     for name, formula, arr in fixtures():
-        assert arr.dtype == np.float64 and arr.ndim == 2 and arr.shape[1] == 3, name
+        assert (
+            arr.dtype == np.float64 and arr.ndim == 2 and arr.shape[1] in (2, 3)
+        ), name
         # The Reference sometimes hands back F-contiguous views; the
         # interchange subset is C order only (crates/fmn-conformance/src/npy.rs).
         arr = np.ascontiguousarray(arr)
