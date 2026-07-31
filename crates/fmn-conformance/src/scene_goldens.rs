@@ -58,7 +58,7 @@ use fmn_core::color::Srgb;
 use fmn_core::constants::{
     BLUE_C, DOWN, GOLD_C, GREEN_B, MAROON_C, PURPLE_B, RED_C, TAU, TEAL_B, WHITE, YELLOW_C,
 };
-use fmn_hash::{Schema, Writer};
+use fmn_hash::{Digest, Schema, Writer, sha256};
 use fmn_library::style::Style;
 use fmn_library::vmobject::{VMobject, v_group};
 use fmn_library::{
@@ -73,6 +73,7 @@ use fmn_render::bin::{ScreenMap, Tiling, Viewport};
 use fmn_render::engine::FrameConfig;
 use fmn_tex::TexEngine;
 use fmn_text::FontBook;
+use std::collections::BTreeSet;
 
 use crate::golden::{GoldenStore, Scope};
 
@@ -94,6 +95,63 @@ pub const CORPUS_SCHEMA: Schema = Schema::new(*b"FMNS", 21, 1, 0);
 
 /// The lock-file family these artifacts live under.
 pub const SUITE: &str = "scene_goldens";
+
+/// Canonical first row of the certified corpus lock.
+pub const CERTIFIED_LOCK_HEADER: &str = "# fmn-golden-lock v1 suite=scene_goldens key=certified";
+
+/// The committed lock bytes that bind the corpus accepted by performance
+/// producers and certified-matrix tests.
+pub const CERTIFIED_LOCK: &str = include_str!("../goldens/scene_goldens.certified.lock");
+
+/// SHA-256 identity of [`CERTIFIED_LOCK`].
+#[must_use]
+pub fn certified_lock_digest() -> Digest {
+    sha256(CERTIFIED_LOCK.as_bytes())
+}
+
+/// Validate that the embedded certified lock and compiled corpus name exactly
+/// the same bounded scene set.
+///
+/// This intentionally validates row syntax as well as names: performance
+/// definitions bind the complete lock bytes, so admitting a malformed length
+/// or digest column would make their workload identity stronger than the
+/// artifact the golden rig can actually consume.
+///
+/// # Errors
+/// Returns a line-attributed message for a malformed, missing, duplicate, or
+/// stale lock row.
+pub fn validate_certified_lock() -> Result<(), String> {
+    let mut lines = CERTIFIED_LOCK.lines();
+    if lines.next() != Some(CERTIFIED_LOCK_HEADER) {
+        return Err("scene-golden lock header does not match the certified v1 schema".to_owned());
+    }
+    let expected: BTreeSet<_> = SCENES.iter().map(|case| case.name).collect();
+    let mut actual = BTreeSet::new();
+    for (index, line) in lines.enumerate() {
+        let mut fields = line.split('\t');
+        let name = fields.next().unwrap_or_default();
+        let length = fields.next().unwrap_or_default();
+        let digest = fields.next().unwrap_or_default();
+        if name.is_empty()
+            || fields.next().is_some()
+            || length.parse::<u64>().is_err()
+            || Digest::from_hex(digest).is_err()
+        {
+            return Err(format!("malformed scene-golden lock row {}", index + 2));
+        }
+        if !actual.insert(name) {
+            return Err(format!("duplicate scene-golden lock row {name:?}"));
+        }
+    }
+    if actual != expected {
+        let missing: Vec<_> = expected.difference(&actual).copied().collect();
+        let stale: Vec<_> = actual.difference(&expected).copied().collect();
+        return Err(format!(
+            "scene-golden lock/corpus mismatch: missing {missing:?}, stale {stale:?}"
+        ));
+    }
+    Ok(())
+}
 
 /// The golden store for this corpus: one lock shared by the certified
 /// matrix (see the module docs).

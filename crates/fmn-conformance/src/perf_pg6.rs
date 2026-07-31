@@ -21,7 +21,6 @@ use fmn_render::{
     AllocStats, Binning, EngineIdentity, FrameArena, FrameJob, MonoTable, RenderPlan, Tier,
     frame_digest,
 };
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -46,9 +45,6 @@ const BUILD_PROFILE: &str = "release-perf";
 const THREAD_PROFILE: &str = "fixed-4";
 const CACHE_STATE: &str = "warm-reused-frame-arena";
 const OUTPUT_MODE: &str = "raw-rgba16f";
-const SCENE_GOLDEN_LOCK_HEADER: &str = "# fmn-golden-lock v1 suite=scene_goldens key=certified";
-const SCENE_GOLDEN_LOCK: &str = include_str!("../goldens/scene_goldens.certified.lock");
-
 // Fixed by the reviewed release-perf corpus proof. The aggregate hashes the
 // ordered scene names and both equal frame digests, independently of allocation
 // counts, so a rendering/corpus drift cannot silently retain the same producer
@@ -120,7 +116,7 @@ impl Pg6Definition {
     /// Digest of the committed certified corpus lock that fixes scene input.
     #[must_use]
     pub fn corpus_lock_digest(self) -> Digest {
-        sha256(SCENE_GOLDEN_LOCK.as_bytes())
+        scene_goldens::certified_lock_digest()
     }
 
     /// Aggregate frame identity required before evidence is emitted.
@@ -142,43 +138,7 @@ impl Pg6Definition {
                 SCENES.len()
             )));
         }
-        let mut lines = SCENE_GOLDEN_LOCK.lines();
-        if lines.next() != Some(SCENE_GOLDEN_LOCK_HEADER) {
-            return Err(Pg6Error::Fixture(
-                "scene-golden lock header does not match the certified v1 schema".to_owned(),
-            ));
-        }
-        let expected: BTreeSet<_> = SCENES.iter().map(|case| case.name).collect();
-        let mut actual = BTreeSet::new();
-        for (index, line) in lines.enumerate() {
-            let mut fields = line.split('\t');
-            let name = fields.next().unwrap_or_default();
-            let length = fields.next().unwrap_or_default();
-            let digest = fields.next().unwrap_or_default();
-            if name.is_empty()
-                || fields.next().is_some()
-                || length.parse::<u64>().is_err()
-                || Digest::from_hex(digest).is_err()
-            {
-                return Err(Pg6Error::Fixture(format!(
-                    "malformed scene-golden lock row {}",
-                    index + 2
-                )));
-            }
-            if !actual.insert(name) {
-                return Err(Pg6Error::Fixture(format!(
-                    "duplicate scene-golden lock row {name:?}"
-                )));
-            }
-        }
-        if actual != expected {
-            let missing: Vec<_> = expected.difference(&actual).copied().collect();
-            let stale: Vec<_> = actual.difference(&expected).copied().collect();
-            return Err(Pg6Error::Fixture(format!(
-                "scene-golden lock/corpus mismatch: missing {missing:?}, stale {stale:?}"
-            )));
-        }
-        Ok(())
+        scene_goldens::validate_certified_lock().map_err(Pg6Error::Fixture)
     }
 
     /// Validate that a baseline names precisely this producer.

@@ -30,9 +30,11 @@
 //! - **LIFECYCLE DRILL** — construct → snapshot → transform → snapshot
 //!   with geometry assertions (the `scene_goldens` lifecycle form), plus
 //!   a journal round-trip: bytes out, bytes in, identical content hash,
-//!   and `plan_replay` reusing exactly the non-barrier prefix; PG-6 also
-//!   warms and reuses the real frame arena/output buffer for a registered
-//!   corpus scene and requires an equal digest with zero measured allocations.
+//!   and `plan_replay` reusing exactly the non-barrier prefix; PG-5 binds its
+//!   checked-in definition to a representative `{1, 4, 16}` certified render,
+//!   while PG-6 warms and reuses the real frame arena/output buffer for a
+//!   registered corpus scene and requires an equal digest with zero measured
+//!   allocations.
 //! - **LOG ASSERTIONS** — the preflight typeset fires before frame zero
 //!   with the typeset count recorded; the segment purity classification
 //!   is recorded for play (pure) and wait (stateful); the engine identity
@@ -57,6 +59,7 @@ use fmn_conformance::e2e::{
     RunOutcome, Runner, ScenarioClass, ScenarioError, ScenarioSpec, Status, Surface, Tier,
 };
 use fmn_conformance::golden::Scope;
+use fmn_conformance::perf_pg5::{PG5_DIRECT_THREADS, Pg5Definition, pg5_identity};
 use fmn_conformance::perf_pg6::{PG6_THREADS, Pg6Definition, pg6_identity};
 use fmn_conformance::scene_goldens::{self, TILING};
 use fmn_core::color::Srgb;
@@ -1192,6 +1195,80 @@ fn lifecycle_journal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         .with_counter("journal_mismatch_detected", 1))
 }
 
+/// Bounded E2E registration for PG-5's user-visible definition surface.
+///
+/// The release-perf producer remains the authoritative complete-corpus proof
+/// for direct, frame-parallel, and ordered-pipeline scheduling. This fast
+/// scenario binds that definition to one real committed scene rendered at the
+/// permanent per-commit direct thread counts, so a CLI/definition landing
+/// cannot silently lose its executable certified-render anchor.
+fn pg5_direct_schedule_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let definition =
+        Pg5Definition::new().map_err(|error| fail(format!("PG-5 definition identity: {error}")))?;
+    definition
+        .validate_corpus_lock()
+        .map_err(|error| fail(format!("PG-5 corpus identity: {error}")))?;
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("PG-5 registered scene is missing"))?;
+    let built = (case.build)(scene_goldens::corpus());
+    let config = scene_goldens::frame_config();
+    let mut plan = RenderPlan::new();
+    plan.sync(&built.stage, 0);
+    let mono = MonoTable::build(&plan, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    binning
+        .prune_occluded(&plan)
+        .map_err(|error| fail(format!("PG-5 binning: {error}")))?;
+
+    let mut digests = Vec::with_capacity(PG5_DIRECT_THREADS.len());
+    for threads in PG5_DIRECT_THREADS {
+        let job = FrameJob::with_identity(&plan, &mono, &binning, config, pg5_identity())
+            .map_err(|error| fail(format!("PG-5 {threads}-thread job: {error}")))?;
+        let frame = job
+            .render(threads)
+            .map_err(|error| fail(format!("PG-5 {threads}-thread render: {error}")))?;
+        digests.push(
+            frame_digest(&frame)
+                .map_err(|error| fail(format!("PG-5 {threads}-thread digest: {error}")))?,
+        );
+    }
+    let reference = digests
+        .first()
+        .copied()
+        .ok_or_else(|| fail("PG-5 direct thread profile is empty"))?;
+    let direct_mismatches = u64::try_from(
+        digests
+            .iter()
+            .skip(1)
+            .filter(|&&digest| digest != reference)
+            .count(),
+    )
+    .map_err(|_| fail("PG-5 mismatch count exceeds u64"))?;
+
+    ctx.record_asset(
+        "pg5.certified-thread-matrix.definition",
+        definition.to_tsv().as_bytes(),
+    );
+    ctx.event(
+        LogEvent::new("performance.pg5.direct_schedule")
+            .field("scene", case.name)
+            .field("direct_threads", "1,4,16")
+            .field("direct_mismatches", direct_mismatches)
+            .field("reference_digest", reference.to_string())
+            .field("benchmark_definition", definition.digest().to_string()),
+    );
+    ctx.counter("pg5_direct_threads", PG5_DIRECT_THREADS.len() as u64);
+    ctx.counter("pg5_direct_mismatches", direct_mismatches);
+    if direct_mismatches != 0 {
+        return Err(fail(format!(
+            "PG-5 representative certified render drifted at {direct_mismatches} thread counts"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("pg5_direct_threads", PG5_DIRECT_THREADS.len() as u64)
+        .with_counter("pg5_direct_mismatches", 0))
+}
+
 /// PG-6's user-visible evidence surface, registered end to end: a committed
 /// corpus scene passes through the same warm/reuse arena lifecycle as the
 /// release-perf producer, and the scenario log retains the observable proof.
@@ -1731,6 +1808,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::str_eq("roundtrip_equal", "true"),
                 FieldPred::u64_ge("replay_reuse", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.pg5_definition_direct_schedule.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(pg5_direct_schedule_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("pg5_direct_threads", 3),
+            counter_eq("pg5_direct_mismatches", 0),
+        ],
+        vec![LogExpect::span_present(
+            "performance.pg5.direct_schedule",
+            vec![
+                FieldPred::str_eq("scene", "circle_tex_label.v1"),
+                FieldPred::str_eq("direct_threads", "1,4,16"),
+                FieldPred::u64_eq("direct_mismatches", 0),
             ],
         )],
     ));

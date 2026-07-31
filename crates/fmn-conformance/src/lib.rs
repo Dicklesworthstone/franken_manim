@@ -32,6 +32,10 @@
 //! - the canonical PG-2 producer (fm-inr.2.1) — [`perf_pg2`]: fixed fill and
 //!   stroke fixtures, exact benchmark/configuration digests, bounded raw
 //!   samples, and a content-addressed stage trace over the real Lumen path.
+//! - the canonical PG-5 per-commit producer (fm-inr.3.2) — [`perf_pg5`]: the
+//!   complete certified corpus at `{1,4,16}` requested threads plus real
+//!   frame-parallel and ordered-emitter schedule lanes, expressed as three
+//!   exact mismatch-count samples.
 //! - the canonical PG-6 allocation producer (fm-inr.3.1) — [`perf_pg6`]: one
 //!   warm frame plus one arena/output-buffer reuse frame for every committed
 //!   scene-golden case, with exact engine-owned allocation samples and retained
@@ -95,6 +99,7 @@ pub mod npy;
 pub mod oracles;
 pub mod perf;
 pub mod perf_pg2;
+pub mod perf_pg5;
 pub mod perf_pg6;
 pub mod perf_pg7;
 pub mod perf_pg8;

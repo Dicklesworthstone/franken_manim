@@ -56,7 +56,10 @@ Existing repository evidence remains distinct:
 
 - W1's Python Reference report is calibration-only shared-host evidence, not a
   PG-1 denominator.
-- PG-5's `{1,4,16}` certified corpus is already a blocking per-commit proof.
+- PG-5's canonical producer covers the complete committed scene corpus at
+  `{1,4,16}` plus the production frame-parallel and ordered-emitter paths. Its
+  output remains host-unqualified until fm-inr.1; weekly high-core and
+  certified-platform receipts are separate evidence, not inferred successes.
 - PG-6's primitive steady-state allocation producer covers the complete
   committed scene-golden corpus. Peak RSS and the one-hour leak soak still
   require their own lifecycle-owned producers and remain inconclusive when
@@ -83,6 +86,9 @@ provides NDJSON-only policy, evidence, and producer commands:
   verifies identity, producer commit, and exact digest.
 - `pg2-definitions` reports the exact compiled benchmark-definition and C7/C10
   configuration digests for both canonical raster workloads.
+- `pg5-definitions` reports the exact compiled corpus lock, semantic
+  configuration, fixed certified ExecutionPlan, one-thread reference
+  self-golden, and all three schedule mechanisms.
 - `pg6-definitions` reports the exact compiled corpus-lock, benchmark,
   configuration, and frame-result self-golden identities for the primitive
   steady-state allocation workload.
@@ -95,6 +101,11 @@ provides NDJSON-only policy, evidence, and producer commands:
   canonical raw sample bundle. Both output paths must be distinct canonical
   files below `tests/artifacts/perf/`; their parent directories must already
   exist and may not contain symlinks, and existing paths are never overwritten.
+- `measure-pg5 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` applies
+  the same identity and exclusive-publication rules to the certified schedule
+  matrix. It records exactly three mismatch-count samples: direct `{1,4,16}`
+  renders, the production frame-parallel runtime, and that runtime publishing
+  through the preallocated ordered emitter.
 - `measure-pg6 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` applies
   the same identity and exclusive-publication rules to the allocation corpus.
   It renders one warm frame and one caller-buffer/arena reuse frame for every
@@ -114,9 +125,9 @@ output I/O failure. A measurement record has status
 to run on and cannot turn a target-only baseline into green evidence. Until
 fm-inr.1 lands live pinned-host attestation, PG-2 output forcibly records
 `bare_metal=false` and `isolated=false` even when a supplied context claims
-otherwise; PG-6 and PG-7 do the same. The profile name and fingerprints are
-retained for calibration, but the common evaluator must classify the bundle as
-host-unqualified or an identity mismatch rather than pass it.
+otherwise; PG-5, PG-6, and PG-7 do the same. The profile name and fingerprints
+are retained for calibration, but the common evaluator must classify the
+bundle as host-unqualified or an identity mismatch rather than pass it.
 
 ## Canonical PG-2 workloads
 
@@ -145,6 +156,46 @@ Zero elapsed time or numeric overflow is retained as an invalid sample, never
 replaced by a plausible throughput. The final frame is canonically hashed
 outside the timed region, and the trace itself is the batch's
 content-addressed `phase-trace` evidence row.
+
+## Canonical PG-5 schedule workload
+
+The `fmn-perf-pg5-definition/1` bytes bind all 27 committed `scene_goldens`
+cases in corpus order, their certified lock digest, the 320×180 semantic
+configuration, certified CPU at the artifact's crate-wide compiled tier, raw
+RGBA16F digest output, and an aggregate one-thread reference self-golden. They
+also bind the fixed certified offline `ExecutionPlan`: a synthetic 64-core
+topology whose planner capability is pinned to the portable scalar definition,
+two 32-thread render teams, and at most two frames in flight. The synthetic
+topology defines a host-independent replayable schedule contract; it is not a
+claim about the measurement host or the separately recorded compiled renderer
+tier.
+
+The producer emits exactly three valid `mismatches` samples:
+
+| Sample | Production path | Comparison |
+|---|---|---|
+| `direct-thread-matrix` | Each prepared scene renders directly at requested thread counts `{1,4,16}` | Four- and sixteen-thread digests against the one-thread digest |
+| `frame-parallel` | `FramePipeline` fans the corpus across both certified render teams and emits in sequence | Every emitted digest against its one-thread scene digest |
+| `ordered-pipeline` | The same runtime reserves a capacity-two `OrderedEmitter` ring, renders into reservations, and publishes through a reliable digest sink | Every sink digest against its one-thread scene digest |
+
+The exact blocking policy requires all three samples to be zero; one candidate
+drift therefore reaches the common verifier as a valid nonzero sample instead
+of being hidden by a median. Independently, the ordered one-thread aggregate
+must match the compiled self-golden before any evidence is emitted, preventing
+corpus or renderer drift from silently redefining the reference.
+
+The `fmn-perf-pg5-trace/1` artifact retains every per-scene digest, all three
+mismatch counts, maximum in-flight observations, per-team frame counts, and
+the ordered emitter's maximum outstanding reservations. The producer validates
+that both teams did real work, every frame was emitted in order, and the emitter
+finished with no outstanding or dropped frames. Its batch still forces host
+qualification false until fm-inr.1 supplies live attestation.
+
+This is the permanent per-commit `{1,4,16}` surface only. Weekly `{32,96}+`
+runs and certified-platform receipts are separate lifecycle evidence. When
+those receipts are absent or a DSR platform cannot stage the repository, their
+status is `inconclusive`; the per-commit producer does not manufacture a
+platform verdict.
 
 ## Canonical PG-6 allocation workload
 

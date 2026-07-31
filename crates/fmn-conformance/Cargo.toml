@@ -16,9 +16,11 @@ fmn-geom.workspace = true
 fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-render.workspace = true
+fmn-frame.workspace = true
 fmn-library.workspace = true
 fmn-scene.workspace = true
 fmn-output.workspace = true
+fmn-runtime.workspace = true
 fmn-cache.workspace = true
 fmn-platform.workspace = true
 fmn-text.workspace = true
@@ -35,12 +37,10 @@ fmd-math.workspace = true
 fmd-font.workspace = true
 
 [dev-dependencies]
-# Gauntlet-only integration proofs for fm-3df/fm-hv4. These remain outside the
-# shipped §19 edge set: the conformance library itself does not acquire frame
-# or scheduler dependencies.
-fmn-frame.workspace = true
+# Gauntlet-only integration proofs for codec surfaces. Frame/runtime are
+# ordinary dependencies because the PG-5 producer is the shipped Gauntlet
+# consumer of their certified schedule and raw-frame evidence.
 fmn-codec.workspace = true
-fmn-runtime.workspace = true
 # W10 e2e CLI scenarios drive fmn_cli's in-process runner (fm-fjq; dev-only,
 # so the shipped edge set and the crate DAG gate are unaffected).
 fmn-cli.workspace = true
