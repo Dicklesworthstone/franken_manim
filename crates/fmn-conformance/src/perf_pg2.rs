@@ -874,6 +874,9 @@ mod tests {
         assert!(!path_is_release_perf(Path::new(
             "/tmp/release-perf-spoof/fmn-perf"
         )));
+        assert!(!path_is_release_perf(Path::new(
+            "/tmp/release-perf/fmn-perf"
+        )));
     }
 
     #[test]
