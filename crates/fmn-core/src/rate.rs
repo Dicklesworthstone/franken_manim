@@ -126,6 +126,44 @@ pub fn exponential_decay(t: f64, half_life: f64) -> f64 {
     1.0 - fmn_dmath::exp(-t / half_life)
 }
 
+// ------------------------------------------------------- FMTL/1 tag catalog
+
+/// The FMTL/1 rate-function catalog (fm-oee, `docs/FMNT1_TIMELINE_BUNDLE.md`):
+/// the bundle format's normative `rate: u8` table. Tag order IS this
+/// declaration order — the zero-parameter catalog entries only. The
+/// parameterized forms (`there_and_back_with_pause`, `running_start`,
+/// `overshoot`, `wiggle`, `exponential_decay`) and the combinators carry
+/// arguments a bare tag cannot identity, so they have no tag: an exporter
+/// that meets one records the segment statefully instead.
+pub const TAG_CATALOG: [fn(f64) -> f64; 8] = [
+    linear,
+    smooth,
+    rush_into,
+    rush_from,
+    slow_into,
+    double_smooth,
+    there_and_back,
+    lingering,
+];
+
+/// The catalog entry for a tag, or `None` for a tag the table does not
+/// define (the reader's named refusal, never a guess).
+#[must_use]
+pub fn from_tag(tag: u8) -> Option<fn(f64) -> f64> {
+    TAG_CATALOG.get(usize::from(tag)).copied()
+}
+
+/// The tag of a catalog entry, or `None` for any other function. Function
+/// identity is pointer identity within one artifact, which is exactly the
+/// question an exporter asks of its own build.
+#[must_use]
+pub fn tag_of(func: fn(f64) -> f64) -> Option<u8> {
+    TAG_CATALOG
+        .iter()
+        .position(|&entry| std::ptr::fn_addr_eq(entry, func))
+        .map(|index| u8::try_from(index).unwrap_or(u8::MAX))
+}
+
 /// Evaluate a 1-D Bézier by the Bernstein sum, mirroring the Reference's
 /// `bezier()` term order: `Σₖ (1-t)^(n-k) · t^k · C(n,k) · pₖ`.
 fn bernstein(points: &[f64], t: f64) -> f64 {
@@ -177,5 +215,25 @@ mod tests {
         assert_eq!(choose(6, 3), 20);
         assert_eq!(choose(5, 0), 1);
         assert_eq!(choose(5, 5), 1);
+    }
+
+    #[test]
+    fn every_catalog_entry_round_trips_its_tag() {
+        for (tag, &func) in TAG_CATALOG.iter().enumerate() {
+            let tag = u8::try_from(tag).unwrap_or(u8::MAX);
+            assert_eq!(tag_of(func), Some(tag), "tag_of catalog[{tag}]");
+            let decoded = from_tag(tag).unwrap_or(linear);
+            assert!(
+                std::ptr::fn_addr_eq(decoded, func),
+                "from_tag({tag}) is not the catalog entry"
+            );
+        }
+        assert!(from_tag(u8::MAX).is_none(), "unknown tags refuse");
+        assert!(
+            tag_of(|t| t * t).is_none(),
+            "a non-catalog function has no tag"
+        );
+        // The parameterized forms are deliberately untaggable.
+        assert!(tag_of(|t| overshoot(t, 1.5)).is_none());
     }
 }
