@@ -25,6 +25,7 @@
 //! consumes this.
 #![forbid(unsafe_code)]
 
+mod arena;
 pub mod bin;
 pub mod cache;
 pub mod camera;
@@ -41,6 +42,7 @@ pub mod table;
 pub mod texture;
 pub mod three_d;
 
+pub use arena::{AllocStats, FrameArena};
 pub use bin::{Binning, BinningError, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
 pub use camera::{
@@ -72,3 +74,23 @@ pub use three_d::{
     SurfaceVertex, TRUE_DOT_AA_WIDTH, TextureMaterial, ThreeDDraw, ThreeDError, ThreeDJob,
     TrueDotDraw, VectorDraw, finalize_color, smoothstep, true_dot_alpha, unit_normal,
 };
+
+/// Thread fan-out clamp (W5 wasm tier 1, fm-l97).
+///
+/// The engines take a `threads` scheduling hint and run their serial band
+/// loop when it is 1. On `wasm32-unknown-unknown` no thread can be spawned
+/// at all — `std::thread::scope`'s spawn panics — so any request collapses
+/// to the serial path: same bytes (fan-out is documented as a scheduling
+/// choice with no effect on output), never a panic. Native builds honor the
+/// request unchanged. `HardwareTopology::current` already reports a single
+/// logical CPU on wasm32, so a topology-derived request arrives as 1; this
+/// clamp is the explicit guarantee for direct callers.
+#[inline]
+#[must_use]
+pub const fn effective_threads(requested: usize) -> usize {
+    if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        requested
+    }
+}

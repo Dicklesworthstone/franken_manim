@@ -1660,7 +1660,7 @@ impl FlatFrame {
             .ok_or(MetalError::Layout("piece range reversed"))?;
 
         let first_join = scalar_row(&self.joins, JOIN_STRIDE, "join index")?;
-        for join in &draw.joins {
+        for join in job.joins_of(draw) {
             self.joins.extend_from_slice(&[
                 join.anchor[0] as f32,
                 join.anchor[1] as f32,
@@ -1682,7 +1682,7 @@ impl FlatFrame {
             .ok_or(MetalError::Layout("join range reversed"))?;
 
         let first_station = scalar_row(&self.stations, STATION_STRIDE, "station index")?;
-        if let Some(field) = &draw.field {
+        if let Some(field) = job.field_of(draw) {
             let (points, params) = field.stations();
             if points.len() != params.len() {
                 return Err(MetalError::Layout("gradient stations are not parallel"));
@@ -1729,10 +1729,7 @@ impl FlatFrame {
             flags,
             joint,
         ]);
-        let stroke_slab = draw
-            .stroke
-            .as_ref()
-            .map_or([0.0; 4], |stroke| stroke.slab());
+        let stroke_slab = draw.stroke.map_or([0.0; 4], |stroke| stroke.slab);
         self.draw_f32.extend(
             draw.fill_slab
                 .into_iter()

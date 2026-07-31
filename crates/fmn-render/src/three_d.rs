@@ -697,7 +697,10 @@ struct CurvePosition {
 
 #[derive(Debug, Clone)]
 struct PlanarGradientField {
-    field: GradientField,
+    /// Station storage backing the [`GradientField`] view built on demand.
+    points: Vec<[f64; 2]>,
+    /// Station parameters, index-aligned with `points`.
+    params: Vec<f64>,
     origin: Vec3,
     u: Vec3,
     v: Vec3,
@@ -855,6 +858,9 @@ impl<'a> ThreeDJob<'a> {
         threads: usize,
         destination: &mut FrameBuffer,
     ) -> Result<(), FrameError> {
+        // W5 wasm tier 1: collapses to 1 on wasm32 (no spawnable threads);
+        // the identity on native. See crate::effective_threads.
+        let threads = crate::effective_threads(threads);
         if destination.layout().format() != PixelFormat::Rgba16F {
             return Err(FrameError::FormatMismatch {
                 expected: "Rgba16F raw frame",
@@ -1355,8 +1361,17 @@ impl PlanarGradientField {
                 s1: segment.s1,
             })
             .collect();
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        GradientField::build_into(
+            &mut points,
+            &mut params,
+            &planar_segments,
+            unit_screen_map(),
+        );
         Some(Self {
-            field: GradientField::build(&planar_segments, unit_screen_map()),
+            points,
+            params,
             origin,
             u,
             v,
@@ -1365,7 +1380,7 @@ impl PlanarGradientField {
 
     fn param_at(&self, world: Vec3) -> f64 {
         let relative = sub(world, self.origin);
-        self.field
+        GradientField::from_parts(&self.points, &self.params)
             .param_at([dot(relative, self.u), dot(relative, self.v)], [0.0; 2])
     }
 }

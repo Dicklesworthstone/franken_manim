@@ -18,6 +18,12 @@ fmn-cache.workspace = true
 ft-kernel-metal = { workspace = true, optional = true }
 
 [features]
+# W5 wasm tier 1 (fm-l97, §10.7): the stable marker a wasm-targeting
+# consumer (fmn-wasm) enables to declare it relies on the wasm32-supported
+# surface. The adaptation itself is target-cfg based — see
+# `effective_threads` and fmn-platform's wasm capability implementations —
+# so the feature can never drift out of sync with what compiles; it exists
+# so the bindgen surface has a single feature axis to unify on.
 wasm = []
 accel-annex = []
 metal = ["accel-annex", "dep:ft-kernel-metal"]

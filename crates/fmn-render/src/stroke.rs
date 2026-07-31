@@ -204,8 +204,13 @@ pub fn max_stroke_reach_px(style: &Style, map: ScreenMap) -> f64 {
     geometric + f64::from(style.anti_alias_width).max(0.0)
 }
 
+/// One segment's style/placement-dependent stroke preparation.
+///
+/// `pub(crate)` so the frame arena ([`crate::arena`]) can hold a typed pool
+/// of them; the engine's per-frame path bump-allocates there instead of
+/// allocating a fresh `Vec` per draw (PG-6).
 #[derive(Debug, Clone, Copy)]
-struct PreparedSegment {
+pub(crate) struct PreparedSegment {
     slab: [f64; 4],
     total_arc_length: f64,
     line: bool,
@@ -219,21 +224,33 @@ struct PreparedSegment {
 /// per segment. A pixel outside a segment slab cannot receive coverage from
 /// that segment, which lets the engine avoid its cubic solve without changing a
 /// visible bit.
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedStroke {
-    segments: Vec<PreparedSegment>,
+///
+/// The struct is a *view*: the segment storage lives in the caller's buffer —
+/// the frame arena's typed pool in the engine, a plain `Vec` in tests — so the
+/// per-frame path allocates nothing once the arena is warm.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreparedStroke<'a> {
+    segments: &'a [PreparedSegment],
     slab: [f64; 4],
 }
 
-impl PreparedStroke {
-    pub(crate) fn new(
+impl<'a> PreparedStroke<'a> {
+    /// The view over caller-owned prepared segments and their aggregate slab.
+    pub(crate) fn from_parts(segments: &'a [PreparedSegment], slab: [f64; 4]) -> Self {
+        Self { segments, slab }
+    }
+
+    /// Derive every segment's slab and total arc length into `out`, returning
+    /// the aggregate slab. Same loop, same order as the retained derivation —
+    /// only the destination is the caller's.
+    pub(crate) fn prepare_into(
+        out: &mut impl crate::arena::Sink<PreparedSegment>,
         segments: &[Segment],
         style: &Style,
         map: ScreenMap,
         translate: [f64; 2],
         straight_segments: bool,
-    ) -> Self {
-        let mut prepared = Vec::with_capacity(segments.len());
+    ) -> [f64; 4] {
         let mut slab = [
             f64::INFINITY,
             f64::INFINITY,
@@ -246,7 +263,7 @@ impl PreparedStroke {
             slab[1] = slab[1].min(segment_slab[1]);
             slab[2] = slab[2].max(segment_slab[2]);
             slab[3] = slab[3].max(segment_slab[3]);
-            prepared.push(PreparedSegment {
+            out.put(PreparedSegment {
                 slab: segment_slab,
                 total_arc_length: fmn_geom::arclength::quadratic_arc_length(
                     segment.p0, segment.p1, segment.p2,
@@ -254,10 +271,7 @@ impl PreparedStroke {
                 line: straight_segments,
             });
         }
-        Self {
-            segments: prepared,
-            slab,
-        }
+        slab
     }
 
     #[must_use]
@@ -285,7 +299,7 @@ impl PreparedStroke {
         let mut best = f64::INFINITY;
         let mut best_s = 0.0;
         let mut admitted = false;
-        for (segment, prepared) in segments.iter().zip(&self.segments) {
+        for (segment, prepared) in segments.iter().zip(self.segments.iter()) {
             if p[0] < prepared.slab[0]
                 || p[0] > prepared.slab[2]
                 || p[1] < prepared.slab[1]
@@ -679,11 +693,39 @@ pub fn join_wedges(
     translate: [f64; 2],
 ) -> Vec<JoinWedge> {
     let mut out = Vec::new();
+    let mut pairs = crate::arena::Pool::default();
+    join_wedges_into(
+        &mut out,
+        &mut pairs,
+        segments,
+        subpath_starts,
+        style,
+        map,
+        translate,
+    );
+    out
+}
+
+/// [`join_wedges`] into caller-owned storage — the engine's per-frame path.
+///
+/// `out` receives the wedges in exactly the order [`join_wedges`] produces
+/// them; `pairs` is per-subpath corner-index scratch, cleared on every use,
+/// so the arena's pooled copy allocates only until the widest subpath has
+/// been seen. Identical arithmetic; only the destinations differ.
+pub(crate) fn join_wedges_into(
+    out: &mut impl crate::arena::Sink<JoinWedge>,
+    pairs: &mut crate::arena::Pool<(usize, usize)>,
+    segments: &[Segment],
+    subpath_starts: &[u32],
+    style: &Style,
+    map: ScreenMap,
+    translate: [f64; 2],
+) {
     if matches!(
         style.joint_type,
         fmn_mobject::JointType::Auto | fmn_mobject::JointType::NoJoint
     ) {
-        return out;
+        return;
     }
     let to_px = |p: fmn_core::types::Vec3| {
         [
@@ -724,15 +766,16 @@ pub fn join_wedges(
         }
         let sub = &segments[a..b];
         // Interior corners, then the wrap corner if the subpath closes.
-        let mut pairs: Vec<(usize, usize)> = (0..sub.len().saturating_sub(1))
-            .map(|i| (i, i + 1))
-            .collect();
+        pairs.clear();
+        for i in 0..sub.len().saturating_sub(1) {
+            pairs.put((i, i + 1));
+        }
         let first = sub[0];
         let last = sub[sub.len() - 1];
         if sub.len() > 1 && to_px(last.p2) == to_px(first.p0) {
-            pairs.push((sub.len() - 1, 0));
+            pairs.put((sub.len() - 1, 0));
         }
-        for (i, j) in pairs {
+        for &(i, j) in pairs.iter() {
             let (Some(t_in), Some(t_out)) = (tan_in(&sub[i]), tan_out(&sub[j])) else {
                 continue;
             };
@@ -749,7 +792,7 @@ pub fn join_wedges(
                     [t[1], -t[0]]
                 }
             };
-            out.push(JoinWedge {
+            out.put(JoinWedge {
                 anchor: to_px(sub[i].p2),
                 t_in,
                 t_out,
@@ -760,7 +803,6 @@ pub fn join_wedges(
             });
         }
     }
-    out
 }
 
 /// Apply the joint override to a round excess at one point.
@@ -847,6 +889,26 @@ mod tests {
         compile_shape(shape_digest(path.points()), path, Hint::General, 0).1
     }
 
+    /// Own the prepared-segment backing for a [`PreparedStroke`] view.
+    fn prepared(
+        segments: &[Segment],
+        style: &Style,
+        map: ScreenMap,
+        translate: [f64; 2],
+        straight_segments: bool,
+    ) -> (Vec<PreparedSegment>, [f64; 4]) {
+        let mut backing = Vec::new();
+        let slab = PreparedStroke::prepare_into(
+            &mut backing,
+            segments,
+            style,
+            map,
+            translate,
+            straight_segments,
+        );
+        (backing, slab)
+    }
+
     /// A style whose stroke is `width` units wide, constant, with the calibrated
     /// AA band.
     fn flat_stroke_style(width: f32) -> Style {
@@ -931,7 +993,8 @@ mod tests {
         };
         let style = flat_stroke_style(14.0);
         let translate = [40.8, -84.0];
-        let prepared = PreparedStroke::new(&segments, &style, map, translate, true);
+        let (backing, slab) = prepared(&segments, &style, map, translate, true);
+        let prepared = PreparedStroke::from_parts(&backing, slab);
         let (coverage, _) = prepared.shade(&segments, &[], &style, map, translate, [206.5, 10.5]);
         assert!(coverage > 0.99, "{coverage}");
     }
@@ -1321,7 +1384,8 @@ mod tests {
                     ..flat_stroke_style(300.0)
                 };
                 let joins = join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
-                let prepared = PreparedStroke::new(&segments, &style, map, translate, false);
+                let (backing, slab) = prepared(&segments, &style, map, translate, false);
+                let prepared = PreparedStroke::from_parts(&backing, slab);
                 for y in -80..80 {
                     for x in -80..120 {
                         let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
@@ -1381,8 +1445,9 @@ mod tests {
             stroke_coverage(&[], &style, map, [0.0, 0.0], [1.0, 1.0]),
             0.0
         );
+        let (backing, slab) = prepared(&[], &style, map, [0.0, 0.0], false);
         assert_eq!(
-            PreparedStroke::new(&[], &style, map, [0.0, 0.0], false).shade(
+            PreparedStroke::from_parts(&backing, slab).shade(
                 &[],
                 &[],
                 &style,
@@ -1403,8 +1468,9 @@ mod tests {
             stroke_excess_px(&segs, &style, degenerate_map, [0.0, 0.0], [1.0, 1.0]),
             None
         );
+        let (backing, slab) = prepared(&segs, &style, degenerate_map, [0.0, 0.0], false);
         assert_eq!(
-            PreparedStroke::new(&segs, &style, degenerate_map, [0.0, 0.0], false).shade(
+            PreparedStroke::from_parts(&backing, slab).shade(
                 &segs,
                 &[],
                 &style,
@@ -1432,7 +1498,8 @@ mod tests {
         cusp.add_quadratic_bezier_curve_to([20.0, 0.0, 0.0], [0.0, 0.0, 0.0], true)
             .unwrap();
         let cusp_segs = segs_of(&cusp);
-        let prepared_cusp = PreparedStroke::new(&cusp_segs, &style, map, [0.0, 0.0], false);
+        let (cusp_backing, cusp_slab) = prepared(&cusp_segs, &style, map, [0.0, 0.0], false);
+        let prepared_cusp = PreparedStroke::from_parts(&cusp_backing, cusp_slab);
         for x in 0..12 {
             let point = [f64::from(x), 0.5];
             let c = stroke_coverage(&cusp_segs, &style, map, [0.0, 0.0], point);

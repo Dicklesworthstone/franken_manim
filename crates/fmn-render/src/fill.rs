@@ -342,14 +342,29 @@ impl MonoTable {
         subpath_starts: &[u32],
         map: ScreenMap,
     ) -> Vec<MonoPiece> {
+        let mut pieces = Vec::with_capacity(segments.len() * 2);
+        let mut curves = crate::arena::Pool::default();
+        Self::pieces_for_segments_into(&mut pieces, &mut curves, segments, subpath_starts, map);
+        pieces
+    }
+
+    /// [`MonoTable::pieces_for_segments`] into caller-owned storage — the
+    /// engine's per-frame path, where `out` is the frame arena's piece pool
+    /// and `curves` its per-subpath scratch. Identical derivation; only the
+    /// destinations differ.
+    pub(crate) fn pieces_for_segments_into(
+        out: &mut impl crate::arena::Sink<MonoPiece>,
+        curves: &mut crate::arena::Pool<[[f64; 2]; 3]>,
+        segments: &[Segment],
+        subpath_starts: &[u32],
+        map: ScreenMap,
+    ) {
         let screen = |p: fmn_core::types::Vec3| {
             [
                 map.origin[0] + p[0] * map.scale,
                 map.origin[1] + p[1] * map.scale,
             ]
         };
-        let mut pieces = Vec::with_capacity(segments.len() * 2);
-        let mut curves: Vec<[[f64; 2]; 3]> = Vec::new();
         for (index, &start) in subpath_starts.iter().enumerate() {
             let end = subpath_starts
                 .get(index + 1)
@@ -360,14 +375,11 @@ impl MonoTable {
                 continue;
             }
             curves.clear();
-            curves.extend(
-                segments[lo..hi]
-                    .iter()
-                    .map(|segment| [screen(segment.p0), screen(segment.p1), screen(segment.p2)]),
-            );
-            append_subpath(&curves, &mut pieces);
+            for segment in &segments[lo..hi] {
+                curves.put([screen(segment.p0), screen(segment.p1), screen(segment.p2)]);
+            }
+            append_subpath(curves, out);
         }
-        pieces
     }
 
     /// Derive the table from a synchronized plan under a screen mapping.
@@ -502,7 +514,7 @@ fn extremum(v0: f64, v1: f64, v2: f64) -> Option<f64> {
 ///
 /// The chord's handle sits at its midpoint, which makes it an exactly straight
 /// quadratic and doubly monotone by construction, so it needs no split.
-fn append_subpath(curves: &[[[f64; 2]; 3]], out: &mut Vec<MonoPiece>) {
+fn append_subpath(curves: &[[[f64; 2]; 3]], out: &mut impl crate::arena::Sink<MonoPiece>) {
     let Some(first) = curves.first() else {
         return;
     };
@@ -512,7 +524,7 @@ fn append_subpath(curves: &[[[f64; 2]; 3]], out: &mut Vec<MonoPiece>) {
     let start = first[0];
     let end = curves[curves.len() - 1][2];
     if start != end {
-        out.push(MonoPiece {
+        out.put(MonoPiece {
             p0: end,
             p1: [0.5 * (end[0] + start[0]), 0.5 * (end[1] + start[1])],
             p2: start,
@@ -524,7 +536,12 @@ fn append_subpath(curves: &[[[f64; 2]; 3]], out: &mut Vec<MonoPiece>) {
 ///
 /// A quadratic has at most one extremum per axis, so this appends at most three
 /// pieces — a bound a device layout can rely on when sizing the table.
-fn split_monotone(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], out: &mut Vec<MonoPiece>) {
+fn split_monotone(
+    p0: [f64; 2],
+    p1: [f64; 2],
+    p2: [f64; 2],
+    out: &mut impl crate::arena::Sink<MonoPiece>,
+) {
     let mut ts = [0.0f64; 2];
     let mut n = 0;
     if let Some(t) = extremum(p0[1], p1[1], p2[1]) {
@@ -549,7 +566,7 @@ fn split_monotone(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], out: &mut Vec<MonoPi
             continue;
         }
         let (left, right) = split_at(cur, local);
-        out.push(MonoPiece {
+        out.put(MonoPiece {
             p0: left[0],
             p1: left[1],
             p2: left[2],
@@ -557,7 +574,7 @@ fn split_monotone(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], out: &mut Vec<MonoPi
         cur = right;
         t_base = t;
     }
-    out.push(MonoPiece {
+    out.put(MonoPiece {
         p0: cur[0],
         p1: cur[1],
         p2: cur[2],
@@ -1773,16 +1790,23 @@ pub const GRADIENT_STATIONS: usize = 64;
 /// gradient fill in the corpus so far. A glyph counter or an annulus wants the
 /// per-loop generalization, and that is a design step rather than a parameter,
 /// so it is filed rather than guessed at.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GradientField {
+/// The interior colour field for a non-flat fill, as a *view* over
+/// caller-owned station storage.
+///
+/// The engine's per-frame path keeps the stations in the frame arena's typed
+/// pools ([`crate::arena`]), so deriving a field allocates nothing once the
+/// arena is warm (PG-6); tests and the annex backends use plain `Vec`s. The
+/// interpolant is identical either way — only the storage moved.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GradientField<'a> {
     /// Station positions, shape-local screen pixels — the same frame
     /// [`MonoPiece`] uses, so one [`instance_translation`] serves both.
-    points: Vec<[f64; 2]>,
+    points: &'a [[f64; 2]],
     /// Each station's normalized arc length along the path.
-    params: Vec<f64>,
+    params: &'a [f64],
 }
 
-impl GradientField {
+impl<'a> GradientField<'a> {
     /// Squared distance below which the query point *is* a station.
     ///
     /// Mean value coordinates are exact at the boundary data — the weight
@@ -1790,31 +1814,41 @@ impl GradientField {
     /// infinity arithmetic, which would produce `NaN` rather than the answer.
     const TOUCH_SQ: f64 = 1e-18;
 
-    /// Derive the field for one compiled shape.
-    ///
-    /// `segments` is the shape's own slice of the IR's segment table, in object
-    /// space. Returns an empty field for a shape with no drawn length, which
-    /// reads as a flat `0` parameter rather than as an error.
-    #[must_use]
-    pub fn build(segments: &[crate::table::Segment], map: ScreenMap) -> GradientField {
-        Self::build_with(GRADIENT_STATIONS, segments, map)
+    /// The view over caller-owned station storage.
+    pub(crate) fn from_parts(points: &'a [[f64; 2]], params: &'a [f64]) -> GradientField<'a> {
+        debug_assert_eq!(points.len(), params.len());
+        GradientField { points, params }
     }
 
-    /// [`GradientField::build`] at an explicit station count.
+    /// Derive the field for one compiled shape into caller-owned storage.
+    ///
+    /// `segments` is the shape's own slice of the IR's segment table, in object
+    /// space. Derives nothing for a shape with no drawn length, which reads as
+    /// a flat `0` parameter rather than as an error.
+    pub(crate) fn build_into(
+        points: &mut impl crate::arena::Sink<[f64; 2]>,
+        params: &mut impl crate::arena::Sink<f64>,
+        segments: &[crate::table::Segment],
+        map: ScreenMap,
+    ) {
+        Self::build_with_into(GRADIENT_STATIONS, points, params, segments, map);
+    }
+
+    /// [`GradientField::build_into`] at an explicit station count.
     ///
     /// Exists so the convergence of the quadrature can be *measured* rather than
     /// asserted — see this module's station-count test. Not a public knob:
     /// [`GRADIENT_STATIONS`] is the shipped definition.
-    fn build_with(
+    fn build_with_into(
         stations: usize,
+        points: &mut impl crate::arena::Sink<[f64; 2]>,
+        params: &mut impl crate::arena::Sink<f64>,
         segments: &[crate::table::Segment],
         map: ScreenMap,
-    ) -> GradientField {
+    ) {
         if segments.is_empty() || stations == 0 {
-            return GradientField::default();
+            return;
         }
-        let mut points = Vec::with_capacity(stations);
-        let mut params = Vec::with_capacity(stations);
         for k in 0..stations {
             // Interval MIDPOINTS, not left endpoints. The boundary ramp is
             // discontinuous where a closed path's end meets its start — it runs
@@ -1838,13 +1872,12 @@ impl GradientField {
             };
             let t = fmn_geom::arclength::t_at_arc_fraction(g.p0, g.p1, g.p2, frac);
             let p = fmn_geom::bezier::quadratic_point(g.p0, g.p1, g.p2, t);
-            points.push([
+            points.put([
                 map.origin[0] + p[0] * map.scale,
                 map.origin[1] + p[1] * map.scale,
             ]);
-            params.push(s);
+            params.put(s);
         }
-        GradientField { points, params }
     }
 
     /// Are there no stations — i.e. does this shape have no drawn boundary?
@@ -1865,8 +1898,8 @@ impl GradientField {
     /// values into their own flat device representation rather than inventing a
     /// second station-placement rule.
     #[cfg(feature = "metal")]
-    pub(crate) fn stations(&self) -> (&[[f64; 2]], &[f64]) {
-        (&self.points, &self.params)
+    pub(crate) fn stations(&self) -> (&'a [[f64; 2]], &'a [f64]) {
+        (self.points, self.params)
     }
 
     /// The field's value at a screen point: mean value coordinates over the
@@ -1971,7 +2004,7 @@ impl GradientField {
     fn nearest_param(&self, p: [f64; 2], translate: [f64; 2]) -> f64 {
         let mut best = f64::INFINITY;
         let mut out = 0.0;
-        for (q, s) in self.points.iter().zip(&self.params) {
+        for (q, s) in self.points.iter().zip(self.params.iter()) {
             let dx = q[0] + translate[0] - p[0];
             let dy = q[1] + translate[1] - p[1];
             let d2 = dx * dx + dy * dy;
@@ -3445,9 +3478,21 @@ mod tests {
     use crate::hint::Hint;
     use crate::table::{Style, compile_shape, shape_digest};
 
-    fn field_of(path: &QuadPath, map: ScreenMap) -> GradientField {
+    /// Own the station backing for a [`GradientField`] view of one path.
+    fn field_of(path: &QuadPath, map: ScreenMap) -> (Vec<[f64; 2]>, Vec<f64>) {
         let (_, segs) = shaped(path, Hint::General);
-        GradientField::build(&segs, map)
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        GradientField::build_into(&mut points, &mut params, &segs, map);
+        (points, params)
+    }
+
+    /// A field at an explicit station count, with its backing owned here.
+    fn field_with(stations: usize, segs: &[Segment], map: ScreenMap) -> (Vec<[f64; 2]>, Vec<f64>) {
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        GradientField::build_with_into(stations, &mut points, &mut params, segs, map);
+        (points, params)
     }
 
     #[test]
@@ -3456,7 +3501,8 @@ mod tests {
         // That is the property that makes the field an *interpolant* rather than
         // an approximation, and the reason the r -> 0 limit is taken explicitly.
         let path = circle_path(20.0, 20.0, 10.0, 16);
-        let field = field_of(&path, unit());
+        let (points, params) = field_of(&path, unit());
+        let field = GradientField::from_parts(&points, &params);
         assert_eq!(field.len(), GRADIENT_STATIONS);
         for i in 0..field.len() {
             let p = field.points[i];
@@ -3476,7 +3522,8 @@ mod tests {
         // cannot leave [0, 1]. Checked over the interior rather than argued.
         let path = circle_path(24.0, 24.0, 16.0, 16);
         let pieces = pieces_of_path(&path, unit());
-        let field = field_of(&path, unit());
+        let (points, params) = field_of(&path, unit());
+        let field = GradientField::from_parts(&points, &params);
         for y in 0..48 {
             for x in 0..48 {
                 let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
@@ -3510,8 +3557,10 @@ mod tests {
             split.add_quadratic_bezier_curve_to(q0, r, false).unwrap();
             split.add_quadratic_bezier_curve_to(q1, p2, false).unwrap();
         }
-        let a = field_of(&path, unit());
-        let b = field_of(&split, unit());
+        let (a_points, a_params) = field_of(&path, unit());
+        let (b_points, b_params) = field_of(&split, unit());
+        let a = GradientField::from_parts(&a_points, &a_params);
+        let b = GradientField::from_parts(&b_points, &b_params);
         assert_eq!(a.len(), b.len());
 
         // The stations themselves must land in the same places, because the
@@ -3545,7 +3594,8 @@ mod tests {
         let path = circle_path(24.0, 24.0, 16.0, 16);
         let segs = shaped(&path, Hint::General).1;
         for n in [8usize, 16, 64, 256] {
-            let field = GradientField::build_with(n, &segs, unit());
+            let (points, params) = field_with(n, &segs, unit());
+            let field = GradientField::from_parts(&points, &params);
             let centre = field.param_at([24.0, 24.0], [0.0, 0.0]);
             assert!(
                 (centre - 0.5).abs() < 1e-12,
@@ -3572,8 +3622,10 @@ mod tests {
         let path = circle_path(24.0, 24.0, r, 16);
         let pieces = pieces_of_path(&path, unit());
         let segs = shaped(&path, Hint::General).1;
-        let coarse = GradientField::build_with(64, &segs, unit());
-        let fine = GradientField::build_with(256, &segs, unit());
+        let (coarse_points, coarse_params) = field_with(64, &segs, unit());
+        let (fine_points, fine_params) = field_with(256, &segs, unit());
+        let coarse = GradientField::from_parts(&coarse_points, &coarse_params);
+        let fine = GradientField::from_parts(&fine_points, &fine_params);
 
         // Four station spacings — the length scale the coarse quadrature can
         // resolve, derived from the boundary rather than picked.
@@ -3617,7 +3669,8 @@ mod tests {
         // the same value at the corresponding point — otherwise a gradient would
         // shift when a glyph moved.
         let path = circle_path(0.0, 0.0, 8.0, 16);
-        let field = field_of(&path, unit());
+        let (points, params) = field_of(&path, unit());
+        let field = GradientField::from_parts(&points, &params);
         for (x, y) in [(-4.0f64, 1.0f64), (0.0, 0.0), (3.5, -2.5)] {
             let here = field.param_at([x, y], [0.0, 0.0]);
             let there = field.param_at([x + 137.0, y - 42.0], [137.0, -42.0]);
@@ -3625,13 +3678,14 @@ mod tests {
         }
         // And a zoom is a scaling of the stations, so the same *relative* point
         // reads the same parameter.
-        let zoomed = field_of(
+        let (z_points, z_params) = field_of(
             &path,
             ScreenMap {
                 scale: 3.0,
                 origin: [0.0, 0.0],
             },
         );
+        let zoomed = GradientField::from_parts(&z_points, &z_params);
         for (x, y) in [(-4.0f64, 1.0f64), (0.0, 0.0), (3.5, -2.5)] {
             let a = field.param_at([x, y], [0.0, 0.0]);
             let b = zoomed.param_at([3.0 * x, 3.0 * y], [0.0, 0.0]);
@@ -3697,7 +3751,8 @@ mod tests {
         // are a partition of unity, so `Σ λᵢ c(sᵢ) = c(Σ λᵢ sᵢ)` exactly for an
         // affine ramp. Checked by evaluating the ramp both ways.
         let path = circle_path(16.0, 16.0, 10.0, 16);
-        let field = field_of(&path, unit());
+        let (points, params) = field_of(&path, unit());
+        let field = GradientField::from_parts(&points, &params);
         let style = Style {
             fill_rgba: [0.1, 0.2, 0.3, 1.0],
             fill_rgba_end: [0.9, 0.8, 0.7, 0.4],
@@ -3714,9 +3769,9 @@ mod tests {
             for i in 0..n {
                 // Reconstruct λᵢ by a one-hot field: the interpolant of the
                 // indicator of station i *is* λᵢ.
-                let mut one_hot = field.clone();
-                one_hot.params = vec![0.0; n];
-                one_hot.params[i] = 1.0;
+                let mut one_hot_params = vec![0.0; n];
+                one_hot_params[i] = 1.0;
+                let one_hot = GradientField::from_parts(&points, &one_hot_params);
                 let lambda = one_hot.param_at(p, [0.0, 0.0]);
                 den += lambda;
                 let s = field.params[i];
@@ -3782,7 +3837,10 @@ mod tests {
         // same bytes.
         let path = circle_path(0.0, 0.0, 12.0, 16);
         let (_, segs) = shaped(&path, Hint::General);
-        let field = GradientField::build(&segs, unit());
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        GradientField::build_into(&mut points, &mut params, &segs, unit());
+        let field = GradientField::from_parts(&points, &params);
         let style = Style {
             fill_rgba: [0.2, 0.4, 0.6, 1.0],
             fill_rgba_end: [0.2, 0.4, 0.6, 1.0],
@@ -3800,7 +3858,10 @@ mod tests {
     fn a_zero_border_leaves_a_gradient_to_the_field() {
         let path = circle_path(0.0, 0.0, 12.0, 16);
         let (_, segs) = shaped(&path, Hint::General);
-        let field = GradientField::build(&segs, unit());
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        GradientField::build_into(&mut points, &mut params, &segs, unit());
+        let field = GradientField::from_parts(&points, &params);
         let style = Style {
             fill_rgba: [0.0, 0.0, 0.0, 1.0],
             fill_rgba_end: [1.0, 1.0, 1.0, 1.0],
@@ -3839,7 +3900,10 @@ mod tests {
             scale: 1.0,
             origin: [0.0, 0.0],
         };
-        let field = GradientField::build(&segs, map);
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        GradientField::build_into(&mut points, &mut params, &segs, map);
+        let field = GradientField::from_parts(&points, &params);
         let style = Style {
             fill_rgba: [0.0, 0.0, 0.0, 1.0],
             fill_rgba_end: [1.0, 1.0, 1.0, 1.0],
@@ -3988,10 +4052,14 @@ mod tests {
 
     #[test]
     fn an_empty_boundary_yields_a_flat_field() {
-        let field = GradientField::build(&[], unit());
+        let mut points: Vec<[f64; 2]> = Vec::new();
+        let mut params: Vec<f64> = Vec::new();
+        GradientField::build_into(&mut points, &mut params, &[], unit());
+        let field = GradientField::from_parts(&points, &params);
         assert!(field.is_empty());
         assert_eq!(field.param_at([3.0, 4.0], [0.0, 0.0]), 0.0);
-        assert_eq!(GradientField::build_with(0, &[], unit()).len(), 0);
+        GradientField::build_with_into(0, &mut points, &mut params, &[], unit());
+        assert_eq!(points.len(), 0);
     }
 
     // ------------------------------------------------------- hinted fill kernels

@@ -96,6 +96,7 @@
 //! existing `compositor` benchmark keep the exact production boundary
 //! reproducible for a future structure-of-arrays layout.
 
+use crate::arena::{AllocStats, FrameArena, PoolRange};
 use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
 use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
@@ -495,6 +496,23 @@ impl Default for EngineIdentity {
     }
 }
 
+impl EngineIdentity {
+    /// The canonical one-string form of the identity the certified input
+    /// closure journals field-wise (`journal` writes engine name, tier
+    /// name, and renderer version): `<engine>:<tier>:<renderer_version>`.
+    /// FMTL/1 records this as its `engine_version` (fm-oee); the timeline
+    /// player refuses a bundle whose recorded string differs from its own.
+    #[must_use]
+    pub fn closure_string(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.engine.name(),
+            self.tier.name(),
+            self.renderer_version
+        )
+    }
+}
+
 /// §10.4's aggregate class for one fine tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageClass {
@@ -860,11 +878,13 @@ pub(crate) struct Draw {
     /// The instance's screen translation.
     pub(crate) translate: [f64; 2],
     /// Frame-local world-space segments for a non-translation affine
-    /// placement. Pure translations keep borrowing the retained object-space
-    /// table and pay only [`Draw::translate`].
-    pub(crate) transformed_segments: Option<Vec<Segment>>,
-    /// Doubly-monotone pieces derived from [`Draw::transformed_segments`].
-    pub(crate) transformed_pieces: Option<Vec<fill::MonoPiece>>,
+    /// placement, as a range into the frame arena's segment pool. Pure
+    /// translations keep borrowing the retained object-space table and pay
+    /// only [`Draw::translate`].
+    pub(crate) transformed_segments: Option<PoolRange>,
+    /// Doubly-monotone pieces derived from [`Draw::transformed_segments`],
+    /// as a range into the frame arena's piece pool.
+    pub(crate) transformed_pieces: Option<PoolRange>,
     /// The still-valid semantic hint proves every segment is a monotone line.
     ///
     /// This is stronger than inferring straightness from RecordBuffer `f32`
@@ -876,13 +896,15 @@ pub(crate) struct Draw {
     pub(crate) style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
     pub(crate) kernel: FillKernel,
-    /// The joint overrides; empty for the round settings (ADR-0012).
-    pub(crate) joins: Vec<JoinWedge>,
-    /// Per-segment slabs and arc lengths derived for this styled occurrence.
-    pub(crate) stroke: Option<stroke::PreparedStroke>,
+    /// The joint overrides, as a range into the frame arena's wedge pool;
+    /// empty for the round settings (ADR-0012).
+    pub(crate) joins: PoolRange,
+    /// Per-segment slabs and arc lengths derived for this styled occurrence,
+    /// as a range into the frame arena's prepared-segment pool.
+    pub(crate) stroke: Option<StrokeRef>,
     /// The interior colour field — `None` when the fill is flat, which is the
     /// overwhelming majority and the case that must not pay for the field.
-    pub(crate) field: Option<GradientField>,
+    pub(crate) field: Option<FieldRef>,
     /// The one fill colour, when the fill is flat.
     pub(crate) flat_fill: Option<[f32; 4]>,
     /// Screen AABB of the outline hull: rows outside it have zero fill coverage.
@@ -891,6 +913,28 @@ pub(crate) struct Draw {
     pub(crate) draws_fill: bool,
     /// Does it contribute a stroke pass?
     pub(crate) draws_stroke: bool,
+}
+
+/// The arena coordinates of a draw's [`stroke::PreparedStroke`].
+///
+/// The stroke's prepared segments live in the frame arena; what the draw
+/// carries is where they are and the aggregate slab that was derived with
+/// them. [`FrameJob::stroke_of`] reconstitutes the borrowed view.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StrokeRef {
+    /// Range into the arena's prepared-segment pool.
+    pub(crate) segments: PoolRange,
+    /// The aggregate conservative slab.
+    pub(crate) slab: [f64; 4],
+}
+
+/// The arena coordinates of a draw's [`GradientField`] stations.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FieldRef {
+    /// Range into the arena's station-position pool.
+    pub(crate) points: PoolRange,
+    /// Range into the arena's station-parameter pool, index-aligned.
+    pub(crate) params: PoolRange,
 }
 
 /// A frame was assembled from derived artifacts that do not share one input
@@ -977,6 +1021,14 @@ impl std::error::Error for FrameJobError {}
 /// owns only the per-instance derivation above. Construction is the serial
 /// front-end; [`FrameJob::render_into`] is the parallel back-end, and the split
 /// between them is exactly §9.3's FramePacket boundary one layer down.
+///
+/// The derivation's *storage* lives in a [`FrameArena`] (PG-6, fm-e9h): every
+/// `Vec` a draw used to own is now a range into one of the arena's typed bump
+/// pools, so a job that shares an arena across frames
+/// ([`FrameJob::new_in`]) allocates nothing once the arena is warm. The
+/// convenience constructors ([`FrameJob::new`], [`FrameJob::with_identity`])
+/// own a fresh arena per job instead — same bits, same single representation,
+/// no caller-visible arena for one-shot renders.
 #[derive(Debug)]
 pub struct FrameJob<'a> {
     plan: &'a RenderPlan,
@@ -984,10 +1036,35 @@ pub struct FrameJob<'a> {
     binning: &'a Binning,
     config: FrameConfig,
     identity: EngineIdentity,
-    /// Index-aligned with `plan.shapes().instances()`; `None` where the
-    /// instance contributes no pass. See [`FrameJob::with_identity`].
-    draws: Vec<Option<Draw>>,
+    /// The bump pools the draw derivation lives in, plus the worker pool.
+    arena: ArenaStorage<'a>,
+    /// The arena range of the draw list. Index-aligned with
+    /// `plan.shapes().instances()`; `None` where the instance contributes no
+    /// pass. See [`FrameJob::with_identity`].
+    draws: PoolRange,
     cols: u32,
+}
+
+/// Who owns the arena: the job (one-shot renders) or the caller (the
+/// reused-across-frames PG-6 path).
+#[derive(Debug)]
+enum ArenaStorage<'a> {
+    /// A fresh arena per job; today's one-shot behaviour. Boxed so the
+    /// shared-arena path does not pay for the owned variant's size.
+    Owned(Box<FrameArena>),
+    /// The caller's arena, reused across frames; `begin_frame` ran at
+    /// construction.
+    Shared(&'a FrameArena),
+}
+
+impl FrameJob<'_> {
+    /// The arena, regardless of who owns it.
+    fn arena(&self) -> &FrameArena {
+        match &self.arena {
+            ArenaStorage::Owned(arena) => arena,
+            ArenaStorage::Shared(arena) => arena,
+        }
+    }
 }
 
 /// The render path after certified-mode normalization.
@@ -1068,7 +1145,81 @@ impl<'a> FrameJob<'a> {
                 engine: identity.engine,
             });
         }
-        Self::prepare(plan, mono, binning, config, identity)
+        let mut arena = FrameArena::new();
+        arena.begin_frame();
+        let (draws, cols) = Self::prepare(plan, mono, binning, config, identity, &mut arena)?;
+        Ok(FrameJob {
+            plan,
+            mono,
+            binning,
+            config,
+            identity,
+            arena: ArenaStorage::Owned(Box::new(arena)),
+            draws,
+            cols,
+        })
+    }
+
+    /// [`FrameJob::new`] with the caller's [`FrameArena`] — the PG-6 path.
+    ///
+    /// The arena is *reset* for this frame (every bump pool truncated, none
+    /// of its buffers released) and then holds the whole draw derivation:
+    /// the draw list, join wedges, prepared stroke segments, gradient
+    /// stations, and any affine-transformed geometry. Reusing one arena
+    /// across frames is what makes the steady state allocation-free; frame 1
+    /// sizes every buffer, and [`FrameJob::allocation_stats`] reports it.
+    ///
+    /// # Errors
+    /// See [`FrameJob::new`].
+    pub fn new_in(
+        arena: &'a mut FrameArena,
+        plan: &'a RenderPlan,
+        mono: &'a fill::MonoTable,
+        binning: &'a Binning,
+        config: FrameConfig,
+    ) -> Result<FrameJob<'a>, FrameJobError> {
+        Self::with_identity_in(
+            arena,
+            plan,
+            mono,
+            binning,
+            config,
+            EngineIdentity::certified(),
+        )
+    }
+
+    /// [`FrameJob::new_in`] with an explicit engine identity.
+    ///
+    /// # Errors
+    /// [`FrameJobError::RendererVersionMismatch`] when the requested identity
+    /// does not name this artifact's renderer semantics;
+    /// [`FrameJobError::UnsupportedEngine`] for an annex backend that has not
+    /// landed; otherwise see [`FrameJob::new`].
+    pub fn with_identity_in(
+        arena: &'a mut FrameArena,
+        plan: &'a RenderPlan,
+        mono: &'a fill::MonoTable,
+        binning: &'a Binning,
+        config: FrameConfig,
+        identity: EngineIdentity,
+    ) -> Result<FrameJob<'a>, FrameJobError> {
+        if matches!(identity.engine, EngineKind::Metal | EngineKind::Cuda) {
+            return Err(FrameJobError::UnsupportedEngine {
+                engine: identity.engine,
+            });
+        }
+        arena.begin_frame();
+        let (draws, cols) = Self::prepare(plan, mono, binning, config, identity, arena)?;
+        Ok(FrameJob {
+            plan,
+            mono,
+            binning,
+            config,
+            identity,
+            arena: ArenaStorage::Shared(arena),
+            draws,
+            cols,
+        })
     }
 
     /// Prepare the shared semantic front-end for the Metal-specific executor.
@@ -1083,16 +1234,38 @@ impl<'a> FrameJob<'a> {
         binning: &'a Binning,
         config: FrameConfig,
     ) -> Result<FrameJob<'a>, FrameJobError> {
-        Self::prepare(plan, mono, binning, config, EngineIdentity::metal())
+        let mut arena = FrameArena::new();
+        arena.begin_frame();
+        let (draws, cols) = Self::prepare(
+            plan,
+            mono,
+            binning,
+            config,
+            EngineIdentity::metal(),
+            &mut arena,
+        )?;
+        Ok(FrameJob {
+            plan,
+            mono,
+            binning,
+            config,
+            identity,
+            arena: ArenaStorage::Owned(Box::new(arena)),
+            draws,
+            cols,
+        })
     }
 
+    /// The draw derivation, into `arena`'s bump pools. Returns the arena
+    /// range of the draw list and the frame's fine-tile column count.
     fn prepare(
         plan: &'a RenderPlan,
         mono: &'a fill::MonoTable,
         binning: &'a Binning,
         config: FrameConfig,
         identity: EngineIdentity,
-    ) -> Result<FrameJob<'a>, FrameJobError> {
+        arena: &mut FrameArena,
+    ) -> Result<(PoolRange, u32), FrameJobError> {
         if identity.renderer_version != RENDERER_VERSION {
             return Err(FrameJobError::RendererVersionMismatch {
                 requested: identity.renderer_version,
@@ -1117,7 +1290,7 @@ impl<'a> FrameJob<'a> {
 
         let map = config.map;
         let segments = plan.segments();
-        let mut draws: Vec<Option<Draw>> = Vec::with_capacity(plan.shapes().instances().len());
+        let draws_start = arena.draws.len();
 
         for (instance_index, inst) in plan.shapes().instances().iter().enumerate() {
             // Every instance gets a slot, including the ones that draw nothing.
@@ -1127,11 +1300,11 @@ impl<'a> FrameJob<'a> {
             // for "this instance contributes no pass"; it costs a word and it is
             // the difference between an index and a coincidence.
             let Some(shape) = plan.shapes().shape(inst.shape) else {
-                draws.push(None);
+                arena.draws.put(None);
                 continue;
             };
             let Some(style) = plan.styles().get(inst.style).copied() else {
-                draws.push(None);
+                arena.draws.put(None);
                 continue;
             };
             let lo = shape.first_segment as usize;
@@ -1147,34 +1320,35 @@ impl<'a> FrameJob<'a> {
                 || style.scale_stroke_with_zoom
                 || style.depth_test;
             let transformed_segments = (!inst.placement.is_translation()).then(|| {
-                let mut transformed = segs
-                    .iter()
-                    .map(|segment| Segment {
-                        p0: inst.placement.apply_vector(segment.p0),
-                        p1: inst.placement.apply_vector(segment.p1),
-                        p2: inst.placement.apply_vector(segment.p2),
-                        s0: segment.s0,
-                        s1: segment.s1,
-                    })
-                    .collect::<Vec<_>>();
+                let range = arena.segments.extend(segs.iter().map(|segment| Segment {
+                    p0: inst.placement.apply_vector(segment.p0),
+                    p1: inst.placement.apply_vector(segment.p1),
+                    p2: inst.placement.apply_vector(segment.p2),
+                    s0: segment.s0,
+                    s1: segment.s1,
+                }));
+                let transformed = arena.segments.slice_mut(range);
                 // Exact signed-axis similarities preserve normalized spans;
                 // general affine maps take the scalar arc-length oracle.
                 // Translation stays out of either route so a large world
                 // origin cannot perturb normalized spans through cancellation.
                 if !retains_normalized_arc_length(inst.placement) {
-                    reparameterize_arc_length(&mut transformed);
+                    reparameterize_arc_length(transformed);
                 }
                 let translation = inst.placement.translation();
-                for segment in &mut transformed {
+                for segment in transformed.iter_mut() {
                     for point in [&mut segment.p0, &mut segment.p1, &mut segment.p2] {
                         for axis in 0..3 {
                             point[axis] += translation[axis];
                         }
                     }
                 }
-                transformed
+                range
             });
-            let effective_segments = transformed_segments.as_deref().unwrap_or(segs);
+            let effective_segments: &[Segment] = match transformed_segments {
+                Some(range) => arena.segments.slice(range),
+                None => segs,
+            };
             let placement_z = if transformed_segments.is_some() {
                 0.0
             } else {
@@ -1195,8 +1369,16 @@ impl<'a> FrameJob<'a> {
             } else {
                 fill::instance_translation(inst, map)
             };
-            let transformed_pieces = transformed_segments.as_ref().map(|segments| {
-                fill::MonoTable::pieces_for_segments(segments, &shape.subpath_starts, map)
+            let transformed_pieces = transformed_segments.map(|_| {
+                let start = arena.pieces.len();
+                fill::MonoTable::pieces_for_segments_into(
+                    &mut arena.pieces,
+                    &mut arena.piece_curves,
+                    effective_segments,
+                    &shape.subpath_starts,
+                    map,
+                );
+                arena.pieces.range_from(start)
             });
 
             let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
@@ -1206,7 +1388,7 @@ impl<'a> FrameJob<'a> {
                 // An instance with no visible pass composites as the identity, so
                 // skipping its work cannot change a byte — but it still holds its
                 // index. Both halves of that sentence matter.
-                draws.push(None);
+                arena.draws.put(None);
                 continue;
             }
 
@@ -1218,29 +1400,52 @@ impl<'a> FrameJob<'a> {
             } else {
                 FillKernel::select(shape, segs, map, translate)
             };
-            let joins = stroke::join_wedges(
-                effective_segments,
-                &shape.subpath_starts,
-                &style,
-                map,
-                translate,
-            );
+            let joins = {
+                let start = arena.joins.len();
+                stroke::join_wedges_into(
+                    &mut arena.joins,
+                    &mut arena.join_pairs,
+                    effective_segments,
+                    &shape.subpath_starts,
+                    &style,
+                    map,
+                    translate,
+                );
+                arena.joins.range_from(start)
+            };
             let stroke = draws_stroke.then(|| {
-                stroke::PreparedStroke::new(
+                let start = arena.stroke_segments.len();
+                let slab = stroke::PreparedStroke::prepare_into(
+                    &mut arena.stroke_segments,
                     effective_segments,
                     &style,
                     map,
                     translate,
                     straight_segments,
-                )
+                );
+                StrokeRef {
+                    segments: arena.stroke_segments.range_from(start),
+                    slab,
+                }
             });
             let field = if draws_fill && !flat {
-                Some(GradientField::build(effective_segments, map))
+                let points_start = arena.gradient_points.len();
+                let params_start = arena.gradient_params.len();
+                GradientField::build_into(
+                    &mut arena.gradient_points,
+                    &mut arena.gradient_params,
+                    effective_segments,
+                    map,
+                );
+                Some(FieldRef {
+                    points: arena.gradient_points.range_from(points_start),
+                    params: arena.gradient_params.range_from(params_start),
+                })
             } else {
                 None
             };
             let fill_slab = hull_slab(effective_segments, map, translate);
-            draws.push(Some(Draw {
+            arena.draws.put(Some(Draw {
                 first_segment: shape.first_segment,
                 segment_count: shape.segment_count,
                 shape: inst.shape,
@@ -1265,7 +1470,7 @@ impl<'a> FrameJob<'a> {
             }));
         }
         debug_assert_eq!(
-            draws.len(),
+            arena.draws.len(),
             plan.shapes().instances().len(),
             "the draw list must be index-aligned with the instance list"
         );
@@ -1275,15 +1480,7 @@ impl<'a> FrameJob<'a> {
             .width
             .div_ceil(binning.tiling().fine_tile.max(1));
 
-        Ok(FrameJob {
-            plan,
-            mono,
-            binning,
-            config,
-            identity,
-            draws,
-            cols,
-        })
+        Ok((arena.draws.range_from(draws_start), cols))
     }
 
     /// The engine identity this frame will claim.
@@ -1318,12 +1515,58 @@ impl<'a> FrameJob<'a> {
     /// instance that draws nothing.
     #[must_use]
     pub fn draw_count(&self) -> usize {
-        self.draws.iter().flatten().count()
+        self.draws().iter().flatten().count()
+    }
+
+    /// The draw list, index-aligned with the instance list.
+    ///
+    /// The list lives in the arena; this resolves its range. Every engine
+    /// read of a draw goes through here or the `_of` accessors below, so the
+    /// range indirection cannot leak into the arithmetic.
+    pub(crate) fn draws(&self) -> &[Option<Draw>] {
+        self.arena().draws.slice(self.draws)
+    }
+
+    /// One draw's join wedges.
+    pub(crate) fn joins_of(&self, rec: &Draw) -> &[JoinWedge] {
+        self.arena().joins.slice(rec.joins)
+    }
+
+    /// One draw's prepared stroke, reconstituted as the borrowed view.
+    pub(crate) fn stroke_of(&self, rec: &Draw) -> Option<stroke::PreparedStroke<'_>> {
+        rec.stroke.map(|stroke| {
+            stroke::PreparedStroke::from_parts(
+                self.arena().stroke_segments.slice(stroke.segments),
+                stroke.slab,
+            )
+        })
+    }
+
+    /// One draw's gradient field, reconstituted as the borrowed view.
+    pub(crate) fn field_of(&self, rec: &Draw) -> Option<GradientField<'_>> {
+        rec.field.map(|field| {
+            GradientField::from_parts(
+                self.arena().gradient_points.slice(field.points),
+                self.arena().gradient_params.slice(field.params),
+            )
+        })
+    }
+
+    /// The PG-6 allocation ledger for this frame (fm-e9h): heap allocations
+    /// the arena and worker pool have performed since this job's
+    /// construction, the arena's reserved buffer bytes, and the worker
+    /// pool's slot count. On the [`FrameJob::new_in`] path with a reused
+    /// arena, frames after the first report zero allocations for a stable
+    /// scene — the steady-state property PG-6 asks for, proven on the
+    /// engine's own counters rather than on an allocator shim.
+    #[must_use]
+    pub fn allocation_stats(&self) -> AllocStats {
+        self.arena().stats()
     }
 
     #[cfg(feature = "metal")]
     pub(crate) fn prepared_draws(&self) -> &[Option<Draw>] {
-        &self.draws
+        self.draws()
     }
 
     #[cfg(feature = "metal")]
@@ -1410,6 +1653,9 @@ impl<'a> FrameJob<'a> {
         threads: usize,
         dst: &mut FrameBuffer,
     ) -> Result<AaStats, FrameError> {
+        // W5 wasm tier 1: collapses to 1 on wasm32 (no spawnable threads);
+        // the identity on native. See crate::effective_threads.
+        let threads = crate::effective_threads(threads);
         if dst.layout().format() != PixelFormat::Rgba16F {
             return Err(FrameError::FormatMismatch {
                 expected: "Rgba16F raw frame",
@@ -1443,29 +1689,28 @@ impl<'a> FrameJob<'a> {
 
         // `chunks_mut` is the whole safety argument: it yields provably disjoint
         // `&mut [u8]`, one per band, so write-disjointness (§10.5b) is a fact the
-        // borrow checker enforces rather than a claim a comment makes.
-        let mut bands: Vec<(usize, &mut [u8])> = plane.chunks_mut(band_bytes).enumerate().collect();
-
+        // borrow checker enforces rather than a claim a comment makes. The
+        // iterator itself is the work queue — pulled one band at a time under
+        // the mutex — so no per-frame `Vec` of band slices is ever
+        // materialized (PG-6 site 2, fm-e9h).
         if threads <= 1 {
-            let mut worker = Worker::<K>::new(tile, self.cols as usize);
-            for (band, bytes) in bands {
+            let mut worker = self.arena().workers.checkout::<K>(tile, self.cols as usize);
+            for (band, bytes) in plane.chunks_mut(band_bytes).enumerate() {
                 self.render_band::<K>(&mut worker, band, bytes, stride);
             }
             return Ok(worker.stats);
         }
 
-        // Popped from the end, so the queue is a stack; which worker takes which
-        // band is deliberately unspecified, because a band's bytes do not depend
-        // on who computed them.
-        bands.reverse();
-        let queue = Mutex::new(bands);
+        // Which worker takes which band is deliberately unspecified, because a
+        // band's bytes do not depend on who computed them.
+        let queue = Mutex::new(plane.chunks_mut(band_bytes).enumerate());
         let stats = Mutex::new(AaStats::default());
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| {
-                    let mut worker = Worker::<K>::new(tile, self.cols as usize);
+                    let mut worker = self.arena().workers.checkout::<K>(tile, self.cols as usize);
                     loop {
-                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
+                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
                         let Some((band, bytes)) = next else { break };
                         self.render_band::<K>(&mut worker, band, bytes, stride);
                     }
@@ -1596,7 +1841,7 @@ impl<'a> FrameJob<'a> {
         let mut visible = false;
         let mut edge = false;
         for (k, &d) in draws.iter().enumerate() {
-            let Some(Some(rec)) = self.draws.get(d as usize) else {
+            let Some(Some(rec)) = self.draws().get(d as usize) else {
                 continue;
             };
             visible = true;
@@ -1634,7 +1879,7 @@ impl<'a> FrameJob<'a> {
             // `d` is an instance index, and `draws` is indexed by instance
             // index. A `None` is an instance with no pass; an out-of-range index
             // would be a binning built against a different plan.
-            let Some(Some(rec)) = self.draws.get(d as usize) else {
+            let Some(Some(rec)) = self.draws().get(d as usize) else {
                 continue;
             };
             let interior = flags.get(k).copied() == Some(CLASS_INTERIOR);
@@ -1717,10 +1962,10 @@ impl<'a> FrameJob<'a> {
             }
             if rec.flat_fill.is_none() {
                 let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
-                let field = rec.field.as_ref().expect("a non-flat fill carries a field");
+                let field = self.field_of(rec).expect("a non-flat fill carries a field");
                 let rgba = fill_rgba_with_border(
                     &rec.style,
-                    field,
+                    &field,
                     segments,
                     self.config.map,
                     rec.translate,
@@ -1744,7 +1989,7 @@ impl<'a> FrameJob<'a> {
         x_hi: u32,
         classify: bool,
     ) {
-        let Some(stroke) = rec.stroke.as_ref() else {
+        let Some(stroke) = self.stroke_of(rec) else {
             return;
         };
         let slab = stroke.slab();
@@ -1752,6 +1997,7 @@ impl<'a> FrameJob<'a> {
             return;
         }
         let segments = self.segments_of(rec);
+        let joins = self.joins_of(rec);
         let w = (x_hi - x_lo) as usize;
         for i in 0..w {
             let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
@@ -1760,7 +2006,7 @@ impl<'a> FrameJob<'a> {
             }
             let (coverage, s) = stroke.shade(
                 segments,
-                &rec.joins,
+                joins,
                 &rec.style,
                 self.config.map,
                 rec.translate,
@@ -1816,15 +2062,16 @@ impl<'a> FrameJob<'a> {
         if constant_width && centre_is_saturated && aa_band > std::f64::consts::FRAC_1_SQRT_2 {
             return false;
         }
-        let Some(stroke) = rec.stroke.as_ref() else {
+        let Some(stroke) = self.stroke_of(rec) else {
             return false;
         };
+        let joins = self.joins_of(rec);
         for dy in [0.25, 0.75] {
             for dx in [0.25, 0.75] {
                 let p = [f64::from(px) + dx, f64::from(py) + dy];
                 let (coverage, s) = stroke.shade(
                     segments,
-                    &rec.joins,
+                    joins,
                     &rec.style,
                     self.config.map,
                     rec.translate,
@@ -1874,7 +2121,7 @@ impl<'a> FrameJob<'a> {
                 };
                 let mut acc = K::from_premul(self.config.background.premultiply());
                 for (k, &d) in draws.iter().enumerate() {
-                    let Some(Some(rec)) = self.draws.get(d as usize) else {
+                    let Some(Some(rec)) = self.draws().get(d as usize) else {
                         continue;
                     };
                     let interior = flags.get(k).copied() == Some(CLASS_INTERIOR);
@@ -1946,7 +2193,7 @@ impl<'a> FrameJob<'a> {
             Some(c) => c,
             None => fill_rgba_with_border(
                 &rec.style,
-                rec.field.as_ref().expect("a non-flat fill carries a field"),
+                &self.field_of(rec).expect("a non-flat fill carries a field"),
                 self.segments_of(rec),
                 self.config.map,
                 rec.translate,
@@ -1963,13 +2210,13 @@ impl<'a> FrameJob<'a> {
         subcell: Subcell,
         dst: K::Pixel,
     ) -> K::Pixel {
-        let Some(stroke) = rec.stroke.as_ref() else {
+        let Some(stroke) = self.stroke_of(rec) else {
             return dst;
         };
         let p = subcell.centre();
         let (coverage, s) = stroke.shade(
             self.segments_of(rec),
-            &rec.joins,
+            self.joins_of(rec),
             &rec.style,
             self.config.map,
             rec.translate,
@@ -1983,9 +2230,9 @@ impl<'a> FrameJob<'a> {
     }
 
     /// This draw's slice of the plan's one flat segment table.
-    pub(crate) fn segments_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [Segment] {
-        if let Some(segments) = rec.transformed_segments.as_deref() {
-            return segments;
+    pub(crate) fn segments_of(&self, rec: &Draw) -> &[Segment] {
+        if let Some(range) = rec.transformed_segments {
+            return self.arena().segments.slice(range);
         }
         let all = self.plan.segments();
         let lo = (rec.first_segment as usize).min(all.len());
@@ -1995,10 +2242,11 @@ impl<'a> FrameJob<'a> {
 
     /// This draw's fill pieces, transformed once per frame when its placement
     /// has a non-identity linear part.
-    pub(crate) fn pieces_of<'draw>(&'draw self, rec: &'draw Draw) -> &'draw [fill::MonoPiece] {
-        rec.transformed_pieces
-            .as_deref()
-            .unwrap_or_else(|| self.mono.pieces_of(rec.shape))
+    pub(crate) fn pieces_of(&self, rec: &Draw) -> &[fill::MonoPiece] {
+        match rec.transformed_pieces {
+            Some(range) => self.arena().pieces.slice(range),
+            None => self.mono.pieces_of(rec.shape),
+        }
     }
 }
 
@@ -2020,12 +2268,16 @@ fn effective_aa_band(style: &Style) -> f64 {
     }
 }
 
-/// One thread's scratch, allocated once per band-loop rather than per row.
+/// One thread's scratch, allocated once per pool slot rather than per row,
+/// per band, or — critically for PG-6 — per `render_into` call.
 ///
 /// PG-6 forbids steady-state per-frame heap allocation. A worker's buffers are
 /// sized for the widest tile the frame can present and then reused for every
-/// band it takes.
+/// band it takes; the [`WorkerPool`] keeps the whole worker alive across
+/// frames, so the allocation happens once at pool warm-up and never again.
 struct Worker<K: PixelKernel> {
+    /// The tile width the row buffers are sized for — the pool's key.
+    tile: usize,
     /// The row accumulator, premultiplied linear light.
     acc: Vec<K::Pixel>,
     /// One draw's coverage over the row.
@@ -2042,8 +2294,15 @@ struct Worker<K: PixelKernel> {
 }
 
 impl<K: PixelKernel> Worker<K> {
+    /// Heap allocations [`Worker::new`] performs: `acc`, `cov`, `edges`, the
+    /// three `Vec`s inside [`RowScratch`], and `tile_classes`. Counted into
+    /// the arena's ledger when the pool creates a slot, so the PG-6 report
+    /// sees worker warm-up exactly once.
+    const SCRATCH_ALLOCATIONS: u64 = 7;
+
     fn new(tile: usize, cols: usize) -> Worker<K> {
         Worker {
+            tile,
             acc: vec![K::from_premul(PremulRgba::TRANSPARENT); tile],
             cov: vec![0.0; tile],
             edges: vec![0; tile],
@@ -2051,6 +2310,153 @@ impl<K: PixelKernel> Worker<K> {
             tile_classes: vec![CoverageClass::Empty; cols],
             stats: AaStats::default(),
             marker: std::marker::PhantomData,
+        }
+    }
+}
+
+/// The worker-scratch pool: one slot per (kernel, tile width), reused across
+/// [`FrameJob::render_into`] calls (PG-6 site 3, fm-e9h).
+///
+/// Owned by the [`FrameArena`], so on the [`FrameJob::new_in`] path a slot's
+/// buffers are allocated once — at the warm-up frame — and checked out by
+/// every later render. There is one sub-pool per monomorphized kernel rather
+/// than any type erasure: the pool serves exactly the four kernels this
+/// module compiles, and the typed slot keeps `#![forbid(unsafe_code)]`
+/// absolute. The pool is keyed on tile width because the row buffers are;
+/// `tile_classes` is resized on checkout when the column count differs.
+///
+/// Sizing is by use, which is sizing by the execution plan one level down:
+/// a render team of `t` threads checks out exactly `t` slots on the first
+/// frame, and the pool never grows past the largest team it has served.
+pub(crate) struct WorkerPool {
+    certified_scalar: KernelSlots<CertifiedScalar>,
+    certified_tier: KernelSlots<CertifiedBuildTier>,
+    fast_scalar: KernelSlots<FastScalar>,
+    fast_tier: KernelSlots<FastBuildTier>,
+    /// Heap allocations slot creation and growth have performed since the
+    /// arena's last `begin_frame`.
+    allocs: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for WorkerPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerPool")
+            .field("slots", &self.slots())
+            .finish()
+    }
+}
+
+/// One kernel's idle workers.
+pub(crate) struct KernelSlots<K: PixelKernel> {
+    slots: Mutex<Vec<Worker<K>>>,
+}
+
+impl<K: PixelKernel> Default for KernelSlots<K> {
+    fn default() -> Self {
+        KernelSlots {
+            slots: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl WorkerPool {
+    pub(crate) fn new() -> WorkerPool {
+        WorkerPool {
+            certified_scalar: KernelSlots::default(),
+            certified_tier: KernelSlots::default(),
+            fast_scalar: KernelSlots::default(),
+            fast_tier: KernelSlots::default(),
+            allocs: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Zero the per-frame allocation counter. The slots persist — they *are*
+    /// the steady state.
+    pub(crate) fn begin_frame(&self) {
+        self.allocs.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Heap allocations since [`WorkerPool::begin_frame`].
+    pub(crate) fn allocs(&self) -> u64 {
+        self.allocs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Idle slots across all four kernel sub-pools.
+    pub(crate) fn slots(&self) -> usize {
+        fn idle<K: PixelKernel>(sub: &KernelSlots<K>) -> usize {
+            sub.slots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len()
+        }
+        idle(&self.certified_scalar)
+            + idle(&self.certified_tier)
+            + idle(&self.fast_scalar)
+            + idle(&self.fast_tier)
+    }
+
+    /// Take a worker for `tile`, creating one on first use; `cols` re-sizes
+    /// the per-tile class row if the grid changed under a reused slot.
+    fn checkout<K: PixelKernel>(&self, tile: usize, cols: usize) -> PooledWorker<'_, K> {
+        let sub = K::sub_pool(self);
+        let mut worker = {
+            let mut slots = sub.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            match slots.iter().position(|idle| idle.tile == tile) {
+                Some(index) => slots.swap_remove(index),
+                None => {
+                    self.allocs.fetch_add(
+                        Worker::<K>::SCRATCH_ALLOCATIONS,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    Worker::<K>::new(tile, cols)
+                }
+            }
+        };
+        worker.stats = AaStats::default();
+        if worker.tile_classes.len() != cols {
+            if worker.tile_classes.capacity() < cols {
+                self.allocs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            worker.tile_classes.resize(cols, CoverageClass::Empty);
+        }
+        PooledWorker {
+            pool: sub,
+            worker: Some(worker),
+        }
+    }
+}
+
+/// A checked-out worker; returns to its sub-pool on drop.
+struct PooledWorker<'a, K: PixelKernel> {
+    pool: &'a KernelSlots<K>,
+    worker: Option<Worker<K>>,
+}
+
+impl<K: PixelKernel> std::ops::Deref for PooledWorker<'_, K> {
+    type Target = Worker<K>;
+
+    fn deref(&self) -> &Worker<K> {
+        // `Some` from checkout to drop.
+        self.worker.as_ref().expect("pooled worker is populated")
+    }
+}
+
+impl<K: PixelKernel> std::ops::DerefMut for PooledWorker<'_, K> {
+    fn deref_mut(&mut self) -> &mut Worker<K> {
+        // `Some` from checkout to drop.
+        self.worker.as_mut().expect("pooled worker is populated")
+    }
+}
+
+impl<K: PixelKernel> Drop for PooledWorker<'_, K> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.pool
+                .slots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(worker);
         }
     }
 }
@@ -2063,13 +2469,19 @@ impl<K: PixelKernel> Worker<K> {
 /// pixel loop contains neither runtime feature detection nor a function-pointer
 /// dispatch. Every implementation is elementwise across RGBA: there is no
 /// horizontal reduction whose association could depend on lane width.
-trait PixelKernel {
+pub(crate) trait PixelKernel {
     type Pixel: Copy + Send;
 
     fn from_premul(pixel: PremulRgba) -> Self::Pixel;
     fn to_premul(pixel: Self::Pixel) -> PremulRgba;
     fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel;
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]);
+
+    /// This kernel's sub-pool — how one [`WorkerPool`] serves all four
+    /// monomorphized kernels with no type erasure.
+    fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self>
+    where
+        Self: Sized;
 
     #[inline]
     fn source_over_span(rgba: [f32; 4], coverage: &[f64], dst: &mut [Self::Pixel]) {
@@ -2107,6 +2519,11 @@ impl PixelKernel for CertifiedScalar {
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
         write_row(acc, out);
     }
+
+    #[inline]
+    fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
+        &pool.certified_scalar
+    }
 }
 
 /// Certified build-tier route.
@@ -2137,6 +2554,11 @@ impl PixelKernel for CertifiedBuildTier {
     #[inline]
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
         write_row(acc, out);
+    }
+
+    #[inline]
+    fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
+        &pool.certified_tier
     }
 }
 
@@ -2192,6 +2614,11 @@ impl PixelKernel for FastScalar {
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
         write_row_f32(acc, out);
     }
+
+    #[inline]
+    fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
+        &pool.fast_scalar
+    }
 }
 
 /// Standard-mode build-tier route.
@@ -2218,6 +2645,11 @@ impl PixelKernel for FastBuildTier {
     #[inline]
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
         FastScalar::write_row(acc, out);
+    }
+
+    #[inline]
+    fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
+        &pool.fast_tier
     }
 }
 
@@ -2492,6 +2924,121 @@ mod tests {
         }
     }
 
+    /// The PG-6 corpus (fm-e9h): a glyph field. Dozens of small two-subpath
+    /// outlines — an angular bowl with a counter, the way a majuscule is —
+    /// miter-stroked and gradient-filled, with affine placements on some, so
+    /// every per-draw allocation the bead named is exercised: the draw list,
+    /// join wedges, prepared stroke segments, gradient stations, and
+    /// transformed segments and pieces.
+    fn glyph_field() -> Stage {
+        let mut stage = Stage::new();
+        for row in 0..6u32 {
+            for col in 0..8u32 {
+                let x = 6.0 + f64::from(col) * 13.0;
+                let y = 8.0 + f64::from(row) * 17.0;
+                let mut path = fmn_geom::quadpath::QuadPath::new();
+                path.add_subpath(&rect_points(x, y, x + 9.0, y + 12.0))
+                    .expect("bowl");
+                path.add_subpath(&rect_points(x + 3.0, y + 4.0, x + 6.0, y + 8.0))
+                    .expect("counter");
+                let points = path.points().to_vec();
+                let last = points.len() - 1;
+                let gradient = (row + col) % 3 == 0;
+                let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+                for (i, p) in points.iter().enumerate() {
+                    buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
+                    // A different colour on the last record is how the IR
+                    // expresses a fill ramp (see vmob's decode note above).
+                    let fill = if gradient && i == last {
+                        [1.0, 0.4, 0.1, 1.0]
+                    } else {
+                        [0.1, 0.4, 1.0, 1.0]
+                    };
+                    buffer.write(i, "fill_rgba", &fill);
+                    buffer.write(i, "stroke_rgba", &[0.9, 0.9, 0.95, 1.0]);
+                    buffer.write(i, "stroke_width", &[120.0]);
+                }
+                let mob = stage.add(Mobject::from_buffer(buffer));
+                stage.uniforms_mut(mob).expect("live").joint_type = fmn_mobject::JointType::Miter;
+                stage.add_to_scene(mob).expect("live");
+                if (row + col) % 4 == 1 {
+                    // A general rotation: off the signed-axis similarity
+                    // route, so the arc-length oracle and the transformed
+                    // segment and piece pools all run.
+                    stage.apply_affine(
+                        mob,
+                        Placement::new(
+                            [[0.875, -0.484, 0.0], [0.484, 0.875, 0.0], [0.0, 0.0, 1.0]],
+                            [1.5, -1.0, 0.0],
+                        ),
+                    );
+                }
+            }
+        }
+        stage
+    }
+
+    /// PG-6 (fm-e9h): the certified engine allocates nothing per frame in the
+    /// steady state.
+    ///
+    /// The same glyph-heavy scene rendered `N + 1` times through one
+    /// caller-owned arena: frame 1 is the documented warm-up that sizes every
+    /// bump pool and every worker slot; frames 2..=N+1 must report **zero**
+    /// heap allocations on the engine's own counters, identical arena buffer
+    /// bytes (the buffer was allocated exactly once), an identical worker
+    /// pool, and — the bit-lock — identical frame digests.
+    #[test]
+    fn steady_state_frames_allocate_nothing() {
+        let stage = glyph_field();
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let mut arena = FrameArena::new();
+        let mut warm: Option<AllocStats> = None;
+        let mut first_digest = None;
+        for frame in 0..4u32 {
+            let job = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+                .expect("matching frame artifacts");
+            // A caller-owned pooled buffer, exactly PG-6's steady-state shape.
+            let mut buffer = FrameBuffer::new(cfg.layout().expect("layout"));
+            job.render_into(4, &mut buffer).expect("the engine renders");
+            let stats = job.allocation_stats();
+            let digest = frame_digest(&buffer).expect("frame digest");
+            drop(job);
+            match warm {
+                None => {
+                    assert!(
+                        stats.heap_allocs_this_frame > 0,
+                        "frame 1 is the warm-up: it must size the arena"
+                    );
+                    assert!(stats.pool_slots > 0, "the worker pool must hold slots");
+                    warm = Some(stats);
+                    first_digest = Some(digest);
+                }
+                Some(warm_stats) => {
+                    assert_eq!(
+                        stats.heap_allocs_this_frame,
+                        0,
+                        "frame {} allocated in the steady state",
+                        frame + 1
+                    );
+                    assert_eq!(
+                        stats.arena_buffer_bytes, warm_stats.arena_buffer_bytes,
+                        "the arena buffer must be allocated exactly once"
+                    );
+                    assert_eq!(
+                        stats.pool_slots, warm_stats.pool_slots,
+                        "the worker pool must not grow in the steady state"
+                    );
+                    assert_eq!(
+                        digest,
+                        first_digest.expect("first frame digest"),
+                        "storage-only means the bits cannot move"
+                    );
+                }
+            }
+        }
+    }
+
     /// The brute-force reference: the same tiling and the same classification,
     /// but **every instance considered for every tile** and no slab rejection.
     ///
@@ -2523,7 +3070,7 @@ mod tests {
                 let w = (x_hi - x_lo) as usize;
                 for py in (ty * tile)..((ty * tile + tile).min(cfg.viewport.height)) {
                     let mut acc = vec![bg; w];
-                    for (d, rec) in job.draws.iter().enumerate() {
+                    for (d, rec) in job.draws().iter().enumerate() {
                         // The draw list is index-aligned with the instance list,
                         // so the enumeration index IS the instance index — which
                         // is exactly the property the engine relies on and this
@@ -2556,7 +3103,7 @@ mod tests {
                                     Some(c) => c,
                                     None => fill_rgba_with_border(
                                         &rec.style,
-                                        rec.field.as_ref().expect("field"),
+                                        &job.field_of(rec).expect("field"),
                                         segments,
                                         cfg.map,
                                         rec.translate,
@@ -2575,7 +3122,7 @@ mod tests {
                                 let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
                                 let (c, s) = stroke_shade(
                                     segments,
-                                    &rec.joins,
+                                    job.joins_of(rec),
                                     &rec.style,
                                     cfg.map,
                                     rec.translate,
@@ -2627,10 +3174,10 @@ mod tests {
         let cfg = config();
         let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
         let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
-        assert_eq!(job.draws.len(), plan.shapes().instances().len());
-        assert_eq!(job.draws.len(), 2);
-        assert!(job.draws[0].is_none(), "the ghost must hold its slot");
-        assert!(job.draws[1].is_some());
+        assert_eq!(job.draws().len(), plan.shapes().instances().len());
+        assert_eq!(job.draws().len(), 2);
+        assert!(job.draws()[0].is_none(), "the ghost must hold its slot");
+        assert!(job.draws()[1].is_some());
         assert_eq!(job.draw_count(), 1, "and must not be counted as a draw");
     }
 
@@ -2727,12 +3274,12 @@ mod tests {
         let lo = shape.first_segment as usize;
         let hi = lo + shape.segment_count as usize;
         let retained = &plan.segments()[lo..hi];
-        let transformed = job.draws[0]
-            .as_ref()
-            .expect("visible draw")
-            .transformed_segments
-            .as_deref()
-            .expect("uniform scale still transforms coefficients");
+        let rec = job.draws()[0].as_ref().expect("visible draw");
+        assert!(
+            rec.transformed_segments.is_some(),
+            "uniform scale still transforms coefficients"
+        );
+        let transformed = job.segments_of(rec);
 
         assert_eq!(transformed.len(), retained.len());
         for (index, (actual, expected)) in transformed.iter().zip(retained).enumerate() {
@@ -3687,7 +4234,7 @@ mod tests {
         {
             let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
             assert!(matches!(
-                job.draws[0].as_ref().expect("visible").kernel,
+                job.draws()[0].as_ref().expect("visible").kernel,
                 FillKernel::Rect { .. }
             ));
         }
@@ -3708,7 +4255,7 @@ mod tests {
         let viewed =
             FrameJob::new(&plan, &mono, &viewed_binning, cfg).expect("matching viewed artifacts");
         assert_eq!(
-            viewed.draws[0].as_ref().expect("visible").kernel,
+            viewed.draws()[0].as_ref().expect("visible").kernel,
             FillKernel::General
         );
         drop(view);
