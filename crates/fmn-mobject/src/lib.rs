@@ -92,6 +92,9 @@ pub enum StageError {
     /// The monotonically assigned updater identity space is exhausted.
     /// Reuse would make durable replay manifests ambiguous.
     UpdaterIdExhausted,
+    /// The proxy pin counter is exhausted. Wrapping it to zero would make a
+    /// live proxy look unpinned and could finalize a deferred deletion.
+    PinCountExhausted,
     /// Durable replay attempted to install updater callables against a
     /// different target/identity set than the decoded manifest named.
     UpdaterBindingMismatch,
@@ -136,6 +139,9 @@ impl std::fmt::Display for StageError {
             }
             Self::UpdaterIdExhausted => {
                 write!(f, "updater identity space is exhausted")
+            }
+            Self::PinCountExhausted => {
+                write!(f, "proxy pin count is exhausted")
             }
             Self::UpdaterBindingMismatch => {
                 write!(f, "updater binding does not match the decoded manifest")

@@ -861,9 +861,15 @@ impl Stage {
     // ----------------------------------------------------------- lifetime
 
     /// Pin an entry (the Python proxy holds one pin for its lifetime).
+    ///
+    /// Refuses exhaustion before mutation so a live proxy count can never
+    /// wrap to zero and invalidate deferred-deletion safety.
     pub fn pin(&mut self, mob: Mob) -> Result<(), StageError> {
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
-        entry.pins += 1;
+        entry.pins = entry
+            .pins
+            .checked_add(1)
+            .ok_or(StageError::PinCountExhausted)?;
         Ok(())
     }
 

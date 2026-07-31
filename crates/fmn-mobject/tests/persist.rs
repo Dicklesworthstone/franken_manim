@@ -5,14 +5,15 @@
 //! refusals, and cross-stage decode (handles re-bound to a fresh mint).
 
 use std::cell::{Cell, RefCell};
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{Limits, SerialError, Writer, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{
-    JointType, Mob, Mobject, PersistError, SNAPSHOT_SCHEMA, SceneState, Snapshot, Stage, UpdaterFn,
-    UpdaterKindTag, UpdaterManifest,
+    JointType, Mob, Mobject, PersistError, SNAPSHOT_SCHEMA, SceneState, Snapshot, Stage,
+    StageError, UpdaterFn, UpdaterKindTag, UpdaterManifest,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
@@ -177,6 +178,55 @@ fn snapshot_with_declared_record_payload(field_count: u16, field_width: u16, len
     }
     writer.put_u16(0).put_u16(0).put_u32(len);
     writer.finish().unwrap()
+}
+
+fn snapshot_with_max_pin_count(stage: &mut Stage, mob: Mob) -> Vec<u8> {
+    let unpinned = stage.snapshot_bytes().unwrap();
+    stage.pin(mob).unwrap();
+    let mut pinned = stage.snapshot_bytes().unwrap();
+    let body_len = pinned.len() - 32;
+    assert_eq!(unpinned.len(), pinned.len());
+    let changed: Vec<usize> = (0..body_len)
+        .filter(|&offset| unpinned[offset] != pinned[offset])
+        .collect();
+    assert_eq!(changed.len(), 1, "pinning changes exactly one payload byte");
+
+    let pin_offset = changed[0];
+    assert_eq!(&unpinned[pin_offset..pin_offset + 8], &0_u64.to_le_bytes());
+    assert_eq!(&pinned[pin_offset..pin_offset + 8], &1_u64.to_le_bytes());
+    let maximum = u64::try_from(usize::MAX).expect("usize pin count fits the durable u64 field");
+    pinned[pin_offset..pin_offset + 8].copy_from_slice(&maximum.to_le_bytes());
+
+    let digest = sha256(&pinned[..body_len]);
+    pinned[body_len..].copy_from_slice(digest.as_bytes());
+    pinned
+}
+
+#[test]
+fn persisted_max_pin_count_refuses_another_pin_without_state_change() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new());
+    let bytes = snapshot_with_max_pin_count(&mut stage, mob);
+    let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+    stage.restore(&decoded.snapshot);
+    assert_eq!(stage.get(mob).unwrap().pins(), usize::MAX);
+    let before = stage.snapshot_bytes().unwrap();
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| stage.pin(mob)));
+    assert_eq!(
+        result.expect("pin-count exhaustion must never panic"),
+        Err(StageError::PinCountExhausted)
+    );
+    assert_eq!(stage.get(mob).unwrap().pins(), usize::MAX);
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+
+    stage.delete(mob).unwrap();
+    assert!(stage.contains(mob), "outstanding pins defer deletion");
+    stage.unpin(mob);
+    assert!(
+        stage.contains(mob),
+        "one unpin from the maximum count cannot finalize deletion"
+    );
 }
 
 #[test]
