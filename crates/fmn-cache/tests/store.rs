@@ -10,7 +10,7 @@
 use fmn_cache::{
     CacheError, CacheKey, EvictOutcome, KeyBuilder, Namespace, NamespacePolicy, Store, StoreConfig,
 };
-use fmn_hash::sha256;
+use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer, sha256};
 use fmn_platform::clock::{Clock, FakeClock};
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind, VirtualFs};
 use std::path::{Path, PathBuf};
@@ -509,6 +509,134 @@ fn envelope_size(store: &Store, payload_len: usize) -> u64 {
         .unwrap();
     n.put(&key("probe"), &vec![0u8; payload_len]).unwrap();
     n.usage().unwrap()
+}
+
+const INDEX_SCHEMA: Schema = Schema::new(*b"FMNC", 2, 1, 0);
+
+fn index_path() -> PathBuf {
+    Path::new(ROOT).join("ns/t/v1/index")
+}
+
+/// An advisory index as another store opening (or an older build) could have
+/// published. Re-declaring the schema here makes format drift test-visible.
+fn foreign_index(next_seq: u64, entries: &[(Digest, u64, u64)]) -> Vec<u8> {
+    let mut writer = Writer::new(INDEX_SCHEMA);
+    writer.put_u64(next_seq);
+    writer.put_u64(u64::try_from(entries.len()).expect("index entry count"));
+    for (digest, size, last_seq) in entries {
+        writer.put_digest(digest);
+        writer.put_u64(*size);
+        writer.put_u64(*last_seq);
+    }
+    writer.finish().expect("foreign index")
+}
+
+fn decoded_index(fs: &VirtualFs) -> (u64, Vec<(Digest, u64, u64)>) {
+    let bytes = fs.read(&index_path()).expect("read index");
+    let mut reader = Reader::open(&bytes, INDEX_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict)
+        .expect("open index");
+    let next_seq = reader.get_u64().expect("next sequence");
+    let count = reader.get_u64().expect("entry count");
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        entries.push((
+            reader.get_digest().expect("entry digest"),
+            reader.get_u64().expect("entry size"),
+            reader.get_u64().expect("entry sequence"),
+        ));
+    }
+    reader.finish().expect("clean index tail");
+    (next_seq, entries)
+}
+
+#[test]
+fn a_schema_valid_max_sequence_is_rebased_before_touch() {
+    let (fs, clock, store_a) = fresh();
+    let per_entry = envelope_size(&store_a, 8);
+    let older = key("sequence-older");
+    let newer = key("sequence-newer");
+    let n = ns(&store_a, None);
+    n.put(&older, &[1u8; 8]).unwrap();
+    n.put(&newer, &[2u8; 8]).unwrap();
+    drop(n);
+
+    fs.write_atomic(
+        &index_path(),
+        &foreign_index(
+            u64::MAX,
+            &[
+                (*older.digest(), per_entry, u64::MAX - 1),
+                (*newer.digest(), per_entry, u64::MAX),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let store_b = open_store(fs.clone(), clock);
+    let n2 = ns(&store_b, None);
+    assert_eq!(
+        n2.get(&older).unwrap().as_deref(),
+        Some(&[1u8; 8][..]),
+        "touching a maximum-sequence index remains a normal cache hit"
+    );
+    n2.flush().expect("rewrite compact index");
+
+    let (next_seq, entries) = decoded_index(&fs);
+    assert_eq!(next_seq, 2, "two entries need only two compact ranks");
+    let sequence = |digest: &Digest| {
+        entries
+            .iter()
+            .find(|(candidate, _, _)| candidate == digest)
+            .map(|(_, _, last_seq)| *last_seq)
+            .expect("indexed digest")
+    };
+    assert_eq!(sequence(newer.digest()), 0);
+    assert_eq!(sequence(older.digest()), 1, "the touched entry is newest");
+}
+
+#[test]
+fn stale_index_sizes_cannot_distort_usage_or_eviction() {
+    let (fs, clock, store_a) = fresh();
+    let per_entry = envelope_size(&store_a, 8);
+    let keys = [key("stale-a"), key("stale-b"), key("stale-c")];
+    let n = ns(&store_a, None);
+    for (index, cache_key) in keys.iter().enumerate() {
+        n.put(cache_key, &[u8::try_from(index).unwrap(); 8])
+            .unwrap();
+    }
+    drop(n);
+
+    fs.write_atomic(
+        &index_path(),
+        &foreign_index(
+            3,
+            &[
+                (*keys[0].digest(), 0, 0),
+                (*keys[1].digest(), u64::MAX, 1),
+                (*keys[2].digest(), u64::MAX, 2),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let store_b = open_store(fs.clone(), clock);
+    let n2 = ns(&store_b, Some(2 * per_entry));
+    assert_eq!(
+        n2.usage().unwrap(),
+        3 * per_entry,
+        "usage measures objects instead of trusting stale zero or maximum sizes"
+    );
+    let report = match n2.evict_to_ceiling().unwrap() {
+        EvictOutcome::Done(report) => report,
+        other => panic!("expected a pass, got {other:?}"),
+    };
+    assert_eq!(report.evicted, 1);
+    assert_eq!(report.evicted_bytes, per_entry);
+    assert_eq!(report.retained_bytes, 2 * per_entry);
+    assert_eq!(n2.usage().unwrap(), 2 * per_entry);
+    assert_eq!(n2.get(&keys[0]).unwrap(), None, "true LRU was evicted");
+    assert!(n2.get(&keys[1]).unwrap().is_some());
+    assert!(n2.get(&keys[2]).unwrap().is_some());
 }
 
 #[test]

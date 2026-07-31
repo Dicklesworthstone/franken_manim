@@ -1299,6 +1299,41 @@ struct AccessLog {
     entries: BTreeMap<Digest, IndexEntry>,
 }
 
+impl AccessLog {
+    /// Compact arbitrary persisted sequence values while preserving the exact
+    /// eviction order `(last_seq, digest)` defines.
+    fn rebase_sequences(&mut self) {
+        let mut order: Vec<(u64, Digest)> = self
+            .entries
+            .iter()
+            .map(|(digest, entry)| (entry.last_seq, *digest))
+            .collect();
+        order.sort_unstable();
+        for (rank, (_, digest)) in order.into_iter().enumerate() {
+            let rank = u64::try_from(rank).unwrap_or(u64::MAX);
+            if let Some(entry) = self.entries.get_mut(&digest) {
+                entry.last_seq = rank;
+            }
+        }
+        self.next_seq = u64::try_from(self.entries.len()).unwrap_or(u64::MAX);
+    }
+
+    fn take_next_sequence(&mut self) -> u64 {
+        if self.next_seq == u64::MAX {
+            self.rebase_sequences();
+        }
+        let sequence = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        sequence
+    }
+
+    fn total_size(&self) -> u64 {
+        self.entries
+            .values()
+            .fold(0u64, |total, entry| total.saturating_add(entry.size))
+    }
+}
+
 struct StoreInner {
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
@@ -1764,8 +1799,7 @@ impl Namespace {
 
     fn touch(&self, digest: &Digest, size: u64) {
         let mut log = self.access.lock().unwrap_or_else(lock_poisoned);
-        let seq = log.next_seq;
-        log.next_seq += 1;
+        let seq = log.take_next_sequence();
         log.entries.insert(
             *digest,
             IndexEntry {
@@ -1803,7 +1837,9 @@ impl Namespace {
             entries.insert(digest, IndexEntry { size, last_seq });
         }
         r.finish().ok()?;
-        Some(AccessLog { next_seq, entries })
+        let mut log = AccessLog { next_seq, entries };
+        log.rebase_sequences();
+        Some(log)
     }
 
     /// Merge this handle's access log with the on-disk index (max sequence
@@ -1816,7 +1852,6 @@ impl Namespace {
     pub fn flush(&self) -> Result<(), CacheError> {
         let mut log = self.access.lock().unwrap_or_else(lock_poisoned);
         if let Some(disk) = self.read_index_file() {
-            log.next_seq = log.next_seq.max(disk.next_seq);
             for (digest, theirs) in disk.entries {
                 log.entries
                     .entry(digest)
@@ -1828,6 +1863,7 @@ impl Namespace {
                     .or_insert(theirs);
             }
         }
+        log.rebase_sequences();
         self.write_index(&log)
     }
 
@@ -1903,6 +1939,40 @@ impl Namespace {
         Ok((digests, unrecognized))
     }
 
+    fn object_size(&self, digest: &Digest) -> Result<Option<u64>, CacheError> {
+        match self.inner.read_file(&self.object_path(digest)) {
+            Ok(bytes) => Ok(Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX))),
+            Err(CacheError::Storage(FsError::NotFound { .. })) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reconcile the advisory index against one disk scan. Persisted sizes are
+    /// never authoritative: every surviving object is measured again.
+    fn reconcile_index(
+        &self,
+        on_disk: &BTreeSet<Digest>,
+        log: &mut AccessLog,
+    ) -> Result<(), CacheError> {
+        log.entries.retain(|digest, _| on_disk.contains(digest));
+        for digest in on_disk {
+            match self.object_size(digest)? {
+                Some(size) => {
+                    log.entries
+                        .entry(*digest)
+                        .and_modify(|entry| entry.size = size)
+                        .or_insert(IndexEntry { size, last_seq: 0 });
+                }
+                None => {
+                    // A racing remover won after the scan. Absence is disk
+                    // truth too, so do not retain a ghost index entry.
+                    log.entries.remove(digest);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Total bytes currently stored in this namespace (entry envelopes as on
     /// disk).
     ///
@@ -1910,19 +1980,9 @@ impl Namespace {
     /// [`CacheError::Storage`].
     pub fn usage(&self) -> Result<u64, CacheError> {
         let (digests, _) = self.scan()?;
-        let log = self.access.lock().unwrap_or_else(lock_poisoned);
-        let mut total = 0u64;
-        for digest in &digests {
-            total += match log.entries.get(digest) {
-                Some(e) => e.size,
-                None => self
-                    .inner
-                    .read_file(&self.object_path(digest))
-                    .map(|b| b.len() as u64)
-                    .unwrap_or(0),
-            };
-        }
-        Ok(total)
+        let mut log = self.access.lock().unwrap_or_else(lock_poisoned);
+        self.reconcile_index(&digests, &mut log)?;
+        Ok(log.total_size())
     }
 
     /// Trim this namespace toward its ceiling: least-recently-used first
@@ -1954,7 +2014,7 @@ impl Namespace {
         };
         for path in unrecognized {
             if self.inner.remove_file(&path).is_ok() {
-                report.swept_unrecognized += 1;
+                report.swept_unrecognized = report.swept_unrecognized.saturating_add(1);
             }
         }
 
@@ -1962,19 +2022,9 @@ impl Namespace {
         // Reconcile: disk is the truth. Ghost log entries drop; strangers
         // (entries other processes wrote) enter with sequence 0, so they are
         // first out unless someone touches them.
-        log.entries.retain(|digest, _| on_disk.contains(digest));
-        for digest in &on_disk {
-            log.entries.entry(*digest).or_insert_with(|| IndexEntry {
-                size: self
-                    .inner
-                    .read_file(&self.object_path(digest))
-                    .map(|b| b.len() as u64)
-                    .unwrap_or(0),
-                last_seq: 0,
-            });
-        }
+        self.reconcile_index(&on_disk, &mut log)?;
 
-        let mut total: u64 = log.entries.values().map(|e| e.size).sum();
+        let mut total = log.total_size();
         if total > ceiling {
             let pinned = self.pins.snapshot();
             let mut order: Vec<(u64, Digest, u64)> = log
@@ -1988,21 +2038,22 @@ impl Namespace {
                     break;
                 }
                 if pinned.contains(&digest) {
-                    report.skipped_pinned += 1;
+                    report.skipped_pinned = report.skipped_pinned.saturating_add(1);
                     continue;
                 }
                 match self.inner.remove_file(&self.object_path(&digest)) {
                     Ok(()) | Err(CacheError::Storage(FsError::NotFound { .. })) => {
                         log.entries.remove(&digest);
                         total = total.saturating_sub(size);
-                        report.evicted += 1;
-                        report.evicted_bytes += size;
+                        report.evicted = report.evicted.saturating_add(1);
+                        report.evicted_bytes = report.evicted_bytes.saturating_add(size);
                     }
                     Err(err) => return Err(err),
                 }
             }
         }
         report.retained_bytes = total;
+        log.rebase_sequences();
         self.write_index(&log)?;
         Ok(report)
     }
