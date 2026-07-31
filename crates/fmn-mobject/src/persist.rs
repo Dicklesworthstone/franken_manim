@@ -488,6 +488,161 @@ fn preflight_record_payload(r: &Reader<'_>, len: usize, stride: usize) -> Result
     Ok(())
 }
 
+fn live_snapshot_entry(slots: &[(u32, Option<SnapshotEntry>)], mob: Mob) -> Option<&SnapshotEntry> {
+    let (index, generation) = mob.parts();
+    let (stored_generation, entry) = slots.get(index as usize)?;
+    if *stored_generation != generation {
+        return None;
+    }
+    entry.as_ref()
+}
+
+fn links_are_unique(links: &[Mob]) -> bool {
+    let mut identities: Vec<u64> = links.iter().map(|mob| mob.bits()).collect();
+    identities.sort_unstable();
+    identities.windows(2).all(|pair| pair[0] != pair[1])
+}
+
+/// Validate the arena invariants that every public [`Stage`] mutation
+/// preserves before the decoded state can reach [`Stage::restore`].
+///
+/// This pass is deliberately iterative: persisted family depth is input, not
+/// a reason to consume the process stack. Its auxiliary storage is linear in
+/// the already-decoded slot and edge inventories.
+fn validate_decoded_arena(snapshot: &Snapshot) -> Result<(), PersistError> {
+    let mut free_seen = vec![false; snapshot.slots.len()];
+    for &raw_index in &snapshot.free {
+        let index = raw_index as usize;
+        let Some((_, entry)) = snapshot.slots.get(index) else {
+            return Err(PersistError::Malformed("free slot index is out of range"));
+        };
+        if entry.is_some() {
+            return Err(PersistError::Malformed(
+                "free slot ledger names a live slot",
+            ));
+        }
+        if std::mem::replace(&mut free_seen[index], true) {
+            return Err(PersistError::Malformed("free slot ledger repeats an index"));
+        }
+    }
+    if snapshot
+        .slots
+        .iter()
+        .enumerate()
+        .any(|(index, (_, entry))| entry.is_none() && !free_seen[index])
+    {
+        return Err(PersistError::Malformed(
+            "free slot ledger omits an empty slot",
+        ));
+    }
+
+    if snapshot
+        .roots
+        .iter()
+        .any(|&root| live_snapshot_entry(&snapshot.slots, root).is_none())
+    {
+        return Err(PersistError::Malformed("scene root is not live"));
+    }
+
+    // Once liveness has proved each handle's generation, slot-index pairs
+    // uniquely identify edges. Keeping the lookup in `(u32, u32)` form uses
+    // exactly the same eight bytes as one serialized handle rather than
+    // doubling auxiliary storage with two `u64` identities.
+    let mut reverse_edges: Vec<(u32, u32)> = Vec::new();
+    let mut child_edge_count = 0_usize;
+    let mut live_count = 0_usize;
+    for (slot_index, (_, entry)) in snapshot.slots.iter().enumerate() {
+        let Some(entry) = entry else {
+            continue;
+        };
+        live_count += 1;
+        if entry.pending_delete && entry.pins == 0 {
+            return Err(PersistError::Malformed("pending delete has no pins"));
+        }
+        if !links_are_unique(&entry.submobjects) || !links_are_unique(&entry.parents) {
+            return Err(PersistError::Malformed("family edge is duplicated"));
+        }
+        if entry
+            .submobjects
+            .iter()
+            .chain(&entry.parents)
+            .any(|&mob| live_snapshot_entry(&snapshot.slots, mob).is_none())
+        {
+            return Err(PersistError::Malformed("family link is not live"));
+        }
+        child_edge_count = child_edge_count
+            .checked_add(entry.submobjects.len())
+            .ok_or(PersistError::Malformed("family edge count overflows"))?;
+        let slot_index = u32::try_from(slot_index)
+            .map_err(|_| PersistError::Malformed("arena slot count exceeds format"))?;
+        reverse_edges.extend(
+            entry
+                .parents
+                .iter()
+                .map(|parent| (parent.parts().0, slot_index)),
+        );
+    }
+    if child_edge_count != reverse_edges.len() {
+        return Err(PersistError::Malformed(
+            "family parent-child links are asymmetric",
+        ));
+    }
+    reverse_edges.sort_unstable();
+    for (slot_index, (_, entry)) in snapshot.slots.iter().enumerate() {
+        let Some(entry) = entry else {
+            continue;
+        };
+        let slot_index = u32::try_from(slot_index)
+            .map_err(|_| PersistError::Malformed("arena slot count exceeds format"))?;
+        if entry.submobjects.iter().any(|child| {
+            reverse_edges
+                .binary_search(&(slot_index, child.parts().0))
+                .is_err()
+        }) {
+            return Err(PersistError::Malformed(
+                "family parent-child links are asymmetric",
+            ));
+        }
+    }
+
+    let mut indegrees = vec![0_u32; snapshot.slots.len()];
+    let mut ready = Vec::new();
+    for (index, (_, entry)) in snapshot.slots.iter().enumerate() {
+        let Some(entry) = entry else {
+            continue;
+        };
+        indegrees[index] = u32::try_from(entry.parents.len())
+            .map_err(|_| PersistError::Malformed("family parent count exceeds format"))?;
+        if indegrees[index] == 0 {
+            ready.push(index);
+        }
+    }
+    let mut visited = 0_usize;
+    while let Some(index) = ready.pop() {
+        visited += 1;
+        let entry = snapshot.slots[index]
+            .1
+            .as_ref()
+            .ok_or(PersistError::Malformed(
+                "family traversal reached a free slot",
+            ))?;
+        for child in &entry.submobjects {
+            let (child_index, _) = child.parts();
+            let degree = &mut indegrees[child_index as usize];
+            *degree = degree.checked_sub(1).ok_or(PersistError::Malformed(
+                "family parent-child links are asymmetric",
+            ))?;
+            if *degree == 0 {
+                ready.push(child_index as usize);
+            }
+        }
+    }
+    if visited != live_count {
+        return Err(PersistError::Malformed("family graph contains a cycle"));
+    }
+    Ok(())
+}
+
 impl Snapshot {
     /// Serialize into the versioned canonical container.
     ///
@@ -807,14 +962,16 @@ impl Snapshot {
             }
         }
         r.finish()?;
+        let snapshot = Snapshot {
+            stage_id,
+            next_updater_id,
+            slots,
+            free,
+            roots,
+        };
+        validate_decoded_arena(&snapshot)?;
         Ok(DecodedSnapshot {
-            snapshot: Snapshot {
-                stage_id,
-                next_updater_id,
-                slots,
-                free,
-                roots,
-            },
+            snapshot,
             updaters: manifest,
         })
     }
@@ -927,5 +1084,152 @@ impl SceneState {
             snapshot: decoded.snapshot,
             updaters: decoded.updaters,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Mobject;
+
+    fn entry_mut(snapshot: &mut Snapshot, mob: Mob) -> &mut SnapshotEntry {
+        let (index, generation) = mob.parts();
+        let (stored_generation, entry) = &mut snapshot.slots[index as usize];
+        assert_eq!(*stored_generation, generation);
+        entry.as_mut().expect("test handle must name a live entry")
+    }
+
+    fn assert_malformed(snapshot: &Snapshot, stage: &Stage, expected: &'static str) {
+        let bytes = snapshot.to_bytes().unwrap();
+        let error = Snapshot::from_bytes(&bytes, stage)
+            .map(|_| ())
+            .expect_err("the malformed canonical snapshot must be refused");
+        assert_eq!(error, PersistError::Malformed(expected));
+    }
+
+    #[test]
+    fn decode_refuses_impossible_lifetime_and_free_slot_ledgers() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+
+        let mut pending_without_pins = stage.snapshot();
+        entry_mut(&mut pending_without_pins, mob).pending_delete = true;
+        assert_malformed(&pending_without_pins, &stage, "pending delete has no pins");
+
+        let mut out_of_range = stage.snapshot();
+        out_of_range
+            .free
+            .push(u32::try_from(out_of_range.slots.len()).unwrap());
+        assert_malformed(&out_of_range, &stage, "free slot index is out of range");
+
+        let mut live_slot = stage.snapshot();
+        live_slot.free.push(0);
+        assert_malformed(&live_slot, &stage, "free slot ledger names a live slot");
+
+        let free_mob = stage.add(Mobject::new());
+        stage.delete(free_mob).unwrap();
+        let mut duplicate = stage.snapshot();
+        duplicate.free.push(duplicate.free[0]);
+        assert_malformed(&duplicate, &stage, "free slot ledger repeats an index");
+
+        let mut missing = stage.snapshot();
+        missing.free.clear();
+        assert_malformed(&missing, &stage, "free slot ledger omits an empty slot");
+    }
+
+    #[test]
+    fn decode_refuses_impossible_roots_and_family_graphs() {
+        let mut stage = Stage::new();
+        let parent = stage.add(Mobject::new());
+        let child = stage.add(Mobject::new());
+
+        let mut stale_root = stage.snapshot();
+        let (index, generation) = parent.parts();
+        stale_root.roots.push(Mob::from_parts(
+            stale_root.stage_id,
+            index,
+            generation.wrapping_add(1),
+        ));
+        assert_malformed(&stale_root, &stage, "scene root is not live");
+
+        let mut stale_edge = stage.snapshot();
+        let (index, generation) = child.parts();
+        let stale_child = Mob::from_parts(stale_edge.stage_id, index, generation.wrapping_add(1));
+        entry_mut(&mut stale_edge, parent)
+            .submobjects
+            .push(stale_child);
+        assert_malformed(&stale_edge, &stage, "family link is not live");
+
+        let mut duplicate_edge = stage.snapshot();
+        entry_mut(&mut duplicate_edge, parent)
+            .submobjects
+            .extend([child, child]);
+        entry_mut(&mut duplicate_edge, child).parents.push(parent);
+        assert_malformed(&duplicate_edge, &stage, "family edge is duplicated");
+
+        let mut asymmetric = stage.snapshot();
+        entry_mut(&mut asymmetric, parent).submobjects.push(child);
+        assert_malformed(
+            &asymmetric,
+            &stage,
+            "family parent-child links are asymmetric",
+        );
+
+        let mut cyclic = stage.snapshot();
+        entry_mut(&mut cyclic, parent).submobjects.push(child);
+        entry_mut(&mut cyclic, parent).parents.push(child);
+        entry_mut(&mut cyclic, child).submobjects.push(parent);
+        entry_mut(&mut cyclic, child).parents.push(parent);
+        assert_malformed(&cyclic, &stage, "family graph contains a cycle");
+    }
+
+    #[test]
+    fn decode_accepts_runtime_reachable_lifetime_and_graph_states() {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::new());
+        let left = stage.add(Mobject::new());
+        let right = stage.add(Mobject::new());
+        let shared = stage.add(Mobject::new());
+        stage.attach(root, left).unwrap();
+        stage.attach(root, right).unwrap();
+        stage.attach(left, shared).unwrap();
+        stage.attach(right, shared).unwrap();
+        stage.add_many_to_scene(&[root, root]).unwrap();
+
+        stage.pin(left).unwrap();
+        stage.delete(left).unwrap();
+
+        stage.generate_target(right).unwrap();
+        let target = stage.target(right).unwrap();
+        stage.delete(target).unwrap();
+        stage.save_state(right).unwrap();
+        let saved = stage.saved_state(right).unwrap();
+        stage.delete(saved).unwrap();
+
+        let bytes = stage.snapshot_bytes().unwrap();
+        let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+        let mut snapshot = decoded.snapshot;
+        assert_eq!(snapshot.roots, [root, root]);
+        assert_eq!(snapshot.to_bytes().unwrap(), bytes);
+        let left_entry = entry_mut(&mut snapshot, left);
+        assert_eq!(left_entry.pins, 1);
+        assert!(left_entry.pending_delete);
+    }
+
+    #[test]
+    fn decode_validates_a_deep_family_without_recursion() {
+        const DEPTH: usize = 4_096;
+
+        let mut stage = Stage::new();
+        let handles: Vec<Mob> = (0..DEPTH).map(|_| stage.add(Mobject::new())).collect();
+        let mut snapshot = stage.snapshot();
+        for edge in handles.windows(2) {
+            entry_mut(&mut snapshot, edge[0]).submobjects.push(edge[1]);
+            entry_mut(&mut snapshot, edge[1]).parents.push(edge[0]);
+        }
+
+        let bytes = snapshot.to_bytes().unwrap();
+        let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+        assert_eq!(decoded.snapshot.slots.len(), DEPTH);
     }
 }
