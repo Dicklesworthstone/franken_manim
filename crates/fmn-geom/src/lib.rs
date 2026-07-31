@@ -50,7 +50,9 @@ pub use isolines::{
     IsolineConfig, IsolineError, IsolineStats, MAX_ISOLINE_EVALUATIONS, MAX_ISOLINE_LEAVES,
     plot_isoline, plot_isoline_with_stats,
 };
-pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
+pub use quadpath::{
+    AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, MAX_SUBDIVIDED_CURVES, QuadPath,
+};
 pub use rotation::{EulerAngles, EulerSeq, Quat};
 pub use smoothing::{MAX_CLOSED_SMOOTHING_DIMENSION, MAX_CLOSED_SMOOTHING_MATRIX_CELLS};
 pub use space_ops::{
@@ -95,6 +97,17 @@ pub enum GeomError {
         /// Number of `f64` cells in the requested dense system.
         cells: usize,
     },
+    /// `subdivide_sharp_curves` requires a positive, finite angle threshold.
+    InvalidSubdivisionThreshold,
+    /// A requested per-curve or aggregate subdivision would exceed the
+    /// bounded output-curve budget.
+    SubdivisionBudgetExceeded {
+        /// Total output curves requested, or `usize::MAX` when the count
+        /// arithmetic itself overflowed.
+        requested: usize,
+        /// Maximum output curves admitted by the operation.
+        max: usize,
+    },
     /// A conversion tolerance that was not a positive, finite number.
     ///
     /// This and [`GeomError::ToleranceUnreachable`] are the converter's
@@ -133,6 +146,16 @@ impl std::fmt::Display for GeomError {
                 "closed smoothing needs a {dimension} by {dimension} system ({cells} cells), above the {}-dimension/{}-cell budget",
                 smoothing::MAX_CLOSED_SMOOTHING_DIMENSION,
                 smoothing::MAX_CLOSED_SMOOTHING_MATRIX_CELLS
+            ),
+            Self::InvalidSubdivisionThreshold => {
+                write!(
+                    f,
+                    "curve-subdivision angle threshold must be positive and finite"
+                )
+            }
+            Self::SubdivisionBudgetExceeded { requested, max } => write!(
+                f,
+                "curve subdivision requests {requested} output curves, above the {max} cap"
             ),
             Self::InvalidTolerance => {
                 write!(f, "conversion tolerance must be a positive, finite number")

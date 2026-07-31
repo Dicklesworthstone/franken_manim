@@ -25,6 +25,13 @@ use fmn_core::types::Vec3;
 /// The Reference's `VMobject.tolerance_for_point_equality`.
 pub const DEFAULT_TOLERANCE_FOR_POINT_EQUALITY: f64 = 1e-8;
 
+/// Maximum total quadratic count after one public subdivision operation.
+///
+/// The shared-anchor representation needs `2 * curves + 1` points, so this
+/// cap bounds the output to 131,073 [`Vec3`] values (about 3 MiB of point
+/// payload) before any output allocation or mutation occurs.
+pub const MAX_SUBDIVIDED_CURVES: usize = 65_536;
+
 /// The Reference's subpath-end disambiguation tolerance (its own comment:
 /// "TODO, this is too unsystematic" — kept exactly, because subpath
 /// decomposition is API behavior).
@@ -605,18 +612,58 @@ impl QuadPath {
 
     /// `subdivide_curves_by_condition`: split each curve into `f(curve) + 1`
     /// equal-parameter pieces.
+    ///
+    /// The callback is evaluated exactly once per input curve during a
+    /// preflight. Per-curve arithmetic, the aggregate piece count, and the
+    /// final shared-anchor point count must all fit [`MAX_SUBDIVIDED_CURVES`]
+    /// before output allocation or path mutation.
     pub fn subdivide_curves_by_condition(
         &mut self,
         tuple_to_subdivisions: impl Fn([Vec3; 3]) -> usize,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, GeomError> {
         if !self.has_points() {
-            return self;
+            return Ok(self);
         }
-        let mut new_points = vec![self.points[0]];
-        for tup in self.bezier_tuples().collect::<Vec<_>>() {
-            let n_divisions = tuple_to_subdivisions(tup);
-            if n_divisions > 0 {
-                let alphas = bezier::linspace(0.0, 1.0, n_divisions + 2);
+        let tuples: Vec<[Vec3; 3]> = self.bezier_tuples().collect();
+        let mut pieces_per_curve = Vec::with_capacity(tuples.len());
+        let mut total_curves = 0usize;
+        for &tup in &tuples {
+            let subdivisions = tuple_to_subdivisions(tup);
+            let pieces =
+                subdivisions
+                    .checked_add(1)
+                    .ok_or(GeomError::SubdivisionBudgetExceeded {
+                        requested: usize::MAX,
+                        max: MAX_SUBDIVIDED_CURVES,
+                    })?;
+            total_curves =
+                total_curves
+                    .checked_add(pieces)
+                    .ok_or(GeomError::SubdivisionBudgetExceeded {
+                        requested: usize::MAX,
+                        max: MAX_SUBDIVIDED_CURVES,
+                    })?;
+            if total_curves > MAX_SUBDIVIDED_CURVES {
+                return Err(GeomError::SubdivisionBudgetExceeded {
+                    requested: total_curves,
+                    max: MAX_SUBDIVIDED_CURVES,
+                });
+            }
+            pieces_per_curve.push(pieces);
+        }
+
+        let point_count = total_curves
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(GeomError::SubdivisionBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_SUBDIVIDED_CURVES,
+            })?;
+        let mut new_points = Vec::with_capacity(point_count);
+        new_points.push(self.points[0]);
+        for (tup, pieces) in tuples.into_iter().zip(pieces_per_curve) {
+            if pieces > 1 {
+                let alphas = bezier::linspace(0.0, 1.0, pieces + 1);
                 for pair in alphas.windows(2) {
                     let sub = bezier::partial_quadratic(&tup, pair[0], pair[1]);
                     new_points.push(sub[1]);
@@ -627,12 +674,16 @@ impl QuadPath {
                 new_points.push(tup[2]);
             }
         }
+        debug_assert_eq!(new_points.len(), point_count);
         self.points = new_points;
-        self
+        Ok(self)
     }
 
-    /// `subdivide_sharp_curves`.
-    pub fn subdivide_sharp_curves(&mut self, angle_threshold: f64) -> &mut Self {
+    /// `subdivide_sharp_curves`, with a positive finite threshold.
+    pub fn subdivide_sharp_curves(&mut self, angle_threshold: f64) -> Result<&mut Self, GeomError> {
+        if !angle_threshold.is_finite() || angle_threshold <= 0.0 {
+            return Err(GeomError::InvalidSubdivisionThreshold);
+        }
         self.subdivide_curves_by_condition(|[b0, b1, b2]| {
             let angle = space_ops::angle_between_vectors(vec::sub(b1, b0), vec::sub(b2, b1));
             (angle / angle_threshold) as usize
@@ -1000,6 +1051,104 @@ impl QuadPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn right_angle_curve() -> QuadPath {
+        QuadPath::from_points(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]).unwrap()
+    }
+
+    #[test]
+    fn subdivision_preflight_enforces_exact_and_overflow_boundaries_atomically() {
+        let mut exact = right_angle_curve();
+        let calls = Cell::new(0usize);
+        exact
+            .subdivide_curves_by_condition(|_| {
+                calls.set(calls.get() + 1);
+                MAX_SUBDIVIDED_CURVES - 1
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(exact.num_curves(), MAX_SUBDIVIDED_CURVES);
+        assert_eq!(exact.num_points(), 2 * MAX_SUBDIVIDED_CURVES + 1);
+
+        let original = right_angle_curve();
+        let mut one_over = original.clone();
+        assert_eq!(
+            one_over
+                .subdivide_curves_by_condition(|_| MAX_SUBDIVIDED_CURVES)
+                .unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: MAX_SUBDIVIDED_CURVES + 1,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(one_over, original);
+
+        let mut arithmetic_overflow = original.clone();
+        assert_eq!(
+            arithmetic_overflow
+                .subdivide_curves_by_condition(|_| usize::MAX)
+                .unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(arithmetic_overflow, original);
+    }
+
+    #[test]
+    fn subdivision_preflight_bounds_aggregate_work_and_calls_once_per_curve() {
+        let mut path = QuadPath::new();
+        path.set_points_as_corners(&[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]])
+            .unwrap();
+        let original = path.clone();
+        let calls = Cell::new(0usize);
+        let first_curve_subdivisions = MAX_SUBDIVIDED_CURVES - 1;
+        assert_eq!(
+            path.subdivide_curves_by_condition(|_| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == 0 {
+                    first_curve_subdivisions
+                } else {
+                    0
+                }
+            })
+            .unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: MAX_SUBDIVIDED_CURVES + 1,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(path, original);
+    }
+
+    #[test]
+    fn sharp_subdivision_rejects_invalid_thresholds_without_mutation() {
+        let original = right_angle_curve();
+        for threshold in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut path = original.clone();
+            assert_eq!(
+                path.subdivide_sharp_curves(threshold).unwrap_err(),
+                GeomError::InvalidSubdivisionThreshold
+            );
+            assert_eq!(path, original);
+        }
+
+        let mut too_fine = original.clone();
+        assert_eq!(
+            too_fine
+                .subdivide_sharp_curves(f64::MIN_POSITIVE)
+                .unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(too_fine, original);
+    }
 
     #[test]
     fn arc_constructor_uses_bn09_density() {

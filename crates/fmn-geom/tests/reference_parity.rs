@@ -21,7 +21,7 @@ const F32_TOL: f64 = 5e-6;
 
 fn fixture(name: &str) -> String {
     let path = format!("{}/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}")) // ubs:ignore — a missing parity fixture must fail the test
 }
 
 /// Split a fixture file into `case`-blocks of non-comment lines.
@@ -49,7 +49,7 @@ fn parse_points(lines: &[String], index: &mut usize, label: &str) -> Vec<Vec3> {
     let header = &lines[*index];
     let count: usize = header
         .strip_prefix(&format!("{label} "))
-        .unwrap_or_else(|| panic!("expected `{label} <n>`, got `{header}`"))
+        .unwrap_or_else(|| panic!("expected `{label} <n>`, got `{header}`")) // ubs:ignore — a malformed parity fixture must fail the test
         .parse()
         .unwrap();
     *index += 1;
@@ -228,7 +228,7 @@ fn build_case(name: &str) -> QuadPath {
         "subdivide_sharp_arc" => {
             path.set_points(bezier::quadratic_points_for_arc(TAU / 4.0, 1))
                 .unwrap();
-            path.subdivide_sharp_curves(30.0 * DEG);
+            path.subdivide_sharp_curves(30.0 * DEG).unwrap();
         }
         "insert_curves" => {
             path.set_points_as_corners(&[p(0.0, 0.0), p(1.0, 0.0), p(4.0, 0.0)])
@@ -250,7 +250,7 @@ fn build_case(name: &str) -> QuadPath {
             let other_points = other.points().to_vec();
             path.add_subpath(&other_points).unwrap();
         }
-        other => panic!("unknown fixture case `{other}` — sync with gen_geom_fixtures.py"),
+        other => panic!("unknown fixture case `{other}` — sync with gen_geom_fixtures.py"), // ubs:ignore — an unknown parity case must fail the test
     }
     path
 }
