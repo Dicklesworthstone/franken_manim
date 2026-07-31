@@ -531,6 +531,7 @@ fn decimal_number_tick(corpus: &Corpus) -> Built {
     let line = NumberLine::new([-3.0, 3.0, 1.0])
         .width(4.0)
         .build()
+        .expect("number-line ticks stay within the default budget")
         .into_vmob()
         .shifted([0.0, -0.6, 0.0]);
     let number = DecimalNumber::new(std::f64::consts::PI)
@@ -657,6 +658,7 @@ fn axes_function_graph(corpus: &Corpus) -> Built {
         .x_range([-3.0, 3.0, 0.05])
         .color(YELLOW_C)
         .build()
+        .expect("function-graph sampling stays within the default budget")
         .scaled_about(0.7, [0.0, 0.0, 0.0]);
     stage_of(v_group([axes, graph]))
 }
@@ -684,7 +686,8 @@ fn parametric_lissajous(corpus: &Corpus) -> Built {
     })
     .t_range([0.0, TAU, TAU / 400.0])
     .color(MAROON_C)
-    .build();
+    .build()
+    .expect("parametric sampling stays within the default budget");
     stage_of(v_group([curve]))
 }
 

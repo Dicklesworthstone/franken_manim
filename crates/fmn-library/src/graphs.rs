@@ -22,8 +22,9 @@
 //!
 //! * **Non-positive `step`.** numpy's `arange` raises on `step = 0` and
 //!   returns empty for a step pointing away from `t2`; an unconditional
-//!   `k·step < t2` loop would hang on the former. Here a non-positive (or
-//!   NaN) step samples only the explicit `t2` endpoint of each pair.
+//!   `k·step < t2` loop would hang on the former. Here a finite
+//!   non-positive step samples only the explicit `t2` endpoint of each
+//!   pair. Non-finite work controls are typed [`SamplingError`]s.
 //! * **Owned closures.** `t_func`/`function` are owned `dyn Fn` values, so
 //!   the builders implement [`std::fmt::Debug`] by hand (configuration
 //!   only) and do not derive `Clone`/`PartialEq` the way the closure-free
@@ -40,7 +41,6 @@ use std::fmt;
 use fmn_core::constants::{FRAME_X_RADIUS, FRAME_Y_RADIUS, YELLOW};
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, IsolineConfig, IsolineError, QuadPath, plot_isoline};
-use fmn_mobject::Mobject;
 use fmn_mobject::uniforms::JointType;
 
 use crate::style::Style;
@@ -56,11 +56,208 @@ pub const DEFAULT_X_RANGE: [f64; 3] = [-8.0, 8.0, 0.25];
 pub const DEFAULT_MIN_DEPTH: u32 = 5;
 /// The Reference's `ImplicitFunction(max_quads=1500)`.
 pub const DEFAULT_MAX_QUADS: usize = 1500;
+/// Default upper bound for values produced by one Atlas sampling
+/// operation.
+///
+/// The bound is deliberately generous for ordinary scene geometry while
+/// still making tiny steps and enormous finite ranges refuse before any
+/// proportional allocation or iteration. Callers with a deliberate
+/// larger corpus can opt into a different [`SamplingBudget`].
+pub const DEFAULT_MAX_SAMPLES: usize = 65_536;
 
-/// A graphing failure: the isoline extractor's named faults, or the path
-/// kernel's during the true spline solve.
+/// The explicit resource contract shared by Atlas range sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplingBudget {
+    max_samples: usize,
+}
+
+impl SamplingBudget {
+    /// The default Atlas sampling budget.
+    pub const DEFAULT: Self = Self::new(DEFAULT_MAX_SAMPLES);
+
+    /// A budget allowing at most `max_samples` produced values.
+    #[must_use]
+    pub const fn new(max_samples: usize) -> Self {
+        Self { max_samples }
+    }
+
+    /// The maximum number of produced values.
+    #[must_use]
+    pub const fn max_samples(self) -> usize {
+        self.max_samples
+    }
+
+    pub(crate) fn ensure_total(
+        self,
+        context: &'static str,
+        samples: usize,
+    ) -> Result<(), SamplingError> {
+        if samples > self.max_samples {
+            return Err(SamplingError::LimitExceeded {
+                context,
+                max_samples: self.max_samples,
+            });
+        }
+        Ok(())
+    }
+
+    fn sampled_count(
+        self,
+        context: &'static str,
+        start: f64,
+        stop: f64,
+        step: f64,
+        include_stop: bool,
+    ) -> Result<usize, SamplingError> {
+        ensure_finite(context, "start", start)?;
+        ensure_finite(context, "stop", stop)?;
+        ensure_finite(context, "step", step)?;
+
+        let terminal = usize::from(include_stop);
+        self.ensure_total(context, terminal)?;
+        if step <= 0.0 || start >= stop {
+            return Ok(terminal);
+        }
+
+        let span = stop - start;
+        let quotient = span / step;
+        if !span.is_finite() || !quotient.is_finite() {
+            return Err(SamplingError::LimitExceeded {
+                context,
+                max_samples: self.max_samples,
+            });
+        }
+
+        let arange_count = quotient.ceil();
+        let allowed = self.max_samples - terminal;
+        if arange_count > allowed as f64 {
+            return Err(SamplingError::LimitExceeded {
+                context,
+                max_samples: self.max_samples,
+            });
+        }
+        let arange_count = arange_count as usize;
+        arange_count
+            .checked_add(terminal)
+            .ok_or(SamplingError::CapacityOverflow { context })
+    }
+}
+
+impl Default for SamplingBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// A sampling request refused before proportional work begins.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SamplingError {
+    /// A range component that controls work is not finite.
+    NonFinite {
+        /// The sampling surface being built.
+        context: &'static str,
+        /// The rejected parameter.
+        parameter: &'static str,
+        /// The rejected value.
+        value: f64,
+    },
+    /// The request would produce more values than its declared budget.
+    LimitExceeded {
+        /// The sampling surface being built.
+        context: &'static str,
+        /// The active limit.
+        max_samples: usize,
+    },
+    /// Count arithmetic cannot be represented by the host.
+    CapacityOverflow {
+        /// The sampling surface being built.
+        context: &'static str,
+    },
+    /// Reserving the validated bounded output failed.
+    AllocationFailed {
+        /// The sampling surface being built.
+        context: &'static str,
+        /// The validated number of values requested.
+        samples: usize,
+    },
+}
+
+impl fmt::Display for SamplingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFinite {
+                context,
+                parameter,
+                value,
+            } => write!(f, "{context} requires finite {parameter}, got {value}"),
+            Self::LimitExceeded {
+                context,
+                max_samples,
+            } => write!(
+                f,
+                "{context} exceeds the declared {max_samples}-sample budget"
+            ),
+            Self::CapacityOverflow { context } => {
+                write!(f, "{context} sample count exceeds the host capacity")
+            }
+            Self::AllocationFailed { context, samples } => {
+                write!(f, "{context} could not reserve {samples} sampled values")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SamplingError {}
+
+fn ensure_finite(
+    context: &'static str,
+    parameter: &'static str,
+    value: f64,
+) -> Result<(), SamplingError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(SamplingError::NonFinite {
+            context,
+            parameter,
+            value,
+        })
+    }
+}
+
+pub(crate) fn sampled_values(
+    context: &'static str,
+    start: f64,
+    stop: f64,
+    step: f64,
+    include_stop: bool,
+    budget: SamplingBudget,
+) -> Result<Vec<f64>, SamplingError> {
+    let count = budget.sampled_count(context, start, stop, step, include_stop)?;
+    let terminal = usize::from(include_stop);
+    let arange_count = count - terminal;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| SamplingError::AllocationFailed {
+            context,
+            samples: count,
+        })?;
+    for k in 0..arange_count {
+        values.push(k as f64 * step + start);
+    }
+    if include_stop {
+        values.push(stop);
+    }
+    Ok(values)
+}
+
+/// A graphing failure: bounded sampling, isoline extraction, or the path
+/// kernel's true spline solve.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GraphError {
+    /// Atlas sampling refused a non-finite or over-budget request.
+    Sampling(SamplingError),
     /// [`plot_isoline`] rejected the domain or depth.
     Isoline(IsolineError),
     /// The path kernel rejected a construction (the true smoothing solve).
@@ -70,13 +267,28 @@ pub enum GraphError {
 impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Sampling(e) => write!(f, "graph sampling failed: {e}"),
             Self::Isoline(e) => write!(f, "isoline extraction failed: {e}"),
             Self::Geom(e) => write!(f, "path construction failed: {e}"),
         }
     }
 }
 
-impl std::error::Error for GraphError {}
+impl std::error::Error for GraphError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sampling(error) => Some(error),
+            Self::Isoline(error) => Some(error),
+            Self::Geom(error) => Some(error),
+        }
+    }
+}
+
+impl From<SamplingError> for GraphError {
+    fn from(e: SamplingError) -> Self {
+        Self::Sampling(e)
+    }
+}
 
 impl From<IsolineError> for GraphError {
     fn from(e: IsolineError) -> Self {
@@ -93,23 +305,14 @@ impl From<GeomError> for GraphError {
 /// The Reference's pair sampling: `t1 + k·step` while `< t2`, then an
 /// explicit `t2` — `[*np.arange(t1, t2, step), t2]`.
 ///
-/// A non-positive or NaN step yields only `t2` (see the module docs).
-fn sample_pair(t1: f64, t2: f64, step: f64) -> Vec<f64> {
-    let mut ts = Vec::new();
-    if step > 0.0 {
-        let mut k = 0usize;
-        loop {
-            let t = k as f64 * step + t1;
-            // NaN never compares `<`, exactly as in numpy's arange.
-            if t.is_nan() || t >= t2 {
-                break;
-            }
-            ts.push(t);
-            k += 1;
-        }
-    }
-    ts.push(t2);
-    ts
+/// A finite non-positive step yields only `t2` (see the module docs).
+fn sample_pair(
+    t1: f64,
+    t2: f64,
+    step: f64,
+    budget: SamplingBudget,
+) -> Result<Vec<f64>, SamplingError> {
+    sampled_values("parametric curve", t1, t2, step, true, budget)
 }
 
 /// `ParametricCurve(t_func, t_range, epsilon, discontinuities,
@@ -125,6 +328,7 @@ pub struct ParametricCurve {
     epsilon: f64,
     discontinuities: Vec<f64>,
     use_smoothing: bool,
+    sampling_budget: SamplingBudget,
     style: Style,
 }
 
@@ -135,6 +339,7 @@ impl fmt::Debug for ParametricCurve {
             .field("epsilon", &self.epsilon)
             .field("discontinuities", &self.discontinuities)
             .field("use_smoothing", &self.use_smoothing)
+            .field("sampling_budget", &self.sampling_budget)
             .field("style", &self.style)
             .finish_non_exhaustive()
     }
@@ -152,6 +357,7 @@ impl ParametricCurve {
             epsilon: DEFAULT_EPSILON,
             discontinuities: Vec::new(),
             use_smoothing: true,
+            sampling_budget: SamplingBudget::default(),
             style: Style::default(),
         }
     }
@@ -182,6 +388,13 @@ impl ParametricCurve {
     #[must_use]
     pub fn use_smoothing(mut self, use_smoothing: bool) -> Self {
         self.use_smoothing = use_smoothing;
+        self
+    }
+
+    /// Bound the total parameter samples produced by [`Self::build`].
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
         self
     }
 
@@ -229,22 +442,86 @@ impl ParametricCurve {
     /// whole line segments; approx-smoothing a valid shared-anchor run is
     /// solver-free), so their results are discarded the way the sibling
     /// builders discard provably-satisfied layout checks.
-    #[must_use]
-    pub fn build(self) -> VMobject {
+    ///
+    /// # Errors
+    /// [`GraphError::Sampling`] if the range controls are non-finite or
+    /// the requested boundary/sample work exceeds the configured budget.
+    pub fn build(self) -> Result<VMobject, GraphError> {
         let [t_min, t_max, step] = self.t_range;
-        let mut boundary_times = vec![t_min, t_max];
+        ensure_finite("parametric curve", "t_min", t_min)?;
+        ensure_finite("parametric curve", "t_max", t_max)?;
+        ensure_finite("parametric curve", "step", step)?;
+        ensure_finite("parametric curve", "epsilon", self.epsilon)?;
+
+        self.sampling_budget.ensure_total(
+            "parametric-curve discontinuities",
+            self.discontinuities.len(),
+        )?;
+        let mut in_range_discontinuities = 0usize;
+        for &jump in &self.discontinuities {
+            ensure_finite("parametric curve", "discontinuity", jump)?;
+            if jump > t_min && jump < t_max {
+                let before = jump - self.epsilon;
+                let after = jump + self.epsilon;
+                ensure_finite("parametric curve", "discontinuity minus epsilon", before)?;
+                ensure_finite("parametric curve", "discontinuity plus epsilon", after)?;
+                in_range_discontinuities = in_range_discontinuities.checked_add(1).ok_or(
+                    SamplingError::CapacityOverflow {
+                        context: "parametric curve boundaries",
+                    },
+                )?;
+            }
+        }
+        let boundary_count = in_range_discontinuities
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(2))
+            .ok_or(SamplingError::CapacityOverflow {
+                context: "parametric curve boundaries",
+            })?;
+        self.sampling_budget
+            .ensure_total("parametric curve boundaries", boundary_count)?;
+
+        let mut boundary_times = Vec::new();
+        boundary_times
+            .try_reserve_exact(boundary_count)
+            .map_err(|_| SamplingError::AllocationFailed {
+                context: "parametric curve boundaries",
+                samples: boundary_count,
+            })?;
+        boundary_times.extend([t_min, t_max]);
         for &jump in &self.discontinuities {
             if jump > t_min && jump < t_max {
-                boundary_times.push(jump - self.epsilon);
-                boundary_times.push(jump + self.epsilon);
+                let before = jump - self.epsilon;
+                let after = jump + self.epsilon;
+                boundary_times.push(before);
+                boundary_times.push(after);
             }
         }
         boundary_times.sort_by(f64::total_cmp);
 
+        let mut total_samples = 0usize;
+        for pair in boundary_times.windows(2).step_by(2) {
+            let count = self.sampling_budget.sampled_count(
+                "parametric curve",
+                pair[0],
+                pair[1],
+                step,
+                true,
+            )?;
+            total_samples =
+                total_samples
+                    .checked_add(count)
+                    .ok_or(SamplingError::CapacityOverflow {
+                        context: "parametric curve",
+                    })?;
+            self.sampling_budget
+                .ensure_total("parametric curve", total_samples)?;
+        }
+
         let mut path = QuadPath::new();
         for pair in boundary_times.windows(2).step_by(2) {
             let (t1, t2) = (pair[0], pair[1]);
-            let ts = sample_pair(t1, t2, step);
+            let ts = sample_pair(t1, t2, step, self.sampling_budget)?;
             path.start_new_path((self.t_func)(ts[0]));
             let corners: Vec<Vec3> = ts[1..].iter().map(|&t| (self.t_func)(t)).collect();
             let _ = path.add_points_as_corners(&corners);
@@ -255,13 +532,7 @@ impl ParametricCurve {
         if !path.has_points() {
             let _ = path.set_points(vec![(self.t_func)(t_min)]);
         }
-        VMobject::from_path(&path).with_style(self.style)
-    }
-}
-
-impl From<ParametricCurve> for Mobject {
-    fn from(curve: ParametricCurve) -> Self {
-        curve.build().into()
+        Ok(VMobject::from_path(&path).with_style(self.style))
     }
 }
 
@@ -274,6 +545,7 @@ pub struct FunctionGraph {
     epsilon: f64,
     discontinuities: Vec<f64>,
     use_smoothing: bool,
+    sampling_budget: SamplingBudget,
     style: Style,
 }
 
@@ -284,6 +556,7 @@ impl fmt::Debug for FunctionGraph {
             .field("epsilon", &self.epsilon)
             .field("discontinuities", &self.discontinuities)
             .field("use_smoothing", &self.use_smoothing)
+            .field("sampling_budget", &self.sampling_budget)
             .field("style", &self.style)
             .finish_non_exhaustive()
     }
@@ -300,6 +573,7 @@ impl FunctionGraph {
             epsilon: DEFAULT_EPSILON,
             discontinuities: Vec::new(),
             use_smoothing: true,
+            sampling_budget: SamplingBudget::default(),
             style: Style::default().color(YELLOW),
         }
     }
@@ -334,6 +608,13 @@ impl FunctionGraph {
         self
     }
 
+    /// Bound the parameter samples produced by [`Self::build`].
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
+        self
+    }
+
     /// Set stroke and fill colour (Reference default `YELLOW`).
     #[must_use]
     pub fn color(mut self, color: fmn_core::color::Srgb) -> Self {
@@ -361,22 +642,16 @@ impl FunctionGraph {
     }
 
     /// Build the parametric curve of `t ↦ (t, f(t), 0)`.
-    #[must_use]
-    pub fn build(self) -> VMobject {
+    pub fn build(self) -> Result<VMobject, GraphError> {
         let function = self.function;
         ParametricCurve::new(move |t| [t, function(t), 0.0])
             .t_range(self.x_range)
             .epsilon(self.epsilon)
             .discontinuities(self.discontinuities)
             .use_smoothing(self.use_smoothing)
+            .sampling_budget(self.sampling_budget)
             .style(self.style)
             .build()
-    }
-}
-
-impl From<FunctionGraph> for Mobject {
-    fn from(graph: FunctionGraph) -> Self {
-        graph.build().into()
     }
 }
 
@@ -556,9 +831,12 @@ pub fn graph_parametric(
     c2p: impl Fn(&[f64]) -> Vec3 + 'static,
     x_range: [f64; 3],
     num_sampled_per_tick: f64,
+    sampling_budget: SamplingBudget,
 ) -> ParametricCurve {
     let step = x_range[2] / num_sampled_per_tick;
-    ParametricCurve::new(move |t| c2p(&[t, function(t)])).t_range([x_range[0], x_range[1], step])
+    ParametricCurve::new(move |t| c2p(&[t, function(t)]))
+        .t_range([x_range[0], x_range[1], step])
+        .sampling_budget(sampling_budget)
 }
 
 #[cfg(test)]
@@ -566,6 +844,8 @@ mod tests {
     use super::*;
     use fmn_core::constants::PI;
     use fmn_geom::plot_isoline_with_stats;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     const EPS: f64 = DEFAULT_EPSILON;
 
@@ -585,7 +865,8 @@ mod tests {
         // plus the explicit t2 — 11 samples, one subpath.
         let vmob = ParametricCurve::new(|t| [t, 2.0 * t, 0.0])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("default sampling is bounded");
         let path = built_path(&vmob);
         let subpaths = path.subpaths();
         assert_eq!(subpaths.len(), 1);
@@ -607,7 +888,8 @@ mod tests {
         let vmob = ParametricCurve::new(|t| [t, t * t, 1.0])
             .t_range([0.25, 0.75, 0.1])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let anchors = anchors_of(&built_path(&vmob));
         assert_eq!(anchors.last(), Some(&[0.75, 0.5625, 1.0]));
         assert_eq!(anchors[0], [0.25, 0.0625, 1.0]);
@@ -619,8 +901,127 @@ mod tests {
             .t_range([-3.0, 3.0, 0.1])
             .discontinuities(vec![-5.0, -3.0, 3.0, 10.0])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         assert_eq!(built_path(&vmob).subpaths().len(), 1);
+    }
+
+    #[test]
+    fn sampling_budget_is_exact_and_checked_before_function_calls() {
+        // Four arange values plus the explicit endpoint fit exactly.
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let vmob = ParametricCurve::new(move |t| {
+            observed.set(observed.get() + 1);
+            [t, 0.0, 0.0]
+        })
+        .t_range([0.0, 1.0, 0.25])
+        .use_smoothing(false)
+        .sampling_budget(SamplingBudget::new(5))
+        .build()
+        .expect("five samples fit exactly");
+        assert_eq!(built_path(&vmob).anchors().len(), 5);
+        assert_eq!(calls.get(), 5);
+
+        let refused_calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&refused_calls);
+        let error = ParametricCurve::new(move |t| {
+            observed.set(observed.get() + 1);
+            [t, 0.0, 0.0]
+        })
+        .t_range([0.0, 1.0, 0.25])
+        .sampling_budget(SamplingBudget::new(4))
+        .build()
+        .expect_err("five samples exceed a four-sample budget");
+        assert!(matches!(
+            error,
+            GraphError::Sampling(SamplingError::LimitExceeded {
+                context: "parametric curve",
+                max_samples: 4
+            })
+        ));
+        assert_eq!(
+            refused_calls.get(),
+            0,
+            "the parameter function must not run before budget validation"
+        );
+    }
+
+    #[test]
+    fn sampling_rejects_non_finite_and_tiny_step_inputs() {
+        for (range, parameter) in [
+            ([f64::NAN, 1.0, 0.1], "t_min"),
+            ([0.0, f64::INFINITY, 0.1], "t_max"),
+            ([0.0, 1.0, f64::NAN], "step"),
+        ] {
+            let error = ParametricCurve::new(|t| [t, 0.0, 0.0])
+                .t_range(range)
+                .build()
+                .expect_err("non-finite work controls must be refused");
+            assert!(matches!(
+                error,
+                GraphError::Sampling(SamplingError::NonFinite {
+                    parameter: got,
+                    ..
+                }) if got == parameter
+            ));
+        }
+
+        let error = ParametricCurve::new(|t| [t, 0.0, 0.0])
+            .t_range([0.0, 1.0, f64::MIN_POSITIVE])
+            .sampling_budget(SamplingBudget::new(32))
+            .build()
+            .expect_err("a tiny finite step must be refused before iteration");
+        assert!(matches!(
+            error,
+            GraphError::Sampling(SamplingError::LimitExceeded {
+                max_samples: 32,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn discontinuity_work_is_bounded_before_expansion() {
+        let error = ParametricCurve::new(|t| [t, 0.0, 0.0])
+            .discontinuities(vec![-10.0; 5])
+            .sampling_budget(SamplingBudget::new(4))
+            .build()
+            .expect_err("even ignored discontinuities are bounded input work");
+        assert!(matches!(
+            error,
+            GraphError::Sampling(SamplingError::LimitExceeded {
+                context: "parametric-curve discontinuities",
+                max_samples: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn discontinuity_boundaries_are_preflighted_before_evaluation() {
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let error = ParametricCurve::new(move |t| {
+            observed.set(observed.get() + 1);
+            [t, 0.0, 0.0]
+        })
+        .t_range([0.0, 1.0, 1.0])
+        .discontinuities(vec![0.5])
+        .sampling_budget(SamplingBudget::new(3))
+        .build()
+        .expect_err("four expanded boundaries exceed a three-sample budget");
+        assert!(matches!(
+            error,
+            GraphError::Sampling(SamplingError::LimitExceeded {
+                context: "parametric curve boundaries",
+                max_samples: 3
+            })
+        ));
+        assert_eq!(
+            calls.get(),
+            0,
+            "the parameter function must not run before boundary validation"
+        );
     }
 
     // ---- Discontinuity fixtures (the bead's headline) -----------------
@@ -633,7 +1034,8 @@ mod tests {
             .t_range([-3.0, 3.0, 0.1])
             .discontinuities(vec![0.0])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let path = built_path(&vmob);
         let subpaths = path.subpaths();
         assert_eq!(subpaths.len(), 2);
@@ -666,7 +1068,8 @@ mod tests {
             .t_range([1.0, 2.0, 0.05])
             .discontinuities(vec![PI / 2.0])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let path = built_path(&vmob);
         let subpaths = path.subpaths();
         assert_eq!(subpaths.len(), 2);
@@ -685,7 +1088,8 @@ mod tests {
             .t_range([0.0, 1.0, 0.1])
             .discontinuities(vec![0.5])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let path = built_path(&vmob);
         let subpaths = path.subpaths();
         assert_eq!(subpaths.len(), 2);
@@ -705,11 +1109,13 @@ mod tests {
         let plain = ParametricCurve::new(t_func)
             .t_range([0.0, 1.0, 0.2])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let smoothed = ParametricCurve::new(t_func)
             .t_range([0.0, 1.0, 0.2])
             .use_smoothing(true)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let plain_path = built_path(&plain);
         let smoothed_path = built_path(&smoothed);
         // Approx smoothing keeps the point count; only the handles move.
@@ -748,7 +1154,7 @@ mod tests {
         let graph = FunctionGraph::new(|x| x * x);
         assert_eq!(graph.x_range_value(), [-8.0, 8.0, 0.25]);
         assert_eq!(graph.underlying_function()(3.0), 9.0);
-        let vmob = graph.build();
+        let vmob = graph.build().expect("default sampling is bounded");
         assert_eq!(vmob.style().stroke_color, YELLOW);
         let path = built_path(&vmob);
         // arange(-8, 8, 0.25) is 64 samples; plus t2 → 65 anchors.
@@ -763,7 +1169,8 @@ mod tests {
         let vmob = FunctionGraph::new(f64::sin)
             .x_range([0.0, PI, 0.1])
             .use_smoothing(false)
-            .build();
+            .build()
+            .expect("fixture sampling is bounded");
         let anchors = anchors_of(&built_path(&vmob));
         for a in &anchors {
             assert_eq!(a[1], a[0].sin());
@@ -885,9 +1292,13 @@ mod tests {
             |cs| [2.0 * cs[0], 3.0 * cs[1], 0.0],
             [0.0, 2.0, 0.5],
             5.0,
+            SamplingBudget::default(),
         );
         assert_eq!(curve.t_range_value(), [0.0, 2.0, 0.1]);
-        let vmob = curve.use_smoothing(false).build();
+        let vmob = curve
+            .use_smoothing(false)
+            .build()
+            .expect("fixture sampling is bounded");
         let anchors = anchors_of(&built_path(&vmob));
         assert_eq!(anchors.len(), 21);
         assert_eq!(anchors[0], [0.0, 0.0, 0.0]);

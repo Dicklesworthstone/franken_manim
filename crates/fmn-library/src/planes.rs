@@ -67,10 +67,11 @@ use fmn_core::types::Vec3;
 use fmn_geom::space_ops::angle_of_vector;
 use fmn_text::FontBook;
 
-use crate::coords::{Axes, AxisConfig, CoordinateSystem, NumberLine, create_axis};
-use crate::graphs::{ParametricCurve, graph_parametric};
+use crate::coords::{Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, create_axis};
+use crate::graphs::{
+    ParametricCurve, SamplingBudget, SamplingError, graph_parametric, sampled_values,
+};
 use crate::line::{Arrow, Line};
-use crate::text::TextMobjectError;
 use crate::vmobject::{VMobject, v_group};
 
 /// The Reference's `ThreeDAxes(x_range=(-6.0, 6.0, 1.0))`.
@@ -171,23 +172,17 @@ fn number_plane_y_axis_config() -> AxisConfig {
 /// floating-point sequence (including endpoint overshoot) matches the
 /// Reference bit for bit.
 ///
-/// A non-positive or NaN `step` yields nothing; numpy raises there, and
+/// A finite non-positive `step` yields nothing; numpy raises there, and
 /// an unconditional index loop would hang (the same divergence
-/// `graphs.rs` documents for its sampler).
-fn arange(start: f64, stop: f64, step: f64) -> Vec<f64> {
-    let n = (stop - start) / step;
-    // `false` for a non-positive or NaN step/count — no negated float
-    // comparisons, so the NaN case is explicit.
-    let proceeds = step > 0.0 && n > 0.0;
-    if !proceeds {
-        return Vec::new();
-    }
-    let n = n.ceil() as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        out.push(i as f64 * step + start);
-    }
-    out
+/// `graphs.rs` documents for its sampler). Non-finite controls are typed
+/// [`SamplingError`]s.
+fn arange(
+    start: f64,
+    stop: f64,
+    step: f64,
+    budget: SamplingBudget,
+) -> Result<Vec<f64>, SamplingError> {
+    sampled_values("number-plane lines", start, stop, step, false, budget)
 }
 
 /// The Reference's `get_lines_parallel_to_axis`: copies of the line
@@ -197,14 +192,19 @@ fn lines_parallel_to_axis(
     axis1: &NumberLine,
     axis2: &NumberLine,
     faded_line_ratio: usize,
-) -> (Vec<VMobject>, Vec<VMobject>) {
-    let dense_freq = 1 + faded_line_ratio;
+    sampling_budget: SamplingBudget,
+) -> Result<(Vec<VMobject>, Vec<VMobject>), SamplingError> {
+    let dense_freq = faded_line_ratio
+        .checked_add(1)
+        .ok_or(SamplingError::CapacityOverflow {
+            context: "number-plane faded-line ratio",
+        })?;
     let step = axis2.x_step() / dense_freq as f64;
     let template = Line::new(axis1.start_point(), axis1.end_point()).build();
     let origin = axis2.n2p(0.0);
     let mut background = Vec::new();
     let mut faded = Vec::new();
-    for (i, x) in arange(axis2.x_min(), axis2.x_max() + step, step)
+    for (i, x) in arange(axis2.x_min(), axis2.x_max() + step, step, sampling_budget)?
         .into_iter()
         .enumerate()
     {
@@ -223,7 +223,7 @@ fn lines_parallel_to_axis(
             faded.push(line);
         }
     }
-    (background, faded)
+    Ok((background, faded))
 }
 
 /// `ThreeDAxes` — three [`NumberLine`] axes with `+z` pointing `OUT` of
@@ -249,6 +249,7 @@ pub struct ThreeDAxes {
     depth: Option<f64>,
     unit_size: f64,
     num_sampled_graph_points_per_tick: f64,
+    sampling_budget: SamplingBudget,
     built: Option<ThreeDBuilt>,
 }
 
@@ -287,6 +288,7 @@ impl ThreeDAxes {
             depth: None,
             unit_size: 1.0,
             num_sampled_graph_points_per_tick: 5.0,
+            sampling_budget: SamplingBudget::default(),
             built: None,
         }
     }
@@ -385,19 +387,27 @@ impl ThreeDAxes {
         self
     }
 
+    /// Bound tick and graph sampling across all three axes.
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
+        self
+    }
+
     /// Assemble the axes. The x/y pair is built by [`Axes`]; the z-axis
     /// is [`create_axis`] output rotated `-π/2` about `UP` through the
     /// origin (putting `+z` along `OUT`) and then by
     /// `angle_of_vector(z_normal)` about `OUT`, and finally shifted onto
     /// the shared origin — the Reference's `__init__` verbatim.
-    pub fn build(mut self, book: &FontBook) -> Result<Self, TextMobjectError> {
+    pub fn build(mut self, book: &FontBook) -> Result<Self, CoordsError> {
         let mut axes_builder = Axes::new()
             .x_range(self.x_range)
             .y_range(self.y_range)
             .axis_config(self.axis_config.clone())
             .x_axis_config(self.x_axis_config.clone())
             .y_axis_config(self.y_axis_config.clone())
-            .unit_size(self.unit_size);
+            .unit_size(self.unit_size)
+            .sampling_budget(self.sampling_budget);
         if let Some(height) = self.height {
             axes_builder = axes_builder.height(height);
         }
@@ -417,7 +427,8 @@ impl ThreeDAxes {
             .rotated_about(-PI / 2.0, UP, ORIGIN)
             .rotated_about(angle_of_vector(self.z_normal), OUT, ORIGIN)
             .shifted(axes.x_axis().n2p(0.0))
-            .build();
+            .sampling_budget(self.sampling_budget)
+            .build()?;
 
         // The Reference's self.add(*self.axes) then self.add(z_axis):
         // a flat [x_axis, y_axis, z_axis] family.
@@ -527,6 +538,7 @@ pub struct NumberPlane {
     faded_line_ratio: usize,
     make_smooth_after_applying_functions: bool,
     num_sampled_graph_points_per_tick: f64,
+    sampling_budget: SamplingBudget,
     built: Option<PlaneBuilt>,
 }
 
@@ -566,6 +578,7 @@ impl NumberPlane {
             faded_line_ratio: DEFAULT_FADED_LINE_RATIO,
             make_smooth_after_applying_functions: true,
             num_sampled_graph_points_per_tick: 5.0,
+            sampling_budget: SamplingBudget::default(),
             built: None,
         }
     }
@@ -664,9 +677,16 @@ impl NumberPlane {
         self
     }
 
+    /// Bound axis ticks, grid lines, rectangles, and graph samples.
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
+        self
+    }
+
     /// Assemble the axes and both line families (the Reference's
     /// `__init__` + `init_background_lines`).
-    pub fn build(mut self, book: &FontBook) -> Result<Self, TextMobjectError> {
+    pub fn build(mut self, book: &FontBook) -> Result<Self, CoordsError> {
         // NumberPlane's default_axis_config sits below the caller's
         // axis_config; its default_y_axis_config (DL) below the
         // caller's y_axis_config — the Reference's merge order.
@@ -678,7 +698,8 @@ impl NumberPlane {
             .axis_config(axis_config)
             .x_axis_config(self.x_axis_config.clone())
             .y_axis_config(y_axis_config)
-            .unit_size(self.unit_size);
+            .unit_size(self.unit_size)
+            .sampling_budget(self.sampling_budget);
         if let Some(height) = self.height {
             axes_builder = axes_builder.height(height);
         }
@@ -687,10 +708,18 @@ impl NumberPlane {
         }
         let axes = axes_builder.build(book)?;
 
-        let (x_bg, x_faded) =
-            lines_parallel_to_axis(axes.x_axis(), axes.y_axis(), self.faded_line_ratio);
-        let (y_bg, y_faded) =
-            lines_parallel_to_axis(axes.y_axis(), axes.x_axis(), self.faded_line_ratio);
+        let (x_bg, x_faded) = lines_parallel_to_axis(
+            axes.x_axis(),
+            axes.y_axis(),
+            self.faded_line_ratio,
+            self.sampling_budget,
+        )?;
+        let (y_bg, y_faded) = lines_parallel_to_axis(
+            axes.y_axis(),
+            axes.x_axis(),
+            self.faded_line_ratio,
+            self.sampling_budget,
+        )?;
 
         // lines1 = (*x_lines1, *y_lines1), lines2 = (*x_lines2, *y_lines2).
         let bg = self.background_line_style;
@@ -819,6 +848,7 @@ impl NumberPlane {
             c2p,
             x_range.unwrap_or(self.x_range),
             self.num_sampled_graph_points_per_tick,
+            self.sampling_budget,
         )
     }
 }
@@ -957,8 +987,15 @@ impl ComplexPlane {
         self
     }
 
+    /// Bound every sampling surface delegated to the underlying plane.
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.plane = self.plane.sampling_budget(budget);
+        self
+    }
+
     /// Assemble the underlying plane.
-    pub fn build(mut self, book: &FontBook) -> Result<Self, TextMobjectError> {
+    pub fn build(mut self, book: &FontBook) -> Result<Self, CoordsError> {
         self.plane = self.plane.build(book)?;
         self.coordinate_labels = Vec::new();
         Ok(self)
@@ -1014,29 +1051,41 @@ impl ComplexPlane {
     /// imaginaries), each skipping its first entry. The Reference's
     /// `skip_first` parameter is accepted but never used — the first
     /// tick is always dropped — so it is not part of this signature.
-    #[must_use]
-    pub fn default_coordinate_values(&self) -> Vec<[f64; 2]> {
-        let mut values: Vec<[f64; 2]> = self
-            .x_axis()
-            .tick_range()
-            .into_iter()
-            .skip(1)
-            .map(|x| [x, 0.0])
-            .collect();
+    pub fn default_coordinate_values(&self) -> Result<Vec<[f64; 2]>, SamplingError> {
+        let x_ticks = self.x_axis().tick_range()?;
+        let y_ticks = self.y_axis().tick_range()?;
+        let x_count = x_ticks.len().saturating_sub(1);
+        let y_count = y_ticks.iter().skip(1).filter(|y| **y != 0.0).count();
+        let total = x_count
+            .checked_add(y_count)
+            .ok_or(SamplingError::CapacityOverflow {
+                context: "complex-plane coordinate labels",
+            })?;
+        self.plane
+            .sampling_budget
+            .ensure_total("complex-plane coordinate labels", total)?;
+
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(total)
+            .map_err(|_| SamplingError::AllocationFailed {
+                context: "complex-plane coordinate labels",
+                samples: total,
+            })?;
+        values.extend(x_ticks.into_iter().skip(1).map(|x| [x, 0.0]));
         values.extend(
-            self.y_axis()
-                .tick_range()
+            y_ticks
                 .into_iter()
                 .skip(1)
                 .filter(|y| *y != 0.0)
                 .map(|y| [0.0, y]),
         );
-        values
+        Ok(values)
     }
 
     /// The Reference's `add_coordinate_labels` over the default values.
-    pub fn add_coordinate_labels(&mut self, book: &FontBook) -> Result<(), TextMobjectError> {
-        let numbers = self.default_coordinate_values();
+    pub fn add_coordinate_labels(&mut self, book: &FontBook) -> Result<(), CoordsError> {
+        let numbers = self.default_coordinate_values()?;
         self.add_labels(&numbers, book)
     }
 
@@ -1046,7 +1095,10 @@ impl ComplexPlane {
         &mut self,
         numbers: &[[f64; 2]],
         book: &FontBook,
-    ) -> Result<(), TextMobjectError> {
+    ) -> Result<(), CoordsError> {
+        self.plane
+            .sampling_budget
+            .ensure_total("complex-plane labels", numbers.len())?;
         self.add_labels(numbers, book)
     }
 
@@ -1054,11 +1106,7 @@ impl ComplexPlane {
     /// the y-axis with the unit `i`, the rest to the x-axis — the
     /// Reference's `abs(z.imag) > abs(z.real)` split. The labels are
     /// appended to the plane as a single trailing group.
-    fn add_labels(
-        &mut self,
-        numbers: &[[f64; 2]],
-        book: &FontBook,
-    ) -> Result<(), TextMobjectError> {
+    fn add_labels(&mut self, numbers: &[[f64; 2]], book: &FontBook) -> Result<(), CoordsError> {
         let mut labels = Vec::with_capacity(numbers.len());
         for z in numbers {
             let (re, im) = (z[0], z[1]);
@@ -1469,16 +1517,68 @@ mod tests {
     fn arange_matches_numpy() {
         // The fixture generator: numpy gives
         // arange(-2, 2 + 1/3, 1/3) == -2 + i/3 for i in 0..14.
-        let values = arange(-2.0, 2.0 + 1.0 / 3.0, 1.0 / 3.0);
+        let values = arange(-2.0, 2.0 + 1.0 / 3.0, 1.0 / 3.0, SamplingBudget::default())
+            .expect("fixture sampling is bounded");
         assert_eq!(values.len(), 14);
         for (i, v) in values.iter().enumerate() {
             assert!((v - (-2.0 + i as f64 / 3.0)).abs() < 1e-12);
         }
         // arange(-4, 4.2, 0.2): 41 values (0.2 quotient undershoots 41).
-        assert_eq!(arange(-4.0, 4.0 + 0.2, 0.2).len(), 41);
+        assert_eq!(
+            arange(-4.0, 4.0 + 0.2, 0.2, SamplingBudget::default())
+                .expect("fixture sampling is bounded")
+                .len(),
+            41
+        );
         // A non-positive step yields nothing (numpy raises there).
-        assert!(arange(0.0, 1.0, 0.0).is_empty());
-        assert!(arange(0.0, 1.0, -0.5).is_empty());
+        assert!(
+            arange(0.0, 1.0, 0.0, SamplingBudget::default())
+                .expect("zero step has no samples")
+                .is_empty()
+        );
+        assert!(
+            arange(0.0, 1.0, -0.5, SamplingBudget::default())
+                .expect("backward step has no samples")
+                .is_empty()
+        );
+
+        let error = arange(-2.0, 2.0 + 1.0 / 3.0, 1.0 / 3.0, SamplingBudget::new(13))
+            .expect_err("the same fourteen-value range exceeds a thirteen-sample budget");
+        assert!(matches!(
+            error,
+            SamplingError::LimitExceeded {
+                context: "number-plane lines",
+                max_samples: 13
+            }
+        ));
+    }
+
+    #[test]
+    fn number_plane_refuses_ratio_overflow_and_dense_ranges() {
+        let overflow = NumberPlane::new()
+            .faded_line_ratio(usize::MAX)
+            .build(&book())
+            .expect_err("the dense-frequency addition must not wrap");
+        assert!(matches!(
+            overflow,
+            CoordsError::Sampling(SamplingError::CapacityOverflow {
+                context: "number-plane faded-line ratio"
+            })
+        ));
+
+        let dense = NumberPlane::new()
+            .x_range([0.0, 1.0, f64::MIN_POSITIVE])
+            .y_range([0.0, 1.0, 1.0])
+            .sampling_budget(SamplingBudget::new(32))
+            .build(&book())
+            .expect_err("a tiny finite grid step must be refused");
+        assert!(matches!(
+            dense,
+            CoordsError::Sampling(SamplingError::LimitExceeded {
+                context: "number-plane lines",
+                max_samples: 32
+            })
+        ));
     }
 
     // ---- ComplexPlane -----------------------------------------------
@@ -1496,7 +1596,9 @@ mod tests {
     #[test]
     fn complex_plane_default_coordinate_values() {
         let plane = ComplexPlane::new().build(&book()).expect("build");
-        let values = plane.default_coordinate_values();
+        let values = plane
+            .default_coordinate_values()
+            .expect("default ticks are bounded");
         // tick ranges -8..=8 and -4..=4, first entry dropped, y's zero
         // dropped: 16 reals then 7 pure imaginaries (numpy-verified).
         assert_eq!(values.len(), 23);
@@ -1511,13 +1613,34 @@ mod tests {
     }
 
     #[test]
+    fn complex_plane_combined_coordinate_values_obey_one_budget() {
+        let plane = ComplexPlane::new()
+            .faded_line_ratio(0)
+            .sampling_budget(SamplingBudget::new(17))
+            .build(&book())
+            .expect("each individual default range fits seventeen samples");
+        let error = plane
+            .default_coordinate_values()
+            .expect_err("the combined twenty-three labels exceed the shared budget");
+        assert!(matches!(
+            error,
+            SamplingError::LimitExceeded {
+                context: "complex-plane coordinate labels",
+                max_samples: 17
+            }
+        ));
+    }
+
+    #[test]
     fn complex_plane_label_glyph_sequences() {
         let book = book();
         let mut plane = ComplexPlane::new().build(&book).expect("build");
         plane.add_coordinate_labels(&book).expect("labels");
         let labels = plane.coordinate_labels();
         assert_eq!(labels.len(), 23);
-        let values = plane.default_coordinate_values();
+        let values = plane
+            .default_coordinate_values()
+            .expect("default ticks are bounded");
 
         for (label, z) in labels.iter().zip(&values) {
             let (re, im) = (z[0], z[1]);

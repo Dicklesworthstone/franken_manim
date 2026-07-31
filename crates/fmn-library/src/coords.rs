@@ -56,6 +56,7 @@ use fmn_core::types::Vec3;
 use fmn_geom::{QuadPath, space_ops};
 use fmn_text::FontBook;
 
+use crate::graphs::{SamplingBudget, SamplingError, sampled_values};
 use crate::line::{DashedLine, Line};
 use crate::numbers::DecimalNumber;
 use crate::poly::{ArrowTip, Rectangle};
@@ -107,11 +108,15 @@ pub trait CoordinateSystem {
 
 /// A coordinate-system failure that the Reference raises as a bare
 /// `Exception`; here it is typed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum CoordsError {
     /// `get_riemann_rectangles(input_sample_type=…)` outside
     /// `"left" | "right" | "center"`.
     InvalidSampleType(String),
+    /// Atlas range sampling refused before proportional work began.
+    Sampling(SamplingError),
+    /// A native number or label failed to typeset.
+    Text(TextMobjectError),
 }
 
 impl std::fmt::Display for CoordsError {
@@ -123,11 +128,33 @@ impl std::fmt::Display for CoordsError {
                     "invalid input sample type {t:?} (expected left|right|center)"
                 )
             }
+            Self::Sampling(e) => write!(f, "coordinate sampling failed: {e}"),
+            Self::Text(e) => write!(f, "coordinate label failed: {e}"),
         }
     }
 }
 
-impl std::error::Error for CoordsError {}
+impl std::error::Error for CoordsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sampling(e) => Some(e),
+            Self::Text(e) => Some(e),
+            Self::InvalidSampleType(_) => None,
+        }
+    }
+}
+
+impl From<SamplingError> for CoordsError {
+    fn from(e: SamplingError) -> Self {
+        Self::Sampling(e)
+    }
+}
+
+impl From<TextMobjectError> for CoordsError {
+    fn from(e: TextMobjectError) -> Self {
+        Self::Text(e)
+    }
+}
 
 // --- small Vec3 helpers (matching the sibling modules' local style) ----
 
@@ -154,29 +181,31 @@ fn fdiv(a: f64, b: f64) -> f64 {
 
 /// numpy `arange(start, stop, step)`: `start + k·step` while `< stop`.
 ///
-/// A non-positive or NaN step yields nothing (numpy raises on 0 and
+/// A finite non-positive step yields nothing (numpy raises on 0 and
 /// returns empty when the step points away from `stop`; both read as
 /// "no ticks", which is the only sane detached-builder behaviour).
-fn arange(start: f64, stop: f64, step: f64) -> Vec<f64> {
-    let mut out = Vec::new();
-    if step.is_nan() || step <= 0.0 {
-        return out;
-    }
-    let mut k = 0.0;
-    loop {
-        let x = start + k * step;
-        if x >= stop {
-            break;
-        }
-        out.push(x);
-        k += 1.0;
-    }
-    out
+/// Non-finite controls are typed [`SamplingError`]s.
+fn arange(
+    context: &'static str,
+    start: f64,
+    stop: f64,
+    step: f64,
+    budget: SamplingBudget,
+) -> Result<Vec<f64>, SamplingError> {
+    sampled_values(context, start, stop, step, false, budget)
 }
 
 /// numpy `isclose` with its defaults (`rtol=1e-5, atol=1e-8`).
 fn isclose(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-8 + 1e-5 * b.abs()
+}
+
+/// Membership under [`isclose`] for finite, total-order-sorted candidates.
+fn sorted_contains_close(values: &[f64], target: f64) -> bool {
+    let index = values.partition_point(|&value| value < target && !isclose(value, target));
+    values
+        .get(index)
+        .is_some_and(|&value| isclose(value, target))
 }
 
 /// The Reference's `inverse_interpolate`.
@@ -218,6 +247,7 @@ pub struct NumberLine {
     number_font_size: f64,
     numbers_font_size: f64,
     numbers_to_exclude: Option<Vec<f64>>,
+    sampling_budget: SamplingBudget,
     // --- geometry state --------------------------------------------------
     /// First point of the line (`get_points()[0]`); kept in sync by the
     /// setters and the transform methods so `n2p` is exact at all times.
@@ -264,6 +294,7 @@ impl NumberLine {
             number_font_size: DEFAULT_NUMBER_FONT_SIZE,
             numbers_font_size: ADD_NUMBERS_FONT_SIZE,
             numbers_to_exclude: None,
+            sampling_budget: SamplingBudget::default(),
             start: ORIGIN,
             end: ORIGIN,
             vmob: VMobject::new(),
@@ -426,6 +457,13 @@ impl NumberLine {
         self
     }
 
+    /// Bound every tick or default-label range produced by this line.
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
+        self
+    }
+
     /// `color=`: stroke and fill together.
     #[must_use]
     pub fn color(mut self, color: Srgb) -> Self {
@@ -504,25 +542,39 @@ impl NumberLine {
     /// `get_tick_range`: `arange(x_min, x_max + x_step, x_step)` — the end
     /// is `x_max` instead when a tip replaces the last tick — filtered to
     /// `<= x_max`.
-    #[must_use]
-    pub fn tick_range(&self) -> Vec<f64> {
+    pub fn tick_range(&self) -> Result<Vec<f64>, SamplingError> {
         let end = if self.include_tip {
             self.x_range[1]
         } else {
             self.x_range[1] + self.x_range[2]
         };
-        arange(self.x_range[0], end, self.x_range[2])
-            .into_iter()
-            .filter(|&x| x <= self.x_range[1])
-            .collect()
+        Ok(arange(
+            "number-line ticks",
+            self.x_range[0],
+            end,
+            self.x_range[2],
+            self.sampling_budget,
+        )?
+        .into_iter()
+        .filter(|&x| x <= self.x_range[1])
+        .collect())
     }
 
     /// The resolved big-tick list (`big_tick_spacing` wins when set).
-    #[must_use]
-    pub fn resolved_big_tick_numbers(&self) -> Vec<f64> {
+    pub fn resolved_big_tick_numbers(&self) -> Result<Vec<f64>, SamplingError> {
         match self.big_tick_spacing {
-            Some(spacing) => arange(self.x_range[0], self.x_range[1] + spacing, spacing),
-            None => self.big_tick_numbers.clone(),
+            Some(spacing) => arange(
+                "number-line big ticks",
+                self.x_range[0],
+                self.x_range[1] + spacing,
+                spacing,
+                self.sampling_budget,
+            ),
+            None => {
+                self.sampling_budget
+                    .ensure_total("number-line big ticks", self.big_tick_numbers.len())?;
+                Ok(self.big_tick_numbers.clone())
+            }
         }
     }
 
@@ -619,8 +671,7 @@ impl NumberLine {
     /// Build the line, tip, and ticks. No font access: number labels need
     /// [`build_numbered`](Self::build_numbered) or
     /// [`add_numbers`](Self::add_numbers) instead.
-    #[must_use]
-    pub fn build(mut self) -> Self {
+    pub fn build(mut self) -> Result<Self, SamplingError> {
         let mut vmob = Line::new(self.start, self.end).style(self.style).build();
         if self.include_tip {
             // The Reference's tip_config (width=length=0.25), stroked like
@@ -636,13 +687,18 @@ impl NumberLine {
             vmob = attach_tip(vmob, tip, TipEnd::End);
         }
         if self.include_ticks {
-            let big = self.resolved_big_tick_numbers();
+            let mut big = self.resolved_big_tick_numbers()?;
+            // Non-finite candidates never match a finite sampled tick under
+            // `isclose`; remove them so one binary search replaces the
+            // previous potentially quadratic scan.
+            big.retain(|value| value.is_finite());
+            big.sort_by(f64::total_cmp);
             let ticks: Vec<VMobject> = self
-                .tick_range()
+                .tick_range()?
                 .into_iter()
                 .map(|x| {
                     let mut size = self.tick_size;
-                    if big.iter().any(|&b| isclose(b, x)) {
+                    if sorted_contains_close(&big, x) {
                         size *= self.longer_tick_multiple;
                     }
                     self.tick_vmob(x, size)
@@ -651,7 +707,7 @@ impl NumberLine {
             vmob = vmob.with_child(v_group(ticks));
         }
         self.vmob = vmob;
-        self
+        Ok(self)
     }
 
     /// Build, then add `include_numbers` labels
@@ -659,11 +715,11 @@ impl NumberLine {
     /// constructor does.
     ///
     /// # Errors
-    /// [`TextMobjectError`] from typesetting the labels.
-    pub fn build_numbered(self, book: &FontBook) -> Result<Self, TextMobjectError> {
+    /// [`CoordsError`] from bounded tick sampling or label typesetting.
+    pub fn build_numbered(self, book: &FontBook) -> Result<Self, CoordsError> {
         let include = self.include_numbers;
         let excluding = self.numbers_to_exclude.clone();
-        let mut built = self.build();
+        let mut built = self.build()?;
         if include {
             built.add_numbers(book, None, excluding.as_deref())?;
         }
@@ -779,16 +835,20 @@ impl NumberLine {
     /// [`numbers`](Self::numbers) for introspection.
     ///
     /// # Errors
-    /// [`TextMobjectError`] from typesetting.
+    /// [`CoordsError`] from bounded default-range sampling or typesetting.
     pub fn add_numbers(
         &mut self,
         book: &FontBook,
         x_values: Option<&[f64]>,
         excluding: Option<&[f64]>,
-    ) -> Result<(), TextMobjectError> {
+    ) -> Result<(), CoordsError> {
         let values: Vec<f64> = match x_values {
-            Some(v) => v.to_vec(),
-            None => self.tick_range(),
+            Some(v) => {
+                self.sampling_budget
+                    .ensure_total("number-line labels", v.len())?;
+                v.to_vec()
+            }
+            None => self.tick_range()?,
         };
         let excluding = excluding.or(self.numbers_to_exclude.as_deref());
         let mut numbers = Vec::new();
@@ -967,6 +1027,7 @@ pub struct Axes {
     width: Option<f64>,
     unit_size: f64,
     num_sampled_graph_points_per_tick: f64,
+    sampling_budget: SamplingBudget,
     // --- built state -----------------------------------------------------
     x_axis: NumberLine,
     y_axis: NumberLine,
@@ -995,6 +1056,7 @@ impl Axes {
             width: None,
             unit_size: 1.0,
             num_sampled_graph_points_per_tick: 5.0,
+            sampling_budget: SamplingBudget::default(),
             x_axis: NumberLine::new(DEFAULT_X_RANGE),
             y_axis: NumberLine::new(DEFAULT_Y_RANGE),
             vmob: VMobject::new(),
@@ -1067,6 +1129,13 @@ impl Axes {
         self
     }
 
+    /// Bound ticks, default labels, rectangles, and graph samples.
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
+        self
+    }
+
     /// The merged x-axis config:
     /// `default_axis < axis_config < {unit_size} < x_axis_config`.
     fn merged_x_config(&self) -> AxisConfig {
@@ -1097,11 +1166,13 @@ impl Axes {
     /// Build both axes and centre the group.
     ///
     /// # Errors
-    /// [`TextMobjectError`] from typesetting `include_numbers` labels.
-    pub fn build(mut self, book: &FontBook) -> Result<Self, TextMobjectError> {
-        let x_axis =
-            create_axis(self.x_range, self.merged_x_config(), self.width).build_numbered(book)?;
+    /// [`CoordsError`] from bounded tick sampling or number typesetting.
+    pub fn build(mut self, book: &FontBook) -> Result<Self, CoordsError> {
+        let x_axis = create_axis(self.x_range, self.merged_x_config(), self.width)
+            .sampling_budget(self.sampling_budget)
+            .build_numbered(book)?;
         let y_axis = create_axis(self.y_range, self.merged_y_config(), self.height)
+            .sampling_budget(self.sampling_budget)
             .build_numbered(book)?
             .rotated_about(PI / 2.0, OUT, ORIGIN);
         let group = v_group([x_axis.vmob().clone(), y_axis.vmob().clone()]);
@@ -1154,14 +1225,14 @@ impl Axes {
     /// re-synced.
     ///
     /// # Errors
-    /// [`TextMobjectError`] from typesetting.
+    /// [`CoordsError`] from bounded default-range sampling or typesetting.
     pub fn add_coordinate_labels(
         &mut self,
         book: &FontBook,
         x_values: Option<&[f64]>,
         y_values: Option<&[f64]>,
         excluding: Option<&[f64]>,
-    ) -> Result<(), TextMobjectError> {
+    ) -> Result<(), CoordsError> {
         let excluding = excluding.unwrap_or(&[0.0]);
         self.x_axis.add_numbers(book, x_values, Some(excluding))?;
         self.y_axis.add_numbers(book, y_values, Some(excluding))?;
@@ -1186,6 +1257,7 @@ impl Axes {
             move |coords| c2p_with_axes(&x_axis, &y_axis, coords),
             self.x_range,
             self.num_sampled_graph_points_per_tick,
+            self.sampling_budget,
         )
     }
 
@@ -1268,7 +1340,8 @@ impl Axes {
     ///
     /// # Errors
     /// [`CoordsError::InvalidSampleType`] for a sample type outside
-    /// `left | right | center`.
+    /// `left | right | center`, or [`CoordsError::Sampling`] when the
+    /// requested rectangle range exceeds the configured budget.
     pub fn get_riemann_rectangles(
         &self,
         function: &dyn Fn(f64) -> f64,
@@ -1294,7 +1367,8 @@ impl Axes {
     ///
     /// # Errors
     /// [`CoordsError::InvalidSampleType`] for a sample type outside
-    /// `left | right | center`.
+    /// `left | right | center`, or [`CoordsError::Sampling`] when the
+    /// requested rectangle range exceeds the configured budget.
     pub fn riemann_rectangles_styled(
         &self,
         function: &dyn Fn(f64) -> f64,
@@ -1308,7 +1382,13 @@ impl Axes {
         }
         let xr = x_range.unwrap_or([self.x_range[0], self.x_range[1]]);
         let dx = dx.unwrap_or(self.x_range[2]);
-        let xs = arange(xr[0], xr[1] + dx, dx);
+        let xs = arange(
+            "Riemann rectangles",
+            xr[0],
+            xr[1] + dx,
+            dx,
+            self.sampling_budget,
+        )?;
         let gradient = if config.colors.len() >= 2 {
             color_gradient(&config.colors, xs.len().saturating_sub(1))
         } else {
@@ -1525,6 +1605,7 @@ pub struct Slider {
     label_direction: Option<Vec3>,
     add_tick_labels: bool,
     tick_label_font_size: f64,
+    sampling_budget: SamplingBudget,
 }
 
 impl Slider {
@@ -1550,6 +1631,7 @@ impl Slider {
             label_direction: None,
             add_tick_labels: true,
             tick_label_font_size: 16.0,
+            sampling_budget: SamplingBudget::default(),
         }
     }
 
@@ -1645,6 +1727,13 @@ impl Slider {
         self
     }
 
+    /// Bound the line's tick and default-label sampling.
+    #[must_use]
+    pub fn sampling_budget(mut self, budget: SamplingBudget) -> Self {
+        self.sampling_budget = budget;
+        self
+    }
+
     /// The resolved label direction (`np.round(rotate_vector(UP, angle), 2)`).
     fn resolved_label_direction(&self) -> Vec3 {
         self.label_direction.unwrap_or_else(|| {
@@ -1662,8 +1751,8 @@ impl Slider {
     /// `set_stroke(behind=True)`).
     ///
     /// # Errors
-    /// [`TextMobjectError`] from typesetting the tick labels and label.
-    pub fn build(&self, book: &FontBook) -> Result<VMobject, TextMobjectError> {
+    /// [`CoordsError`] from bounded sampling or typesetting.
+    pub fn build(&self, book: &FontBook) -> Result<VMobject, CoordsError> {
         let label_direction = self.resolved_label_direction();
 
         // The number line, rotated by `angle`, with tick labels on the
@@ -1676,6 +1765,7 @@ impl Slider {
             .line_to_number_buff(2.0 * self.tick_size)
             .numbers_font_size(self.tick_label_font_size)
             .include_numbers(self.add_tick_labels)
+            .sampling_budget(self.sampling_budget)
             .build_numbered(book)?
             .rotated_about(self.angle, OUT, ORIGIN);
 
@@ -1726,6 +1816,7 @@ fn stroke_behind_deep(vmob: VMobject) -> VMobject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn book() -> FontBook {
         FontBook::bundled().expect("bundled faces parse")
@@ -1796,8 +1887,11 @@ mod tests {
     fn tick_positions_and_longer_ticks_match_the_reference() {
         // Ticks at every integer of [-2, 2]; big ticks at 0 and ±2.
         let line = NumberLine::new([-2.0, 2.0, 1.0])
-            .big_tick_numbers(vec![-2.0, 0.0, 2.0])
-            .build();
+            // Explicit inputs need not be sorted; non-finite candidates
+            // never match a finite tick under numpy `isclose`.
+            .big_tick_numbers(vec![f64::INFINITY, 2.0, -2.0, f64::NAN, 0.0])
+            .build()
+            .expect("fixture ticks are bounded");
         let ticks = &line.vmob().children()[0];
         assert_eq!(ticks.children().len(), 5);
         for (i, tick) in ticks.children().iter().enumerate() {
@@ -1823,11 +1917,96 @@ mod tests {
     }
 
     #[test]
+    fn sorted_isclose_membership_matches_the_reference_scan() {
+        let candidates = vec![
+            f64::NAN,
+            f64::INFINITY,
+            -f64::MAX,
+            -1.0,
+            -0.0,
+            0.999_98,
+            1.000_005,
+            f64::MAX,
+            f64::NEG_INFINITY,
+        ];
+        let mut sorted: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect();
+        sorted.sort_by(f64::total_cmp);
+        for target in [-f64::MAX, -1.0, 0.0, 1.0, f64::MAX] {
+            let expected = candidates
+                .iter()
+                .copied()
+                .any(|value| isclose(value, target));
+            assert_eq!(
+                sorted_contains_close(&sorted, target),
+                expected,
+                "membership drifted at {target}"
+            );
+        }
+    }
+
+    #[test]
     fn tick_range_respects_include_tip() {
         let line = NumberLine::new([-2.0, 2.0, 1.0]);
-        assert_eq!(line.tick_range(), vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+        assert_eq!(
+            line.tick_range().expect("fixture ticks are bounded"),
+            vec![-2.0, -1.0, 0.0, 1.0, 2.0]
+        );
         let tipped = line.include_tip(true);
-        assert_eq!(tipped.tick_range(), vec![-2.0, -1.0, 0.0, 1.0]);
+        assert_eq!(
+            tipped.tick_range().expect("fixture ticks are bounded"),
+            vec![-2.0, -1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn number_line_sampling_budget_has_an_exact_boundary() {
+        let exact = NumberLine::new([0.0, 4.0, 1.0])
+            .sampling_budget(SamplingBudget::new(5))
+            .tick_range()
+            .expect("five tick values fit exactly");
+        assert_eq!(exact, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+
+        let error = NumberLine::new([0.0, 4.0, 1.0])
+            .sampling_budget(SamplingBudget::new(4))
+            .tick_range()
+            .expect_err("five values exceed a four-sample budget");
+        assert!(matches!(
+            error,
+            SamplingError::LimitExceeded {
+                context: "number-line ticks",
+                max_samples: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn number_line_refuses_hostile_ranges_before_building_ticks() {
+        let tiny_step = NumberLine::new([0.0, 1.0, f64::MIN_POSITIVE])
+            .sampling_budget(SamplingBudget::new(32))
+            .build()
+            .expect_err("tiny finite steps must be bounded");
+        assert!(matches!(
+            tiny_step,
+            SamplingError::LimitExceeded {
+                max_samples: 32,
+                ..
+            }
+        ));
+
+        let non_finite = NumberLine::new([0.0, f64::INFINITY, 1.0])
+            .tick_range()
+            .expect_err("non-finite endpoints must be refused");
+        assert!(matches!(
+            non_finite,
+            SamplingError::NonFinite {
+                parameter: "stop",
+                ..
+            }
+        ));
     }
 
     // --- NumberLine labels (glyph sequences) ------------------------------
@@ -1841,7 +2020,9 @@ mod tests {
 
     #[test]
     fn add_numbers_glyph_sequence_excluding_zero() {
-        let mut line = NumberLine::new([-3.0, 3.0, 1.0]).build();
+        let mut line = NumberLine::new([-3.0, 3.0, 1.0])
+            .build()
+            .expect("fixture ticks are bounded");
         line.add_numbers(&book(), None, Some(&[0.0]))
             .expect("typeset labels");
         // The Reference's minus glyph is U+2013 EN DASH.
@@ -1879,12 +2060,16 @@ mod tests {
         let mut fine = NumberLine::new([0.0, 1.0, 0.25])
             .unit_size(6.0)
             .num_decimal_places(1)
-            .build();
+            .build()
+            .expect("fixture ticks are bounded");
         fine.add_numbers(&book(), None, None).expect("typeset");
         assert_eq!(num_strings(&fine), vec!["0.0", "0.2", "0.5", "0.8", "1.0"]);
 
         // Coarse range at a small scale, integer formatting.
-        let mut coarse = NumberLine::new([-10.0, 10.0, 5.0]).unit_size(0.5).build();
+        let mut coarse = NumberLine::new([-10.0, 10.0, 5.0])
+            .unit_size(0.5)
+            .build()
+            .expect("fixture ticks are bounded");
         coarse.add_numbers(&book(), None, None).expect("typeset");
         assert_eq!(
             num_strings(&coarse),
@@ -2148,7 +2333,10 @@ mod tests {
         let err = axes
             .get_riemann_rectangles(&|x| x, None, None, "middle")
             .expect_err("invalid sample type must fail");
-        assert_eq!(err, CoordsError::InvalidSampleType("middle".to_owned()));
+        assert!(matches!(
+            err,
+            CoordsError::InvalidSampleType(ref sample) if sample == "middle"
+        ));
     }
 
     #[test]
@@ -2166,9 +2354,42 @@ mod tests {
     }
 
     #[test]
+    fn riemann_sampling_is_preflighted_before_function_evaluation() {
+        let axes = Axes::new()
+            .x_range([0.0, 1.0, 0.25])
+            .axis_config(AxisConfig {
+                include_ticks: Some(false),
+                ..AxisConfig::default()
+            })
+            .sampling_budget(SamplingBudget::new(4))
+            .build(&book())
+            .expect("tick-free axes do not sample during build");
+        let calls = Cell::new(0);
+        let function = |x| {
+            calls.set(calls.get() + 1);
+            x
+        };
+        let error = axes
+            .get_riemann_rectangles(&function, None, None, "left")
+            .expect_err("five bounds exceed a four-sample budget");
+        assert!(matches!(
+            error,
+            CoordsError::Sampling(SamplingError::LimitExceeded {
+                context: "Riemann rectangles",
+                max_samples: 4
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
     fn area_under_graph_closes_through_the_axis() {
         let axes = Axes::new().build(&book()).expect("build axes");
-        let graph = axes.get_graph(|x| x * x).use_smoothing(false).build();
+        let graph = axes
+            .get_graph(|x| x * x)
+            .use_smoothing(false)
+            .build()
+            .expect("default graph sampling is bounded");
         let area = axes.get_area_under_graph(&graph, [-8.0, 8.0], Some([-1.0, 2.0]));
         let points = area.points();
         assert!(points.len() > 6, "a partial curve plus the closing lines");
@@ -2217,8 +2438,13 @@ mod tests {
         assert_vec3_near(line.n2p(0.0), [-5.0, 0.0, 0.0], 1e-12, "n2p(0)");
         assert_vec3_near(line.n2p(0.5), ORIGIN, 1e-12, "n2p(0.5)");
         assert_vec3_near(line.n2p(1.0), [5.0, 0.0, 0.0], 1e-12, "n2p(1)");
-        assert_eq!(line.tick_range().len(), 11);
-        let built = line.build();
+        assert_eq!(
+            line.tick_range()
+                .expect("unit-interval ticks are bounded")
+                .len(),
+            11
+        );
+        let built = line.build().expect("unit-interval ticks are bounded");
         let ticks = &built.vmob().children()[0];
         assert_eq!(ticks.children().len(), 11);
         // Big ticks at 0 and 1 (the ends): 1.5× taller.

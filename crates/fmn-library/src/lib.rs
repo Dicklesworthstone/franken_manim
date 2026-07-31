@@ -83,7 +83,10 @@ pub use coords::{
     Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, RiemannConfig, Slider,
     UnitInterval, create_axis,
 };
-pub use graphs::{FunctionGraph, ImplicitFunction, ParametricCurve};
+pub use graphs::{
+    DEFAULT_MAX_SAMPLES, FunctionGraph, GraphError, ImplicitFunction, ParametricCurve,
+    SamplingBudget, SamplingError,
+};
 pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
