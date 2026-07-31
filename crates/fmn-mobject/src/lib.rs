@@ -40,6 +40,7 @@ pub mod shape;
 pub mod stage;
 pub mod uniforms;
 
+pub use align::MAX_ALIGNED_SUBMOBJECTS;
 pub use animate::{AnimBuilder, AnimateArgs, AnimateError, BuiltAnimate, IntoAnimate};
 pub use bbox::BoundingBox;
 pub use dynamics::{Tracker, TrackerKind};
@@ -80,6 +81,14 @@ pub enum StageError {
     /// The geometry kernel refused a point run or bounded operation during
     /// alignment (alignment reads point runs as [`fmn_geom::QuadPath`]s).
     Geometry(fmn_geom::GeomError),
+    /// Family alignment was asked to create more direct children than its
+    /// fixed resource ceiling permits.
+    SubmobjectBudgetExceeded {
+        /// Requested final direct-child count.
+        requested: usize,
+        /// Maximum accepted final direct-child count.
+        max: usize,
+    },
     /// The monotonically assigned updater identity space is exhausted.
     /// Reuse would make durable replay manifests ambiguous.
     UpdaterIdExhausted,
@@ -118,6 +127,12 @@ impl std::fmt::Display for StageError {
             }
             Self::Geometry(err) => {
                 write!(f, "geometry operation refused during alignment: {err}")
+            }
+            Self::SubmobjectBudgetExceeded { requested, max } => {
+                write!(
+                    f,
+                    "family alignment requested {requested} direct submobjects; maximum is {max}"
+                )
             }
             Self::UpdaterIdExhausted => {
                 write!(f, "updater identity space is exhausted")

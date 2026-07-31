@@ -27,6 +27,31 @@ use fmn_geom::{DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
 use crate::StageError;
 use crate::stage::{Mob, Stage};
 
+/// Maximum direct-child fan-out that family alignment may produce at one
+/// node. Alignment recursively copies child families, so the public operation
+/// needs a deterministic ceiling before it begins cloning or allocating.
+pub const MAX_ALIGNED_SUBMOBJECTS: usize = 65_536;
+
+fn checked_aligned_submobject_count(
+    current: usize,
+    additional: usize,
+) -> Result<usize, StageError> {
+    let requested =
+        current
+            .checked_add(additional)
+            .ok_or(StageError::SubmobjectBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_ALIGNED_SUBMOBJECTS,
+            })?;
+    if requested > MAX_ALIGNED_SUBMOBJECTS {
+        return Err(StageError::SubmobjectBudgetExceeded {
+            requested,
+            max: MAX_ALIGNED_SUBMOBJECTS,
+        });
+    }
+    Ok(requested)
+}
+
 /// Euclidean distance between two points (local helper; fmn-geom's vector
 /// utilities are crate-private).
 fn dist(a: Vec3, b: Vec3) -> f64 {
@@ -119,23 +144,24 @@ impl Stage {
     /// `repeat_indices = arange(curr + n) * curr // (curr + n)`.
     ///
     /// # Errors
-    /// [`StageError::StaleHandle`].
+    /// [`StageError::StaleHandle`] or
+    /// [`StageError::SubmobjectBudgetExceeded`].
     pub fn add_n_more_submobjects(&mut self, mob: Mob, n: usize) -> Result<(), StageError> {
         if n == 0 {
             return Ok(());
         }
         let children = self.try_get(mob)?.submobjects().to_vec();
         let curr = children.len();
+        let target = checked_aligned_submobject_count(curr, n)?;
         if curr == 0 {
             let center = self.get_center(mob);
-            for _ in 0..n {
+            for _ in 0..target {
                 let copy = self.copy_family(mob)?;
                 write_points(self, copy, &[center])?;
                 self.attach(mob, copy).expect("fresh leaf copy is acyclic");
             }
             return Ok(());
         }
-        let target = curr + n;
         let mut split_factors = vec![0usize; curr];
         for i in 0..target {
             split_factors[i * curr / target] += 1;
@@ -554,5 +580,18 @@ mod tests {
     fn polyline_length_sums_consecutive_gaps() {
         let pts = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 2.0, 0.0]];
         assert!((polyline_length(&pts) - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aligned_submobject_budget_accepts_the_exact_boundary() {
+        assert_eq!(MAX_ALIGNED_SUBMOBJECTS, 65_536);
+        assert_eq!(
+            checked_aligned_submobject_count(0, MAX_ALIGNED_SUBMOBJECTS),
+            Ok(MAX_ALIGNED_SUBMOBJECTS)
+        );
+        assert_eq!(
+            checked_aligned_submobject_count(MAX_ALIGNED_SUBMOBJECTS - 1, 1),
+            Ok(MAX_ALIGNED_SUBMOBJECTS)
+        );
     }
 }

@@ -6,7 +6,7 @@
 
 use fmn_geom::{GeomError, MAX_SUBDIVIDED_CURVES};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
-use fmn_mobject::{Mob, Mobject, Stage, StageError};
+use fmn_mobject::{MAX_ALIGNED_SUBMOBJECTS, Mob, Mobject, Stage, StageError};
 
 fn base(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
     stage.add(Mobject::from_points(points))
@@ -134,6 +134,42 @@ fn ghost_distribution_spreads_across_children() {
     assert_eq!(x_of(children[1]), 10.0);
     assert_eq!(x_of(children[2]), 10.0);
     assert_eq!(x_of(children[4]), 20.0);
+}
+
+#[test]
+fn submobject_growth_budget_refusals_are_atomic() {
+    let mut stage = Stage::new();
+    let leaf = base(&mut stage, &[[0.0; 3]]);
+    let before_leaf = stage.snapshot_bytes().unwrap();
+    assert_eq!(
+        stage.add_n_more_submobjects(leaf, MAX_ALIGNED_SUBMOBJECTS + 1),
+        Err(StageError::SubmobjectBudgetExceeded {
+            requested: MAX_ALIGNED_SUBMOBJECTS + 1,
+            max: MAX_ALIGNED_SUBMOBJECTS,
+        })
+    );
+    assert_eq!(stage.snapshot_bytes().unwrap(), before_leaf);
+
+    let parent = base(&mut stage, &[[1.0; 3]]);
+    let child = base(&mut stage, &[[2.0; 3]]);
+    stage.attach(parent, child).unwrap();
+    let before_parent = stage.snapshot_bytes().unwrap();
+    assert_eq!(
+        stage.add_n_more_submobjects(parent, MAX_ALIGNED_SUBMOBJECTS),
+        Err(StageError::SubmobjectBudgetExceeded {
+            requested: MAX_ALIGNED_SUBMOBJECTS + 1,
+            max: MAX_ALIGNED_SUBMOBJECTS,
+        })
+    );
+    assert_eq!(stage.snapshot_bytes().unwrap(), before_parent);
+    assert_eq!(
+        stage.add_n_more_submobjects(parent, usize::MAX),
+        Err(StageError::SubmobjectBudgetExceeded {
+            requested: usize::MAX,
+            max: MAX_ALIGNED_SUBMOBJECTS,
+        })
+    );
+    assert_eq!(stage.snapshot_bytes().unwrap(), before_parent);
 }
 
 #[test]
