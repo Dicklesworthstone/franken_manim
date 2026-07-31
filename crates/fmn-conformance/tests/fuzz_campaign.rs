@@ -1266,6 +1266,15 @@ fn registry() -> Vec<(Box<dyn Target>, CampaignSpec)> {
 /// (fm-6nm). Kept as the mechanism for future not-yet-landed targets.
 const PENDING: &[(&str, &str)] = &[];
 
+fn pending_manifest_records() -> Vec<(String, String)> {
+    let mut pending: Vec<_> = PENDING
+        .iter()
+        .map(|(name, note)| ((*name).to_owned(), (*note).to_owned()))
+        .collect();
+    pending.sort_by(|a, b| a.0.cmp(&b.0));
+    pending
+}
+
 fn manifest_row(
     target: &dyn Target,
     spec: &CampaignSpec,
@@ -1328,6 +1337,11 @@ fn ci_campaign_matches_manifest_and_corpus() {
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .expect("fixtures/fuzz_corpus/MANIFEST.tsv is committed");
     let manifest = fuzz::parse_manifest(&manifest_text).expect("manifest parses");
+    assert_eq!(
+        manifest.pending,
+        pending_manifest_records(),
+        "manifest pending records match the declared pending-target authority"
+    );
 
     let registry = registry();
     assert_eq!(
@@ -1413,10 +1427,7 @@ fn full_campaign_is_the_campaign_authority() {
                 println!("{name}: stale corpus files to remove by hand: {stale:?}");
             }
         }
-        let pending: Vec<(String, String)> = PENDING
-            .iter()
-            .map(|(n, note)| ((*n).to_owned(), (*note).to_owned()))
-            .collect();
+        let pending = pending_manifest_records();
         std::fs::write(
             corpus_root().join("MANIFEST.tsv"),
             fuzz::render_manifest(&rows, &pending),
@@ -1429,6 +1440,16 @@ fn full_campaign_is_the_campaign_authority() {
     let manifest_text = std::fs::read_to_string(corpus_root().join("MANIFEST.tsv"))
         .expect("fixtures/fuzz_corpus/MANIFEST.tsv is committed");
     let manifest = fuzz::parse_manifest(&manifest_text).expect("manifest parses");
+    assert_eq!(
+        manifest.rows.len(),
+        rows.len(),
+        "full-campaign manifest row count matches the target registry"
+    );
+    assert_eq!(
+        manifest.pending,
+        pending_manifest_records(),
+        "full-campaign manifest pending records match the declared authority"
+    );
     for row in &rows {
         let committed = manifest
             .rows
