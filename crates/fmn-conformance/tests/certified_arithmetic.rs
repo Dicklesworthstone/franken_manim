@@ -397,8 +397,9 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
         }
 
         scanned += 1;
+        let searchable: String = code.chars().filter(|c| !c.is_whitespace()).collect();
         for (needle, name) in needles {
-            if code.contains(needle.as_str()) {
+            if searchable.contains(needle.as_str()) {
                 out.push(Offence {
                     path: format!("{label}/{}", path.file_name().unwrap().to_string_lossy()),
                     line: i + 1,
@@ -418,6 +419,8 @@ fn transcendental_needles() -> Vec<(String, String)> {
         out.push((format!(".{name}("), (*name).to_string()));
         out.push((format!("f64::{name}"), format!("f64::{name}")));
         out.push((format!("f32::{name}"), format!("f32::{name}")));
+        out.push((format!("<f64>::{name}"), format!("<f64>::{name}")));
+        out.push((format!("<f32>::{name}"), format!("<f32>::{name}")));
     }
     out
 }
@@ -436,6 +439,14 @@ fn fma_needles() -> Vec<(String, String)> {
         (
             concat!("f32::mul", "_add").to_string(),
             "f32::mul_add".to_string(),
+        ),
+        (
+            concat!("<f64>::mul", "_add").to_string(),
+            "<f64>::mul_add".to_string(),
+        ),
+        (
+            concat!("<f32>::mul", "_add").to_string(),
+            "<f32>::mul_add".to_string(),
         ),
     ]
 }
@@ -525,10 +536,13 @@ let c = z.powf(2.4);
 let d = w.cbrt();
 let e = p.atan2(q);
 let f = m.mul_add(n, o);
+let f_qualified = <f64>::mul_add(m, n, o);
 let g = t.sqrt();
 let h = u.powi(3);
 let i = fmn_dmath::sin(v);
 let pair = r.sin_cos();
+let qualified = <f64>::acos(q);
+let comment_between_call_tokens = z.cosh /* retained comment */ ();
 let gamma = aa.gamma();
 let ln_gamma = bb.ln_gamma();
 let erf = cc.erf();
@@ -567,9 +581,8 @@ let after_test_only_cfg = q.exp_m1();
     names.sort_unstable();
     names.dedup();
     // Four claims in one comparison:
-    //  * the method and path forms are both caught, and reported under distinct
-    //    names — `f64::cos(y)` contains no `.cos(`, so it appears once, which is
-    //    what makes a failure message point at the right line;
+    //  * the method and path forms are both caught, including fully qualified
+    //    `<f64>::` syntax and whitespace left by an intervening comment;
     //  * comments, strings, `sqrt`, `to_radians` and a qualified
     //    `fmn_dmath::` call are all legal and must not appear;
     //  * `powi`, `sin_cos`, and the four pinned-nightly libc-backed functions
@@ -583,8 +596,23 @@ let after_test_only_cfg = q.exp_m1();
     assert_eq!(
         names,
         [
-            "asinh", "atan2", "atanh", "cbrt", "erf", "erfc", "exp_m1", "f64::cos", "gamma",
-            "ln_gamma", "powf", "powi", "sin", "sin_cos", "tanh"
+            "<f64>::acos",
+            "asinh",
+            "atan2",
+            "atanh",
+            "cbrt",
+            "cosh",
+            "erf",
+            "erfc",
+            "exp_m1",
+            "f64::cos",
+            "gamma",
+            "ln_gamma",
+            "powf",
+            "powi",
+            "sin",
+            "sin_cos",
+            "tanh"
         ],
         "the transcendental needles do not catch what they must, or catch what \
          they must not"
@@ -592,7 +620,13 @@ let after_test_only_cfg = q.exp_m1();
 
     let mut fma = Vec::new();
     scan(&file, "sample", &fma_needles(), &mut fma);
-    assert_eq!(fma.len(), 1, "the FMA needle missed a hand-written mul_add");
+    let mut fma_names: Vec<&str> = fma.iter().map(|o| o.needle.as_str()).collect();
+    fma_names.sort_unstable();
+    assert_eq!(
+        fma_names,
+        ["<f64>::mul_add", "mul_add"],
+        "the FMA needles missed a hand-written contraction"
+    );
 
     std::fs::remove_file(&file).ok();
     std::fs::remove_dir(&dir).ok();
