@@ -91,8 +91,11 @@ pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
 };
-pub use matrix::{DecimalMatrix, IntegerMatrix, Matrix, MatrixMobject, MobjectMatrix, TexMatrix};
-pub use numbers::{DecimalNumber, Integer};
+pub use matrix::{
+    DEFAULT_MAX_MATRIX_ENTRIES, DecimalMatrix, IntegerMatrix, Matrix, MatrixError, MatrixMobject,
+    MobjectMatrix, TexMatrix,
+};
+pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
 pub use planes::{ComplexPlane, NumberPlane, ThreeDAxes};
 pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, TipStyle};
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};

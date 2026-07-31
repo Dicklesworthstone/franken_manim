@@ -51,7 +51,8 @@ pub fn text_style() -> Style {
 
 /// A text-bridge failure: the layouter's named errors pass through
 /// untouched (markup diagnostics, font policy, unmapped characters,
-/// outline decode); the bridge itself only names its own two faults.
+/// outline decode); the bridge names its own geometry, calibration, and
+/// bounded native-layout faults.
 #[derive(Debug)]
 pub enum TextMobjectError {
     /// The fmn-text pipeline's precise error, verbatim.
@@ -69,6 +70,28 @@ pub enum TextMobjectError {
         /// The geometry kernel's report.
         what: String,
     },
+    /// A native text-backed surface refused proportional work above its
+    /// declared limit.
+    ResourceLimit {
+        /// The surface or dimension being bounded.
+        context: &'static str,
+        /// Items the request would require.
+        requested: usize,
+        /// Maximum items admitted.
+        limit: usize,
+    },
+    /// Native layout count arithmetic cannot be represented by the host.
+    CapacityOverflow {
+        /// The arithmetic operation being bounded.
+        context: &'static str,
+    },
+    /// Reserving a validated bounded native-layout buffer failed.
+    AllocationFailed {
+        /// The buffer being reserved.
+        context: &'static str,
+        /// Validated capacity requested.
+        requested: usize,
+    },
 }
 
 impl core::fmt::Display for TextMobjectError {
@@ -81,6 +104,20 @@ impl core::fmt::Display for TextMobjectError {
                  text scale calibration is impossible"
             ),
             Self::Geometry { what } => write!(f, "glyph path commit failed: {what}"),
+            Self::ResourceLimit {
+                context,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "{context} requires {requested} items, above the declared limit of {limit}"
+            ),
+            Self::CapacityOverflow { context } => {
+                write!(f, "{context} exceeds the host's representable capacity")
+            }
+            Self::AllocationFailed { context, requested } => {
+                write!(f, "{context} could not reserve {requested} validated items")
+            }
         }
     }
 }

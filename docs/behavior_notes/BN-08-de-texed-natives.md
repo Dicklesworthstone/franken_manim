@@ -133,6 +133,16 @@ Two honest scope lines: the complex formatter
 text — a leading `^` is an alignment marker, never a TeX command; write
 the glyph itself (`°`), which the bundled faces map.
 
+Native layout work is explicitly bounded. `DecimalNumber` admits 4,096
+display characters by default, covering numeric glyphs, ellipsis, and unit;
+the `Matrix` family admits 4,096 entries before cloning, typesetting, or
+bracket construction. `character_limit` and `entry_limit` are explicit
+Rust-side opt-ins for larger scenes. Requests above the declared limit,
+unrepresentable dimension arithmetic, and failed validated reservations are
+typed errors rather than allocation panics. Within the admitted range,
+formatting and layout retain the Reference behavior described above,
+including comma-boundary width overshoot.
+
 ## The small compositions
 
 `BulletedList` is a native bullet glyph (U+2022, which the bundled faces
@@ -173,6 +183,10 @@ mouse/keyboard wiring is Proscenium's (W9), not the library's.
   here: `DecimalMatrix`/`IntegerMatrix`/`TexMatrix`/`MobjectMatrix` own the
   branches, and the base `Matrix` takes built entries. Out-of-range row and
   column access returns `Option` rather than raising `IndexError`.
+- **Native dimensions are bounded.** Ordinary labels and matrices need no
+  change. Extremely large generated surfaces must opt into a larger
+  `character_limit` or `entry_limit` and handle the typed resource error;
+  host-size overflow remains a refusal at every limit.
 
 ## Evidence
 
@@ -189,10 +203,12 @@ mouse/keyboard wiring is Proscenium's (W9), not the library's.
   family-recursive style surface `fade_all_but` rides.
 - `crates/fmn-library/src/numbers.rs` — the glyph cache (`typesets()` is
   the recycling witness: an update inside the cached alphabet typesets
-  nothing, test-proven) and the formatting corpus.
+  nothing, test-proven), the formatting corpus, and exact-limit,
+  just-over-limit, and `usize` boundary tests.
 - `crates/fmn-library/src/matrix.rs` — the delimiter construction, with
   bracket height held to grid height plus `v_buff` across the glyph and
-  drawn-path stages at row counts 1–8.
+  drawn-path stages at row counts 1–8, plus checked entry, partition,
+  accessor, and child-capacity bounds.
 - `crates/fmn-library/src/special_tex.rs` — the bullet and title
   compositions; `fade_all_but`'s formula port.
 - `crates/fmn-library/src/controls.rs` — the control compositions and the

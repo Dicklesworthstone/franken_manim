@@ -44,6 +44,7 @@
 //! `add_background_rectangle()` defaults (camera background, `buff=0`).
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLACK, DOWN, LEFT, RIGHT, UP};
@@ -60,6 +61,15 @@ const EN_DASH: char = '\u{2013}';
 
 /// The `show_ellipsis` glyph: one child, the font's own U+2026.
 const ELLIPSIS: char = '\u{2026}';
+
+/// Default upper bound for characters produced by one native number
+/// layout.
+///
+/// The limit covers numeric glyphs, an optional ellipsis, and unit
+/// glyphs. It is deliberately far above ordinary scene labels while
+/// preventing public precision/width inputs from becoming unbounded
+/// formatting or child-layout work.
+pub const DEFAULT_MAX_NUMBER_CHARACTERS: usize = 4_096;
 
 /// `DecimalNumber` (Appendix A `mobject/numbers`): a native decimal
 /// readout — one glyph child per displayed character, a per-character
@@ -88,6 +98,7 @@ pub struct DecimalNumber {
     edge_to_fix: Vec3,
     font_size: f64,
     font_size_for_unit_height: f64,
+    character_limit: usize,
     // --- built state -----------------------------------------------------
     /// The family: one child per displayed character (ellipsis and unit
     /// trailing as one child each), the background rectangle at child 0
@@ -127,6 +138,7 @@ impl DecimalNumber {
             edge_to_fix: LEFT,
             font_size: crate::text::DEFAULT_FONT_SIZE,
             font_size_for_unit_height: crate::text::DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
+            character_limit: DEFAULT_MAX_NUMBER_CHARACTERS,
             vmob: VMobject::new(),
             num_string: String::new(),
             cache: HashMap::new(),
@@ -148,6 +160,18 @@ impl DecimalNumber {
     #[must_use]
     pub fn min_total_width(mut self, width: usize) -> Self {
         self.min_total_width = width;
+        self
+    }
+
+    /// Maximum characters admitted for native number formatting and
+    /// layout.
+    ///
+    /// The default is [`DEFAULT_MAX_NUMBER_CHARACTERS`]. Raising it is an
+    /// explicit opt-in to proportionally larger work; count overflow is
+    /// still refused.
+    #[must_use]
+    pub fn character_limit(mut self, limit: usize) -> Self {
+        self.character_limit = limit;
         self
     }
 
@@ -367,29 +391,82 @@ impl DecimalNumber {
     /// children from the cache, arrange `RIGHT` aligned `DOWN` and center,
     /// then re-seat the special characters.
     fn refresh(&mut self, book: &FontBook) -> Result<(), TextMobjectError> {
-        self.num_string = self.format_number();
+        let num_string = self.format_number()?;
+        let numeric_characters = bounded_char_count(
+            &num_string,
+            self.character_limit,
+            "decimal-number numeric characters",
+        )?;
+        let unit_up = self
+            .unit
+            .as_deref()
+            .is_some_and(|unit| unit.starts_with('^'));
+        let unit_source = self
+            .unit
+            .as_deref()
+            .map(|unit| unit.strip_prefix('^').unwrap_or(unit));
+        let unit_characters = match unit_source {
+            Some(unit) => {
+                bounded_char_count(unit, self.character_limit, "decimal-number unit characters")?
+            }
+            None => 0,
+        };
+        let total_characters = checked_add(
+            "decimal-number character count",
+            checked_add(
+                "decimal-number character count",
+                numeric_characters,
+                usize::from(self.show_ellipsis),
+            )?,
+            unit_characters,
+        )?;
+        ensure_resource_limit(
+            "decimal-number characters",
+            total_characters,
+            self.character_limit,
+        )?;
+
+        // Own the bounded unit text before mutating the glyph cache.
+        let unit_text = match unit_source {
+            Some(unit) => {
+                let mut owned = try_string_with_capacity("decimal-number unit text", unit.len())?;
+                owned.push_str(unit);
+                Some(owned)
+            }
+            None => None,
+        };
+
+        self.num_string = num_string;
         let digit_buff = self.digit_buff_per_font_unit * self.font_size;
-        let chars: Vec<char> = self.num_string.chars().collect();
-        let mut children = Vec::with_capacity(chars.len() + 2);
+        let mut chars =
+            try_vec_with_capacity("decimal-number numeric characters", numeric_characters)?;
+        chars.extend(self.num_string.chars());
+        let child_capacity = checked_add(
+            "decimal-number child count",
+            checked_add(
+                "decimal-number child count",
+                chars.len(),
+                usize::from(self.show_ellipsis),
+            )?,
+            usize::from(self.unit.is_some()),
+        )?;
+        let mut children = try_vec_with_capacity("decimal-number children", child_capacity)?;
         for &c in &chars {
             children.push(self.collect_child(c, book)?);
         }
         if self.show_ellipsis {
             children.push(self.collect_child(ELLIPSIS, book)?);
         }
-        let unit_up = self.unit.as_deref().is_some_and(|u| u.starts_with('^'));
-        if let Some(unit) = &self.unit {
-            let text = unit.strip_prefix('^').unwrap_or(unit.as_str());
-            let unit_chars: Vec<char> = text.chars().collect();
-            let mut glyphs = Vec::with_capacity(unit_chars.len());
-            for c in unit_chars {
+        if let Some(unit) = unit_text {
+            let mut glyphs = try_vec_with_capacity("decimal-number unit glyphs", unit_characters)?;
+            for c in unit.chars() {
                 glyphs.push(self.collect_child(c, book)?);
             }
             children.push(VMobject::arranged(glyphs, RIGHT, digit_buff, DOWN));
         }
 
         // arrange(RIGHT, buff, aligned_edge=DOWN) with center=True.
-        let mut placed: Vec<VMobject> = Vec::with_capacity(children.len());
+        let mut placed = try_vec_with_capacity("decimal-number placement", children.len())?;
         for child in children {
             match placed.last() {
                 None => placed.push(child),
@@ -439,7 +516,12 @@ impl DecimalNumber {
             }
         }
 
-        let mut family = Vec::with_capacity(placed.len() + 1);
+        let family_capacity = checked_add(
+            "decimal-number family count",
+            placed.len(),
+            usize::from(self.include_background_rectangle),
+        )?;
+        let mut family = try_vec_with_capacity("decimal-number family", family_capacity)?;
         if self.include_background_rectangle {
             // add_background_rectangle(): camera background (BLACK), full
             // opacity, buff 0, added to the back — child 0.
@@ -455,77 +537,143 @@ impl DecimalNumber {
     /// `str.format` semantics for sign, zero-padding (re-grouping
     /// included), comma grouping, and precision, then negative-zero
     /// suppression against round-half-even, then the en-dash swap.
-    fn format_number(&self) -> String {
+    fn format_number(&self) -> Result<String, TextMobjectError> {
         let ndp = self.num_decimal_places;
         let number = self.number;
+        ensure_resource_limit("decimal-number precision", ndp, self.character_limit)?;
+        ensure_resource_limit(
+            "decimal-number minimum width",
+            self.min_total_width,
+            self.character_limit,
+        )?;
+        let frac_len = if ndp > 0 {
+            checked_add("decimal-number fractional width", 1, ndp)?
+        } else {
+            0
+        };
+        let minimum_numeric_width =
+            checked_add("decimal-number minimum numeric width", 1, frac_len)?;
+        ensure_resource_limit(
+            "decimal-number numeric characters",
+            minimum_numeric_width,
+            self.character_limit,
+        )?;
+
         // int(number) truncation when ndp == 0; round-half-even fixed
         // precision otherwise (Rust's float formatting rounds exactly the
         // way CPython's does).
-        let (neg, int_digits, frac_digits, rounded_basis) = if ndp == 0 {
+        let (neg, int_digits, frac_digits, rounded_is_zero) = if ndp == 0 {
             let t = number.trunc();
             // int(-0.4) == 0: no negative zero survives truncation.
             let t = if t == 0.0 { 0.0 } else { t };
-            let s = format!("{t:.0}");
+            let s = format_float(t, Some(0), "decimal-number integer formatting")?;
+            let body = s.trim_start_matches('-');
+            bounded_char_count(body, self.character_limit, "decimal-number formatted body")?;
             (
                 t < 0.0,
-                s.trim_start_matches('-').to_owned(),
+                try_copy_string("decimal-number integer digits", body)?,
                 String::new(),
-                t,
+                t == 0.0,
             )
         } else {
-            let s = format!("{number:.ndp$}");
+            let s = format_float(
+                number,
+                Some(ndp),
+                "decimal-number fixed-precision formatting",
+            )?;
             let neg = s.starts_with('-');
             let body = s.trim_start_matches('-');
+            bounded_char_count(body, self.character_limit, "decimal-number formatted body")?;
             let (int_part, frac_part) = body.split_once('.').unwrap_or((body, ""));
-            (neg, int_part.to_owned(), frac_part.to_owned(), number)
+            (
+                neg,
+                try_copy_string("decimal-number integer digits", int_part)?,
+                try_copy_string("decimal-number fractional digits", frac_part)?,
+                body.bytes().all(|byte| byte == b'0' || byte == b'.'),
+            )
         };
 
         // 0N zero-padding: pad the digit run until sign + grouped digits
-        // + fraction reach the width — one zero at a time, so the
-        // re-grouping overshoot is CPython's.
+        // + fraction reach the width. Determine the bounded final length
+        // first, then prepend once; comma-boundary overshoot remains
+        // CPython's exactly without repeated front insertion.
         let sign_len = usize::from(neg || self.include_sign);
-        let frac_len = if ndp > 0 { 1 + ndp } else { 0 };
         let mut digits = int_digits;
-        if self.min_total_width > 0 {
-            while sign_len + grouped_len(digits.len(), self.group_with_commas) + frac_len
-                < self.min_total_width
-            {
-                digits.insert(0, '0');
+        let fixed_width = checked_add("decimal-number fixed width", sign_len, frac_len)?;
+        let padded_digits = padded_digit_count(
+            digits.len(),
+            fixed_width,
+            self.min_total_width,
+            self.group_with_commas,
+        );
+        if padded_digits > digits.len() {
+            let zeroes = padded_digits - digits.len();
+            ensure_resource_limit(
+                "decimal-number padded digits",
+                padded_digits,
+                self.character_limit,
+            )?;
+            let mut padded =
+                try_string_with_capacity("decimal-number padded digits", padded_digits)?;
+            for _ in 0..zeroes {
+                padded.push('0');
             }
+            padded.push_str(&digits);
+            digits = padded;
         }
+        let grouped_characters = grouped_len(digits.len(), self.group_with_commas)?;
+        let emitted_sign_len = usize::from(if neg {
+            !rounded_is_zero || self.include_sign
+        } else {
+            self.include_sign
+        });
+        let output_characters = checked_add(
+            "decimal-number rendered width",
+            checked_add(
+                "decimal-number rendered width",
+                emitted_sign_len,
+                grouped_characters,
+            )?,
+            frac_len,
+        )?;
+        ensure_resource_limit(
+            "decimal-number numeric characters",
+            output_characters,
+            self.character_limit,
+        )?;
         let grouped = if self.group_with_commas {
-            group_digits(&digits)
+            group_digits(&digits)?
         } else {
             digits
         };
-
-        let mut out = String::with_capacity(sign_len + grouped.len() + frac_len);
-        out.push_str(if neg {
-            "-"
+        debug_assert_eq!(grouped.len(), grouped_characters);
+        let output_bytes = checked_add(
+            "decimal-number output bytes",
+            output_characters,
+            if neg && !rounded_is_zero {
+                EN_DASH.len_utf8() - 1
+            } else {
+                0
+            },
+        )?;
+        let mut out = try_string_with_capacity("decimal-number output", output_bytes)?;
+        if neg {
+            if rounded_is_zero {
+                if self.include_sign {
+                    out.push('+');
+                }
+            } else {
+                out.push(EN_DASH);
+            }
         } else if self.include_sign {
-            "+"
-        } else {
-            ""
-        });
+            out.push('+');
+        }
         out.push_str(&grouped);
         if ndp > 0 {
             out.push('.');
             out.push_str(&frac_digits);
         }
-
-        // Negative-zero suppression: a leading '-' on a value that rounds
-        // to nothing becomes '+' (include_sign) or disappears. The exact
-        // `== 0.0` is the Reference's `rounded_num == 0` (IEEE: -0.0 == 0.0).
-        let scale = 10f64.powi(ndp as i32);
-        let rounded = (rounded_basis * scale).round_ties_even() / scale;
-        if out.starts_with('-') && rounded == 0.0 {
-            out = if self.include_sign {
-                format!("+{}", &out[1..])
-            } else {
-                out[1..].to_owned()
-            };
-        }
-        out.replace('-', "\u{2013}")
+        Ok(out)
     }
 }
 
@@ -566,6 +714,13 @@ impl Integer {
     #[must_use]
     pub fn min_total_width(mut self, width: usize) -> Self {
         self.inner = self.inner.min_total_width(width);
+        self
+    }
+
+    /// See [`DecimalNumber::character_limit`].
+    #[must_use]
+    pub fn character_limit(mut self, limit: usize) -> Self {
+        self.inner = self.inner.character_limit(limit);
         self
     }
 
@@ -749,25 +904,187 @@ fn union_extent(children: &[VMobject]) -> Option<(Vec3, Vec3)> {
     any.then_some((min, max))
 }
 
-/// The rendered length of an `n`-digit run, commas included.
-fn grouped_len(n: usize, with_commas: bool) -> usize {
-    if n == 0 {
-        return 0;
+fn ensure_resource_limit(
+    context: &'static str,
+    requested: usize,
+    limit: usize,
+) -> Result<(), TextMobjectError> {
+    if requested > limit {
+        Err(TextMobjectError::ResourceLimit {
+            context,
+            requested,
+            limit,
+        })
+    } else {
+        Ok(())
     }
-    n + if with_commas { (n - 1) / 3 } else { 0 }
+}
+
+fn checked_add(context: &'static str, lhs: usize, rhs: usize) -> Result<usize, TextMobjectError> {
+    lhs.checked_add(rhs)
+        .ok_or(TextMobjectError::CapacityOverflow { context })
+}
+
+fn try_vec_with_capacity<T>(
+    context: &'static str,
+    capacity: usize,
+) -> Result<Vec<T>, TextMobjectError> {
+    let element_size = core::mem::size_of::<T>();
+    if element_size != 0 {
+        let bytes = capacity
+            .checked_mul(element_size)
+            .ok_or(TextMobjectError::CapacityOverflow { context })?;
+        if bytes > isize::MAX as usize {
+            return Err(TextMobjectError::CapacityOverflow { context });
+        }
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| TextMobjectError::AllocationFailed {
+            context,
+            requested: capacity,
+        })?;
+    Ok(values)
+}
+
+fn try_string_with_capacity(
+    context: &'static str,
+    capacity: usize,
+) -> Result<String, TextMobjectError> {
+    if capacity > isize::MAX as usize {
+        return Err(TextMobjectError::CapacityOverflow { context });
+    }
+    let mut value = String::new();
+    value
+        .try_reserve_exact(capacity)
+        .map_err(|_| TextMobjectError::AllocationFailed {
+            context,
+            requested: capacity,
+        })?;
+    Ok(value)
+}
+
+fn try_copy_string(context: &'static str, source: &str) -> Result<String, TextMobjectError> {
+    let mut value = try_string_with_capacity(context, source.len())?;
+    value.push_str(source);
+    Ok(value)
+}
+
+fn bounded_char_count(
+    value: &str,
+    limit: usize,
+    context: &'static str,
+) -> Result<usize, TextMobjectError> {
+    let mut count = 0usize;
+    for _ in value.chars() {
+        count = checked_add(context, count, 1)?;
+        ensure_resource_limit(context, count, limit)?;
+    }
+    Ok(count)
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl core::fmt::Write for CountingWriter {
+    fn write_str(&mut self, value: &str) -> core::fmt::Result {
+        self.bytes = self
+            .bytes
+            .checked_add(value.len())
+            .ok_or(core::fmt::Error)?;
+        Ok(())
+    }
+}
+
+/// Format once into a counting sink, reserve the exact byte count
+/// fallibly, then render into that reservation. The caller bounds
+/// `precision` before this helper runs.
+fn format_float(
+    number: f64,
+    precision: Option<usize>,
+    context: &'static str,
+) -> Result<String, TextMobjectError> {
+    let mut count = CountingWriter::default();
+    let counted = match precision {
+        Some(precision) => write!(&mut count, "{number:.precision$}"),
+        None => write!(&mut count, "{number}"),
+    };
+    counted.map_err(|_| TextMobjectError::CapacityOverflow { context })?;
+
+    let mut output = try_string_with_capacity(context, count.bytes)?;
+    let rendered = match precision {
+        Some(precision) => write!(&mut output, "{number:.precision$}"),
+        None => write!(&mut output, "{number}"),
+    };
+    rendered.map_err(|_| TextMobjectError::CapacityOverflow { context })?;
+    debug_assert_eq!(output.len(), count.bytes);
+    Ok(output)
+}
+
+/// The rendered length of an `n`-digit run, commas included.
+fn grouped_len(n: usize, with_commas: bool) -> Result<usize, TextMobjectError> {
+    if n == 0 {
+        return Ok(0);
+    }
+    checked_add(
+        "decimal-number grouped width",
+        n,
+        if with_commas { (n - 1) / 3 } else { 0 },
+    )
+}
+
+fn grouped_len_saturating(n: usize, with_commas: bool) -> usize {
+    n.saturating_add(if with_commas {
+        n.saturating_sub(1) / 3
+    } else {
+        0
+    })
+}
+
+/// Find the smallest digit run whose sign, fraction, and optional comma
+/// grouping reach `minimum_width`. Saturating comparison preserves the
+/// monotone search at the host boundary; exact checked arithmetic still
+/// gates the resulting allocation.
+fn padded_digit_count(
+    current_digits: usize,
+    fixed_width: usize,
+    minimum_width: usize,
+    with_commas: bool,
+) -> usize {
+    let rendered_width =
+        |digits: usize| fixed_width.saturating_add(grouped_len_saturating(digits, with_commas));
+    if rendered_width(current_digits) >= minimum_width {
+        return current_digits;
+    }
+
+    let mut low = current_digits;
+    let mut high = minimum_width.max(current_digits);
+    while low < high {
+        let midpoint = low + (high - low) / 2;
+        if rendered_width(midpoint) >= minimum_width {
+            high = midpoint;
+        } else {
+            low = midpoint + 1;
+        }
+    }
+    low
 }
 
 /// Insert a comma every three digits from the right.
-fn group_digits(digits: &str) -> String {
+fn group_digits(digits: &str) -> Result<String, TextMobjectError> {
     let n = digits.len();
-    let mut out = String::with_capacity(grouped_len(n, true));
+    let capacity = grouped_len(n, true)?;
+    let mut out = try_string_with_capacity("decimal-number grouped digits", capacity)?;
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (n - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -867,6 +1184,88 @@ mod tests {
             .build(&book)
             .expect("builds");
         assert_eq!(d.num_string(), "+007");
+    }
+
+    #[test]
+    fn formatting_budget_accepts_the_boundary_and_refuses_one_over() {
+        let exact = DecimalNumber::new(42.0)
+            .num_decimal_places(0)
+            .group_with_commas(false)
+            .min_total_width(8)
+            .character_limit(8)
+            .format_number()
+            .expect("the declared boundary is admitted");
+        assert_eq!(exact, "00000042");
+
+        let err = DecimalNumber::new(42.0)
+            .num_decimal_places(0)
+            .group_with_commas(false)
+            .min_total_width(9)
+            .character_limit(8)
+            .format_number();
+        assert!(matches!(
+            err,
+            Err(TextMobjectError::ResourceLimit {
+                context: "decimal-number minimum width",
+                requested: 9,
+                limit: 8,
+            })
+        ));
+
+        // Grouping can overshoot a requested width at a comma boundary;
+        // the resulting width, not merely `min_total_width`, is bounded.
+        let err = DecimalNumber::new(123_456.0)
+            .num_decimal_places(0)
+            .min_total_width(8)
+            .character_limit(8)
+            .format_number();
+        assert!(matches!(
+            err,
+            Err(TextMobjectError::ResourceLimit {
+                context: "decimal-number numeric characters",
+                requested: 9,
+                limit: 8,
+            })
+        ));
+    }
+
+    #[test]
+    fn formatting_budget_reports_host_count_overflow() {
+        let err = DecimalNumber::new(0.0)
+            .num_decimal_places(usize::MAX)
+            .character_limit(usize::MAX)
+            .format_number();
+        assert!(matches!(
+            err,
+            Err(TextMobjectError::CapacityOverflow {
+                context: "decimal-number fractional width",
+            })
+        ));
+
+        let err = DecimalNumber::new(0.0)
+            .num_decimal_places(0)
+            .group_with_commas(false)
+            .min_total_width(usize::MAX)
+            .character_limit(usize::MAX)
+            .format_number();
+        assert!(matches!(
+            err,
+            Err(TextMobjectError::CapacityOverflow {
+                context: "decimal-number padded digits",
+            })
+        ));
+    }
+
+    #[test]
+    fn high_bounded_precision_suppresses_negative_zero_without_scaling() {
+        let rendered = DecimalNumber::new(-0.0)
+            .num_decimal_places(4_000)
+            .character_limit(4_002)
+            .format_number()
+            .expect("bounded formatting");
+        assert_eq!(rendered.chars().count(), 4_002);
+        assert!(rendered.starts_with("0."));
+        assert!(!rendered.contains(EN_DASH));
     }
 
     #[test]

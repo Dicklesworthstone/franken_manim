@@ -77,9 +77,15 @@ pub const DEFAULT_ELLIPSES_WIDTH_RATIO: f64 = 0.4;
 pub const DEFAULT_MOBJECT_MATRIX_HEIGHT: f64 = 4.0;
 /// `DecimalMatrix`'s `num_decimal_places` default.
 pub const DEFAULT_NUM_DECIMAL_PLACES: usize = 2;
+/// Default upper bound for entries admitted by one matrix layout.
+///
+/// The limit is shared by every typed front and is checked before
+/// cloning, typesetting, partitioning, or bracket construction.
+pub const DEFAULT_MAX_MATRIX_ENTRIES: usize = 4_096;
 
 /// A matrix-build failure: the tex/text bridges' precise errors pass
-/// through untouched; the grid itself names its own three faults.
+/// through untouched; the grid itself names malformed shapes, bounded
+/// resource refusals, and delimiter failures.
 #[derive(Debug)]
 pub enum MatrixError {
     /// A bracket or `TexMatrix`/ellipses entry failed to typeset.
@@ -104,6 +110,29 @@ pub enum MatrixError {
         /// Entries the partition needs.
         need: usize,
     },
+    /// Matrix dimensions describe more entries than the configured
+    /// layout budget admits.
+    ResourceLimit {
+        /// The dimension or buffer being bounded.
+        context: &'static str,
+        /// Items the request would require.
+        requested: usize,
+        /// Maximum items admitted.
+        limit: usize,
+    },
+    /// Matrix dimension or capacity arithmetic cannot be represented by
+    /// the host.
+    CapacityOverflow {
+        /// The arithmetic operation being bounded.
+        context: &'static str,
+    },
+    /// Reserving a validated bounded matrix buffer failed.
+    AllocationFailed {
+        /// The buffer being reserved.
+        context: &'static str,
+        /// Validated capacity requested.
+        requested: usize,
+    },
     /// The bracket typeset produced fewer than two submobjects — the
     /// delimiter engine must always emit a pair.
     Delimiters,
@@ -121,6 +150,20 @@ impl core::fmt::Display for MatrixError {
             ),
             Self::TooFewEntries { have, need } => {
                 write!(f, "MobjectMatrix needs at least {need} entries, got {have}")
+            }
+            Self::ResourceLimit {
+                context,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "{context} requires {requested} items, above the declared limit of {limit}"
+            ),
+            Self::CapacityOverflow { context } => {
+                write!(f, "{context} exceeds the host's representable capacity")
+            }
+            Self::AllocationFailed { context, requested } => {
+                write!(f, "{context} could not reserve {requested} validated items")
             }
             Self::Delimiters => {
                 write!(f, "the bracket typeset produced fewer than two submobjects")
@@ -165,6 +208,7 @@ struct Spec {
     ellipses_col: Option<isize>,
     ellipses_height_ratio: f64,
     ellipses_width_ratio: f64,
+    entry_limit: usize,
 }
 
 impl Spec {
@@ -181,6 +225,7 @@ impl Spec {
         ellipses_col: None,
         ellipses_height_ratio: DEFAULT_ELLIPSES_HEIGHT_RATIO,
         ellipses_width_ratio: DEFAULT_ELLIPSES_WIDTH_RATIO,
+        entry_limit: DEFAULT_MAX_MATRIX_ENTRIES,
     };
 
     /// `MobjectMatrix`'s overrides: `element_alignment_corner=ORIGIN`,
@@ -223,6 +268,17 @@ macro_rules! spec_setters {
         #[must_use]
         pub fn bracket_v_buff(mut self, bracket_v_buff: f64) -> Self {
             self.spec.bracket_v_buff = bracket_v_buff;
+            self
+        }
+
+        /// Maximum entries admitted for construction and layout.
+        ///
+        /// The default is [`DEFAULT_MAX_MATRIX_ENTRIES`]. Raising it is
+        /// an explicit opt-in to proportionally larger work; dimension
+        /// overflow is still refused.
+        #[must_use]
+        pub fn entry_limit(mut self, limit: usize) -> Self {
+            self.spec.entry_limit = limit;
             self
         }
 
@@ -275,6 +331,87 @@ macro_rules! spec_setters {
     };
 }
 
+fn checked_matrix_add(context: &'static str, lhs: usize, rhs: usize) -> Result<usize, MatrixError> {
+    lhs.checked_add(rhs)
+        .ok_or(MatrixError::CapacityOverflow { context })
+}
+
+fn checked_matrix_mul(context: &'static str, lhs: usize, rhs: usize) -> Result<usize, MatrixError> {
+    lhs.checked_mul(rhs)
+        .ok_or(MatrixError::CapacityOverflow { context })
+}
+
+fn checked_matrix_entries(
+    n_rows: usize,
+    n_cols: usize,
+    limit: usize,
+) -> Result<usize, MatrixError> {
+    if n_rows == 0 || n_cols == 0 {
+        return Err(MatrixError::Empty);
+    }
+    let requested = checked_matrix_mul("matrix entry count", n_rows, n_cols)?;
+    if requested > limit {
+        return Err(MatrixError::ResourceLimit {
+            context: "matrix entries",
+            requested,
+            limit,
+        });
+    }
+    Ok(requested)
+}
+
+fn validate_grid_shape<T>(
+    grid: &[Vec<T>],
+    entry_limit: usize,
+) -> Result<(usize, usize, usize), MatrixError> {
+    let n_rows = grid.len();
+    let n_cols = grid.first().map_or(0, Vec::len);
+    let n_entries = checked_matrix_entries(n_rows, n_cols, entry_limit)?;
+    for row in grid {
+        if row.len() != n_cols {
+            return Err(MatrixError::Ragged {
+                expected: n_cols,
+                found: row.len(),
+            });
+        }
+    }
+    Ok((n_rows, n_cols, n_entries))
+}
+
+fn try_matrix_vec<T>(context: &'static str, capacity: usize) -> Result<Vec<T>, MatrixError> {
+    let element_size = core::mem::size_of::<T>();
+    if element_size != 0 {
+        let bytes = capacity
+            .checked_mul(element_size)
+            .ok_or(MatrixError::CapacityOverflow { context })?;
+        if bytes > isize::MAX as usize {
+            return Err(MatrixError::CapacityOverflow { context });
+        }
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| MatrixError::AllocationFailed {
+            context,
+            requested: capacity,
+        })?;
+    Ok(values)
+}
+
+fn clone_grid<T: Clone>(
+    grid: &[Vec<T>],
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<Vec<Vec<T>>, MatrixError> {
+    let mut cloned = try_matrix_vec("matrix rows", n_rows)?;
+    for row in grid {
+        let mut cloned_row = try_matrix_vec("matrix row entries", n_cols)?;
+        cloned_row.extend(row.iter().cloned());
+        cloned.push(cloned_row);
+    }
+    Ok(cloned)
+}
+
 /// `Matrix(matrix)` — a grid of already-built entries between brackets.
 ///
 /// This is the Reference base class at its post-`element_to_mobject`
@@ -307,7 +444,9 @@ impl Matrix {
     /// typeset, [`MatrixError::Delimiters`] when the delimiter engine
     /// emits no pair.
     pub fn build(&self, engine: &TexEngine) -> Result<MatrixMobject, MatrixError> {
-        build_grid(self.entries.clone(), &self.spec, engine)
+        let (n_rows, n_cols, _) = validate_grid_shape(&self.entries, self.spec.entry_limit)?;
+        let entries = clone_grid(&self.entries, n_rows, n_cols)?;
+        build_grid(entries, &self.spec, engine)
     }
 }
 
@@ -347,9 +486,10 @@ impl<'a> TexMatrix<'a> {
     /// [`MatrixError::Tex`] when an entry, bracket, or ellipsis fails to
     /// typeset; the grid errors of [`Matrix::build`].
     pub fn build(&self, engine: &TexEngine) -> Result<MatrixMobject, MatrixError> {
-        let mut grid = Vec::with_capacity(self.entries.len());
+        let (n_rows, n_cols, _) = validate_grid_shape(&self.entries, self.spec.entry_limit)?;
+        let mut grid = try_matrix_vec("tex-matrix rows", n_rows)?;
         for row in &self.entries {
-            let mut placed = Vec::with_capacity(row.len());
+            let mut placed = try_matrix_vec("tex-matrix entries", n_cols)?;
             for entry in row {
                 let m = Tex::new(entry).font_size(self.font_size).build(engine)?;
                 placed.push(m.vmob);
@@ -406,9 +546,10 @@ impl DecimalMatrix {
     /// [`MatrixError::Tex`] for the brackets and ellipses; the grid
     /// errors of [`Matrix::build`].
     pub fn build(&self, engine: &TexEngine, book: &FontBook) -> Result<MatrixMobject, MatrixError> {
-        let mut grid = Vec::with_capacity(self.entries.len());
+        let (n_rows, n_cols, _) = validate_grid_shape(&self.entries, self.spec.entry_limit)?;
+        let mut grid = try_matrix_vec("decimal-matrix rows", n_rows)?;
         for row in &self.entries {
-            let mut placed = Vec::with_capacity(row.len());
+            let mut placed = try_matrix_vec("decimal-matrix entries", n_cols)?;
             for entry in row {
                 let number = DecimalNumber::new(*entry)
                     .num_decimal_places(self.num_decimal_places)
@@ -459,9 +600,10 @@ impl IntegerMatrix {
     /// [`MatrixError::Tex`] for the brackets and ellipses; the grid
     /// errors of [`Matrix::build`].
     pub fn build(&self, engine: &TexEngine, book: &FontBook) -> Result<MatrixMobject, MatrixError> {
-        let mut grid = Vec::with_capacity(self.entries.len());
+        let (n_rows, n_cols, _) = validate_grid_shape(&self.entries, self.spec.entry_limit)?;
+        let mut grid = try_matrix_vec("integer-matrix rows", n_rows)?;
         for row in &self.entries {
-            let mut placed = Vec::with_capacity(row.len());
+            let mut placed = try_matrix_vec("integer-matrix entries", n_cols)?;
             for entry in row {
                 let number = Integer::new(*entry).font_size(self.font_size).build(book)?;
                 placed.push(number.into_vmob());
@@ -543,16 +685,26 @@ impl MobjectMatrix {
                 n / n_rows
             }
         };
-        if n < n_rows * n_cols {
+        let n_entries = checked_matrix_entries(n_rows, n_cols, self.spec.entry_limit)?;
+        if n < n_entries {
             return Err(MatrixError::TooFewEntries {
                 have: n,
-                need: n_rows * n_cols,
+                need: n_entries,
             });
         }
-        let grid: Vec<Vec<VMobject>> = self.entries[..n_rows * n_cols]
-            .chunks(n_cols.max(1))
-            .map(<[VMobject]>::to_vec)
-            .collect();
+        let entries = self
+            .entries
+            .get(..n_entries)
+            .ok_or(MatrixError::TooFewEntries {
+                have: n,
+                need: n_entries,
+            })?;
+        let mut grid = try_matrix_vec("mobject-matrix rows", n_rows)?;
+        for row in entries.chunks(n_cols) {
+            let mut cloned_row = try_matrix_vec("mobject-matrix row entries", n_cols)?;
+            cloned_row.extend(row.iter().cloned());
+            grid.push(cloned_row);
+        }
         build_grid(grid, &self.spec, engine)
     }
 }
@@ -571,6 +723,7 @@ pub struct MatrixMobject {
     pub vmob: VMobject,
     n_rows: usize,
     n_cols: usize,
+    n_entries: usize,
     ellipses: Vec<usize>,
     brackets_drawn: bool,
 }
@@ -602,10 +755,10 @@ impl MatrixMobject {
         if index >= self.n_rows {
             return None;
         }
-        let start = index * self.n_cols;
-        Some(v_group(
-            self.vmob.children()[start..start + self.n_cols].to_vec(),
-        ))
+        let start = index.checked_mul(self.n_cols)?;
+        let end = start.checked_add(self.n_cols)?;
+        let row = self.vmob.children().get(start..end)?;
+        Some(v_group(row.to_vec()))
     }
 
     /// `get_column(index)`: the column's entries as one detached group.
@@ -614,11 +767,13 @@ impl MatrixMobject {
         if index >= self.n_cols {
             return None;
         }
-        Some(v_group(
-            (0..self.n_rows)
-                .map(|i| self.vmob.children()[i * self.n_cols + index].clone())
-                .collect::<Vec<_>>(),
-        ))
+        let mut column = Vec::new();
+        column.try_reserve_exact(self.n_rows).ok()?;
+        for row in 0..self.n_rows {
+            let entry = row.checked_mul(self.n_cols)?.checked_add(index)?;
+            column.push(self.vmob.children().get(entry)?.clone());
+        }
+        Some(v_group(column))
     }
 
     /// `get_rows()`: every row as a detached group, top to bottom.
@@ -639,9 +794,13 @@ impl MatrixMobject {
     /// in row-major grid order, as one detached group.
     #[must_use]
     pub fn get_entries(&self) -> VMobject {
-        let n_entries = self.n_rows * self.n_cols;
+        let entries = self
+            .vmob
+            .children()
+            .get(..self.n_entries)
+            .unwrap_or_default();
         v_group(
-            self.vmob.children()[..n_entries]
+            entries
                 .iter()
                 .enumerate()
                 .filter(|(k, _)| !self.ellipses.contains(k))
@@ -654,8 +813,12 @@ impl MatrixMobject {
     /// group.
     #[must_use]
     pub fn get_brackets(&self) -> VMobject {
-        let n_entries = self.n_rows * self.n_cols;
-        v_group(self.vmob.children()[n_entries..].to_vec())
+        let brackets = self
+            .vmob
+            .children()
+            .get(self.n_entries..)
+            .unwrap_or_default();
+        v_group(brackets.to_vec())
     }
 
     /// `get_ellipses()`: the ellipses swapped in for entries, as one
@@ -665,7 +828,7 @@ impl MatrixMobject {
         v_group(
             self.ellipses
                 .iter()
-                .map(|&k| self.vmob.children()[k].clone())
+                .filter_map(|&k| self.vmob.children().get(k).cloned())
                 .collect::<Vec<_>>(),
         )
     }
@@ -676,12 +839,12 @@ impl MatrixMobject {
     #[must_use]
     pub fn set_column_colors(mut self, colors: &[Srgb]) -> Self {
         let n_cols = self.n_cols;
-        let n_entries = self.n_rows * self.n_cols;
+        let n_entries = self.n_entries;
         let mut index = 0usize;
         self.vmob = self.vmob.map_children(|child| {
             let k = index;
-            index += 1;
-            if k < n_entries {
+            index = index.saturating_add(1);
+            if k < n_entries && n_cols != 0 {
                 match colors.get(k % n_cols) {
                     Some(&color) => child.map_style_deep(|s| s.color(color)),
                     None => child,
@@ -707,19 +870,10 @@ fn build_grid(
     spec: &Spec,
     engine: &TexEngine,
 ) -> Result<MatrixMobject, MatrixError> {
-    let n_rows = grid.len();
-    let n_cols = grid.first().map_or(0, Vec::len);
-    if n_rows == 0 || n_cols == 0 {
-        return Err(MatrixError::Empty);
-    }
-    for row in &grid {
-        if row.len() != n_cols {
-            return Err(MatrixError::Ragged {
-                expected: n_cols,
-                found: row.len(),
-            });
-        }
-    }
+    let (n_rows, n_cols, n_entries) = validate_grid_shape(&grid, spec.entry_limit)?;
+    let child_capacity = checked_matrix_add("matrix child capacity", n_entries, 2)?;
+    let ellipses_capacity =
+        checked_matrix_add("matrix ellipses capacity", n_rows, n_cols)?.min(n_entries);
 
     // create_mobject_matrix: shared-corner placement on the step grid.
     let max_width = grid
@@ -807,10 +961,10 @@ fn build_grid(
     let right_bracket = right_bracket.shifted(offset);
 
     // The constructor-time ellipses swap (Reference semantics exactly).
-    let mut ellipses: Vec<usize> = Vec::new();
+    let mut ellipses = try_matrix_vec("matrix ellipses", ellipses_capacity)?;
     swap_entries_for_ellipses(&mut grid, spec, engine, &mut ellipses)?;
 
-    let mut children = Vec::with_capacity(n_rows * n_cols + 2);
+    let mut children = try_matrix_vec("matrix children", child_capacity)?;
     for row in grid {
         children.extend(row);
     }
@@ -820,6 +974,7 @@ fn build_grid(
         vmob: v_group(children),
         n_rows,
         n_cols,
+        n_entries,
         ellipses,
         brackets_drawn: drawn,
     })
@@ -827,6 +982,22 @@ fn build_grid(
 
 /// The Reference's `swap_entries_for_ellipses`: vdots first (so the
 /// intersection cell ends as an hdots), then hdots, then the −45° turn.
+fn normalized_index(index: isize, len: usize) -> Option<usize> {
+    if index >= 0 {
+        usize::try_from(index).ok().filter(|&value| value < len)
+    } else {
+        len.checked_sub(index.unsigned_abs())
+    }
+}
+
+fn checked_grid_index(row: usize, n_cols: usize, col: usize) -> Result<usize, MatrixError> {
+    checked_matrix_add(
+        "matrix entry index",
+        checked_matrix_mul("matrix entry index", row, n_cols)?,
+        col,
+    )
+}
+
 fn swap_entries_for_ellipses(
     grid: &mut [Vec<VMobject>],
     spec: &Spec,
@@ -835,9 +1006,12 @@ fn swap_entries_for_ellipses(
 ) -> Result<(), MatrixError> {
     let n_rows = grid.len();
     let n_cols = grid.first().map_or(0, Vec::len);
-    let in_range = |index: isize, len: usize| -(len as isize) <= index && index < len as isize;
-    let row_index = spec.ellipses_row.filter(|&r| in_range(r, n_rows));
-    let col_index = spec.ellipses_col.filter(|&c| in_range(c, n_cols));
+    let row_index = spec
+        .ellipses_row
+        .and_then(|index| normalized_index(index, n_rows));
+    let col_index = spec
+        .ellipses_col
+        .and_then(|index| normalized_index(index, n_cols));
     if row_index.is_none() && col_index.is_none() {
         return Ok(());
     }
@@ -849,45 +1023,47 @@ fn swap_entries_for_ellipses(
     let hdots_width = spec.ellipses_width_ratio * avg_col_width;
 
     if let Some(ri) = row_index {
-        #[allow(clippy::cast_sign_loss)]
-        let ri = ri.rem_euclid(n_rows as isize) as usize;
-        for (j, entry) in grid[ri].iter_mut().enumerate() {
+        let row = grid.get_mut(ri).ok_or(MatrixError::CapacityOverflow {
+            context: "matrix ellipses row index",
+        })?;
+        for (j, entry) in row.iter_mut().enumerate() {
             let dots = Tex::new(r"\vdots")
                 .build(engine)?
                 .vmob
                 .with_height(vdots_height, false)
                 .moved_to(entry.center_point());
             *entry = dots;
-            let k = ri * n_cols + j;
+            let k = checked_grid_index(ri, n_cols, j)?;
             if !ellipses.contains(&k) {
                 ellipses.push(k);
             }
         }
     }
     if let Some(ci) = col_index {
-        #[allow(clippy::cast_sign_loss)]
-        let ci = ci.rem_euclid(n_cols as isize) as usize;
         for (i, row) in grid.iter_mut().enumerate() {
+            let entry = row.get_mut(ci).ok_or(MatrixError::CapacityOverflow {
+                context: "matrix ellipses column index",
+            })?;
             let dots = Tex::new(r"\hdots")
                 .build(engine)?
                 .vmob
                 .with_width(hdots_width, false)
-                .moved_to(row[ci].center_point());
-            row[ci] = dots;
-            let k = i * n_cols + ci;
+                .moved_to(entry.center_point());
+            *entry = dots;
+            let k = checked_grid_index(i, n_cols, ci)?;
             if !ellipses.contains(&k) {
                 ellipses.push(k);
             }
         }
     }
     if let (Some(ri), Some(ci)) = (row_index, col_index) {
-        #[allow(clippy::cast_sign_loss)]
-        let (ri, ci) = (
-            ri.rem_euclid(n_rows as isize) as usize,
-            ci.rem_euclid(n_cols as isize) as usize,
-        );
-        let centre = grid[ri][ci].center_point();
-        grid[ri][ci] = grid[ri][ci].clone().rotated_about(-45.0 * DEG, OUT, centre);
+        let entry = grid.get_mut(ri).and_then(|row| row.get_mut(ci)).ok_or(
+            MatrixError::CapacityOverflow {
+                context: "matrix ellipses intersection index",
+            },
+        )?;
+        let centre = entry.center_point();
+        *entry = entry.clone().rotated_about(-45.0 * DEG, OUT, centre);
     }
     Ok(())
 }
@@ -898,11 +1074,27 @@ fn swap_entries_for_ellipses(
 /// the glyph stages the Reference's own half-split applies. The boolean
 /// reports which stage engaged.
 fn brackets(n_rows: usize, engine: &TexEngine) -> Result<(VMobject, VMobject, bool), MatrixError> {
-    let mut source = String::from(r"\left[\begin{array}{c}");
+    const PREFIX: &str = r"\left[\begin{array}{c}";
+    const ROW: &str = "\\quad \\\\";
+    const SUFFIX: &str = r"\end{array}\right]";
+    let row_bytes = checked_matrix_mul("matrix bracket source bytes", n_rows, ROW.len())?;
+    let source_bytes = checked_matrix_add(
+        "matrix bracket source bytes",
+        checked_matrix_add("matrix bracket source bytes", PREFIX.len(), row_bytes)?,
+        SUFFIX.len(),
+    )?;
+    let mut source = String::new();
+    source
+        .try_reserve_exact(source_bytes)
+        .map_err(|_| MatrixError::AllocationFailed {
+            context: "matrix bracket source",
+            requested: source_bytes,
+        })?;
+    source.push_str(PREFIX);
     for _ in 0..n_rows {
-        source.push_str(r"\quad \\");
+        source.push_str(ROW);
     }
-    source.push_str(r"\end{array}\right]");
+    source.push_str(SUFFIX);
     let brackets = Tex::new(&source).build(engine)?;
     let children = brackets.vmob.children();
     let path_ordinals: Vec<usize> = brackets
@@ -913,11 +1105,15 @@ fn brackets(n_rows: usize, engine: &TexEngine) -> Result<(VMobject, VMobject, bo
         .filter_map(|(i, sub)| matches!(sub.prim, Prim::Path(_)).then_some(i))
         .collect();
     if path_ordinals.len() == 2 {
-        return Ok((
-            children[path_ordinals[0]].clone(),
-            children[path_ordinals[1]].clone(),
-            true,
-        ));
+        let left = children
+            .get(path_ordinals[0])
+            .ok_or(MatrixError::Delimiters)?
+            .clone();
+        let right = children
+            .get(path_ordinals[1])
+            .ok_or(MatrixError::Delimiters)?
+            .clone();
+        return Ok((left, right, true));
     }
     let n = children.len();
     if n < 2 {
@@ -1351,6 +1547,74 @@ mod tests {
     }
 
     #[test]
+    fn matrix_entry_budget_accepts_the_boundary_and_refuses_one_over() {
+        let exact = Matrix::new(grid_of(2, 2, 0.25, 0.25))
+            .entry_limit(4)
+            .build(&engine())
+            .expect("the declared boundary is admitted");
+        assert_eq!((exact.n_rows(), exact.n_cols()), (2, 2));
+
+        let err = Matrix::new(grid_of(2, 2, 0.25, 0.25))
+            .entry_limit(3)
+            .build(&engine());
+        assert!(matches!(
+            err,
+            Err(MatrixError::ResourceLimit {
+                context: "matrix entries",
+                requested: 4,
+                limit: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn hostile_mobject_matrix_dimensions_are_typed_refusals() {
+        let err = MobjectMatrix::new(vec![cell(0.25, 0.25)])
+            .n_rows(1)
+            .n_cols(2)
+            .entry_limit(1)
+            .build(&engine());
+        assert!(matches!(
+            err,
+            Err(MatrixError::ResourceLimit {
+                context: "matrix entries",
+                requested: 2,
+                limit: 1,
+            })
+        ));
+
+        let err = MobjectMatrix::new(vec![cell(0.25, 0.25)])
+            .n_rows(usize::MAX)
+            .n_cols(2)
+            .entry_limit(usize::MAX)
+            .build(&engine());
+        assert!(matches!(
+            err,
+            Err(MatrixError::CapacityOverflow {
+                context: "matrix entry count",
+            })
+        ));
+    }
+
+    #[test]
+    fn accessors_refuse_unrepresentable_internal_ranges_without_panicking() {
+        let malformed = MatrixMobject {
+            vmob: VMobject::new(),
+            n_rows: usize::MAX,
+            n_cols: usize::MAX,
+            n_entries: usize::MAX,
+            ellipses: vec![usize::MAX],
+            brackets_drawn: false,
+        };
+        assert!(malformed.get_row(0).is_none());
+        assert!(malformed.get_row(2).is_none());
+        assert!(malformed.get_column(0).is_none());
+        assert!(malformed.get_entries().children().is_empty());
+        assert!(malformed.get_brackets().children().is_empty());
+        assert!(malformed.get_ellipses().children().is_empty());
+    }
+
+    #[test]
     fn empty_and_ragged_grids_are_typed_errors() {
         let err = Matrix::new(Vec::new()).build(&engine());
         assert!(matches!(err, Err(MatrixError::Empty)));
@@ -1358,5 +1622,9 @@ mod tests {
         assert!(matches!(err, Err(MatrixError::Ragged { .. })));
         let err = Matrix::new(vec![Vec::new()]).build(&engine());
         assert!(matches!(err, Err(MatrixError::Empty)));
+
+        // Shape validation precedes entry typesetting.
+        let err = TexMatrix::new(vec![vec![r"\not-a-command"], Vec::new()]).build(&engine());
+        assert!(matches!(err, Err(MatrixError::Ragged { .. })));
     }
 }
