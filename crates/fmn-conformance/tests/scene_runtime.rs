@@ -252,9 +252,12 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
             .height(0.62 + 0.03 * (index % 3) as f64)
             .color(color)
             .into(),
-        2 | 13 => RegularPolygon::triangle().radius(0.6).color(color).into(),
-        3 => RegularPolygon::new(5).radius(0.56).color(color).into(),
-        14 => RegularPolygon::new(6).radius(0.56).color(color).into(),
+        2 | 13 => Mobject::try_from(RegularPolygon::triangle().radius(0.6).color(color))
+            .expect("three directions are within the public cap"),
+        3 => Mobject::try_from(RegularPolygon::new(5).radius(0.56).color(color))
+            .expect("five directions are within the public cap"),
+        14 => Mobject::try_from(RegularPolygon::new(6).radius(0.56).color(color))
+            .expect("six directions are within the public cap"),
         4 | 15 => Arc::new()
             .start_angle(-0.4)
             .angle(4.2)
@@ -295,7 +298,8 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
             .into(),
         // The caller enumerates the fixed 25-entry NAMES table, so this is
         // index 24: the dedicated layered-polygon fixture.
-        _ => RegularPolygon::new(7).radius(0.56).color(color).into(),
+        _ => Mobject::try_from(RegularPolygon::new(7).radius(0.56).color(color))
+            .expect("seven directions are within the public cap"),
     }
 }
 

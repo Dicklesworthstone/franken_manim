@@ -370,11 +370,13 @@ fn poly_family(corpus: &Corpus) -> Built {
         .radius(0.5)
         .style(filled(RED_C, 0.35))
         .build()
+        .expect("three directions are within the public cap")
         .shifted([0.0, 0.0, 0.0]);
     let hexagon = RegularPolygon::new(6)
         .radius(0.5)
         .style(filled(TEAL_B, 0.35))
         .build()
+        .expect("six directions are within the public cap")
         .shifted([1.2, 0.0, 0.0]);
     stage_of(v_group([rect, triangle, hexagon]))
 }
@@ -436,6 +438,7 @@ fn layered_alpha_stack(corpus: &Corpus) -> Built {
         .radius(0.55)
         .style(filled(RED_C, 0.5))
         .build()
+        .expect("three directions are within the public cap")
         .shifted([0.55, -0.15, 0.0]);
     triangle = triangle.with_z_index(2);
     stage_of(v_group([circle, rect, triangle]))

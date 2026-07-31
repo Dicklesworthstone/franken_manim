@@ -39,7 +39,7 @@ impl Case {
     fn scalar(&self, key: &str) -> f64 {
         self.params
             .get(key)
-            .unwrap_or_else(|| panic!("{}: no `{key}`", self.name))[0]
+            .unwrap_or_else(|| panic!("{}: no `{key}`", self.name))[0] // ubs:ignore — malformed parity fixtures must fail the test
     }
 
     fn opt(&self, key: &str) -> Option<f64> {
@@ -50,7 +50,7 @@ impl Case {
         let v = self
             .params
             .get(key)
-            .unwrap_or_else(|| panic!("{}: no `{key}`", self.name));
+            .unwrap_or_else(|| panic!("{}: no `{key}`", self.name)); // ubs:ignore — malformed parity fixtures must fail the test
         [v[0], v[1], v[2]]
     }
 
@@ -58,7 +58,7 @@ impl Case {
         let v = self
             .params
             .get(key)
-            .unwrap_or_else(|| panic!("{}: no `{key}`", self.name));
+            .unwrap_or_else(|| panic!("{}: no `{key}`", self.name)); // ubs:ignore — malformed parity fixtures must fail the test
         v.as_chunks::<3>()
             .0
             .iter()
@@ -69,7 +69,7 @@ impl Case {
 
 fn load() -> Vec<Case> {
     let path = format!("{}/fixtures/geometry.txt", env!("CARGO_MANIFEST_DIR"));
-    let content = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}")); // ubs:ignore — a missing parity fixture must fail the test
     let mut cases = Vec::new();
     let mut current: Option<Case> = None;
     let mut want_points = 0usize;
@@ -176,6 +176,7 @@ fn build(case: &Case) -> VMobject {
                 poly = poly.start_angle(angle);
             }
             poly.build()
+                .expect("the reference fixture polygon is within the direction cap")
         }
         "rectangle" => Rectangle::new()
             .width(case.scalar("width"))
@@ -197,7 +198,7 @@ fn build(case: &Case) -> VMobject {
         )
         .build()
         .expect("finite parity cubic is within the default converter budget"),
-        other => panic!("{}: unhandled kind `{other}`", case.name),
+        other => panic!("{}: unhandled kind `{other}`", case.name), // ubs:ignore — an unhandled fixture kind must fail the test
     }
 }
 
@@ -278,6 +279,6 @@ fn every_built_path_keeps_the_shared_anchor_invariant() {
         );
         built
             .path()
-            .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+            .unwrap_or_else(|e| panic!("{}: {e}", case.name)); // ubs:ignore — an invalid parity path must fail the test
     }
 }

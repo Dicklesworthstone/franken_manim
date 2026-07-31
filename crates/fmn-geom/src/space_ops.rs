@@ -51,6 +51,67 @@ pub const DEFAULT_UNIT_NORMAL_TOL: f64 = 1e-6;
 /// `rotation_between_vectors`' alignment tolerance.
 const ROTATION_BETWEEN_ATOL: f64 = 1e-8;
 
+/// Maximum number of vectors one [`compass_directions`] call may publish.
+///
+/// The cap matches the other geometry-family multiplicity limits: it is
+/// ample for authored scenes while preventing one scalar argument from
+/// requesting effectively unbounded rotation work and allocation.
+pub const MAX_COMPASS_DIRECTIONS: usize = 4_096;
+
+/// Maximum admitted dimension of a square [`thick_diagonal`] mask.
+///
+/// A 64-by-64 mask contains [`MAX_THICK_DIAGONAL_CELLS`] bytes. The helper
+/// checks the square with checked arithmetic before applying this limit.
+pub const MAX_THICK_DIAGONAL_DIMENSION: usize = 64;
+
+/// Maximum number of cells one [`thick_diagonal`] call may publish.
+pub const MAX_THICK_DIAGONAL_CELLS: usize =
+    MAX_THICK_DIAGONAL_DIMENSION * MAX_THICK_DIAGONAL_DIMENSION;
+
+/// A public `space_ops` construction refused before proportional work begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceOpsError {
+    /// The requested compass family exceeds [`MAX_COMPASS_DIRECTIONS`].
+    TooManyDirections {
+        /// Requested number of output vectors.
+        requested: usize,
+        /// Declared maximum.
+        max: usize,
+    },
+    /// Squaring a thick-diagonal dimension cannot be represented by the host.
+    DiagonalSizeOverflow {
+        /// Requested square dimension.
+        dim: usize,
+    },
+    /// The requested thick-diagonal square exceeds [`MAX_THICK_DIAGONAL_CELLS`].
+    TooManyDiagonalCells {
+        /// Requested number of output cells.
+        requested: usize,
+        /// Declared maximum.
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for SpaceOpsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyDirections { requested, max } => write!(
+                f,
+                "requested {requested} compass directions, above the {max} cap"
+            ),
+            Self::DiagonalSizeOverflow { dim } => {
+                write!(f, "a {dim}-by-{dim} thick diagonal exceeds host capacity")
+            }
+            Self::TooManyDiagonalCells { requested, max } => write!(
+                f,
+                "requested {requested} thick-diagonal cells, above the {max} cap"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpaceOpsError {}
+
 // ------------------------------------------------------------ vector basics
 
 /// `space_ops.cross`.
@@ -481,28 +542,53 @@ pub fn is_inside_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
 
 /// `space_ops.compass_directions`: `n` copies of `start_vect`, rotated by
 /// successive `TAU/n` steps about the z axis.
-#[must_use]
-pub fn compass_directions(n: usize, start_vect: Vec3) -> Vec<Vec3> {
+///
+/// # Errors
+///
+/// Returns [`SpaceOpsError::TooManyDirections`] before iteration or
+/// allocation when `n` exceeds [`MAX_COMPASS_DIRECTIONS`].
+pub fn compass_directions(n: usize, start_vect: Vec3) -> Result<Vec<Vec3>, SpaceOpsError> {
+    if n > MAX_COMPASS_DIRECTIONS {
+        return Err(SpaceOpsError::TooManyDirections {
+            requested: n,
+            max: MAX_COMPASS_DIRECTIONS,
+        });
+    }
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let angle = TAU / n as f64;
-    (0..n)
+    Ok((0..n)
         .map(|k| rotate_vector(start_vect, k as f64 * angle, OUT))
-        .collect()
+        .collect())
 }
 
 /// `space_ops.thick_diagonal`: a `dim × dim` 0/1 mask, set within
 /// `thickness` of the diagonal.
-#[must_use]
-pub fn thick_diagonal(dim: usize, thickness: usize) -> Vec<Vec<u8>> {
-    (0..dim)
+///
+/// # Errors
+///
+/// Returns [`SpaceOpsError::DiagonalSizeOverflow`] when `dim²` cannot be
+/// represented, or [`SpaceOpsError::TooManyDiagonalCells`] when the square
+/// exceeds [`MAX_THICK_DIAGONAL_CELLS`]. Both checks happen before iteration
+/// or allocation.
+pub fn thick_diagonal(dim: usize, thickness: usize) -> Result<Vec<Vec<u8>>, SpaceOpsError> {
+    let cells = dim
+        .checked_mul(dim)
+        .ok_or(SpaceOpsError::DiagonalSizeOverflow { dim })?;
+    if cells > MAX_THICK_DIAGONAL_CELLS {
+        return Err(SpaceOpsError::TooManyDiagonalCells {
+            requested: cells,
+            max: MAX_THICK_DIAGONAL_CELLS,
+        });
+    }
+    Ok((0..dim)
         .map(|r| {
             (0..dim)
                 .map(|c| u8::from(r.abs_diff(c) < thickness))
                 .collect()
         })
-        .collect()
+        .collect())
 }
 
 // --------------------------------------------------------- complex helpers
@@ -780,13 +866,41 @@ mod tests {
 
     #[test]
     fn compass_directions_close_the_circle() {
-        let dirs = compass_directions(4, RIGHT);
+        let dirs = compass_directions(4, RIGHT).expect("four directions are within the cap");
         assert_eq!(dirs.len(), 4);
         close(dirs[0], RIGHT, 1e-15);
         close(dirs[1], UP, 1e-15);
         close(dirs[2], [-1.0, 0.0, 0.0], 1e-15);
         close(dirs[3], DOWN, 1e-15);
-        assert!(compass_directions(0, RIGHT).is_empty());
+        assert!(
+            compass_directions(0, RIGHT)
+                .expect("zero directions are defined")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn compass_directions_enforce_the_exact_count_boundary() {
+        assert_eq!(
+            compass_directions(MAX_COMPASS_DIRECTIONS, RIGHT)
+                .expect("the declared boundary is admitted")
+                .len(),
+            MAX_COMPASS_DIRECTIONS
+        );
+        assert_eq!(
+            compass_directions(MAX_COMPASS_DIRECTIONS + 1, RIGHT),
+            Err(SpaceOpsError::TooManyDirections {
+                requested: MAX_COMPASS_DIRECTIONS + 1,
+                max: MAX_COMPASS_DIRECTIONS,
+            })
+        );
+        assert_eq!(
+            compass_directions(usize::MAX, RIGHT),
+            Err(SpaceOpsError::TooManyDirections {
+                requested: usize::MAX,
+                max: MAX_COMPASS_DIRECTIONS,
+            })
+        );
     }
 
     #[test]
@@ -822,14 +936,44 @@ mod tests {
     #[test]
     fn thick_diagonal_masks() {
         assert_eq!(
-            thick_diagonal(3, 1),
+            thick_diagonal(3, 1).expect("three-by-three is within the cap"),
             vec![vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]]
         );
         assert_eq!(
-            thick_diagonal(3, 2),
+            thick_diagonal(3, 2).expect("three-by-three is within the cap"),
             vec![vec![1, 1, 0], vec![1, 1, 1], vec![0, 1, 1]]
         );
-        assert!(thick_diagonal(0, 2).is_empty());
+        assert!(
+            thick_diagonal(0, 2)
+                .expect("zero dimension is defined")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn thick_diagonal_enforces_cell_budget_and_square_overflow() {
+        let boundary = thick_diagonal(MAX_THICK_DIAGONAL_DIMENSION, usize::MAX)
+            .expect("the declared boundary is admitted");
+        assert_eq!(boundary.len(), MAX_THICK_DIAGONAL_DIMENSION);
+        assert!(
+            boundary
+                .iter()
+                .all(|row| row.len() == MAX_THICK_DIAGONAL_DIMENSION)
+        );
+
+        let one_over_dim = MAX_THICK_DIAGONAL_DIMENSION + 1;
+        let one_over_cells = one_over_dim * one_over_dim;
+        assert_eq!(
+            thick_diagonal(one_over_dim, 1),
+            Err(SpaceOpsError::TooManyDiagonalCells {
+                requested: one_over_cells,
+                max: MAX_THICK_DIAGONAL_CELLS,
+            })
+        );
+        assert_eq!(
+            thick_diagonal(usize::MAX, 1),
+            Err(SpaceOpsError::DiagonalSizeOverflow { dim: usize::MAX })
+        );
     }
 
     #[test]

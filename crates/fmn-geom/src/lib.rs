@@ -52,7 +52,10 @@ pub use isolines::{
 };
 pub use quadpath::{AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
 pub use rotation::{EulerAngles, EulerSeq, Quat};
-pub use space_ops::rotation_matrix;
+pub use space_ops::{
+    MAX_COMPASS_DIRECTIONS, MAX_THICK_DIAGONAL_CELLS, MAX_THICK_DIAGONAL_DIMENSION, SpaceOpsError,
+    rotation_matrix,
+};
 pub use vec::Mat3;
 
 /// Errors from the geometry kernel.

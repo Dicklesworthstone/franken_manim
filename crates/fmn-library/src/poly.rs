@@ -10,10 +10,10 @@
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
     BLACK, DEFAULT_MOBJECT_COLOR, DEG, DL, DR, FRAME_HEIGHT, FRAME_WIDTH, GREY_E, ORIGIN, OUT,
-    RIGHT, UL, UR,
+    RIGHT, TAU, UL, UR,
 };
 use fmn_core::types::Vec3;
-use fmn_geom::{GeomError, QuadPath, space_ops};
+use fmn_geom::{GeomError, QuadPath, SpaceOpsError, space_ops};
 use fmn_mobject::Mobject;
 use fmn_mobject::ShapeTag;
 
@@ -308,23 +308,35 @@ impl RegularPolygon {
     }
 
     /// The vertices this polygon is built from.
-    #[must_use]
-    pub fn corner_points(&self) -> Vec<Vec3> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpaceOpsError::TooManyDirections`] before constructing any
+    /// vertices when `n` exceeds [`fmn_geom::MAX_COMPASS_DIRECTIONS`].
+    pub fn corner_points(&self) -> Result<Vec<Vec3>, SpaceOpsError> {
         let start_angle = self.start_angle.unwrap_or((self.n % 2) as f64 * 90.0 * DEG);
         let start_vect = space_ops::rotate_vector(scale(RIGHT, self.radius), start_angle, OUT);
         space_ops::compass_directions(self.n, start_vect)
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
-        Polygon::new(self.corner_points()).style(self.style).build()
+    ///
+    /// # Errors
+    ///
+    /// Propagates the bounded direction-count refusal from [`Self::corner_points`]
+    /// before polygon construction begins.
+    pub fn build(self) -> Result<VMobject, SpaceOpsError> {
+        Ok(Polygon::new(self.corner_points()?)
+            .style(self.style)
+            .build())
     }
 }
 
-impl From<RegularPolygon> for Mobject {
-    fn from(p: RegularPolygon) -> Self {
-        p.build().into()
+impl TryFrom<RegularPolygon> for Mobject {
+    type Error = SpaceOpsError;
+
+    fn try_from(p: RegularPolygon) -> Result<Self, Self::Error> {
+        p.build().map(Into::into)
     }
 }
 
@@ -418,10 +430,17 @@ impl ArrowTip {
     /// Build the detached mobject.
     #[must_use]
     pub fn build(self) -> VMobject {
-        let base = RegularPolygon::new(3)
-            .start_angle(0.0)
-            .style(self.style)
-            .build();
+        // The tip's vertex count is fixed by its type, so construct that
+        // bounded triangle directly instead of introducing a fallible public
+        // count into this otherwise infallible builder.
+        let step = TAU / 3.0;
+        let base = Polygon::new([
+            RIGHT,
+            space_ops::rotate_vector(RIGHT, step, OUT),
+            space_ops::rotate_vector(RIGHT, 2.0 * step, OUT),
+        ])
+        .style(self.style)
+        .build();
         let sized = base
             .with_height(self.width, false)
             .with_width(self.length, true);
@@ -668,7 +687,9 @@ mod tests {
     fn regular_polygon_vertices_are_on_the_circumcircle() {
         for n in [3usize, 4, 5, 6, 8] {
             let poly = RegularPolygon::new(n).radius(2.0);
-            let verts = poly.corner_points();
+            let verts = poly
+                .corner_points()
+                .expect("the test polygon is within the direction cap");
             assert_eq!(verts.len(), n);
             for v in &verts {
                 assert!(close(space_ops::get_norm(*v), 2.0), "{n}-gon: {v:?}");
@@ -683,21 +704,55 @@ mod tests {
     fn regular_polygon_default_start_angle_follows_parity() {
         // `(n % 2) * 90°`: odd n starts at 90° (a triangle points up),
         // even n at 0° (a hexagon has a vertex on +x).
-        let tri = RegularPolygon::new(3).corner_points();
+        let tri = RegularPolygon::new(3)
+            .corner_points()
+            .expect("three directions are within the cap");
         assert!(
             close(tri[0][0], 0.0) && close(tri[0][1], 1.0),
             "{:?}",
             tri[0]
         );
-        let hex = RegularPolygon::new(6).corner_points();
+        let hex = RegularPolygon::new(6)
+            .corner_points()
+            .expect("six directions are within the cap");
         assert!(
             close(hex[0][0], 1.0) && close(hex[0][1], 0.0),
             "{:?}",
             hex[0]
         );
         // An explicit angle overrides the parity rule.
-        let turned = RegularPolygon::new(3).start_angle(0.0).corner_points();
+        let turned = RegularPolygon::new(3)
+            .start_angle(0.0)
+            .corner_points()
+            .expect("three directions are within the cap");
         assert!(close(turned[0][0], 1.0) && close(turned[0][1], 0.0));
+    }
+
+    #[test]
+    fn regular_polygon_propagates_the_direction_limit() {
+        assert_eq!(
+            RegularPolygon::new(fmn_geom::MAX_COMPASS_DIRECTIONS)
+                .corner_points()
+                .expect("the declared boundary is admitted")
+                .len(),
+            fmn_geom::MAX_COMPASS_DIRECTIONS
+        );
+
+        let one_over = fmn_geom::MAX_COMPASS_DIRECTIONS + 1;
+        assert_eq!(
+            RegularPolygon::new(one_over).corner_points(),
+            Err(SpaceOpsError::TooManyDirections {
+                requested: one_over,
+                max: fmn_geom::MAX_COMPASS_DIRECTIONS,
+            })
+        );
+        assert_eq!(
+            RegularPolygon::new(usize::MAX).build(),
+            Err(SpaceOpsError::TooManyDirections {
+                requested: usize::MAX,
+                max: fmn_geom::MAX_COMPASS_DIRECTIONS,
+            })
+        );
     }
 
     #[test]

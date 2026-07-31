@@ -45,7 +45,7 @@ impl Case {
     fn values(&self, key: &str) -> &[f64] {
         match self.fields.get(key) {
             Some(Field::Values(v)) => v,
-            other => panic!("{}: field `{key}` is {other:?}, wanted values", self.name),
+            other => panic!("{}: field `{key}` is {other:?}, wanted values", self.name), // ubs:ignore — malformed parity fixtures must fail the test
         }
     }
 
@@ -87,7 +87,7 @@ impl Case {
     fn rows(&self, key: &str) -> &[Vec<f64>] {
         match self.fields.get(key) {
             Some(Field::Rows(r)) => r,
-            other => panic!("{}: field `{key}` is {other:?}, wanted rows", self.name),
+            other => panic!("{}: field `{key}` is {other:?}, wanted rows", self.name), // ubs:ignore — malformed parity fixtures must fail the test
         }
     }
 
@@ -115,7 +115,7 @@ impl Case {
     fn text(&self, key: &str) -> &str {
         match self.fields.get(key) {
             Some(Field::Text(s)) => s,
-            other => panic!("{}: field `{key}` is {other:?}, wanted text", self.name),
+            other => panic!("{}: field `{key}` is {other:?}, wanted text", self.name), // ubs:ignore — malformed parity fixtures must fail the test
         }
     }
 
@@ -126,7 +126,7 @@ impl Case {
 
 fn load_cases() -> Vec<Case> {
     let path = format!("{}/fixtures/space_ops.txt", env!("CARGO_MANIFEST_DIR"));
-    let content = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}")); // ubs:ignore — a missing parity fixture must fail the test
 
     let mut cases = Vec::new();
     let mut current: Option<Case> = None;
@@ -443,7 +443,8 @@ fn space_ops_matches_the_reference() {
             }
             "compass_directions" => {
                 let n = case.scalar("n") as usize;
-                let got = so::compass_directions(n, case.vec3("start"));
+                let got = so::compass_directions(n, case.vec3("start"))
+                    .expect("the reference fixture direction count is within the public cap");
                 let expected = case.points("points");
                 assert_eq!(got.len(), expected.len(), "{name}: count");
                 for (i, (a, e)) in got.iter().zip(&expected).enumerate() {
@@ -499,7 +500,8 @@ fn space_ops_matches_the_reference() {
             "thick_diagonal" => {
                 let dim = case.scalar("dim") as usize;
                 let thickness = case.scalar("thickness") as usize;
-                let got = so::thick_diagonal(dim, thickness);
+                let got = so::thick_diagonal(dim, thickness)
+                    .expect("the reference fixture diagonal is within the public cap");
                 let expected = case.rows("matrix");
                 assert_eq!(got.len(), expected.len(), "{name}: rows");
                 for (r, (row, exp)) in got.iter().zip(expected).enumerate() {
@@ -509,9 +511,7 @@ fn space_ops_matches_the_reference() {
                 }
             }
 
-            other => panic!(
-                "{name}: unhandled op `{other}` — the fixture grew a case the test does not check"
-            ),
+            other => panic!("{name}: unhandled parity operation `{other}`"), // ubs:ignore — an unhandled parity operation must fail the test
         }
     }
 
