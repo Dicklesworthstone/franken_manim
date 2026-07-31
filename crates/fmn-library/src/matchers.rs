@@ -155,7 +155,9 @@ pub fn background_rectangle(target: &VMobject, color: Srgb, fill_opacity: f64) -
 /// through [`VMobject::with_stroke_profile`].
 #[must_use]
 pub fn cross(target: &VMobject, color: Srgb, width: f64) -> VMobject {
-    let (min, max) = target.extent().unwrap_or(([0.0; 3], [0.0; 3]));
+    let Some((min, max)) = target.extent() else {
+        return VMobject::new();
+    };
     let corner = |d: Vec3| {
         [
             if d[0] > 0.0 { max[0] } else { min[0] },
@@ -196,7 +198,9 @@ pub fn cross(target: &VMobject, color: Srgb, width: f64) -> VMobject {
 /// stretch_factor=1.2)`: a rule under the target, fading in at both ends.
 #[must_use]
 pub fn underline(target: &VMobject, color: Srgb, buff: f64, stretch_factor: f64) -> VMobject {
-    let (min, max) = target.extent().unwrap_or(([0.0; 3], [0.0; 3]));
+    let Some((min, max)) = target.extent() else {
+        return VMobject::new();
+    };
     let half = 0.5 * (max[0] - min[0]) * stretch_factor;
     let centre_x = 0.5 * (min[0] + max[0]);
     let y = min[1] - buff;
@@ -436,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn matchers_on_an_empty_target_stay_finite() {
+    fn matchers_on_an_empty_target_have_no_geometry() {
         // fm-sjl: styling a point-less mobject is a documented no-op, and
         // these classes are the ones most likely to meet one (a caller
         // surrounds a group before filling it).
@@ -447,20 +451,11 @@ mod tests {
             ("cross", cross(&empty, RED, 6.0)),
             ("underline", underline(&empty, RED, 0.1, 1.2)),
         ] {
-            let mut count = 0;
-            let mut finite = true;
-            for p in built.points() {
-                count += 1;
-                finite &= p.iter().all(|c| c.is_finite());
-            }
-            for child in built.children() {
-                for p in child.points() {
-                    count += 1;
-                    finite &= p.iter().all(|c| c.is_finite());
-                }
-            }
-            assert!(finite, "{name} produced a non-finite point");
-            let _ = count;
+            assert!(built.points().is_empty(), "{name} invented target geometry");
+            assert!(
+                built.children().is_empty(),
+                "{name} invented child geometry"
+            );
         }
     }
 
