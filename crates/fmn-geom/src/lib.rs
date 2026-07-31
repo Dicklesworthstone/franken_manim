@@ -99,8 +99,8 @@ pub enum GeomError {
     },
     /// `subdivide_sharp_curves` requires a positive, finite angle threshold.
     InvalidSubdivisionThreshold,
-    /// A requested per-curve or aggregate subdivision would exceed the
-    /// bounded output-curve budget.
+    /// A requested subdivision or curve insertion would exceed the bounded
+    /// output-curve budget.
     SubdivisionBudgetExceeded {
         /// Total output curves requested, or `usize::MAX` when the count
         /// arithmetic itself overflowed.
@@ -155,7 +155,7 @@ impl std::fmt::Display for GeomError {
             }
             Self::SubdivisionBudgetExceeded { requested, max } => write!(
                 f,
-                "curve subdivision requests {requested} output curves, above the {max} cap"
+                "curve operation requests {requested} output curves, above the {max} cap"
             ),
             Self::InvalidTolerance => {
                 write!(f, "conversion tolerance must be a positive, finite number")

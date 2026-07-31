@@ -233,7 +233,7 @@ fn build_case(name: &str) -> QuadPath {
         "insert_curves" => {
             path.set_points_as_corners(&[p(0.0, 0.0), p(1.0, 0.0), p(4.0, 0.0)])
                 .unwrap();
-            path.insert_n_curves(3);
+            path.insert_n_curves(3).unwrap();
         }
         "null_line" => {
             path.start_new_path(p(0.0, 0.0));

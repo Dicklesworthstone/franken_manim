@@ -4,6 +4,7 @@
 //! align corpus lands with the Transform mechanism; these are the
 //! rule-for-rule unit tests.
 
+use fmn_geom::{GeomError, MAX_SUBDIVIDED_CURVES};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage, StageError};
 
@@ -235,6 +236,28 @@ fn vmobject_equal_counts_short_circuits() {
         .read_column("joint_angle")
         .unwrap();
     assert!(angles.iter().all(|a| a.is_finite()));
+}
+
+#[test]
+fn vmobject_alignment_propagates_curve_budget_atomically() {
+    let mut stage = Stage::new();
+    let a = vmob(&mut stage, &[[0.0; 3], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+    let oversized_curve_count = MAX_SUBDIVIDED_CURVES + 1;
+    let oversized_point_count = 2 * oversized_curve_count + 1;
+    let oversized = vec![[0.0; 3]; oversized_point_count];
+    let b = vmob(&mut stage, &oversized);
+    let before_a = points_of(&stage, a);
+    let before_b = points_of(&stage, b);
+
+    assert_eq!(
+        stage.align_points(a, b),
+        Err(StageError::Geometry(GeomError::SubdivisionBudgetExceeded {
+            requested: oversized_curve_count,
+            max: MAX_SUBDIVIDED_CURVES,
+        }))
+    );
+    assert_eq!(points_of(&stage, a), before_a);
+    assert_eq!(points_of(&stage, b), before_b);
 }
 
 #[test]

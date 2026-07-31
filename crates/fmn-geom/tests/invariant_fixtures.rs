@@ -118,7 +118,7 @@ fn one_point_path_degeneracies() {
 
 #[test]
 fn one_point_insert_n_curves_repeats() {
-    let points = QuadPath::insert_n_curves_to_point_list(2, &[p(3.0, 4.0)], 1e-8);
+    let points = QuadPath::insert_n_curves_to_point_list(2, &[p(3.0, 4.0)], 1e-8).unwrap();
     assert_eq!(points, vec![p(3.0, 4.0); 5]);
 }
 

@@ -25,7 +25,8 @@ use fmn_core::types::Vec3;
 /// The Reference's `VMobject.tolerance_for_point_equality`.
 pub const DEFAULT_TOLERANCE_FOR_POINT_EQUALITY: f64 = 1e-8;
 
-/// Maximum total quadratic count after one public subdivision operation.
+/// Maximum total quadratic count after one public subdivision or insertion
+/// operation.
 ///
 /// The shared-anchor representation needs `2 * curves + 1` points, so this
 /// cap bounds the output to 131,073 [`Vec3`] values (about 3 MiB of point
@@ -39,6 +40,73 @@ const SUBPATH_END_ATOL: f64 = 1e-4;
 
 /// The angle below which `add_arc_to` degrades to a line.
 const ARC_ANGLE_THRESHOLD: f64 = 1e-3;
+
+const NO_CURVE: usize = usize::MAX;
+
+fn curve_priority(norm: f64, index: usize) -> f64 {
+    if norm.is_nan() {
+        // `np.argmax` starts with index zero. A NaN there therefore keeps
+        // winning because every later `value > NaN` comparison is false;
+        // later NaNs are ignored. Map those two cases to an ordinary total
+        // priority so the tournament below preserves that exact behavior.
+        if index == 0 {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
+    } else {
+        norm
+    }
+}
+
+fn preferred_curve(norms: &[f64], left: usize, right: usize) -> usize {
+    if left == NO_CURVE {
+        return right;
+    }
+    if right == NO_CURVE {
+        return left;
+    }
+    if curve_priority(norms[right], right) > curve_priority(norms[left], left) {
+        right
+    } else {
+        // First index wins ties, matching `np.argmax` and the old linear
+        // scan.
+        left
+    }
+}
+
+fn curve_winner_tree(norms: &[f64]) -> Result<(Vec<usize>, usize), GeomError> {
+    let leaf_count =
+        norms
+            .len()
+            .checked_next_power_of_two()
+            .ok_or(GeomError::SubdivisionBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_SUBDIVIDED_CURVES,
+            })?;
+    let tree_len = leaf_count
+        .checked_mul(2)
+        .ok_or(GeomError::SubdivisionBudgetExceeded {
+            requested: usize::MAX,
+            max: MAX_SUBDIVIDED_CURVES,
+        })?;
+    let mut tree = vec![NO_CURVE; tree_len];
+    for index in 0..norms.len() {
+        tree[leaf_count + index] = index;
+    }
+    for node in (1..leaf_count).rev() {
+        tree[node] = preferred_curve(norms, tree[2 * node], tree[2 * node + 1]);
+    }
+    Ok((tree, leaf_count))
+}
+
+fn refresh_curve_winner(tree: &mut [usize], leaf_count: usize, index: usize, norms: &[f64]) {
+    let mut node = leaf_count + index;
+    while node > 1 {
+        node /= 2;
+        tree[node] = preferred_curve(norms, tree[2 * node], tree[2 * node + 1]);
+    }
+}
 
 /// Anchor modes for [`QuadPath::change_anchor_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -692,10 +760,57 @@ impl QuadPath {
 
     /// `insert_n_curves_to_point_list`: distribute `n` extra curves over the
     /// longest curves (null curves never split), preserving the traced shape.
-    #[must_use]
-    pub fn insert_n_curves_to_point_list(n: usize, points: &[Vec3], tolerance: f64) -> Vec<Vec3> {
+    ///
+    /// The shared-anchor input is validated and the final curve and point
+    /// counts are checked against [`MAX_SUBDIVIDED_CURVES`] before selection
+    /// work or output allocation. The winner tournament preserves the
+    /// Reference's first-index tie rule while reducing selection from
+    /// `O(n * input_curves)` to `O(input_curves + n log input_curves)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeomError::EvenPointCount`] for a malformed shared-anchor
+    /// run or [`GeomError::SubdivisionBudgetExceeded`] when count arithmetic
+    /// overflows or the requested output exceeds the public curve budget.
+    pub fn insert_n_curves_to_point_list(
+        n: usize,
+        points: &[Vec3],
+        tolerance: f64,
+    ) -> Result<Vec<Vec3>, GeomError> {
+        if points.is_empty() {
+            return Ok(Vec::new());
+        }
+        if points.len().is_multiple_of(2) {
+            return Err(GeomError::EvenPointCount { len: points.len() });
+        }
+
+        let existing_curves = (points.len() - 1) / 2;
+        let output_curves =
+            existing_curves
+                .checked_add(n)
+                .ok_or(GeomError::SubdivisionBudgetExceeded {
+                    requested: usize::MAX,
+                    max: MAX_SUBDIVIDED_CURVES,
+                })?;
+        if output_curves > MAX_SUBDIVIDED_CURVES {
+            return Err(GeomError::SubdivisionBudgetExceeded {
+                requested: output_curves,
+                max: MAX_SUBDIVIDED_CURVES,
+            });
+        }
+        let point_count = output_curves
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(GeomError::SubdivisionBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_SUBDIVIDED_CURVES,
+            })?;
+
         if points.len() == 1 {
-            return vec![points[0]; 2 * n + 1];
+            return Ok(vec![points[0]; point_count]);
+        }
+        if n == 0 {
+            return Ok(points.to_vec());
         }
         let tuples: Vec<[Vec3; 3]> = (0..points.len().saturating_sub(1) / 2)
             .map(|i| [points[2 * i], points[2 * i + 1], points[2 * i + 2]])
@@ -711,18 +826,29 @@ impl QuadPath {
             })
             .collect();
         let mut ipc = vec![0usize; tuples.len()];
+        let (mut winners, winner_leaves) = curve_winner_tree(&norms)?;
         for _ in 0..n {
-            // argmax (first index wins ties, like np.argmax).
-            let mut index = 0;
-            for (i, &value) in norms.iter().enumerate() {
-                if value > norms[index] {
-                    index = i;
-                }
-            }
-            ipc[index] += 1;
-            norms[index] *= ipc[index] as f64 / (ipc[index] + 1) as f64;
+            let index = winners[1];
+            let next_count =
+                ipc[index]
+                    .checked_add(1)
+                    .ok_or(GeomError::SubdivisionBudgetExceeded {
+                        requested: usize::MAX,
+                        max: MAX_SUBDIVIDED_CURVES,
+                    })?;
+            let divisor =
+                next_count
+                    .checked_add(1)
+                    .ok_or(GeomError::SubdivisionBudgetExceeded {
+                        requested: usize::MAX,
+                        max: MAX_SUBDIVIDED_CURVES,
+                    })?;
+            ipc[index] = next_count;
+            norms[index] *= next_count as f64 / divisor as f64;
+            refresh_curve_winner(&mut winners, winner_leaves, index, &norms);
         }
-        let mut new_points = vec![points[0]];
+        let mut new_points = Vec::with_capacity(point_count);
+        new_points.push(points[0]);
         for (tup, &n_inserts) in tuples.iter().zip(ipc.iter()) {
             let alphas = bezier::linspace(0.0, 1.0, n_inserts + 2);
             for pair in alphas.windows(2) {
@@ -731,7 +857,7 @@ impl QuadPath {
                 new_points.push(sub[2]);
             }
         }
-        new_points
+        Ok(new_points)
     }
 
     /// `integer_interpolate` (utils/bezier.py): the integer sample index
@@ -823,16 +949,17 @@ impl QuadPath {
         Some((new_points, i1, i4))
     }
 
-    /// `insert_n_curves`.
-    pub fn insert_n_curves(&mut self, n: usize) -> &mut Self {
+    /// `insert_n_curves`, with checked output sizing and failure atomicity.
+    pub fn insert_n_curves(&mut self, n: usize) -> Result<&mut Self, GeomError> {
         if self.num_curves() > 0 {
-            self.points = Self::insert_n_curves_to_point_list(
+            let points = Self::insert_n_curves_to_point_list(
                 n,
                 &self.points,
                 self.tolerance_for_point_equality,
-            );
+            )?;
+            self.points = points;
         }
-        self
+        Ok(self)
     }
 
     // ------------------------------------------------------- anchor modes
@@ -1148,6 +1275,99 @@ mod tests {
             }
         );
         assert_eq!(too_fine, original);
+    }
+
+    #[test]
+    fn curve_insertion_preflight_enforces_layout_budget_and_atomicity() {
+        let point = [3.0, 4.0, 0.0];
+        let exact = QuadPath::insert_n_curves_to_point_list(
+            MAX_SUBDIVIDED_CURVES,
+            &[point],
+            DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+        )
+        .unwrap();
+        assert_eq!(exact.len(), 2 * MAX_SUBDIVIDED_CURVES + 1);
+        assert!(exact.iter().all(|candidate| *candidate == point));
+
+        assert_eq!(
+            QuadPath::insert_n_curves_to_point_list(
+                MAX_SUBDIVIDED_CURVES + 1,
+                &[point],
+                DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+            )
+            .unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: MAX_SUBDIVIDED_CURVES + 1,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(
+            QuadPath::insert_n_curves_to_point_list(
+                usize::MAX,
+                &[point],
+                DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+            )
+            .unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: usize::MAX,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(
+            QuadPath::insert_n_curves_to_point_list(
+                0,
+                &[point, point],
+                DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+            )
+            .unwrap_err(),
+            GeomError::EvenPointCount { len: 2 }
+        );
+        assert!(
+            QuadPath::insert_n_curves_to_point_list(
+                usize::MAX,
+                &[],
+                DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        let original = right_angle_curve();
+        let mut path = original.clone();
+        assert_eq!(
+            path.insert_n_curves(MAX_SUBDIVIDED_CURVES).unwrap_err(),
+            GeomError::SubdivisionBudgetExceeded {
+                requested: MAX_SUBDIVIDED_CURVES + 1,
+                max: MAX_SUBDIVIDED_CURVES,
+            }
+        );
+        assert_eq!(path, original);
+    }
+
+    #[test]
+    fn curve_insertion_tournament_preserves_first_max_distribution() {
+        let points = [
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ];
+        let inserted = QuadPath::insert_n_curves_to_point_list(
+            4,
+            &points,
+            DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+        )
+        .unwrap();
+        let anchors: Vec<f64> = inserted.iter().step_by(2).map(|point| point[0]).collect();
+        assert_eq!(anchors, vec![0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        let (tree, _) = curve_winner_tree(&[1.0, f64::NAN, 100.0]).unwrap();
+        assert_eq!(tree[1], 2, "later NaN is ignored like np.argmax");
+        let (tree, _) = curve_winner_tree(&[f64::NAN, 100.0]).unwrap();
+        assert_eq!(tree[1], 0, "leading NaN remains the first winner");
+        let (tree, _) = curve_winner_tree(&[2.0, 2.0, 2.0]).unwrap();
+        assert_eq!(tree[1], 0, "first index wins equal priorities");
     }
 
     #[test]

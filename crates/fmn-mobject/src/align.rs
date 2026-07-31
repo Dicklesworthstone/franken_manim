@@ -524,12 +524,14 @@ impl Stage {
                 diff1,
                 &sp1,
                 DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
-            );
+            )
+            .map_err(StageError::Geometry)?;
             let sp2 = QuadPath::insert_n_curves_to_point_list(
                 diff2,
                 &sp2,
                 DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
-            );
+            )
+            .map_err(StageError::Geometry)?;
             if n > 0 {
                 // Intermediate anchor marking the subpath break.
                 new_points1.push(*new_points1.last().expect("prior subpath emitted"));

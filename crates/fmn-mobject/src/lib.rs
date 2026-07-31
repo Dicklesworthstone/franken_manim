@@ -77,9 +77,8 @@ pub enum StageError {
     /// `become` between records of different schemas — the Reference's
     /// `set_data` asserts dtype equality; this is the typed refusal.
     SchemaMismatch,
-    /// A point field whose contents violate the shared-anchor layout
-    /// reached the geometry kernel (alignment reads point runs as
-    /// [`fmn_geom::QuadPath`]s).
+    /// The geometry kernel refused a point run or bounded operation during
+    /// alignment (alignment reads point runs as [`fmn_geom::QuadPath`]s).
     Geometry(fmn_geom::GeomError),
     /// The monotonically assigned updater identity space is exhausted.
     /// Reuse would make durable replay manifests ambiguous.
@@ -118,7 +117,7 @@ impl std::fmt::Display for StageError {
                 write!(f, "become between records of different schemas")
             }
             Self::Geometry(err) => {
-                write!(f, "malformed point run in alignment: {err}")
+                write!(f, "geometry operation refused during alignment: {err}")
             }
             Self::UpdaterIdExhausted => {
                 write!(f, "updater identity space is exhausted")
