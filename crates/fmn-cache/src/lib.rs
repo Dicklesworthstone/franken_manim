@@ -35,8 +35,10 @@
 //!   fatal**.
 //! - **Versioned namespaces.** A namespace is `(name, schema_version)`; its
 //!   directory is `ns/<name>/v<version>`. Bumping the version is a clean
-//!   invalidation — a cold directory — without touching unrelated namespaces;
-//!   [`Namespace::purge_stale_versions`] reclaims the abandoned ones.
+//!   invalidation — a cold directory — without touching unrelated namespaces.
+//!   Versions coexist until the ownership-authorized whole-store clear: an
+//!   opener never guesses that a sibling version is abandoned while another
+//!   process may still be using it.
 //! - **Cross-process safety.** Entry writes are atomic, immutable, and
 //!   digest-addressed: keyed entries derive their address from canonical key
 //!   material, while blobs derive it from their content. The first complete

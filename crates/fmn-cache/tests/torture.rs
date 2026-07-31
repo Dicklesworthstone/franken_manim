@@ -679,57 +679,136 @@ fn namespace_open_refuses_a_symlinked_name_ancestor() {
 
 #[cfg(unix)]
 #[test]
-fn stale_version_purge_refuses_a_linked_version() {
-    let root = scratch("purge_symlinked_version");
+fn opening_a_new_version_ignores_a_linked_sibling_version() {
+    let root = scratch("ignored_symlinked_version");
     let store = open(&root);
     std::fs::create_dir_all(root.join("ns/shared")).expect("create namespace parent");
-    let victim = scratch("purge_symlinked_version_victim");
+    let victim = scratch("ignored_symlinked_version_victim");
     std::fs::create_dir(&victim).expect("create victim directory");
     let sentinel = victim.join("important.txt");
     std::fs::write(&sentinel, b"keep").expect("write sentinel");
-    std::os::unix::fs::symlink(&victim, root.join("ns/shared/v1")).expect("link stale version");
+    let sibling = root.join("ns/shared/v1");
+    std::os::unix::fs::symlink(&victim, &sibling).expect("link sibling version");
 
-    let current = store
+    store
         .namespace("shared", 2, NamespacePolicy::default())
         .expect("current version remains usable");
-    assert!(
-        matches!(current.purge_stale_versions(), Err(CacheError::Storage(_))),
-        "purge must reject the linked stale version"
-    );
     assert_eq!(
         std::fs::read(&sentinel).expect("sentinel survives"),
         b"keep"
+    );
+    assert!(
+        std::fs::symlink_metadata(&sibling)
+            .expect("sibling link survives")
+            .file_type()
+            .is_symlink(),
+        "opening one version never inspects or removes a sibling version"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn stale_version_purge_preflights_linked_descendants() {
-    let root = scratch("purge_linked_descendant");
+fn opening_a_new_version_never_preflights_sibling_descendants() {
+    let root = scratch("ignored_sibling_descendant");
     let store = open(&root);
     let stale_objects = root.join("ns/shared/v1/objects");
-    std::fs::create_dir_all(&stale_objects).expect("create real stale version");
-    let victim = scratch("purge_linked_descendant_victim");
+    std::fs::create_dir_all(&stale_objects).expect("create real sibling version");
+    let victim = scratch("ignored_sibling_descendant_victim");
     std::fs::create_dir(&victim).expect("create victim directory");
     let sentinel = victim.join("important.txt");
     std::fs::write(&sentinel, b"keep").expect("write sentinel");
-    std::os::unix::fs::symlink(&victim, stale_objects.join("linked"))
-        .expect("link stale descendant");
+    let linked = stale_objects.join("linked");
+    std::os::unix::fs::symlink(&victim, &linked).expect("link sibling descendant");
 
-    let current = store
+    store
         .namespace("shared", 2, NamespacePolicy::default())
         .expect("current version remains usable");
-    assert!(
-        matches!(current.purge_stale_versions(), Err(CacheError::Storage(_))),
-        "purge must preflight descendants before recursive removal"
-    );
     assert_eq!(
         std::fs::read(&sentinel).expect("sentinel survives"),
         b"keep"
     );
     assert!(
         root.join("ns/shared/v1").is_dir(),
-        "a refused purge leaves the stale tree intact"
+        "opening v2 leaves the complete v1 tree intact"
+    );
+    assert!(
+        std::fs::symlink_metadata(&linked)
+            .expect("descendant link survives")
+            .file_type()
+            .is_symlink(),
+        "no sibling descendant is traversed"
+    );
+}
+
+const VERSION_CHILD_ROOT: &str = "FMN_CACHE_VERSION_CHILD_ROOT";
+const VERSION_CHILD_VERSION: &str = "FMN_CACHE_VERSION_CHILD_VERSION";
+
+#[test]
+fn live_version_process_entry() {
+    let Some(root) = std::env::var_os(VERSION_CHILD_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let version = std::env::var(VERSION_CHILD_VERSION)
+        .expect("child version")
+        .parse::<u32>()
+        .expect("numeric child version");
+    let namespace = open(&root)
+        .namespace("live-versions", version, NamespacePolicy::default())
+        .expect("child namespace");
+    namespace
+        .put(
+            &key(500),
+            &payload(usize::try_from(version).expect("host-sized child version")),
+        )
+        .expect("child publication");
+
+    // Model a process that terminates without running Namespace::drop. There
+    // is no lease to abandon and no sibling opener may erase these objects.
+    std::process::exit(0);
+}
+
+fn spawn_version_child(root: &std::path::Path, version: u32) -> std::process::Child {
+    Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", "live_version_process_entry", "--nocapture"])
+        .env(VERSION_CHILD_ROOT, root)
+        .env(VERSION_CHILD_VERSION, version.to_string())
+        .spawn()
+        .expect("spawn version child")
+}
+
+#[test]
+fn simultaneous_process_versions_survive_exit_and_reopen() {
+    let root = scratch("simultaneous_live_versions");
+    drop(open(&root));
+    let mut v1_child = spawn_version_child(&root, 1);
+    let mut v2_child = spawn_version_child(&root, 2);
+    assert!(v1_child.wait().expect("wait for v1 child").success());
+    assert!(v2_child.wait().expect("wait for v2 child").success());
+
+    let v1 = open(&root)
+        .namespace("live-versions", 1, NamespacePolicy::default())
+        .expect("reopen v1");
+    let v2 = open(&root)
+        .namespace("live-versions", 2, NamespacePolicy::default())
+        .expect("reopen v2");
+    assert_eq!(
+        v1.get(&key(500)).expect("read v1").as_deref(),
+        Some(payload(1).as_slice())
+    );
+    assert_eq!(
+        v2.get(&key(500)).expect("read v2").as_deref(),
+        Some(payload(2).as_slice())
+    );
+
+    v1.put(&key(501), &payload(3)).expect("write reopened v1");
+    v2.put(&key(501), &payload(4)).expect("write reopened v2");
+    assert_eq!(
+        v1.get(&key(501)).unwrap().as_deref(),
+        Some(payload(3).as_slice())
+    );
+    assert_eq!(
+        v2.get(&key(501)).unwrap().as_deref(),
+        Some(payload(4).as_slice())
     );
 }
 

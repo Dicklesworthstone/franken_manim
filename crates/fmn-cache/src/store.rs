@@ -633,39 +633,6 @@ fn list_managed_directory(
     Ok(checked)
 }
 
-fn remove_managed_directory_all(
-    fs: &dyn FileSystem,
-    root: &Path,
-    path: &Path,
-) -> Result<(), CacheError> {
-    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
-        Some(FsNodeKind::Directory) => {}
-        Some(kind) => return Err(managed_node_refused(path, "real directory", kind)),
-        None => return Err(managed_not_found(path)),
-    }
-
-    // Preflight every descendant without following it. `remove_dir_all` is
-    // required by the capability contract not to follow link-like children,
-    // but this explicit walk also rejects every static reparse point and
-    // wrong-kind node before a cache purge delegates the recursive removal.
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for child in list_managed_directory(fs, root, &directory)? {
-            if child.is_directory {
-                pending.push(child.path);
-            }
-        }
-    }
-
-    // The preflight can be long; classify the deletion leaf again immediately
-    // before the path-based operation.
-    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
-        Some(FsNodeKind::Directory) => fs.remove_dir_all(path).map_err(CacheError::Storage),
-        Some(kind) => Err(managed_node_refused(path, "real directory", kind)),
-        None => Err(managed_not_found(path)),
-    }
-}
-
 fn owner_stamp(root: &Path) -> Vec<u8> {
     let digest = sha256(root.as_os_str().as_encoded_bytes());
     format!("{OWNER_PREFIX}{}\n", digest.to_hex()).into_bytes()
@@ -1376,10 +1343,6 @@ impl StoreInner {
     fn list_directory(&self, path: &Path) -> Result<Vec<ManagedDirEntry>, CacheError> {
         list_managed_directory(self.fs.as_ref(), &self.root, path)
     }
-
-    fn remove_directory_all(&self, path: &Path) -> Result<(), CacheError> {
-        remove_managed_directory_all(self.fs.as_ref(), &self.root, path)
-    }
 }
 
 /// The persistent content-addressed store. Cheap to clone conceptually — open
@@ -1490,8 +1453,8 @@ impl Store {
 
     /// Open a versioned namespace. The name is validated (the traversal
     /// boundary); the version selects the directory, so a bump is a clean,
-    /// namespace-local cold start. Stale sibling versions are purged
-    /// best-effort on open.
+    /// namespace-local cold start. Sibling versions are never removed here:
+    /// another process may still have a live handle onto any one of them.
     ///
     /// # Errors
     /// [`CacheError::InvalidNamespace`], or [`CacheError::Storage`] when an
@@ -1521,14 +1484,12 @@ impl Store {
             objects_dir: dir.join("objects"),
             index_path: dir.join("index"),
             lock_path: dir.join("lock"),
-            dir,
             policy,
             pins,
             access: Mutex::new(AccessLog::default()),
             held_lock: Mutex::new(None),
         };
         ns.load_index();
-        let _ = ns.purge_stale_versions();
         Ok(ns)
     }
 }
@@ -1569,7 +1530,6 @@ pub struct Namespace {
     inner: Arc<StoreInner>,
     name: String,
     version: u32,
-    dir: PathBuf,
     objects_dir: PathBuf,
     index_path: PathBuf,
     lock_path: PathBuf,
@@ -2056,54 +2016,6 @@ impl Namespace {
         log.rebase_sequences();
         self.write_index(&log)?;
         Ok(report)
-    }
-
-    /// Remove abandoned sibling versions of this namespace (`v<n>` with
-    /// `n != version`), leaving every other namespace untouched. Returns how
-    /// many were purged. Racing purgers and readers of a dead version are
-    /// safe: a vanished entry is a miss.
-    ///
-    /// # Errors
-    /// [`CacheError::Storage`] (absence of the namespace directory is zero,
-    /// not an error).
-    pub fn purge_stale_versions(&self) -> Result<usize, CacheError> {
-        let parent = match self.dir.parent() {
-            Some(parent) => parent.to_path_buf(),
-            None => return Ok(0),
-        };
-        let children = match self.inner.list_directory(&parent) {
-            Ok(children) => children,
-            Err(CacheError::Storage(FsError::NotFound { .. })) => return Ok(0),
-            Err(err) => return Err(err),
-        };
-        let keep = format!("v{}", self.version);
-        let mut purged = 0;
-        for child in children {
-            if !child.is_directory {
-                continue;
-            }
-            let Some(name) = child
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-            else {
-                continue;
-            };
-            if name == keep {
-                continue;
-            }
-            // Only `v<u32>` directories are ours to reclaim.
-            if let Some(rest) = name.strip_prefix('v')
-                && rest.parse::<u32>().is_ok()
-            {
-                match self.inner.remove_directory_all(&child.path) {
-                    Ok(()) => purged += 1,
-                    Err(CacheError::Storage(FsError::NotFound { .. })) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-        }
-        Ok(purged)
     }
 
     // ------------------------------------------------------------------

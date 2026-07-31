@@ -830,37 +830,47 @@ fn an_unparseable_lock_is_treated_as_abandoned() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_version_bump_is_a_cold_start_and_purges_only_its_own_stale_versions() {
-    let (fs, _clock, store) = fresh();
+fn live_namespace_versions_are_cold_and_never_delete_each_other() {
+    let (fs, clock, store_a) = fresh();
     let k = key("entry");
 
-    let v1 = store.namespace("t", 1, NamespacePolicy::default()).unwrap();
+    let v1 = store_a
+        .namespace("t", 1, NamespacePolicy::default())
+        .unwrap();
     v1.put(&k, b"v1 value").unwrap();
-    let unrelated = store
+    let unrelated = store_a
         .namespace("other", 1, NamespacePolicy::default())
         .unwrap();
     unrelated.put(&k, b"unrelated value").unwrap();
-    drop(v1);
 
-    // The bump: v2 is cold, and opening it reclaimed the abandoned v1.
-    let v2 = store.namespace("t", 2, NamespacePolicy::default()).unwrap();
+    // A separate opening selects v2. It is cold, but cannot infer that the
+    // still-live v1 handle (or an equivalent handle in another process) is
+    // abandoned.
+    let store_b = open_store(fs.clone(), clock);
+    let v2 = store_b
+        .namespace("t", 2, NamespacePolicy::default())
+        .unwrap();
     assert_eq!(
         v2.get(&k).unwrap(),
         None,
         "version bump invalidates cleanly"
     );
     assert!(
-        !fs.exists(&Path::new(ROOT).join("ns/t/v1")),
-        "stale version reclaimed on open"
+        fs.exists(&Path::new(ROOT).join("ns/t/v1")),
+        "opening v2 leaves the live v1 tree intact"
     );
+    assert_eq!(v1.get(&k).unwrap().as_deref(), Some(&b"v1 value"[..]));
+    v1.put(&key("v1-after-v2"), b"still live").unwrap();
+
     // The unrelated namespace was never touched.
     assert_eq!(
         unrelated.get(&k).unwrap().as_deref(),
         Some(&b"unrelated value"[..])
     );
-    // And v2 fills independently.
+    // Both versions continue to fill independently.
     v2.put(&k, b"v2 value").unwrap();
     assert_eq!(v2.get(&k).unwrap().as_deref(), Some(&b"v2 value"[..]));
+    assert_eq!(v1.get(&k).unwrap().as_deref(), Some(&b"v1 value"[..]));
 }
 
 // ---------------------------------------------------------------------------
