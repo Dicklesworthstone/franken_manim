@@ -61,10 +61,14 @@ pub fn attach_tip(shape: VMobject, tip: ArrowTip, end: TipEnd) -> VMobject {
 ///
 /// This is the true tangent — the derivative of the terminal quadratic —
 /// not the chord between the last two control points, so a tip on a curve
-/// lines up with the curve.
+/// lines up with the curve. Empty and point-only paths have no direction and
+/// return the zero vector.
 #[must_use]
 pub fn outward_tangent(path: &QuadPath, end: TipEnd) -> Vec3 {
     let points = path.points();
+    if points.is_empty() {
+        return [0.0; 3];
+    }
     let fallback = |a: Vec3, b: Vec3| space_ops::normalize(sub(a, b));
     match end {
         TipEnd::End => {
@@ -290,6 +294,19 @@ mod tests {
         let point = VMobject::from_points(vec![[1.0, 1.0, 0.0]; 3]);
         let tipped = attach_tip(point, ArrowTip::new(), TipEnd::End);
         assert_eq!(tipped.children().len(), 1);
+    }
+
+    #[test]
+    fn tip_direction_queries_are_total_on_degenerate_paths() {
+        let empty = QuadPath::new();
+        let point = QuadPath::from_points(vec![[1.0, 1.0, 0.0]]).expect("valid point path");
+
+        for end in [TipEnd::Start, TipEnd::End] {
+            assert_eq!(outward_tangent(&empty, end), [0.0; 3]);
+            assert_eq!(tip_direction(&empty, end), 0.0);
+            assert_eq!(outward_tangent(&point, end), [0.0; 3]);
+            assert_eq!(tip_direction(&point, end), 0.0);
+        }
     }
 
     #[test]
