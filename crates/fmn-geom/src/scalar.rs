@@ -21,6 +21,11 @@ pub(crate) fn cos(x: f64) -> f64 {
 }
 
 #[inline]
+pub(crate) fn tan(x: f64) -> f64 {
+    fmn_dmath::tan(x)
+}
+
+#[inline]
 pub(crate) fn acos(x: f64) -> f64 {
     fmn_dmath::acos(x)
 }

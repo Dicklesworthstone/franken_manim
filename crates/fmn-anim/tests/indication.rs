@@ -14,7 +14,7 @@ use fmn_mobject::{Mob, Mobject, Stage};
 fn vmob(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
-    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     #[allow(clippy::cast_possible_truncation)]
     let flat: Vec<f32> = points
         .iter()

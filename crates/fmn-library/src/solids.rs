@@ -192,6 +192,7 @@ pub fn surface_schema() -> RecordSchema {
         &["point"],
         &["point", "d_normal_point"],
     )
+    .expect("the surface record schema is ten lanes")
 }
 
 /// The Reference's `TexturedSurface.data_dtype`:
@@ -209,6 +210,7 @@ pub fn textured_surface_schema() -> RecordSchema {
         &["point"],
         &["point", "d_normal_point"],
     )
+    .expect("the textured-surface record schema is nine lanes")
 }
 
 /// The Reference's `Surface.compute_triangle_indices`: the fixed six-index
@@ -686,7 +688,8 @@ impl Surface {
 
 impl From<Surface> for Mobject {
     fn from(s: Surface) -> Self {
-        let mut buffer = RecordBuffer::new(surface_schema(), s.points.len());
+        let mut buffer = RecordBuffer::new(surface_schema(), s.points.len())
+            .expect("record sizing bounded by the surface grid");
         buffer.write_range("point", 0, &flat_f32(&s.points));
         buffer.write_range("d_normal_point", 0, &flat_f32(&s.d_normal_point));
         #[allow(clippy::cast_possible_truncation)]
@@ -1339,7 +1342,8 @@ impl SGroup {
 impl From<SGroup> for Mobject {
     fn from(g: SGroup) -> Self {
         Mobject {
-            buffer: RecordBuffer::new(surface_schema(), 0),
+            buffer: RecordBuffer::new(surface_schema(), 0)
+                .expect("an empty surface buffer cannot overflow"),
             uniforms: g.uniforms,
             shape: ShapeTag::General,
             z_index: g.z_index,
@@ -2318,7 +2322,8 @@ impl TexturedSurface {
 
 impl From<TexturedSurface> for Mobject {
     fn from(t: TexturedSurface) -> Self {
-        let mut buffer = RecordBuffer::new(textured_surface_schema(), t.points.len());
+        let mut buffer = RecordBuffer::new(textured_surface_schema(), t.points.len())
+            .expect("record sizing bounded by the surface grid");
         buffer.write_range("point", 0, &flat_f32(&t.points));
         buffer.write_range("d_normal_point", 0, &flat_f32(&t.d_normal_point));
         #[allow(clippy::cast_possible_truncation)]
@@ -2531,7 +2536,8 @@ impl TexturedGeometry {
 
 impl From<TexturedGeometry> for Mobject {
     fn from(t: TexturedGeometry) -> Self {
-        let mut buffer = RecordBuffer::new(textured_surface_schema(), t.points.len());
+        let mut buffer = RecordBuffer::new(textured_surface_schema(), t.points.len())
+            .expect("record sizing bounded by the surface grid");
         buffer.write_range("point", 0, &flat_f32(&t.points));
         buffer.write_range("d_normal_point", 0, &flat_f32(&t.d_normal_point));
         #[allow(clippy::cast_possible_truncation)]

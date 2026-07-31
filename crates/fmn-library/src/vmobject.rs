@@ -732,7 +732,8 @@ impl From<VMobject> for Mobject {
             submobjects,
         } = v;
 
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+            .expect("record sizing bounded by the point list");
         #[allow(clippy::cast_possible_truncation)]
         let flat: Vec<f32> = points
             .iter()

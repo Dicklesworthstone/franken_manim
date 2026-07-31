@@ -2837,7 +2837,7 @@ mod tests {
         camera_revision: u64,
         configure: impl FnOnce(&mut Uniforms),
     ) -> RenderPlan {
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (index, point) in points.iter().enumerate() {
             buffer.write(
                 index,
@@ -2865,7 +2865,7 @@ mod tests {
         camera_revision: u64,
         configure: impl FnOnce(&mut Uniforms),
     ) -> RenderPlan {
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (index, point) in points.iter().enumerate() {
             buffer.write(
                 index,

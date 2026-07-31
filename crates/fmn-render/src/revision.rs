@@ -362,7 +362,7 @@ mod tests {
 
     /// A stage with one VMobject-shaped mobject holding a triangle.
     fn vmobject(points: &[[f64; 3]]) -> Mobject {
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
         }
@@ -503,7 +503,7 @@ mod tests {
         // precise and wrong.
         let (mut stage, mob) = one_mobject();
         let before = read(&stage, mob);
-        stage.get_mut(mob).expect("live").buffer.resize(9);
+        stage.get_mut(mob).expect("live").buffer.resize(9).unwrap();
         let after = read(&stage, mob);
         assert_eq!(
             after.diff(&before),

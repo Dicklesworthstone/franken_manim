@@ -632,8 +632,12 @@ impl From<ThreeDModel> for Mobject {
             &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
             &["point"],
             &["point", "d_normal_point"],
-        );
-        let mut buffer = RecordBuffer::new(schema, model.mesh.triangles.len() * 3);
+        )
+        .expect("the obj-model record schema is ten lanes");
+        // The mesh index buffer is itself memory-resident, so its record
+        // count is far below any sizing ceiling.
+        let mut buffer = RecordBuffer::new(schema, model.mesh.triangles.len() * 3)
+            .expect("obj-model record sizing bounded by the loaded mesh");
         let rgba = [model.color.r, model.color.g, model.color.b, model.opacity];
         for (triangle, corners) in model.mesh.triangles.iter().enumerate() {
             for (k, corner) in corners.iter().enumerate() {

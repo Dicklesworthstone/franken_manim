@@ -30,7 +30,8 @@ use std::time::Instant;
 use crossing::CrossingClass;
 
 use fmn_mobject::{
-    JointType, Mob, Mobject, RecordBuffer, RecordSchema, RecordView, StageError, Uniforms,
+    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, StageError,
+    Uniforms,
 };
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::create_exception;
@@ -167,6 +168,20 @@ fn bound_parts(proxy: &BridgeMobject) -> PyResult<(Engine, Mob)> {
 
 fn same_engine(left: &Engine, right: &Engine) -> bool {
     Rc::ptr_eq(left, right)
+}
+
+/// The typed Python surface of a record sizing refusal (fm-vek.2):
+/// schema stride and buffer shape overflows raise `OverflowError`, the
+/// same exception class the bridge has always used for shape arithmetic.
+fn record_error_to_py(error: RecordError) -> PyErr {
+    match error {
+        RecordError::StrideOverflow => {
+            PyOverflowError::new_err("record dtype stride overflows usize")
+        }
+        RecordError::SizeOverflow { .. } => {
+            PyOverflowError::new_err("RecordBuffer shape overflows usize")
+        }
+    }
 }
 
 fn with_buffer<T>(
@@ -410,7 +425,10 @@ fn parse_schema(proxy: &Bound<'_, BridgeMobject>) -> PyResult<RecordSchema> {
         .collect();
     let aligned_refs: Vec<&str> = aligned.iter().map(String::as_str).collect();
     let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
-    Ok(RecordSchema::new(&fields, &aligned_refs, &pointlike_refs))
+    // The stride was already proved above; the fallible schema constructor
+    // (fm-vek.2) re-proves it and any refusal surfaces as the same typed
+    // Python exception.
+    RecordSchema::new(&fields, &aligned_refs, &pointlike_refs).map_err(record_error_to_py)
 }
 
 fn proxy_children<'py>(proxy: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -846,7 +864,8 @@ fn restore_record_state(
         .collect();
     let aligned_refs: Vec<&str> = aligned.iter().map(String::as_str).collect();
     let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
-    let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs);
+    let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs)
+        .map_err(record_error_to_py)?;
     let expected = len
         .checked_mul(stride)
         .ok_or_else(|| PyOverflowError::new_err("restored record shape overflows usize"))?;
@@ -856,7 +875,7 @@ fn restore_record_state(
             records.len()
         )));
     }
-    let mut buffer = RecordBuffer::new(schema, len);
+    let mut buffer = RecordBuffer::new(schema, len).map_err(record_error_to_py)?;
     let mut cursor = 0usize;
     for index in 0..len {
         for (name, width) in &fields {
@@ -1024,7 +1043,9 @@ impl BridgeMobject {
         let schema = parse_schema(slf)?;
         {
             let mut cell = slf.borrow_mut();
-            cell.detached = Some(Mobject::from_buffer(RecordBuffer::new(schema, 0)));
+            cell.detached = Some(Mobject::from_buffer(
+                RecordBuffer::new(schema, 0).map_err(record_error_to_py)?,
+            ));
             cell.initialized = true;
         }
         // No engine or proxy borrow is live across these calls. Each hook
@@ -1047,10 +1068,10 @@ impl BridgeMobject {
 
     fn resize(slf: &Bound<'_, Self>, len: usize) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
-        let stride = with_buffer_ref(slf, |buffer| buffer.schema().stride())?;
-        len.checked_mul(stride)
-            .ok_or_else(|| PyOverflowError::new_err("RecordBuffer resize overflows usize"))?;
-        with_buffer(slf, |buffer| buffer.resize(len))
+        // The sizing proof lives in the fallible resize itself (fm-vek.2);
+        // a refusal surfaces to Python as a typed OverflowError, and the
+        // buffer (plus every exported NumPy view) is left untouched.
+        with_buffer(slf, |buffer| buffer.resize(len))?.map_err(record_error_to_py)
     }
 
     fn n_records(slf: &Bound<'_, Self>) -> PyResult<usize> {

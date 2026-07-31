@@ -25,11 +25,11 @@
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
+    require_compiled_cargo_profile,
 };
 use fmn_hash::{Digest, Sha256, sha256};
 use std::fmt;
 use std::fmt::Write as _;
-use std::path::Path;
 
 /// Stable fixture-definition schema.
 pub const PG8_DEFINITION_SCHEMA: &str = "fmn-perf-pg8-definition/1";
@@ -513,27 +513,7 @@ fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
 }
 
 fn require_release_perf_artifact() -> Result<(), Pg8Error> {
-    if cfg!(debug_assertions) {
-        return Err(Pg8Error::Identity(
-            "measurement requires a release-perf artifact; debug assertions are enabled".to_owned(),
-        ));
-    }
-    let executable = std::env::current_exe().map_err(|error| {
-        Pg8Error::Identity(format!(
-            "cannot identify the running producer artifact: {error}"
-        ))
-    })?;
-    if !path_is_release_perf(&executable) {
-        return Err(Pg8Error::Identity(format!(
-            "measurement requires the Cargo release-perf artifact path, got {executable:?}"
-        )));
-    }
-    Ok(())
-}
-
-fn path_is_release_perf(path: &Path) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == BUILD_PROFILE)
+    require_compiled_cargo_profile(BUILD_PROFILE).map_err(Pg8Error::from)
 }
 
 fn render_trace(
@@ -693,5 +673,21 @@ mod tests {
         );
         assert_eq!(sample.invalid_reason.as_deref(), Some("host preemption"));
         assert_eq!(sample.value, 42);
+    }
+
+    #[test]
+    fn artifact_profile_check_uses_the_compiled_identity() {
+        let result = require_release_perf_artifact();
+        assert_eq!(
+            result.is_ok(),
+            crate::perf::COMPILED_CARGO_PROFILE == BUILD_PROFILE
+        );
+        if let Err(error) = result {
+            assert!(
+                error
+                    .to_string()
+                    .contains(crate::perf::COMPILED_CARGO_PROFILE)
+            );
+        }
     }
 }

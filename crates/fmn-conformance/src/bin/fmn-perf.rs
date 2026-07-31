@@ -5,7 +5,7 @@
 use fmn_cache::{Store, StoreConfig};
 use fmn_conformance::perf::{
     BASELINE_SCHEMA, Baseline, EvidenceKind, EvidenceRef, MeasurementBatch, POLICY_SCHEMA,
-    SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog,
+    SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog, require_compiled_cargo_profile,
 };
 use fmn_conformance::perf_pg2::{
     PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
@@ -484,22 +484,8 @@ fn validate_cache_root(path: &OsStr) -> Result<(), CliError> {
 }
 
 fn require_release_perf_front_door() -> Result<(), CliError> {
-    if cfg!(debug_assertions) {
-        return Err(CliError::data(
-            "measurement requires a release-perf artifact; debug assertions are enabled",
-        ));
-    }
-    let executable = std::env::current_exe()
-        .map_err(|error| CliError::data(format!("cannot identify producer artifact: {error}")))?;
-    if !executable
-        .components()
-        .any(|component| component.as_os_str() == "release-perf")
-    {
-        return Err(CliError::data(format!(
-            "measurement requires the Cargo release-perf artifact path, got {executable:?}"
-        )));
-    }
-    Ok(())
+    require_compiled_cargo_profile("release-perf")
+        .map_err(|error| CliError::data(error.to_string()))
 }
 
 fn utf8_argument<'a>(value: &'a OsStr, label: &str) -> Result<&'a str, CliError> {
@@ -654,6 +640,16 @@ mod tests {
         let record = error.to_ndjson();
         assert_eq!(record.lines().count(), 1);
         assert!(record.contains("quote \\\" and newline\\nstay data"));
+    }
+
+    #[test]
+    fn release_perf_front_door_is_compile_bound() {
+        let result = require_release_perf_front_door();
+        let compiled_profile = fmn_conformance::perf::COMPILED_CARGO_PROFILE;
+        assert_eq!(result.is_ok(), compiled_profile == "release-perf");
+        if let Err(error) = result {
+            assert!(error.detail.contains(compiled_profile));
+        }
     }
 
     #[test]

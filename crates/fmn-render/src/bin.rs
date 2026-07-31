@@ -791,7 +791,7 @@ mod tests {
             [cx - hw, cy, 0.0],
             [cx - hw, cy - hh, 0.0],
         ];
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len()).unwrap();
         for (i, p) in pts.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "fill_rgba", &[0.2, 0.4, 0.6, fill_alpha]);
@@ -838,7 +838,7 @@ mod tests {
     /// the stroke's half-width and AA band plainly reach into the next one.
     fn stroked_line(x0: f64, y: f64, x1: f64, width: f32) -> Mobject {
         let pts = [[x0, y, 0.0], [0.5 * (x0 + x1), y, 0.0], [x1, y, 0.0]];
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len()).unwrap();
         for (i, p) in pts.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "stroke_rgba", &[1.0, 1.0, 1.0, 1.0]);
@@ -855,7 +855,7 @@ mod tests {
             [76.0, 84.0, 0.0],
             [88.0, 104.0, 0.0],
         ];
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (i, point) in points.iter().enumerate() {
             buffer.write(
                 i,
@@ -1327,7 +1327,7 @@ mod tests {
         .iter()
         .map(|p| [p[0], p[1], 0.0])
         .collect();
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), l.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), l.len()).unwrap();
         for (i, p) in l.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "fill_rgba", &[0.2, 0.4, 0.6, 1.0]);

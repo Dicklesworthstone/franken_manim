@@ -334,7 +334,7 @@ mod tests {
     use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
 
     fn vmobject(points: &[[f64; 3]]) -> Mobject {
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
         }

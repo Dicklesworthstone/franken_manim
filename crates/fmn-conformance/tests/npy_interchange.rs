@@ -127,7 +127,7 @@ fn snapshot_field_exports_as_npy() {
     let mut stage = Stage::new();
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
-    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), 3);
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
     let flat: Vec<f32> = vec![0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 2.0, 0.0, 0.0];
     entry.buffer.write_range("point", 0, &flat);
 

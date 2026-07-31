@@ -72,7 +72,7 @@ use std::collections::HashMap;
 use fmn_core::color::Srgb;
 use fmn_core::types::Vec3;
 
-use crate::{FillRule, GeomError, QuadPath, cubic};
+use crate::{FillRule, GeomError, QuadPath, cubic, scalar};
 
 /// The cubic→quadratic conversion tolerance for SVG ingress, in path-local
 /// user units: the G0-2 pixel tolerance applied to SVG's px-scaled user
@@ -486,14 +486,14 @@ impl Affine {
 
     fn skew_x(degrees: f64) -> Self {
         Self {
-            c: degrees.to_radians().tan(),
+            c: scalar::tan(degrees.to_radians()),
             ..Self::IDENTITY
         }
     }
 
     fn skew_y(degrees: f64) -> Self {
         Self {
-            b: degrees.to_radians().tan(),
+            b: scalar::tan(degrees.to_radians()),
             ..Self::IDENTITY
         }
     }
@@ -1736,7 +1736,7 @@ impl PathCursor<'_> {
 fn angle_between(u: (f64, f64), v: (f64, f64)) -> f64 {
     let cross = u.0 * v.1 - u.1 * v.0;
     let dot = u.0 * v.0 + u.1 * v.1;
-    cross.atan2(dot)
+    scalar::atan2(cross, dot)
 }
 
 /// An SVG elliptical arc, endpoint → center parameterization (SVG F.6.5),
@@ -1814,7 +1814,7 @@ fn arc_to(
     for i in 0..segments {
         let t0 = theta1 + delta * (i as f64 / segments as f64);
         let t1 = theta1 + delta * ((i + 1) as f64 / segments as f64);
-        let k = 4.0 / 3.0 * ((t1 - t0) / 4.0).tan();
+        let k = 4.0 / 3.0 * scalar::tan((t1 - t0) / 4.0);
         let (s0, c0) = t0.sin_cos();
         let (s1, c1) = t1.sin_cos();
         let p0 = map(c0, s0);

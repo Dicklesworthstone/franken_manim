@@ -12,9 +12,10 @@ const LANES: usize = 1 << 20;
 
 fn field(stage: &mut Stage, values: &[f32]) -> Mob {
     let mut buffer = RecordBuffer::new(
-        RecordSchema::new(&[("value", 1)], &["value"], &[]),
+        RecordSchema::new(&[("value", 1)], &["value"], &[]).unwrap(),
         values.len(),
-    );
+    )
+    .unwrap();
     assert!(buffer.write_range("value", 0, values));
     stage.add(Mobject::from_buffer(buffer))
 }

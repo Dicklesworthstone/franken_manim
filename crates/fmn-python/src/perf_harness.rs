@@ -220,7 +220,8 @@ impl RustTwin {
         let mut scene = Scene::new(RuntimeConfig::default(), 0)
             .map_err(|error| format!("rust twin scene: {error}"))?;
         for _ in 0..mobjects {
-            let buffer = RecordBuffer::new(RecordSchema::mobject(), 4);
+            let buffer = RecordBuffer::new(RecordSchema::mobject(), 4)
+                .expect("the harness twin buffer cannot overflow");
             let mob = scene.stage_mut().add(Mobject::from_buffer(buffer));
             scene
                 .stage_mut()

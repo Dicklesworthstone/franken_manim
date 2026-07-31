@@ -26,7 +26,7 @@ fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64, fill: [f32; 4]) -> Mobject {
         points.push([b[0], b[1], 0.0]);
     }
 
-    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     for (i, point) in points.iter().enumerate() {
         buffer.write(
             i,
@@ -71,7 +71,7 @@ fn stroked_chain(segment_count: usize) -> Mobject {
         points.push([x2, y2, 0.0]);
     }
 
-    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     for (i, point) in points.iter().enumerate() {
         buffer.write(
             i,

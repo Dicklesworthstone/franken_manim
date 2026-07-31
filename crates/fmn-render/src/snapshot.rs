@@ -239,7 +239,7 @@ mod tests {
                 [dx + 2.0, 1.0, 0.0],
                 [dx + 2.0, 2.0, 0.0],
             ];
-            let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len());
+            let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len()).unwrap();
             for (i, p) in pts.iter().enumerate() {
                 buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
                 buffer.write(i, "stroke_rgba", &rgba);
@@ -270,7 +270,7 @@ mod tests {
             None,
         );
         let pts = arc.points();
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len()).unwrap();
         for (i, p) in pts.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "stroke_rgba", &[0.0, 0.0, 1.0, 1.0]);

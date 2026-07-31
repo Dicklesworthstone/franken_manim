@@ -2328,7 +2328,7 @@ fn write_stroke_widths(stage: &mut Stage, mob: Mob, widths: &[f64]) {
         return;
     };
     if entry.buffer.len() != widths.len() {
-        entry.buffer.resize_preserving_order(widths.len());
+        let _ = entry.buffer.resize_preserving_order(widths.len());
     }
     let flat: Vec<f32> = widths.iter().map(|&w| w as f32).collect();
     let _ = entry.buffer.write_range("stroke_width", 0, &flat);
@@ -2339,7 +2339,7 @@ fn write_stroke_rgba(stage: &mut Stage, mob: Mob, rgba: &[[f64; 4]]) {
         return;
     };
     if entry.buffer.len() != rgba.len() {
-        entry.buffer.resize_preserving_order(rgba.len());
+        let _ = entry.buffer.resize_preserving_order(rgba.len());
     }
     let flat: Vec<f32> = rgba
         .iter()

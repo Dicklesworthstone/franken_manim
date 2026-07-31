@@ -2751,7 +2751,7 @@ mod tests {
     /// the way `mobject.data` presents them — so these fixtures exercise
     /// `read_style`'s decode rather than sneaking past it.
     fn vmob(points: &[[f64; 3]], fill: [f32; 4], stroke: [f32; 4], width: f32) -> Mobject {
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "fill_rgba", &fill);
@@ -2944,7 +2944,7 @@ mod tests {
                 let points = path.points().to_vec();
                 let last = points.len() - 1;
                 let gradient = (row + col) % 3 == 0;
-                let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+                let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
                 for (i, p) in points.iter().enumerate() {
                     buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
                     // A different colour on the last record is how the IR

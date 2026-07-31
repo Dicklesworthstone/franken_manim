@@ -263,8 +263,9 @@ impl From<ImageMobject> for Mobject {
             &[("point", 3), ("im_coords", 2), ("opacity", 1)],
             &["point"],
             &["point"],
-        );
-        let mut buffer = RecordBuffer::new(schema, 6);
+        )
+        .expect("the image record schema is six lanes");
+        let mut buffer = RecordBuffer::new(schema, 6).expect("six image records cannot overflow");
         #[allow(clippy::cast_possible_truncation)]
         let flat_points: Vec<f32> = image
             .quad_points()

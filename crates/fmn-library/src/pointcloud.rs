@@ -457,7 +457,8 @@ impl From<PMobject> for Mobject {
             ..
         } = pm;
         // The Reference's Mobject dtype: [('point', f32, 3), ('rgba', f32, 4)].
-        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), points.len())
+            .expect("record sizing bounded by the point list");
         #[allow(clippy::cast_possible_truncation)]
         let flat_points: Vec<f32> = points
             .iter()
@@ -796,8 +797,10 @@ impl From<DotCloud> for Mobject {
             &[("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 1)],
             &["point"],
             &["point"],
-        );
-        let mut buffer = RecordBuffer::new(schema, points.len());
+        )
+        .expect("the point-cloud record schema is nine lanes");
+        let mut buffer = RecordBuffer::new(schema, points.len())
+            .expect("record sizing bounded by the point list");
         #[allow(clippy::cast_possible_truncation)]
         let flat_points: Vec<f32> = points
             .iter()

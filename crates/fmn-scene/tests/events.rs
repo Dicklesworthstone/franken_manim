@@ -25,7 +25,7 @@ fn rectangle(center: [f64; 3], color: Srgb) -> Mobject {
         [center[0] + 0.5, center[1] + 0.5, center[2]],
         [center[0] - 0.5, center[1] + 0.5, center[2]],
     ];
-    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
     #[allow(clippy::cast_possible_truncation)]
     let flat_points: Vec<f32> = points
         .iter()

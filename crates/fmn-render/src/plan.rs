@@ -641,7 +641,7 @@ mod tests {
     use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
 
     fn vmobject(points: &[[f64; 3]]) -> Mobject {
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "stroke_rgba", &[1.0, 1.0, 1.0, 1.0]);
@@ -772,7 +772,8 @@ mod tests {
             ],
             &["point"],
             &["point"],
-        );
+        )
+        .unwrap();
         let points = [
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
@@ -780,7 +781,7 @@ mod tests {
             [2.0, 0.5, 0.0],
             [2.0, 1.0, 0.0],
         ];
-        let mut buffer = RecordBuffer::new(schema, points.len());
+        let mut buffer = RecordBuffer::new(schema, points.len()).unwrap();
         for (i, point) in points.iter().enumerate() {
             buffer.write(i, "point", point);
             buffer.write(i, "stroke_rgba", &[1.0; 4]);

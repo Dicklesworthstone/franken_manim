@@ -188,7 +188,8 @@ impl StyleSpec {
 /// the library's `From<VMobject> for Mobject` conversion: flat points,
 /// joint angles from the Chisel path, then style columns.
 fn build_vmobject(points: &[Vec3], shape: ShapeTag, style: StyleSpec) -> Mobject {
-    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len());
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+        .expect("record sizing bounded by the point list");
     let flat: Vec<f32> = points
         .iter()
         .flat_map(|p| p.iter().map(|v| *v as f32))

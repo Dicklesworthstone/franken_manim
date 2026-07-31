@@ -420,7 +420,7 @@ mod tests {
     /// library's record schema. No geometry crate needed at this tier.
     fn test_mobject(points: &[[f64; 3]]) -> Mobject {
         let n = points.len();
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), n);
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), n).unwrap();
         let flat: Vec<f32> = points
             .iter()
             .flat_map(|p| p.iter().map(|v| *v as f32))

@@ -1181,7 +1181,8 @@ mod wasm_tier1_determinism_proxy {
             [-1.0, -1.0, 0.0],
         ];
         let mut buffer =
-            fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), points.len());
+            fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), points.len())
+                .unwrap();
         for (i, point) in points.iter().enumerate() {
             buffer.write(i, "point", point);
             buffer.write(i, "fill_rgba", &[1.0, 0.0, 0.0, 1.0]);

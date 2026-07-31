@@ -324,8 +324,9 @@ mod tests {
     use fmn_mobject::RecordSchema;
 
     fn buffer() -> RecordBuffer {
-        let schema = RecordSchema::new(&[("point", 3), ("rgba", 4)], &["point"], &["point"]);
-        let mut buffer = RecordBuffer::new(schema, 2);
+        let schema =
+            RecordSchema::new(&[("point", 3), ("rgba", 4)], &["point"], &["point"]).unwrap();
+        let mut buffer = RecordBuffer::new(schema, 2).unwrap();
         assert!(buffer.write(0, "point", &[1.0, 2.0, 3.0]));
         assert!(buffer.write(1, "point", &[-1.0, 0.5, 4.0]));
         assert!(buffer.write(0, "rgba", &[0.0, 0.0, 0.0, 1.0]));

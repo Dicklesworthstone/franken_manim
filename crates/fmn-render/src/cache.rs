@@ -375,7 +375,7 @@ mod tests {
             [cx - hw, cy, 0.0],
             [cx - hw, cy - hh, 0.0],
         ];
-        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len());
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len()).unwrap();
         for (i, p) in pts.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
             buffer.write(i, "fill_rgba", &[0.2, 0.4, 0.6, 1.0]);
