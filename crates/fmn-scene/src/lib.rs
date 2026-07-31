@@ -16,6 +16,7 @@ pub mod events;
 pub mod interactive;
 pub mod journal;
 pub mod runtime;
+pub mod timeline_bundle;
 
 /// Lower-layer scene types exposed through Proscenium for Studio adapters.
 ///
@@ -48,4 +49,7 @@ pub use runtime::{
     OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram, SceneRegistration,
     SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError, SceneSink,
     SceneStateRestore, SoundRequest, ThreeDAddOptions, ThreeDScene,
+};
+pub use timeline_bundle::{
+    BundleError, TIMELINE_BUNDLE_SCHEMA, bundle_engine_version, export_timeline_bundle,
 };

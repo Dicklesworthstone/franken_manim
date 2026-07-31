@@ -1118,3 +1118,177 @@ fn direct_scene_state_fixture_can_restore_rng_exactly() {
     // Keep the public persistence type in the acceptance surface.
     let _: &SceneState = &captured;
 }
+
+// W5 wasm tier 1 (fm-l97): the host-side proxy for the wasm32 determinism
+// contract. The browser build runs single-threaded —
+// `HardwareTopology::current` reports one logical CPU and
+// `fmn_render::effective_threads` collapses any fan-out request to the
+// serial band loop — so the wasm32-equivalent configuration is `threads = 1`.
+// This proxy runs the full Proscenium lifecycle (play + wait, packets
+// materialized at the Lumen boundary exactly as the conformance corpus does)
+// twice and demands byte-identical canonical frames. The in-VM half of the
+// proof — the same property observed executing inside a real wasm32 VM —
+// lives in `wasm-smoke/` and runs under node; this test pins the property to
+// the host gates so it cannot rot when no wasm runner is wired into CI.
+mod wasm_tier1_determinism_proxy {
+    use fmn_core::color::Srgb;
+    use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
+    use fmn_render::engine::{FrameConfig, FrameJob, encode_frame};
+    use fmn_render::fill::MonoTable;
+    use fmn_render::plan::RenderPlan;
+
+    use super::*;
+
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 54;
+    const TILING: Tiling = Tiling {
+        macro_tile: 64,
+        fine_tile: 8,
+    };
+
+    fn frame_config() -> FrameConfig {
+        FrameConfig::new(
+            Viewport {
+                width: WIDTH,
+                height: HEIGHT,
+            },
+            ScreenMap {
+                scale: 20.0,
+                origin: [f64::from(WIDTH) / 2.0, f64::from(HEIGHT) / 2.0],
+            },
+            Srgb::from_rgb8(0x22, 0x22, 0x22).to_linear(1.0),
+        )
+    }
+
+    /// A filled square — the smallest primitive scene with real coverage.
+    /// The point run is the quad-path anchor/handle interleave a library
+    /// builder would emit (`set_points_as_corners` over the closed corner
+    /// ring: anchors with midpoint handles, first corner repeated to close),
+    /// written over the VMobject record schema with an opaque fill. A bare
+    /// `Mobject::from_points` carries neither the path structure nor a style
+    /// and would rasterize to background, making the byte-equality assertion
+    /// below vacuous.
+    fn square() -> Mobject {
+        let points: [[f32; 3]; 9] = [
+            [-1.0, -1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [-1.0, -1.0, 0.0],
+        ];
+        let mut buffer =
+            fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), points.len());
+        for (i, point) in points.iter().enumerate() {
+            buffer.write(i, "point", point);
+            buffer.write(i, "fill_rgba", &[1.0, 0.0, 0.0, 1.0]);
+            buffer.write(i, "stroke_rgba", &[1.0, 1.0, 1.0, 1.0]);
+            buffer.write(i, "stroke_width", &[4.0]);
+        }
+        Mobject::from_buffer(buffer)
+    }
+
+    /// Materialize one packet and rasterize it single-threaded — the wasm32
+    /// configuration — returning the canonical encoded frame bytes.
+    fn render_single_thread(packet: &fmn_anim::FramePacket) -> Vec<u8> {
+        let stage = packet.materialize_stage();
+        let config = frame_config();
+        let mut plan = RenderPlan::new();
+        let camera_revision = u64::try_from(packet.frame_index()).expect("frame index");
+        plan.sync(&stage, camera_revision);
+        let mono = MonoTable::build(&plan, config.map);
+        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+        binning.prune_occluded(&plan).expect("prune");
+        let job = FrameJob::new(&plan, &mono, &binning, config).expect("job");
+        let frame = job.render(1).expect("render");
+        encode_frame(&frame).expect("encode")
+    }
+
+    struct FrameBytes {
+        frames: Vec<Vec<u8>>,
+    }
+
+    impl SceneSink for FrameBytes {
+        fn capture(
+            &mut self,
+            _reason: CaptureReason,
+            packet: fmn_anim::FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.frames.push(render_single_thread(&packet));
+            Ok(())
+        }
+    }
+
+    /// Run one small scene (a shifting square, then a wait hold) and collect
+    /// every captured frame's canonical bytes.
+    fn run_scene_frames() -> Vec<Vec<u8>> {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 8,
+                ..RuntimeConfig::default()
+            },
+            5,
+        )
+        .expect("scene");
+        let mob = scene.add_mobject(square()).expect("root");
+        let builder = mob
+            .animate()
+            .set_anim_args(AnimateArgs {
+                run_time: Some(0.5),
+                rate_func: Some(fmn_core::rate::linear),
+                ..AnimateArgs::default()
+            })
+            .and_then(|builder| builder.shift([2.0, 1.0, 0.0]))
+            .expect("records");
+        let animation = prepare_animation(builder, scene.stage_mut()).expect("prepares");
+        let mut sink = FrameBytes { frames: Vec::new() };
+        scene
+            .play(vec![animation], PlayOverrides::default(), &mut sink)
+            .expect("plays");
+        sink.frames
+    }
+
+    #[test]
+    fn single_thread_render_is_byte_identical_across_runs() {
+        let first = run_scene_frames();
+        let second = run_scene_frames();
+        assert!(
+            !first.is_empty(),
+            "the play segment captured at least one frame"
+        );
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "frame counts diverged between identical scene runs"
+        );
+        for (index, (a, b)) in first.iter().zip(&second).enumerate() {
+            assert_eq!(
+                a, b,
+                "frame {index} differs between identical single-threaded runs"
+            );
+        }
+
+        // The proxy must prove the scene actually drew something, or the
+        // equality above would hold vacuously over background-only frames.
+        let background_only = {
+            let stage = Stage::default();
+            let config = frame_config();
+            let mut plan = RenderPlan::new();
+            plan.sync(&stage, 0);
+            let mono = MonoTable::build(&plan, config.map);
+            let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+            binning.prune_occluded(&plan).expect("prune");
+            let job = FrameJob::new(&plan, &mono, &binning, config).expect("job");
+            let frame = job.render(1).expect("render");
+            encode_frame(&frame).expect("encode")
+        };
+        assert_ne!(
+            first[0], background_only,
+            "the square scene rendered background-only bytes — the proxy \
+             would be vacuous"
+        );
+    }
+}
