@@ -1,0 +1,8 @@
+# fmn-wasm artifact-size budget (R19, fm-l97, §10.7)
+# budget_bytes = measured_bytes + 10% headroom (ceil), enforced by the
+# size_budget_within_headroom test in crates/fmn-wasm/src/lib.rs.
+# Rebuild and re-measure deliberately; never raise the budget silently.
+artifact	measured_bytes	budget_bytes	measured_on	notes
+cargo-release-wasm	534945	588440	2026-07-31	target/wasm32-unknown-unknown/release/fmn_wasm.wasm (cargo build --target wasm32-unknown-unknown --release -p fmn-wasm; thin LTO). 2026-07-31 re-measure: +FmnPlayer (fm-oee tier 2)
+wasm-bindgen-web-pkg	377436	415180	2026-07-31	demo/wasm/pkg/fmn_wasm_bg.wasm (wasm-pack 0.13.1 build --target web; wasm-bindgen 0.2.126 + wasm-opt). 2026-07-31 re-measure: +FmnPlayer (fm-oee tier 2)
+demo-timeline-bundle	302437	332681	2026-07-31	demo/wasm/bundle.fmtl (cargo run -p fmn-wasm --example export_bundle; FMTL/1, fm-oee; enforced by demo_bundle_size_within_budget)

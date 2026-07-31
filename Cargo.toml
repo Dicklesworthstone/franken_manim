@@ -22,6 +22,7 @@ members = [
     "crates/fmn-runtime",
     "crates/fmn-cli",
     "crates/fmn-conformance",
+    "crates/fmn-wasm",
     "crates/fmn-python",
     "spikes/g0-1-object-model",
     "spikes/g0-3-fmd-math",
@@ -42,6 +43,7 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "33398129845d0017adfbbf8a481e2504c01336c7", default-features = false }
 fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8", features = ["bundled-faces"] }
 fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "4e5066c62818dfce75ccd940a7a54f600e1fe6a8" }
+fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
 ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "523aaf827faf538aa541126ee222fcd7af348410" }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
