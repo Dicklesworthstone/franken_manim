@@ -133,6 +133,36 @@ fn compiled_definitions_accept_only_their_exact_baseline_identity() {
 }
 
 #[test]
+fn producer_refuses_baseline_drift_before_profile_or_sampler() {
+    let scenario = Pg8Scenario::NativeBuiltins;
+    let mut baseline =
+        Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
+    baseline.key.benchmark_definition = sha256(b"other-definition");
+    let sampler_called = std::cell::Cell::new(false);
+    let sampler = |_| {
+        sampler_called.set(true);
+        Err(fmn_conformance::perf_pg8::Pg8Error::Harness(
+            "sampler must not run".to_owned(),
+        ))
+    };
+    let result = measure_pg8(
+        &baseline,
+        COMMIT,
+        &sampler,
+        "tests/artifacts/perf/pg8-preflight/trace.tsv",
+    );
+    let error = result.expect_err("baseline drift must fail before timing");
+    assert!(
+        !sampler_called.get(),
+        "sampler ran before identity preflight"
+    );
+    assert!(
+        error.to_string().contains("benchmark_definition"),
+        "{error}"
+    );
+}
+
+#[test]
 fn injected_pg8_slowdown_blocks_through_the_common_verifier() {
     for scenario in Pg8Scenario::ALL {
         let baseline_batch = batch(scenario, target(scenario) / 2);

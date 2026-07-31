@@ -269,9 +269,11 @@ impl Pg8Definition {
         if baseline.policy.max_invalid_samples != PG8_MAX_INVALID_SAMPLES {
             mismatches.push("max_invalid_samples");
         }
+        // ubs:ignore - public benchmark identity digest, not an authentication secret.
         if key.benchmark_definition != self.digest() {
             mismatches.push("benchmark_definition");
         }
+        // ubs:ignore - public configuration identity digest, not an authentication secret.
         if key.config_digest != self.config_digest() {
             mismatches.push("config_digest");
         }
@@ -387,6 +389,7 @@ pub fn assemble_pg8(
         )));
     }
     let result_digest = sha256(&measurement.result_state);
+    // ubs:ignore - public self-golden digest, not an authentication secret.
     if result_digest != definition.expected_result_digest() {
         return Err(Pg8Error::SelfGolden(format!(
             "{scenario} result digest drifted: expected {}, measured {result_digest}",
@@ -457,6 +460,8 @@ pub fn measure_pg8(
             baseline.policy.scenario
         ))
     })?;
+    let definition = Pg8Definition::new(scenario);
+    definition.validate_baseline(baseline)?;
     require_release_perf_artifact()?;
     let measurement = sampler(scenario)?;
     assemble_pg8(baseline, producer_commit, &measurement, trace_path)
