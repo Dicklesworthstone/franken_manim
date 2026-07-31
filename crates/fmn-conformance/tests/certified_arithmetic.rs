@@ -138,35 +138,213 @@ fn certified_roots() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Strip a trailing `//` comment, honouring string literals.
+/// Return source with comments and literals blanked, preserving line breaks.
 ///
 /// A guard that reads comments flags its own documentation: `fill.rs` explains
 /// why the disc antiderivative uses `atan2` "because `f64::asin` defers to the
 /// platform's libm", and `distance.rs` says the same about `cbrt`. Both
 /// sentences are the *reason this file exists* and neither is a call.
 ///
-/// The string-literal handling is not fussiness. A naive `find("//")` truncates
-/// at the first `//` anywhere on the line, so one URL in a string would silently
-/// blind the rest of that line — and a guard's false *negative* is the failure
-/// that matters, because it reads as a pass.
-fn code_of(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut in_string = false;
-    let mut escaped = false;
+/// Blanking rather than deleting keeps every diagnostic on its original line.
+/// It also makes the brace counter below operate on Rust tokens rather than on
+/// braces that happen to occur inside a test string or block comment.
+fn code_only(text: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment(usize),
+        String,
+        RawString(usize),
+    }
+
+    fn raw_string_open(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+        if bytes.get(start) != Some(&b'r') {
+            return None;
+        }
+        let mut quote = start + 1;
+        while bytes.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        (bytes.get(quote) == Some(&b'"')).then_some((quote + 1, quote - start - 1))
+    }
+
+    fn char_literal_end(text: &str, start: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut next = start + 1;
+        match *bytes.get(next)? {
+            b'\n' | b'\r' | b'\'' => return None,
+            b'\\' => {
+                next += 1;
+                match *bytes.get(next)? {
+                    b'x' => next += 3,
+                    b'u' => {
+                        next += 1;
+                        if bytes.get(next) != Some(&b'{') {
+                            return None;
+                        }
+                        next += 1;
+                        while !matches!(bytes.get(next), None | Some(b'}' | b'\n' | b'\r')) {
+                            next += 1;
+                        }
+                        if bytes.get(next) != Some(&b'}') {
+                            return None;
+                        }
+                        next += 1;
+                    }
+                    _ => next += 1,
+                }
+            }
+            _ => next += text[next..].chars().next()?.len_utf8(),
+        }
+        (bytes.get(next) == Some(&b'\'')).then_some(next + 1)
+    }
+
+    let bytes = text.as_bytes();
+    let mut out = vec![b' '; bytes.len()];
+    let mut state = State::Code;
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            _ if escaped => escaped = false,
-            b'\\' if in_string => escaped = true,
-            b'"' => in_string = !in_string,
-            b'/' if !in_string && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                return &line[..i];
+        if bytes[i] == b'\n' {
+            out[i] = b'\n';
+            if matches!(state, State::LineComment) {
+                state = State::Code;
             }
-            _ => {}
+            i += 1;
+            continue;
         }
-        i += 1;
+
+        match state {
+            State::Code => {
+                if bytes[i..].starts_with(b"//") {
+                    state = State::LineComment;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"/*") {
+                    state = State::BlockComment(1);
+                    i += 2;
+                } else if let Some((after_quote, hashes)) = raw_string_open(bytes, i) {
+                    state = State::RawString(hashes);
+                    i = after_quote;
+                } else if bytes[i] == b'"' {
+                    state = State::String;
+                    i += 1;
+                } else if bytes[i] == b'\'' {
+                    if let Some(end) = char_literal_end(text, i) {
+                        i = end;
+                    } else {
+                        out[i] = bytes[i];
+                        i += 1;
+                    }
+                } else {
+                    out[i] = bytes[i];
+                    i += 1;
+                }
+            }
+            State::LineComment => i += 1,
+            State::BlockComment(depth) => {
+                if bytes[i..].starts_with(b"/*") {
+                    state = State::BlockComment(depth + 1);
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    state = if depth == 1 {
+                        State::Code
+                    } else {
+                        State::BlockComment(depth - 1)
+                    };
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            State::String => {
+                if bytes[i] == b'\\' {
+                    if bytes.get(i + 1) == Some(&b'\n') {
+                        out[i + 1] = b'\n';
+                    }
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == b'"' {
+                    state = State::Code;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            State::RawString(hashes) => {
+                if bytes[i] == b'"'
+                    && bytes
+                        .get(i + 1..i + 1 + hashes)
+                        .is_some_and(|suffix| suffix.iter().all(|b| *b == b'#'))
+                {
+                    state = State::Code;
+                    i += 1 + hashes;
+                } else {
+                    i += 1;
+                }
+            }
+        }
     }
-    line
+    String::from_utf8(out).expect("blanking valid UTF-8 with ASCII preserves UTF-8")
+}
+
+/// Whether a cfg expression can only be true when `test` is true.
+///
+/// This is deliberately conservative: an expression we do not understand is
+/// scanned as production. `all` requires only one test-only conjunct, while
+/// `any` is test-only only when every branch is.
+fn cfg_requires_test(expr: &str) -> bool {
+    fn arguments<'a>(expr: &'a str, operator: &str) -> Option<Vec<&'a str>> {
+        let body = expr
+            .strip_prefix(operator)?
+            .strip_prefix('(')?
+            .strip_suffix(')')?;
+        let mut args = Vec::new();
+        let mut depth = 0_u32;
+        let mut start = 0;
+        for (i, byte) in body.bytes().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => {
+                    args.push(&body[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        args.push(&body[start..]);
+        Some(args)
+    }
+
+    if expr == "test" {
+        return true;
+    }
+    if let Some(args) = arguments(expr, "all") {
+        return args.into_iter().any(cfg_requires_test);
+    }
+    if let Some(args) = arguments(expr, "any") {
+        return !args.is_empty() && args.into_iter().all(cfg_requires_test);
+    }
+    false
+}
+
+/// Return the byte immediately after a leading test-only cfg attribute.
+fn test_only_cfg_end(code: &str) -> Option<usize> {
+    let trimmed = code.trim_start();
+    let leading = code.len() - trimmed.len();
+    let close = trimmed.find(']')?;
+    let attribute = &trimmed[..=close];
+    let compact: String = attribute.chars().filter(|c| !c.is_whitespace()).collect();
+    let expr = compact.strip_prefix("#[cfg(")?.strip_suffix(")]")?;
+    cfg_requires_test(expr).then_some(leading + close + 1)
+}
+
+/// Consume one line of a test-only item and report whether the item ended.
+fn test_item_line_ends(code: &str, depth: &mut usize, started: &mut bool) -> bool {
+    let opens = code.matches('{').count();
+    let closes = code.matches('}').count();
+    *started |= opens > 0;
+    *depth = depth.saturating_add(opens).saturating_sub(closes);
+    (*started && *depth == 0) || (!*started && code.trim_end().ends_with(';'))
 }
 
 /// Scan one file's **non-test** region for `needles`, returning the lines read.
@@ -189,34 +367,32 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
     let Ok(text) = std::fs::read_to_string(path) else {
         return 0;
     };
+    let code_text = code_only(&text);
     let mut scanned = 0;
-    let mut skip_depth: Option<i32> = None;
+    let mut skip_depth: Option<usize> = None;
     let mut skip_started = false;
 
-    for (i, line) in text.lines().enumerate() {
+    for (i, (line, code)) in text.lines().zip(code_text.lines()).enumerate() {
         let trimmed = line.trim_start();
-        let code = code_of(line);
 
         // Inside a `#[cfg(test)]` item: consume it, then resume.
         if let Some(depth) = skip_depth.as_mut() {
-            let opens = code.matches('{').count() as i32;
-            let closes = code.matches('}').count() as i32;
-            if opens > 0 {
-                skip_started = true;
-            }
-            *depth += opens - closes;
-            let ends_block = skip_started && *depth <= 0;
-            let ends_statement = !skip_started && code.trim_end().ends_with(';');
-            if ends_block || ends_statement {
+            if test_item_line_ends(code, depth, &mut skip_started) {
                 skip_depth = None;
                 skip_started = false;
             }
             continue;
         }
 
-        if trimmed.starts_with("#[cfg(test)]") {
-            skip_depth = Some(0);
+        if let Some(attribute_end) = test_only_cfg_end(code) {
+            let mut depth = 0;
             skip_started = false;
+            let item_on_attribute_line = &code[attribute_end..];
+            if !test_item_line_ends(item_on_attribute_line, &mut depth, &mut skip_started) {
+                skip_depth = Some(depth);
+            } else {
+                skip_started = false;
+            }
             continue;
         }
 
@@ -359,12 +535,22 @@ let erf = cc.erf();
 let erfc = dd.erfc();
 // this comment mentions .sin() and f64::cbrt and must not count
 /// nor must this doc comment's `.exp()`
+let string_only = \".log(\";
+let raw_string_only = r#\".log2(\"#;
+/* this block comment's `.log10()` must not count */
 let j = k.to_radians();
 let url = \"https://example.invalid/a\"; let leak = q.tanh();
 #[cfg(test)]
 mod tests {
+    const OPEN_BRACE_INSIDE_A_STRING: &str = \"{\";
     fn helper() { let hidden = z.acos(); }
 }
+let after_test_string_brace = q.asinh();
+#[cfg(test)] mod inline_tests { fn helper() { let hidden = z.acosh(); } }
+let after_inline_test_item = q.atanh();
+#[cfg(all(test, unix))]
+mod unix_tests { fn helper() { let hidden = z.log10(); } }
+let after_test_only_cfg = q.exp_m1();
 ";
     let dir = std::env::temp_dir().join(format!(
         "fmn-guard-selftest-{}-{}",
@@ -384,20 +570,21 @@ mod tests {
     //  * the method and path forms are both caught, and reported under distinct
     //    names — `f64::cos(y)` contains no `.cos(`, so it appears once, which is
     //    what makes a failure message point at the right line;
-    //  * comments, `sqrt`, `to_radians` and a qualified `fmn_dmath::` call are
-    //    all legal and must not appear;
+    //  * comments, strings, `sqrt`, `to_radians` and a qualified
+    //    `fmn_dmath::` call are all legal and must not appear;
     //  * `powi`, `sin_cos`, and the four pinned-nightly libc-backed functions
     //    are covered, and `tanh` IS caught even though a `//`-bearing string
     //    literal precedes it on the same line — the false-negative class
-    //    `code_of` now closes;
-    //  * `acos` is NOT caught, because it sits inside the `#[cfg(test)] mod`,
-    //    while everything after the `#[cfg(test)] use` on line 1 still is —
-    //    the coverage hole `bezier.rs` exposed.
+    //    `code_only` now closes;
+    //  * `acos`, `acosh`, and `log10` are NOT caught because they sit inside
+    //    test-only items, while `asinh`, `atanh`, and `exp_m1` after those items
+    //    are caught even when a test string contains an unmatched source brace
+    //    or the entire test item shares its attribute's line.
     assert_eq!(
         names,
         [
-            "atan2", "cbrt", "erf", "erfc", "f64::cos", "gamma", "ln_gamma", "powf", "powi", "sin",
-            "sin_cos", "tanh"
+            "asinh", "atan2", "atanh", "cbrt", "erf", "erfc", "exp_m1", "f64::cos", "gamma",
+            "ln_gamma", "powf", "powi", "sin", "sin_cos", "tanh"
         ],
         "the transcendental needles do not catch what they must, or catch what \
          they must not"
