@@ -12,11 +12,22 @@
 //! Rust and no engine borrow crosses a Python callback.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod crossing;
+mod ladder;
+mod method_cache;
+pub mod perf_harness;
+mod report;
+
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_int, c_void};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Instant;
+
+use crossing::CrossingClass;
 
 use fmn_mobject::{
     JointType, Mob, Mobject, RecordBuffer, RecordSchema, RecordView, StageError, Uniforms,
@@ -1016,10 +1027,15 @@ impl BridgeMobject {
             cell.detached = Some(Mobject::from_buffer(RecordBuffer::new(schema, 0)));
             cell.initialized = true;
         }
-        // No engine or proxy borrow is live across these calls.
-        slf.call_method0("init_data")?;
-        slf.call_method0("init_points")?;
-        slf.call_method0("init_uniforms")?;
+        // No engine or proxy borrow is live across these calls. Each hook
+        // dispatches through the fm-zoi method-resolution cache (one native
+        // →Python method_dispatch crossing per hook).
+        crossing::record(CrossingClass::MethodDispatch);
+        method_cache::call_cached0(slf.as_any(), "init_data")?;
+        crossing::record(CrossingClass::MethodDispatch);
+        method_cache::call_cached0(slf.as_any(), "init_points")?;
+        crossing::record(CrossingClass::MethodDispatch);
+        method_cache::call_cached0(slf.as_any(), "init_uniforms")?;
         Ok(())
     }
 
@@ -1030,6 +1046,7 @@ impl BridgeMobject {
     fn init_uniforms(_slf: &Bound<'_, Self>) {}
 
     fn resize(slf: &Bound<'_, Self>, len: usize) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
         let stride = with_buffer_ref(slf, |buffer| buffer.schema().stride())?;
         len.checked_mul(stride)
             .ok_or_else(|| PyOverflowError::new_err("RecordBuffer resize overflows usize"))?;
@@ -1037,14 +1054,17 @@ impl BridgeMobject {
     }
 
     fn n_records(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        crossing::record(CrossingClass::Other);
         with_buffer_ref(slf, RecordBuffer::len)
     }
 
     fn revision(slf: &Bound<'_, Self>) -> PyResult<u64> {
+        crossing::record(CrossingClass::Other);
         with_buffer_ref(slf, RecordBuffer::revision)
     }
 
     fn field_names(slf: &Bound<'_, Self>) -> PyResult<Vec<String>> {
+        crossing::record(CrossingClass::Other);
         with_buffer_ref(slf, |buffer| {
             buffer
                 .schema()
@@ -1056,6 +1076,7 @@ impl BridgeMobject {
     }
 
     fn get_field(slf: &Bound<'_, Self>, field: &str, index: usize) -> PyResult<Vec<f32>> {
+        crossing::record(CrossingClass::Other);
         with_buffer_ref(slf, |buffer| buffer.read(index, field))?
             .ok_or_else(|| PyKeyError::new_err(format!("no `{field}` record at index {index}")))
     }
@@ -1066,6 +1087,7 @@ impl BridgeMobject {
         index: usize,
         values: Vec<f32>,
     ) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
         if with_buffer(slf, |buffer| buffer.write(index, field, &values))? {
             Ok(())
         } else {
@@ -1078,6 +1100,7 @@ impl BridgeMobject {
 
     #[pyo3(signature = (writable = true))]
     fn _data_array<'py>(slf: &Bound<'py, Self>, writable: bool) -> PyResult<Bound<'py, PyAny>> {
+        crossing::record(CrossingClass::Other);
         numpy_array(slf.py(), slf, writable)
     }
 
@@ -1087,10 +1110,12 @@ impl BridgeMobject {
     }
 
     fn _get_uniform<'py>(slf: &Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        crossing::record(CrossingClass::Other);
         uniform_value(slf.py(), uniforms_snapshot(slf)?, name)
     }
 
     fn _set_uniform(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
         with_uniforms(slf, |uniforms| set_uniform(uniforms, name, value))
     }
 
@@ -1190,6 +1215,7 @@ impl BridgeMobject {
     }
 
     fn family_size(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        crossing::record(CrossingClass::Other);
         let location = {
             let cell = slf.borrow();
             cell.engine
@@ -1225,26 +1251,32 @@ impl BridgeMobject {
             ));
         }
         let alpha = alpha as f32;
+        // fm-zoi GIL discipline (§17.4): the mixing kernel touches only
+        // owned f32 vectors, so it runs with the GIL released and the
+        // interpreter overlaps the native conversion. Bit-identical lane
+        // order: from + (to - from) * alpha, record-major.
+        let mixed: Vec<f32> = slf.py().detach(move || {
+            start_records
+                .iter()
+                .zip(target_records.iter())
+                .map(|(from, to)| from + (to - from) * alpha)
+                .collect()
+        });
+        crossing::record(CrossingClass::Other);
         with_buffer(slf, |buffer| {
+            let fields: Vec<(String, usize)> = buffer
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| (field.name.clone(), field.width))
+                .collect();
             let mut cursor = 0usize;
             for index in 0..buffer.len() {
-                let fields: Vec<(String, usize)> = buffer
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|field| (field.name.clone(), field.width))
-                    .collect();
-                for (field, width) in fields {
-                    let mixed: Vec<f32> = (0..width)
-                        .map(|lane| {
-                            let from = start_records[cursor + lane];
-                            let to = target_records[cursor + lane];
-                            from + (to - from) * alpha
-                        })
-                        .collect();
-                    let wrote = buffer.write(index, &field, &mixed);
+                for (field, width) in &fields {
+                    let end = cursor + width;
+                    let wrote = buffer.write(index, field, &mixed[cursor..end]);
                     debug_assert!(wrote, "schema and loop are identical");
-                    cursor += width;
+                    cursor = end;
                 }
             }
         })
@@ -1290,6 +1322,7 @@ impl BridgeMobject {
     }
 
     fn is_alive(slf: &Bound<'_, Self>) -> bool {
+        crossing::record(CrossingClass::Other);
         let cell = slf.borrow();
         match (&cell.engine, cell.mob) {
             (Some(engine), Some(mob)) => engine.borrow().stage().contains(mob),
@@ -1336,6 +1369,21 @@ fn scene_proxy_handles(
         handles.push(mob);
     }
     Ok(handles)
+}
+
+/// Mobjects receiving updater dispatch this frame, in stage order.
+fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
+    let scene_cell = scene.borrow();
+    let runtime = scene_cell.engine.borrow();
+    let mut targets = Vec::new();
+    for &root in runtime.stage().roots() {
+        for member in runtime.stage().family(root) {
+            if !targets.contains(&member) {
+                targets.push(member);
+            }
+        }
+    }
+    targets
 }
 
 #[pymethods]
@@ -1388,10 +1436,12 @@ impl PyScene {
     }
 
     fn root_count(&self) -> usize {
+        crossing::record(CrossingClass::Other);
         self.engine.borrow().stage().roots().len()
     }
 
     fn time(&self) -> f64 {
+        crossing::record(CrossingClass::Other);
         self.engine.borrow().stage().time()
     }
 
@@ -1404,37 +1454,79 @@ impl PyScene {
             .collect()
     }
 
-    /// Python updater callbacks run with no Scene/Stage borrow live. After
-    /// they finish, Marionette advances time and runs native updaters.
+    /// Rung 0 (always-correct default): Python updater callbacks run with
+    /// no Scene/Stage borrow live, one native→Python crossing per updater.
+    /// After they finish, Marionette advances time and runs native updaters.
     fn update(slf: &Bound<'_, Self>, dt: f64) -> PyResult<()> {
-        let targets = {
-            let scene = slf.borrow();
-            let runtime = scene.engine.borrow();
-            let mut targets = Vec::new();
-            for &root in runtime.stage().roots() {
-                for member in runtime.stage().family(root) {
-                    if !targets.contains(&member) {
-                        targets.push(member);
-                    }
-                }
-            }
-            targets
-        };
+        let targets = update_targets(slf);
         let py = slf.py();
+        let python_start = Instant::now();
         for target in targets {
             let Some(proxy) = live_proxy(py, slf, target) else {
                 continue;
             };
+            crossing::record(CrossingClass::Other);
             let updaters = proxy.getattr("updaters")?;
             let snapshot: Vec<Py<PyAny>> = updaters
                 .try_iter()?
                 .map(|item| item.map(Bound::unbind))
                 .collect::<PyResult<_>>()?;
             for updater in snapshot {
-                proxy.call_method1("_dispatch_updater", (updater, dt))?;
+                crossing::record(CrossingClass::UpdaterCall);
+                let args = PyTuple::new(
+                    py,
+                    [updater.bind(py).clone(), dt.into_pyobject(py)?.into_any()],
+                )?;
+                method_cache::call_cached1(&proxy, "_dispatch_updater", &args)?;
             }
         }
+        let python_ns = u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let native_start = Instant::now();
         slf.borrow().engine.borrow_mut().stage_mut().update(dt);
+        let native_ns = u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        crossing::record_phase(python_ns, native_ns);
+        Ok(())
+    }
+
+    /// Rung 1 (explicit opt-in, fm-zoi §15.2 Rev 4): the updater phase
+    /// crosses native→Python ONCE per frame. The bootstrap's
+    /// `Scene._dispatch_updater_batch` staticmethod iterates the same target
+    /// list in the same order, snapshots each mobject's `updaters` at that
+    /// mobject's turn (identical to rung 0's lazy snapshot), and invokes
+    /// `_dispatch_updater` per updater inside Python. The batch's return is
+    /// the single batched dirty-propagation crossing for the whole callback
+    /// group. Declared semantics: identical ordering and identical
+    /// observable state after each frame; liveness of proxies is resolved
+    /// once at frame start (frame-atomic).
+    fn update_batched(slf: &Bound<'_, Self>, dt: f64) -> PyResult<()> {
+        let targets = update_targets(slf);
+        let py = slf.py();
+        let mut batch = Vec::with_capacity(targets.len());
+        for target in targets {
+            if let Some(proxy) = live_proxy(py, slf, target) {
+                batch.push(proxy);
+            }
+        }
+        let python_start = Instant::now();
+        if !batch.is_empty() {
+            crossing::record(CrossingClass::MethodDispatch);
+            let args = PyTuple::new(
+                py,
+                [
+                    PyTuple::new(py, batch)?.into_any(),
+                    dt.into_pyobject(py)?.into_any(),
+                ],
+            )?;
+            method_cache::call_static_cached1(slf.as_any(), "_dispatch_updater_batch", &args)?;
+            // The batch return transfers the frame's accumulated dirty state
+            // to native in one crossing (batched per callback group).
+            crossing::record(CrossingClass::DirtyPropagation);
+        }
+        let python_ns = u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let native_start = Instant::now();
+        slf.borrow().engine.borrow_mut().stage_mut().update(dt);
+        let native_ns = u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        crossing::record_phase(python_ns, native_ns);
         Ok(())
     }
 
@@ -1453,14 +1545,24 @@ impl PyScene {
                 ));
             }
         }
-        let copy = mobject.call_method0("__copy__")?;
+        crossing::record(CrossingClass::MethodDispatch);
+        let copy = method_cache::call_cached0(mobject.as_any(), "__copy__")?;
         for step in 0..=steps {
             let alpha = if steps == 0 {
                 1.0
             } else {
                 step as f64 / steps as f64
             };
-            mobject.call_method1("interpolate", (&copy, target, alpha))?;
+            crossing::record(CrossingClass::MethodDispatch);
+            let args = PyTuple::new(
+                slf.py(),
+                [
+                    copy.clone(),
+                    target.as_any().clone(),
+                    alpha.into_pyobject(slf.py())?.into_any(),
+                ],
+            )?;
+            method_cache::call_cached1(mobject.as_any(), "interpolate", &args)?;
         }
         Ok(())
     }
@@ -1468,9 +1570,12 @@ impl PyScene {
     /// setup → construct → tear_down through Python MRO. tear_down runs even
     /// when construct raises; the original construct exception remains primary.
     fn _run_lifecycle(slf: &Bound<'_, Self>) -> PyResult<()> {
-        slf.call_method0("setup")?;
-        let construct = slf.call_method0("construct");
-        let teardown = slf.call_method0("tear_down");
+        crossing::record(CrossingClass::MethodDispatch);
+        method_cache::call_cached0(slf.as_any(), "setup")?;
+        crossing::record(CrossingClass::MethodDispatch);
+        let construct = method_cache::call_cached0(slf.as_any(), "construct");
+        crossing::record(CrossingClass::MethodDispatch);
+        let teardown = method_cache::call_cached0(slf.as_any(), "tear_down");
         match (construct, teardown) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
@@ -1483,6 +1588,78 @@ impl PyScene {
             .borrow_mut()
             .state_bytes()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+}
+
+/// Deterministic GIL-release verification probe (fm-zoi §17.4).
+///
+/// Holds only `Arc` atomics, so it is `Send` and usable from any Python
+/// thread. The intended protocol (see tests/bridge.py):
+///
+/// 1. a Python worker thread spins on [`PyGilProbe::native_started`], then
+///    calls [`PyGilProbe::tick`] in a loop — each tick requires the GIL;
+/// 2. the main thread calls [`PyGilProbe::run_native`], which flips
+///    `started` and runs a deterministic native kernel with the GIL
+///    RELEASED (`Python::detach`), returning the tick count observed at
+///    kernel end;
+/// 3. observed > 0 proves the interpreter made progress during a long
+///    native wait. If the GIL were held across the kernel, the worker could
+///    never tick after `started` and the probe deterministically returns 0.
+///
+/// No wall-clock assertions anywhere: termination depends only on the fixed
+/// work-unit count, and the pass/fail signal is a counter.
+#[pyclass(name = "_GilProbe")]
+struct PyGilProbe {
+    progress: Arc<AtomicUsize>,
+    started: Arc<AtomicBool>,
+}
+
+#[pymethods]
+impl PyGilProbe {
+    #[new]
+    fn new() -> Self {
+        Self {
+            progress: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// One unit of Python-thread progress. Requires the GIL to execute —
+    /// that is the point of the probe.
+    fn tick(&self) {
+        self.progress.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Ticks observed so far.
+    fn observed(&self) -> usize {
+        self.progress.load(Ordering::Acquire)
+    }
+
+    /// Whether the native kernel has begun (the worker waits for this).
+    fn native_started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    /// Run `work_units` iterations of a deterministic native kernel with the
+    /// GIL released; return the number of Python ticks observed at the end.
+    /// This is the seam shape every long native wait (compilation,
+    /// rasterization, conversion, output) uses: owned `Send` state in,
+    /// `py.detach`, owned result out.
+    fn run_native(&self, py: Python<'_>, work_units: u64) -> usize {
+        let progress = Arc::clone(&self.progress);
+        let started = Arc::clone(&self.started);
+        py.detach(move || {
+            started.store(true, Ordering::Release);
+            // SplitMix64-style mixing; black_box keeps the kernel honest
+            // (un-elidable) while remaining fully deterministic.
+            let mut acc = 0x9E37_79B9_7F4A_7C15_u64;
+            for i in 0..work_units {
+                acc = acc.wrapping_add(i).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                acc ^= acc >> 31;
+                std::hint::black_box(acc);
+            }
+            progress.load(Ordering::Acquire)
+        })
     }
 }
 
@@ -1510,6 +1687,18 @@ fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;
     module.add_class::<PyRecordView>()?;
+    module.add_class::<PyGilProbe>()?;
+    module.add_class::<ladder::PyBatchedUpdater>()?;
+    module.add_class::<ladder::PyArrayUpdater>()?;
+    module.add_class::<ladder::PyNativeUpdater>()?;
+    module.add_function(wrap_pyfunction!(
+        crossing::_crossing_stats_snapshot,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(crossing::_crossing_stats_reset, module)?)?;
+    module.add_function(wrap_pyfunction!(method_cache::_method_cache_stats, module)?)?;
+    module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
+    module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
     module.add("_StaleHandleError", py.get_type::<StaleHandleError>())?;
     module.add("_ForeignStageError", py.get_type::<ForeignStageError>())?;
     module.add("_FamilyCycleError", py.get_type::<FamilyCycleError>())?;
@@ -1522,6 +1711,16 @@ fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     execute_bootstrap(py, module)
 }
 
+/// Serialize the Python-embedding acceptance suites: they share one
+/// process-global interpreter and one `sys.modules["manimlib"]` slot, so
+/// concurrent module construction races. Poison-tolerant: a panicked suite
+/// must not wedge the others.
+#[cfg(test)]
+pub(crate) fn python_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,6 +1728,7 @@ mod tests {
 
     #[test]
     fn production_bridge_acceptance_suite() {
+        let _lock = crate::python_test_lock();
         Python::initialize();
         Python::attach(|py| {
             let module = PyModule::new(py, "manimlib").expect("create test module");

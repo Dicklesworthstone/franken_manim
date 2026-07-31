@@ -105,3 +105,22 @@ wrapper. W11, not W10, owns the wheel/ABI matrix and namespace packaging.
 - W11 still owns wheels, CPython/platform ABI coverage, and the final
   `manimlib` namespace distribution policy. fm-aqv supplies the wheel-buildable
   cdylib boundary and import contract; it does not preempt that workstream.
+
+## Amendment 1 — fm-zoi ratifies one read-only `tp_version_tag` observer
+
+**Status:** Accepted
+**Date:** 2026-07-30
+**Bead:** fm-zoi (the binding-tax program)
+
+Decision 4 is amended to admit a third project-authored unsafe item beside
+the two buffer slots: `method_cache::type_version_tag` performs a single
+scalar read of `PyTypeObject::tp_version_tag` through pyo3-ffi's non-limited
+`#[repr(C)]` layout (abi3 remains off, so that layout is the interpreter
+ABI). It is the invalidation oracle for the fm-zoi method-resolution cache —
+the same mechanism CPython's own type caches use — and it is deliberately
+narrower than the buffer slots: it publishes no pointer, transfers no
+ownership, extends no lifetime, and mutates nothing. Tag `0` (CPython's
+invalid sentinel) is never cached as a hit, and the cache holds a strong
+reference to each keyed type so a keyed pointer can never dangle or be
+recycled while an entry lives. Any further project-authored unsafe in
+fmn-python still requires an amendment to this ADR.

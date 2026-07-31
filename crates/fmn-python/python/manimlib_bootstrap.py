@@ -407,6 +407,16 @@ class Scene(_SceneCore):
 
     render = run
 
+    @staticmethod
+    def _dispatch_updater_batch(mobjects, dt):
+        # fm-zoi rung 1: one native→Python crossing per frame. Iterates the
+        # engine's target list in order and snapshots each mobject's updater
+        # list at that mobject's turn — identical ordering and observable
+        # state to rung 0's per-updater dispatch.
+        for mobject in mobjects:
+            for updater in list(mobject.updaters):
+                mobject._dispatch_updater(updater, dt)
+
 
 class InteractiveScene(Scene):
     def embed(self, namespace=None):

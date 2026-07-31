@@ -418,3 +418,199 @@ for module_name, name in classes:
     types.new_class(f"_SubclassProbe_{name}", (candidate,))
 actual = {name for name in vars(manimlib) if not name.startswith("_")}
 assert actual == exported, sorted(actual ^ exported)[:20]
+
+
+# ---------------------------------------------------------------------------
+# fm-zoi (W10 binding tax, §15.2 Rev 4): method-resolution cache, batched
+# crossings (rung 1), CrossingStats instrumentation, and GIL release.
+# All assertions are count/state based — no wall-clock thresholds.
+# ---------------------------------------------------------------------------
+
+# The opt-in rung-1 API exists beside the always-correct rung 0.
+assert callable(Scene.update)
+assert callable(Scene.update_batched)
+
+
+# METHOD-RESOLUTION CACHE — correct under Python subclass mutation.
+class CacheProbe(Mobject):
+    def init_points(self):
+        self.seen = []
+        self.resize(1)
+        self.set_field("point", 0, [0.0, 0.0, 0.0])
+
+    def _dispatch_updater(self, updater, dt):
+        self.seen.append("original")
+        return super()._dispatch_updater(updater, dt)
+
+
+cache_scene = Scene()
+probe = CacheProbe()
+cache_scene.add(probe)
+probe_ticks = []
+probe.add_updater(lambda mob, dt: probe_ticks.append(dt), call=False)
+manimlib._method_cache_reset()
+cache_scene.update(0.25)  # first dispatch resolves and caches
+assert probe.seen == ["original"]
+assert probe_ticks == [0.25]
+cache_stats_first = manimlib._method_cache_stats()
+assert cache_stats_first["misses"] >= 1
+cache_scene.update(0.25)  # second dispatch hits the cache
+assert probe.seen == ["original", "original"]
+cache_stats_second = manimlib._method_cache_stats()
+assert cache_stats_second["hits"] > cache_stats_first["hits"]
+
+
+def patched_dispatch(self, updater, dt):
+    self.seen.append("patched")
+    return Mobject._dispatch_updater(self, updater, dt)
+
+
+CacheProbe._dispatch_updater = patched_dispatch  # class mutation
+cache_scene.update(0.25)
+assert probe.seen == ["original", "original", "patched"]
+cache_stats_patched = manimlib._method_cache_stats()
+assert cache_stats_patched["invalidations"] > cache_stats_second["invalidations"]
+assert probe_ticks == [0.25, 0.25, 0.25]
+
+
+# Base-class mutation recursively invalidates subclass cache entries.
+class BaseProbe(Mobject):
+    def init_points(self):
+        self.resize(1)
+        self.set_field("point", 0, [0.0, 0.0, 0.0])
+
+
+base_scene = Scene()
+base_probe = BaseProbe()
+base_scene.add(base_probe)
+base_ticks = []
+base_probe.add_updater(lambda mob, dt: base_ticks.append(dt), call=False)
+base_scene.update(0.5)  # caches (BaseProbe, _dispatch_updater) → Mobject's
+assert base_ticks == [0.5]
+saved_mobject_dispatch = Mobject._dispatch_updater
+base_calls = []
+
+
+def base_patched(self, updater, dt):
+    base_calls.append(dt)
+    return saved_mobject_dispatch(self, updater, dt)
+
+
+Mobject._dispatch_updater = base_patched
+try:
+    base_scene.update(0.5)
+    assert base_calls == [0.5]
+    assert base_ticks == [0.5, 0.5]
+finally:
+    Mobject._dispatch_updater = saved_mobject_dispatch
+
+
+# Instance-__dict__ shadowing still wins over the class-level cache.
+shadow = BaseProbe()
+shadow_scene = Scene()
+shadow_scene.add(shadow)
+shadow_ticks = []
+shadow.add_updater(lambda mob, dt: shadow_ticks.append(dt), call=False)
+shadow._dispatch_updater = lambda updater, dt: shadow_ticks.append("shadow")
+shadow_scene.update(1.0)
+assert shadow_ticks == ["shadow"]
+
+
+# BATCHED CROSSINGS (rung 1) — identical ordering and observable state with
+# measurably fewer crossings than rung 0 on the same callback corpus.
+def make_updater_scene(count, updaters_each):
+    scene = Scene()
+    mobjects = []
+    for index in range(count):
+        mob = Mobject()
+        mob.resize(1)
+        mob.set_field("point", 0, [float(index), 0.0, 0.0])
+
+        def make_tick(step):
+            def tick(m, dt):
+                point = m.get_field("point", 0)
+                m.set_field("point", 0, [point[0] + step * dt, point[1], point[2]])
+
+            return tick
+
+        for k in range(updaters_each):
+            mob.add_updater(make_tick(k + 1), call=False)
+        mobjects.append(mob)
+    scene.add(*mobjects)
+    return scene, mobjects
+
+
+N_MOBS, N_UPDATERS = 6, 4
+scene_rung0, mobs_rung0 = make_updater_scene(N_MOBS, N_UPDATERS)
+scene_rung1, mobs_rung1 = make_updater_scene(N_MOBS, N_UPDATERS)
+
+manimlib._crossing_stats_reset()
+scene_rung0.update(1.0)
+rung0 = manimlib._crossing_stats_snapshot()
+
+manimlib._crossing_stats_reset()
+scene_rung1.update_batched(1.0)
+rung1 = manimlib._crossing_stats_snapshot()
+
+assert rung0["updater_call"] == N_MOBS * N_UPDATERS
+assert rung1["updater_call"] == 0
+assert rung1["method_dispatch"] == 1
+assert rung1["dirty_propagation"] == 1
+# Field writes are inherent to the updaters and equal across rungs.
+assert rung0["field_write"] == rung1["field_write"] == N_MOBS * N_UPDATERS
+assert rung1["total"] < rung0["total"]
+# Exact deterministic counts: rung 0 pays 24 updater crossings + 6 updater
+# list snapshots on top of the 48 inherent field-I/O crossings; rung 1 pays
+# one batch dispatch + one batched dirty-propagation return.
+assert rung0["other"] == N_MOBS + N_MOBS * N_UPDATERS
+assert rung0["total"] == 2 * N_MOBS * N_UPDATERS + N_MOBS + N_MOBS * N_UPDATERS
+assert rung1["other"] == N_MOBS * N_UPDATERS
+assert rung1["total"] == 2 * N_MOBS * N_UPDATERS + 2
+assert rung0["python_callback_ns"] > 0
+assert rung1["python_callback_ns"] > 0
+# Bit-equality vs rung 0 after the frame, and updater ordering preserved:
+# updater k adds (k + 1) * dt to lane 0, so the sum is 1+2+3+4 = 10.
+for left, right in zip(mobs_rung0, mobs_rung1):
+    assert left.get_field("point", 0) == right.get_field("point", 0)
+assert mobs_rung1[0].get_field("point", 0)[0] == 10.0
+
+
+# Exceptions still propagate intact through the single batched crossing.
+def boom(mob, dt):
+    raise KeyError("batched updater boom")
+
+
+batch_exploding = Mobject()
+batch_exploding.resize(1)
+batch_exploding.set_field("point", 0, [0.0, 0.0, 0.0])
+batch_exploding.add_updater(boom, call=False)
+batch_scene = Scene()
+batch_scene.add(batch_exploding)
+try:
+    batch_scene.update_batched(0.1)
+except KeyError as error:
+    assert "batched updater boom" in str(error)
+else:
+    raise AssertionError("batched updater exception did not propagate")
+
+
+# GIL RELEASE — a Python thread makes progress (counter increments) during a
+# long detached native kernel; the pass/fail signal is the counter alone.
+gil_probe = manimlib._GilProbe()
+gil_stop = []
+
+
+def gil_spin():
+    while not gil_probe.native_started():
+        pass
+    while not gil_stop:
+        gil_probe.tick()
+
+
+gil_worker = threading.Thread(target=gil_spin)
+gil_worker.start()
+gil_observed = gil_probe.run_native(40_000_000)
+gil_stop.append(True)
+gil_worker.join()
+assert gil_observed > 0, "no Python progress during the detached native kernel"
+assert gil_probe.observed() >= gil_observed
