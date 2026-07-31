@@ -19,7 +19,8 @@
 //! (§7.4). [`isolines`] is the adaptive quadtree isoline extractor
 //! `ImplicitFunction` rides (§7.7), and [`earclip`] the deterministic
 //! hole-support triangulator for booleans' flatten fallback and mesh export
-//! (§7.8, fm-81u). Still to land: the SVG document processor (fm-6nm).
+//! (§7.8, fm-81u). [`svg`] is the hardened user-SVG document processor
+//! (§7.6, fm-6nm) with an explicit accept/reject matrix.
 #![forbid(unsafe_code)]
 
 pub mod arclength;
@@ -33,6 +34,7 @@ pub mod quadpath;
 pub mod rotation;
 pub mod smoothing;
 pub mod space_ops;
+pub mod svg;
 
 mod scalar;
 mod vec;
@@ -58,6 +60,10 @@ pub use smoothing::{MAX_CLOSED_SMOOTHING_DIMENSION, MAX_CLOSED_SMOOTHING_MATRIX_
 pub use space_ops::{
     MAX_COMPASS_DIRECTIONS, MAX_THICK_DIAGONAL_CELLS, MAX_THICK_DIAGONAL_DIMENSION, SpaceOpsError,
     rotation_matrix,
+};
+pub use svg::{
+    DEFAULT_SVG_TOLERANCE, LineCap, LineJoin, Paint, SvgDocument, SvgError, SvgLimits, SvgShape,
+    SvgStyle,
 };
 pub use vec::Mat3;
 
