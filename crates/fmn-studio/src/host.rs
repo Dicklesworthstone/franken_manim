@@ -427,6 +427,7 @@ impl Drop for FrameHub {
 /// callback. The only injected callback verifies replayed asset digests.
 pub struct StudioWorkerSession {
     scene: String,
+    protocol_limits: ProtocolLimits,
     supervisor: Mutex<Supervisor>,
     asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync>,
 }
@@ -450,8 +451,10 @@ impl StudioWorkerSession {
         if scene.is_empty() {
             return Err(HostError::Configuration("empty Studio scene name"));
         }
+        let protocol_limits = supervisor.protocol_limits();
         Ok(Self {
             scene,
+            protocol_limits,
             supervisor: Mutex::new(supervisor),
             asset_ok,
         })
@@ -624,6 +627,7 @@ impl StudioHost {
                     };
                     clients.push(client);
                 }
+                // ubs:ignore - I/O error kinds are public enum values, not secrets.
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -871,7 +875,7 @@ impl HostHandler {
                 write_json_response(stream, &bytes)
             }
             WorkerResponse::Frame(frame) if expected_data.is_none() => {
-                let published = self.frames.publish(&frame, ProtocolLimits::default())?;
+                let published = self.frames.publish(&frame, self.session.protocol_limits)?;
                 let body = format!(
                     "{{\"status\":\"frame\",\"frame_index\":{},\"sha256\":\"{}\"}}",
                     published.frame_index,
@@ -1647,6 +1651,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    use fmn_cache::{NamespacePolicy, Store, StoreConfig};
+    use fmn_platform::clock::FakeClock;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    use crate::supervisor::{StdWorkerLauncher, SupervisorConfig};
+
     #[test]
     fn strict_parser_rejects_duplicate_host_and_transfer_encoding() {
         let config = StudioHostConfig::default();
@@ -1804,6 +1814,88 @@ mod tests {
             ),
             Err(HostError::RateLimited)
         ));
+    }
+
+    #[test]
+    fn worker_frame_publication_uses_the_supervisor_protocol_budget() {
+        let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
+        let cache = Store::open(
+            fs,
+            Arc::clone(&clock),
+            "/host-protocol-limit-cache",
+            StoreConfig::default(),
+        )
+        .unwrap()
+        .namespace(
+            "studio-replay",
+            1,
+            NamespacePolicy {
+                ceiling_bytes: None,
+            },
+        )
+        .unwrap();
+        let limits = ProtocolLimits {
+            max_frame_bytes: 3,
+            ..ProtocolLimits::default()
+        };
+        let supervisor = Supervisor::new(
+            Box::new(StdWorkerLauncher::default()),
+            Arc::clone(&clock),
+            cache,
+            SupervisorConfig {
+                protocol_limits: limits,
+                ..SupervisorConfig::default()
+            },
+        );
+        let session =
+            Arc::new(StudioWorkerSession::new("Demo", supervisor, Arc::new(|_| true)).unwrap());
+        let token = CapabilityToken::new([0x44; TOKEN_BYTES]).unwrap();
+        let handler = HostHandler {
+            session,
+            frames: FrameHub::new(1, 1024).unwrap(),
+            clock,
+            config: StudioHostConfig::default(),
+            authority: "127.0.0.1:42".to_owned(),
+            localhost_authority: "localhost:42".to_owned(),
+            auth: Arc::new(Mutex::new(AuthState {
+                token,
+                started: Duration::ZERO,
+                requests: VecDeque::new(),
+            })),
+        };
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let bytes = vec![0x11; 4];
+        let response = WorkerResponse::Frame(FrameStream {
+            scene: "Demo".to_owned(),
+            frame_index: 0,
+            width: 1,
+            height: 1,
+            stride: 4,
+            encoding: FrameEncoding::Rgba8,
+            payload: FramePayload::Pipe {
+                digest: sha256(&bytes),
+                bytes,
+            },
+        });
+
+        let error = handler
+            .write_worker_response(&mut server, response, None)
+            .expect_err("the configured three-byte frame budget must reject four bytes");
+        assert!(matches!(
+            error,
+            HostError::Protocol(ProtocolError::PayloadLimit {
+                field: "frame",
+                limit: 3,
+                needed: 4,
+            })
+        ));
+        assert!(handler.frames.latest().is_none());
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        server.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(client);
     }
 
     fn authorized_get(token: &CapabilityToken) -> HttpRequest {

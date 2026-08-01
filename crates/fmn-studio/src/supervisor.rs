@@ -796,6 +796,12 @@ impl Supervisor {
         self.generation
     }
 
+    /// Immutable IPC resource budgets enforced for this supervisor session.
+    #[must_use]
+    pub const fn protocol_limits(&self) -> ProtocolLimits {
+        self.config.protocol_limits
+    }
+
     /// Crash reports retained by the stable supervisor.
     #[must_use]
     pub fn crashes(&self) -> &[CrashReport] {
