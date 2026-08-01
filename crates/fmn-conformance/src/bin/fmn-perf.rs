@@ -764,6 +764,14 @@ fn refuse_existing(path: &OsStr, label: &str) -> Result<(), CliError> {
 }
 
 fn validate_output_parent(path: &OsStr, label: &str) -> Result<(), CliError> {
+    validate_output_parent_with(path, label, host_node_kind)
+}
+
+fn validate_output_parent_with(
+    path: &OsStr,
+    label: &str,
+    mut node_kind: impl FnMut(&Path) -> Result<Option<FsNodeKind>, String>,
+) -> Result<(), CliError> {
     let parent = Path::new(path)
         .parent()
         .ok_or_else(|| CliError::data(format!("{label} has no parent directory")))?;
@@ -775,14 +783,19 @@ fn validate_output_parent(path: &OsStr, label: &str) -> Result<(), CliError> {
             )));
         };
         cursor.push(name);
-        let metadata = fs::symlink_metadata(&cursor)
-            .map_err(|error| CliError::io(format!("cannot inspect {label} parent: {error}")))?;
-        if metadata.file_type().is_symlink() {
+        let Some(kind) = node_kind(&cursor)
+            .map_err(|error| CliError::io(format!("cannot inspect {label} parent: {error}")))?
+        else {
+            return Err(CliError::io(format!(
+                "cannot inspect {label} parent: missing path component {cursor:?}"
+            )));
+        };
+        if kind == FsNodeKind::Link {
             return Err(CliError::data(format!(
-                "{label} parent contains a symbolic link at {cursor:?}"
+                "{label} parent contains a symbolic link or reparse point at {cursor:?}"
             )));
         }
-        if !metadata.is_dir() {
+        if kind != FsNodeKind::Directory {
             return Err(CliError::data(format!(
                 "{label} parent component is not a directory: {cursor:?}"
             )));
@@ -792,11 +805,13 @@ fn validate_output_parent(path: &OsStr, label: &str) -> Result<(), CliError> {
 }
 
 fn preflight_regular_input(path: &OsStr, label: &str) -> Result<(), CliError> {
-    preflight_regular_input_with(path, label, |candidate| {
-        StdFs
-            .node_kind_no_follow(candidate)
-            .map_err(|error| error.to_string())
-    })
+    preflight_regular_input_with(path, label, host_node_kind)
+}
+
+fn host_node_kind(path: &Path) -> Result<Option<FsNodeKind>, String> {
+    StdFs
+        .node_kind_no_follow(path)
+        .map_err(|error| error.to_string())
 }
 
 fn preflight_regular_input_with(
@@ -1133,6 +1148,30 @@ mod tests {
             validate_output_parent(OsStr::new("src/../new-output.tsv"), "test output").unwrap_err();
         assert_eq!(error.kind, "data");
         assert!(error.detail.contains("canonical relative path"));
+
+        const OUTPUT: &str = "tests/artifacts/perf/run/raw.tsv";
+        for (override_kind, expected_kind, expected_detail) in [
+            (
+                Some(FsNodeKind::Link),
+                "data",
+                "symbolic link or reparse point",
+            ),
+            (Some(FsNodeKind::RegularFile), "data", "not a directory"),
+            (Some(FsNodeKind::Other), "data", "not a directory"),
+            (None, "io", "missing path component"),
+        ] {
+            let error =
+                validate_output_parent_with(OsStr::new(OUTPUT), "test output", |candidate| {
+                    Ok(if candidate == Path::new("tests/artifacts") {
+                        override_kind
+                    } else {
+                        Some(FsNodeKind::Directory)
+                    })
+                })
+                .unwrap_err();
+            assert_eq!(error.kind, expected_kind);
+            assert!(error.detail.contains(expected_detail), "{}", error.detail);
+        }
     }
 
     #[test]

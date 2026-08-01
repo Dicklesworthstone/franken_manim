@@ -104,7 +104,9 @@ provides NDJSON-only policy, evidence, and producer commands:
   it, and exclusively creates a content-addressed phase trace followed by the
   canonical raw sample bundle. Both output paths must be distinct canonical
   files below `tests/artifacts/perf/`; their parent directories must already
-  exist and may not contain symlinks, and existing paths are never overwritten.
+  exist and may not contain links or Windows reparse points, and existing paths
+  are never overwritten. This component preflight has the same safe-`std`
+  concurrent-retargeting boundary as replay-source validation.
 - `measure-pg5 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` applies
   the same identity and exclusive-publication rules to the certified schedule
   matrix. It records exactly three mismatch-count samples: direct `{1,4,16}`
