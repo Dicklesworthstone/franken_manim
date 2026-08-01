@@ -366,7 +366,7 @@ fn crash_report(
     payload: Box<dyn Any + Send>,
     limits: ProtocolLimits,
 ) -> CrashReport {
-    let message = panic_message(payload);
+    let message = panic_message(payload, limits.max_crash_message_bytes);
     let scene = catch_unwind(AssertUnwindSafe(|| service.active_scene()))
         .ok()
         .flatten();
@@ -386,12 +386,46 @@ fn crash_report(
     }
 }
 
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
+fn panic_message(payload: Box<dyn Any + Send>, limit: usize) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_owned()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "scene worker panicked with a non-string payload".to_owned()
+        return bounded_message(message, limit);
     }
+    if let Ok(message) = payload.downcast::<String>() {
+        return bounded_owned_message(*message, limit);
+    }
+    bounded_message("scene worker panicked with a non-string payload", limit)
+}
+
+fn bounded_owned_message(mut message: String, limit: usize) -> String {
+    if message.is_empty() {
+        return bounded_message("scene worker panicked with an empty message", limit);
+    }
+    let end = utf8_prefix_boundary(&message, limit);
+    if end == 0 && limit > 0 {
+        return "?".to_owned();
+    }
+    message.truncate(end);
+    message
+}
+
+fn bounded_message(message: &str, limit: usize) -> String {
+    let message = if message.is_empty() {
+        "scene worker panicked with an empty message"
+    } else {
+        message
+    };
+    let end = utf8_prefix_boundary(message, limit);
+    if end == 0 && limit > 0 {
+        "?".to_owned()
+    } else {
+        message[..end].to_owned()
+    }
+}
+
+fn utf8_prefix_boundary(value: &str, limit: usize) -> usize {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }

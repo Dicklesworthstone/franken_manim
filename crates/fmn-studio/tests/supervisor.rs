@@ -798,6 +798,7 @@ fn journal_segment_replaces_only_its_declared_tail() {
 struct PanicService {
     build_id: Digest,
     negotiated_frame_budget: Option<usize>,
+    panic_message: Option<String>,
 }
 
 impl WorkerService for PanicService {
@@ -815,6 +816,10 @@ impl WorkerService for PanicService {
     }
 
     fn handle(&mut self, _request: SupervisorRequest) -> Result<WorkerResponse, ServiceError> {
+        if let Some(message) = self.panic_message.take() {
+            // ubs:ignore - deliberate fixture panic exercises bounded crash reporting.
+            std::panic::panic_any(message);
+        }
         // ubs:ignore - deliberate fixture panic exercises worker isolation.
         std::panic::panic_any("fixture scene panic")
     }
@@ -863,6 +868,7 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
     let mut service = PanicService {
         build_id,
         negotiated_frame_budget: None,
+        panic_message: None,
     };
     let outcome = serve_worker(
         &mut service,
@@ -893,6 +899,64 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
 }
 
 #[test]
+fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
+    let limits = ProtocolLimits {
+        max_crash_message_bytes: 7,
+        ..ProtocolLimits::default()
+    };
+    let build_id = sha256(b"bounded panic worker");
+    let mut input = Vec::new();
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::Hello {
+                version: fmn_studio::CURRENT_VERSION,
+                supervisor_build: sha256(b"supervisor"),
+                max_frame_bytes: 1024,
+            },
+        },
+        limits,
+    )
+    .expect("hello");
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 2,
+            request: SupervisorRequest::EnumerateScenes,
+        },
+        limits,
+    )
+    .expect("command");
+
+    let mut output = Vec::new();
+    let mut service = PanicService {
+        build_id,
+        negotiated_frame_budget: None,
+        panic_message: Some("éééé".to_owned()),
+    };
+    let outcome = serve_worker(
+        &mut service,
+        &mut std::io::Cursor::new(input),
+        &mut output,
+        limits,
+    )
+    .expect("worker emits a bounded crash report");
+    let WorkerServeOutcome::Crashed(report) = outcome else {
+        std::panic::panic_any("expected crash outcome");
+    };
+    assert_eq!(report.message, "ééé");
+    assert_eq!(report.message.len(), 6);
+
+    let mut output = std::io::Cursor::new(output);
+    let hello = read_response(&mut output, limits).expect("hello response");
+    assert!(matches!(hello.response, WorkerResponse::Hello { .. }));
+    let crash = read_response(&mut output, limits).expect("crash response");
+    assert_eq!(crash.request_id, 2);
+    assert_eq!(crash.response, WorkerResponse::Crash(report));
+}
+
+#[test]
 fn worker_loop_rejects_reserved_and_nonmonotonic_request_ids() {
     let limits = ProtocolLimits::default();
     let build_id = sha256(b"request-id worker");
@@ -911,6 +975,7 @@ fn worker_loop_rejects_reserved_and_nonmonotonic_request_ids() {
     let mut service = PanicService {
         build_id,
         negotiated_frame_budget: None,
+        panic_message: None,
     };
     assert_eq!(
         serve_worker(
