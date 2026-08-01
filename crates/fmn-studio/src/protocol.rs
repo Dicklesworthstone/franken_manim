@@ -130,6 +130,17 @@ pub enum ProtocolError {
         /// Supplied size.
         needed: usize,
     },
+    /// A collection count cannot fit in the bytes left in the document.
+    CollectionPayloadTooShort {
+        /// Which collection.
+        field: &'static str,
+        /// Declared item count.
+        count: usize,
+        /// Minimum encoded bytes required for that count.
+        minimum_bytes: u64,
+        /// Bytes actually left after the count.
+        remaining_bytes: usize,
+    },
     /// A decoded payload violated a semantic invariant.
     Malformed(&'static str),
     /// A journal field was not a valid canonical replay journal.
@@ -160,6 +171,15 @@ impl fmt::Display for ProtocolError {
             } => write!(
                 f,
                 "IPC {field} payload {needed} bytes exceeds the configured limit {limit}"
+            ),
+            Self::CollectionPayloadTooShort {
+                field,
+                count,
+                minimum_bytes,
+                remaining_bytes,
+            } => write!(
+                f,
+                "IPC {field} count {count} requires at least {minimum_bytes} encoded bytes, but only {remaining_bytes} remain"
             ),
             Self::Malformed(message) => write!(f, "malformed IPC payload: {message}"),
             Self::InvalidJournal(message) => write!(f, "invalid replay journal: {message}"),
@@ -1188,6 +1208,7 @@ fn get_response(
         }),
         1 => {
             let count = count(reader.get_u32()?, "scene", limits.max_scenes)?;
+            require_collection_payload(reader, "scene", count, 8)?;
             let mut scenes = Vec::with_capacity(count);
             for _ in 0..count {
                 scenes.push(reader.get_str()?.to_owned());
@@ -1212,6 +1233,7 @@ fn get_response(
                 "replay state hash",
                 limits.max_replay_hashes,
             )?;
+            require_collection_payload(reader, "replay state hash", count, 32)?;
             let mut state_hashes = Vec::with_capacity(count);
             for _ in 0..count {
                 state_hashes.push(reader.get_digest()?);
@@ -1821,6 +1843,34 @@ fn count(raw: u32, field: &'static str, limit: usize) -> Result<usize, ProtocolE
         usize::try_from(raw).map_err(|_| ProtocolError::Malformed("wire count overflows usize"))?;
     limit_count(field, needed, limit)?;
     Ok(needed)
+}
+
+fn require_collection_payload(
+    reader: &Reader<'_>,
+    field: &'static str,
+    count: usize,
+    minimum_item_bytes: u64,
+) -> Result<(), ProtocolError> {
+    let count_u64 = u64::try_from(count)
+        .map_err(|_| ProtocolError::Malformed("collection count overflows u64"))?;
+    let minimum_bytes =
+        count_u64
+            .checked_mul(minimum_item_bytes)
+            .ok_or(ProtocolError::Malformed(
+                "collection minimum byte count overflow",
+            ))?;
+    let remaining_bytes = reader.remaining();
+    let remaining_u64 = u64::try_from(remaining_bytes).unwrap_or(u64::MAX);
+    if minimum_bytes > remaining_u64 {
+        Err(ProtocolError::CollectionPayloadTooShort {
+            field,
+            count,
+            minimum_bytes,
+            remaining_bytes,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn wire_count(field: &'static str, needed: usize) -> Result<u32, ProtocolError> {

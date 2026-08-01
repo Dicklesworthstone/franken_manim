@@ -382,6 +382,40 @@ fn length_framing_round_trips_and_rejects_oversize_before_allocation() {
     ));
 }
 
+#[test]
+fn response_collection_counts_are_preflighted_before_reserve() {
+    let limits = ProtocolLimits::default();
+
+    let mut scenes = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+    scenes.put_u64(41);
+    scenes.put_u8(1);
+    scenes.put_u32(u32::try_from(limits.max_scenes).unwrap());
+    assert_eq!(
+        ResponseEnvelope::from_bytes(&scenes.finish().unwrap(), limits),
+        Err(ProtocolError::CollectionPayloadTooShort {
+            field: "scene",
+            count: limits.max_scenes,
+            minimum_bytes: u64::try_from(limits.max_scenes).unwrap() * 8,
+            remaining_bytes: 0,
+        })
+    );
+
+    let mut replay = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+    replay.put_u64(42);
+    replay.put_u8(6);
+    replay.put_u64(0);
+    replay.put_u32(u32::try_from(limits.max_replay_hashes).unwrap());
+    assert_eq!(
+        ResponseEnvelope::from_bytes(&replay.finish().unwrap(), limits),
+        Err(ProtocolError::CollectionPayloadTooShort {
+            field: "replay state hash",
+            count: limits.max_replay_hashes,
+            minimum_bytes: u64::try_from(limits.max_replay_hashes).unwrap() * 32,
+            remaining_bytes: 0,
+        })
+    );
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
