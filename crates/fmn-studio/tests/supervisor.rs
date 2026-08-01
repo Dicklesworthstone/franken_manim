@@ -668,6 +668,145 @@ fn invalid_session_install_is_atomic_and_preserves_prior_recovery_state() {
 }
 
 #[test]
+fn session_install_refuses_unrecoverable_protocol_payloads_atomically() {
+    let oversized_checkpoint = b"12345".to_vec();
+    let mut checkpoint_journal = Journal::new();
+    checkpoint_journal.record(Entry {
+        command: command(1),
+        effect: EffectClass::Pure,
+        reads: Vec::new(),
+        subprocesses: Vec::new(),
+        checkpoint: Some(oversized_checkpoint.clone()),
+        state_hash: sha256(&oversized_checkpoint),
+    });
+    let checkpoint_journal_len = checkpoint_journal
+        .to_bytes()
+        .expect("checkpoint journal encodes")
+        .len();
+    let max_field_bytes = checkpoint_journal_len
+        .checked_add(64)
+        .expect("fixture field budget");
+    let limits = ProtocolLimits {
+        max_field_bytes,
+        max_journal_bytes: checkpoint_journal_len,
+        max_checkpoint_bytes: oversized_checkpoint.len() - 1,
+        ..ProtocolLimits::default()
+    };
+
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = Supervisor::new(
+        Box::new(FakeLauncher {
+            state: Arc::clone(&state),
+            clock: Arc::clone(&clock),
+            exchange_cost: Duration::ZERO,
+        }),
+        clock.clone(),
+        cache(clock.clone()),
+        SupervisorConfig {
+            protocol_limits: limits,
+            ..SupervisorConfig::default()
+        },
+    );
+    supervisor
+        .install_session("Demo", Journal::new())
+        .expect("boundary-compatible prior session");
+    let prior_journal_digest = supervisor.journal_cache_digest();
+
+    let oversized_scene = "S".repeat(max_field_bytes + 1);
+    assert!(matches!(
+        supervisor.install_session(oversized_scene, Journal::new()),
+        Err(fmn_studio::SupervisorError::InvalidSession(
+            "scene name exceeds protocol field budget"
+        ))
+    ));
+    assert_eq!(supervisor.journal_cache_digest(), prior_journal_digest);
+
+    let mut oversized_journal = checkpoint_journal.clone();
+    oversized_journal.record(Entry {
+        command: command(2),
+        effect: EffectClass::Pure,
+        reads: Vec::new(),
+        subprocesses: Vec::new(),
+        checkpoint: None,
+        state_hash: sha256(b"second state"),
+    });
+    assert!(
+        oversized_journal
+            .to_bytes()
+            .expect("oversized journal encodes")
+            .len()
+            > limits.max_journal_bytes
+    );
+    assert!(matches!(
+        supervisor.install_session("Next", oversized_journal),
+        Err(fmn_studio::SupervisorError::InvalidSession(
+            "journal exceeds protocol payload budget"
+        ))
+    ));
+    assert_eq!(supervisor.journal_cache_digest(), prior_journal_digest);
+
+    assert_eq!(
+        checkpoint_journal
+            .to_bytes()
+            .expect("boundary journal encodes")
+            .len(),
+        limits.max_journal_bytes
+    );
+    assert!(matches!(
+        supervisor.install_session("Next", checkpoint_journal.clone()),
+        Err(fmn_studio::SupervisorError::InvalidSession(
+            "checkpoint exceeds protocol payload budget"
+        ))
+    ));
+    assert_eq!(supervisor.journal_cache_digest(), prior_journal_digest);
+
+    state
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .channel_error_first_play = true;
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+    let reply = supervisor
+        .request(
+            SupervisorRequest::Play {
+                scene: "Demo".to_owned(),
+                command: command(0),
+            },
+            &|_| true,
+        )
+        .expect("prior session still recovers");
+    let SupervisorReply::Recovered { crash, recovery } = reply else {
+        std::panic::panic_any("expected recovery from the preserved session");
+    };
+    assert_eq!(crash.scene.as_deref(), Some("Demo"));
+    assert_eq!(recovery.plan.reuse, 0);
+
+    let boundary_state = Arc::new(Mutex::new(FakeState::default()));
+    let boundary_clock = Arc::new(FakeClock::new());
+    let boundary_limits = ProtocolLimits {
+        max_checkpoint_bytes: oversized_checkpoint.len(),
+        ..limits
+    };
+    let mut boundary_supervisor = Supervisor::new(
+        Box::new(FakeLauncher {
+            state: boundary_state,
+            clock: Arc::clone(&boundary_clock),
+            exchange_cost: Duration::ZERO,
+        }),
+        boundary_clock.clone(),
+        cache(boundary_clock),
+        SupervisorConfig {
+            protocol_limits: boundary_limits,
+            ..SupervisorConfig::default()
+        },
+    );
+    boundary_supervisor
+        .install_session("S".repeat(max_field_bytes), checkpoint_journal)
+        .expect("exact scene, journal, and checkpoint budgets are admitted");
+}
+
+#[test]
 fn worker_checkpoint_must_match_the_installed_journal_authority() {
     let journal = make_journal(2, Some(0));
     let incoming = commands(&journal);

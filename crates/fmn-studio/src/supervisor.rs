@@ -838,10 +838,35 @@ impl Supervisor {
         if scene.is_empty() {
             return Err(SupervisorError::InvalidSession("empty scene name"));
         }
+        if scene.len() > self.config.protocol_limits.max_field_bytes {
+            return Err(SupervisorError::InvalidSession(
+                "scene name exceeds protocol field budget",
+            ));
+        }
         let journal_bytes = journal.to_bytes()?;
+        let journal_limit = self
+            .config
+            .protocol_limits
+            .max_journal_bytes
+            .min(self.config.protocol_limits.max_field_bytes);
+        if journal_bytes.len() > journal_limit {
+            return Err(SupervisorError::InvalidSession(
+                "journal exceeds protocol payload budget",
+            ));
+        }
+        let checkpoint_limit = self
+            .config
+            .protocol_limits
+            .max_checkpoint_bytes
+            .min(self.config.protocol_limits.max_field_bytes);
         let mut validated = Vec::new();
         for (index, entry) in journal.entries().iter().enumerate() {
             if let Some(state) = &entry.checkpoint {
+                if state.len() > checkpoint_limit {
+                    return Err(SupervisorError::InvalidSession(
+                        "checkpoint exceeds protocol payload budget",
+                    ));
+                }
                 if sha256(state) != entry.state_hash {
                     return Err(SupervisorError::InvalidSession(
                         "checkpoint bytes do not match their state hash",
