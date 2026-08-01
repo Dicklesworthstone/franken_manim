@@ -929,7 +929,6 @@ impl FixtureCorpus {
     }
 
     /// Fixture names in stable lexical order.
-    #[must_use]
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.manifest.keys().map(String::as_str)
     }
