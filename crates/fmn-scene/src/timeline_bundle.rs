@@ -368,7 +368,7 @@ pub fn export_timeline_bundle(
     writer.put_str(&bundle_engine_version());
     writer.put_u32(fps);
     writer.put_bytes(&plan.to_bytes()?);
-    writer.put_u32(u32::try_from(entries.len()).unwrap_or(u32::MAX));
+    writer.put_u32(wire_count(entries.len())?);
     for entry in &entries {
         match entry {
             SegmentEntry::Pure {
@@ -385,7 +385,7 @@ pub fn export_timeline_bundle(
             }
             SegmentEntry::Stateful { frames } => {
                 writer.put_u8(1);
-                writer.put_u32(u32::try_from(frames.len()).unwrap_or(u32::MAX));
+                writer.put_u32(wire_count(frames.len())?);
                 for frame in frames {
                     writer.put_bytes(frame);
                 }
@@ -393,6 +393,13 @@ pub fn export_timeline_bundle(
         }
     }
     Ok(writer.finish()?)
+}
+
+fn wire_count(needed: usize) -> Result<u32, SerialError> {
+    u32::try_from(needed).map_err(|_| SerialError::SizeLimit {
+        limit: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+        needed,
+    })
 }
 
 /// The kind-1 record of a captured segment: every frame's canonical
@@ -491,6 +498,19 @@ mod tests {
         let mut timeline = Timeline::new(30).expect("fps");
         timeline.play(vec![animation]).expect("play step");
         timeline
+    }
+
+    #[test]
+    fn wire_count_accepts_u32_max_and_refuses_one_over() {
+        let max = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        assert_eq!(wire_count(max).unwrap(), u32::try_from(max).unwrap());
+        if let Some(one_over) = max.checked_add(1) {
+            assert!(matches!(
+                wire_count(one_over),
+                Err(SerialError::SizeLimit { limit, needed })
+                    if limit == max && needed == one_over
+            ));
+        }
     }
 
     #[test]
