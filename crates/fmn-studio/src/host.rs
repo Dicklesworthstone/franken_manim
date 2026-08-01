@@ -613,13 +613,7 @@ impl StudioHost {
                     let previous = self.active_clients.fetch_add(1, Ordering::AcqRel);
                     if previous >= self.handler.config.max_clients {
                         self.active_clients.fetch_sub(1, Ordering::AcqRel);
-                        write_http_response(
-                            &mut stream,
-                            503,
-                            "Service Unavailable",
-                            "text/plain; charset=utf-8",
-                            b"Studio connection limit reached\n",
-                        )?;
+                        write_connection_limit_response(&mut stream);
                         continue;
                     }
                     let handler = self.handler.clone();
@@ -1408,6 +1402,20 @@ fn write_json_response(stream: &mut impl Write, body: &[u8]) -> Result<(), HostE
     write_http_response(stream, 200, "OK", "application/json; charset=utf-8", body)
 }
 
+fn write_connection_limit_response(stream: &mut impl Write) {
+    // The connection is already rejected and is not owned by a client
+    // handler. Delivery is best-effort: a peer that disconnected before the
+    // 503 must not bypass the server's common frame-close and thread-join
+    // path by returning from inside the accept loop.
+    let _ = write_http_response(
+        stream,
+        503,
+        "Service Unavailable",
+        "text/plain; charset=utf-8",
+        b"Studio connection limit reached\n",
+    );
+}
+
 fn write_http_response(
     stream: &mut impl Write,
     status: u16,
@@ -1661,7 +1669,7 @@ impl From<SupervisorError> for HostError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, ErrorKind};
 
     use fmn_cache::{NamespacePolicy, Store, StoreConfig};
     use fmn_platform::clock::FakeClock;
@@ -1723,6 +1731,29 @@ mod tests {
             clock,
             config,
         )
+    }
+
+    #[derive(Default)]
+    struct DisconnectedClient {
+        write_attempts: usize,
+    }
+
+    impl Write for DisconnectedClient {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            self.write_attempts += 1;
+            Err(std::io::Error::from(ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(ErrorKind::BrokenPipe))
+        }
+    }
+
+    #[test]
+    fn connection_limit_reply_failure_is_best_effort() {
+        let mut client = DisconnectedClient::default();
+        write_connection_limit_response(&mut client);
+        assert_eq!(client.write_attempts, 1);
     }
 
     #[test]
