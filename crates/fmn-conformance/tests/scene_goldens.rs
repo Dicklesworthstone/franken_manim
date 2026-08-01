@@ -12,7 +12,9 @@
 //!   failure, and the rig writes the offending bytes to
 //!   `goldens/scene_goldens.certified.actual/` for byte-level review;
 //! - the certified frames are thread-count invariant at {1, 4} threads, so
-//!   scheduling cannot silently change the locked bits;
+//!   scheduling cannot silently change the locked bits — the PG-5 harness
+//!   (`scripts/pg5_thread_determinism.sh`) widens that sweep through
+//!   `FMN_PG5_THREAD_COUNTS` ({1,4,16} per commit, {1,32,96} weekly);
 //! - every artifact is reproducible within a run (build twice, byte-equal).
 //!
 //! Blessing: `UPDATE_GOLDENS=1 cargo test -p fmn-conformance --test
@@ -72,19 +74,52 @@ fn the_corpus_is_bit_locked_across_the_certified_matrix() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// The thread counts PG-5's determinism sweep renders at, from
+/// `FMN_PG5_THREAD_COUNTS` (comma-separated, must start at the 1-thread
+/// baseline every other count is compared against). The default is the
+/// historical {1, 4} pair so `scripts/check.sh` runs exactly what it
+/// always ran; CI's PG-5 lanes set {1,4,16} per commit and {1,32,96}
+/// on the weekly high-core cadence (fm-sol).
+fn pg5_thread_counts() -> Vec<usize> {
+    let Ok(raw) = std::env::var("FMN_PG5_THREAD_COUNTS") else {
+        return vec![1, 4];
+    };
+    let counts: Vec<usize> = raw
+        .split(',')
+        .map(|field| {
+            field
+                .trim()
+                .parse::<usize>()
+                .expect("FMN_PG5_THREAD_COUNTS entries are positive integers")
+        })
+        .collect();
+    assert!(
+        counts.first() == Some(&1),
+        "FMN_PG5_THREAD_COUNTS must start at the 1-thread baseline, got {raw:?}"
+    );
+    assert!(
+        counts.iter().all(|&n| n >= 1),
+        "thread counts must be at least 1, got {raw:?}"
+    );
+    counts
+}
+
 #[test]
 fn every_certified_frame_is_thread_count_invariant() {
     let corpus = corpus();
+    let counts = pg5_thread_counts();
     for case in SCENES {
         let built = (case.build)(corpus);
         let one = render_frame(&built.stage, EngineIdentity::certified(), 1);
-        let four = render_frame(&built.stage, EngineIdentity::certified(), 4);
-        assert_eq!(
-            one.as_bytes(),
-            four.as_bytes(),
-            "{} drifted between 1 and 4 threads",
-            case.name
-        );
+        for &threads in &counts[1..] {
+            let parallel = render_frame(&built.stage, EngineIdentity::certified(), threads);
+            assert_eq!(
+                one.as_bytes(),
+                parallel.as_bytes(),
+                "{} drifted between 1 and {threads} threads",
+                case.name
+            );
+        }
     }
 }
 

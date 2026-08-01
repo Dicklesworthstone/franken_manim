@@ -329,8 +329,13 @@ pub fn git_tracked_files(root: &Path) -> Result<Vec<String>, LeakError> {
 /// the real `.gitignore` matcher.
 pub fn gitignore_violations(root: &Path) -> Result<Vec<Leak>, LeakError> {
     let mut leaks = Vec::new();
-    for dir in PRIVATE_FIXTURE_DIRS {
-        let dir = dir.trim_end_matches('/');
+    for &dir in PRIVATE_FIXTURE_DIRS {
+        // Keep the trailing slash on the query: git only applies dir-only
+        // patterns (`/corpus/`) to paths it knows are directories — a
+        // slash-suffixed query matches even where the directory does not
+        // exist on disk (fresh clones, CI checkouts), while a bare query
+        // matches only when git can stat a real directory, which would
+        // make this gate vacuous exactly where it matters most.
         let status = Command::new("git")
             .args(["check-ignore", "-q", "--", dir])
             .current_dir(root)
@@ -341,10 +346,10 @@ pub fn gitignore_violations(root: &Path) -> Result<Vec<Leak>, LeakError> {
         if !status.success() {
             leaks.push(Leak {
                 kind: LeakKind::PrivateDirNotIgnored,
-                path: format!("{dir}/"),
+                path: dir.to_string(),
                 detail: "git check-ignore does not exclude it — a private fixture could be \
                          committed (§15.3)"
-                    .to_owned(),
+                    .to_string(),
             });
         }
     }

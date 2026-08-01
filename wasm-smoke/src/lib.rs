@@ -90,7 +90,8 @@ fn probe_stage() -> Stage {
         [-1.0, -1.0, 0.0],
     ];
     let mut buffer =
-        fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), points.len());
+        fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), points.len())
+            .expect("nine probe records cannot overflow the buffer size");
     for (i, point) in points.iter().enumerate() {
         buffer.write(i, "point", point);
         buffer.write(i, "fill_rgba", &[1.0, 0.0, 0.0, 1.0]);
