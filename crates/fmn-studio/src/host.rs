@@ -19,7 +19,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use fmn_codec::{CompressionLevel, encode_rgba8};
+use fmn_codec::{CompressionLevel, PngError, PngLimits, decode_png, encode_rgba8};
 use fmn_hash::{Digest, sha256};
 use fmn_platform::clock::Clock;
 use fmn_scene::{AssetRead, EventPayload, Key, Modifiers, MouseButton};
@@ -278,7 +278,26 @@ impl FrameHub {
     ) -> Result<Arc<PngFrame>, HostError> {
         frame.validate(limits)?;
         let png = match (&frame.encoding, &frame.payload) {
-            (FrameEncoding::Png, FramePayload::Pipe { bytes, .. }) => bytes.clone(),
+            (FrameEncoding::Png, FramePayload::Pipe { bytes, .. }) => {
+                if bytes.len() > self.max_png_bytes {
+                    return Err(HostError::Frame("preview PNG exceeds the host budget"));
+                }
+                let decoded = decode_png(
+                    bytes,
+                    &PngLimits {
+                        max_pixels: u64::from(frame.width) * u64::from(frame.height),
+                        ..PngLimits::default()
+                    },
+                )?;
+                // ubs:ignore - public image dimensions are not secret comparisons.
+                if decoded.width != frame.width || decoded.height != frame.height {
+                    return Err(HostError::Frame(
+                        "preview PNG dimensions do not match frame metadata",
+                    ));
+                }
+                drop(decoded);
+                bytes.clone()
+            }
             (FrameEncoding::Rgba8, FramePayload::Pipe { bytes, .. }) => {
                 let tight_stride = usize::try_from(frame.width)
                     .ok()
@@ -1536,6 +1555,8 @@ pub enum HostError {
     WorkerRecovered(String),
     /// Frame could not be admitted to the preview hub.
     Frame(&'static str),
+    /// The owned codec rejected an inline preview PNG.
+    FramePng(PngError),
     /// Worker answered a route with the wrong response class.
     UnexpectedWorkerResponse,
     /// A bounded client handler panicked before it could be joined.
@@ -1552,6 +1573,7 @@ impl HostError {
             Self::Supervisor(_)
             | Self::WorkerRecovered(_)
             | Self::Frame(_)
+            | Self::FramePng(_)
             | Self::UnexpectedWorkerResponse
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
             Self::Configuration(_) => Some((500, "Internal Server Error")),
@@ -1575,6 +1597,7 @@ impl fmt::Display for HostError {
                 write!(f, "scene worker recovered after crash: {message}")
             }
             Self::Frame(message) => write!(f, "Studio preview frame: {message}"),
+            Self::FramePng(error) => write!(f, "Studio preview PNG: {error}"),
             Self::UnexpectedWorkerResponse => {
                 f.write_str("worker returned an unexpected Studio response")
             }
@@ -1589,6 +1612,7 @@ impl std::error::Error for HostError {
             Self::Io(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Supervisor(error) => Some(error),
+            Self::FramePng(error) => Some(error),
             _ => None,
         }
     }
@@ -1603,6 +1627,12 @@ impl From<std::io::Error> for HostError {
 impl From<ProtocolError> for HostError {
     fn from(error: ProtocolError) -> Self {
         Self::Protocol(error)
+    }
+}
+
+impl From<PngError> for HostError {
+    fn from(error: PngError) -> Self {
+        Self::FramePng(error)
     }
 }
 

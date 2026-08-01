@@ -64,6 +64,61 @@ fn frame_hub_validates_converts_and_bounds_multipart_png() {
 }
 
 #[test]
+fn frame_hub_rejects_invalid_or_mismatched_png_without_history_mutation() {
+    let rgba = [255, 0, 0, 255, 0, 255, 0, 255];
+    let png = encode_rgba8(2, 1, &rgba, CompressionLevel::Fast);
+    let stream = |width, height, frame_index, bytes: Vec<u8>| FrameStream {
+        scene: "Demo".to_owned(),
+        frame_index,
+        width,
+        height,
+        stride: 0,
+        encoding: FrameEncoding::Png,
+        payload: FramePayload::Pipe {
+            digest: sha256(&bytes),
+            bytes,
+        },
+    };
+    let hub = FrameHub::new(2, png.len()).unwrap();
+    let first = hub
+        .publish(&stream(2, 1, 7, png.clone()), Default::default())
+        .expect("exact byte and pixel boundaries are admitted");
+    assert_eq!(first.publication_sequence, 0);
+
+    let mut corrupt = png.clone();
+    *corrupt.last_mut().expect("encoded PNG is nonempty") ^= 1;
+    let error = hub
+        .publish(&stream(2, 1, 8, corrupt.clone()), Default::default())
+        .expect_err("a corrupt PNG must not enter preview history");
+    assert!(error.to_string().contains("crc"));
+    assert_eq!(hub.latest().unwrap().frame_index, 7);
+
+    let error = hub
+        .publish(&stream(1, 2, 8, png.clone()), Default::default())
+        .expect_err("equal-area transposed dimensions must be refused");
+    assert!(error.to_string().contains("dimensions"));
+    assert_eq!(hub.latest().unwrap().frame_index, 7);
+
+    let error = hub
+        .publish(&stream(1, 1, 8, png.clone()), Default::default())
+        .expect_err("the PNG must honor the declared frame pixel count");
+    assert!(error.to_string().contains("1-pixel budget"));
+    assert_eq!(hub.latest().unwrap().frame_index, 7);
+
+    let second = hub
+        .publish(&stream(2, 1, 8, png), Default::default())
+        .expect("a later valid frame is still admitted");
+    assert_eq!(second.publication_sequence, 1);
+
+    let size_first = FrameHub::new(1, 8).unwrap();
+    let error = size_first
+        .publish(&stream(2, 1, 9, corrupt), Default::default())
+        .expect_err("the host byte ceiling must precede PNG codec work");
+    assert!(error.to_string().contains("host budget"));
+    assert!(size_first.latest().is_none());
+}
+
+#[test]
 fn inspector_and_debug_overlays_follow_visible_family_order() {
     let first = Mobject::from_points(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
     let second = Mobject::from_points(&[[2.0, 2.0, 1.0]]);
