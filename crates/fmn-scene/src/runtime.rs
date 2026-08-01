@@ -1274,8 +1274,8 @@ impl Scene {
         program: &mut dyn SceneProgram,
         sink: &mut dyn SceneSink,
     ) -> Result<SceneRunReport, SceneError> {
-        self.emit_event(sink, LifecyclePhase::SceneBegin, None)?;
         let body = (|| {
+            self.emit_event(sink, LifecyclePhase::SceneBegin, None)?;
             self.emit_event(sink, LifecyclePhase::Setup, None)?;
             program.setup(self, sink)?;
             self.emit_event(sink, LifecyclePhase::Construct, None)?;

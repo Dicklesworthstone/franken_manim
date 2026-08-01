@@ -977,6 +977,82 @@ fn scene_end_is_attempted_even_when_program_teardown_fails() {
     );
 }
 
+#[derive(Default)]
+struct BeginFailureSink {
+    attempted: Vec<LifecyclePhase>,
+    failed_begin: bool,
+}
+
+impl SceneSink for BeginFailureSink {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        self.attempted.push(event.phase);
+        if event.phase == LifecyclePhase::SceneBegin && !self.failed_begin {
+            self.failed_begin = true;
+            return Err(IntegrationError::new("sink", "fixture begin failure"));
+        }
+        Ok(())
+    }
+
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        _packet: fmn_anim::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TracksTearDown {
+    tear_down_calls: usize,
+}
+
+impl SceneProgram for TracksTearDown {
+    fn construct(
+        &mut self,
+        _scene: &mut Scene,
+        _sink: &mut dyn SceneSink,
+    ) -> Result<(), SceneError> {
+        Ok(())
+    }
+
+    fn tear_down(
+        &mut self,
+        _scene: &mut Scene,
+        _sink: &mut dyn SceneSink,
+    ) -> Result<(), SceneError> {
+        self.tear_down_calls += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn scene_begin_failure_still_runs_the_common_cleanup_path() {
+    let mut scene = Scene::default();
+    let mut program = TracksTearDown::default();
+    let mut sink = BeginFailureSink::default();
+
+    let error = scene
+        .run(&mut program, &mut sink)
+        .expect_err("the original SceneBegin failure must surface");
+    let SceneError::Integration(error) = error else {
+        std::panic::panic_any(format!(
+            "expected the begin integration error, found {error}"
+        ));
+    };
+    assert_eq!(error.point(), "sink");
+    assert_eq!(error.message(), "fixture begin failure");
+    assert_eq!(program.tear_down_calls, 1);
+    assert_eq!(
+        sink.attempted,
+        vec![
+            LifecyclePhase::SceneBegin,
+            LifecyclePhase::TearDown,
+            LifecyclePhase::SceneEnd,
+        ]
+    );
+}
+
 #[test]
 fn sink_failure_surfaces_after_deterministic_segment_completion() {
     let mut scene = Scene::new(
