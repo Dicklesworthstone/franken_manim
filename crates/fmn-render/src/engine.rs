@@ -2819,7 +2819,7 @@ mod tests {
         let step = std::f64::consts::TAU / n as f64;
         let sgn = if ccw { 1.0 } else { -1.0 };
         // The handle sits at the tangent intersection, which is the radius
-        // scaled by sec(step/2) — the same construction QuadPath::arc uses.
+        // scaled by sec(step/2) — the same construction QuadPath::try_arc uses.
         let sec = 1.0 / fmn_dmath::cos(step / 2.0);
         for k in 0..n {
             let a0 = sgn * step * k as f64;

@@ -102,6 +102,7 @@ use fmn_core::constants::{
     RIGHT, SMALL_BUFF, UP, WHITE,
 };
 use fmn_core::types::Vec3;
+use fmn_geom::GeomError;
 use fmn_mobject::Mobject;
 use fmn_mobject::stage::{Mob, Stage};
 use fmn_text::FontBook;
@@ -496,7 +497,8 @@ impl EnableDisableButton {
             .width(self.width)
             .height(self.height)
             .style(Style::default().fill(fill, 1.0))
-            .build();
+            .build()
+            .expect("an unrounded control rectangle cannot request arc components");
     }
 }
 
@@ -641,6 +643,7 @@ impl Checkbox {
             .height(self.box_height)
             .style(Style::default().fill_opacity(0.0))
             .build()
+            .expect("an unrounded checkbox cannot request arc components")
     }
 
     /// `get_checkmark` / `get_cross`: the unit-box mark stretched onto the
@@ -687,6 +690,8 @@ impl From<Checkbox> for Mobject {
 /// A refused slider configuration, input value, projection, or readout update.
 #[derive(Debug)]
 pub enum SliderError {
+    /// The rounded bar or its straight axis refused invalid geometry.
+    Geometry(GeomError),
     /// Bounds must be finite, ordered, and have a representable span.
     InvalidRange,
     /// The snap step must be positive, finite, and usable over the range.
@@ -704,6 +709,7 @@ pub enum SliderError {
 impl core::fmt::Display for SliderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Geometry(e) => write!(f, "slider geometry failed: {e}"),
             Self::InvalidRange => {
                 write!(
                     f,
@@ -727,6 +733,7 @@ impl core::fmt::Display for SliderError {
 impl std::error::Error for SliderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Geometry(e) => Some(e),
             Self::Text(e) => Some(e),
             _ => None,
         }
@@ -736,6 +743,12 @@ impl std::error::Error for SliderError {
 impl From<TextMobjectError> for SliderError {
     fn from(e: TextMobjectError) -> Self {
         Self::Text(e)
+    }
+}
+
+impl From<GeomError> for SliderError {
+    fn from(e: GeomError) -> Self {
+        Self::Geometry(e)
     }
 }
 
@@ -793,7 +806,7 @@ impl LinearNumberSlider {
             readout_book: None,
             num_decimal_places: 2,
         };
-        slider.rebuild_geometry();
+        slider.rebuild_geometry()?;
         Ok(slider)
     }
 
@@ -834,19 +847,23 @@ impl LinearNumberSlider {
     }
 
     /// Bar width (`rounded_rect_kwargs["width"]`).
-    #[must_use]
-    pub fn bar_width(mut self, width: f64) -> Self {
+    ///
+    /// # Errors
+    /// [`SliderError::Geometry`] if the rounded bar refuses the dimensions.
+    pub fn bar_width(mut self, width: f64) -> Result<Self, SliderError> {
         self.bar_width = width;
-        self.rebuild_geometry();
-        self
+        self.rebuild_geometry()?;
+        Ok(self)
     }
 
     /// Bar height (`rounded_rect_kwargs["height"]`).
-    #[must_use]
-    pub fn bar_height(mut self, height: f64) -> Self {
+    ///
+    /// # Errors
+    /// [`SliderError::Geometry`] if the rounded bar refuses the dimensions.
+    pub fn bar_height(mut self, height: f64) -> Result<Self, SliderError> {
         self.bar_height = height;
-        self.rebuild_geometry();
-        self
+        self.rebuild_geometry()?;
+        Ok(self)
     }
 
     /// Handle colour (`circle_kwargs` stroke+fill `GREY_A`). Used by
@@ -1105,18 +1122,18 @@ impl LinearNumberSlider {
             .moved_to(center)
     }
 
-    fn rebuild_geometry(&mut self) {
+    fn rebuild_geometry(&mut self) -> Result<(), SliderError> {
         self.bar = Rectangle::new()
             .width(self.bar_width)
             .height(self.bar_height)
             .corner_radius(self.corner_radius)
-            .build();
+            .build()?;
         let left = self.bar.bbox_point(LEFT).unwrap_or(LEFT);
         let right = self.bar.bbox_point(RIGHT).unwrap_or(RIGHT);
         self.axis_ends = (left, right);
         self.axis = Line::new(left, right)
             .style(Style::default().stroke(WHITE, 0.0, 0.0).fill(WHITE, 0.0))
-            .build();
+            .build()?;
         // The Reference parks the handle at the axis midpoint at
         // construction (move_to(slider_axis)); set_value moves it to the
         // value's fraction.
@@ -1126,6 +1143,7 @@ impl LinearNumberSlider {
             0.5 * (left[2] + right[2]),
         ];
         self.handle = self.build_handle(midpoint);
+        Ok(())
     }
 }
 
@@ -1298,6 +1316,7 @@ impl ColorSliders {
                     Rectangle::square(len)
                         .style(Style::default().stroke(color, 0.0, 0.0).fill(color, 1.0))
                         .build()
+                        .expect("an unrounded checker square cannot request arc components")
                         .shifted([x, y, 0.0]),
                 );
             }
@@ -1339,6 +1358,7 @@ impl ColorSliders {
                     .fill(self.picked_color(), self.picked_opacity()),
             )
             .build()
+            .expect("an unrounded color box cannot request arc components")
     }
 }
 
@@ -1474,6 +1494,7 @@ impl Textbox {
                 1.0,
             ))
             .build()
+            .expect("an unrounded text box cannot request arc components")
     }
 
     /// `update_text`: re-typeset into the box, fit the width to
@@ -1553,7 +1574,8 @@ impl ControlPanel {
             .width(FRAME_WIDTH / 4.0)
             .height(panel_height)
             .style(Style::default().fill(GREY_C, 1.0).stroke(GREY_C, 0.0, 1.0))
-            .build();
+            .build()
+            .expect("an unrounded control panel cannot request arc components");
         // to_corner(UP + LEFT, buff=0), then shift up by the panel height.
         let panel = to_corner(panel, [LEFT[0], UP[1], 0.0], 0.0).shifted([0.0, panel_height, 0.0]);
 
@@ -1561,7 +1583,8 @@ impl ControlPanel {
             .width(FRAME_WIDTH / 8.0)
             .height(0.5)
             .style(Style::default().fill(GREY_C, 1.0))
-            .build();
+            .build()
+            .expect("an unrounded opener cannot request arc components");
         let info_text = Text::new(&self.opener_text)
             .font_size(self.opener_font_size)
             .build(book)?
@@ -2046,7 +2069,8 @@ mod tests {
 
         let zero_axis = LinearNumberSlider::new(0.0)
             .expect("valid slider")
-            .bar_width(0.0);
+            .bar_width(0.0)
+            .expect("a zero-width finite bar remains defined");
         assert_eq!(
             zero_axis
                 .value_from_point([100.0, 5.0, 0.0])

@@ -262,13 +262,14 @@ mod tests {
         // points. Truthfulness matters more here than it looks: a hint selects a
         // kernel, so tagging a polyline as a circle would be a wrong picture,
         // and Marionette's `set_shape` records what it is told.
-        let arc = fmn_geom::quadpath::QuadPath::arc(
+        let arc = fmn_geom::quadpath::QuadPath::try_arc(
             0.0,
             std::f64::consts::TAU,
             1.0,
             [30.0, 0.0, 0.0],
             None,
-        );
+        )
+        .expect("valid arc");
         let pts = arc.points();
         let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), pts.len()).unwrap();
         for (i, p) in pts.iter().enumerate() {

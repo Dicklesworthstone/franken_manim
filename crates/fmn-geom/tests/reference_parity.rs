@@ -132,7 +132,7 @@ fn arc_points_match_reference() {
             .unwrap();
         let mut i = 2;
         let expected = parse_points(&lines, &mut i, "points");
-        let points = bezier::quadratic_points_for_arc(angle, n);
+        let points = bezier::quadratic_points_for_arc(angle, n).expect("fixture arc");
         assert_points_close(&points, &expected, F64_TOL, &name);
     }
 }
@@ -210,7 +210,7 @@ fn build_case(name: &str) -> QuadPath {
             path.reverse_points();
         }
         "make_jagged_arc" => {
-            path.set_points(bezier::quadratic_points_for_arc(TAU / 4.0, 4))
+            path.set_points(bezier::quadratic_points_for_arc(TAU / 4.0, 4).expect("fixture arc"))
                 .unwrap();
             path.change_anchor_mode(AnchorMode::Jagged).unwrap();
         }
@@ -226,7 +226,7 @@ fn build_case(name: &str) -> QuadPath {
             path.make_smooth(true).unwrap();
         }
         "subdivide_sharp_arc" => {
-            path.set_points(bezier::quadratic_points_for_arc(TAU / 4.0, 1))
+            path.set_points(bezier::quadratic_points_for_arc(TAU / 4.0, 1).expect("fixture arc"))
                 .unwrap();
             path.subdivide_sharp_curves(30.0 * DEG).unwrap();
         }

@@ -920,8 +920,8 @@ mod tests {
         // chord through it"; and the break itself survives into the segment list,
         // so a stroked annulus grows a radial spoke from its outer ring to its
         // inner one.
-        let outer = QuadPath::arc(0.0, TAU, 1.0, [0.0, 0.0, 0.0], Some(8));
-        let inner = QuadPath::arc(0.0, -TAU, 0.4, [0.0, 0.0, 0.0], Some(8));
+        let outer = QuadPath::try_arc(0.0, TAU, 1.0, [0.0, 0.0, 0.0], Some(8)).expect("valid arc");
+        let inner = QuadPath::try_arc(0.0, -TAU, 0.4, [0.0, 0.0, 0.0], Some(8)).expect("valid arc");
         let mut ring = QuadPath::new();
         ring.add_subpath(outer.points()).expect("outer");
         ring.add_subpath(inner.points()).expect("inner");

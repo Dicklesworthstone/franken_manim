@@ -344,11 +344,13 @@ fn arc_family(corpus: &Corpus) -> Built {
         .radius(0.55)
         .style(filled(TEAL_B, 0.3))
         .build()
+        .expect("the locked arc-family arc is valid")
         .shifted([-1.15, 0.45, 0.0]);
     let between = ArcBetweenPoints::new([-0.55, -0.3, 0.0], [0.55, 0.1, 0.0])
         .angle(1.1)
         .style(filled(GOLD_C, 0.3))
         .build()
+        .expect("the locked between-points arc is valid")
         .shifted([0.0, 0.5, 0.0]);
     let annulus = Annulus::new()
         .inner_radius(0.2)
@@ -363,6 +365,7 @@ fn arc_family(corpus: &Corpus) -> Built {
         .start_angle(0.3)
         .style(filled(PURPLE_B, 0.4))
         .build()
+        .expect("the locked annular sector is valid")
         .shifted([0.0, -0.75, 0.0]);
     stage_of(v_group([arc, between, annulus, sector]))
 }
@@ -394,7 +397,8 @@ fn line_family(corpus: &Corpus) -> Built {
     let plain = Line::new([-1.4, 0.6, 0.0], [-0.2, 0.6, 0.0])
         .path_arc(0.15)
         .color(BLUE_C)
-        .build();
+        .build()
+        .expect("the locked line-family arc is valid");
     let dashed = DashedLine::new([-1.4, 0.2, 0.0], [-0.2, 0.2, 0.0])
         .dash_length(0.12)
         .positive_space_ratio(0.6)
@@ -404,10 +408,12 @@ fn line_family(corpus: &Corpus) -> Built {
     let arrow = Arrow::new([-1.4, -0.2, 0.0], [-0.2, -0.2, 0.0])
         .buff(0.0)
         .color(YELLOW_C)
-        .build();
+        .build()
+        .expect("the locked straight arrow is valid");
     let stroke_arrow = StrokeArrow::new([0.2, 0.6, 0.0], [1.4, 0.6, 0.0])
         .color(MAROON_C)
-        .build();
+        .build()
+        .expect("the locked straight stroke arrow is valid");
     let elbow = Elbow::new()
         .width(0.5)
         .color(GREEN_B)
@@ -423,6 +429,7 @@ fn poly_family(corpus: &Corpus) -> Built {
         .height(0.6)
         .style(filled(BLUE_C, 0.35))
         .build()
+        .expect("the locked rectangle is unrounded")
         .shifted([-1.2, 0.0, 0.0]);
     let triangle = RegularPolygon::triangle()
         .radius(0.5)
@@ -470,10 +477,12 @@ fn rounded_rectangle_arrow(corpus: &Corpus) -> Built {
         .corner_radius(0.18)
         .style(filled(MAROON_C, 0.35))
         .build()
+        .expect("the locked rounded rectangle is valid")
         .shifted([-0.9, 0.0, 0.0]);
     let arrow = StrokeArrow::new([0.1, 0.0, 0.0], [1.5, 0.0, 0.0])
         .color(WHITE)
-        .build();
+        .build()
+        .expect("the locked straight stroke arrow is valid");
     stage_of(v_group([rounded, arrow]))
 }
 
@@ -490,6 +499,7 @@ fn layered_alpha_stack(corpus: &Corpus) -> Built {
         .height(1.0)
         .style(filled(YELLOW_C, 0.5))
         .build()
+        .expect("the locked alpha-stack rectangle is unrounded")
         .shifted([0.1, 0.1, 0.0]);
     rect = rect.with_z_index(1);
     let mut triangle = RegularPolygon::triangle()
@@ -507,7 +517,8 @@ fn brace_label(corpus: &Corpus) -> Built {
         .width(1.6)
         .height(0.7)
         .style(filled(TEAL_B, 0.25))
-        .build();
+        .build()
+        .expect("the locked brace target is unrounded");
     let label = Text::new("span")
         .font_size(28.0)
         .build(&corpus.book)
@@ -534,6 +545,7 @@ fn matchers_marks(corpus: &Corpus) -> Built {
         .height(0.5)
         .style(filled(BLUE_C, 0.25))
         .build()
+        .expect("the locked matcher target is unrounded")
         .shifted([1.0, -0.45, 0.0]);
     let bad = cross(&bad_target, RED_C, 6.0);
     let bang = exmark(GOLD_C)

@@ -135,7 +135,7 @@ impl From<BooleanError> for OracleError {
 
 /// Relative error of the quadratic circle model's arc length against the
 /// analytic circumference: `|L − 2πr| / (2πr)` for the full-circle
-/// [`QuadPath::arc`] at `radius`.
+/// [`QuadPath::try_arc`] at `radius`.
 ///
 /// The model is sixteen quadratic Béziers standing in for the circle (the
 /// BN-09 density rule), so this error is *not* rounding — it is the
@@ -144,7 +144,8 @@ impl From<BooleanError> for OracleError {
 /// 1.006e-4 relative, independent of radius.
 #[must_use]
 pub fn circle_arc_length_rel_error(radius: f64) -> f64 {
-    let path = QuadPath::arc(0.0, TAU, radius, [0.0; 3], None);
+    let path = QuadPath::try_arc(0.0, TAU, radius, [0.0; 3], None)
+        .expect("the oracle's fixed full-turn component request is valid");
     let measured = ArcLengthTable::for_path(&path).total();
     let analytic = TAU * radius.abs();
     if analytic == 0.0 {

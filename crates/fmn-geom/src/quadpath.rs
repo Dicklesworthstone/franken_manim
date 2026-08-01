@@ -156,17 +156,25 @@ impl QuadPath {
     /// unit-arc points scaled by `radius`, rotated by `start_angle`, and
     /// shifted to `arc_center`. `n_components` defaults to
     /// [`bezier::arc_n_components`].
-    #[must_use]
-    pub fn arc(
+    ///
+    /// # Errors
+    /// The arc-component contract's typed refusals (fm-4tb.1):
+    /// [`GeomError::NonFiniteArcAngle`], [`GeomError::ZeroArcComponents`],
+    /// [`GeomError::ArcComponentOverflow`], and
+    /// [`GeomError::ArcComponentsAboveBudget`].
+    pub fn try_arc(
         start_angle: f64,
         angle: f64,
         radius: f64,
         arc_center: Vec3,
         n_components: Option<usize>,
-    ) -> Self {
-        let n = n_components.unwrap_or_else(|| bezier::arc_n_components(angle));
+    ) -> Result<Self, GeomError> {
+        let n = match n_components {
+            Some(n) => n,
+            None => bezier::arc_n_components(angle)?,
+        };
         let rot = space_ops::rotation_about_z(start_angle);
-        let points = bezier::quadratic_points_for_arc(angle, n)
+        let points = bezier::quadratic_points_for_arc(angle, n)?
             .into_iter()
             .map(|p| {
                 let rotated = [
@@ -177,10 +185,10 @@ impl QuadPath {
                 vec::add(vec::scale(rotated, radius), arc_center)
             })
             .collect();
-        Self {
+        Ok(Self {
             points,
             ..Self::new()
-        }
+        })
     }
 
     // ------------------------------------------------------------- storage
@@ -408,6 +416,10 @@ impl QuadPath {
     /// `point`. `n_components` defaults to the one arc-density rule (BN-09);
     /// the Reference's `ceil(8·|θ|/TAU)` here was one of the three retired
     /// conventions.
+    ///
+    /// # Errors
+    /// [`GeomError::EmptyPath`] without a current endpoint, or the typed
+    /// arc-component refusal for the requested angle and count.
     pub fn add_arc_to(
         &mut self,
         point: Vec3,
@@ -415,11 +427,21 @@ impl QuadPath {
         n_components: Option<usize>,
     ) -> Result<&mut Self, GeomError> {
         let last = self.last_point().ok_or(GeomError::EmptyPath)?;
+        match n_components {
+            Some(n) => {
+                let _point_count = bezier::arc_point_count(angle, n)?;
+            }
+            None if !angle.is_finite() => return Err(GeomError::NonFiniteArcAngle),
+            None => {}
+        }
         if angle.abs() < ARC_ANGLE_THRESHOLD {
             return self.add_line_to(point, true);
         }
-        let n = n_components.unwrap_or_else(|| bezier::arc_n_components(angle));
-        let mut arc_points = bezier::quadratic_points_for_arc(angle, n);
+        let n = match n_components {
+            Some(n) => n,
+            None => bezier::arc_n_components(angle)?,
+        };
+        let mut arc_points = bezier::quadratic_points_for_arc(angle, n)?;
         let target_vect = vec::sub(point, last);
         let curr_vect = vec::sub(arc_points[arc_points.len() - 1], arc_points[0]);
         let rot = space_ops::rotation_between_vectors(curr_vect, target_vect);
@@ -1372,15 +1394,45 @@ mod tests {
 
     #[test]
     fn arc_constructor_uses_bn09_density() {
-        let quarter = QuadPath::arc(0.0, TAU / 4.0, 1.0, [0.0; 3], None);
+        let quarter = QuadPath::try_arc(0.0, TAU / 4.0, 1.0, [0.0; 3], None).expect("valid arc");
         assert_eq!(quarter.num_curves(), 4);
-        let full = QuadPath::arc(0.0, TAU, 2.0, [1.0, 0.0, 0.0], None);
+        let full = QuadPath::try_arc(0.0, TAU, 2.0, [1.0, 0.0, 0.0], None).expect("valid arc");
         assert_eq!(full.num_curves(), 16);
         // Anchors sit on the circle of radius 2 about (1, 0, 0).
         for anchor in full.anchors() {
             let r = space_ops::get_norm(vec::sub(anchor, [1.0, 0.0, 0.0]));
             assert!((r - 2.0).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn arc_public_surfaces_refuse_invalid_components_before_mutation() {
+        assert_eq!(
+            QuadPath::try_arc(0.0, TAU / 4.0, 1.0, [0.0; 3], Some(0)),
+            Err(GeomError::ZeroArcComponents)
+        );
+        assert_eq!(
+            QuadPath::try_arc(0.0, f64::NAN, 1.0, [0.0; 3], None),
+            Err(GeomError::NonFiniteArcAngle)
+        );
+        assert_eq!(
+            QuadPath::try_arc(0.0, TAU / 4.0, 1.0, [0.0; 3], Some(usize::MAX)),
+            Err(GeomError::ArcComponentOverflow { count: usize::MAX })
+        );
+
+        let mut path = QuadPath::new();
+        path.start_new_path([0.0; 3]);
+        let original = path.clone();
+        assert!(matches!(
+            path.add_arc_to([1.0, 0.0, 0.0], 0.0, Some(0)),
+            Err(GeomError::ZeroArcComponents)
+        ));
+        assert_eq!(path, original, "a tiny-angle refusal must be atomic");
+        assert!(matches!(
+            path.add_arc_to([1.0, 0.0, 0.0], f64::INFINITY, None),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert_eq!(path, original, "a non-finite refusal must be atomic");
     }
 
     #[test]

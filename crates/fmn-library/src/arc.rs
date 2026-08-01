@@ -12,15 +12,16 @@
 //! arc here goes through `fmn_geom::bezier::arc_n_components`:
 //! `max(1, ceil(16·|θ|/TAU))`, which agrees with the `Arc` convention (the
 //! finest of the three) at every common angle and is never coarser than
-//! any of them. An explicit `n_components` is honoured verbatim, as it is
-//! in the Reference. Behaviour Note BN-09 carries the migration guidance.
+//! any of them. An explicit `n_components` is honoured when it satisfies
+//! Chisel's checked component budget; invalid counts are typed refusals.
+//! Behaviour Note BN-09 carries the migration guidance.
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
     BLACK, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, ORIGIN, OUT, RED, TAU,
 };
 use fmn_core::types::Vec3;
-use fmn_geom::{QuadPath, bezier, space_ops};
+use fmn_geom::{GeomError, QuadPath, bezier, space_ops};
 use fmn_mobject::{Mobject, ShapeTag};
 
 use crate::poly::{ArrowTip, arc_between_points};
@@ -86,8 +87,8 @@ impl Arc {
         self
     }
 
-    /// Override the arc-density rule for this arc (BN-09 honours it
-    /// verbatim).
+    /// Override the arc-density rule for this arc (BN-09 honours valid
+    /// explicit counts exactly).
     #[must_use]
     pub fn n_components(mut self, n: usize) -> Self {
         self.n_components = Some(n);
@@ -116,36 +117,49 @@ impl Arc {
     }
 
     /// The number of quadratic components this arc will use.
-    #[must_use]
-    pub fn component_count(&self) -> usize {
-        self.n_components
-            .unwrap_or_else(|| bezier::arc_n_components(self.angle))
+    pub fn component_count(&self) -> Result<usize, GeomError> {
+        match self.n_components {
+            Some(count) => bezier::arc_point_count(self.angle, count).map(|_| count),
+            None => bezier::arc_n_components(self.angle),
+        }
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
-        let path = QuadPath::arc(
+    ///
+    /// # Errors
+    /// The typed arc-component refusal produced before allocation.
+    pub fn build(self) -> Result<VMobject, GeomError> {
+        let path = QuadPath::try_arc(
             self.start_angle,
             self.angle,
             self.radius,
             self.arc_center,
             self.n_components,
-        );
-        VMobject::from_path(&path)
+        )?;
+        Ok(VMobject::from_path(&path)
             .with_style(self.style)
             .with_shape(ShapeTag::Arc {
                 center: self.arc_center,
                 radius: self.radius,
                 start_angle: self.start_angle,
                 angle: self.angle,
-            })
+            }))
     }
 }
 
-impl From<Arc> for Mobject {
-    fn from(a: Arc) -> Self {
-        a.build().into()
+impl TryFrom<Arc> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(arc: Arc) -> Result<Self, Self::Error> {
+        arc.build()
+    }
+}
+
+impl TryFrom<Arc> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(arc: Arc) -> Result<Self, Self::Error> {
+        arc.build().map(Into::into)
     }
 }
 
@@ -203,44 +217,74 @@ impl ArcBetweenPoints {
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
-        VMobject::from_points(arc_between_points(
+    ///
+    /// # Errors
+    /// The typed arc-component refusal produced before allocation.
+    pub fn build(self) -> Result<VMobject, GeomError> {
+        Ok(VMobject::from_points(arc_between_points(
             self.start,
             self.end,
             self.angle,
             self.n_components,
-        ))
-        .with_style(self.style)
+        )?)
+        .with_style(self.style))
     }
 }
 
-impl From<ArcBetweenPoints> for Mobject {
-    fn from(a: ArcBetweenPoints) -> Self {
-        a.build().into()
+impl TryFrom<ArcBetweenPoints> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(arc: ArcBetweenPoints) -> Result<Self, Self::Error> {
+        arc.build()
+    }
+}
+
+impl TryFrom<ArcBetweenPoints> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(arc: ArcBetweenPoints) -> Result<Self, Self::Error> {
+        arc.build().map(Into::into)
     }
 }
 
 /// `CurvedArrow(start_point, end_point, angle)`: an [`ArcBetweenPoints`]
 /// with a tip at its end.
-#[must_use]
-pub fn curved_arrow(start: Vec3, end: Vec3, angle: f64, style: Style) -> VMobject {
+///
+/// # Errors
+/// The typed arc-component refusal produced before allocation.
+pub fn curved_arrow(
+    start: Vec3,
+    end: Vec3,
+    angle: f64,
+    style: Style,
+) -> Result<VMobject, GeomError> {
     let arc = ArcBetweenPoints::new(start, end)
         .angle(angle)
         .style(style)
-        .build();
-    attach_tip(arc, ArrowTip::new().color(style.stroke_color), TipEnd::End)
+        .build()?;
+    Ok(attach_tip(
+        arc,
+        ArrowTip::new().color(style.stroke_color),
+        TipEnd::End,
+    ))
 }
 
 /// `CurvedDoubleArrow`: a [`curved_arrow`] with a tip at both ends.
-#[must_use]
-pub fn curved_double_arrow(start: Vec3, end: Vec3, angle: f64, style: Style) -> VMobject {
-    let once = curved_arrow(start, end, angle, style);
-    attach_tip(
+///
+/// # Errors
+/// The typed arc-component refusal produced before allocation.
+pub fn curved_double_arrow(
+    start: Vec3,
+    end: Vec3,
+    angle: f64,
+    style: Style,
+) -> Result<VMobject, GeomError> {
+    let once = curved_arrow(start, end, angle, style)?;
+    Ok(attach_tip(
         once,
         ArrowTip::new().color(style.stroke_color),
         TipEnd::Start,
-    )
+    ))
 }
 
 /// `Circle(radius, arc_center)`: an [`Arc`] of a full turn, stroked red by
@@ -311,6 +355,7 @@ impl Circle {
         let radius = self.arc.radius;
         self.arc
             .build()
+            .expect("Circle's fixed full-turn component request is valid")
             .with_shape(ShapeTag::Circle { center, radius })
     }
 }
@@ -391,6 +436,7 @@ impl Dot {
             .arc_center(self.center)
             .style(self.style)
             .build()
+            .expect("Dot's fixed full-turn component request is valid")
             .with_shape(ShapeTag::Dot {
                 center: self.center,
                 radius: self.radius,
@@ -583,15 +629,19 @@ impl AnnularSector {
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
-        let arc_of = |radius: f64| {
-            QuadPath::arc(self.start_angle, self.angle, radius, self.center, None)
-                .points()
-                .to_vec()
+    ///
+    /// # Errors
+    /// The typed arc-component refusal produced before allocation.
+    pub fn build(self) -> Result<VMobject, GeomError> {
+        let arc_of = |radius: f64| -> Result<Vec<Vec3>, GeomError> {
+            Ok(
+                QuadPath::try_arc(self.start_angle, self.angle, radius, self.center, None)?
+                    .points()
+                    .to_vec(),
+            )
         };
-        let inner = arc_of(self.inner_radius);
-        let outer = arc_of(self.outer_radius);
+        let inner = arc_of(self.inner_radius)?;
+        let outer = arc_of(self.outer_radius)?;
 
         let mut path = QuadPath::new();
         let mut reversed = inner.clone();
@@ -604,13 +654,23 @@ impl AnnularSector {
         if let Some(&last) = inner.last() {
             let _ = path.add_line_to(last, true);
         }
-        VMobject::from_path(&path).with_style(self.style)
+        Ok(VMobject::from_path(&path).with_style(self.style))
     }
 }
 
-impl From<AnnularSector> for Mobject {
-    fn from(s: AnnularSector) -> Self {
-        s.build().into()
+impl TryFrom<AnnularSector> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(sector: AnnularSector) -> Result<Self, Self::Error> {
+        sector.build()
+    }
+}
+
+impl TryFrom<AnnularSector> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(sector: AnnularSector) -> Result<Self, Self::Error> {
+        sector.build().map(Into::into)
     }
 }
 
@@ -683,10 +743,12 @@ impl Annulus {
     /// Build the detached mobject.
     #[must_use]
     pub fn build(self) -> VMobject {
-        let outer: Vec<Vec3> = QuadPath::arc(0.0, TAU, self.outer_radius, ORIGIN, None)
+        let outer: Vec<Vec3> = QuadPath::try_arc(0.0, TAU, self.outer_radius, ORIGIN, None)
+            .expect("Annulus's fixed full-turn outer arc is valid")
             .points()
             .to_vec();
-        let inner: Vec<Vec3> = QuadPath::arc(0.0, -TAU, self.inner_radius, ORIGIN, None)
+        let inner: Vec<Vec3> = QuadPath::try_arc(0.0, -TAU, self.inner_radius, ORIGIN, None)
+            .expect("Annulus's fixed full-turn inner arc is valid")
             .points()
             .to_vec();
         let mut path = QuadPath::new();
@@ -781,14 +843,21 @@ mod tests {
     fn arc_density_is_one_rule() {
         // BN-09: 16 components for a full turn, and agreement with the
         // Reference's Arc convention at the common angles.
-        assert_eq!(Arc::new().angle(TAU).component_count(), 16);
-        assert_eq!(Arc::new().angle(PI).component_count(), 8);
-        assert_eq!(Arc::new().angle(TAU / 4.0).component_count(), 4);
-        assert_eq!(Arc::new().angle(-TAU / 4.0).component_count(), 4);
-        assert_eq!(Arc::new().angle(1e-9).component_count(), 1);
+        assert_eq!(Arc::new().angle(TAU).component_count(), Ok(16));
+        assert_eq!(Arc::new().angle(PI).component_count(), Ok(8));
+        assert_eq!(Arc::new().angle(TAU / 4.0).component_count(), Ok(4));
+        assert_eq!(Arc::new().angle(-TAU / 4.0).component_count(), Ok(4));
+        assert_eq!(Arc::new().angle(1e-9).component_count(), Ok(1));
         // An explicit count is honoured verbatim.
-        assert_eq!(Arc::new().angle(TAU).n_components(3).component_count(), 3);
-        let arc = Arc::new().angle(TAU).n_components(3).build();
+        assert_eq!(
+            Arc::new().angle(TAU).n_components(3).component_count(),
+            Ok(3)
+        );
+        let arc = Arc::new()
+            .angle(TAU)
+            .n_components(3)
+            .build()
+            .expect("three components are valid");
         assert_eq!(arc.points().len(), 7);
     }
 
@@ -799,7 +868,8 @@ mod tests {
             .angle(1.7)
             .radius(2.5)
             .arc_center([1.0, -2.0, 0.0])
-            .build();
+            .build()
+            .expect("the fixture arc is valid");
         let points = arc.points();
         for anchor in points.iter().step_by(2) {
             let r = space_ops::get_norm(sub(*anchor, [1.0, -2.0, 0.0]));
@@ -874,7 +944,10 @@ mod tests {
     fn arc_between_points_meets_its_ends() {
         let (start, end) = ([0.0, 0.0, 0.0], [1.0, 2.0, 0.0]);
         for angle in [TAU / 4.0, -TAU / 12.0, TAU / 2.0] {
-            let arc = ArcBetweenPoints::new(start, end).angle(angle).build();
+            let arc = ArcBetweenPoints::new(start, end)
+                .angle(angle)
+                .build()
+                .expect("the fixture angle is valid");
             assert!(close_vec(arc.points()[0], start), "angle {angle}");
             assert!(
                 close_vec(*arc.points().last().unwrap(), end),
@@ -882,7 +955,10 @@ mod tests {
             );
         }
         // A zero angle degenerates to the straight segment.
-        let straight = ArcBetweenPoints::new(start, end).angle(0.0).build();
+        let straight = ArcBetweenPoints::new(start, end)
+            .angle(0.0)
+            .build()
+            .expect("a zero-angle segment uses one valid component");
         assert!(close_vec(straight.points()[0], start));
         assert!(close_vec(*straight.points().last().unwrap(), end));
         assert_eq!(straight.points().len(), 3);
@@ -894,7 +970,8 @@ mod tests {
             .inner_radius(1.0)
             .outer_radius(2.0)
             .angle(TAU / 4.0)
-            .build();
+            .build()
+            .expect("the fixture sector is valid");
         let radii: Vec<f64> = sector
             .points()
             .iter()
@@ -906,7 +983,9 @@ mod tests {
         assert!(close(min, 1.0), "inner radius {min}");
         assert!(close(max, 2.0), "outer radius {max}");
         // Sector: the hole closes to a point at the centre.
-        let plain = AnnularSector::sector(TAU / 4.0, 2.0).build();
+        let plain = AnnularSector::sector(TAU / 4.0, 2.0)
+            .build()
+            .expect("the fixture sector is valid");
         assert!(
             plain
                 .points()
@@ -941,10 +1020,56 @@ mod tests {
 
     #[test]
     fn degenerate_arcs_are_defined() {
-        let flat = Arc::new().angle(0.0).build();
+        let flat = Arc::new()
+            .angle(0.0)
+            .build()
+            .expect("the default density admits a zero-angle arc");
         assert!(!flat.points().is_empty());
         let zero_radius = Circle::new().radius(0.0).build();
         assert!(close(zero_radius.length_over_dim(0), 0.0));
         assert!(close(radius_of(&zero_radius), 0.0));
+    }
+
+    #[test]
+    fn public_arc_builders_propagate_component_refusals() {
+        assert!(matches!(
+            Arc::new().n_components(0).build(),
+            Err(GeomError::ZeroArcComponents)
+        ));
+        assert!(matches!(
+            Arc::new().n_components(usize::MAX).build(),
+            Err(GeomError::ArcComponentOverflow { count: usize::MAX })
+        ));
+        assert!(matches!(
+            Arc::new().angle(f64::NAN).build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert!(matches!(
+            Arc::new().angle(f64::INFINITY).build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert!(
+            Arc::new()
+                .n_components(bezier::MAX_ARC_COMPONENTS)
+                .build()
+                .is_ok()
+        );
+        assert!(matches!(
+            Arc::new()
+                .n_components(bezier::MAX_ARC_COMPONENTS + 1)
+                .build(),
+            Err(GeomError::ArcComponentsAboveBudget { .. })
+        ));
+        assert!(matches!(
+            ArcBetweenPoints::new([0.0; 3], [1.0, 0.0, 0.0])
+                .angle(0.0)
+                .n_components(0)
+                .build(),
+            Err(GeomError::ZeroArcComponents)
+        ));
+        assert!(matches!(
+            AnnularSector::new().angle(f64::NAN).build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
     }
 }

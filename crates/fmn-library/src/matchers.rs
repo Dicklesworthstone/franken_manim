@@ -113,6 +113,7 @@ impl SurroundingRectangle {
             .height(h)
             .style(self.style)
             .build()
+            .expect("a surrounding rectangle never requests rounded corners")
             .shifted(centre)
             .with_shape(ShapeTag::Rect {
                 center: centre,
@@ -285,7 +286,11 @@ mod tests {
     use fmn_core::constants::{GREEN, RED};
 
     fn box_of(w: f64, h: f64) -> VMobject {
-        crate::poly::Rectangle::new().width(w).height(h).build()
+        crate::poly::Rectangle::new()
+            .width(w)
+            .height(h)
+            .build()
+            .expect("the test box is unrounded")
     }
 
     #[test]

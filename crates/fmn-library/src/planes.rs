@@ -200,7 +200,9 @@ fn lines_parallel_to_axis(
             context: "number-plane faded-line ratio",
         })?;
     let step = axis2.x_step() / dense_freq as f64;
-    let template = Line::new(axis1.start_point(), axis1.end_point()).build();
+    let template = Line::new(axis1.start_point(), axis1.end_point())
+        .build()
+        .expect("number-plane grid templates are straight segments");
     let origin = axis2.n2p(0.0);
     let mut background = Vec::new();
     let mut faded = Vec::new();
@@ -815,6 +817,7 @@ impl NumberPlane {
         Arrow::new(self.c2p(&[0.0, 0.0]), self.c2p(coords))
             .buff(0.0)
             .build()
+            .expect("coordinate-system vectors are uncurved arrows")
     }
 
     /// The Reference's `get_graph`: sample `function` over `x_range`

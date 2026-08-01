@@ -16,7 +16,7 @@ use fmn_core::constants::{
     DEFAULT_LIGHT_COLOR, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI, RIGHT, UP, UR,
 };
 use fmn_core::types::Vec3;
-use fmn_geom::{ArcLengthTable, QuadPath, space_ops};
+use fmn_geom::{ArcLengthTable, GeomError, QuadPath, space_ops};
 use fmn_mobject::{Mobject, ShapeTag};
 
 use crate::poly::ArrowTip;
@@ -95,45 +95,64 @@ impl Line {
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
-        let points = points_by_ends(self.start, self.end, self.buff, self.path_arc);
-        VMobject::from_points(points)
+    ///
+    /// # Errors
+    /// The typed arc-component refusal for an invalid `path_arc`.
+    pub fn build(self) -> Result<VMobject, GeomError> {
+        let points = points_by_ends(self.start, self.end, self.buff, self.path_arc)?;
+        Ok(VMobject::from_points(points)
             .with_style(self.style)
             .with_shape(ShapeTag::Line {
                 start: self.start,
                 end: self.end,
                 path_arc: self.path_arc,
                 buff: self.buff,
-            })
+            }))
     }
 }
 
-impl From<Line> for Mobject {
-    fn from(l: Line) -> Self {
-        l.build().into()
+impl TryFrom<Line> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(line: Line) -> Result<Self, Self::Error> {
+        line.build()
+    }
+}
+
+impl TryFrom<Line> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(line: Line) -> Result<Self, Self::Error> {
+        line.build().map(Into::into)
     }
 }
 
 /// The Reference's `set_points_by_ends`, with the buffer measured along
 /// the path rather than across the chord.
-#[must_use]
-pub fn points_by_ends(start: Vec3, end: Vec3, buff: f64, path_arc: f64) -> Vec<Vec3> {
+///
+/// # Errors
+/// The typed arc-component refusal for an invalid `path_arc`.
+pub fn points_by_ends(
+    start: Vec3,
+    end: Vec3,
+    buff: f64,
+    path_arc: f64,
+) -> Result<Vec<Vec3>, GeomError> {
     let mut path = QuadPath::new();
     path.start_new_path(start);
-    let _ = path.add_arc_to(end, path_arc, None);
+    path.add_arc_to(end, path_arc, None)?;
     if buff <= 0.0 {
-        return path.points().to_vec();
+        return Ok(path.points().to_vec());
     }
     let length = path.get_arc_length();
     if length <= 0.0 {
-        return path.points().to_vec();
+        return Ok(path.points().to_vec());
     }
     let alpha = (buff / length).min(0.5);
-    match partial_by_length(&path, alpha, 1.0 - alpha) {
+    Ok(match partial_by_length(&path, alpha, 1.0 - alpha) {
         Some(points) => points,
         None => path.points().to_vec(),
-    }
+    })
 }
 
 /// The true-length restriction of a path to `[a, b]`, as a point run.
@@ -269,7 +288,7 @@ impl DashedLine {
     pub fn num_dashes(&self) -> Result<usize, DashError> {
         validate_dash_length(self.dash_length)?;
         validate_positive_space_ratio(self.positive_space_ratio)?;
-        let source = self.line.build();
+        let source = self.line.build().map_err(DashError::from)?;
         self.num_dashes_for(&source)
     }
 
@@ -301,7 +320,7 @@ impl DashedLine {
     pub fn build(self) -> Result<VMobject, DashError> {
         validate_dash_length(self.dash_length)?;
         validate_positive_space_ratio(self.positive_space_ratio)?;
-        let source = self.line.build();
+        let source = self.line.build().map_err(DashError::from)?;
         let n = self.num_dashes_for(&source)?;
         dashed_vmobject(&source, n, self.positive_space_ratio, 0.0)
     }
@@ -340,7 +359,10 @@ pub fn tangent_line(
     ) else {
         return VMobject::new().with_style(style);
     };
-    let line = Line::new(p1, p2).style(style).build();
+    let line = Line::new(p1, p2)
+        .style(style)
+        .build()
+        .expect("tangent_line constructs a finite straight segment");
     let current = space_ops::get_norm(sub(p2, p1));
     if current == 0.0 {
         return line;
@@ -551,8 +573,10 @@ impl Arrow {
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
+    ///
+    /// # Errors
+    /// The arc-component contract's typed refusals (fm-4tb.1).
+    pub fn build(self) -> Result<VMobject, GeomError> {
         let vect = sub(self.end, self.start);
         let length = space_ops::get_norm(vect).max(1e-8);
         let unit = space_ops::normalize(vect);
@@ -608,7 +632,7 @@ impl Arrow {
             (base, mirrored)
         } else {
             let r = length / 2.0 / fmn_dmath::sin(path_arc / 2.0);
-            let arc: Vec<Vec3> = QuadPath::arc(0.0, path_arc, 1.0, ORIGIN, None)
+            let arc: Vec<Vec3> = QuadPath::try_arc(0.0, path_arc, 1.0, ORIGIN, None)?
                 .points()
                 .to_vec();
             let outer: Vec<Vec3> = arc.iter().map(|p| scale(*p, r + width / 2.0)).collect();
@@ -672,18 +696,28 @@ impl Arrow {
         let shifted = tilted
             .clone()
             .shifted(sub(start, arrow_start(&tilted, tip_index)));
-        shifted.with_shape(ShapeTag::Line {
+        Ok(shifted.with_shape(ShapeTag::Line {
             start: self.start,
             end: self.end,
             path_arc: self.path_arc,
             buff: self.buff,
-        })
+        }))
     }
 }
 
-impl From<Arrow> for Mobject {
-    fn from(a: Arrow) -> Self {
-        a.build().into()
+impl TryFrom<Arrow> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(arrow: Arrow) -> Result<Self, Self::Error> {
+        arrow.build()
+    }
+}
+
+impl TryFrom<Arrow> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(arrow: Arrow) -> Result<Self, Self::Error> {
+        arrow.build().map(Into::into)
     }
 }
 
@@ -734,9 +768,11 @@ impl StrokeArrow {
 
     /// Build the detached mobject: the shaft, with a tip sized from the
     /// stroke width exactly as the Reference's `insert_tip_anchor` does.
-    #[must_use]
-    pub fn build(self) -> VMobject {
-        let shaft = self.line.build();
+    ///
+    /// # Errors
+    /// The typed arc-component refusal for an invalid `path_arc`.
+    pub fn build(self) -> Result<VMobject, GeomError> {
+        let shaft = self.line.build()?;
         let style = shaft.style();
         let arc_len = line_arc_length(&shaft);
         let tip_len = style.stroke_width * self.tip_width_ratio * self.tip_len_to_width;
@@ -748,20 +784,30 @@ impl StrokeArrow {
             tip_len
         };
         let tip_width = self.tip_width_ratio * style.stroke_width * self.tip_len_to_width * 2.0;
-        attach_tip(
+        Ok(attach_tip(
             shaft,
             ArrowTip::new()
                 .length(tip_length)
                 .width(tip_width.max(tip_length))
                 .color(style.stroke_color),
             TipEnd::End,
-        )
+        ))
     }
 }
 
-impl From<StrokeArrow> for Mobject {
-    fn from(a: StrokeArrow) -> Self {
-        a.build().into()
+impl TryFrom<StrokeArrow> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(arrow: StrokeArrow) -> Result<Self, Self::Error> {
+        arrow.build()
+    }
+}
+
+impl TryFrom<StrokeArrow> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(arrow: StrokeArrow) -> Result<Self, Self::Error> {
+        arrow.build().map(Into::into)
     }
 }
 
@@ -827,7 +873,9 @@ mod tests {
 
     #[test]
     fn a_plain_line_runs_between_its_ends() {
-        let line = Line::new([-1.0, 0.0, 0.0], [2.0, 4.0, 0.0]).build();
+        let line = Line::new([-1.0, 0.0, 0.0], [2.0, 4.0, 0.0])
+            .build()
+            .expect("the fixture line is valid");
         assert!(close_vec(line.points()[0], [-1.0, 0.0, 0.0], 1e-12));
         assert!(close_vec(
             *line.points().last().unwrap(),
@@ -841,7 +889,10 @@ mod tests {
 
     #[test]
     fn the_buffer_is_measured_along_the_path() {
-        let line = Line::new([0.0; 3], [10.0, 0.0, 0.0]).buff(2.0).build();
+        let line = Line::new([0.0; 3], [10.0, 0.0, 0.0])
+            .buff(2.0)
+            .build()
+            .expect("the fixture line is valid");
         assert!(close_vec(line.points()[0], [2.0, 0.0, 0.0], 1e-6));
         assert!(close_vec(
             *line.points().last().unwrap(),
@@ -855,10 +906,12 @@ mod tests {
         let curved = Line::new([0.0; 3], [4.0, 0.0, 0.0])
             .path_arc(TAU / 4.0)
             .buff(1.0)
-            .build();
+            .build()
+            .expect("the fixture arc is valid");
         let full = Line::new([0.0; 3], [4.0, 0.0, 0.0])
             .path_arc(TAU / 4.0)
-            .build();
+            .build()
+            .expect("the fixture arc is valid");
         assert!(
             close(line_arc_length(&full) - line_arc_length(&curved), 2.0, 1e-3),
             "trimmed {} from {}",
@@ -873,7 +926,10 @@ mod tests {
         // negatively bent line reported its chord. Ours reports the arc.
         let chord = 4.0;
         for arc in [TAU / 4.0, -TAU / 4.0] {
-            let line = Line::new([0.0; 3], [chord, 0.0, 0.0]).path_arc(arc).build();
+            let line = Line::new([0.0; 3], [chord, 0.0, 0.0])
+                .path_arc(arc)
+                .build()
+                .expect("the fixture arc is valid");
             let length = line_arc_length(&line);
             assert!(
                 length > chord + 0.1,
@@ -884,7 +940,9 @@ mod tests {
 
     #[test]
     fn line_queries_read_the_built_geometry() {
-        let line = Line::new([0.0; 3], [3.0, 4.0, 0.0]).build();
+        let line = Line::new([0.0; 3], [3.0, 4.0, 0.0])
+            .build()
+            .expect("the fixture line is valid");
         assert!(close_vec(line_vector(&line), [3.0, 4.0, 0.0], 1e-12));
         assert!(close_vec(line_unit_vector(&line), [0.6, 0.8, 0.0], 1e-12));
         assert!(close(line_slope(&line), 4.0 / 3.0, 1e-12));
@@ -998,7 +1056,10 @@ mod tests {
 
     #[test]
     fn arrow_spans_its_ends_and_caps_its_head() {
-        let arrow = Arrow::new([0.0; 3], [4.0, 0.0, 0.0]).buff(0.0).build();
+        let arrow = Arrow::new([0.0; 3], [4.0, 0.0, 0.0])
+            .buff(0.0)
+            .build()
+            .expect("the fixture arrow is valid");
         let extent = arrow.length_over_dim(0);
         assert!(close(extent, 4.0, 1e-6), "arrow spans {extent}");
         assert!(
@@ -1013,7 +1074,9 @@ mod tests {
 
     #[test]
     fn vector_starts_at_the_origin() {
-        let v = Arrow::vector([2.0, 2.0, 0.0]).build();
+        let v = Arrow::vector([2.0, 2.0, 0.0])
+            .build()
+            .expect("the fixture vector is valid");
         // The shaft's back edge straddles the start point by half its
         // width, so the extent begins a shaft-half-width behind the
         // origin and no further.
@@ -1031,19 +1094,54 @@ mod tests {
 
     #[test]
     fn stroke_arrow_carries_a_tip_child() {
-        let arrow = StrokeArrow::new([0.0; 3], [4.0, 0.0, 0.0]).build();
+        let arrow = StrokeArrow::new([0.0; 3], [4.0, 0.0, 0.0])
+            .build()
+            .expect("the fixture stroke arrow is valid");
         assert_eq!(arrow.children().len(), 1, "shaft plus one tip");
         assert!(!arrow.points().is_empty(), "the shaft keeps its path");
     }
 
     #[test]
     fn degenerate_lines_are_defined() {
-        let zero = Line::new([1.0, 1.0, 0.0], [1.0, 1.0, 0.0]).build();
+        let zero = Line::new([1.0, 1.0, 0.0], [1.0, 1.0, 0.0])
+            .build()
+            .expect("a zero-length straight line is valid");
         assert!(close(line_arc_length(&zero), 0.0, 1e-12));
         assert_eq!(line_unit_vector(&zero), ORIGIN, "no direction to report");
         // A buffer longer than the line collapses to its midpoint, not to
         // a reversed segment.
-        let over = Line::new([0.0; 3], [1.0, 0.0, 0.0]).buff(10.0).build();
+        let over = Line::new([0.0; 3], [1.0, 0.0, 0.0])
+            .buff(10.0)
+            .build()
+            .expect("an over-buffered straight line is valid");
         assert!(line_arc_length(&over) < 1e-6, "{}", line_arc_length(&over));
+    }
+
+    #[test]
+    fn arc_bearing_line_builders_propagate_non_finite_angles() {
+        assert!(matches!(
+            Line::new([0.0; 3], [1.0, 0.0, 0.0])
+                .path_arc(f64::NAN)
+                .build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert!(matches!(
+            Arrow::new([0.0; 3], [1.0, 0.0, 0.0])
+                .path_arc(f64::INFINITY)
+                .build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert!(matches!(
+            StrokeArrow::new([0.0; 3], [1.0, 0.0, 0.0])
+                .path_arc(f64::NAN)
+                .build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert!(matches!(
+            DashedLine::new([0.0; 3], [1.0, 0.0, 0.0])
+                .path_arc(f64::NAN)
+                .build(),
+            Err(DashError::Geometry(GeomError::NonFiniteArcAngle))
+        ));
     }
 }

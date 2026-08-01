@@ -672,7 +672,8 @@ impl NumberLine {
     fn tick_vmob(&self, x: f64, size: f64) -> VMobject {
         let tick = Line::new(scale(DOWN, size), scale(UP, size))
             .style(self.style)
-            .build();
+            .build()
+            .expect("a NumberLine tick is always a straight segment");
         let angle = self.line_angle();
         let center = tick.center_point();
         tick.rotated_about(angle, OUT, center).moved_to(self.n2p(x))
@@ -682,7 +683,10 @@ impl NumberLine {
     /// [`build_numbered`](Self::build_numbered) or
     /// [`add_numbers`](Self::add_numbers) instead.
     pub fn build(mut self) -> Result<Self, SamplingError> {
-        let mut vmob = Line::new(self.start, self.end).style(self.style).build();
+        let mut vmob = Line::new(self.start, self.end)
+            .style(self.style)
+            .build()
+            .expect("a NumberLine axis is always a straight segment");
         if self.include_tip {
             // The Reference's tip_config (width=length=0.25), stroked like
             // the line (`self.tip.set_stroke(self.stroke_color, …)`).
@@ -1353,7 +1357,10 @@ impl Axes {
     /// graph point.
     #[must_use]
     pub fn get_tangent_line(&self, x: f64, function: &dyn Fn(f64) -> f64, length: f64) -> VMobject {
-        let line = Line::new(LEFT, RIGHT).build().with_width(length, false);
+        let line = Line::new(LEFT, RIGHT)
+            .build()
+            .expect("the tangent template is always a straight segment")
+            .with_width(length, false);
         let angle = self.angle_of_tangent(x, function);
         let center = line.center_point();
         line.rotated_about(angle, OUT, center)
@@ -1443,6 +1450,7 @@ impl Axes {
                 .height(space_ops::get_norm(height_vect))
                 .style(style)
                 .build()
+                .expect("an unrounded Riemann rectangle cannot request arc components")
                 .with_stroke_behind(config.stroke_behind)
                 .moved_to_aligned(self.c2p(&[x0, 0.0]), if positive { DL } else { UL });
             rects.push(rect);

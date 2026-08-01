@@ -563,7 +563,11 @@ mod tests {
 
     #[test]
     fn a_brace_around_a_mobject_spans_it_and_clears_it_by_the_buff() {
-        let target = crate::poly::Rectangle::new().width(4.0).height(2.0).build();
+        let target = crate::poly::Rectangle::new()
+            .width(4.0)
+            .height(2.0)
+            .build()
+            .expect("the test target is unrounded");
         let brace = Brace::around(&target, DOWN).buff(0.25);
         assert!(
             (brace.width - 4.0).abs() < 1e-9,
@@ -603,7 +607,11 @@ mod tests {
     #[test]
     fn put_at_tip_places_past_the_tip_along_the_brace_direction() {
         let brace = Brace::new().width(3.0);
-        let label = crate::poly::Rectangle::new().width(0.4).height(0.2).build();
+        let label = crate::poly::Rectangle::new()
+            .width(0.4)
+            .height(0.2)
+            .build()
+            .expect("the test label is unrounded");
         let placed = brace.put_at_tip(label, 0.1);
         let tip = brace.tip();
         let (lmin, _) = placed.extent().expect("the label has extent");

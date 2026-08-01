@@ -43,7 +43,7 @@
 //! and commit the lock diff (the rig never commits; frame hashes join these
 //! artifacts once Lumen exists).
 
-use fmn_conformance::golden::{GoldenStore, Scope};
+use fmn_conformance::golden::{GoldenError, GoldenStore, Scope};
 use fmn_core::constants::{DOWN, LEFT, RIGHT, TAU, UP};
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
@@ -76,7 +76,8 @@ fn geom_lifecycle_doc() -> Vec<u8> {
     let mut w = Writer::new(GEOM_SCHEMA);
 
     // Step 1: a quarter arc of radius 1.5 centered off-origin.
-    let mut path = QuadPath::arc(0.0, TAU / 4.0, 1.5, [0.5, -0.25, 0.0], Some(4));
+    let mut path = QuadPath::try_arc(0.0, TAU / 4.0, 1.5, [0.5, -0.25, 0.0], Some(4))
+        .expect("the lifecycle fixture arc is valid");
     put_points_f64(&mut w, "arc", path.points());
 
     // Step 2: a line to a corner point.
@@ -160,19 +161,17 @@ fn stage_lifecycle_doc() -> Vec<u8> {
 }
 
 #[test]
-fn geom_lifecycle_is_bit_locked() {
+fn geom_lifecycle_is_bit_locked() -> Result<(), GoldenError> {
     let doc = geom_lifecycle_doc();
-    if let Err(e) = store().check("geom_lifecycle.v1", &doc) {
-        panic!("{e}");
-    }
+    store().check("geom_lifecycle.v1", &doc)?;
+    Ok(())
 }
 
 #[test]
-fn stage_lifecycle_is_bit_locked() {
+fn stage_lifecycle_is_bit_locked() -> Result<(), GoldenError> {
     let doc = stage_lifecycle_doc();
-    if let Err(e) = store().check("stage_lifecycle.v1", &doc) {
-        panic!("{e}");
-    }
+    store().check("stage_lifecycle.v1", &doc)?;
+    Ok(())
 }
 
 #[test]

@@ -2663,7 +2663,7 @@ mod tests {
     }
 
     fn circle_path(cx: f64, cy: f64, r: f64, n: usize) -> QuadPath {
-        let pts = bezier::quadratic_points_for_arc(std::f64::consts::TAU, n);
+        let pts = bezier::quadratic_points_for_arc(std::f64::consts::TAU, n).expect("valid arc");
         let placed: Vec<Vec3> = pts
             .iter()
             .map(|p| [cx + r * p[0], cy + r * p[1], 0.0])
@@ -4199,20 +4199,22 @@ mod tests {
         // control below is a kernel that IS taken, and the ring's decline can
         // only be about its second subpath.
         let radius = 0.08;
-        let outer = QuadPath::arc(
+        let outer = QuadPath::try_arc(
             0.0,
             std::f64::consts::TAU,
             radius,
             [0.0, 0.0, 0.0],
             Some(16),
-        );
-        let inner = QuadPath::arc(
+        )
+        .expect("the fixed outer annulus arc is valid");
+        let inner = QuadPath::try_arc(
             0.0,
             -std::f64::consts::TAU,
             0.5 * radius,
             [0.0, 0.0, 0.0],
             Some(16),
-        );
+        )
+        .expect("the fixed inner annulus arc is valid");
         // Built the way `fmn_library::Annulus` builds one: two `add_subpath`
         // calls on a fresh path, so the null-curve breaks `compile_shape` reads
         // are where they would really be.

@@ -1183,7 +1183,11 @@ mod tests {
 
     /// A w×h rectangle entry centred on the origin.
     fn cell(w: f64, h: f64) -> VMobject {
-        Rectangle::new().width(w).height(h).build()
+        Rectangle::new()
+            .width(w)
+            .height(h)
+            .build()
+            .expect("the test cell is unrounded")
     }
 
     /// An n×n grid of identical w×h cells.

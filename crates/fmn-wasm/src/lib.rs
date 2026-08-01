@@ -230,7 +230,8 @@ fn build_vmobject(points: &[Vec3], shape: ShapeTag, style: StyleSpec) -> Mobject
 /// The corpus circle: a full unit-circle quadratic arc run scaled to
 /// `radius` about `center`, tagged so the primitive kernel can claim it.
 pub(crate) fn circle_mobject(center: Vec3, radius: f64) -> Mobject {
-    let unit = quadratic_points_for_arc(TAU, arc_n_components(TAU));
+    let unit = quadratic_points_for_arc(TAU, arc_n_components(TAU).expect("TAU is a finite angle"))
+        .expect("TAU fits the arc budget");
     let points: Vec<Vec3> = unit
         .iter()
         .map(|p| {

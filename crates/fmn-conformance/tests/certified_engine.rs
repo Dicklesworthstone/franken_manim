@@ -356,7 +356,10 @@ fn caps_and_joins() -> Stage {
         let x = -2.1 + 1.4 * i as f64;
         let m = add(
             &mut stage,
-            Line::new([x - 0.42, 1.25, 0.0], [x + 0.42, 1.25, 0.0]).color(TEAL_B),
+            Line::new([x - 0.42, 1.25, 0.0], [x + 0.42, 1.25, 0.0])
+                .color(TEAL_B)
+                .build()
+                .expect("the cap fixture line is straight"),
         );
         stage.set_stroke(m, Some(TEAL_B), Some(w), Some(1.0), None, true);
     }
@@ -409,7 +412,12 @@ fn fills() -> Stage {
     stage.set_fill(d, Some(GREEN_B), Some(1.0), Some(0.0), true);
     let r = add(
         &mut stage,
-        Rectangle::new().width(1.1).height(0.55).color(MAROON_C),
+        Rectangle::new()
+            .width(1.1)
+            .height(0.55)
+            .color(MAROON_C)
+            .build()
+            .expect("the fill fixture rectangle is unrounded"),
     );
     stage.shift(r, [1.15, -0.85, 0.0]);
     stage.set_fill(r, Some(MAROON_C), Some(1.0), Some(0.0), true);
@@ -527,7 +535,10 @@ fn composite() -> Stage {
     // A tapered gradient stroke over the fills, exercising the arc-length ramp.
     let taper = add(
         &mut stage,
-        Line::new([-2.3, -1.15, 0.0], [2.3, -0.85, 0.0]).color(GREEN_B),
+        Line::new([-2.3, -1.15, 0.0], [2.3, -0.85, 0.0])
+            .color(GREEN_B)
+            .build()
+            .expect("the taper fixture line is straight"),
     );
     stage.set_stroke(taper, Some(GREEN_B), Some(13.0), Some(0.95), None, true);
     taper_stroke(&mut stage, taper, BLUE_C, 1.0);
@@ -543,7 +554,10 @@ fn composite() -> Stage {
     // A hairline finer than the AA band, so the sub-pixel regime is in the hash.
     let hair = add(
         &mut stage,
-        Line::new([-2.4, 1.35, 0.0], [2.4, 1.28, 0.0]).color(WHITE),
+        Line::new([-2.4, 1.35, 0.0], [2.4, 1.28, 0.0])
+            .color(WHITE)
+            .build()
+            .expect("the hairline fixture is straight"),
     );
     stage.set_stroke(hair, Some(WHITE), Some(0.45), Some(1.0), None, true);
 

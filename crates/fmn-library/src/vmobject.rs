@@ -15,7 +15,7 @@
 use fmn_core::color::Srgb;
 use fmn_core::constants::OUT;
 use fmn_core::types::Vec3;
-use fmn_geom::{QuadPath, space_ops};
+use fmn_geom::{GeomError, QuadPath, space_ops};
 use fmn_mobject::stage::{Mob, Stage};
 use fmn_mobject::uniforms::{JointType, Uniforms};
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag};
@@ -32,6 +32,8 @@ pub const MAX_DASHES: usize = 4_096;
 /// A dashed-path configuration refused before arc-length work or iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashError {
+    /// The source path refused its arc configuration before allocation.
+    Geometry(GeomError),
     /// Dash length must be positive and finite.
     InvalidDashLength,
     /// The drawn fraction of a period must be finite and in `(0, 1]`.
@@ -54,6 +56,7 @@ pub enum DashError {
 impl std::fmt::Display for DashError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Geometry(error) => write!(f, "dash source geometry failed: {error}"),
             Self::InvalidDashLength => write!(f, "dash length must be positive and finite"),
             Self::InvalidPositiveSpaceRatio => {
                 write!(f, "positive-space ratio must be finite and in (0, 1]")
@@ -68,7 +71,20 @@ impl std::fmt::Display for DashError {
     }
 }
 
-impl std::error::Error for DashError {}
+impl std::error::Error for DashError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Geometry(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<GeomError> for DashError {
+    fn from(error: GeomError) -> Self {
+        Self::Geometry(error)
+    }
+}
 
 pub(crate) fn validate_dash_length(length: f64) -> Result<(), DashError> {
     if length.is_finite() && length > 0.0 {

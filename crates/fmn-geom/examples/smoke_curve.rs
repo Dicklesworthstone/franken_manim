@@ -16,13 +16,14 @@ fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64) -> QuadPath {
 }
 
 fn circle(radius: f64, center: [f64; 2]) -> QuadPath {
-    QuadPath::arc(
+    QuadPath::try_arc(
         0.0,
         fmn_core::constants::TAU,
         radius,
         [center[0], center[1], 0.0],
         None,
     )
+    .expect("valid arc")
 }
 
 fn main() {

@@ -177,7 +177,12 @@ fn prepare_profiled(
 
     let rectangle = add(
         &mut stage,
-        Rectangle::new().width(1.1).height(0.58).color(WHITE),
+        Rectangle::new()
+            .width(1.1)
+            .height(0.58)
+            .color(WHITE)
+            .build()
+            .expect("the frame-pipeline rectangle is unrounded"),
     );
     stage.shift(rectangle, [0.62 - 1.24 * phase, 0.42, 0.0]);
     stage.set_fill(

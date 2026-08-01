@@ -251,6 +251,8 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
             .width(1.1)
             .height(0.62 + 0.03 * (index % 3) as f64)
             .color(color)
+            .build()
+            .expect("the runtime rectangle is unrounded")
             .into(),
         2 | 13 => Mobject::try_from(RegularPolygon::triangle().radius(0.6).color(color))
             .expect("three directions are within the public cap"),
@@ -263,6 +265,8 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
             .angle(4.2)
             .radius(0.58)
             .color(color)
+            .build()
+            .expect("the locked runtime arc is valid")
             .into(),
         5 | 16 => Dot::new().radius(0.23).color(color).into(),
         6 | 17 => Ellipse::new().width(1.15).height(0.58).color(color).into(),
@@ -274,6 +278,8 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
         8 | 19 => Line::new([-0.58, -0.25, 0.0], [0.58, 0.25, 0.0])
             .path_arc(0.18)
             .color(color)
+            .build()
+            .expect("the locked runtime line arc is valid")
             .into(),
         9 | 20 => DashedLine::new([-0.62, 0.0, 0.0], [0.62, 0.0, 0.0])
             .dash_length(0.16)
@@ -285,16 +291,22 @@ fn primitive(index: usize, color: Srgb) -> Mobject {
         10 | 21 => Arrow::new([-0.58, 0.0, 0.0], [0.58, 0.0, 0.0])
             .buff(0.0)
             .color(color)
+            .build()
+            .expect("the locked runtime arrow is valid")
             .into(),
         22 => Rectangle::new()
             .width(1.1)
             .height(0.66)
             .corner_radius(0.16)
             .color(color)
+            .build()
+            .expect("the locked runtime rounded rectangle is valid")
             .into(),
         23 => ArcBetweenPoints::new([-0.58, -0.18, 0.0], [0.58, 0.18, 0.0])
             .angle(1.2)
             .color(color)
+            .build()
+            .expect("the locked runtime between-points arc is valid")
             .into(),
         // The caller enumerates the fixed 25-entry NAMES table, so this is
         // index 24: the dedicated layered-polygon fixture.

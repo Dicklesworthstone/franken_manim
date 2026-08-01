@@ -146,7 +146,7 @@ fn parabola_matches_analytic_formula() {
 fn full_circle_approximation_length_is_close_to_tau() {
     // The BN-09 16-component circle: the quadratic spline's true length
     // is close to (and distinct from) the ideal circumference.
-    let circle = QuadPath::arc(0.0, TAU, 1.0, [0.0; 3], None);
+    let circle = QuadPath::try_arc(0.0, TAU, 1.0, [0.0; 3], None).expect("valid arc");
     let len = circle.get_arc_length();
     assert!((len - TAU).abs() < 2e-3, "spline circumference {len}");
     // The Reference's get_arc_length (chord/handle blend) would land

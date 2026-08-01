@@ -300,7 +300,8 @@ fn self_intersection_is_resolved_by_winding_not_input_vertex_order() {
 
 #[test]
 fn curved_inputs_flatten_deterministically_and_drop_z() {
-    let mut circle = QuadPath::arc(0.0, fmn_core::constants::TAU, 2.0, [0.0, 0.0, 9.0], None);
+    let mut circle = QuadPath::try_arc(0.0, fmn_core::constants::TAU, 2.0, [0.0, 0.0, 9.0], None)
+        .expect("valid arc");
     for point in circle.points().iter().copied() {
         assert_eq!(point[2], 9.0);
     }
@@ -492,7 +493,8 @@ fn concave_rotated_and_self_crossing_polygon_corpus_matches_oracle() {
 
 #[test]
 fn curve_flattening_is_raster_equivalent_across_scales_away_from_boundary() {
-    let circle = QuadPath::arc(0.0, fmn_core::constants::TAU, 2.0, [0.0, 0.0, 0.0], None);
+    let circle = QuadPath::try_arc(0.0, fmn_core::constants::TAU, 2.0, [0.0, 0.0, 0.0], None)
+        .expect("valid arc");
     let clip = rectangle(-1.0, -3.0, 1.0, 3.0);
     for operation in [
         BooleanOperation::Union,
@@ -541,8 +543,10 @@ fn curve_flattening_is_raster_equivalent_across_scales_away_from_boundary() {
 
 #[test]
 fn separated_control_hulls_preserve_curves_and_match_forced_fallback() {
-    let subject = QuadPath::arc(0.0, fmn_core::constants::TAU, 1.5, [-4.0, 0.0, 7.0], None);
-    let clip = QuadPath::arc(0.0, fmn_core::constants::TAU, 1.25, [4.0, 0.0, -3.0], None);
+    let subject = QuadPath::try_arc(0.0, fmn_core::constants::TAU, 1.5, [-4.0, 0.0, 7.0], None)
+        .expect("valid arc");
+    let clip = QuadPath::try_arc(0.0, fmn_core::constants::TAU, 1.25, [4.0, 0.0, -3.0], None)
+        .expect("valid arc");
     let samples: Vec<Point> = (0..17)
         .flat_map(|y| {
             (0..31).map(move |x| [-7.13 + 0.47 * f64::from(x), -3.11 + 0.39 * f64::from(y)])

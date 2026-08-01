@@ -153,7 +153,7 @@ fn build(case: &Case) -> VMobject {
             if let Some(explicit) = case.opt("explicit_n_components") {
                 arc = arc.n_components(explicit as usize);
             }
-            arc.build()
+            arc.build().expect("the parity fixture arc is valid")
         }
         "circle" => Circle::new()
             .radius(case.scalar("radius"))
@@ -181,11 +181,15 @@ fn build(case: &Case) -> VMobject {
         "rectangle" => Rectangle::new()
             .width(case.scalar("width"))
             .height(case.scalar("height"))
-            .build(),
-        "square" => Rectangle::square(case.scalar("side_length")).build(),
+            .build()
+            .expect("the parity rectangle is unrounded"),
+        "square" => Rectangle::square(case.scalar("side_length"))
+            .build()
+            .expect("the parity square is unrounded"),
         "line" => Line::new(case.point("start"), case.point("end"))
             .buff(case.scalar("buff"))
-            .build(),
+            .build()
+            .expect("the parity line is straight"),
         "elbow" => Elbow::new()
             .width(case.scalar("width"))
             .angle(case.scalar("angle"))
@@ -250,7 +254,7 @@ fn the_arc_density_rule_is_ours_and_never_coarser() {
         let theirs = case.scalar("reference_n_components") as usize;
         assert_eq!(
             arc.component_count(),
-            ours,
+            Ok(ours),
             "{}: BN-09 component count",
             case.name
         );

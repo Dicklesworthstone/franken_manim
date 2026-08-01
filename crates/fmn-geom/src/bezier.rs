@@ -2,6 +2,7 @@
 //! and the unit-circle arc construction — ports of `manimlib/utils/bezier.py`
 //! (`3b1b/manim` @ `6199a00d`), computed in f64 per §6.1.
 
+use crate::GeomError;
 use crate::scalar;
 #[cfg(test)]
 use crate::space_ops;
@@ -69,12 +70,55 @@ pub(crate) fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
     out
 }
 
+/// The declared arc-component budget (fm-4tb.1): no arc may request more
+/// quadratic components than this. Far beyond BN-09's 16 for a full
+/// circle; anything above it is a caller error or hostile input, not a
+/// quality choice.
+pub const MAX_ARC_COMPONENTS: usize = 4096;
+
+/// Validate an arc request and return its exact shared-anchor point count.
+///
+/// This is the one component contract used by Chisel and every higher-level
+/// builder (fm-4tb.1): finite angle, nonzero count, representable `2·n + 1`
+/// point arithmetic, then the declared component budget. No allocation is
+/// performed.
+///
+/// # Errors
+/// The corresponding typed [`GeomError`] for each rejected precondition.
+pub fn arc_point_count(angle: f64, n_components: usize) -> Result<usize, GeomError> {
+    if !angle.is_finite() {
+        return Err(GeomError::NonFiniteArcAngle);
+    }
+    if n_components == 0 {
+        return Err(GeomError::ZeroArcComponents);
+    }
+    let point_count = n_components
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(1))
+        .ok_or(GeomError::ArcComponentOverflow {
+            count: n_components,
+        })?;
+    if n_components > MAX_ARC_COMPONENTS {
+        return Err(GeomError::ArcComponentsAboveBudget {
+            count: n_components,
+            budget: MAX_ARC_COMPONENTS,
+        });
+    }
+    Ok(point_count)
+}
+
 /// `quadratic_bezier_points_for_arc`: `2n+1` shared-anchor points tracing the
 /// unit-circle arc from angle 0 to `angle`, handles pushed out by
 /// `1/cos(θ/2)` so each quadratic component interpolates its arc chord.
-#[must_use]
-pub fn quadratic_points_for_arc(angle: f64, n_components: usize) -> Vec<Vec3> {
-    let n_points = 2 * n_components + 1;
+///
+/// # Errors
+/// [`GeomError::NonFiniteArcAngle`] for NaN/infinite angles,
+/// [`GeomError::ZeroArcComponents`] for a zero count,
+/// [`GeomError::ArcComponentOverflow`] when `2·n + 1` is not representable,
+/// [`GeomError::ArcComponentsAboveBudget`] above
+/// [`MAX_ARC_COMPONENTS`].
+pub fn quadratic_points_for_arc(angle: f64, n_components: usize) -> Result<Vec<Vec3>, GeomError> {
+    let n_points = arc_point_count(angle, n_components)?;
     let angles = linspace(0.0, angle, n_points);
     let mut points: Vec<Vec3> = angles
         .iter()
@@ -85,7 +129,7 @@ pub fn quadratic_points_for_arc(angle: f64, n_components: usize) -> Vec<Vec3> {
     for point in points.iter_mut().skip(1).step_by(2) {
         *point = vec::scale(*point, handle_scale);
     }
-    points
+    Ok(points)
 }
 
 /// The one arc-density rule (Behavior Note BN-09): the number of quadratic
@@ -96,10 +140,20 @@ pub fn quadratic_points_for_arc(angle: f64, n_components: usize) -> Vec<Vec3> {
 /// uses `max(1, ceil(16·|θ|/TAU))` everywhere — 16 components for a full
 /// circle, matching the Reference's `Arc`/`Circle` quality (its finest
 /// convention) at every common angle and never coarser than it.
-#[must_use]
-pub fn arc_n_components(angle: f64) -> usize {
+///
+/// # Errors
+/// [`GeomError::NonFiniteArcAngle`] for NaN/infinite angles;
+/// [`GeomError::ArcComponentsAboveBudget`] when the rule's count exceeds
+/// [`MAX_ARC_COMPONENTS`]; or [`GeomError::ArcComponentOverflow`] when an
+/// extreme finite angle saturates the host component count.
+pub fn arc_n_components(angle: f64) -> Result<usize, GeomError> {
+    if !angle.is_finite() {
+        return Err(GeomError::NonFiniteArcAngle);
+    }
     let n = (16.0 * angle.abs() / TAU).ceil() as usize;
-    n.max(1)
+    let n = n.max(1);
+    let _point_count = arc_point_count(angle, n)?;
+    Ok(n)
 }
 
 /// `integer_interpolate`: an integer in `[start, end]` plus the residue
@@ -149,17 +203,63 @@ mod tests {
 
     #[test]
     fn arc_density_rule() {
-        assert_eq!(arc_n_components(TAU), 16);
-        assert_eq!(arc_n_components(PI), 8);
-        assert_eq!(arc_n_components(TAU / 4.0), 4);
-        assert_eq!(arc_n_components(-TAU / 4.0), 4);
-        assert_eq!(arc_n_components(1e-9), 1);
-        assert_eq!(arc_n_components(0.0), 1);
+        assert_eq!(arc_n_components(TAU), Ok(16));
+        assert_eq!(arc_n_components(PI), Ok(8));
+        assert_eq!(arc_n_components(TAU / 4.0), Ok(4));
+        assert_eq!(arc_n_components(-TAU / 4.0), Ok(4));
+        assert_eq!(arc_n_components(1e-9), Ok(1));
+        assert_eq!(arc_n_components(0.0), Ok(1));
+    }
+
+    #[test]
+    fn arc_component_contract_refusals_are_typed() {
+        // fm-4tb.1: zero, non-finite, above-budget, and point-count
+        // overflow are typed errors before any allocation.
+        assert_eq!(
+            quadratic_points_for_arc(1.0, 0),
+            Err(GeomError::ZeroArcComponents)
+        );
+        assert_eq!(
+            quadratic_points_for_arc(f64::NAN, 2),
+            Err(GeomError::NonFiniteArcAngle)
+        );
+        assert_eq!(
+            quadratic_points_for_arc(f64::INFINITY, 2),
+            Err(GeomError::NonFiniteArcAngle)
+        );
+        assert_eq!(
+            arc_n_components(f64::NEG_INFINITY),
+            Err(GeomError::NonFiniteArcAngle)
+        );
+        // The budget boundary itself works; one past it refuses.
+        let at = quadratic_points_for_arc(TAU / 4.0, MAX_ARC_COMPONENTS)
+            .expect("budget boundary admits");
+        assert_eq!(at.len(), 2 * MAX_ARC_COMPONENTS + 1);
+        assert_eq!(
+            quadratic_points_for_arc(TAU / 4.0, MAX_ARC_COMPONENTS + 1),
+            Err(GeomError::ArcComponentsAboveBudget {
+                count: MAX_ARC_COMPONENTS + 1,
+                budget: MAX_ARC_COMPONENTS
+            })
+        );
+        assert_eq!(
+            quadratic_points_for_arc(TAU / 4.0, usize::MAX),
+            Err(GeomError::ArcComponentOverflow { count: usize::MAX })
+        );
+        // The rule's own count for an extreme finite angle is a budget
+        // refusal, never a wrap.
+        assert_eq!(
+            arc_n_components(1e18),
+            Err(GeomError::ArcComponentsAboveBudget {
+                count: (16.0_f64 * 1e18 / TAU).ceil() as usize,
+                budget: MAX_ARC_COMPONENTS
+            })
+        );
     }
 
     #[test]
     fn arc_points_interpolate_unit_circle() {
-        let pts = quadratic_points_for_arc(PI / 2.0, 2);
+        let pts = quadratic_points_for_arc(PI / 2.0, 2).expect("valid arc");
         assert_eq!(pts.len(), 5);
         // Anchors sit on the unit circle.
         for p in [pts[0], pts[2], pts[4]] {

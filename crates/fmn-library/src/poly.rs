@@ -13,7 +13,7 @@ use fmn_core::constants::{
     RIGHT, TAU, UL, UR,
 };
 use fmn_core::types::Vec3;
-use fmn_geom::{GeomError, QuadPath, SpaceOpsError, space_ops};
+use fmn_geom::{GeomError, QuadPath, SpaceOpsError, bezier, space_ops};
 use fmn_mobject::Mobject;
 use fmn_mobject::ShapeTag;
 
@@ -160,12 +160,15 @@ impl Polygon {
     ///
     /// `None` picks the Reference's default, a quarter of the shortest
     /// edge. A negative radius gives concave corners, as it does there.
-    #[must_use]
-    pub fn round_corners(self, radius: Option<f64>) -> VMobject {
+    ///
+    /// # Errors
+    /// The typed arc-component refusal if a corner cannot produce a finite,
+    /// budgeted arc.
+    pub fn round_corners(self, radius: Option<f64>) -> Result<VMobject, GeomError> {
         let style = self.style;
         let verts = self.vertices.clone();
         if verts.len() < 3 {
-            return self.build();
+            return Ok(self.build());
         }
         let radius = match radius {
             Some(radius) => radius,
@@ -175,7 +178,7 @@ impl Polygon {
                     .filter(|edge| edge.is_finite() && *edge > 1e-8)
                     .reduce(f64::min);
                 let Some(min_edge) = min_edge else {
-                    return self.build();
+                    return Ok(self.build());
                 };
                 0.25 * min_edge
             }
@@ -195,7 +198,7 @@ impl Polygon {
             let sign = (radius * space_ops::cross2d(vect1, vect2)).signum();
             let start = sub(v2, scale(vect1, cut_off_length));
             let end = add(v2, scale(vect2, cut_off_length));
-            arcs.push(arc_between_points(start, end, sign * angle, Some(2)));
+            arcs.push(arc_between_points(start, end, sign * angle, Some(2))?);
         }
 
         // The Reference loops starting with the last arc so the path
@@ -210,7 +213,7 @@ impl Polygon {
                 let _ = path.add_line_to(start, false);
             }
         }
-        VMobject::from_path(&path).with_style(style)
+        Ok(VMobject::from_path(&path).with_style(style))
     }
 }
 
@@ -222,22 +225,33 @@ impl From<Polygon> for Mobject {
 
 /// The point run of an arc between two points subtending `angle` — the
 /// construction `ArcBetweenPoints` and `round_corners` share.
+///
+/// # Errors
+/// The typed arc-component refusal for the requested angle and count.
 pub(crate) fn arc_between_points(
     start: Vec3,
     end: Vec3,
     angle: f64,
     n_components: Option<usize>,
-) -> Vec<Vec3> {
+) -> Result<Vec<Vec3>, GeomError> {
     if angle == 0.0 {
+        match n_components {
+            Some(count) => {
+                let _point_count = bezier::arc_point_count(angle, count)?;
+            }
+            None => {
+                let _count = bezier::arc_n_components(angle)?;
+            }
+        }
         let mut path = QuadPath::new();
-        let _ = path.set_points_as_corners(&[start, end]);
-        return path.points().to_vec();
+        path.set_points_as_corners(&[start, end])?;
+        return Ok(path.points().to_vec());
     }
-    let arc = QuadPath::arc(0.0, angle, 1.0, ORIGIN, n_components);
-    VMobject::from_points(arc.points().to_vec())
+    let arc = QuadPath::try_arc(0.0, angle, 1.0, ORIGIN, n_components)?;
+    Ok(VMobject::from_points(arc.points().to_vec())
         .put_start_and_end_on(start, end)
         .points()
-        .to_vec()
+        .to_vec())
 }
 
 /// `RegularPolygon(n, radius, start_angle)`.
@@ -569,12 +583,14 @@ impl Rectangle {
     }
 
     /// Build the detached mobject.
-    #[must_use]
-    pub fn build(self) -> VMobject {
+    ///
+    /// # Errors
+    /// A rounded rectangle propagates the typed arc-component refusal.
+    pub fn build(self) -> Result<VMobject, GeomError> {
         // The Reference builds the unit square UR, UL, DL, DR and stretches.
         let corners = Polygon::new([UR, UL, DL, DR]).style(self.style);
         match self.corner_radius {
-            None => corners
+            None => Ok(corners
                 .build()
                 .with_width(self.width, true)
                 .with_height(self.height, true)
@@ -582,7 +598,7 @@ impl Rectangle {
                     center: ORIGIN,
                     width: self.width,
                     height: self.height,
-                }),
+                })),
             Some(radius) => {
                 // round_corners runs on the *stretched* rectangle, exactly
                 // as the Reference's RoundedRectangle does, so the corner
@@ -595,20 +611,32 @@ impl Rectangle {
                 Polygon::new(stretched)
                     .style(self.style)
                     .round_corners(Some(radius))
-                    .with_shape(ShapeTag::RoundedRect {
-                        center: ORIGIN,
-                        width: self.width,
-                        height: self.height,
-                        corner_radius: radius,
+                    .map(|rounded| {
+                        rounded.with_shape(ShapeTag::RoundedRect {
+                            center: ORIGIN,
+                            width: self.width,
+                            height: self.height,
+                            corner_radius: radius,
+                        })
                     })
             }
         }
     }
 }
 
-impl From<Rectangle> for Mobject {
-    fn from(r: Rectangle) -> Self {
-        r.build().into()
+impl TryFrom<Rectangle> for VMobject {
+    type Error = GeomError;
+
+    fn try_from(rectangle: Rectangle) -> Result<Self, Self::Error> {
+        rectangle.build()
+    }
+}
+
+impl TryFrom<Rectangle> for Mobject {
+    type Error = GeomError;
+
+    fn try_from(rectangle: Rectangle) -> Result<Self, Self::Error> {
+        rectangle.build().map(Into::into)
     }
 }
 
@@ -757,13 +785,19 @@ mod tests {
 
     #[test]
     fn rectangle_has_the_requested_dimensions() {
-        let rect = Rectangle::new().width(3.0).height(5.0).build();
+        let rect = Rectangle::new()
+            .width(3.0)
+            .height(5.0)
+            .build()
+            .expect("an unrounded rectangle is valid");
         assert!(close(rect.length_over_dim(0), 3.0));
         assert!(close(rect.length_over_dim(1), 5.0));
         assert!(close(rect.center_point()[0], 0.0));
         assert!(matches!(rect.shape(), ShapeTag::Rect { .. }));
 
-        let square = Rectangle::square(2.0).build();
+        let square = Rectangle::square(2.0)
+            .build()
+            .expect("an unrounded square is valid");
         assert!(close(square.length_over_dim(0), 2.0));
         assert!(close(square.length_over_dim(1), 2.0));
     }
@@ -775,7 +809,8 @@ mod tests {
             .width(4.0)
             .height(2.0)
             .corner_radius(radius)
-            .build();
+            .build()
+            .expect("the fixture radius is valid");
         assert!(
             close(rect.length_over_dim(0), 4.0),
             "{}",
@@ -798,7 +833,9 @@ mod tests {
     #[test]
     fn round_corners_defaults_to_a_quarter_of_the_shortest_edge() {
         let poly = Polygon::new([[0.0; 3], [4.0, 0.0, 0.0], [4.0, 2.0, 0.0], [0.0, 2.0, 0.0]]);
-        let rounded = poly.round_corners(None);
+        let rounded = poly
+            .round_corners(None)
+            .expect("the fixture polygon has finite corner arcs");
         assert!(rounded.points().len() > 9, "corners became arcs");
         // The default radius is 0.5 here (shortest edge 2), so the corner
         // at the origin is cut back by 0.5 in both directions.
@@ -811,8 +848,9 @@ mod tests {
 
     #[test]
     fn round_corners_includes_the_closing_edge_in_its_default_radius() {
-        let rounded =
-            Polygon::new([[0.0; 3], [10.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).round_corners(None);
+        let rounded = Polygon::new([[0.0; 3], [10.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+            .round_corners(None)
+            .expect("the fixture polygon has finite corner arcs");
         let has_quarter_unit_cut = rounded
             .points()
             .iter()
@@ -825,7 +863,9 @@ mod tests {
 
     #[test]
     fn round_corners_keeps_an_all_coincident_polygon_finite() {
-        let rounded = Polygon::new([[1.0, 2.0, 0.0]; 3]).round_corners(None);
+        let rounded = Polygon::new([[1.0, 2.0, 0.0]; 3])
+            .round_corners(None)
+            .expect("coincident finite vertices remain valid");
         assert!(!rounded.points().is_empty());
         assert!(
             rounded
@@ -843,7 +883,9 @@ mod tests {
         let single = Polygon::new([[1.0, 1.0, 0.0]]).build();
         assert!(single.points().len() <= 3);
         // Fewer than three vertices: round_corners has nothing to round.
-        let two = Polygon::new([[0.0; 3], [1.0, 0.0, 0.0]]).round_corners(None);
+        let two = Polygon::new([[0.0; 3], [1.0, 0.0, 0.0]])
+            .round_corners(None)
+            .expect("two vertices do not request corner arcs");
         assert!(!two.points().is_empty());
     }
 
@@ -924,14 +966,33 @@ mod tests {
 
     #[test]
     fn frame_rectangles_match_the_frame() {
-        let full = full_screen_rectangle().build();
+        let full = full_screen_rectangle()
+            .build()
+            .expect("the full-screen rectangle is unrounded");
         assert!(close(full.length_over_dim(0), FRAME_WIDTH * 1.01));
         assert!(close(full.length_over_dim(1), FRAME_HEIGHT * 1.01));
-        let screen = screen_rectangle(16.0 / 9.0, 4.0).build();
+        let screen = screen_rectangle(16.0 / 9.0, 4.0)
+            .build()
+            .expect("the screen rectangle is unrounded");
         assert!(close(screen.length_over_dim(1), 4.0));
         assert!(close(screen.length_over_dim(0), 4.0 * 16.0 / 9.0));
-        let fade = full_screen_fade_rectangle(0.7).build();
+        let fade = full_screen_fade_rectangle(0.7)
+            .build()
+            .expect("the fade rectangle is unrounded");
         assert!(close(fade.style().fill_opacity, 0.7));
         assert!(close(fade.style().stroke_width, 0.0));
+    }
+
+    #[test]
+    fn rounded_surfaces_propagate_non_finite_arc_refusals() {
+        assert!(matches!(
+            Rectangle::new().corner_radius(f64::NAN).build(),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
+        assert!(matches!(
+            Polygon::new([[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+                .round_corners(Some(f64::NAN)),
+            Err(GeomError::NonFiniteArcAngle)
+        ));
     }
 }

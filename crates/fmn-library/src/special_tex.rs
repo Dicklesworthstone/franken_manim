@@ -374,6 +374,7 @@ impl<'a> Title<'a> {
         let underline = Line::new(LEFT, RIGHT)
             .style(self.underline_style)
             .build()
+            .expect("the Underline template is a straight segment")
             .next_to(&text_block, DOWN, self.underline_buff, ORIGIN);
         let underline = if self.match_underline_width_to_text {
             underline.with_width(text_block.length_over_dim(0), false)

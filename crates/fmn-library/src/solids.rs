@@ -1708,7 +1708,10 @@ impl VCube {
         let style = Style::default()
             .fill(self.fill_color, self.fill_opacity)
             .stroke_width(self.stroke_width);
-        Rectangle::square(self.side_length).style(style).build()
+        Rectangle::square(self.side_length)
+            .style(style)
+            .build()
+            .expect("a cube face never requests rounded corners")
     }
 
     /// Build the six-face vectorized group.
@@ -2854,7 +2857,9 @@ mod tests {
 
     #[test]
     fn vgroup3d_settings_recurse() {
-        let face = Rectangle::square(2.0).build();
+        let face = Rectangle::square(2.0)
+            .build()
+            .expect("the test face is unrounded");
         let mobject: Mobject = VGroup3D::new([face]).build().into();
         assert_eq!(mobject.submobjects.len(), 1);
         let uniforms = &mobject.submobjects[0].uniforms;

@@ -60,7 +60,7 @@ fn arc_fixtures_match_fmn_geom() {
         ("arc_neg_third_n2.npy", -TAU / 3.0, 2),
     ] {
         let reference = load_points(name, &manifest);
-        let ours = quadratic_points_for_arc(angle, n);
+        let ours = quadratic_points_for_arc(angle, n).expect("the fixture arc is valid");
         let comparison = check_points_abs(&reference, &ours, TOL, NanPolicy::Reject);
         assert!(comparison.is_ok(), "{name}: {comparison:?}");
     }

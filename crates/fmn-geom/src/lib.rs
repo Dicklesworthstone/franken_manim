@@ -128,6 +128,27 @@ pub enum GeomError {
         /// The piece count the tolerance would have required.
         needed: usize,
     },
+    /// An arc was requested with zero quadratic components — the
+    /// degenerate case the caller must refuse rather than emit a one-point
+    /// pseudo-arc (fm-4tb.1).
+    ZeroArcComponents,
+    /// An arc was requested with a non-finite angle (NaN or infinite) —
+    /// the component count cannot be computed (fm-4tb.1).
+    NonFiniteArcAngle,
+    /// An arc's point-count arithmetic (`2·n + 1`) overflowed `usize`
+    /// before allocation (fm-4tb.1).
+    ArcComponentOverflow {
+        /// The offending component count.
+        count: usize,
+    },
+    /// An arc's component count exceeds the declared
+    /// [`bezier::MAX_ARC_COMPONENTS`] budget (fm-4tb.1).
+    ArcComponentsAboveBudget {
+        /// The offending component count.
+        count: usize,
+        /// The declared budget.
+        budget: usize,
+    },
 }
 
 impl std::fmt::Display for GeomError {
@@ -171,6 +192,17 @@ impl std::fmt::Display for GeomError {
                 "tolerance would need {needed} quadratics, above the {} cap",
                 cubic::MAX_SEGMENTS
             ),
+            Self::ZeroArcComponents => {
+                write!(f, "an arc needs at least one quadratic component")
+            }
+            Self::NonFiniteArcAngle => write!(f, "arc angle must be finite"),
+            Self::ArcComponentOverflow { count } => write!(
+                f,
+                "arc component count {count} overflows point-count arithmetic"
+            ),
+            Self::ArcComponentsAboveBudget { count, budget } => {
+                write!(f, "arc component count {count} exceeds the {budget} budget")
+            }
         }
     }
 }

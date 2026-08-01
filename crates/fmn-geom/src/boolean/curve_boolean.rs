@@ -1411,13 +1411,14 @@ mod tests {
     }
 
     fn circle(radius: f64, center: Point) -> QuadPath {
-        QuadPath::arc(
+        QuadPath::try_arc(
             0.0,
             fmn_core::constants::TAU,
             radius,
             [center[0], center[1], 0.0],
             None,
         )
+        .expect("valid arc")
     }
 
     fn line_path(contour: &[Point]) -> QuadPath {

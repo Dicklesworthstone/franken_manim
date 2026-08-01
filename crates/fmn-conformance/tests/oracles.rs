@@ -93,7 +93,8 @@ fn ellipse_model_arc_length_matches_an_independent_integral() {
     // 2×1 ellipse. There is no elementary circumference to compare
     // against; the analytic reference for the model's length is the
     // independent quadrature.
-    let circle = QuadPath::arc(0.0, TAU, 1.0, [0.0; 3], None);
+    let circle = QuadPath::try_arc(0.0, TAU, 1.0, [0.0; 3], None)
+        .expect("the oracle's fixed circle is valid");
     let points: Vec<Vec3> = circle
         .points()
         .iter()
@@ -369,7 +370,8 @@ const PROBE_ALPHAS: [f64; 9] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
 fn resampled_path_stays_on_the_original_curve() {
     // A path with real curvature: an arc past the trivial quadrant, plus
     // a smooth tail so two curve shapes participate.
-    let mut path = QuadPath::arc(0.3, 4.2, 1.5, [0.1, -0.2, 0.0], None);
+    let mut path = QuadPath::try_arc(0.3, 4.2, 1.5, [0.1, -0.2, 0.0], None)
+        .expect("the resampling fixture arc is valid");
     let end = path.last_point().expect("arc has points");
     let _ = path
         .add_smooth_curve_to([end[0] + 1.0, end[1] - 0.5, 0.0])
@@ -390,7 +392,8 @@ fn boolean_results_are_subdivision_invariant_in_area() {
     // drift. Measured exactly 0.0 for all three operations; the bound
     // sits far under the flatten tolerance's own area scale
     // (perimeter × tolerance ≈ 6e-2).
-    let subject = QuadPath::arc(0.0, TAU, 1.0, [0.0; 3], None);
+    let subject = QuadPath::try_arc(0.0, TAU, 1.0, [0.0; 3], None)
+        .expect("the subdivision fixture circle is valid");
     let clip = rect(0.1, -0.6, 1.7, 0.9);
     let options = BooleanOptions::default();
     let mut worst = 0.0f64;
@@ -451,7 +454,9 @@ fn translation_scene() -> (Stage, Vec<Mob>) {
         Rectangle::new()
             .width(1.4)
             .height(0.9)
-            .style(Style::default().fill(BLUE_C, 0.9).stroke(WHITE, 2.0, 1.0)),
+            .style(Style::default().fill(BLUE_C, 0.9).stroke(WHITE, 2.0, 1.0))
+            .build()
+            .expect("the translation fixture rectangle is unrounded"),
     );
     stage.add_to_scene(rectangle).expect("live");
     // Overlap the two so compositing participates, off-center so the
@@ -691,7 +696,7 @@ fn fixture_manifest_is_canonical_and_shape_bound() {
 fn arc_half_fixture_matches_fmn_geom() {
     let corpus = fixtures();
     let reference = corpus.points("arc_half_n8.npy").expect("fixture decodes");
-    let ours = quadratic_points_for_arc(TAU / 2.0, 8);
+    let ours = quadratic_points_for_arc(TAU / 2.0, 8).expect("valid arc");
     check_points_abs(&reference, &ours, FIXTURE_TOL, NanPolicy::Reject)
         .expect("arc_half_n8: reference vs fmn-geom");
 }

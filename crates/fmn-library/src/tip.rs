@@ -255,7 +255,8 @@ mod tests {
         let arc = ArcBetweenPoints::new([0.0; 3], [2.0, 0.0, 0.0])
             .angle(TAU / 2.0)
             .style(Style::default())
-            .build();
+            .build()
+            .expect("the fixture arc is valid");
         let path = arc.path().unwrap();
         let end_tangent = outward_tangent(&path, TipEnd::End);
         let tipped = attach_tip(arc, ArrowTip::new(), TipEnd::End);
@@ -273,7 +274,8 @@ mod tests {
         // chord: the trimmed arc's remaining points stay on the circle.
         let arc = ArcBetweenPoints::new([0.0; 3], [2.0, 0.0, 0.0])
             .angle(TAU / 2.0)
-            .build();
+            .build()
+            .expect("the fixture arc is valid");
         let center = crate::arc::arc_center_of(arc.points()).unwrap();
         let radius = space_ops::get_norm(sub(arc.points()[0], center));
         let tipped = attach_tip(arc, ArrowTip::new(), TipEnd::End);
