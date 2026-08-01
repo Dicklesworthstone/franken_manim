@@ -1330,6 +1330,12 @@ impl Supervisor {
         for entry in segment.entries() {
             merged.record(entry.clone());
         }
+        merged
+            .record_events(self.journal.events())
+            .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
+        merged
+            .record_events(segment.events())
+            .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
         self.install_session(scene.to_owned(), merged)
     }
 

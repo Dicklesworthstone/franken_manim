@@ -10,11 +10,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use fmn_anim::RationalTime;
 use fmn_cache::{Namespace, NamespacePolicy, Store, StoreConfig};
 use fmn_hash::{Digest, sha256};
 use fmn_platform::clock::{Clock, FakeClock};
 use fmn_platform::fs::{FileSystem, VirtualFs};
-use fmn_scene::{AssetRead, CommandKind, CommandRecord, EffectClass, Entry, Journal, Scene};
+use fmn_scene::{
+    AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventPayload, InputEvent, Journal,
+    Key, Modifiers, Scene,
+};
 use fmn_studio::{
     BuildError, ChannelError, ChannelFailureKind, Checkpoint, CheckpointSource, CrashReport,
     FramingError, JournalReplay, LaunchError, ProtocolLimits, ProtocolVersion, RebuildDriver,
@@ -103,6 +107,7 @@ struct FakeState {
     inspection_digest: Option<Digest>,
     restored: Vec<Vec<u8>>,
     replayed: Vec<(u64, u64)>,
+    replayed_events: Vec<InputEvent>,
 }
 
 struct FakeLauncher {
@@ -274,6 +279,7 @@ impl WorkerChannel for FakeChannel {
                 state
                     .replayed
                     .push((replay.from_entry, replay.through_entry));
+                state.replayed_events = journal.events().to_vec();
                 if state.diverge_next_replay && !hashes.is_empty() {
                     state.diverge_next_replay = false;
                     hashes[0] = sha256(b"deliberate divergence");
@@ -1097,13 +1103,37 @@ fn journal_segment_replaces_only_its_declared_tail() {
         checkpoint: None,
         state_hash: sha256(b"replacement tail state"),
     });
+    let segment_event = InputEvent::new(
+        2,
+        RationalTime::zero(30) + 1,
+        EventPayload::KeyRelease {
+            key: Key::Character('s'),
+            modifiers: Modifiers::NONE,
+        },
+    )
+    .expect("segment event");
+    replacement
+        .record_event(segment_event.clone())
+        .expect("segment event records");
     let state = Arc::new(Mutex::new(FakeState {
         journal_segment: Some((1, replacement.to_bytes().expect("segment encodes"))),
         ..FakeState::default()
     }));
     let clock = Arc::new(FakeClock::new());
     let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
-    let original = make_journal(2, Some(0));
+    let mut original = make_journal(2, Some(0));
+    let original_event = InputEvent::new(
+        1,
+        RationalTime::zero(30),
+        EventPayload::KeyPress {
+            key: Key::Character('s'),
+            modifiers: Modifiers::NONE,
+        },
+    )
+    .expect("original event");
+    original
+        .record_event(original_event.clone())
+        .expect("original event records");
     let first = original.entries()[0].command.clone();
     supervisor
         .install_session("Demo", original)
@@ -1123,6 +1153,73 @@ fn journal_segment_replaces_only_its_declared_tail() {
     assert_eq!(report.plan.reuse, 2);
     assert_eq!(report.restored_checkpoint, Some(0));
     assert_eq!(report.replayed_entries, 1);
+    assert_eq!(
+        state.lock().unwrap_or_else(lock_poisoned).replayed_events,
+        vec![original_event, segment_event],
+        "the retained and segment-local input streams must both reach replay"
+    );
+}
+
+#[test]
+fn journal_segment_rejects_out_of_order_events_without_replacing_the_session() {
+    let original_event = InputEvent::new(
+        2,
+        RationalTime::zero(30) + 1,
+        EventPayload::KeyPress {
+            key: Key::Character('s'),
+            modifiers: Modifiers::NONE,
+        },
+    )
+    .expect("original event");
+    let mut original = make_journal(2, Some(0));
+    original
+        .record_event(original_event.clone())
+        .expect("original event records");
+
+    let mut replacement = make_journal(1, None);
+    replacement
+        .record_event(
+            InputEvent::new(
+                1,
+                RationalTime::zero(30) + 2,
+                EventPayload::KeyRelease {
+                    key: Key::Character('s'),
+                    modifiers: Modifiers::NONE,
+                },
+            )
+            .expect("out-of-order segment event"),
+        )
+        .expect("segment-local stream is valid on its own");
+
+    let state = Arc::new(Mutex::new(FakeState {
+        journal_segment: Some((1, replacement.to_bytes().expect("segment encodes"))),
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
+    let incoming = commands(&original);
+    supervisor
+        .install_session("Demo", original)
+        .expect("session");
+    let prior_digest = supervisor.journal_cache_digest();
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+
+    let error = supervisor
+        .request(SupervisorRequest::EnumerateScenes, &|_| true)
+        .expect_err("an out-of-order segment event must be refused");
+    assert!(matches!(error, SupervisorError::InvalidJournal(_)));
+    assert_eq!(supervisor.journal_cache_digest(), prior_digest);
+
+    let report = supervisor
+        .rebuild_and_restart(&mut builder, &incoming, &|_| true)
+        .expect("the prior session remains recoverable");
+    assert_eq!(report.plan.reuse, 2);
+    assert_eq!(
+        state.lock().unwrap_or_else(lock_poisoned).replayed_events,
+        vec![original_event],
+        "a refused segment must leave the installed event stream unchanged"
+    );
 }
 
 struct PanicService {
