@@ -506,11 +506,19 @@ fn parse_header_dict(header: &str) -> Result<(String, bool, Vec<usize>), NpyErro
                 let (tuple, tail) = after.split_once(')').ok_or_else(|| NpyError::Header {
                     detail: "unterminated shape tuple".to_string(),
                 })?;
-                let mut dims = Vec::new();
-                for part in tuple.split(',') {
+                let mut dims = Vec::with_capacity(MAX_DIMS);
+                let mut parts = tuple.split(',');
+                while let Some(part) = parts.next() {
                     let part = part.trim();
                     if part.is_empty() {
                         continue; // trailing comma in (n,)
+                    }
+                    if dims.len() == MAX_DIMS {
+                        let remaining = parts.filter(|part| !part.trim().is_empty()).count();
+                        return Err(NpyError::TooManyDims {
+                            dims: MAX_DIMS.saturating_add(1).saturating_add(remaining),
+                            max: MAX_DIMS,
+                        });
                     }
                     dims.push(part.parse::<usize>().map_err(|_| NpyError::Header {
                         detail: format!("bad shape dimension {part:?}"),
@@ -640,5 +648,24 @@ mod tests {
                 actual: 5
             })
         ));
+    }
+
+    #[test]
+    fn dimension_cap_is_enforced_during_header_parsing() {
+        let mut shape = "1,".repeat(4_095);
+        shape.push('1');
+        let header = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({shape}), }}");
+        let error = parse_header_dict(&header).expect_err("4,096 dimensions exceed the cap");
+        assert_eq!(
+            error,
+            NpyError::TooManyDims {
+                dims: 4_096,
+                max: MAX_DIMS
+            }
+        );
+        assert!(
+            error.to_string().len() < 128,
+            "dimension-cap diagnostic must stay bounded: {error}"
+        );
     }
 }
