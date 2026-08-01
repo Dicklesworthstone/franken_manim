@@ -27,11 +27,10 @@ use fmn_conformance::perf_pg7::{
 };
 use fmn_hash::sha256;
 use fmn_platform::clock::StdClock;
-use fmn_platform::fs::{FileSystem as _, FsNodeKind, StdFs};
+use fmn_platform::fs::{FileSystem, FsNodeKind, StdFs};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
-use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -860,15 +859,22 @@ fn preflight_regular_input_with(
 }
 
 fn write_new(path: &OsStr, bytes: &[u8], label: &str) -> Result<(), CliError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| CliError::io(format!("cannot create {label}: {error}")))?;
-    file.write_all(bytes)
-        .map_err(|error| CliError::io(format!("cannot write {label}: {error}")))?;
-    file.sync_all()
-        .map_err(|error| CliError::io(format!("cannot sync {label}: {error}")))
+    write_new_with_fs(&StdFs, path, bytes, label)
+}
+
+fn write_new_with_fs(
+    fs: &dyn FileSystem,
+    path: &OsStr,
+    bytes: &[u8],
+    label: &str,
+) -> Result<(), CliError> {
+    match fs.create_new(Path::new(path), bytes) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(CliError::io(format!(
+            "cannot create {label}: destination appeared before atomic publication"
+        ))),
+        Err(error) => Err(CliError::io(format!("cannot create {label}: {error}"))),
+    }
 }
 
 fn read_utf8(path: &OsStr, label: &'static str, limit: u64) -> Result<String, CliError> {
@@ -1271,6 +1277,27 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind, "data");
         assert!(error.detail.contains("classification unavailable"));
+    }
+
+    #[test]
+    fn write_new_uses_complete_no_clobber_publication() {
+        let fs = fmn_platform::fs::VirtualFs::new();
+        fs.create_dir(Path::new("/evidence")).unwrap();
+        let path = OsStr::new("/evidence/raw.tsv");
+
+        write_new_with_fs(&fs, path, b"complete artifact", "raw output").unwrap();
+        assert_eq!(
+            fs.read(Path::new(path)).unwrap(),
+            b"complete artifact".to_vec()
+        );
+
+        let error = write_new_with_fs(&fs, path, b"replacement", "raw output").unwrap_err();
+        assert_eq!(error.kind, "io");
+        assert!(error.detail.contains("before atomic publication"));
+        assert_eq!(
+            fs.read(Path::new(path)).unwrap(),
+            b"complete artifact".to_vec()
+        );
     }
 
     #[test]
