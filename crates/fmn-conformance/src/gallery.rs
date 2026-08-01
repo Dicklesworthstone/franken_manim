@@ -60,7 +60,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,6 +71,11 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The manifest format tag; the first line of every look-gallery TSV.
 pub const MANIFEST_HEADER: &str = "# fmn-look-gallery v1";
+
+/// Maximum byte length of one look-gallery manifest. The ledger is a small,
+/// reviewed TSV; one MiB leaves ample growth room while keeping malformed
+/// file and in-memory inputs bounded before row ownership begins.
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Sobel L1 gradient magnitude at or above which a luma pixel is an edge.
 ///
@@ -627,6 +632,13 @@ fn split_gallery_row(line: &str) -> Option<[&str; 5]> {
     fields.next().is_none().then_some(exact)
 }
 
+fn oversized_manifest() -> GalleryError {
+    GalleryError::Corrupt {
+        line: 1,
+        detail: format!("manifest exceeds the {MAX_MANIFEST_BYTES}-byte format limit"),
+    }
+}
+
 impl GalleryManifest {
     /// Parse manifest text in format v1.
     ///
@@ -635,6 +647,9 @@ impl GalleryManifest {
     /// revision line, wrong field count, unknown verdict token, invalid panel
     /// or path, duplicate panel.
     pub fn parse(text: &str) -> Result<Self, GalleryError> {
+        if text.len() > MAX_MANIFEST_BYTES {
+            return Err(oversized_manifest());
+        }
         let mut revision = None;
         let mut rows: Vec<GalleryRow> = Vec::new();
         let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
@@ -733,11 +748,25 @@ impl GalleryManifest {
     /// [`GalleryError::Io`] on read failure, [`GalleryError::Corrupt`] on a
     /// format violation.
     pub fn load(path: &Path) -> Result<Self, GalleryError> {
-        let text = std::fs::read_to_string(path).map_err(|err| GalleryError::Io {
+        let file = std::fs::File::open(path).map_err(|err| GalleryError::Io {
             path: path.to_path_buf(),
             err,
         })?;
-        Self::parse(&text)
+        let mut bytes = Vec::new();
+        file.take((MAX_MANIFEST_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|err| GalleryError::Io {
+                path: path.to_path_buf(),
+                err,
+            })?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(oversized_manifest());
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|err| GalleryError::Io {
+            path: path.to_path_buf(),
+            err: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+        })?;
+        Self::parse(text)
     }
 
     /// The canonical text form: header, revision, column legend, rows sorted

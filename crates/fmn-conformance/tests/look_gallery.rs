@@ -358,6 +358,34 @@ fn corrupt_manifests_are_named_errors() {
     );
 }
 
+#[test]
+fn oversized_manifest_documents_are_refused_by_parse_and_load() {
+    let oversized = "x".repeat(1024 * 1024 + 1);
+    let parse_error = GalleryManifest::parse(&oversized)
+        .expect_err("an oversized in-memory manifest must be refused");
+    assert!(
+        matches!(
+            parse_error,
+            GalleryError::Corrupt { line: 1, ref detail }
+                if detail.contains("1048576-byte format limit")
+        ),
+        "unexpected parse refusal: {parse_error}"
+    );
+
+    let path = scratch("oversized_manifest").join("look_gallery.tsv");
+    std::fs::write(&path, oversized).expect("write oversized manifest fixture");
+    let load_error = GalleryManifest::load(&path)
+        .expect_err("an oversized file-backed manifest must be refused");
+    assert!(
+        matches!(
+            load_error,
+            GalleryError::Corrupt { line: 1, ref detail }
+                if detail.contains("1048576-byte format limit")
+        ),
+        "unexpected load refusal: {load_error}"
+    );
+}
+
 // ------------------------------------------------------- verdict workflow
 
 #[test]
