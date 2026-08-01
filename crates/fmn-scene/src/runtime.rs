@@ -1165,8 +1165,11 @@ impl Scene {
     pub fn state(&mut self) -> Result<SceneState, SceneError> {
         self.ensure_ready()?;
         self.sync_stage_time();
+        let time = self.clock.now();
         Ok(SceneState::capture(
             &self.stage,
+            time.frames(),
+            time.fps(),
             self.play_count,
             &self.scene_rng,
         ))
@@ -1180,7 +1183,8 @@ impl Scene {
     /// Restore an in-memory state, including updater callables.
     pub fn restore_state(&mut self, state: &SceneState) -> Result<(), SceneError> {
         self.apply_state(
-            state.time,
+            state.frames_elapsed,
+            state.fps,
             state.play_count,
             state.rng_state,
             &state.snapshot,
@@ -1198,7 +1202,8 @@ impl Scene {
     pub fn restore_state_bytes(&mut self, bytes: &[u8]) -> Result<SceneStateRestore, SceneError> {
         let decoded = SceneState::from_bytes(bytes, &self.stage)?;
         self.apply_state(
-            decoded.time,
+            decoded.frames_elapsed,
+            decoded.fps,
             decoded.play_count,
             decoded.rng_state,
             &decoded.snapshot,
@@ -1485,22 +1490,33 @@ impl Scene {
 
     fn apply_state(
         &mut self,
-        time: f64,
+        frames_elapsed: i64,
+        fps: u32,
         play_count: u64,
         rng_state: ([u64; 2], [u64; 2]),
         snapshot: &fmn_mobject::Snapshot,
     ) -> Result<(), SceneError> {
-        let frames = frames_for_restored_time(time, self.clock.fps())?;
+        if frames_elapsed < 0 {
+            return Err(SceneError::InvalidState(
+                "elapsed frame count must be non-negative",
+            ));
+        }
+        if fps != self.clock.fps() {
+            return Err(SceneError::InvalidState(
+                "state frame grid does not match this scene",
+            ));
+        }
+        let mut restored_clock = RationalFrameClock::new(fps).map_err(AnimError::Clock)?;
+        restored_clock
+            .advance_frames(frames_elapsed)
+            .map_err(AnimError::Clock)?;
         if !self.stage.can_restore(snapshot) {
             return Err(SceneError::InvalidState(
                 "an in-memory SceneState belongs to a different scene",
             ));
         }
         self.stage.restore(snapshot);
-        self.clock = RationalFrameClock::new(self.clock.fps()).map_err(AnimError::Clock)?;
-        self.clock
-            .advance_frames(frames)
-            .map_err(AnimError::Clock)?;
+        self.clock = restored_clock;
         self.sync_stage_time();
         self.play_count = play_count;
         self.scene_rng = Pcg64Dxsm::restore(rng_state.0, rng_state.1);
@@ -1572,30 +1588,6 @@ fn drain_event_queue(
         dispatched += 1;
     }
     dispatched
-}
-
-fn frames_for_restored_time(time: f64, fps: u32) -> Result<i64, SceneError> {
-    if !time.is_finite() || time < 0.0 {
-        return Err(SceneError::InvalidState(
-            "time must be finite and non-negative",
-        ));
-    }
-    let scaled = time * f64::from(fps);
-    // `i64::MAX as f64` rounds upward to 2^63, which is already one frame
-    // outside the counter. Reject equality as well as larger values.
-    if !scaled.is_finite() || scaled >= i64::MAX as f64 {
-        return Err(SceneError::InvalidState(
-            "time exceeds the rational frame counter",
-        ));
-    }
-    let rounded = scaled.round();
-    let tolerance = f64::EPSILON * scaled.abs().max(1.0) * 4.0;
-    if (scaled - rounded).abs() > tolerance {
-        return Err(SceneError::InvalidState(
-            "time is not on this scene's frame grid",
-        ));
-    }
-    Ok(rounded as i64)
 }
 
 /// Camera-frame orientation, stored in radians.

@@ -442,14 +442,49 @@ fn scene_state_round_trips_with_the_rng() {
     for _ in 0..5 {
         rng.next_u64();
     }
-    let state = SceneState::capture(&stage, 3, &rng);
+    let state = SceneState::capture(&stage, 0, 30, 3, &rng);
     let bytes = state.to_bytes().unwrap();
     let decoded = SceneState::from_bytes(&bytes, &stage).unwrap();
-    assert_eq!(decoded.time, stage.time());
+    assert_eq!(decoded.frames_elapsed, 0);
+    assert_eq!(decoded.fps, 30);
     assert_eq!(decoded.play_count, 3);
     let mut restored = decoded.rng();
     assert_eq!(restored, rng, "generator state is bit-identical");
     assert_eq!(restored.next_u64(), rng.clone().next_u64());
+}
+
+#[test]
+fn scene_state_distinguishes_adjacent_large_clock_frames() {
+    let stage = Stage::new();
+    let rng = Pcg64Dxsm::from_seed(7);
+    let earlier_frame = 1_i64 << 53;
+    let later_frame = earlier_frame + 1;
+
+    let earlier = SceneState::capture(&stage, earlier_frame, 1, 0, &rng);
+    let later = SceneState::capture(&stage, later_frame, 1, 0, &rng);
+
+    let earlier_bytes = earlier.to_bytes().unwrap();
+    let later_bytes = later.to_bytes().unwrap();
+    assert_ne!(
+        earlier_bytes, later_bytes,
+        "adjacent valid clock frames must remain distinct durable states"
+    );
+    let decoded = SceneState::from_bytes(&later_bytes, &stage).unwrap();
+    assert_eq!(decoded.frames_elapsed, later_frame);
+    assert_eq!(decoded.fps, 1);
+
+    let mut previous_major = later_bytes;
+    previous_major[8..10].copy_from_slice(&1_u16.to_le_bytes());
+    let body_len = previous_major.len() - 32;
+    let digest = sha256(&previous_major[..body_len]);
+    previous_major[body_len..].copy_from_slice(digest.as_bytes());
+    let error = SceneState::from_bytes(&previous_major, &stage)
+        .map(|_| ())
+        .expect_err("the lossy v1 envelope must not be compatibility-shimmed");
+    assert!(matches!(
+        error,
+        PersistError::Serial(SerialError::MajorMismatch { reader: 2, doc: 1 })
+    ));
 }
 
 #[test]
@@ -676,7 +711,7 @@ fn scene_state_decode_preflights_the_nested_snapshot() {
     let inner_bytes = inner.finish().unwrap();
 
     let mut w = Writer::new(fmn_mobject::SCENE_STATE_SCHEMA);
-    w.put_f64(0.0).put_u64(0);
+    w.put_i64(0).put_u32(30).put_u64(0);
     w.put_u64(0).put_u64(0).put_u64(0).put_u64(0);
     w.put_bytes(&inner_bytes);
     let bytes = w.finish().unwrap();
@@ -697,7 +732,7 @@ fn scene_state_decode_preflights_the_nested_snapshot() {
     let mob = stage.add(Mobject::from_points(&[[0.0, 1.0, 2.0]]));
     stage.add_to_scene(mob).unwrap();
     let rng = Pcg64Dxsm::from_seed(42);
-    let state = SceneState::capture(&stage, 7, &rng);
+    let state = SceneState::capture(&stage, 0, 30, 7, &rng);
     let bytes = state.to_bytes().unwrap();
     let decoded = SceneState::from_bytes(&bytes, &stage).unwrap();
     assert_eq!(decoded.play_count, 7);

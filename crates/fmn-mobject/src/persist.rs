@@ -6,7 +6,7 @@
 //!
 //! Format guarantees, exactly the §6.7 policy:
 //! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.4,
-//!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v1.4; the self-golden suites hold `FMNS`):
+//!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
 //! - **Deterministic bytes**: canonical field order (schema order for
@@ -60,9 +60,12 @@ use crate::uniforms::{JointType, Uniforms};
 /// the object→world placement table from fm-7if.
 pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 4);
 
-/// The scene-state envelope: magic `FMNA`, schema id 2, version 1.4 — it
-/// embeds a snapshot, so it moves with [`SNAPSHOT_SCHEMA`].
-pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 1, 4);
+/// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
+///
+/// Version 2 replaces the lossy floating scene time with the exact rational
+/// clock identity `(frames_elapsed, fps)`. It still embeds a
+/// [`SNAPSHOT_SCHEMA`] document as its final field.
+pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 2, 0);
 
 /// Errors from snapshot decode.
 #[derive(Debug, Clone, PartialEq)]
@@ -1254,13 +1257,15 @@ impl Stage {
 
 // ----------------------------------------------------------- SceneState
 
-/// The §13.1 scene-scope state: scene time, play count, the one RNG's
-/// state words (fmn-core's export surface), and the arena snapshot. The
-/// scene runtime (fm-5xm) captures and re-applies it; this layer owns the
-/// bytes.
+/// The §13.1 scene-scope state: exact rational-clock position, play count,
+/// the one RNG's state words (fmn-core's export surface), and the arena
+/// snapshot. The scene runtime (fm-5xm) captures and re-applies it; this
+/// layer owns the bytes.
 pub struct SceneState {
-    /// Scene time at capture.
-    pub time: f64,
+    /// Exact number of elapsed frames at capture.
+    pub frames_elapsed: i64,
+    /// Exact frame grid at capture.
+    pub fps: u32,
     /// Completed `play()` count at capture.
     pub play_count: u64,
     /// `Pcg64Dxsm::state()`: `((state_hi, state_lo), (inc_hi, inc_lo))`.
@@ -1271,8 +1276,10 @@ pub struct SceneState {
 
 /// A decoded scene state: the fields plus the snapshot's updater manifest.
 pub struct DecodedSceneState {
-    /// Scene time at capture.
-    pub time: f64,
+    /// Exact number of elapsed frames at capture.
+    pub frames_elapsed: i64,
+    /// Exact frame grid at capture.
+    pub fps: u32,
     /// Completed `play()` count at capture.
     pub play_count: u64,
     /// The RNG state words; [`DecodedSceneState::rng`] rebuilds the
@@ -1294,27 +1301,36 @@ impl DecodedSceneState {
 }
 
 impl SceneState {
-    /// Capture the scene-scope state from a stage, a play counter, and
-    /// the RNG.
+    /// Capture the scene-scope state from a stage, its exact clock position,
+    /// a play counter, and the RNG.
     #[must_use]
-    pub fn capture(stage: &Stage, play_count: u64, rng: &Pcg64Dxsm) -> Self {
+    pub fn capture(
+        stage: &Stage,
+        frames_elapsed: i64,
+        fps: u32,
+        play_count: u64,
+        rng: &Pcg64Dxsm,
+    ) -> Self {
         Self {
-            time: stage.time(),
+            frames_elapsed,
+            fps,
             play_count,
             rng_state: rng.state(),
             snapshot: stage.snapshot(),
         }
     }
 
-    /// Serialize the envelope (time, play count, RNG words, then the
-    /// nested snapshot document as a length-prefixed field).
+    /// Serialize the envelope (exact clock fields, play count, RNG words,
+    /// then the nested snapshot document as a length-prefixed field).
     ///
     /// # Errors
     /// As [`Snapshot::to_bytes`].
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
         let snapshot_bytes = self.snapshot.to_bytes()?;
         let mut w = Writer::new(SCENE_STATE_SCHEMA);
-        w.put_f64(self.time).put_u64(self.play_count);
+        w.put_i64(self.frames_elapsed)
+            .put_u32(self.fps)
+            .put_u64(self.play_count);
         let (state, inc) = self.rng_state;
         w.put_u64(state[0])
             .put_u64(state[1])
@@ -1335,7 +1351,8 @@ impl SceneState {
             Limits::DEFAULT,
             UnknownPolicy::Strict,
         )?;
-        let time = r.get_f64()?;
+        let frames_elapsed = r.get_i64()?;
+        let fps = r.get_u32()?;
         let play_count = r.get_u64()?;
         let state = [r.get_u64()?, r.get_u64()?];
         let inc = [r.get_u64()?, r.get_u64()?];
@@ -1346,7 +1363,8 @@ impl SceneState {
         r.finish()?;
         let decoded = Snapshot::from_bytes(snapshot_bytes, stage)?;
         Ok(DecodedSceneState {
-            time,
+            frames_elapsed,
+            fps,
             play_count,
             rng_state: (state, inc),
             snapshot: decoded.snapshot,

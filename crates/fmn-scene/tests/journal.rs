@@ -65,27 +65,35 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
     let b = vmob(stage, &[[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0]]);
     stage.add_to_scene(a).unwrap();
     stage.add_to_scene(b).unwrap();
-    let state0 = SceneState::capture(stage, 0, rng).to_bytes().unwrap();
+    let state0 = SceneState::capture(stage, 0, 30, 0, rng)
+        .to_bytes()
+        .unwrap();
     let mut e0 = entry_for(CommandKind::Add, "add a, b", &state0);
     e0.checkpoint = Some(state0.clone());
     incoming.push(e0.command.clone());
     journal.record(e0);
 
     stage.shift(a, [3.0, -1.0, 0.0]);
-    let state1 = SceneState::capture(stage, 1, rng).to_bytes().unwrap();
+    let state1 = SceneState::capture(stage, 0, 30, 1, rng)
+        .to_bytes()
+        .unwrap();
     let mut e1 = entry_for(CommandKind::Play, "play shift(a)", &state1);
     e1.effect = EffectClass::from_purity(&classify_play(stage, &[]));
     incoming.push(e1.command.clone());
     journal.record(e1);
 
     stage.shift(b, [0.0, 2.5, 0.0]);
-    let state2 = SceneState::capture(stage, 2, rng).to_bytes().unwrap();
+    let state2 = SceneState::capture(stage, 0, 30, 2, rng)
+        .to_bytes()
+        .unwrap();
     let mut e2 = entry_for(CommandKind::Play, "play shift(b)", &state2);
     e2.checkpoint = Some(state2.clone());
     incoming.push(e2.command.clone());
     journal.record(e2);
 
-    let state3 = SceneState::capture(stage, 3, rng).to_bytes().unwrap();
+    let state3 = SceneState::capture(stage, 0, 30, 3, rng)
+        .to_bytes()
+        .unwrap();
     let e3 = entry_for(CommandKind::Wait, "wait 1.0", &state3);
     incoming.push(e3.command.clone());
     journal.record(e3);
@@ -223,9 +231,15 @@ fn record_replay_equivalence_is_bit_identical() {
     let mut fresh = Stage::new();
     let decoded = SceneState::from_bytes(checkpoint, &fresh).unwrap();
     fresh.restore(&decoded.snapshot);
-    let replayed = SceneState::capture(&fresh, decoded.play_count, &decoded.rng())
-        .to_bytes()
-        .unwrap();
+    let replayed = SceneState::capture(
+        &fresh,
+        decoded.frames_elapsed,
+        decoded.fps,
+        decoded.play_count,
+        &decoded.rng(),
+    )
+    .to_bytes()
+    .unwrap();
     assert_eq!(&replayed, checkpoint, "checkpoint restore diverged");
 
     // The audit confirms replayed states against recorded hashes.
@@ -474,9 +488,15 @@ fn repro_bundle_end_to_end() {
     let mut fresh = Stage::new();
     let decoded = SceneState::from_bytes(checkpoint, &fresh).unwrap();
     fresh.restore(&decoded.snapshot);
-    let replayed = SceneState::capture(&fresh, decoded.play_count, &decoded.rng())
-        .to_bytes()
-        .unwrap();
+    let replayed = SceneState::capture(
+        &fresh,
+        decoded.frames_elapsed,
+        decoded.fps,
+        decoded.play_count,
+        &decoded.rng(),
+    )
+    .to_bytes()
+    .unwrap();
     assert_eq!(&replayed, checkpoint, "fresh-machine replay diverged");
 
     // A divergent closure is named precisely.

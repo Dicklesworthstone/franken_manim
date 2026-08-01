@@ -667,7 +667,7 @@ fn durable_updater_restore_fails_closed_until_manifest_is_atomically_rebound() {
 }
 
 #[test]
-fn off_grid_or_nonfinite_state_time_is_refused() {
+fn invalid_scene_clock_state_is_refused_before_mutation() {
     let mut scene = Scene::new(
         RuntimeConfig {
             fps: 4,
@@ -677,26 +677,34 @@ fn off_grid_or_nonfinite_state_time_is_refused() {
     )
     .expect("scene");
     let mut state = scene.state().expect("state");
-    state.time = 0.1;
-    assert!(matches!(
-        scene.restore_state(&state),
-        Err(SceneError::InvalidState(_))
-    ));
-    state.time = f64::NAN;
-    assert!(matches!(
-        scene.restore_state(&state),
-        Err(SceneError::InvalidState(_))
-    ));
-    state.time = i64::MAX as f64 / 4.0;
+    state.frames_elapsed = -1;
     assert!(matches!(
         scene.restore_state(&state),
         Err(SceneError::InvalidState(
-            "time exceeds the rational frame counter"
+            "elapsed frame count must be non-negative"
         ))
     ));
+    assert_eq!(scene.time().frames(), 0, "negative-frame refusal is atomic");
+
+    state.frames_elapsed = 0;
+    state.fps = 5;
+    assert!(matches!(
+        scene.restore_state(&state),
+        Err(SceneError::InvalidState(
+            "state frame grid does not match this scene"
+        ))
+    ));
+    assert_eq!(scene.time().frames(), 0, "grid refusal is atomic");
+
+    state.fps = 4;
+    state.frames_elapsed = i64::MAX;
+    scene
+        .restore_state(&state)
+        .expect("the exact frame-counter boundary is representable");
+    assert_eq!(scene.time().frames(), i64::MAX);
 
     let mut exhausted = scene.state().expect("state");
-    exhausted.time = 0.0;
+    exhausted.frames_elapsed = 0;
     exhausted.play_count = u64::MAX;
     scene
         .restore_state(&exhausted)
@@ -707,7 +715,14 @@ fn off_grid_or_nonfinite_state_time_is_refused() {
     ));
     assert_eq!(scene.time().frames(), 0, "refusal is atomic");
 
-    let mut other = Scene::default();
+    let mut other = Scene::new(
+        RuntimeConfig {
+            fps: 4,
+            ..RuntimeConfig::default()
+        },
+        0,
+    )
+    .expect("other scene");
     let foreign = other.state().expect("state");
     assert!(matches!(
         scene.restore_state(&foreign),
@@ -715,6 +730,38 @@ fn off_grid_or_nonfinite_state_time_is_refused() {
             "an in-memory SceneState belongs to a different scene"
         ))
     ));
+}
+
+#[test]
+fn durable_scene_state_restores_adjacent_large_frames_exactly() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 1,
+            ..RuntimeConfig::default()
+        },
+        0,
+    )
+    .expect("scene");
+    let expected_frame = (1_i64 << 53) + 1;
+    let mut state = scene.state().expect("state");
+    state.frames_elapsed = expected_frame;
+    scene.restore_state(&state).expect("in-memory restore");
+    assert_eq!(scene.time().frames(), expected_frame);
+
+    let bytes = scene.state_bytes().expect("durable state");
+    let mut restored = Scene::new(
+        RuntimeConfig {
+            fps: 1,
+            ..RuntimeConfig::default()
+        },
+        1,
+    )
+    .expect("fresh scene");
+    restored
+        .restore_state_bytes(&bytes)
+        .expect("durable restore");
+    assert_eq!(restored.time().frames(), expected_frame);
+    assert_eq!(restored.state_bytes().expect("re-encode"), bytes);
 }
 
 #[test]
