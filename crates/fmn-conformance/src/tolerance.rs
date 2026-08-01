@@ -14,7 +14,8 @@
 //! 3. **Loose absolute f32** — cross-engine structural fixtures against the
 //!    Reference (we compute in f64 over f32 records; the Reference computes
 //!    in f64 over f32 records with different op ordering). Plain absolute
-//!    tolerance on values of frame-coordinate magnitude.
+//!    finite, non-negative tolerance on values of frame-coordinate
+//!    magnitude.
 //! 4. **Explicit NaN/−0 handling** — [`NanPolicy`] is a required parameter
 //!    wherever NaN can occur, and the −0 behavior of every regime is stated
 //!    in its doc comment. Nothing here treats NaN or signed zero implicitly.
@@ -80,6 +81,12 @@ pub enum Verdict {
         /// The permitted budget.
         max_ulps: u64,
     },
+    /// Absolute regime: the requested tolerance was negative or non-finite,
+    /// so it cannot define a comparison budget.
+    InvalidTolerance {
+        /// The rejected tolerance.
+        tol: f64,
+    },
     /// Absolute regime: `|expected − actual|` exceeded the tolerance (or was
     /// NaN under [`NanPolicy::Reject`], or infinities disagreed).
     AbsExceeded {
@@ -118,6 +125,10 @@ impl fmt::Display for Mismatch {
                         Some(d) => write!(f, "{d} ULPs apart, budget {max_ulps}"),
                         None => write!(f, "not ULP-comparable (sign/NaN), budget {max_ulps}"),
                     },
+                    Verdict::InvalidTolerance { tol } => write!(
+                        f,
+                        "invalid absolute tolerance {tol:e}; expected a finite non-negative value"
+                    ),
                     Verdict::AbsExceeded { error, tol } => {
                         write!(f, "absolute error {error:e} exceeds tolerance {tol:e}")
                     }
@@ -246,9 +257,18 @@ pub fn check_slice_ulp_f64(
 /// not promise zero signs).
 ///
 /// # Errors
-/// [`Mismatch::Element`] when the error exceeds `tol`, infinities disagree,
-/// or a NaN appears under [`NanPolicy::Reject`].
+/// [`Mismatch::Element`] when `tol` is negative or non-finite, the error
+/// exceeds `tol`, infinities disagree, or a NaN appears under
+/// [`NanPolicy::Reject`].
 pub fn check_abs(expected: f64, actual: f64, tol: f64, nan: NanPolicy) -> Result<(), Mismatch> {
+    if !tol.is_finite() || tol < 0.0 {
+        return Err(element(
+            0,
+            expected,
+            actual,
+            Verdict::InvalidTolerance { tol },
+        ));
+    }
     let nan_case = expected.is_nan() || actual.is_nan();
     if nan_case {
         if nan == NanPolicy::EqualNans && expected.is_nan() && actual.is_nan() {
@@ -405,15 +425,43 @@ mod tests {
     }
 
     #[test]
+    fn abs_regime_rejects_invalid_budgets_before_comparing_values() {
+        for tol in [-1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+            let error = check_abs(1.0, 1.0, tol, NanPolicy::Reject)
+                .expect_err("an invalid tolerance must not pass an exact match");
+            assert!(
+                matches!(
+                    error,
+                    Mismatch::Element {
+                        verdict: Verdict::InvalidTolerance { .. },
+                        ..
+                    }
+                ),
+                "wrong invalid-tolerance verdict: {error}"
+            );
+        }
+
+        assert!(
+            check_abs(
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                NanPolicy::Reject
+            )
+            .is_err(),
+            "an infinite budget must not admit disagreeing infinities"
+        );
+        assert!(check_slice_abs(&[1.0], &[1.0], f64::NAN, NanPolicy::Reject).is_err());
+        assert!(check_points_abs(&[[0.0; 3]], &[[0.0; 3]], -1.0, NanPolicy::Reject).is_err());
+    }
+
+    #[test]
     fn slice_helpers_report_flat_indices() {
         let e = [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]];
         let mut a = e;
         a[1][2] = 5.01;
         let m = check_points_abs(&e, &a, 1e-3, NanPolicy::Reject).unwrap_err();
-        match m {
-            Mismatch::Element { index, .. } => assert_eq!(index, 5),
-            Mismatch::Length { .. } => panic!("wrong variant"),
-        }
+        assert!(matches!(m, Mismatch::Element { index: 5, .. }));
     }
 
     #[test]
