@@ -538,31 +538,111 @@ fn integer_pixel_translation_translates_the_frame() {
 
 #[test]
 fn fixture_manifest_is_canonical_and_shape_bound() {
-    const HEADER: &str = "# fmn npy fixture manifest v1";
-    const HASH: &str = "acdf740923ae14f4f8a6ac7b161be06e7b6d023a8376ea205d38205f05cb7a1f";
+    const PARTIAL_HASH: &str = "acdf740923ae14f4f8a6ac7b161be06e7b6d023a8376ea205d38205f05cb7a1f";
+    const QUAD_EVAL_HASH: &str = "033d1c456aa1f3488f9af1eb014e261928ce758f69f938f1c7e59096edbde4aa";
+    const FIRST_FORMULA: &str = "quadratic_bezier_points_for_arc(TAU/4, n_components=4)";
 
     let root = fixture_manifest_scratch();
     let manifest_path = root.join("MANIFEST.tsv");
-    let malformed = [
+    let committed = include_str!("../fixtures/npy/MANIFEST.tsv");
+    let mut reordered_lines: Vec<&str> = committed.lines().collect();
+    reordered_lines.swap(4, 5);
+    let reordered = format!("{}\n", reordered_lines.join("\n"));
+    let mut missing_lines: Vec<&str> = committed.lines().collect();
+    missing_lines.pop();
+    let missing_row = format!("{}\n", missing_lines.join("\n"));
+    let first_row = committed
+        .lines()
+        .nth(4)
+        .expect("committed manifest has its first generator row");
+    let extra_row = format!("{committed}{first_row}\n");
+    let malformed = vec![
         (
-            "missing header",
-            format!("partial_quad.npy\t<f8\t3x3\t{HASH}\tformula\n"),
+            "missing final line feed",
+            committed
+                .strip_suffix('\n')
+                .expect("committed manifest has its canonical final line feed")
+                .to_string(),
         ),
         (
-            "missing provenance field",
-            format!("{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\n"),
+            "carriage-return separators",
+            committed.replace('\n', "\r\n"),
+        ),
+        (
+            "reference drift",
+            committed.replacen(
+                "# reference: 3b1b/manim @ 6199a00d4c1b1127ebe45cb629c3f22538b10e13",
+                "# reference: 3b1b/manim @ unknown",
+                1,
+            ),
+        ),
+        (
+            "generator drift",
+            committed.replacen("(numpy 2.2.4)", "(numpy unknown)", 1),
+        ),
+        (
+            "column drift",
+            committed.replacen("# columns: file\t", "# columns: path\t", 1),
+        ),
+        (
+            "comment after the prelude",
+            committed.replacen(
+                "# columns: file\tdtype\tshape\tsha256\tformula\n",
+                "# columns: file\tdtype\tshape\tsha256\tformula\n# ungoverned comment\n",
+                1,
+            ),
+        ),
+        (
+            "blank row",
+            committed.replacen("\narc_full", "\n\narc_full", 1),
         ),
         (
             "extra field",
-            format!("{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\tformula\textra\n"),
+            committed.replacen(FIRST_FORMULA, &format!("{FIRST_FORMULA}\textra"), 1),
         ),
         (
             "duplicate fixture",
-            format!(
-                "{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\tfirst\n\
-                 partial_quad.npy\t<f8\t3x3\t{HASH}\tsecond\n"
+            committed.replacen("arc_full_n8.npy", "arc_quarter_n4.npy", 1),
+        ),
+        (
+            "noncanonical fixture name",
+            committed.replacen("arc_quarter_n4.npy", "../arc_quarter_n4.npy", 1),
+        ),
+        (
+            "unsupported dtype",
+            committed.replacen("arc_quarter_n4.npy\t<f8", "arc_quarter_n4.npy\t>f8", 1),
+        ),
+        (
+            "noncanonical shape",
+            committed.replacen(
+                "arc_quarter_n4.npy\t<f8\t9x3",
+                "arc_quarter_n4.npy\t<f8\t09x3",
+                1,
             ),
         ),
+        (
+            "non-lowercase digest",
+            committed.replacen(
+                "5d1019d7270ec7e7576d0f4d7ac968a5185134793075be689c13fbcbff5e2c29",
+                "5D1019d7270ec7e7576d0f4d7ac968a5185134793075be689c13fbcbff5e2c29",
+                1,
+            ),
+        ),
+        (
+            "formula drift",
+            committed.replacen(
+                FIRST_FORMULA,
+                "quadratic_bezier_points_for_arc(TAU/4, 4)",
+                1,
+            ),
+        ),
+        (
+            "formula field limit",
+            committed.replacen(FIRST_FORMULA, &"x".repeat(257), 1),
+        ),
+        ("generator row order", reordered),
+        ("missing generator row", missing_row),
+        ("extra generator row", extra_row),
     ];
     for (case, text) in malformed {
         std::fs::write(&manifest_path, text).expect("write malformed manifest");
@@ -575,7 +655,7 @@ fn fixture_manifest_is_canonical_and_shape_bound() {
         );
     }
 
-    let mut excessive_separators = format!("{HEADER}\npartial_quad.npy\t<f8\t3x3\t{HASH}\tformula");
+    let mut excessive_separators = committed.to_string();
     excessive_separators.extend(std::iter::repeat_n('\t', 1_000_000));
     std::fs::write(&manifest_path, excessive_separators)
         .expect("write noncanonical separator-heavy row");
@@ -589,12 +669,12 @@ fn fixture_manifest_is_canonical_and_shape_bound() {
     );
 
     let committed_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/npy");
-    let fixture_bytes =
-        std::fs::read(committed_root.join("partial_quad.npy")).expect("committed fixture bytes");
+    let fixture_bytes = std::fs::read(committed_root.join("quad_eval.npy"))
+        .expect("committed shape-mismatch fixture bytes");
     std::fs::write(root.join("partial_quad.npy"), fixture_bytes).expect("write scratch fixture");
     std::fs::write(
         &manifest_path,
-        format!("{HEADER}\npartial_quad.npy\t<f8\t99x3\t{HASH}\tshape binding\n"),
+        committed.replacen(PARTIAL_HASH, QUAD_EVAL_HASH, 1),
     )
     .expect("write mismatched-shape manifest");
     let error = FixtureCorpus::load(&root)
@@ -602,7 +682,7 @@ fn fixture_manifest_is_canonical_and_shape_bound() {
         .array("partial_quad.npy")
         .expect_err("declared shape must bind the decoded fixture");
     assert!(
-        error.to_string().contains("decoded shape [3, 3]"),
+        error.to_string().contains("decoded shape [9, 3]"),
         "shape mismatch must name the decoded shape: {error}"
     );
 }

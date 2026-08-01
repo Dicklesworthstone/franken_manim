@@ -567,12 +567,14 @@ pub struct ManifestRow {
     pub shape: String,
     /// Declared sha256 of the file bytes, lowercase hex.
     pub sha256: String,
+    /// Generator expression that produced the fixture.
+    pub formula: String,
 }
 
-/// The `fixtures/npy` corpus with manifest-hash verification: every read
-/// checks the file's sha256 against MANIFEST.tsv before decoding, so a
-/// corrupted or drifted fixture is a named failure, not a silent
-/// tolerance miss.
+/// The canonical `fixtures/npy` corpus. Loading binds the exact four-line
+/// provenance prelude and generator-defined row order; every fixture read
+/// then checks its sha256 before decoding, so drift is a named failure rather
+/// than a silent tolerance miss.
 #[derive(Clone, Debug)]
 pub struct FixtureCorpus {
     root: PathBuf,
@@ -580,8 +582,83 @@ pub struct FixtureCorpus {
 }
 
 const FIXTURE_MANIFEST_HEADER: &str = "# fmn npy fixture manifest v1";
+const FIXTURE_MANIFEST_REFERENCE: &str =
+    "# reference: 3b1b/manim @ 6199a00d4c1b1127ebe45cb629c3f22538b10e13";
+const FIXTURE_MANIFEST_GENERATOR: &str = "# generator: scripts/gen_npy_fixtures.py (numpy 2.2.4)";
+const FIXTURE_MANIFEST_COLUMNS: &str = "# columns: file\tdtype\tshape\tsha256\tformula";
 const MAX_FIXTURE_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_FIXTURE_MANIFEST_LINE_BYTES: usize = 512;
+const MAX_FIXTURE_NAME_BYTES: usize = 128;
+const MAX_FIXTURE_DTYPE_BYTES: usize = 8;
+const MAX_FIXTURE_SHAPE_BYTES: usize = 64;
+const MAX_FIXTURE_HASH_BYTES: usize = 64;
+const MAX_FIXTURE_FORMULA_BYTES: usize = 256;
 const MAX_NPY_FIXTURE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct FixtureManifestSpec {
+    name: &'static str,
+    dtype: &'static str,
+    shape: &'static str,
+    formula: &'static str,
+}
+
+const FIXTURE_MANIFEST_SPECS: [FixtureManifestSpec; 9] = [
+    FixtureManifestSpec {
+        name: "arc_quarter_n4.npy",
+        dtype: "<f8",
+        shape: "9x3",
+        formula: "quadratic_bezier_points_for_arc(TAU/4, n_components=4)",
+    },
+    FixtureManifestSpec {
+        name: "arc_full_n8.npy",
+        dtype: "<f8",
+        shape: "17x3",
+        formula: "quadratic_bezier_points_for_arc(TAU, n_components=8)",
+    },
+    FixtureManifestSpec {
+        name: "arc_neg_third_n2.npy",
+        dtype: "<f8",
+        shape: "5x3",
+        formula: "quadratic_bezier_points_for_arc(-TAU/3, n_components=2)",
+    },
+    FixtureManifestSpec {
+        name: "arc_half_n8.npy",
+        dtype: "<f8",
+        shape: "17x3",
+        formula: "quadratic_bezier_points_for_arc(TAU/2, n_components=8)",
+    },
+    FixtureManifestSpec {
+        name: "partial_quad.npy",
+        dtype: "<f8",
+        shape: "3x3",
+        formula: "partial_quadratic_bezier_points(PARTIAL_QUAD, 0.25, 0.75)",
+    },
+    FixtureManifestSpec {
+        name: "partial_quad_first_half.npy",
+        dtype: "<f8",
+        shape: "3x3",
+        formula: "partial_quadratic_bezier_points(PARTIAL_QUAD, 0.0, 0.5)",
+    },
+    FixtureManifestSpec {
+        name: "partial_quad_second_half.npy",
+        dtype: "<f8",
+        shape: "3x3",
+        formula: "partial_quadratic_bezier_points(PARTIAL_QUAD, 0.5, 1.0)",
+    },
+    FixtureManifestSpec {
+        name: "quad_eval.npy",
+        dtype: "<f8",
+        shape: "9x3",
+        formula: "bezier(PARTIAL_QUAD)(t) for t in {0, 1/8, ..., 1}",
+    },
+    FixtureManifestSpec {
+        name: "integer_interpolate.npy",
+        dtype: "<f8",
+        shape: "5x2",
+        formula: "integer_interpolate(0, 10, a) for a in {0.05, 0.25, 0.5, 0.75, 0.95}",
+    },
+];
 
 fn read_bounded_artifact(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, String> {
     let metadata = std::fs::symlink_metadata(path)
@@ -623,6 +700,187 @@ fn split_fixture_manifest_row(line: &str) -> Option<[&str; 5]> {
     fields.next().is_none().then_some(exact)
 }
 
+fn canonical_fixture_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".npy") else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && (value.len() == 1 || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<usize>().is_ok_and(|parsed| parsed > 0)
+}
+
+fn canonical_fixture_shape(shape: &str) -> bool {
+    let mut dimensions = shape.split('x');
+    let Some(rows) = dimensions.next() else {
+        return false;
+    };
+    let Some(width) = dimensions.next() else {
+        return false;
+    };
+    dimensions.next().is_none()
+        && canonical_decimal(rows)
+        && canonical_decimal(width)
+        && matches!(width, "2" | "3")
+}
+
+fn lowercase_sha256(digest: &str) -> bool {
+    digest.len() == MAX_FIXTURE_HASH_BYTES
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn parse_fixture_manifest(text: &str) -> Result<BTreeMap<String, ManifestRow>, String> {
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_FIXTURE_MANIFEST_BYTES {
+        return Err(format!(
+            "MANIFEST.tsv exceeds the {MAX_FIXTURE_MANIFEST_BYTES}-byte limit"
+        ));
+    }
+    let Some(body) = text.strip_suffix('\n') else {
+        return Err("MANIFEST.tsv must end with exactly one line feed".to_string());
+    };
+    if body.contains('\r') {
+        return Err("MANIFEST.tsv must use line-feed separators, not carriage returns".to_string());
+    }
+
+    let prelude = [
+        FIXTURE_MANIFEST_HEADER,
+        FIXTURE_MANIFEST_REFERENCE,
+        FIXTURE_MANIFEST_GENERATOR,
+        FIXTURE_MANIFEST_COLUMNS,
+    ];
+    let mut lines = body.split('\n').enumerate();
+    for (expected_index, expected) in prelude.into_iter().enumerate() {
+        let line_number = expected_index + 1;
+        let Some((_, actual)) = lines.next() else {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} must be {expected:?}"
+            ));
+        };
+        if actual.len() > MAX_FIXTURE_MANIFEST_LINE_BYTES {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} exceeds the {MAX_FIXTURE_MANIFEST_LINE_BYTES}-byte line limit"
+            ));
+        }
+        if actual != expected {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} must be {expected:?}"
+            ));
+        }
+    }
+
+    let mut manifest = BTreeMap::new();
+    for (index, line) in lines {
+        let line_number = index + 1;
+        let row_index = manifest.len();
+        if row_index == FIXTURE_MANIFEST_SPECS.len() {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} exceeds the {}-row fixture census",
+                FIXTURE_MANIFEST_SPECS.len()
+            ));
+        }
+        if line.len() > MAX_FIXTURE_MANIFEST_LINE_BYTES {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} exceeds the {MAX_FIXTURE_MANIFEST_LINE_BYTES}-byte line limit"
+            ));
+        }
+        let Some([name, dtype, shape, sha256, formula]) = split_fixture_manifest_row(line) else {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} must contain exactly 5 tab-separated fields"
+            ));
+        };
+        for (field_name, field, max_bytes) in [
+            ("file", name, MAX_FIXTURE_NAME_BYTES),
+            ("dtype", dtype, MAX_FIXTURE_DTYPE_BYTES),
+            ("shape", shape, MAX_FIXTURE_SHAPE_BYTES),
+            ("sha256", sha256, MAX_FIXTURE_HASH_BYTES),
+            ("formula", formula, MAX_FIXTURE_FORMULA_BYTES),
+        ] {
+            if field.is_empty() {
+                return Err(format!(
+                    "MANIFEST.tsv line {line_number} has an empty {field_name} field"
+                ));
+            }
+            if field.len() > max_bytes {
+                return Err(format!(
+                    "MANIFEST.tsv line {line_number} {field_name} exceeds its {max_bytes}-byte field limit"
+                ));
+            }
+        }
+        if !canonical_fixture_name(name) {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} file must be one lowercase single-component .npy name"
+            ));
+        }
+        if !matches!(dtype, "<f8" | "<f4" | "<i8") {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} dtype is outside the owned NPY subset"
+            ));
+        }
+        if !canonical_fixture_shape(shape) {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} shape must be a canonical positive rowsx2 or rowsx3 declaration"
+            ));
+        }
+        if !lowercase_sha256(sha256) {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} sha256 must be exactly 64 lowercase hexadecimal digits"
+            ));
+        }
+        if !formula
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+        {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} formula must contain printable ASCII only"
+            ));
+        }
+        if manifest.contains_key(name) {
+            return Err(format!(
+                "MANIFEST.tsv line {line_number} duplicates an earlier fixture name"
+            ));
+        }
+
+        let expected = FIXTURE_MANIFEST_SPECS[row_index];
+        for (field_name, actual, expected_value) in [
+            ("file", name, expected.name),
+            ("dtype", dtype, expected.dtype),
+            ("shape", shape, expected.shape),
+            ("formula", formula, expected.formula),
+        ] {
+            if actual != expected_value {
+                return Err(format!(
+                    "MANIFEST.tsv line {line_number} {field_name} must be {expected_value:?}"
+                ));
+            }
+        }
+        manifest.insert(
+            name.to_string(),
+            ManifestRow {
+                dtype: dtype.to_string(),
+                shape: shape.to_string(),
+                sha256: sha256.to_string(),
+                formula: formula.to_string(),
+            },
+        );
+    }
+    if manifest.len() != FIXTURE_MANIFEST_SPECS.len() {
+        return Err(format!(
+            "MANIFEST.tsv must contain exactly {} generator-defined fixture rows",
+            FIXTURE_MANIFEST_SPECS.len()
+        ));
+    }
+    Ok(manifest)
+}
+
 fn shape_matches(declared: &str, actual: &[usize]) -> bool {
     let mut dimensions = declared.split('x');
     actual.iter().all(|actual_dimension| {
@@ -651,52 +909,7 @@ impl FixtureCorpus {
                 })?;
         let text = String::from_utf8(bytes)
             .map_err(|error| OracleError::Fixture(format!("MANIFEST.tsv is not UTF-8: {error}")))?;
-        let mut lines = text.lines().enumerate();
-        let Some((_, header)) = lines.next() else {
-            return Err(OracleError::Fixture(
-                "MANIFEST.tsv is empty; expected the v1 header".to_string(),
-            ));
-        };
-        if header != FIXTURE_MANIFEST_HEADER {
-            return Err(OracleError::Fixture(format!(
-                "MANIFEST.tsv line 1 must be {FIXTURE_MANIFEST_HEADER:?}"
-            )));
-        }
-
-        let mut manifest = BTreeMap::new();
-        for (index, line) in lines {
-            let line_number = index + 1;
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some([name, dtype, shape, sha256, formula]) = split_fixture_manifest_row(line)
-            else {
-                return Err(OracleError::Fixture(format!(
-                    "MANIFEST.tsv line {line_number} must contain exactly 5 tab-separated fields"
-                )));
-            };
-            if [name, dtype, shape, sha256, formula]
-                .iter()
-                .any(|field| field.is_empty())
-            {
-                return Err(OracleError::Fixture(format!(
-                    "MANIFEST.tsv line {line_number} contains an empty field"
-                )));
-            }
-            if manifest.contains_key(name) {
-                return Err(OracleError::Fixture(format!(
-                    "MANIFEST.tsv line {line_number} duplicates an earlier fixture name"
-                )));
-            }
-            manifest.insert(
-                name.to_string(),
-                ManifestRow {
-                    dtype: dtype.to_string(),
-                    shape: shape.to_string(),
-                    sha256: sha256.to_string(),
-                },
-            );
-        }
+        let manifest = parse_fixture_manifest(&text).map_err(OracleError::Fixture)?;
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
@@ -715,12 +928,18 @@ impl FixtureCorpus {
         self.manifest.is_empty()
     }
 
-    /// Read one fixture, verifying its manifest hash, dtype, and shape.
+    /// Fixture names in stable lexical order.
+    #[must_use]
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.manifest.keys().map(String::as_str)
+    }
+
+    /// Read one fixture after binding its bytes to the manifest hash.
     ///
     /// # Errors
-    /// [`OracleError::Fixture`] on a missing row, an unreadable file, a
-    /// hash, dtype, or shape mismatch, or a decode failure.
-    pub fn array(&self, name: &str) -> Result<NpyArray, OracleError> {
+    /// [`OracleError::Fixture`] on a missing row, an unreadable or oversized
+    /// file, or a hash mismatch.
+    pub fn bytes(&self, name: &str) -> Result<Vec<u8>, OracleError> {
         let row = self
             .manifest
             .get(name)
@@ -736,6 +955,20 @@ impl FixtureCorpus {
                 row.sha256
             )));
         }
+        Ok(bytes)
+    }
+
+    /// Read one fixture, verifying its manifest hash, dtype, and shape.
+    ///
+    /// # Errors
+    /// [`OracleError::Fixture`] on a missing row, an unreadable file, a
+    /// hash, dtype, or shape mismatch, or a decode failure.
+    pub fn array(&self, name: &str) -> Result<NpyArray, OracleError> {
+        let row = self
+            .manifest
+            .get(name)
+            .ok_or_else(|| OracleError::Fixture(format!("{name} missing from MANIFEST.tsv")))?;
+        let bytes = self.bytes(name)?;
         let array = read_npy(&bytes).map_err(|e| OracleError::Fixture(format!("{name}: {e}")))?;
         if array.data.dtype().descr() != row.dtype {
             return Err(OracleError::Fixture(format!(

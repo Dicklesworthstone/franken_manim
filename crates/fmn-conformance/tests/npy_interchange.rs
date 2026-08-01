@@ -11,12 +11,11 @@
 
 use fmn_conformance::npy::read_npy;
 use fmn_conformance::npy::write_npy;
+use fmn_conformance::oracles::FixtureCorpus;
 use fmn_conformance::tolerance::{NanPolicy, check_points_abs};
 use fmn_core::constants::TAU;
 use fmn_core::types::Vec3;
 use fmn_geom::bezier::{partial_quadratic, quadratic_points_for_arc};
-use fmn_hash::sha256;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Loose cross-engine tolerance: both sides compute these formulas in f64,
@@ -28,49 +27,28 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/npy")
 }
 
-/// Manifest rows: file name → (dtype, shape, sha256-hex).
-fn load_manifest() -> BTreeMap<String, (String, String, String)> {
-    let text = std::fs::read_to_string(fixture_dir().join("MANIFEST.tsv"))
-        .expect("fixtures/npy/MANIFEST.tsv present; regenerate with scripts/gen_npy_fixtures.py");
-    let mut rows = BTreeMap::new();
-    for line in text.lines() {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.split('\t').collect();
-        assert!(fields.len() >= 4, "manifest row too short: {line:?}");
-        rows.insert(
-            fields[0].to_string(),
-            (
-                fields[1].to_string(),
-                fields[2].to_string(),
-                fields[3].to_string(),
-            ),
-        );
-    }
-    rows
+fn load_manifest() -> FixtureCorpus {
+    FixtureCorpus::load(&fixture_dir())
+        .expect("fixtures/npy/MANIFEST.tsv must satisfy the canonical bounded authority")
 }
 
 /// Read one fixture, verifying its manifest hash first.
-fn load_points(name: &str, manifest: &BTreeMap<String, (String, String, String)>) -> Vec<Vec3> {
-    let (dtype, _shape, hex) = manifest
-        .get(name)
-        .unwrap_or_else(|| panic!("{name} missing from MANIFEST.tsv"));
-    assert_eq!(dtype, "<f8", "{name}: manifest dtype");
-    let bytes = std::fs::read(fixture_dir().join(name)).expect("fixture file present");
-    assert_eq!(
-        &sha256(&bytes).to_hex(),
-        hex,
-        "{name}: fixture bytes do not match MANIFEST.tsv — regenerate or investigate"
-    );
-    let array = read_npy(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+fn load_points(name: &str, manifest: &FixtureCorpus) -> Vec<Vec3> {
+    let bytes = manifest
+        .bytes(name)
+        .expect("named fixture must exist and match its manifest hash");
+    let array = manifest
+        .array(name)
+        .expect("named fixture must match its manifest dtype and shape");
     // Byte-compatibility with np.save: our writer must reproduce the file.
     assert_eq!(
         write_npy(&array),
         bytes,
         "{name}: owned writer is not byte-compatible with np.save"
     );
-    array.to_points().unwrap_or_else(|e| panic!("{name}: {e}"))
+    array
+        .to_points()
+        .expect("the point fixture census contains only Nx3 f64 arrays")
 }
 
 #[test]
@@ -83,8 +61,8 @@ fn arc_fixtures_match_fmn_geom() {
     ] {
         let reference = load_points(name, &manifest);
         let ours = quadratic_points_for_arc(angle, n);
-        check_points_abs(&reference, &ours, TOL, NanPolicy::Reject)
-            .unwrap_or_else(|m| panic!("{name}: {m}"));
+        let comparison = check_points_abs(&reference, &ours, TOL, NanPolicy::Reject);
+        assert!(comparison.is_ok(), "{name}: {comparison:?}");
     }
 }
 
@@ -95,20 +73,30 @@ fn partial_quad_fixture_matches_fmn_geom() {
     // The same asymmetric off-axis quadratic the generator hardcodes.
     let quad: [Vec3; 3] = [[-1.0, 0.5, 0.25], [0.75, 2.0, -0.5], [2.0, -1.0, 1.0]];
     let ours = partial_quadratic(&quad, 0.25, 0.75);
-    check_points_abs(&reference, &ours, TOL, NanPolicy::Reject)
-        .unwrap_or_else(|m| panic!("partial_quad: {m}"));
+    let comparison = check_points_abs(&reference, &ours, TOL, NanPolicy::Reject);
+    assert!(comparison.is_ok(), "partial_quad: {comparison:?}");
 }
 
 #[test]
 fn every_manifest_row_has_its_file_and_hash() {
     let manifest = load_manifest();
-    assert!(manifest.len() >= 4, "expected the full fixture set");
-    for (name, (_dtype, shape, hex)) in &manifest {
-        let bytes = std::fs::read(fixture_dir().join(name)).expect("fixture listed but missing");
-        assert_eq!(&sha256(&bytes).to_hex(), hex, "{name}: integrity");
-        let array = read_npy(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let dims: Vec<String> = array.shape.iter().map(ToString::to_string).collect();
-        assert_eq!(&dims.join("x"), shape, "{name}: manifest shape");
+    assert_eq!(
+        manifest.len(),
+        9,
+        "expected the generator-defined fixture set"
+    );
+    for name in manifest.names() {
+        let bytes = manifest
+            .bytes(name)
+            .expect("listed fixture must exist and match its manifest hash");
+        let array = manifest
+            .array(name)
+            .expect("listed fixture must match its manifest dtype and shape");
+        assert_eq!(
+            write_npy(&array),
+            bytes,
+            "{name}: owned writer is not byte-compatible with np.save"
+        );
     }
 }
 
