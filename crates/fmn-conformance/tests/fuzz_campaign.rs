@@ -1470,6 +1470,9 @@ fn full_campaign_is_the_campaign_authority() {
     }
 
     if bless {
+        let pending = pending_manifest_records();
+        let rendered_manifest = fuzz::render_manifest(&rows, &pending)
+            .expect("render bounded canonical MANIFEST.tsv before blessing files");
         for (name, report) in &reports {
             let stale =
                 fuzz::bless_corpus(&corpus_root().join(name), &fuzz::expected_corpus(report))
@@ -1478,12 +1481,8 @@ fn full_campaign_is_the_campaign_authority() {
                 println!("{name}: stale corpus files to remove by hand: {stale:?}");
             }
         }
-        let pending = pending_manifest_records();
-        std::fs::write(
-            corpus_root().join("MANIFEST.tsv"),
-            fuzz::render_manifest(&rows, &pending),
-        )
-        .expect("write MANIFEST.tsv");
+        std::fs::write(corpus_root().join("MANIFEST.tsv"), rendered_manifest)
+            .expect("write MANIFEST.tsv");
         println!("fuzz campaign blessed — review the diff and commit it (the rig never commits)");
         return;
     }

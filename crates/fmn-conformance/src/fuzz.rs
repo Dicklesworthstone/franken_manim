@@ -55,7 +55,7 @@
 //! it.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{self, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -790,38 +790,272 @@ pub struct Manifest {
     pub pending: Vec<(String, String)>,
 }
 
+const PENDING_PREFIX: &str = "# pending: ";
+const PENDING_SEPARATOR: &str = " — ";
+
+fn decimal_len(mut value: u64) -> usize {
+    let mut len = 1;
+    while value >= 10 {
+        value /= 10;
+        len += 1;
+    }
+    len
+}
+
+fn checked_manifest_sum(parts: &[usize]) -> Result<usize, String> {
+    parts.iter().try_fold(0_usize, |sum, part| {
+        sum.checked_add(*part)
+            .ok_or_else(|| "rendered manifest size overflow".to_owned())
+    })
+}
+
+fn add_rendered_line(
+    rendered_bytes: &mut usize,
+    line_bytes: usize,
+    record_kind: &str,
+    record_index: usize,
+) -> Result<(), String> {
+    if line_bytes > MAX_MANIFEST_LINE_BYTES {
+        return Err(format!(
+            "{record_kind} {record_index} exceeds the {MAX_MANIFEST_LINE_BYTES}-byte line limit"
+        ));
+    }
+    *rendered_bytes = rendered_bytes
+        .checked_add(line_bytes)
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or_else(|| "rendered manifest size overflow".to_owned())?;
+    if *rendered_bytes > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "rendered manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_render_label(
+    value: &str,
+    record_kind: &str,
+    record_index: usize,
+    field: &str,
+    allow_underscore: bool,
+) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!(
+            "{record_kind} {record_index}: {field} must not be empty"
+        ));
+    }
+    if value.len() > MAX_MANIFEST_LABEL_BYTES {
+        return Err(format!(
+            "{record_kind} {record_index}: {field} exceeds the {MAX_MANIFEST_LABEL_BYTES}-byte label limit"
+        ));
+    }
+    let valid = value.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || byte == b'-'
+            || (allow_underscore && byte == b'_')
+    });
+    if !valid {
+        let alphabet = if allow_underscore {
+            "[a-z0-9_-]"
+        } else {
+            "[a-z0-9-]"
+        };
+        return Err(format!(
+            "{record_kind} {record_index}: {field} must use only lowercase {alphabet} characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Serialize a manifest deterministically (pending records and rows sorted
 /// by target).
-#[must_use]
-pub fn render_manifest(rows: &[ManifestRow], pending: &[(String, String)]) -> String {
-    let mut out = String::new();
+///
+/// All parser grammar and resource limits are checked before the output
+/// buffer is allocated, so callers can refuse invalid authority data before
+/// attempting a filesystem write.
+pub fn render_manifest(
+    rows: &[ManifestRow],
+    pending: &[(String, String)],
+) -> Result<String, String> {
+    if rows.is_empty() {
+        return Err("manifest records no targets".to_owned());
+    }
+    if rows.len() > MAX_MANIFEST_ROWS {
+        return Err(format!(
+            "rendered manifest exceeds the {MAX_MANIFEST_ROWS}-row limit"
+        ));
+    }
+    if pending.len() > MAX_MANIFEST_PENDING {
+        return Err(format!(
+            "rendered manifest exceeds the {MAX_MANIFEST_PENDING}-pending-record limit"
+        ));
+    }
+
+    let mut rendered_bytes =
+        checked_manifest_sum(&[MANIFEST_HEADER.len(), 1, MANIFEST_COLUMNS.len(), 1])?;
+
+    for (index, (name, note)) in pending.iter().enumerate() {
+        let record_index = index + 1;
+        validate_render_label(name, "pending record", record_index, "target", true)?;
+        if note.len() > MAX_MANIFEST_FIELD_BYTES {
+            return Err(format!(
+                "pending record {record_index}: note exceeds the {MAX_MANIFEST_FIELD_BYTES}-byte field limit"
+            ));
+        }
+        if note.is_empty()
+            || note.trim() != note
+            || note.contains('\t')
+            || note.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "pending record {record_index}: note must be nonempty, unpadded, and free of control characters"
+            ));
+        }
+        let line_bytes = checked_manifest_sum(&[
+            PENDING_PREFIX.len(),
+            name.len(),
+            PENDING_SEPARATOR.len(),
+            note.len(),
+        ])?;
+        add_rendered_line(
+            &mut rendered_bytes,
+            line_bytes,
+            "pending record",
+            record_index,
+        )?;
+    }
+
+    for (index, row) in rows.iter().enumerate() {
+        let record_index = index + 1;
+        validate_render_label(&row.target, "target row", record_index, "target", true)?;
+        if row.ci_cases == 0 {
+            return Err(format!(
+                "target row {record_index}: ci_cases must be positive"
+            ));
+        }
+        if row.full_cases < row.ci_cases {
+            return Err(format!(
+                "target row {record_index}: full_cases must be at least ci_cases"
+            ));
+        }
+        if row.max_input_bytes == 0 {
+            return Err(format!(
+                "target row {record_index}: max_input_bytes must be positive"
+            ));
+        }
+        if row.classes.is_empty() {
+            return Err(format!(
+                "target row {record_index}: outcome classes must be nonempty"
+            ));
+        }
+        if row.classes.len() > MAX_MANIFEST_CLASSES {
+            return Err(format!(
+                "target row {record_index}: outcome_classes exceeds the {MAX_MANIFEST_CLASSES}-class limit"
+            ));
+        }
+
+        let mut classes_bytes = row.classes.len() - 1;
+        let mut previous_class: Option<&str> = None;
+        for class in &row.classes {
+            validate_render_label(class, "target row", record_index, "outcome class", false)?;
+            classes_bytes = classes_bytes
+                .checked_add(class.len())
+                .ok_or_else(|| "rendered manifest size overflow".to_owned())?;
+            if let Some(previous) = previous_class {
+                if previous == class {
+                    return Err(format!(
+                        "target row {record_index}: outcome classes must not contain duplicates"
+                    ));
+                }
+                if previous > class.as_str() {
+                    return Err(format!(
+                        "target row {record_index}: outcome classes must be strictly sorted"
+                    ));
+                }
+            }
+            previous_class = Some(class);
+        }
+        if classes_bytes > MAX_MANIFEST_FIELD_BYTES {
+            return Err(format!(
+                "target row {record_index}: outcome_classes exceeds the {MAX_MANIFEST_FIELD_BYTES}-byte field limit"
+            ));
+        }
+
+        let max_output_bytes = row.max_output_bytes.map_or(1, decimal_len);
+        let line_bytes = checked_manifest_sum(&[
+            row.target.len(),
+            6,
+            decimal_len(row.seed),
+            decimal_len(u64::from(row.ci_cases)),
+            decimal_len(u64::from(row.full_cases)),
+            decimal_len(row.max_input_bytes),
+            max_output_bytes,
+            classes_bytes,
+        ])?;
+        add_rendered_line(&mut rendered_bytes, line_bytes, "target row", record_index)?;
+    }
+
+    let mut sorted_pending: Vec<_> = pending.iter().collect();
+    sorted_pending.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for pair in sorted_pending.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err("rendered manifest contains a duplicate pending target".to_owned());
+        }
+    }
+
+    let mut sorted_rows: Vec<_> = rows.iter().collect();
+    sorted_rows.sort_unstable_by(|left, right| left.target.cmp(&right.target));
+    for pair in sorted_rows.windows(2) {
+        if pair[0].target == pair[1].target {
+            return Err("rendered manifest contains a duplicate target row".to_owned());
+        }
+    }
+    for (name, _) in &sorted_pending {
+        if sorted_rows
+            .binary_search_by(|row| row.target.as_str().cmp(name))
+            .is_ok()
+        {
+            return Err("rendered manifest target cannot be both pending and committed".to_owned());
+        }
+    }
+
+    let mut out = String::with_capacity(rendered_bytes);
     out.push_str(MANIFEST_HEADER);
     out.push('\n');
     out.push_str(MANIFEST_COLUMNS);
     out.push('\n');
-    let mut pending = pending.to_vec();
-    pending.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, note) in &pending {
-        out.push_str(&format!("# pending: {name} — {note}\n"));
+    for (name, note) in sorted_pending {
+        out.push_str(PENDING_PREFIX);
+        out.push_str(name);
+        out.push_str(PENDING_SEPARATOR);
+        out.push_str(note);
+        out.push('\n');
     }
-    let mut rows = rows.to_vec();
-    rows.sort_by(|a, b| a.target.cmp(&b.target));
-    for row in &rows {
-        let max_out = row
-            .max_output_bytes
-            .map_or_else(|| "-".to_owned(), |v| v.to_string());
-        out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            row.target,
-            row.seed,
-            row.ci_cases,
-            row.full_cases,
-            row.max_input_bytes,
-            max_out,
-            row.classes.join(","),
-        ));
+    for row in sorted_rows {
+        write!(
+            &mut out,
+            "{}\t{}\t{}\t{}\t{}\t",
+            row.target, row.seed, row.ci_cases, row.full_cases, row.max_input_bytes
+        )
+        .map_err(|_| "internal manifest formatting failure".to_owned())?;
+        if let Some(max_output_bytes) = row.max_output_bytes {
+            write!(&mut out, "{max_output_bytes}")
+                .map_err(|_| "internal manifest formatting failure".to_owned())?;
+        } else {
+            out.push('-');
+        }
+        out.push('\t');
+        for (index, class) in row.classes.iter().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            out.push_str(class);
+        }
+        out.push('\n');
     }
-    out
+    debug_assert_eq!(out.len(), rendered_bytes);
+    Ok(out)
 }
 
 fn split_manifest_row(line: &str) -> Option<[&str; 7]> {
@@ -1210,7 +1444,7 @@ mod tests {
                 "lands with the parser tranche".to_owned(),
             ),
         ];
-        let text = render_manifest(&rows, &pending);
+        let text = render_manifest(&rows, &pending).expect("manifest renders");
         let parsed = parse_manifest(&text).expect("manifest parses");
         assert_eq!(parsed.rows, {
             let mut sorted = rows.clone();
@@ -1223,7 +1457,125 @@ mod tests {
             sorted
         });
         // Rendering is idempotent — the checked-in file is byte-stable.
-        assert_eq!(render_manifest(&parsed.rows, &parsed.pending), text);
+        assert_eq!(
+            render_manifest(&parsed.rows, &parsed.pending).expect("parsed manifest renders"),
+            text
+        );
+    }
+
+    #[test]
+    fn manifest_renderer_rejects_noncanonical_authority() {
+        let row = |target: &str| ManifestRow {
+            target: target.to_owned(),
+            seed: 7,
+            ci_cases: 1,
+            full_cases: 2,
+            max_input_bytes: 3,
+            max_output_bytes: None,
+            classes: vec!["accepted".to_owned(), "malformed".to_owned()],
+        };
+
+        let invalid_target = row("Tex_math");
+        assert!(
+            render_manifest(&[invalid_target], &[])
+                .expect_err("invalid target label must be refused")
+                .contains("[a-z0-9_-]")
+        );
+
+        let mut invalid_classes = row("tex_math");
+        invalid_classes.classes.swap(0, 1);
+        assert!(
+            render_manifest(&[invalid_classes], &[])
+                .expect_err("unsorted classes must be refused")
+                .contains("strictly sorted")
+        );
+
+        let duplicate_rows = [row("tex_math"), row("tex_math")];
+        assert!(
+            render_manifest(&duplicate_rows, &[])
+                .expect_err("duplicate target rows must be refused")
+                .contains("duplicate target")
+        );
+
+        let duplicate_pending = [
+            ("future_target".to_owned(), "first note".to_owned()),
+            ("future_target".to_owned(), "second note".to_owned()),
+        ];
+        assert!(
+            render_manifest(&[row("tex_math")], &duplicate_pending)
+                .expect_err("duplicate pending targets must be refused")
+                .contains("duplicate pending")
+        );
+
+        let conflicting_pending = [("tex_math".to_owned(), "not landed".to_owned())];
+        assert!(
+            render_manifest(&[row("tex_math")], &conflicting_pending)
+                .expect_err("pending and committed target conflict must be refused")
+                .contains("both pending and committed")
+        );
+
+        for note in ["", " padded", "padded ", "tab\tnote", "line\nnote"] {
+            let pending = [("future_target".to_owned(), note.to_owned())];
+            assert!(
+                render_manifest(&[row("tex_math")], &pending).is_err(),
+                "pending note {note:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_renderer_enforces_bounds_before_output_allocation() {
+        let row = || ManifestRow {
+            target: "tex_math".to_owned(),
+            seed: 7,
+            ci_cases: 1,
+            full_cases: 2,
+            max_input_bytes: 3,
+            max_output_bytes: None,
+            classes: vec!["accepted".to_owned()],
+        };
+
+        let excessive_rows = vec![row(); MAX_MANIFEST_ROWS + 1];
+        assert!(
+            render_manifest(&excessive_rows, &[])
+                .expect_err("excessive row count must be refused")
+                .contains("row limit")
+        );
+
+        let excessive_pending =
+            vec![("future_target".to_owned(), "note".to_owned()); MAX_MANIFEST_PENDING + 1];
+        assert!(
+            render_manifest(&[row()], &excessive_pending)
+                .expect_err("excessive pending count must be refused")
+                .contains("pending-record limit")
+        );
+
+        let mut excessive_classes = row();
+        excessive_classes.classes = vec!["accepted".to_owned(); MAX_MANIFEST_CLASSES + 1];
+        assert!(
+            render_manifest(&[excessive_classes], &[])
+                .expect_err("excessive class count must be refused")
+                .contains("class limit")
+        );
+
+        let oversized_note = [(
+            "future_target".to_owned(),
+            "n".repeat(MAX_MANIFEST_FIELD_BYTES + 1),
+        )];
+        assert!(
+            render_manifest(&[row()], &oversized_note)
+                .expect_err("oversized note must be refused")
+                .contains("field limit")
+        );
+
+        let document_bomb: Vec<_> = (0..256)
+            .map(|index| (format!("p{index:03}"), "n".repeat(MAX_MANIFEST_FIELD_BYTES)))
+            .collect();
+        assert!(
+            render_manifest(&[row()], &document_bomb)
+                .expect_err("oversized rendered document must be refused")
+                .contains("byte limit")
+        );
     }
 
     #[test]
