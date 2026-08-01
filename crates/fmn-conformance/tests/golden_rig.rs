@@ -241,6 +241,37 @@ fn lock_identity_and_rows_are_strictly_parsed_with_bounded_refusals() {
         2,
         "invalid sha256 field",
     );
+    assert_corrupt(
+        &format!("{exact_header}\r\nartifact\t1\t{sha}\r\n"),
+        1,
+        "carriage returns",
+    );
+    assert_corrupt(
+        &format!("{exact_header}\nartifact\t1\t{sha}"),
+        2,
+        "end with exactly one LF",
+    );
+    assert_corrupt(&format!("{exact_header}\n\n"), 2, "blank data row");
+    assert_corrupt(
+        &format!("{exact_header}\n# extra metadata\n"),
+        2,
+        "comment data row",
+    );
+    assert_corrupt(
+        &format!("{exact_header}\nartifact\t01\t{sha}\n"),
+        2,
+        "noncanonical length field",
+    );
+    assert_corrupt(
+        &format!("{exact_header}\nz-last\t1\t{sha}\na-first\t1\t{sha}\n"),
+        3,
+        "not strictly increasing",
+    );
+    assert_corrupt(
+        &format!("{exact_header}\nartifact\t1\t{sha}\nartifact\t1\t{sha}\n"),
+        3,
+        "duplicate artifact name",
+    );
 
     let mut delimiter_heavy = format!("{exact_header}\nartifact\t1\t{sha}");
     delimiter_heavy.extend(std::iter::repeat_n('\t', 1_000_000));
@@ -251,12 +282,18 @@ fn lock_identity_and_rows_are_strictly_parsed_with_bounded_refusals() {
         "expected 3 tab-separated fields, found 1000003",
     );
 
-    std::fs::write(&lock, format!("{exact_header}\nartifact\t1\t{sha}\n"))
-        .expect("write canonical lock");
+    let canonical = format!("{exact_header}\nartifact-a\t1\t{sha}\nartifact-b\t2\t{sha}\n");
+    std::fs::write(&lock, &canonical).expect("write canonical lock");
     let entries = store.load_entries().expect("canonical lock parses");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries["artifact"].len, 1);
-    assert_eq!(entries["artifact"].sha256_hex, sha);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries["artifact-a"].len, 1);
+    assert_eq!(entries["artifact-b"].len, 2);
+    assert_eq!(entries["artifact-a"].sha256_hex, sha);
+    assert_eq!(
+        std::fs::read_to_string(&lock).expect("read canonical lock"),
+        canonical,
+        "accepted lock bytes must already match the canonical writer"
+    );
 }
 
 #[test]

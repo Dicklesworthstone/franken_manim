@@ -23,6 +23,7 @@
 //! path components, and a fixture name must never be a traversal vector.
 
 use fmn_hash::sha256;
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read as _, Write as _};
@@ -380,7 +381,33 @@ impl GoldenStore {
             path: path.clone(),
             err: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
         })?;
-        let mut lines = text.lines().enumerate();
+        if let Some(offset) = bytes.iter().position(|&byte| byte == b'\r') {
+            return Err(GoldenError::Corrupt {
+                path,
+                line: bytes
+                    .iter()
+                    .take(offset)
+                    .filter(|&&byte| byte == b'\n')
+                    .count()
+                    + 1,
+                detail: "carriage returns are forbidden; use LF line endings".to_string(),
+            });
+        }
+        if bytes.is_empty() {
+            return Err(GoldenError::Corrupt {
+                path,
+                line: 1,
+                detail: "empty lock file (delete it or restore the header)".to_string(),
+            });
+        }
+        if !bytes.ends_with(b"\n") {
+            return Err(GoldenError::Corrupt {
+                path,
+                line: bytes.iter().filter(|&&byte| byte == b'\n').count() + 1,
+                detail: "lock file must end with exactly one LF".to_string(),
+            });
+        }
+        let mut lines = text.split_terminator('\n').enumerate();
         let expected_header = self.lock_header();
         match lines.next() {
             Some((_, first)) if first == expected_header => {}
@@ -398,14 +425,26 @@ impl GoldenStore {
                 return Err(GoldenError::Corrupt {
                     path,
                     line: 1,
-                    detail: "empty lock file (delete it or restore the header)".to_string(),
+                    detail: "lock file has no header line".to_string(),
                 });
             }
         }
         let mut entries = BTreeMap::new();
+        let mut previous_name = None;
         for (idx, line) in lines {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+            if line.is_empty() {
+                return Err(GoldenError::Corrupt {
+                    path,
+                    line: idx + 1,
+                    detail: "blank data rows are not canonical".to_string(),
+                });
+            }
+            if line.starts_with('#') {
+                return Err(GoldenError::Corrupt {
+                    path,
+                    line: idx + 1,
+                    detail: "comment data rows are not canonical".to_string(),
+                });
             }
             let Some([name, len, hex]) = split_lock_row(line) else {
                 return Err(GoldenError::Corrupt {
@@ -424,11 +463,18 @@ impl GoldenStore {
                     detail: format!("invalid artifact name ({} bytes)", name.len()),
                 });
             }
-            let len: u64 = len.parse().map_err(|_| GoldenError::Corrupt {
+            let parsed_len: u64 = len.parse().map_err(|_| GoldenError::Corrupt {
                 path: path.clone(),
                 line: idx + 1,
                 detail: format!("invalid length field ({} bytes)", len.len()),
             })?;
+            if parsed_len.to_string() != len {
+                return Err(GoldenError::Corrupt {
+                    path,
+                    line: idx + 1,
+                    detail: format!("noncanonical length field ({} bytes)", len.len()),
+                });
+            }
             if hex.len() != 64
                 || !hex
                     .bytes()
@@ -443,22 +489,44 @@ impl GoldenStore {
                     ),
                 });
             }
-            if entries
-                .insert(
-                    (*name).to_string(),
-                    LockEntry {
-                        len,
-                        sha256_hex: (*hex).to_string(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(GoldenError::Corrupt {
-                    path,
-                    line: idx + 1,
-                    detail: format!("duplicate artifact name ({} bytes)", name.len()),
-                });
+            if let Some(previous) = previous_name {
+                match name.cmp(previous) {
+                    CmpOrdering::Less => {
+                        return Err(GoldenError::Corrupt {
+                            path,
+                            line: idx + 1,
+                            detail: format!(
+                                "artifact names are not strictly increasing ({} then {} bytes)",
+                                previous.len(),
+                                name.len()
+                            ),
+                        });
+                    }
+                    CmpOrdering::Equal => {
+                        return Err(GoldenError::Corrupt {
+                            path,
+                            line: idx + 1,
+                            detail: format!("duplicate artifact name ({} bytes)", name.len()),
+                        });
+                    }
+                    CmpOrdering::Greater => {}
+                }
             }
+            previous_name = Some(name);
+            entries.insert(
+                name.to_string(),
+                LockEntry {
+                    len: parsed_len,
+                    sha256_hex: hex.to_string(),
+                },
+            );
+        }
+        if self.canonical_lock_text(&entries, &path)?.as_bytes() != bytes {
+            return Err(GoldenError::Corrupt {
+                path,
+                line: 1,
+                detail: "lock bytes do not match the canonical writer".to_string(),
+            });
         }
         Ok(entries)
     }

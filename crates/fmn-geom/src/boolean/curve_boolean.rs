@@ -341,12 +341,26 @@ fn solve_intersections(
                 continue;
             }
             bump(&mut stats.pair_tests, options.limits.max_pair_tests)?;
-            let roots = clip_pair(&pieces[i].quad, &pieces[j].quad, options, stats)?;
+            let dbg = std::env::var_os("FMN_CURVE_DEBUG").is_some();
+            let Some(roots) = clip_pair(&pieces[i].quad, &pieces[j].quad, options, stats) else {
+                if dbg {
+                    eprintln!(
+                        "  clip_pair None: pieces ({i},{j}) same_op={} curved=({},{})",
+                        pieces[i].operand == pieces[j].operand,
+                        pieces[i].curved,
+                        pieces[j].curved
+                    );
+                }
+                return None;
+            };
             if pieces[i].operand == pieces[j].operand {
                 if roots
                     .iter()
                     .any(|&(t, u)| !at_shared_endpoint(&pieces[i].quad, &pieces[j].quad, t, u))
                 {
+                    if dbg {
+                        eprintln!("  same-operand non-endpoint root: pieces ({i},{j}) roots={roots:?}");
+                    }
                     return None;
                 }
                 continue;
@@ -521,6 +535,9 @@ fn clip_recurse(
         );
         let width_a = ta.1 - ta.0;
         let width_b = tb.1 - tb.0;
+        if std::env::var_os("FMN_CLIP_TRACE").is_some() {
+            eprintln!("    depth={depth} widths=({width_a:.3e},{width_b:.3e}) ta={ta:?} tb={tb:?}");
+        }
         if width_a <= CLIP_T_EPS && width_b <= CLIP_T_EPS {
             roots.push(((ta.0 + ta.1) * 0.5, (tb.0 + tb.1) * 0.5));
             return Some(());
