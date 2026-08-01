@@ -872,6 +872,7 @@ fn write_new(path: &OsStr, bytes: &[u8], label: &str) -> Result<(), CliError> {
 }
 
 fn read_utf8(path: &OsStr, label: &'static str, limit: u64) -> Result<String, CliError> {
+    preflight_regular_leaf(path, label)?;
     let file = fs::File::open(path)
         .map_err(|error| CliError::data(format!("cannot read {label}: {error}")))?;
     let mut bytes = Vec::new();
@@ -885,6 +886,30 @@ fn read_utf8(path: &OsStr, label: &'static str, limit: u64) -> Result<String, Cl
     }
     String::from_utf8(bytes)
         .map_err(|error| CliError::data(format!("{label} is not UTF-8: {error}")))
+}
+
+fn preflight_regular_leaf(path: &OsStr, label: &str) -> Result<(), CliError> {
+    preflight_regular_leaf_with(path, label, host_node_kind)
+}
+
+fn preflight_regular_leaf_with(
+    path: &OsStr,
+    label: &str,
+    mut node_kind: impl FnMut(&Path) -> Result<Option<FsNodeKind>, String>,
+) -> Result<(), CliError> {
+    match node_kind(Path::new(path)) {
+        Ok(Some(FsNodeKind::RegularFile)) => Ok(()),
+        Ok(Some(FsNodeKind::Link)) => Err(CliError::data(format!(
+            "{label} is a symbolic link or reparse point"
+        ))),
+        Ok(Some(FsNodeKind::Directory | FsNodeKind::Other)) => {
+            Err(CliError::data(format!("{label} is not a regular file")))
+        }
+        Ok(None) => Err(CliError::data(format!(
+            "cannot read {label}: path is missing"
+        ))),
+        Err(error) => Err(CliError::data(format!("cannot inspect {label}: {error}"))),
+    }
 }
 
 #[derive(Debug)]
@@ -1221,6 +1246,31 @@ mod tests {
         preflight_regular_input(OsStr::new("Cargo.toml"), "test input").unwrap();
         let error = preflight_regular_input(OsStr::new("src"), "test input").unwrap_err();
         assert!(error.detail.contains("not a regular file"));
+    }
+
+    #[test]
+    fn bounded_reader_preflight_requires_a_regular_leaf() {
+        let path = OsStr::new("/explicit/authority.tsv");
+        preflight_regular_leaf_with(path, "authority", |_| Ok(Some(FsNodeKind::RegularFile)))
+            .unwrap();
+
+        for (kind, expected) in [
+            (Some(FsNodeKind::Link), "symbolic link or reparse point"),
+            (Some(FsNodeKind::Directory), "not a regular file"),
+            (Some(FsNodeKind::Other), "not a regular file"),
+            (None, "path is missing"),
+        ] {
+            let error = preflight_regular_leaf_with(path, "authority", |_| Ok(kind)).unwrap_err();
+            assert_eq!(error.kind, "data");
+            assert!(error.detail.contains(expected), "{}", error.detail);
+        }
+
+        let error = preflight_regular_leaf_with(path, "authority", |_| {
+            Err("classification unavailable".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(error.kind, "data");
+        assert!(error.detail.contains("classification unavailable"));
     }
 
     #[test]
