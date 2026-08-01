@@ -24,7 +24,11 @@
 //! - `svg_document_processor` — SVG text → `fmn_geom::SvgDocument` under its
 //!   declared `SvgLimits` (fm-6nm, the W2 document processor), with
 //!   XML/path-grammar token splices, entity and DOCTYPE staples, digit
-//!   perturbation, and chunk-duplication budget-bomb steering.
+//!   perturbation, and chunk-duplication budget-bomb steering;
+//! - `path_boolean` — bytes → `fmn_geom::boolean::fuzz_probe` (fm-qjy):
+//!   arbitrary quadratic paths through every admitted boolean route and the
+//!   certified fallback under tight budgets; the contract IS never-panic
+//!   and totality, asserted on structured mutations.
 //!
 //! Modes:
 //! - CI (default): the reduced case counts; classes must be a subset of
@@ -1225,6 +1229,85 @@ impl Target for SvgDocumentProcessor {
     }
 }
 
+// ---------------------------------------------------------------- (i) boolean
+
+/// Bytes → `fmn_geom::boolean::fuzz_probe`: two arbitrary quadratic paths
+/// through every admitted boolean route and the certified fallback under
+/// tight budgets. The contract IS never-panic (the driver's
+/// `catch_unwind` asserts it) plus totality: every byte string is either
+/// computed or refused with a typed budget/validation error inside the
+/// probe — there is no input class that can hang or fault (fm-qjy).
+struct PathBoolean;
+
+impl PathBoolean {
+    /// Deterministic seed of `selector` followed by `len - 1` structured
+    /// body bytes (4-byte chunks become quadratic control points).
+    fn seed_bytes(selector: u8, len: usize, multiplier: u8) -> Vec<u8> {
+        let mut bytes = vec![selector];
+        for index in 1..len {
+            bytes.push(
+                (index as u8)
+                    .wrapping_mul(multiplier)
+                    .wrapping_add(selector),
+            );
+        }
+        bytes
+    }
+}
+
+impl Target for PathBoolean {
+    fn name(&self) -> &'static str {
+        "path_boolean"
+    }
+
+    fn budgets(&self) -> Budgets {
+        Budgets {
+            // The probe reads one selector byte plus at most 258 body
+            // bytes; presenting more only wastes mutations.
+            max_input_bytes: 259,
+            // The probe drains to a bool: zero output by construction.
+            max_output_bytes: Some(0),
+        }
+    }
+
+    fn seeds(&self) -> Vec<Vec<u8>> {
+        vec![
+            Self::seed_bytes(0, 259, 73),
+            Self::seed_bytes(3, 129, 41),
+            Self::seed_bytes(7, 258, 17),
+        ]
+    }
+
+    fn mutate(&self, rng: &mut XorShift64, input: &mut Vec<u8>) {
+        match rng.below(7) {
+            0 => mutate::flip_bit(rng, input),
+            // Selector scramble: operation and fill-rule bits.
+            1 => {
+                if input.is_empty() {
+                    input.push(rng.byte());
+                } else {
+                    input[0] = rng.byte();
+                }
+            }
+            2 => mutate::overwrite_byte(rng, input),
+            3 => mutate::splice_chunk(rng, input),
+            4 => mutate::duplicate_chunk(rng, input, self.budgets().max_input_bytes),
+            5 => mutate::truncate(rng, input),
+            _ => mutate::overwrite_u32be(rng, input),
+        }
+    }
+
+    fn run(&self, input: &[u8]) -> Verdict {
+        if fmn_geom::boolean::fuzz_probe(input) {
+            Verdict::Accepted { output_bytes: 0 }
+        } else {
+            Verdict::Fault {
+                message: "boolean fuzz probe breached its totality contract".to_owned(),
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- registry
 
 /// The campaign registry: every target with its spec. The manifest must
@@ -1291,6 +1374,14 @@ fn registry() -> Vec<(Box<dyn Target>, CampaignSpec)> {
             Box::new(SvgDocumentProcessor),
             CampaignSpec {
                 seed: 0x5bde_0001_3800_0008,
+                ci_cases: 600,
+                full_cases: 20_000,
+            },
+        ),
+        (
+            Box::new(PathBoolean),
+            CampaignSpec {
+                seed: 0xb001_0001_3900_0009,
                 ci_cases: 600,
                 full_cases: 20_000,
             },

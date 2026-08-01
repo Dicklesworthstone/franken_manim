@@ -229,12 +229,42 @@ pub fn path_arc_length_vs_quadrature(path: &QuadPath, panels: usize) -> f64 {
 // 1. Analytic ground truths — path-boolean identities
 // =====================================================================
 
-/// The signed fill area of a boolean result: shoelace sum over every
-/// closed contour's anchors, signed per contour so oppositely wound holes
-/// subtract. Boolean results are line-quadratic paths (flatten-and-clip),
-/// so the anchor polygon is the exact filled set the arrangement produced.
+/// The signed fill area of a boolean result: the exact quadratic boundary
+/// integral `⅓·cross(p0,h) + ⅙·cross(p0,p2) + ⅓·cross(h,p2)` per piece
+/// plus each subpath's implicit closing chord, signed per contour so
+/// oppositely wound holes subtract. For the flatten-and-clip route every
+/// piece is a line quadratic (`h` on the chord) and the formula reduces
+/// to the anchor shoelace exactly; for the curve-aware routes it is the
+/// exact area of the curve-preserving output the anchor polygon would
+/// only approximate (fm-qjy).
 fn fill_area(result: &BooleanResult) -> f64 {
-    result.path.area_vector()[2].abs()
+    exact_path_area(&result.path)
+}
+
+/// The exact quadratic boundary integral of any path, including each
+/// subpath's implicit fill-closing chord (matching `area_vector`'s cyclic
+/// wrap and Stage-1 fill semantics; identical values on line-only paths).
+fn exact_path_area(path: &QuadPath) -> f64 {
+    let cross = |a: [f64; 3], b: [f64; 3]| a[0] * b[1] - a[1] * b[0];
+    path.subpaths()
+        .iter()
+        .map(|subpath| {
+            let pieces: f64 = subpath
+                .windows(3)
+                .step_by(2)
+                .map(|piece| {
+                    (cross(piece[0], piece[1])
+                        + 0.5 * cross(piece[0], piece[2])
+                        + cross(piece[1], piece[2]))
+                        / 3.0
+                })
+                .sum();
+            let first = subpath[0];
+            let last = subpath[subpath.len() - 1];
+            pieces + 0.5 * cross(last, first)
+        })
+        .sum::<f64>()
+        .abs()
 }
 
 /// One boolean evaluated for the identity oracles.
@@ -264,10 +294,12 @@ pub fn boolean_union_commutes_area_error(
 }
 
 /// `|area(A∩B) + area(A−B) − area(A)|` — the intersection/difference
-/// partition of the subject. `area(A)` is measured on `A`'s own anchors,
-/// so the identity is exact for polygonal subjects (the oracles use
-/// corner rectangles); for curved subjects the same flatten-tolerance
-/// boundary as [`boolean_subdivision_area_error`] applies.
+/// partition of the subject. `area(A)` is measured by the same exact
+/// quadratic boundary integral as the boolean outputs, so the identity is
+/// exact for polygonal subjects (the oracles use corner rectangles) and
+/// stays exact for curve-preserving route outputs; for flattened curved
+/// subjects the flatten-tolerance boundary of
+/// [`boolean_subdivision_area_error`] applies.
 ///
 /// # Errors
 /// [`OracleError::Boolean`] if an evaluation refuses its inputs.
@@ -278,7 +310,7 @@ pub fn boolean_partition_area_error(
 ) -> Result<f64, OracleError> {
     let intersection = boolean_area(a, b, BooleanOperation::Intersection, options)?;
     let difference = boolean_area(a, b, BooleanOperation::Difference, options)?;
-    let subject = a.area_vector()[2].abs();
+    let subject = exact_path_area(a);
     Ok((intersection + difference - subject).abs())
 }
 
@@ -304,7 +336,7 @@ pub fn boolean_de_morgan_area_error(
         BooleanOperation::Intersection,
         options,
     )?;
-    let whole = universe.area_vector()[2].abs();
+    let whole = exact_path_area(universe);
     Ok((union - (whole - fill_area(&complement_of_union))).abs())
 }
 
