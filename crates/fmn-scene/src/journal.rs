@@ -44,6 +44,16 @@ pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 1);
 /// The repro bundle's versioned container schema (FMNA/4).
 pub const BUNDLE_SCHEMA: Schema = Schema::new(*b"FMNA", 4, 1, 0);
 
+const LENGTH_PREFIX_BYTES: u64 = 8;
+const DIGEST_BYTES: u64 = 32;
+const MIN_COMMAND_BYTES: u64 = 1 + DIGEST_BYTES + LENGTH_PREFIX_BYTES;
+const MIN_ENTRY_BYTES: u64 = MIN_COMMAND_BYTES + 1 + 4 + 4 + 1 + DIGEST_BYTES;
+const MIN_ASSET_READ_BYTES: u64 = LENGTH_PREFIX_BYTES + DIGEST_BYTES;
+const MIN_SUBPROCESS_BYTES: u64 = LENGTH_PREFIX_BYTES + DIGEST_BYTES + LENGTH_PREFIX_BYTES;
+// A key event is the smallest input event: sequence, time, fps, event type,
+// key tag, key value, and modifier bits.
+const MIN_INPUT_EVENT_BYTES: u64 = 8 + 8 + 4 + 1 + 1 + 4 + 1;
+
 /// A journal failure.
 #[derive(Debug)]
 pub enum JournalError {
@@ -53,6 +63,17 @@ pub enum JournalError {
     Event(EventError),
     /// The payload decoded but violates a journal invariant.
     Malformed(&'static str),
+    /// A declared collection cannot fit in the bytes that remain.
+    CollectionPayloadTooShort {
+        /// Collection field.
+        field: &'static str,
+        /// Declared item count.
+        count: usize,
+        /// Minimum bytes required for the declared items.
+        minimum_bytes: u64,
+        /// Bytes left after the count field.
+        remaining_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for JournalError {
@@ -61,6 +82,15 @@ impl std::fmt::Display for JournalError {
             Self::Serial(e) => write!(f, "journal container: {e}"),
             Self::Event(e) => write!(f, "journal event: {e}"),
             Self::Malformed(what) => write!(f, "malformed journal: {what}"),
+            Self::CollectionPayloadTooShort {
+                field,
+                count,
+                minimum_bytes,
+                remaining_bytes,
+            } => write!(
+                f,
+                "journal {field} count {count} requires at least {minimum_bytes} encoded bytes, but only {remaining_bytes} remain"
+            ),
         }
     }
 }
@@ -234,6 +264,7 @@ impl CommandRecord {
     /// Whether `other` re-executes to the same behavior.
     #[must_use]
     pub fn matches(&self, other: &Self) -> bool {
+        // ubs:ignore - command identities are public content hashes, not secrets.
         self.kind == other.kind && self.identity == other.identity
     }
 }
@@ -415,11 +446,13 @@ impl Journal {
             UnknownPolicy::Strict,
         )?;
         let count = r.get_u32()? as usize;
+        require_collection_payload(&r, "entry", count, MIN_ENTRY_BYTES)?;
         let mut entries = Vec::with_capacity(count.min(65_536));
         for _ in 0..count {
             let command = get_command(&mut r)?;
             let effect = get_effect(&mut r)?;
             let read_count = r.get_u32()? as usize;
+            require_collection_payload(&r, "asset read", read_count, MIN_ASSET_READ_BYTES)?;
             let mut reads = Vec::with_capacity(read_count.min(4096));
             for _ in 0..read_count {
                 reads.push(AssetRead {
@@ -428,6 +461,7 @@ impl Journal {
                 });
             }
             let sub_count = r.get_u32()? as usize;
+            require_collection_payload(&r, "subprocess", sub_count, MIN_SUBPROCESS_BYTES)?;
             let mut subprocesses = Vec::with_capacity(sub_count.min(4096));
             for _ in 0..sub_count {
                 subprocesses.push(SubprocessRecord {
@@ -457,6 +491,7 @@ impl Journal {
         };
         if r.version().1 >= 1 {
             let event_count = r.get_u32()? as usize;
+            require_collection_payload(&r, "input event", event_count, MIN_INPUT_EVENT_BYTES)?;
             for _ in 0..event_count {
                 journal.record_event(get_input_event(&mut r)?)?;
             }
@@ -521,6 +556,7 @@ fn get_effect(r: &mut Reader<'_>) -> Result<EffectClass, JournalError> {
             if count > 16 {
                 return Err(JournalError::Malformed("impure effect count"));
             }
+            require_collection_payload(r, "impure effect tag", count, 1)?;
             let mut tags = Vec::with_capacity(count);
             for _ in 0..count {
                 tags.push(ImpureEffectTag::from_code(r.get_u8()?)?);
@@ -531,6 +567,34 @@ fn get_effect(r: &mut Reader<'_>) -> Result<EffectClass, JournalError> {
         3 => EffectClass::Opaque,
         _ => return Err(JournalError::Malformed("effect class")),
     })
+}
+
+fn require_collection_payload(
+    reader: &Reader<'_>,
+    field: &'static str,
+    count: usize,
+    minimum_item_bytes: u64,
+) -> Result<(), JournalError> {
+    let count_u64 = u64::try_from(count)
+        .map_err(|_| JournalError::Malformed("collection count overflows u64"))?;
+    let minimum_bytes =
+        count_u64
+            .checked_mul(minimum_item_bytes)
+            .ok_or(JournalError::Malformed(
+                "collection minimum byte count overflow",
+            ))?;
+    let remaining_bytes = reader.remaining();
+    let remaining_u64 = u64::try_from(remaining_bytes).unwrap_or(u64::MAX);
+    if minimum_bytes > remaining_u64 {
+        Err(JournalError::CollectionPayloadTooShort {
+            field,
+            count,
+            minimum_bytes,
+            remaining_bytes,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn put_input_event(w: &mut Writer, event: &InputEvent) {
@@ -775,6 +839,7 @@ impl ReplayAudit {
             return false;
         }
         match journal.entries().get(index) {
+            // ubs:ignore - state hashes are public determinism evidence, not secrets.
             Some(entry) if entry.state_hash == *produced => {
                 self.verified = index + 1;
                 true
@@ -874,6 +939,7 @@ impl ReproBundle {
         let seed = r.get_u64()?;
         let fps = (r.get_u32()?, r.get_u32()?);
         let count = r.get_u32()? as usize;
+        require_collection_payload(&r, "repro closure", count, MIN_ASSET_READ_BYTES)?;
         let mut closure = Vec::with_capacity(count.min(65_536));
         for _ in 0..count {
             closure.push(AssetRead {
@@ -908,6 +974,7 @@ impl ReproBundle {
     pub fn verify(&self, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<(), BundleDivergence> {
         for asset in &self.closure {
             let found = read(&asset.path).map(|bytes| sha256(&bytes));
+            // ubs:ignore - asset digests are public content addresses, not secrets.
             if found.as_ref() != Some(&asset.digest) {
                 return Err(BundleDivergence {
                     path: asset.path.clone(),

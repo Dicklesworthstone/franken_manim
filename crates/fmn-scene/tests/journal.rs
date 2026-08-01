@@ -11,6 +11,7 @@ use fmn_hash::serial::{Schema, Writer};
 use fmn_hash::sha256::sha256;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, SceneState, Stage};
+use fmn_scene::journal::{BUNDLE_SCHEMA, JOURNAL_SCHEMA};
 use fmn_scene::{
     AssetRead, CommandKind, CommandRecord, EffectClass, Entry, ImpureEffectTag, InvalidationReason,
     Journal, ReplayAudit, ReproBundle, SubprocessRecord, plan_replay,
@@ -45,6 +46,12 @@ fn entry_for(kind: CommandKind, label: &str, state: &[u8]) -> Entry {
         subprocesses: Vec::new(),
         checkpoint: None,
         state_hash: sha256(state),
+    }
+}
+
+fn pad_writer(writer: &mut Writer, bytes: usize) {
+    for _ in 0..bytes {
+        writer.put_u8(0);
     }
 }
 
@@ -94,6 +101,106 @@ fn journal_minor_one_reads_legacy_minor_zero_without_events() {
     let decoded = Journal::from_bytes(&legacy).expect("minor-zero journal remains readable");
     assert!(decoded.entries().is_empty());
     assert!(decoded.events().is_empty());
+}
+
+#[test]
+fn journal_collection_counts_are_preflighted_before_reserve() {
+    const COUNT: u32 = 65_536;
+
+    let mut entries = Writer::new(JOURNAL_SCHEMA);
+    entries.put_u32(COUNT);
+
+    let mut reads = Writer::new(JOURNAL_SCHEMA);
+    reads.put_u32(1);
+    reads.put_u8(1);
+    reads.put_digest(&sha256(b"command"));
+    reads.put_str("");
+    reads.put_u8(0);
+    reads.put_u32(COUNT);
+    pad_writer(&mut reads, 37);
+
+    let mut subprocesses = Writer::new(JOURNAL_SCHEMA);
+    subprocesses.put_u32(1);
+    subprocesses.put_u8(1);
+    subprocesses.put_digest(&sha256(b"command"));
+    subprocesses.put_str("");
+    subprocesses.put_u8(0);
+    subprocesses.put_u32(0);
+    subprocesses.put_u32(COUNT);
+    pad_writer(&mut subprocesses, 33);
+
+    let mut events = Writer::new(JOURNAL_SCHEMA);
+    events.put_u32(0);
+    events.put_u32(COUNT);
+
+    let mut closure = Writer::new(BUNDLE_SCHEMA);
+    closure.put_str("");
+    closure.put_u64(0);
+    closure.put_u32(30);
+    closure.put_u32(1);
+    closure.put_u32(COUNT);
+
+    let cases = [
+        (
+            "entry",
+            Journal::from_bytes(&entries.finish().unwrap()).unwrap_err(),
+            u64::from(COUNT) * 83,
+            0,
+        ),
+        (
+            "asset read",
+            Journal::from_bytes(&reads.finish().unwrap()).unwrap_err(),
+            u64::from(COUNT) * 40,
+            37,
+        ),
+        (
+            "subprocess",
+            Journal::from_bytes(&subprocesses.finish().unwrap()).unwrap_err(),
+            u64::from(COUNT) * 48,
+            33,
+        ),
+        (
+            "input event",
+            Journal::from_bytes(&events.finish().unwrap()).unwrap_err(),
+            u64::from(COUNT) * 27,
+            0,
+        ),
+        (
+            "repro closure",
+            ReproBundle::from_bytes(&closure.finish().unwrap()).unwrap_err(),
+            u64::from(COUNT) * 40,
+            0,
+        ),
+    ];
+    for (field, error, minimum_bytes, remaining_bytes) in cases {
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "journal {field} count {COUNT} requires at least {minimum_bytes} encoded bytes, but only {remaining_bytes} remain"
+            )
+        );
+    }
+
+    let mut valid = Journal::new();
+    let mut entry = entry_for(CommandKind::Sound, "bounded collections", b"state");
+    entry.reads.push(AssetRead {
+        path: "asset.bin".to_owned(),
+        digest: sha256(b"asset"),
+    });
+    entry.subprocesses.push(SubprocessRecord {
+        tool_sha256_hex: "ab".repeat(32),
+        argv_digest: sha256(b"argv"),
+        destination: "output.wav".to_owned(),
+    });
+    valid.record(entry);
+    let valid_bytes = valid.to_bytes().unwrap();
+    assert_eq!(
+        Journal::from_bytes(&valid_bytes)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+        valid_bytes
+    );
 }
 
 #[test]
