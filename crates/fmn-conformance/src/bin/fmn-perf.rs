@@ -45,6 +45,9 @@ const EXIT_IO: u8 = 74;
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
 const MAX_BASELINE_BYTES: u64 = 64 * 1024;
 const MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CLI_DIAGNOSTIC_VALUE_BYTES: usize = 160;
+const MAX_CLI_ERROR_DETAIL_BYTES: usize = 1024;
+const MAX_CLI_ERROR_RECORD_BYTES: usize = 8 * 1024;
 
 fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
@@ -161,7 +164,10 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             "measure-pg7 requires <baseline.tsv> <producer-commit> \
              <cache-root-or-dash> <trace.tsv> <raw.tsv>",
         )),
-        _ => Err(CliError::usage(format!("unknown command {command:?}"))),
+        _ => Err(CliError::usage(format!(
+            "unknown command {}",
+            bounded_argument_debug(command)
+        ))),
     }
 }
 
@@ -823,39 +829,71 @@ struct CliError {
 }
 
 impl CliError {
-    fn usage(detail: impl Into<String>) -> Self {
-        Self {
-            exit_code: EXIT_USAGE,
-            kind: "usage",
-            detail: detail.into(),
-        }
+    fn usage(detail: impl AsRef<str>) -> Self {
+        Self::new(EXIT_USAGE, "usage", detail.as_ref())
     }
 
-    fn data(detail: impl Into<String>) -> Self {
-        Self {
-            exit_code: EXIT_DATA,
-            kind: "data",
-            detail: detail.into(),
-        }
+    fn data(detail: impl AsRef<str>) -> Self {
+        Self::new(EXIT_DATA, "data", detail.as_ref())
     }
 
-    fn io(detail: impl Into<String>) -> Self {
+    fn io(detail: impl AsRef<str>) -> Self {
+        Self::new(EXIT_IO, "io", detail.as_ref())
+    }
+
+    fn new(exit_code: u8, kind: &'static str, detail: &str) -> Self {
         Self {
-            exit_code: EXIT_IO,
-            kind: "io",
-            detail: detail.into(),
+            exit_code,
+            kind,
+            detail: bounded_cli_detail(detail),
         }
     }
 
     fn to_ndjson(&self) -> String {
-        format!(
+        let output = format!(
             "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"error\",\
              \"error_kind\":\"{}\",\"exit_code\":{},\"detail\":\"{}\"}}",
             self.kind,
             self.exit_code,
             escape_json(&self.detail),
-        )
+        );
+        if output.len() <= MAX_CLI_ERROR_RECORD_BYTES {
+            output
+        } else {
+            format!(
+                "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"error\",\
+                 \"error_kind\":\"{}\",\"exit_code\":{},\
+                 \"detail\":\"error detail exceeded the internal record limit\"}}",
+                self.kind, self.exit_code,
+            )
+        }
     }
+}
+
+fn bounded_argument_debug(value: &str) -> String {
+    if value.len() <= MAX_CLI_DIAGNOSTIC_VALUE_BYTES {
+        return format!("{value:?}");
+    }
+    let mut end = MAX_CLI_DIAGNOSTIC_VALUE_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{:?}... <{} bytes total>", &value[..end], value.len())
+}
+
+fn bounded_cli_detail(value: &str) -> String {
+    if value.len() <= MAX_CLI_ERROR_DETAIL_BYTES {
+        return value.to_owned();
+    }
+    let suffix = format!("... <{} bytes total>", value.len());
+    let mut end = MAX_CLI_ERROR_DETAIL_BYTES.saturating_sub(suffix.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut output = String::with_capacity(end + suffix.len());
+    output.push_str(&value[..end]);
+    output.push_str(&suffix);
+    output
 }
 
 fn escape_json(value: &str) -> String {
@@ -895,6 +933,34 @@ mod tests {
         let record = error.to_ndjson();
         assert_eq!(record.lines().count(), 1);
         assert!(record.contains("quote \\\" and newline\\nstay data"));
+    }
+
+    #[test]
+    fn argv_diagnostics_and_error_records_are_bounded_before_rendering() {
+        let short = dispatch(&["unknown".into()]).unwrap_err();
+        assert_eq!(short.detail, "unknown command \"unknown\"");
+
+        let command = format!("bad{}", "\u{00e9}".repeat(MAX_CLI_ERROR_DETAIL_BYTES));
+        let command_bytes = command.len();
+        let error = dispatch(&[command.into()]).unwrap_err();
+        assert!(error.detail.len() <= MAX_CLI_ERROR_DETAIL_BYTES);
+        assert!(
+            error
+                .detail
+                .contains(&format!("<{command_bytes} bytes total>"))
+        );
+        let record = error.to_ndjson();
+        assert!(record.len() <= MAX_CLI_ERROR_RECORD_BYTES);
+        assert_eq!(record.lines().count(), 1);
+
+        let raw_detail = "\u{1f}".repeat(MAX_CLI_ERROR_DETAIL_BYTES + 1);
+        let raw_bytes = raw_detail.len();
+        let error = CliError::data(&raw_detail);
+        assert_eq!(error.detail.len(), MAX_CLI_ERROR_DETAIL_BYTES);
+        assert!(error.detail.contains(&format!("<{raw_bytes} bytes total>")));
+        let record = error.to_ndjson();
+        assert!(record.len() <= MAX_CLI_ERROR_RECORD_BYTES);
+        assert_eq!(record.lines().count(), 1);
     }
 
     #[test]
