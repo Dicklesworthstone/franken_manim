@@ -10,6 +10,8 @@
 use fmn_conformance::gallery::{
     GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, compare_pair, render_pairs,
 };
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // ------------------------------------------------------------ image helpers
@@ -627,9 +629,68 @@ fn regressions_since_flags_new_regression_panels_only() {
 
 // ------------------------------------------------------------ the demo run
 
-/// Decode a PNG via the dev-dependency codec into an RGBA8 buffer.
+/// Maximum compressed size of one 1920×1080 Look Gallery image.
+///
+/// Sixteen MiB is roughly twice a tight RGBA8 frame, leaving ample room for
+/// PNG framing and incompressible image data while keeping this file-backed
+/// smoke-alarm input inside an explicit allocation envelope.
+const MAX_GALLERY_PNG_BYTES: u64 = 16 * 1024 * 1024;
+
+fn read_gallery_png_bytes(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_GALLERY_PNG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read gallery PNG: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GALLERY_PNG_BYTES {
+        return Err(format!(
+            "gallery PNG exceeds the {MAX_GALLERY_PNG_BYTES}-byte compressed-input limit"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_gallery_png(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect gallery PNG {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "gallery PNG {} is not a regular file",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_GALLERY_PNG_BYTES {
+        return Err(format!(
+            "gallery PNG {} exceeds the {MAX_GALLERY_PNG_BYTES}-byte compressed-input limit",
+            path.display()
+        ));
+    }
+    let file = File::open(path)
+        .map_err(|error| format!("could not open gallery PNG {}: {error}", path.display()))?;
+    read_gallery_png_bytes(file).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+#[test]
+fn gallery_png_reader_accepts_exact_limit_and_refuses_the_next_byte() {
+    let exact = read_gallery_png_bytes(std::io::repeat(0).take(MAX_GALLERY_PNG_BYTES))
+        .expect("the exact compressed-input limit is accepted");
+    assert_eq!(
+        u64::try_from(exact.len()).expect("the bounded length fits u64"),
+        MAX_GALLERY_PNG_BYTES
+    );
+    drop(exact);
+
+    let error = read_gallery_png_bytes(std::io::repeat(0).take(MAX_GALLERY_PNG_BYTES + 1))
+        .expect_err("one byte beyond the compressed-input limit must refuse");
+    assert_eq!(
+        error,
+        format!("gallery PNG exceeds the {MAX_GALLERY_PNG_BYTES}-byte compressed-input limit")
+    );
+}
+
+/// Decode a bounded PNG via the dev-dependency codec into an RGBA8 buffer.
 fn load_rgba(path: &Path) -> (u32, u32, Vec<u8>) {
-    let bytes = std::fs::read(path).expect("read image");
+    let bytes = read_gallery_png(path).expect("read bounded gallery image");
     let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
         .expect("the gallery images are valid PNGs");
     (decoded.width, decoded.height, decoded.rgba)
