@@ -215,6 +215,15 @@ pub trait WorkerChannel: Send {
         timeout: Duration,
     ) -> Result<ResponseEnvelope, ChannelError>;
 
+    /// Whether every returned response already passed the canonical protocol
+    /// validator under this channel's launch-time limits.
+    ///
+    /// The safe default is `false`: injected channels are revalidated by the
+    /// supervisor before their response can cross the stable boundary.
+    fn responses_are_protocol_validated(&self) -> bool {
+        false
+    }
+
     /// Stop only this exact owned worker and reap it.  Implementations must be
     /// idempotent.
     fn terminate(&mut self);
@@ -496,6 +505,10 @@ impl WorkerChannel for ChildPipeChannel {
             return Err(error);
         }
         Ok(response)
+    }
+
+    fn responses_are_protocol_validated(&self) -> bool {
+        true
     }
 
     fn terminate(&mut self) {
@@ -1008,6 +1021,7 @@ impl Supervisor {
         let mut worker = self
             .launcher
             .launch(&artifact, self.config.protocol_limits)?;
+        let response_is_validated = worker.responses_are_protocol_validated();
         let response = match worker.exchange(&request, self.config.request_timeout) {
             Ok(response) => response,
             Err(error) => {
@@ -1015,6 +1029,12 @@ impl Supervisor {
                 return Err(error.into());
             }
         };
+        if !response_is_validated
+            && let Err(error) = response.response.validate(self.config.protocol_limits)
+        {
+            worker.terminate();
+            return Err(channel_protocol_error(error).into());
+        }
         // ubs:ignore - request IDs are public correlation integers, not secrets.
         if response.request_id != request.request_id {
             worker.terminate();
@@ -1211,8 +1231,18 @@ impl Supervisor {
             request_id: self.take_request_id()?,
             request,
         };
-        let worker = self.worker.as_mut().ok_or(SupervisorError::NoWorker)?;
-        let response = worker.exchange(&envelope, self.config.request_timeout)?;
+        let (response, response_is_validated) = {
+            let worker = self.worker.as_mut().ok_or(SupervisorError::NoWorker)?;
+            let response_is_validated = worker.responses_are_protocol_validated();
+            let response = worker.exchange(&envelope, self.config.request_timeout)?;
+            (response, response_is_validated)
+        };
+        if !response_is_validated
+            && let Err(error) = response.response.validate(self.config.protocol_limits)
+        {
+            self.stop_worker(false);
+            return Err(channel_protocol_error(error).into());
+        }
         // ubs:ignore - request IDs are public correlation integers, not secrets.
         if response.request_id != envelope.request_id {
             return Err(ChannelError::new(
@@ -1409,6 +1439,10 @@ impl Supervisor {
         worker.terminate();
         self.transports = None;
     }
+}
+
+fn channel_protocol_error(error: ProtocolError) -> ChannelError {
+    ChannelError::new(ChannelFailureKind::Protocol, error.to_string())
 }
 
 fn supervisor_request_scene(request: &SupervisorRequest) -> Option<&str> {

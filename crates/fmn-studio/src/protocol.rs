@@ -799,7 +799,7 @@ pub enum WorkerResponse {
 }
 
 impl WorkerResponse {
-    fn validate(&self, limits: ProtocolLimits) -> Result<(), ProtocolError> {
+    pub(crate) fn validate(&self, limits: ProtocolLimits) -> Result<(), ProtocolError> {
         match self {
             Self::Hello { .. } | Self::Ack { .. } | Self::Bye => {}
             Self::Scenes(scenes) => {

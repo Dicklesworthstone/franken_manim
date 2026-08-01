@@ -99,6 +99,8 @@ struct FakeState {
     journal_segment: Option<(u64, Vec<u8>)>,
     checkpoint_response: Option<Checkpoint>,
     inspection_scene: Option<String>,
+    inspection_bytes: Option<Vec<u8>>,
+    inspection_digest: Option<Digest>,
     restored: Vec<Vec<u8>>,
     replayed: Vec<(u64, u64)>,
 }
@@ -220,18 +222,18 @@ impl WorkerChannel for FakeChannel {
                 })
             }
             SupervisorRequest::Inspect { .. } => {
-                let scene = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(lock_poisoned)
-                    .inspection_scene
-                    .clone();
+                let state = self.state.lock().unwrap_or_else(lock_poisoned);
+                let scene = state.inspection_scene.clone();
                 if let Some(scene) = scene {
-                    let bytes = br#"{"nodes":[]}"#.to_vec();
+                    let bytes = state
+                        .inspection_bytes
+                        .clone()
+                        .unwrap_or_else(|| br#"{"nodes":[]}"#.to_vec());
+                    let digest = state.inspection_digest.unwrap_or_else(|| sha256(&bytes));
                     WorkerResponse::StudioData {
                         scene,
                         kind: StudioDataKind::Inspection,
-                        digest: sha256(&bytes),
+                        digest,
                         bytes,
                     }
                 } else {
@@ -615,6 +617,84 @@ fn scene_bearing_responses_are_correlated_to_the_request_scene() {
     };
     // ubs:ignore - scene names are public routing identifiers, not secrets.
     assert_eq!(scene, "Demo");
+}
+
+#[test]
+fn injected_worker_responses_are_revalidated_before_exposure() {
+    let state = Arc::new(Mutex::new(FakeState {
+        inspection_scene: Some("Demo".to_owned()),
+        inspection_digest: Some(sha256(b"different Studio data")),
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+
+    let error = supervisor
+        .request(
+            SupervisorRequest::Inspect {
+                scene: "Demo".to_owned(),
+            },
+            &|_| true,
+        )
+        .expect_err("an injected response with the wrong digest must be refused");
+    let SupervisorError::Channel(error) = error else {
+        std::panic::panic_any(format!("expected a channel protocol error, found {error}"));
+    };
+    assert_eq!(error.kind, ChannelFailureKind::Protocol);
+    assert!(error.detail.contains("Studio data digest"));
+    assert_eq!(state.lock().unwrap_or_else(lock_poisoned).terminated, 1);
+    assert_eq!(supervisor.transports(), None);
+
+    let checkpoint = b"12345".to_vec();
+    let checkpoint_state = Arc::new(Mutex::new(FakeState {
+        checkpoint_response: Some(Checkpoint {
+            scene: "Demo".to_owned(),
+            after_entry: 0,
+            state_hash: sha256(&checkpoint),
+            state: checkpoint,
+        }),
+        ..FakeState::default()
+    }));
+    let checkpoint_clock = Arc::new(FakeClock::new());
+    let limits = ProtocolLimits {
+        max_checkpoint_bytes: 4,
+        ..ProtocolLimits::default()
+    };
+    let mut checkpoint_supervisor = Supervisor::new(
+        Box::new(FakeLauncher {
+            state: Arc::clone(&checkpoint_state),
+            clock: Arc::clone(&checkpoint_clock),
+            exchange_cost: Duration::ZERO,
+        }),
+        checkpoint_clock.clone(),
+        cache(checkpoint_clock.clone()),
+        SupervisorConfig {
+            protocol_limits: limits,
+            ..SupervisorConfig::default()
+        },
+    );
+    let mut checkpoint_builder = ScriptedBuilder::fake(checkpoint_clock, Duration::ZERO);
+    checkpoint_supervisor
+        .build_and_start(&mut checkpoint_builder)
+        .expect("start");
+    let error = checkpoint_supervisor
+        .request(SupervisorRequest::EnumerateScenes, &|_| true)
+        .expect_err("an injected checkpoint above its budget must be refused");
+    let SupervisorError::Channel(error) = error else {
+        std::panic::panic_any(format!("expected a channel protocol error, found {error}"));
+    };
+    assert_eq!(error.kind, ChannelFailureKind::Protocol);
+    assert!(error.detail.contains("checkpoint payload 5 bytes"));
+    assert_eq!(
+        checkpoint_state
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .terminated,
+        1
+    );
+    assert_eq!(checkpoint_supervisor.transports(), None);
 }
 
 #[test]
@@ -1638,6 +1718,7 @@ impl WorkerLauncher for TcpLauncher {
                         child: Some(child),
                     }));
                 }
+                // ubs:ignore - I/O error kinds are public enum values, not secrets.
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if let Ok(Some(_)) = child.try_wait() {
                         return Err(LaunchError::InvalidArtifact(
