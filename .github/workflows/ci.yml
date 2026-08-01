@@ -209,6 +209,191 @@ jobs:
       - name: Run native exact-image capability suite
         run: cargo test --locked -p fmn-platform --test capabilities --target ${{ matrix.target }}
 
+  windows:
+    # fm-sol (a), R18: windows-x86-64 FUNCTIONAL CI. This job promises
+    # exactly that the workspace compiles and its tests pass on Windows on
+    # the pinned nightly — it is NOT bit-certification. The certified
+    # matrix stays linux-x86-64 / linux-aarch64 / macos-aarch64
+    # (docs/INPUT_CLOSURE.md §5); whether Windows ever joins it is OQ-6, a
+    # separate declared decision, not implied by this job being green.
+    # Steps are the fmt/check/clippy/test equivalents of scripts/check.sh,
+    # in bash on the GitHub Windows runner (the boring correct form); the
+    # wasm32, crate-DAG, and node-smoke legs of check.sh stay Linux-side.
+    name: check (functional, windows-x86-64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: target/windows-portable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/windows-portable
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-windows-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: check
+        run: |
+          cargo check --all-targets
+          cargo check -p fmn-cli --features batch --all-targets
+          cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets
+
+      - name: clippy
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy -p fmn-cli --features batch --all-targets -- -D warnings
+          cargo clippy -p fmn-output --features ffmpeg-test-fixture --all-targets -- -D warnings
+
+      - name: test
+        run: |
+          cargo test
+          cargo test -p fmn-cli --features batch --all-targets
+          cargo test -p fmn-output --features ffmpeg-test-fixture --all-targets
+
+      # §17.4/§17.6 watch items, named so their coverage is visible in the
+      # job log rather than implied by the workspace run above (already
+      # compiled there, so this step is cheap):
+      # - fmn-platform topology: synthetic >64-logical-CPU processor-group
+      #   models ([64, 32], fallback(128)) and the std path/filesystem
+      #   implementations;
+      # - fmn-output boundary: the subprocess env allowlist with the pinned
+      #   LANG=C / LC_ALL=C locale.
+      - name: Windows watch items (processor groups, path/fs, locale pinning)
+        run: |
+          cargo test -p fmn-platform
+          cargo test -p fmn-output --features ffmpeg-test-fixture --test boundary
+
+  certified-matrix:
+    # fm-sol (b): the certified matrix's CI legs (G0-6's frozen list, minus
+    # linux-x86-64 whose leg is the per-commit `portable` job). Each leg
+    # runs the workspace tests — which include the one certified
+    # scene_goldens lock — the fmn-dmath cross-platform vector gate by
+    # name, and PG-5's {1,4,16} sweep on real multicore hardware, exactly
+    # as docs/INPUT_CLOSURE.md §5 describes. Weekly (R22 budget) plus
+    # manual dispatch; per-commit stays the two pinned linux-x86-64
+    # profiles.
+    name: certified-matrix (${{ matrix.label }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - label: macos-aarch64
+            runner: macos-14
+    env:
+      CARGO_TARGET_DIR: target/certified-${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/certified-${{ matrix.label }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-certified-${{ matrix.label }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Run the workspace tests
+        run: cargo test
+
+      # The bit-identity base layer, named per leg from day one: the same
+      # committed mpmath vectors must hold on every certified target.
+      - name: fmn-dmath cross-platform vector gate
+        run: cargo test -p fmn-dmath --test vectors
+
+      - name: PG-5 {1,4,16} thread sweep on this leg
+        run: bash scripts/pg5_thread_determinism.sh
+
+  pg5-thread-determinism:
+    # fm-sol (c), PG-5 per-commit lane: the {1,4,16}-thread determinism
+    # check over today's thread-invariance tests, as its own named job so
+    # scheduling drift reads as its own signal. Thread count is declared
+    # outside the input closure (§16.7); this lane is the standing proof
+    # of inertness. No wall-clock assertions anywhere in the lane.
+    name: PG-5 thread determinism {1,4,16}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: target/pg5
+      FMN_PG5_THREAD_COUNTS: "1,4,16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/pg5
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-pg5-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Run the per-commit PG-5 sweep
+        run: bash scripts/pg5_thread_determinism.sh
+
+  pg5-high-core:
+    # fm-sol (c), PG-5 weekly cadence: the {32,96} high-core sweep, env-gated
+    # through FMN_PG5_THREAD_COUNTS (same harness, no code-path change).
+    # Schedule-only — never a merge gate. Runner size is irrelevant to the
+    # verdict: the gate proves byte-invariance of the frame under thread
+    # oversubscription, not throughput.
+    name: weekly PG-5 thread determinism {32,96}
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: target/pg5-high-core
+      FMN_PG5_THREAD_COUNTS: "1,32,96"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/pg5-high-core
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-pg5-high-core-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Run the weekly high-core PG-5 sweep
+        run: bash scripts/pg5_thread_determinism.sh
+
   fuzz-codec:
     # fm-ntp (ADR-0003 class=fuzz): coverage-guided fuzzing of the
     # fmn-codec untrusted-input parsers. SCHEDULED ONLY — never a merge
