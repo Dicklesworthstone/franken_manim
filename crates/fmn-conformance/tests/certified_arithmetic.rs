@@ -44,6 +44,7 @@
 //! dependency edge to fmn-dmath at all, so the funnel was unreachable from the
 //! crates that most needed it.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Every crate whose arithmetic can reach a certified artifact.
@@ -55,6 +56,13 @@ use std::path::{Path, PathBuf};
 /// `f64::sin` on purpose (§6.6: "`standard` may use fast paths") — and
 /// `fmn-python` is the PyO3 bridge, whose expansion is not ours to constrain.
 const EXEMPT_CRATES: &[&str] = &["fmn-dmath", "fmn-python"];
+
+/// Maximum bytes read from one Rust source authority.
+///
+/// Two MiB leaves ample headroom for ordinary source growth while keeping a
+/// replaced or malformed authority from being allocated without bound before
+/// the guard can inspect it.
+const MAX_RUST_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// The transcendental methods a certified crate may not call on a float.
 ///
@@ -99,43 +107,111 @@ impl std::fmt::Display for Offence {
     }
 }
 
+/// Read one UTF-8 authority through a limit-plus-one envelope.
+fn read_utf8_bounded(reader: impl Read, label: &str, max_bytes: u64) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("reading {label}: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(format!(
+            "reading {label}: source exceeds the {max_bytes}-byte limit"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("reading {label}: not UTF-8: {error}"))
+}
+
+/// Read one Rust source without allocating past the declared authority limit.
+fn read_rust_source(path: &Path) -> Result<String, String> {
+    let label = path.display().to_string();
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("opening Rust source {label}: {error}"))?;
+    read_utf8_bounded(file, &format!("Rust source {label}"), MAX_RUST_SOURCE_BYTES)
+}
+
 /// Every `.rs` file under a directory, sorted, so a failure lists the same
-/// offences in the same order on every machine.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for p in paths {
-        if p.is_dir() {
-            rust_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
-            out.push(p);
+/// offences in the same order on every machine. Traversal errors and special
+/// filesystem entries are fatal: silently omitting a source file would make a
+/// clean scan meaningless.
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("reading source directory {}: {error}", dir.display()))?;
+    let mut entries = entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("reading an entry under {}: {error}", dir.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("reading filesystem type for {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            rust_files(&path, out)?;
+        } else if file_type.is_file() {
+            if path.extension().is_some_and(|extension| extension == "rs") {
+                out.push(path);
+            }
+        } else {
+            return Err(format!(
+                "source traversal encountered a non-file, non-directory entry: {}",
+                path.display()
+            ));
         }
     }
+    Ok(())
 }
 
 /// The crate source roots this guard covers.
-fn certified_roots() -> Vec<(String, PathBuf)> {
+fn certified_roots() -> Result<Vec<(String, PathBuf)>, String> {
     let root = workspace().join("crates");
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&root)
-        .expect("crates/ is readable")
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
-    entries
-        .into_iter()
-        .filter_map(|p| {
-            let name = p.file_name()?.to_str()?.to_string();
-            if EXEMPT_CRATES.contains(&name.as_str()) {
-                return None;
+    let entries = std::fs::read_dir(&root)
+        .map_err(|error| format!("reading crate directory {}: {error}", root.display()))?;
+    let mut entries = entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("reading an entry under {}: {error}", root.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::path);
+    let mut roots = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("reading filesystem type for {}: {error}", path.display()))?;
+        if !file_type.is_dir() {
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "crate traversal encountered a symbolic link: {}",
+                    path.display()
+                ));
             }
-            let src = p.join("src");
-            src.is_dir().then_some((name, src))
-        })
-        .collect()
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("crate directory name is not UTF-8: {}", path.display()))?;
+        if EXEMPT_CRATES.contains(&name.as_str()) {
+            continue;
+        }
+        let src = path.join("src");
+        match std::fs::symlink_metadata(&src) {
+            Ok(metadata) if metadata.file_type().is_dir() => roots.push((name, src)),
+            Ok(_) => {
+                return Err(format!(
+                    "crate source root is not a real directory: {}",
+                    src.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "reading crate source root {}: {error}",
+                    src.display()
+                ));
+            }
+        }
+    }
+    Ok(roots)
 }
 
 /// Return source with comments and literals blanked, preserving line breaks.
@@ -385,10 +461,13 @@ fn approved_associated_funnel(label: &str, text: &str, offset: usize) -> bool {
 /// lines, so matching each line independently would leave `.ln_1p\n()` and
 /// `.mul_add\n()` as silent holes. The window retains only the longest needle's
 /// prefix budget and resets across a skipped test item.
-fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Offence>) -> usize {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return 0;
-    };
+fn scan(
+    path: &Path,
+    label: &str,
+    needles: &[(String, String)],
+    out: &mut Vec<Offence>,
+) -> Result<usize, String> {
+    let text = read_rust_source(path)?;
     let code_text = code_only(&text);
     let mut scanned = 0;
     let mut skip_depth: Option<usize> = None;
@@ -475,7 +554,7 @@ fn scan(path: &Path, label: &str, needles: &[(String, String)], out: &mut Vec<Of
         carry = combined[carry_start..].to_owned();
         carry_lines = combined_lines[carry_start..].to_vec();
     }
-    scanned
+    Ok(scanned)
 }
 
 /// The needles for property 1: ordinary/raw method and associated-call forms.
@@ -506,17 +585,17 @@ fn fma_needles() -> Vec<(String, String)> {
 }
 
 /// Run one guard over the whole certified path, returning `(offences, lines)`.
-fn sweep(needles: &[(String, String)]) -> (Vec<Offence>, usize) {
+fn sweep(needles: &[(String, String)]) -> Result<(Vec<Offence>, usize), String> {
     let mut offences = Vec::new();
     let mut scanned = 0;
-    for (name, src) in certified_roots() {
+    for (name, src) in certified_roots()? {
         let mut files = Vec::new();
-        rust_files(&src, &mut files);
+        rust_files(&src, &mut files)?;
         for f in &files {
-            scanned += scan(f, &name, needles, &mut offences);
+            scanned += scan(f, &name, needles, &mut offences)?;
         }
     }
-    (offences, scanned)
+    Ok((offences, scanned))
 }
 
 /// The floor the sweep must clear before a clean result means anything.
@@ -531,7 +610,8 @@ const MIN_SCANNED_LINES: usize = 40_000;
 
 #[test]
 fn every_certified_transcendental_routes_through_fmn_dmath() {
-    let (offences, scanned) = sweep(&transcendental_needles());
+    let (offences, scanned) = sweep(&transcendental_needles())
+        .expect("the certified arithmetic sweep must read every source authority");
     assert!(
         scanned > MIN_SCANNED_LINES,
         "the sweep only read {scanned} lines — the walk is broken, not the code clean"
@@ -556,7 +636,8 @@ fn every_certified_transcendental_routes_through_fmn_dmath() {
 
 #[test]
 fn no_fma_contraction_on_the_certified_path() {
-    let (offences, scanned) = sweep(&fma_needles());
+    let (offences, scanned) = sweep(&fma_needles())
+        .expect("the certified arithmetic sweep must read every source authority");
     assert!(
         scanned > MIN_SCANNED_LINES,
         "the sweep read only {scanned} lines"
@@ -645,7 +726,8 @@ let after_test_only_cfg = q.exp_m1();
     std::fs::write(&file, sample).expect("write sample");
 
     let mut hits = Vec::new();
-    scan(&file, "sample", &transcendental_needles(), &mut hits);
+    scan(&file, "sample", &transcendental_needles(), &mut hits)
+        .expect("self-test source is readable");
     let mut names: Vec<&str> = hits.iter().map(|o| o.needle.as_str()).collect();
     names.sort_unstable();
     names.dedup();
@@ -697,7 +779,7 @@ let after_test_only_cfg = q.exp_m1();
     );
 
     let mut fma = Vec::new();
-    scan(&file, "sample", &fma_needles(), &mut fma);
+    scan(&file, "sample", &fma_needles(), &mut fma).expect("self-test source is readable");
     let mut fma_names: Vec<&str> = fma.iter().map(|o| o.needle.as_str()).collect();
     fma_names.sort_unstable();
     assert_eq!(
@@ -717,13 +799,74 @@ let after_test_only_cfg = q.exp_m1();
 }
 
 #[test]
+fn source_authority_failures_are_fatal_and_reads_are_bounded() {
+    let missing =
+        workspace().join("crates/fmn-conformance/tests/__missing_certified_arithmetic_authority__");
+    assert!(
+        !missing.exists(),
+        "the missing-authority test sentinel must remain absent"
+    );
+
+    let mut files = Vec::new();
+    let walk_error = rust_files(&missing, &mut files).expect_err("a missing root must fail");
+    assert!(
+        walk_error.contains("reading source directory"),
+        "unexpected walk diagnostic: {walk_error}"
+    );
+
+    let mut offences = Vec::new();
+    let read_error = scan(
+        &missing.with_extension("rs"),
+        "missing",
+        &transcendental_needles(),
+        &mut offences,
+    )
+    .expect_err("a missing source must fail");
+    assert!(
+        read_error.contains("opening Rust source"),
+        "unexpected source diagnostic: {read_error}"
+    );
+
+    let exact = read_utf8_bounded(std::io::Cursor::new(b"12345678"), "exact.rs", 8)
+        .expect("the exact byte limit is admitted");
+    assert_eq!(exact, "12345678");
+    let oversize = read_utf8_bounded(std::io::Cursor::new(b"123456789"), "oversize.rs", 8)
+        .expect_err("one byte over the authority limit must fail");
+    assert!(
+        oversize.contains("exceeds the 8-byte limit"),
+        "unexpected size diagnostic: {oversize}"
+    );
+
+    struct RefusingReader;
+    impl Read for RefusingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic read refusal",
+            ))
+        }
+    }
+
+    let refusal = read_utf8_bounded(RefusingReader, "unreadable.rs", 8)
+        .expect_err("an authority read error must fail");
+    assert!(
+        refusal.contains("synthetic read refusal"),
+        "unexpected read diagnostic: {refusal}"
+    );
+}
+
+#[test]
 fn the_exemptions_are_the_two_that_are_argued_for() {
     // The allowlist is one line long and it must stay that way: an exemption is
     // a hole in a property ADR-0010 calls load-bearing, so growing this list is
     // an ADR rather than an edit.
     assert_eq!(EXEMPT_CRATES, &["fmn-dmath", "fmn-python"]);
     // And the sweep must actually be reaching the crates that matter.
-    let names: Vec<String> = certified_roots().into_iter().map(|(n, _)| n).collect();
+    let names: Vec<String> = certified_roots()
+        .expect("crate roots are readable")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     for expected in [
         "fmn-core",
         "fmn-geom",
