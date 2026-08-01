@@ -1822,8 +1822,13 @@ impl Baseline {
     }
 
     /// Canonical dependency-free TSV representation.
-    #[must_use]
-    pub fn to_tsv(&self) -> String {
+    ///
+    /// # Errors
+    /// Returns a typed error before allocating the output buffer when public
+    /// baseline state is invalid, or if the canonical document exceeds its
+    /// resource limit.
+    pub fn to_tsv(&self) -> Result<String, PerfError> {
+        self.validate()?;
         let observation = self.observation.as_ref();
         let stats = observation.map(|value| value.stats);
         let source = observation.map(|value| &value.source);
@@ -1934,7 +1939,13 @@ impl Baseline {
             "source_digest",
             source.map_or_else(|| NONE.to_owned(), |value| value.digest.to_hex()),
         );
-        output
+        if output.len() > MAX_BASELINE_BYTES {
+            return Err(PerfError::Baseline(format!(
+                "rendered baseline is {} bytes, exceeding the {MAX_BASELINE_BYTES}-byte limit",
+                output.len()
+            )));
+        }
+        Ok(output)
     }
 
     /// Parse a canonical baseline TSV.
@@ -2052,7 +2063,7 @@ impl Baseline {
             observation,
         };
         baseline.validate()?;
-        if baseline.to_tsv() != text {
+        if baseline.to_tsv()? != text {
             return Err(PerfError::Baseline(
                 "baseline is valid but not in canonical form".to_owned(),
             ));
@@ -3253,10 +3264,40 @@ mod tests {
     #[test]
     fn observed_and_targeted_baselines_round_trip() {
         let observed = observed_baseline(2, 320_000);
-        assert_eq!(Baseline::from_tsv(&observed.to_tsv()).unwrap(), observed);
+        let observed_tsv = observed.to_tsv().unwrap();
+        assert_eq!(Baseline::from_tsv(&observed_tsv).unwrap(), observed);
 
         let targeted = Baseline::targeted(3, policy(), key(), COMMIT).unwrap();
-        assert_eq!(Baseline::from_tsv(&targeted.to_tsv()).unwrap(), targeted);
+        let targeted_tsv = targeted.to_tsv().unwrap();
+        assert_eq!(Baseline::from_tsv(&targeted_tsv).unwrap(), targeted);
+    }
+
+    #[test]
+    fn baseline_writer_rejects_invalid_or_oversized_public_state() {
+        let mut invalid = Baseline::targeted(1, policy(), key(), COMMIT).unwrap();
+        invalid.generation = 0;
+        assert!(
+            invalid
+                .to_tsv()
+                .unwrap_err()
+                .to_string()
+                .contains("generation must be nonzero")
+        );
+
+        let mut oversized = Baseline::targeted(1, policy(), key(), COMMIT).unwrap();
+        oversized.policy.scenario = "x".repeat(MAX_BASELINE_BYTES);
+        oversized
+            .key
+            .scenario
+            .clone_from(&oversized.policy.scenario);
+        let error = oversized.to_tsv().unwrap_err().to_string();
+        assert!(error.contains("scenario length must be"), "{error}");
+
+        let canonical = Baseline::targeted(1, policy(), key(), COMMIT)
+            .unwrap()
+            .to_tsv()
+            .unwrap();
+        assert!(canonical.len() <= MAX_BASELINE_BYTES);
     }
 
     #[test]
@@ -3264,6 +3305,7 @@ mod tests {
         let observed = observed_baseline(2, 320_000);
         let bad_counts = observed
             .to_tsv()
+            .unwrap()
             .replace("observed_total\t5\n", "observed_total\t6\n");
         assert!(
             Baseline::from_tsv(&bad_counts)
@@ -3274,6 +3316,7 @@ mod tests {
 
         let bad_ratio = observed
             .to_tsv()
+            .unwrap()
             .replace("observed_mad_bps\t0\n", "observed_mad_bps\t1\n");
         assert!(
             Baseline::from_tsv(&bad_ratio)
@@ -3284,6 +3327,7 @@ mod tests {
 
         let plausible_but_wrong = observed
             .to_tsv()
+            .unwrap()
             .replace("observed_p95\t320002\n", "observed_p95\t320001\n");
         let manipulated = Baseline::from_tsv(&plausible_but_wrong).unwrap();
         assert!(

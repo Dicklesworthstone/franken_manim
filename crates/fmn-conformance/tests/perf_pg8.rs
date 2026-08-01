@@ -610,7 +610,7 @@ fn release_perf_producer_records_replayable_pg8_baseline() {
         std::fs::write(format!("{directory}/samples.tsv"), &raw).expect("record raw bundle");
         std::fs::write(format!("{directory}/trace.tsv"), &artifacts.trace_tsv)
             .expect("record trace");
-        std::fs::write(format!("{directory}/baseline.tsv"), baseline.to_tsv())
-            .expect("record baseline");
+        let baseline_tsv = baseline.to_tsv().expect("canonical baseline");
+        std::fs::write(format!("{directory}/baseline.tsv"), baseline_tsv).expect("record baseline");
     }
 }
