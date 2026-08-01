@@ -799,6 +799,8 @@ struct PanicService {
     build_id: Digest,
     negotiated_frame_budget: Option<usize>,
     panic_message: Option<String>,
+    active_scene: Option<String>,
+    journal_tail: Vec<u8>,
 }
 
 impl WorkerService for PanicService {
@@ -824,12 +826,12 @@ impl WorkerService for PanicService {
         std::panic::panic_any("fixture scene panic")
     }
 
-    fn active_scene(&self) -> Option<String> {
-        Some("Demo".to_owned())
+    fn active_scene(&self) -> Option<&str> {
+        self.active_scene.as_deref()
     }
 
-    fn journal_tail(&self) -> Vec<u8> {
-        b"canonical journal tail".to_vec()
+    fn journal_tail(&self) -> &[u8] {
+        &self.journal_tail
     }
 
     fn last_state_hash(&self) -> Option<Digest> {
@@ -869,6 +871,8 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
         build_id,
         negotiated_frame_budget: None,
         panic_message: None,
+        active_scene: Some("Demo".to_owned()),
+        journal_tail: b"canonical journal tail".to_vec(),
     };
     let outcome = serve_worker(
         &mut service,
@@ -934,6 +938,8 @@ fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
         build_id,
         negotiated_frame_budget: None,
         panic_message: Some("éééé".to_owned()),
+        active_scene: Some("Demo".to_owned()),
+        journal_tail: b"canonical journal tail".to_vec(),
     };
     let outcome = serve_worker(
         &mut service,
@@ -947,6 +953,66 @@ fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
     };
     assert_eq!(report.message, "ééé");
     assert_eq!(report.message.len(), 6);
+
+    let mut output = std::io::Cursor::new(output);
+    let hello = read_response(&mut output, limits).expect("hello response");
+    assert!(matches!(hello.response, WorkerResponse::Hello { .. }));
+    let crash = read_response(&mut output, limits).expect("crash response");
+    assert_eq!(crash.request_id, 2);
+    assert_eq!(crash.response, WorkerResponse::Crash(report));
+}
+
+#[test]
+fn worker_omits_invalid_scene_and_copies_the_bounded_journal_suffix() {
+    let limits = ProtocolLimits {
+        max_crash_tail_bytes: 3,
+        ..ProtocolLimits::default()
+    };
+    let build_id = sha256(b"bounded crash context worker");
+    let mut input = Vec::new();
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::Hello {
+                version: fmn_studio::CURRENT_VERSION,
+                supervisor_build: sha256(b"supervisor"),
+                max_frame_bytes: 1024,
+            },
+        },
+        limits,
+    )
+    .expect("hello");
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 2,
+            request: SupervisorRequest::EnumerateScenes,
+        },
+        limits,
+    )
+    .expect("command");
+
+    let mut output = Vec::new();
+    let mut service = PanicService {
+        build_id,
+        negotiated_frame_budget: None,
+        panic_message: None,
+        active_scene: Some(String::new()),
+        journal_tail: b"abcdef".to_vec(),
+    };
+    let outcome = serve_worker(
+        &mut service,
+        &mut std::io::Cursor::new(input),
+        &mut output,
+        limits,
+    )
+    .expect("worker emits a valid crash report despite invalid optional context");
+    let WorkerServeOutcome::Crashed(report) = outcome else {
+        std::panic::panic_any("expected crash outcome");
+    };
+    assert_eq!(report.scene, None);
+    assert_eq!(report.journal_tail, b"def");
 
     let mut output = std::io::Cursor::new(output);
     let hello = read_response(&mut output, limits).expect("hello response");
@@ -976,6 +1042,8 @@ fn worker_loop_rejects_reserved_and_nonmonotonic_request_ids() {
         build_id,
         negotiated_frame_budget: None,
         panic_message: None,
+        active_scene: Some("Demo".to_owned()),
+        journal_tail: b"canonical journal tail".to_vec(),
     };
     assert_eq!(
         serve_worker(
@@ -1272,12 +1340,12 @@ impl WorkerService for ChildService {
         }
     }
 
-    fn active_scene(&self) -> Option<String> {
-        Some("Demo".to_owned())
+    fn active_scene(&self) -> Option<&str> {
+        Some("Demo")
     }
 
-    fn journal_tail(&self) -> Vec<u8> {
-        b"subprocess journal tail".to_vec()
+    fn journal_tail(&self) -> &[u8] {
+        b"subprocess journal tail"
     }
 }
 

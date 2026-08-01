@@ -78,14 +78,20 @@ pub trait WorkerService {
     /// delegated here.
     fn handle(&mut self, request: SupervisorRequest) -> Result<WorkerResponse, ServiceError>;
 
-    /// Active scene for a crash report.
-    fn active_scene(&self) -> Option<String> {
+    /// Borrow the active scene name for a crash report.
+    ///
+    /// The protocol driver validates the optional diagnostic before taking
+    /// ownership so an invalid scene name cannot suppress the crash report.
+    fn active_scene(&self) -> Option<&str> {
         None
     }
 
-    /// Canonical replay-journal tail for a crash report.
-    fn journal_tail(&self) -> Vec<u8> {
-        Vec::new()
+    /// Borrow the canonical replay-journal bytes for a crash report.
+    ///
+    /// The protocol driver copies only the suffix admitted by
+    /// [`ProtocolLimits::max_crash_tail_bytes`].
+    fn journal_tail(&self) -> &[u8] {
+        &[]
     }
 
     /// Last known state hash for a crash report.
@@ -369,13 +375,16 @@ fn crash_report(
     let message = panic_message(payload, limits.max_crash_message_bytes);
     let scene = catch_unwind(AssertUnwindSafe(|| service.active_scene()))
         .ok()
-        .flatten();
-    let mut journal_tail =
-        catch_unwind(AssertUnwindSafe(|| service.journal_tail())).unwrap_or_default();
-    if journal_tail.len() > limits.max_crash_tail_bytes {
-        let keep_from = journal_tail.len() - limits.max_crash_tail_bytes;
-        journal_tail.drain(..keep_from);
-    }
+        .flatten()
+        .filter(|scene| !scene.is_empty() && scene.len() <= limits.max_field_bytes)
+        .map(str::to_owned);
+    let journal_tail = catch_unwind(AssertUnwindSafe(|| service.journal_tail())).map_or_else(
+        |_| Vec::new(),
+        |tail| {
+            let keep_from = tail.len().saturating_sub(limits.max_crash_tail_bytes);
+            tail.get(keep_from..).unwrap_or_default().to_vec()
+        },
+    );
     let state_hash =
         catch_unwind(AssertUnwindSafe(|| service.last_state_hash())).unwrap_or_default();
     CrashReport {
