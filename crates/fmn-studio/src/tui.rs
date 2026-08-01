@@ -9,7 +9,7 @@
 use std::fmt;
 use std::io::Write;
 
-use fmn_codec::{CompressionLevel, encode_rgba8};
+use fmn_codec::{CompressionLevel, PngError, PngLimits, decode_png, encode_rgba8};
 
 /// Terminal image protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +102,15 @@ impl TerminalPreview {
         if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
             return Err(TuiError::InvalidPngSignature);
         }
+        kitty_encoded_size(png.len(), self.limits)?;
+        let max_pixels = u64::try_from(self.limits.max_pixels).unwrap_or(u64::MAX);
+        decode_png(
+            png,
+            &PngLimits {
+                max_pixels,
+                ..PngLimits::default()
+            },
+        )?;
         let encoded = encode_kitty_png(png, self.limits)?;
         writer.write_all(&encoded)?;
         writer.flush()?;
@@ -138,25 +147,7 @@ fn validate_rgba(width: u32, height: u32, rgba: &[u8], limits: TuiLimits) -> Res
 }
 
 fn encode_kitty_png(png: &[u8], limits: TuiLimits) -> Result<Vec<u8>, TuiError> {
-    let chunk_bytes = limits.kitty_chunk_bytes & !3;
-    let base64_bytes = png
-        .len()
-        .div_ceil(3)
-        .checked_mul(4)
-        .ok_or(TuiError::EncodedSizeOverflow)?;
-    let chunks = base64_bytes.div_ceil(chunk_bytes);
-    let framing_bytes = chunks
-        .checked_mul(32)
-        .ok_or(TuiError::EncodedSizeOverflow)?;
-    let estimated = base64_bytes
-        .checked_add(framing_bytes)
-        .ok_or(TuiError::EncodedSizeOverflow)?;
-    if estimated > limits.max_encoded_bytes {
-        return Err(TuiError::EncodedLimit {
-            limit: limits.max_encoded_bytes,
-            needed: estimated,
-        });
-    }
+    let (chunk_bytes, chunks, estimated) = kitty_encoded_size(png.len(), limits)?;
     let base64 = base64(png);
     let mut out = Vec::with_capacity(estimated);
     for (index, chunk) in base64.as_bytes().chunks(chunk_bytes).enumerate() {
@@ -176,6 +167,31 @@ fn encode_kitty_png(png: &[u8], limits: TuiLimits) -> Result<Vec<u8>, TuiError> 
         });
     }
     Ok(out)
+}
+
+fn kitty_encoded_size(
+    png_len: usize,
+    limits: TuiLimits,
+) -> Result<(usize, usize, usize), TuiError> {
+    let chunk_bytes = limits.kitty_chunk_bytes & !3;
+    let base64_bytes = png_len
+        .div_ceil(3)
+        .checked_mul(4)
+        .ok_or(TuiError::EncodedSizeOverflow)?;
+    let chunks = base64_bytes.div_ceil(chunk_bytes);
+    let framing_bytes = chunks
+        .checked_mul(32)
+        .ok_or(TuiError::EncodedSizeOverflow)?;
+    let estimated = base64_bytes
+        .checked_add(framing_bytes)
+        .ok_or(TuiError::EncodedSizeOverflow)?;
+    if estimated > limits.max_encoded_bytes {
+        return Err(TuiError::EncodedLimit {
+            limit: limits.max_encoded_bytes,
+            needed: estimated,
+        });
+    }
+    Ok((chunk_bytes, chunks, estimated))
 }
 
 fn encode_sixel(
@@ -355,6 +371,8 @@ pub enum TuiError {
     PngRequiresKitty,
     /// Input did not begin with the PNG signature.
     InvalidPngSignature,
+    /// The owned PNG decoder rejected the container or its pixel budget.
+    InvalidPng(PngError),
 }
 
 impl fmt::Display for TuiError {
@@ -385,6 +403,7 @@ impl fmt::Display for TuiError {
             }
             Self::PngRequiresKitty => f.write_str("pre-encoded PNG output requires Kitty graphics"),
             Self::InvalidPngSignature => f.write_str("terminal PNG has an invalid signature"),
+            Self::InvalidPng(error) => write!(f, "terminal PNG is invalid: {error}"),
         }
     }
 }
@@ -393,6 +412,7 @@ impl std::error::Error for TuiError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::InvalidPng(error) => Some(error),
             _ => None,
         }
     }
@@ -401,6 +421,12 @@ impl std::error::Error for TuiError {
 impl From<std::io::Error> for TuiError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<PngError> for TuiError {
+    fn from(error: PngError) -> Self {
+        Self::InvalidPng(error)
     }
 }
 

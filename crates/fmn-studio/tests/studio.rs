@@ -5,14 +5,15 @@
 use std::sync::Arc;
 
 use fmn_anim::Timeline;
+use fmn_codec::{CompressionLevel, encode_rgba8};
 use fmn_core::rng::RngRoot;
 use fmn_hash::sha256;
 use fmn_mobject::{Mobject, Stage};
 use fmn_studio::{
     CapabilityToken, DebugLayerSet, DebugOverlaySnapshot, FrameEncoding, FrameHub, FramePayload,
     FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, NodeOverlay,
-    ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol, TileOverlay, TuiLimits,
-    commit_timeline_frame, preview_timeline_frame,
+    ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol, TileOverlay, TuiError,
+    TuiLimits, commit_timeline_frame, preview_timeline_frame,
 };
 
 #[test]
@@ -154,7 +155,7 @@ fn overlay_json_budget_stops_during_tile_encoding() {
         };
         match overlays.to_json(limits).unwrap_err() {
             InspectError::JsonLimit { limit, needed } => (limit, needed),
-            error => panic!("unexpected overlay encoding error: {error}"),
+            error => std::panic::panic_any(format!("unexpected overlay encoding error: {error}")),
         }
     };
 
@@ -182,7 +183,7 @@ fn inspector_json_budget_stops_within_record_values() {
         field.total_values = value_count;
         match inspection.to_json(limits).unwrap_err() {
             InspectError::JsonLimit { limit, needed } => (limit, needed),
-            error => panic!("unexpected inspector encoding error: {error}"),
+            error => std::panic::panic_any(format!("unexpected inspector encoding error: {error}")),
         }
     };
 
@@ -225,7 +226,7 @@ fn overlay_json_budget_stops_within_control_points() {
     assert!(snapshot(1).to_json(limits).is_ok());
     let overrun = |point_count| match snapshot(point_count).to_json(limits).unwrap_err() {
         InspectError::JsonLimit { limit, needed } => (limit, needed),
-        error => panic!("unexpected overlay encoding error: {error}"),
+        error => std::panic::panic_any(format!("unexpected overlay encoding error: {error}")),
     };
 
     let first_overrun = overrun(64);
@@ -275,6 +276,62 @@ fn terminal_adapters_emit_bounded_protocol_bytes() {
         assert!(out.starts_with(prefix));
         assert!(out.ends_with(b"\x1b\\"));
     }
+}
+
+#[test]
+fn preencoded_kitty_png_is_validated_under_the_declared_pixel_budget() {
+    let rgba = [255, 0, 0, 255, 0, 255, 0, 255];
+    let png = encode_rgba8(2, 1, &rgba, CompressionLevel::Fast);
+
+    let exact = TerminalPreview::new(
+        TerminalProtocol::Kitty,
+        TuiLimits {
+            max_pixels: 2,
+            ..TuiLimits::default()
+        },
+    )
+    .unwrap();
+    let mut exact_output = Vec::new();
+    exact.write_png(&mut exact_output, &png).unwrap();
+    assert!(exact_output.starts_with(b"\x1b_G"));
+
+    let over_limit = TerminalPreview::new(
+        TerminalProtocol::Kitty,
+        TuiLimits {
+            max_pixels: 1,
+            ..TuiLimits::default()
+        },
+    )
+    .unwrap();
+    let mut refused_output = Vec::new();
+    let error = over_limit
+        .write_png(&mut refused_output, &png)
+        .expect_err("two pixels must exceed the one-pixel ceiling");
+    assert!(error.to_string().contains("1-pixel budget"));
+    assert!(refused_output.is_empty());
+
+    let mut corrupt = png.clone();
+    let last = corrupt.last_mut().expect("encoded PNG is nonempty");
+    *last ^= 1;
+    let error = exact
+        .write_png(&mut refused_output, &corrupt)
+        .expect_err("a corrupt PNG must not reach the terminal");
+    assert!(error.to_string().contains("crc"));
+    assert!(refused_output.is_empty());
+
+    let size_first = TerminalPreview::new(
+        TerminalProtocol::Kitty,
+        TuiLimits {
+            max_encoded_bytes: 1,
+            ..TuiLimits::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        size_first.write_png(&mut refused_output, b"\x89PNG\r\n\x1a\n"),
+        Err(TuiError::EncodedLimit { limit: 1, .. })
+    ));
+    assert!(refused_output.is_empty());
 }
 
 #[cfg(feature = "metal")]
