@@ -388,6 +388,43 @@ fn crash_messages_use_their_specific_limit_before_ownership() {
 }
 
 #[test]
+fn worker_error_messages_use_their_specific_limit_before_ownership() {
+    let limits = ProtocolLimits {
+        max_error_message_bytes: 4,
+        ..ProtocolLimits::default()
+    };
+    assert_eq!(
+        response(
+            9,
+            WorkerResponse::Error {
+                code: WorkerErrorCode::ReplayFailed,
+                message: "12345".to_owned(),
+            },
+        )
+        .to_bytes(limits),
+        Err(ProtocolError::PayloadLimit {
+            field: "worker error",
+            limit: 4,
+            needed: 5,
+        })
+    );
+
+    let mut writer = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+    writer.put_u64(10);
+    writer.put_u8(8);
+    writer.put_u16(4);
+    writer.put_str("12345");
+    assert_eq!(
+        ResponseEnvelope::from_bytes(&writer.finish().unwrap(), limits),
+        Err(ProtocolError::PayloadLimit {
+            field: "worker error",
+            limit: 4,
+            needed: 5,
+        })
+    );
+}
+
+#[test]
 fn length_framing_round_trips_and_rejects_oversize_before_allocation() {
     let limits = ProtocolLimits::default();
     let request = request(1, SupervisorRequest::EnumerateScenes);

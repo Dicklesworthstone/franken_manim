@@ -67,6 +67,8 @@ pub struct ProtocolLimits {
     pub max_journal_bytes: usize,
     /// Maximum crash-report diagnostic string.
     pub max_crash_message_bytes: usize,
+    /// Maximum typed worker-refusal diagnostic string.
+    pub max_error_message_bytes: usize,
     /// Maximum crash-report journal tail.
     pub max_crash_tail_bytes: usize,
     /// Maximum scene names in one enumeration response.
@@ -95,6 +97,7 @@ impl Default for ProtocolLimits {
             max_checkpoint_bytes: 64 * 1024 * 1024,
             max_journal_bytes: 64 * 1024 * 1024,
             max_crash_message_bytes: 64 * 1024,
+            max_error_message_bytes: 64 * 1024,
             max_crash_tail_bytes: 1024 * 1024,
             max_scenes: 4096,
             max_replay_hashes: 1_000_000,
@@ -825,6 +828,11 @@ impl WorkerResponse {
                 if message.is_empty() {
                     return Err(ProtocolError::Malformed("empty worker error"));
                 }
+                limit_payload(
+                    "worker error",
+                    message.len(),
+                    limits.max_error_message_bytes,
+                )?;
             }
             Self::StudioData {
                 scene,
@@ -1254,7 +1262,7 @@ fn get_response(
         7 => Ok(WorkerResponse::Crash(get_crash(reader, limits)?)),
         8 => Ok(WorkerResponse::Error {
             code: WorkerErrorCode::from_code(reader.get_u16()?)?,
-            message: reader.get_str()?.to_owned(),
+            message: bounded_string(reader, "worker error", limits.max_error_message_bytes)?,
         }),
         9 => Ok(WorkerResponse::Bye),
         10 => Ok(WorkerResponse::StudioData {

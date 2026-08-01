@@ -176,10 +176,12 @@ pub fn serve_worker(
             writer,
             &ResponseEnvelope {
                 request_id: hello.request_id,
-                response: WorkerResponse::Error {
-                    code: WorkerErrorCode::InvalidRequest,
-                    message: "Hello must be the first worker request".to_owned(),
-                },
+                response: worker_error(
+                    WorkerErrorCode::InvalidRequest,
+                    "Hello must be the first worker request",
+                    "worker protocol error",
+                    limits,
+                ),
             },
             limits,
         )?;
@@ -190,10 +192,12 @@ pub fn serve_worker(
             writer,
             &ResponseEnvelope {
                 request_id: hello.request_id,
-                response: WorkerResponse::Error {
-                    code: WorkerErrorCode::InvalidRequest,
-                    message: "request id zero is reserved".to_owned(),
-                },
+                response: worker_error(
+                    WorkerErrorCode::InvalidRequest,
+                    "request id zero is reserved",
+                    "worker protocol error",
+                    limits,
+                ),
             },
             limits,
         )?;
@@ -204,13 +208,15 @@ pub fn serve_worker(
             writer,
             &ResponseEnvelope {
                 request_id: hello.request_id,
-                response: WorkerResponse::Error {
-                    code: WorkerErrorCode::VersionSkew,
-                    message: format!(
+                response: worker_error(
+                    WorkerErrorCode::VersionSkew,
+                    format!(
                         "worker protocol requires {}.{}, peer sent {}.{}",
                         CURRENT_VERSION.major, CURRENT_VERSION.minor, version.major, version.minor
                     ),
-                },
+                    "worker protocol error",
+                    limits,
+                ),
             },
             limits,
         )?;
@@ -223,10 +229,12 @@ pub fn serve_worker(
                 writer,
                 &ResponseEnvelope {
                     request_id: hello.request_id,
-                    response: WorkerResponse::Error {
-                        code: WorkerErrorCode::InvalidRequest,
-                        message: "peer frame budget exceeds this platform".to_owned(),
-                    },
+                    response: worker_error(
+                        WorkerErrorCode::InvalidRequest,
+                        "peer frame budget exceeds this platform",
+                        "worker protocol error",
+                        limits,
+                    ),
                 },
                 limits,
             )?;
@@ -236,18 +244,17 @@ pub fn serve_worker(
     let mut session_limits = limits;
     session_limits.max_frame_bytes = session_limits.max_frame_bytes.min(peer_frame_budget);
     if let Err(error) = service.begin_session(supervisor_build, session_limits.max_frame_bytes) {
+        let ServiceError { code, message } = error;
         write_response(
             writer,
             &ResponseEnvelope {
                 request_id: hello.request_id,
-                response: WorkerResponse::Error {
-                    code: error.code,
-                    message: if error.message.is_empty() {
-                        "worker service rejected the session".to_owned()
-                    } else {
-                        error.message
-                    },
-                },
+                response: worker_error(
+                    code,
+                    message,
+                    "worker service rejected the session",
+                    limits,
+                ),
             },
             limits,
         )?;
@@ -278,10 +285,12 @@ pub fn serve_worker(
                 writer,
                 &ResponseEnvelope {
                     request_id: envelope.request_id,
-                    response: WorkerResponse::Error {
-                        code: WorkerErrorCode::InvalidRequest,
-                        message: "request ids must increase strictly".to_owned(),
-                    },
+                    response: worker_error(
+                        WorkerErrorCode::InvalidRequest,
+                        "request ids must increase strictly",
+                        "worker protocol error",
+                        session_limits,
+                    ),
                 },
                 session_limits,
             )?;
@@ -295,10 +304,12 @@ pub fn serve_worker(
                     writer,
                     &ResponseEnvelope {
                         request_id: envelope.request_id,
-                        response: WorkerResponse::Error {
-                            code: WorkerErrorCode::InvalidRequest,
-                            message: "Hello may appear only once".to_owned(),
-                        },
+                        response: worker_error(
+                            WorkerErrorCode::InvalidRequest,
+                            "Hello may appear only once",
+                            "worker protocol error",
+                            session_limits,
+                        ),
                     },
                     session_limits,
                 )?;
@@ -319,6 +330,15 @@ pub fn serve_worker(
                 let handled = catch_unwind(AssertUnwindSafe(|| service.handle(request)));
                 match handled {
                     Ok(Ok(response)) => {
+                        let response = match response {
+                            WorkerResponse::Error { code, message } => worker_error(
+                                code,
+                                message,
+                                "worker service refused the request",
+                                session_limits,
+                            ),
+                            response => response,
+                        };
                         if matches!(response, WorkerResponse::Hello { .. } | WorkerResponse::Bye) {
                             return Err(WorkerServeError::ReservedResponse);
                         }
@@ -332,19 +352,17 @@ pub fn serve_worker(
                         )?;
                     }
                     Ok(Err(error)) => {
-                        let message = if error.message.is_empty() {
-                            "worker service refused the request".to_owned()
-                        } else {
-                            error.message
-                        };
+                        let ServiceError { code, message } = error;
                         write_response(
                             writer,
                             &ResponseEnvelope {
                                 request_id: envelope.request_id,
-                                response: WorkerResponse::Error {
-                                    code: error.code,
+                                response: worker_error(
+                                    code,
                                     message,
-                                },
+                                    "worker service refused the request",
+                                    session_limits,
+                                ),
                             },
                             session_limits,
                         )?;
@@ -400,14 +418,18 @@ fn panic_message(payload: Box<dyn Any + Send>, limit: usize) -> String {
         return bounded_message(message, limit);
     }
     if let Ok(message) = payload.downcast::<String>() {
-        return bounded_owned_message(*message, limit);
+        return bounded_owned_message(
+            *message,
+            "scene worker panicked with an empty message",
+            limit,
+        );
     }
     bounded_message("scene worker panicked with a non-string payload", limit)
 }
 
-fn bounded_owned_message(mut message: String, limit: usize) -> String {
+fn bounded_owned_message(mut message: String, fallback: &str, limit: usize) -> String {
     if message.is_empty() {
-        return bounded_message("scene worker panicked with an empty message", limit);
+        return bounded_message(fallback, limit);
     }
     let end = utf8_prefix_boundary(&message, limit);
     if end == 0 && limit > 0 {
@@ -415,6 +437,22 @@ fn bounded_owned_message(mut message: String, limit: usize) -> String {
     }
     message.truncate(end);
     message
+}
+
+fn error_message_limit(limits: ProtocolLimits) -> usize {
+    limits.max_error_message_bytes.min(limits.max_field_bytes)
+}
+
+fn worker_error(
+    code: WorkerErrorCode,
+    message: impl Into<String>,
+    fallback: &str,
+    limits: ProtocolLimits,
+) -> WorkerResponse {
+    WorkerResponse::Error {
+        code,
+        message: bounded_owned_message(message.into(), fallback, error_message_limit(limits)),
+    }
 }
 
 fn bounded_message(message: &str, limit: usize) -> String {

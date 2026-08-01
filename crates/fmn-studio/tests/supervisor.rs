@@ -803,6 +803,39 @@ struct PanicService {
     journal_tail: Vec<u8>,
 }
 
+struct RefusalService {
+    build_id: Digest,
+    session_error: Option<ServiceError>,
+    request_error: Option<ServiceError>,
+}
+
+impl WorkerService for RefusalService {
+    fn build_id(&self) -> Digest {
+        self.build_id
+    }
+
+    fn begin_session(
+        &mut self,
+        _supervisor_build: Digest,
+        _max_frame_bytes: usize,
+    ) -> Result<(), ServiceError> {
+        match self.session_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn handle(&mut self, _request: SupervisorRequest) -> Result<WorkerResponse, ServiceError> {
+        match self.request_error.take() {
+            Some(error) => Err(error),
+            None => Err(ServiceError::new(
+                WorkerErrorCode::InvalidRequest,
+                "fixture refusal was not configured",
+            )),
+        }
+    }
+}
+
 impl WorkerService for PanicService {
     fn build_id(&self) -> Digest {
         self.build_id
@@ -1023,8 +1056,116 @@ fn worker_omits_invalid_scene_and_copies_the_bounded_journal_suffix() {
 }
 
 #[test]
+fn worker_bounds_session_and_request_refusals_before_framing() {
+    let limits = ProtocolLimits {
+        max_field_bytes: 5,
+        ..ProtocolLimits::default()
+    };
+    let supervisor_build = sha256(b"supervisor");
+
+    let mut session_input = Vec::new();
+    write_request(
+        &mut session_input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::Hello {
+                version: fmn_studio::CURRENT_VERSION,
+                supervisor_build,
+                max_frame_bytes: 1024,
+            },
+        },
+        limits,
+    )
+    .expect("session hello");
+    let mut session_output = Vec::new();
+    let mut session_service = RefusalService {
+        build_id: sha256(b"session refusal worker"),
+        session_error: Some(ServiceError::new(WorkerErrorCode::InvalidRequest, "abcdef")),
+        request_error: None,
+    };
+    assert_eq!(
+        serve_worker(
+            &mut session_service,
+            &mut std::io::Cursor::new(session_input),
+            &mut session_output,
+            limits,
+        )
+        .expect("session refusal remains structured"),
+        WorkerServeOutcome::HandshakeRejected
+    );
+    assert_eq!(
+        read_response(&mut std::io::Cursor::new(session_output), limits)
+            .expect("session refusal")
+            .response,
+        WorkerResponse::Error {
+            code: WorkerErrorCode::InvalidRequest,
+            message: "abcde".to_owned(),
+        }
+    );
+
+    let mut request_input = Vec::new();
+    write_request(
+        &mut request_input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::Hello {
+                version: fmn_studio::CURRENT_VERSION,
+                supervisor_build,
+                max_frame_bytes: 1024,
+            },
+        },
+        limits,
+    )
+    .expect("request hello");
+    write_request(
+        &mut request_input,
+        &RequestEnvelope {
+            request_id: 2,
+            request: SupervisorRequest::EnumerateScenes,
+        },
+        limits,
+    )
+    .expect("request command");
+    let mut request_output = Vec::new();
+    let mut request_service = RefusalService {
+        build_id: sha256(b"request refusal worker"),
+        session_error: None,
+        request_error: Some(ServiceError::new(WorkerErrorCode::ReplayFailed, "ééé")),
+    };
+    assert_eq!(
+        serve_worker(
+            &mut request_service,
+            &mut std::io::Cursor::new(request_input),
+            &mut request_output,
+            limits,
+        )
+        .expect("request refusal remains structured"),
+        WorkerServeOutcome::PeerClosed
+    );
+    let mut request_output = std::io::Cursor::new(request_output);
+    assert!(matches!(
+        read_response(&mut request_output, limits)
+            .expect("worker hello")
+            .response,
+        WorkerResponse::Hello { .. }
+    ));
+    assert_eq!(
+        read_response(&mut request_output, limits)
+            .expect("request refusal")
+            .response,
+        WorkerResponse::Error {
+            code: WorkerErrorCode::ReplayFailed,
+            message: "éé".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn worker_loop_rejects_reserved_and_nonmonotonic_request_ids() {
-    let limits = ProtocolLimits::default();
+    let limits = ProtocolLimits {
+        max_error_message_bytes: 5,
+        ..ProtocolLimits::default()
+    };
     let build_id = sha256(b"request-id worker");
     let hello = |request_id| RequestEnvelope {
         request_id,
@@ -1055,15 +1196,15 @@ fn worker_loop_rejects_reserved_and_nonmonotonic_request_ids() {
         .expect("zero id is a typed refusal"),
         WorkerServeOutcome::HandshakeRejected
     );
-    assert!(matches!(
+    assert_eq!(
         read_response(&mut std::io::Cursor::new(zero_output), limits)
             .expect("zero-id refusal")
             .response,
         WorkerResponse::Error {
             code: WorkerErrorCode::InvalidRequest,
-            ..
+            message: "reque".to_owned(),
         }
-    ));
+    );
 
     let mut repeated_input = Vec::new();
     write_request(&mut repeated_input, &hello(1), limits).expect("hello");
@@ -1094,15 +1235,15 @@ fn worker_loop_rejects_reserved_and_nonmonotonic_request_ids() {
             .response,
         WorkerResponse::Hello { .. }
     ));
-    assert!(matches!(
+    assert_eq!(
         read_response(&mut repeated_output, limits)
             .expect("nonmonotonic refusal")
             .response,
         WorkerResponse::Error {
             code: WorkerErrorCode::InvalidRequest,
-            ..
+            message: "reque".to_owned(),
         }
-    ));
+    );
 }
 
 // ---------------------------------------------------------------------------
