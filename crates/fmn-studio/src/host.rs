@@ -528,6 +528,13 @@ impl StudioHost {
         config: StudioHostConfig,
     ) -> Result<Self, HostError> {
         config.validate()?;
+        if frames.max_history > config.max_frame_history
+            || frames.max_png_bytes > config.max_png_bytes
+        {
+            return Err(HostError::Configuration(
+                "frame hub exceeds Studio host resource budgets",
+            ));
+        }
         let listener = TcpListener::bind(config.bind_addr)?;
         let local_addr = listener.local_addr()?;
         if !local_addr.ip().is_loopback() {
@@ -1657,6 +1664,55 @@ mod tests {
 
     use crate::supervisor::{StdWorkerLauncher, SupervisorConfig};
 
+    fn test_session_with_protocol_limits(
+        limits: ProtocolLimits,
+    ) -> (Arc<StudioWorkerSession>, Arc<dyn Clock>) {
+        let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
+        let cache = Store::open(
+            fs,
+            Arc::clone(&clock),
+            "/host-protocol-limit-cache",
+            StoreConfig::default(),
+        )
+        .unwrap()
+        .namespace(
+            "studio-replay",
+            1,
+            NamespacePolicy {
+                ceiling_bytes: None,
+            },
+        )
+        .unwrap();
+        let supervisor = Supervisor::new(
+            Box::new(StdWorkerLauncher::default()),
+            Arc::clone(&clock),
+            cache,
+            SupervisorConfig {
+                protocol_limits: limits,
+                ..SupervisorConfig::default()
+            },
+        );
+        let session =
+            Arc::new(StudioWorkerSession::new("Demo", supervisor, Arc::new(|_| true)).unwrap());
+        (session, clock)
+    }
+
+    fn bind_test_host(
+        config: StudioHostConfig,
+        max_history: usize,
+        max_png_bytes: usize,
+    ) -> Result<StudioHost, HostError> {
+        let (session, clock) = test_session_with_protocol_limits(ProtocolLimits::default());
+        StudioHost::bind(
+            session,
+            FrameHub::new(max_history, max_png_bytes).unwrap(),
+            CapabilityToken::new([0x55; TOKEN_BYTES]).unwrap(),
+            clock,
+            config,
+        )
+    }
+
     #[test]
     fn strict_parser_rejects_duplicate_host_and_transfer_encoding() {
         let config = StudioHostConfig::default();
@@ -1818,38 +1874,11 @@ mod tests {
 
     #[test]
     fn worker_frame_publication_uses_the_supervisor_protocol_budget() {
-        let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
-        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
-        let cache = Store::open(
-            fs,
-            Arc::clone(&clock),
-            "/host-protocol-limit-cache",
-            StoreConfig::default(),
-        )
-        .unwrap()
-        .namespace(
-            "studio-replay",
-            1,
-            NamespacePolicy {
-                ceiling_bytes: None,
-            },
-        )
-        .unwrap();
         let limits = ProtocolLimits {
             max_frame_bytes: 3,
             ..ProtocolLimits::default()
         };
-        let supervisor = Supervisor::new(
-            Box::new(StdWorkerLauncher::default()),
-            Arc::clone(&clock),
-            cache,
-            SupervisorConfig {
-                protocol_limits: limits,
-                ..SupervisorConfig::default()
-            },
-        );
-        let session =
-            Arc::new(StudioWorkerSession::new("Demo", supervisor, Arc::new(|_| true)).unwrap());
+        let (session, clock) = test_session_with_protocol_limits(limits);
         let token = CapabilityToken::new([0x44; TOKEN_BYTES]).unwrap();
         let handler = HostHandler {
             session,
@@ -1896,6 +1925,53 @@ mod tests {
         client.shutdown(std::net::Shutdown::Both).unwrap();
         server.shutdown(std::net::Shutdown::Both).unwrap();
         drop(client);
+    }
+
+    #[test]
+    fn host_frame_hub_budgets_refuse_looser_history() {
+        let config = StudioHostConfig {
+            max_frame_history: 1,
+            max_png_bytes: 8,
+            ..StudioHostConfig::default()
+        };
+        assert!(matches!(
+            bind_test_host(config, 2, 8),
+            Err(HostError::Configuration(
+                "frame hub exceeds Studio host resource budgets"
+            ))
+        ));
+    }
+
+    #[test]
+    fn host_frame_hub_budgets_refuse_looser_png_limit() {
+        let config = StudioHostConfig {
+            max_frame_history: 1,
+            max_png_bytes: 8,
+            ..StudioHostConfig::default()
+        };
+        assert!(matches!(
+            bind_test_host(config, 1, 9),
+            Err(HostError::Configuration(
+                "frame hub exceeds Studio host resource budgets"
+            ))
+        ));
+    }
+
+    #[test]
+    fn host_frame_hub_budgets_admit_equal_and_tighter_hubs() {
+        let equal = StudioHostConfig {
+            max_frame_history: 1,
+            max_png_bytes: 8,
+            ..StudioHostConfig::default()
+        };
+        assert!(bind_test_host(equal, 1, 8).is_ok());
+
+        let tighter = StudioHostConfig {
+            max_frame_history: 2,
+            max_png_bytes: 9,
+            ..StudioHostConfig::default()
+        };
+        assert!(bind_test_host(tighter, 1, 8).is_ok());
     }
 
     fn authorized_get(token: &CapabilityToken) -> HttpRequest {
