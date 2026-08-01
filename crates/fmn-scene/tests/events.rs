@@ -506,6 +506,117 @@ fn select_grab_resize_color_and_mobject_paste_have_scene_state_outcomes() {
 }
 
 #[test]
+fn clipboard_replacement_and_undo_keep_templates_live_and_bounded() {
+    let (mut interactive, selected, _) = scripted_scene();
+    let selected_child = interactive.stage_mut().add(Mobject::new());
+    interactive
+        .stage_mut()
+        .attach(selected, selected_child)
+        .unwrap();
+    for payload in scripted_payloads().into_iter().take(4) {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 4);
+    assert_eq!(interactive.selection(), vec![selected]);
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    let first_clipboard = interactive.clipboard();
+    assert!(matches!(first_clipboard, InteractiveClipboard::Mobjects(_)));
+    let InteractiveClipboard::Mobjects(first_templates) = first_clipboard else {
+        return;
+    };
+    let first_template = first_templates[0];
+    assert!(interactive.stage().contains(first_template));
+    let first_family = interactive.stage().family(first_template);
+    assert_eq!(first_family.len(), 2);
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::ArrowRight,
+            modifiers: Modifiers::NONE,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    let second_clipboard = interactive.clipboard();
+    assert!(matches!(
+        second_clipboard,
+        InteractiveClipboard::Mobjects(_)
+    ));
+    let InteractiveClipboard::Mobjects(second_templates) = second_clipboard else {
+        return;
+    };
+    let second_template = second_templates[0];
+    assert_ne!(second_template, first_template);
+    assert!(interactive.stage().contains(second_template));
+    let second_family = interactive.stage().family(second_template);
+    assert_eq!(second_family.len(), 2);
+    assert!(
+        first_family
+            .iter()
+            .all(|member| !interactive.stage().contains(*member)),
+        "replacing the clipboard must release its detached template family"
+    );
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('z'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    assert_eq!(
+        interactive.clipboard(),
+        InteractiveClipboard::Mobjects(vec![first_template])
+    );
+    assert!(
+        first_family
+            .iter()
+            .all(|member| interactive.stage().contains(*member))
+    );
+    assert!(
+        second_family
+            .iter()
+            .all(|member| !interactive.stage().contains(*member))
+    );
+
+    let roots_before_paste = interactive.stage().roots().len();
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('v'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    assert_eq!(interactive.stage().roots().len(), roots_before_paste + 1);
+
+    interactive.set_clipboard_text("host text");
+    assert_eq!(
+        interactive.clipboard(),
+        InteractiveClipboard::Text("host text".to_owned())
+    );
+    assert!(
+        first_family
+            .iter()
+            .all(|member| !interactive.stage().contains(*member)),
+        "text replacement must release the mobject clipboard family"
+    );
+}
+
+#[test]
 fn journaled_event_stream_replays_to_identical_scene_state() {
     let (mut original, _, _) = scripted_scene();
     run_script(&mut original);

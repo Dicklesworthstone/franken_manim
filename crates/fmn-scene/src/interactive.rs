@@ -179,6 +179,11 @@ struct ResizeGesture {
     last_scale: [f64; 3],
 }
 
+struct UndoState {
+    stage: Rc<Snapshot>,
+    clipboard: InteractiveClipboard,
+}
+
 struct InteractionState {
     selection: Vec<Mob>,
     unselectables: Vec<Mob>,
@@ -191,7 +196,7 @@ struct InteractionState {
     information_visible: bool,
     cursor_visible: bool,
     clipboard: InteractiveClipboard,
-    undo: Option<Rc<Snapshot>>,
+    undo: Option<UndoState>,
 }
 
 impl Default for InteractionState {
@@ -377,14 +382,21 @@ impl InteractionState {
     }
 
     fn save_undo(&mut self, stage: &Stage) {
-        self.undo = Some(Rc::new(stage.snapshot()));
+        self.undo = Some(UndoState {
+            stage: Rc::new(stage.snapshot()),
+            clipboard: self.clipboard.clone(),
+        });
     }
 
     fn restore_undo(&mut self, stage: &mut Stage) {
-        if let Some(snapshot) = &self.undo {
-            stage.restore(snapshot);
-            self.prune(stage);
-        }
+        let Some(undo) = &self.undo else {
+            return;
+        };
+        let snapshot = Rc::clone(&undo.stage);
+        let clipboard = undo.clipboard.clone();
+        stage.restore(&snapshot);
+        self.clipboard = clipboard;
+        self.prune(stage);
     }
 
     fn prepare_grab(&mut self, stage: &Stage, mouse: Vec3, axis: GrabAxis) {
@@ -621,11 +633,12 @@ impl InteractionState {
                 templates.push(copy);
             }
         }
-        self.clipboard = if templates.is_empty() {
+        let replacement = if templates.is_empty() {
             InteractiveClipboard::Empty
         } else {
             InteractiveClipboard::Mobjects(templates)
         };
+        self.replace_clipboard(stage, replacement);
     }
 
     fn paste_selection(&mut self, stage: &mut Stage) {
@@ -701,6 +714,25 @@ impl InteractionState {
         };
         for selected in &self.selection {
             write_color(stage, *selected, color);
+        }
+    }
+
+    fn replace_clipboard(&mut self, stage: &mut Stage, replacement: InteractiveClipboard) {
+        let previous = std::mem::replace(&mut self.clipboard, replacement);
+        let InteractiveClipboard::Mobjects(templates) = previous else {
+            return;
+        };
+
+        let mut family = Vec::new();
+        for template in templates {
+            for member in stage.family(template) {
+                if !family.contains(&member) {
+                    family.push(member);
+                }
+            }
+        }
+        for member in family.into_iter().rev() {
+            let _ = stage.delete(member);
         }
     }
 
@@ -820,7 +852,10 @@ impl InteractiveScene {
 
     /// Replace text clipboard data supplied by a host.
     pub fn set_clipboard_text(&mut self, text: impl Into<String>) {
-        self.state.borrow_mut().clipboard = InteractiveClipboard::Text(text.into());
+        let Self { scene, state, .. } = self;
+        state
+            .borrow_mut()
+            .replace_clipboard(scene.stage_mut(), InteractiveClipboard::Text(text.into()));
     }
 
     /// Exclude whole families from selection/hit search.
