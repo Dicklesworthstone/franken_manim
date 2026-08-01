@@ -643,9 +643,13 @@ impl StudioHost {
                 Err(error) => break Err(error.into()),
             }
         };
+        let blocking_result = self
+            .listener
+            .set_nonblocking(false)
+            .map_err(HostError::from);
         self.handler.frames.close();
         let join_result = join_clients(&mut clients);
-        serve_result.and(join_result)
+        serve_result.and(blocking_result).and(join_result)
     }
 }
 
@@ -1757,6 +1761,45 @@ mod tests {
         let mut client = DisconnectedClient::default();
         write_connection_limit_response(&mut client);
         assert_eq!(client.write_attempts, 1);
+    }
+
+    #[test]
+    fn serve_until_restores_blocking_mode_for_serve_once() {
+        let host = bind_test_host(StudioHostConfig::default(), 1, 8).unwrap();
+        let shutdown = AtomicBool::new(true);
+        host.serve_until(&shutdown).unwrap();
+        let address = host.local_addr().unwrap();
+
+        std::thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let server_barrier = Arc::clone(&barrier);
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let server = scope.spawn(move || {
+                server_barrier.wait();
+                result_tx.send(host.serve_once()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
+            assert!(
+                result_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .is_ok()
+            );
+            server.join().unwrap();
+        });
     }
 
     #[test]
