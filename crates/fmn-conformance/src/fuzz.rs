@@ -56,7 +56,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
@@ -643,6 +644,36 @@ pub enum CorpusDrift {
     Stale(String),
 }
 
+const CORPUS_COMPARE_CHUNK_BYTES: usize = 8 * 1024;
+
+fn corpus_reader_matches(mut reader: impl Read, expected: &[u8]) -> Result<bool, io::Error> {
+    let mut scratch = [0_u8; CORPUS_COMPARE_CHUNK_BYTES];
+    for expected_chunk in expected.chunks(scratch.len()) {
+        match reader.read_exact(&mut scratch[..expected_chunk.len()]) {
+            Ok(()) if scratch[..expected_chunk.len()] == *expected_chunk => {}
+            Ok(()) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut trailing = [0_u8; 1];
+    match reader.read_exact(&mut trailing) {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn corpus_file_matches(path: &Path, expected: &[u8]) -> Result<Option<bool>, io::Error> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    corpus_reader_matches(file, expected).map(Some)
+}
+
 impl fmt::Display for CorpusDrift {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -667,13 +698,10 @@ pub fn check_corpus(
     let mut drift = Vec::new();
     for (name, bytes) in expected {
         let path = target_dir.join(name);
-        match std::fs::read(&path) {
-            Ok(on_disk) if on_disk == *bytes => {}
-            Ok(_) => drift.push(CorpusDrift::Changed(name.clone())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                drift.push(CorpusDrift::Missing(name.clone()));
-            }
-            Err(e) => return Err(e),
+        match corpus_file_matches(&path, bytes)? {
+            Some(true) => {}
+            Some(false) => drift.push(CorpusDrift::Changed(name.clone())),
+            None => drift.push(CorpusDrift::Missing(name.clone())),
         }
     }
     if exact && target_dir.is_dir() {
@@ -698,8 +726,7 @@ pub fn bless_corpus(
     create_dir_all(target_dir)?;
     for (name, bytes) in expected {
         let path = target_dir.join(name);
-        let current = std::fs::read(&path).ok();
-        if current.as_deref() != Some(bytes.as_slice()) {
+        if !corpus_file_matches(&path, bytes)?.unwrap_or(false) {
             std::fs::write(&path, bytes)?;
         }
     }
@@ -1501,7 +1528,32 @@ mod tests {
         let stale = bless_corpus(&dir, &expected).expect("bless");
         assert_eq!(stale, vec!["case000009__old__ccc.bin".to_owned()]);
         assert!(dir.join("case000009__old__ccc.bin").exists());
+    }
 
-        let _ = std::fs::remove_file(dir.join("case000009__old__ccc.bin"));
+    #[test]
+    fn corpus_reader_stops_after_expected_length_plus_one() {
+        struct RepeatingReader {
+            byte: u8,
+            bytes_read: usize,
+        }
+
+        impl std::io::Read for RepeatingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                buffer.fill(self.byte);
+                self.bytes_read += buffer.len();
+                Ok(buffer.len())
+            }
+        }
+
+        let expected = vec![b'x'; CORPUS_COMPARE_CHUNK_BYTES * 2 + 17];
+        let mut reader = RepeatingReader {
+            byte: b'x',
+            bytes_read: 0,
+        };
+        assert!(
+            !corpus_reader_matches(&mut reader, &expected).expect("comparison succeeds"),
+            "a trailing byte must make the artifact different"
+        );
+        assert_eq!(reader.bytes_read, expected.len() + 1);
     }
 }
