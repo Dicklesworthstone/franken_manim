@@ -438,6 +438,10 @@ impl FileSystem for FailNthWriteFs {
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
         self.inner.list_dir(path)
     }
+
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError> {
+        self.inner.count_dir_entries_bounded(path, max_entries)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -555,6 +559,10 @@ impl FileSystem for ChunkProbeFs {
 
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
         self.inner.list_dir(path)
+    }
+
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError> {
+        self.inner.count_dir_entries_bounded(path, max_entries)
     }
 }
 

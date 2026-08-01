@@ -1613,7 +1613,7 @@ fn cache_report_from_resolution(
     resolution: Result<PathBuf, fmn_cache::CacheRootError>,
 ) -> Result<CacheReport, CliError> {
     match resolution {
-        Ok(root) => Ok(inspect_cache(fs, &root)),
+        Ok(root) => Ok(inspect_cache(fs, &root, MAX_DOCTOR_CACHE_DIRECT_ENTRIES)),
         Err(error @ fmn_cache::CacheRootError::InvalidConfigured { .. }) => {
             Err(cache_root_cli_error(error))
         }
@@ -1695,7 +1695,9 @@ fn cache_root_cli_error(error: fmn_cache::CacheRootError) -> CliError {
     CliError::new(exit_name, error.to_string())
 }
 
-fn inspect_cache(fs: &dyn FileSystem, root: &Path) -> CacheReport {
+const MAX_DOCTOR_CACHE_DIRECT_ENTRIES: usize = 4 * 1024;
+
+fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheReport {
     let mut components: Vec<&Path> = root
         .ancestors()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1733,11 +1735,11 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path) -> CacheReport {
             }
         }
     }
-    match fs.list_dir(root) {
-        Ok(entries) => CacheReport::Configured {
+    match fs.count_dir_entries_bounded(root, max_entries) {
+        Ok(entry_count) => CacheReport::Configured {
             root: root.to_path_buf(),
             exists: true,
-            direct_entries: Some(entries.len()),
+            direct_entries: Some(entry_count),
             warning: None,
         },
         Err(error) => CacheReport::Configured {
@@ -3460,7 +3462,11 @@ mod tests {
     fn doctor_cache_inspection_refuses_a_wrong_kind_ancestor() {
         let fs = VirtualFs::new();
         fs.insert("/cache/blocker", b"foreign file".to_vec());
-        match inspect_cache(&fs, Path::new("/cache/blocker/owned")) {
+        match inspect_cache(
+            &fs,
+            Path::new("/cache/blocker/owned"),
+            MAX_DOCTOR_CACHE_DIRECT_ENTRIES,
+        ) {
             CacheReport::Configured {
                 exists,
                 direct_entries,
@@ -3473,6 +3479,26 @@ mod tests {
                 assert!(warning.contains("/cache/blocker"));
             }
             other => panic!("expected a no-follow traversal warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_cache_entry_count_is_bounded_before_path_collection() {
+        let fs = VirtualFs::new();
+        fs.insert("/cache/one", Vec::new());
+        fs.insert("/cache/two", Vec::new());
+        match inspect_cache(&fs, Path::new("/cache"), 1) {
+            CacheReport::Configured {
+                exists,
+                direct_entries,
+                warning: Some(warning),
+                ..
+            } => {
+                assert!(exists);
+                assert_eq!(direct_entries, None);
+                assert!(warning.contains("1-entry limit"));
+            }
+            other => panic!("expected a bounded cache-count warning, got {other:?}"),
         }
     }
 

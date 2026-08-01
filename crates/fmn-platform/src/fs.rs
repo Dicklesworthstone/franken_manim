@@ -112,6 +112,13 @@ pub enum FsError {
         /// Maximum admitted file size in bytes.
         limit: usize,
     },
+    /// A directory exceeded a caller-supplied direct-entry limit.
+    TooManyEntries {
+        /// The offending directory.
+        path: PathBuf,
+        /// Maximum admitted number of direct entries.
+        limit: usize,
+    },
     /// Any other I/O failure.
     Io {
         /// The path being accessed.
@@ -146,6 +153,11 @@ impl fmt::Display for FsError {
             Self::TooLarge { path, limit } => write!(
                 f,
                 "file at {} exceeds the {limit}-byte limit",
+                path.display()
+            ),
+            Self::TooManyEntries { path, limit } => write!(
+                f,
+                "directory at {} exceeds the {limit}-entry limit",
                 path.display()
             ),
             Self::Io { path, err } => write!(f, "I/O failure at {}: {err}", path.display()),
@@ -415,6 +427,16 @@ pub trait FileSystem: Send + Sync {
     /// [`FsError::NotFound`] or [`FsError::Io`].
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError>;
 
+    /// Count entries directly under `path` subject to a hard work limit.
+    ///
+    /// Implementations must accept exactly `max_entries`, inspect at most one
+    /// additional entry to detect overflow, and must not collect the complete
+    /// directory before enforcing the limit.
+    ///
+    /// # Errors
+    /// [`FsError::NotFound`], [`FsError::TooManyEntries`], or [`FsError::Io`].
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError>;
+
     /// Read a file and decode it as UTF-8.
     ///
     /// # Errors
@@ -601,6 +623,21 @@ impl FileSystem for StdFs {
         }
         out.sort();
         Ok(out)
+    }
+
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError> {
+        let mut count = 0_usize;
+        for entry in std::fs::read_dir(path).map_err(|error| io_error(path, error))? {
+            entry.map_err(|error| io_error(path, error))?;
+            if count == max_entries {
+                return Err(FsError::TooManyEntries {
+                    path: path.to_path_buf(),
+                    limit: max_entries,
+                });
+            }
+            count += 1;
+        }
+        Ok(count)
     }
 }
 
@@ -1282,6 +1319,54 @@ impl FileSystem for VirtualFs {
             Ok(out.into_iter().collect())
         })
     }
+
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError> {
+        self.with_state(|state| {
+            if let Some(blocker) = virtual_file_ancestor(state, path) {
+                return Err(io_error(
+                    &blocker,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "a parent component is a file",
+                    ),
+                ));
+            }
+            match virtual_node_kind(state, path) {
+                Some(FsNodeKind::Directory) => {}
+                Some(_) => {
+                    return Err(io_error(
+                        path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "path is not a directory",
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(FsError::NotFound {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+            let mut entries = BTreeSet::new();
+            for candidate in state.files.keys().chain(state.directories.iter()) {
+                if candidate == path {
+                    continue;
+                }
+                if let Ok(rest) = candidate.strip_prefix(path)
+                    && let Some(first) = rest.components().next()
+                    && entries.insert(path.join(first))
+                    && entries.len() > max_entries
+                {
+                    return Err(FsError::TooManyEntries {
+                        path: path.to_path_buf(),
+                        limit: max_entries,
+                    });
+                }
+            }
+            Ok(entries.len())
+        })
+    }
 }
 
 struct VirtualAtomicFileWriter {
@@ -1475,6 +1560,23 @@ mod tests {
             fs.read_to_string(Path::new("/a/c.txt")).unwrap(),
             "replaced"
         );
+    }
+
+    #[test]
+    fn virtual_fs_bounded_entry_count_accepts_exactly_the_limit() {
+        let fs = VirtualFs::new();
+        fs.insert("/root/a", Vec::new());
+        fs.insert("/root/nested/one", Vec::new());
+        fs.insert("/root/nested/two", Vec::new());
+
+        assert_eq!(
+            fs.count_dir_entries_bounded(Path::new("/root"), 2).unwrap(),
+            2
+        );
+        assert!(matches!(
+            fs.count_dir_entries_bounded(Path::new("/root"), 1),
+            Err(FsError::TooManyEntries { limit: 1, .. })
+        ));
     }
 
     #[test]
