@@ -33,6 +33,12 @@ pub const SAMPLES_SCHEMA: &str = "fmn-perf-samples/1";
 /// Stable robot-facing report schema.
 pub const REPORT_SCHEMA: &str = "fmn-perf-report/1";
 
+const POLICY_PREAMBLE: &str = "# Machine-readable §17.2 policy catalog. These are targets and enforcement\n\
+# policy, not observed baselines. A row becomes pass-capable only after a\n\
+# content-addressed pinned-host observation is committed through\n\
+# fmn_conformance::perf::Baseline.\n";
+const POLICY_COLUMNS: &str = "# gate\tscenario\tunit\tdirection\ttarget\tmin_valid_samples\tmax_invalid_samples\tmax_mad_bps\talert_regression_bps\tblock_regression_bps\tenforcement\tscope\trequire_regression_profile";
+
 /// Cargo profile selected when this `fmn-conformance` artifact was compiled.
 ///
 /// The package build script derives this from Cargo-controlled `OUT_DIR`
@@ -385,26 +391,6 @@ impl GatePolicy {
         }
         Ok(())
     }
-
-    fn to_catalog_row(&self) -> String {
-        format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            self.gate,
-            self.scenario,
-            self.unit.name(),
-            self.direction.name(),
-            self.target
-                .map_or_else(|| NONE.to_owned(), |value| value.to_string()),
-            self.min_valid_samples,
-            self.max_invalid_samples,
-            self.max_mad_bps,
-            self.alert_regression_bps,
-            self.block_regression_bps,
-            self.enforcement.name(),
-            self.scope.name(),
-            self.require_regression_profile,
-        )
-    }
 }
 
 /// Parse the committed policy catalog.
@@ -423,6 +409,18 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
                 "catalog is {} bytes, exceeding the {MAX_POLICY_CATALOG_BYTES}-byte limit",
                 text.len()
             ),
+        });
+    }
+    if !text.ends_with('\n') {
+        return Err(PerfError::Catalog {
+            line: 0,
+            detail: "catalog must end with a final LF newline".to_owned(),
+        });
+    }
+    if text.contains('\r') {
+        return Err(PerfError::Catalog {
+            line: 0,
+            detail: "catalog must use LF line endings".to_owned(),
         });
     }
     let mut schema_seen = false;
@@ -547,27 +545,147 @@ pub fn parse_policy_catalog(text: &str) -> Result<Vec<GatePolicy>, PerfError> {
             });
         }
     }
+    if render_policy_catalog(&policies)? != text {
+        return Err(PerfError::Catalog {
+            line: 0,
+            detail: "catalog is valid but not in canonical form".to_owned(),
+        });
+    }
     Ok(policies)
 }
 
 /// Render a canonical policy catalog.
-#[must_use]
-pub fn render_policy_catalog(policies: &[GatePolicy]) -> String {
-    let mut ordered = policies.to_vec();
-    ordered.sort_by(|left, right| {
+///
+/// # Errors
+/// Returns a typed error before allocating the output when policies are
+/// incomplete, duplicated, invalid, or exceed the catalog resource envelope.
+pub fn render_policy_catalog(policies: &[GatePolicy]) -> Result<String, PerfError> {
+    if policies.len() > MAX_POLICY_ROWS {
+        return Err(PerfError::Catalog {
+            line: 0,
+            detail: format!("catalog exceeds the {MAX_POLICY_ROWS}-row limit"),
+        });
+    }
+
+    let mut identities = BTreeSet::new();
+    for policy in policies {
+        policy.validate()?;
+        if !identities.insert((policy.gate, policy.scenario.as_str())) {
+            return Err(PerfError::Catalog {
+                line: 0,
+                detail: format!("duplicate {} scenario {:?}", policy.gate, policy.scenario),
+            });
+        }
+    }
+    for gate in GateId::ALL {
+        if !policies.iter().any(|policy| policy.gate == gate) {
+            return Err(PerfError::Catalog {
+                line: 0,
+                detail: format!("catalog has no {gate} policy"),
+            });
+        }
+    }
+
+    let mut ordered: Vec<_> = policies.iter().collect();
+    ordered.sort_unstable_by(|left, right| {
         (left.gate, left.scenario.as_str()).cmp(&(right.gate, right.scenario.as_str()))
     });
-    let mut output = format!("schema\t{POLICY_SCHEMA}\n");
-    output.push_str(
-        "# gate\tscenario\tunit\tdirection\ttarget\tmin_valid_samples\t\
-         max_invalid_samples\tmax_mad_bps\talert_regression_bps\t\
-         block_regression_bps\tenforcement\tscope\trequire_regression_profile\n",
-    );
-    for policy in ordered {
-        output.push_str(&policy.to_catalog_row());
-        output.push('\n');
+
+    let mut output_len = POLICY_PREAMBLE
+        .len()
+        .checked_add("schema\t".len())
+        .and_then(|length| length.checked_add(POLICY_SCHEMA.len()))
+        .and_then(|length| length.checked_add(1))
+        .and_then(|length| length.checked_add(POLICY_COLUMNS.len()))
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| PerfError::Catalog {
+            line: 0,
+            detail: "catalog size overflow".to_owned(),
+        })?;
+    for policy in &ordered {
+        output_len = output_len
+            .checked_add(policy_catalog_row_len(policy))
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| PerfError::Catalog {
+                line: 0,
+                detail: "catalog size overflow".to_owned(),
+            })?;
+        if output_len > MAX_POLICY_CATALOG_BYTES {
+            return Err(PerfError::Catalog {
+                line: 0,
+                detail: format!(
+                    "rendered catalog exceeds the {MAX_POLICY_CATALOG_BYTES}-byte limit"
+                ),
+            });
+        }
     }
-    output
+
+    let mut output = String::with_capacity(output_len);
+    output.push_str(POLICY_PREAMBLE);
+    let _ = writeln!(output, "schema\t{POLICY_SCHEMA}");
+    output.push_str(POLICY_COLUMNS);
+    output.push('\n');
+    for policy in ordered {
+        let _ = write!(
+            output,
+            "{}\t{}\t{}\t{}\t",
+            policy.gate,
+            policy.scenario,
+            policy.unit.name(),
+            policy.direction.name(),
+        );
+        if let Some(target) = policy.target {
+            let _ = write!(output, "{target}");
+        } else {
+            output.push_str(NONE);
+        }
+        let _ = writeln!(
+            output,
+            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            policy.min_valid_samples,
+            policy.max_invalid_samples,
+            policy.max_mad_bps,
+            policy.alert_regression_bps,
+            policy.block_regression_bps,
+            policy.enforcement.name(),
+            policy.scope.name(),
+            policy.require_regression_profile,
+        );
+    }
+    debug_assert_eq!(output.len(), output_len);
+    Ok(output)
+}
+
+fn decimal_digits(mut value: u128) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn policy_catalog_row_len(policy: &GatePolicy) -> usize {
+    policy.gate.name().len()
+        + policy.scenario.len()
+        + policy.unit.name().len()
+        + policy.direction.name().len()
+        + policy
+            .target
+            .map_or(1, |value| decimal_digits(u128::from(value)))
+        + decimal_digits(policy.min_valid_samples as u128)
+        + decimal_digits(policy.max_invalid_samples as u128)
+        + decimal_digits(u128::from(policy.max_mad_bps))
+        + decimal_digits(u128::from(policy.alert_regression_bps))
+        + decimal_digits(u128::from(policy.block_regression_bps))
+        + policy.enforcement.name().len()
+        + policy.scope.name().len()
+        + if policy.require_regression_profile {
+            "true".len()
+        } else {
+            "false".len()
+        }
+        + 12
 }
 
 /// Exact environment/benchmark identity required for comparison.
@@ -2666,6 +2784,49 @@ mod tests {
         }
     }
 
+    fn complete_policy_catalog() -> Vec<GatePolicy> {
+        GateId::ALL
+            .into_iter()
+            .map(|gate| {
+                let (scope, unit, direction, target) = match gate {
+                    GateId::Pg8 => (
+                        GateScope::PythonOnly,
+                        MetricUnit::RatioPpm,
+                        Direction::AtMost,
+                        Some(1_100_000),
+                    ),
+                    GateId::PgA => (
+                        GateScope::AnnexOnly,
+                        MetricUnit::FramesPerSecondMilli,
+                        Direction::AtLeast,
+                        None,
+                    ),
+                    _ => (
+                        GateScope::Core,
+                        MetricUnit::Nanoseconds,
+                        Direction::AtMost,
+                        Some(1),
+                    ),
+                };
+                GatePolicy {
+                    gate,
+                    scenario: format!("{}-fixture", gate.name().replace('-', "")),
+                    unit,
+                    direction,
+                    target,
+                    min_valid_samples: 3,
+                    max_invalid_samples: 0,
+                    max_mad_bps: 1_000,
+                    alert_regression_bps: 500,
+                    block_regression_bps: 1_000,
+                    enforcement: Enforcement::Blocking,
+                    scope,
+                    require_regression_profile: true,
+                }
+            })
+            .collect()
+    }
+
     fn key() -> BenchmarkKey {
         BenchmarkKey {
             profile_id: "linux-x86-64-8c-v1".to_owned(),
@@ -3252,47 +3413,13 @@ mod tests {
 
     #[test]
     fn policy_catalog_is_strict_complete_and_canonical() {
-        let mut policies = Vec::new();
-        for gate in GateId::ALL {
-            let (scope, unit, direction, target) = match gate {
-                GateId::Pg8 => (
-                    GateScope::PythonOnly,
-                    MetricUnit::RatioPpm,
-                    Direction::AtMost,
-                    Some(1_100_000),
-                ),
-                GateId::PgA => (
-                    GateScope::AnnexOnly,
-                    MetricUnit::FramesPerSecondMilli,
-                    Direction::AtLeast,
-                    None,
-                ),
-                _ => (
-                    GateScope::Core,
-                    MetricUnit::Nanoseconds,
-                    Direction::AtMost,
-                    Some(1),
-                ),
-            };
-            policies.push(GatePolicy {
-                gate,
-                scenario: format!("{}-fixture", gate.name().replace('-', "")),
-                unit,
-                direction,
-                target,
-                min_valid_samples: 3,
-                max_invalid_samples: 0,
-                max_mad_bps: 1_000,
-                alert_regression_bps: 500,
-                block_regression_bps: 1_000,
-                enforcement: Enforcement::Blocking,
-                scope,
-                require_regression_profile: true,
-            });
-        }
-        let rendered = render_policy_catalog(&policies);
+        let policies = complete_policy_catalog();
+        let rendered = render_policy_catalog(&policies).expect("valid policies render");
         let parsed = parse_policy_catalog(&rendered).unwrap();
-        assert_eq!(render_policy_catalog(&parsed), rendered);
+        assert_eq!(
+            render_policy_catalog(&parsed).expect("parsed policies render"),
+            rendered
+        );
 
         let short = format!("schema\t{POLICY_SCHEMA}\npg-1\tshort\n");
         let error = parse_policy_catalog(&short)
@@ -3308,6 +3435,115 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "performance policy catalog:2: policy row has 14 fields, expected 13"
+        );
+    }
+
+    #[test]
+    fn policy_catalog_parser_rejects_noncanonical_bytes() {
+        let canonical =
+            render_policy_catalog(&complete_policy_catalog()).expect("valid policies render");
+
+        let missing_final_lf = canonical
+            .strip_suffix('\n')
+            .expect("canonical catalog has a final LF");
+        assert_eq!(
+            parse_policy_catalog(missing_final_lf)
+                .expect_err("missing final LF must fail")
+                .to_string(),
+            "performance policy catalog: catalog must end with a final LF newline"
+        );
+
+        let crlf = canonical.replace('\n', "\r\n");
+        assert_eq!(
+            parse_policy_catalog(&crlf)
+                .expect_err("CRLF must fail")
+                .to_string(),
+            "performance policy catalog: catalog must use LF line endings"
+        );
+
+        let without_preamble = canonical
+            .strip_prefix(POLICY_PREAMBLE)
+            .expect("canonical catalog has its preamble");
+        assert!(
+            parse_policy_catalog(without_preamble)
+                .expect_err("the canonical preamble is authority")
+                .to_string()
+                .contains("not in canonical form")
+        );
+
+        let leading_zero = canonical.replacen("\t3\t0\t", "\t03\t0\t", 1);
+        assert!(
+            parse_policy_catalog(&leading_zero)
+                .expect_err("noncanonical decimal spelling must fail")
+                .to_string()
+                .contains("not in canonical form")
+        );
+
+        let mut lines: Vec<_> = canonical.lines().collect();
+        lines.swap(6, 7);
+        let reordered = format!("{}\n", lines.join("\n"));
+        assert!(
+            parse_policy_catalog(&reordered)
+                .expect_err("policy rows must be canonical-order")
+                .to_string()
+                .contains("not in canonical form")
+        );
+    }
+
+    #[test]
+    fn policy_catalog_writer_refuses_invalid_or_oversized_authority() {
+        let policies = complete_policy_catalog();
+
+        let mut duplicate = policies.clone();
+        duplicate.push(policies[0].clone());
+        assert!(
+            render_policy_catalog(&duplicate)
+                .expect_err("duplicate identity must fail")
+                .to_string()
+                .contains("duplicate pg-1 scenario")
+        );
+
+        assert!(
+            render_policy_catalog(&policies[..1])
+                .expect_err("incomplete gate coverage must fail")
+                .to_string()
+                .contains("catalog has no pg-2 policy")
+        );
+
+        let mut invalid = policies.clone();
+        invalid[0].scenario = "Bad-Scenario".to_owned();
+        assert!(
+            render_policy_catalog(&invalid)
+                .expect_err("invalid policy fields must fail")
+                .to_string()
+                .contains("not a lowercase portable token")
+        );
+
+        let too_many = vec![policies[0].clone(); MAX_POLICY_ROWS + 1];
+        assert!(
+            render_policy_catalog(&too_many)
+                .expect_err("row envelope must run before duplicate handling")
+                .to_string()
+                .contains("row limit")
+        );
+
+        let mut oversized = policies;
+        for index in oversized.len()..MAX_POLICY_ROWS {
+            let mut policy = oversized[0].clone();
+            let prefix = format!("s{index:04}");
+            policy.scenario = format!("{prefix}{}", "x".repeat(MAX_TOKEN_BYTES - prefix.len()));
+            policy.target = Some(u64::MAX);
+            policy.max_invalid_samples = MAX_SAMPLES - policy.min_valid_samples;
+            policy.max_mad_bps = u32::MAX;
+            policy.alert_regression_bps = u32::MAX;
+            policy.block_regression_bps = u32::MAX;
+            oversized.push(policy);
+        }
+        assert!(
+            render_policy_catalog(&oversized)
+                .expect_err("document envelope must be checked before output allocation")
+                .to_string()
+                .contains("rendered catalog exceeds")
         );
     }
 

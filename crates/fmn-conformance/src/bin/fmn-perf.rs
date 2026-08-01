@@ -172,7 +172,8 @@ fn catalog(path: &OsStr) -> Result<String, CliError> {
     policies.sort_by(|left, right| {
         (left.gate, left.scenario.as_str()).cmp(&(right.gate, right.scenario.as_str()))
     });
-    let canonical = render_policy_catalog(&policies);
+    let canonical =
+        render_policy_catalog(&policies).map_err(|error| CliError::data(error.to_string()))?;
     let mut output = String::new();
     let _ = writeln!(
         output,

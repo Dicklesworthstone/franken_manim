@@ -11,9 +11,13 @@ fn committed_policy_catalog_is_complete_and_canonically_round_trips() {
     let policies = parse_policy_catalog(POLICY_CATALOG).expect("committed policy catalog");
     assert_eq!(policies.len(), 21);
 
-    let rendered = render_policy_catalog(&policies);
+    let rendered = render_policy_catalog(&policies).expect("valid policies render");
+    assert_eq!(rendered, POLICY_CATALOG);
     let reparsed = parse_policy_catalog(&rendered).expect("rendered policy catalog");
-    assert_eq!(render_policy_catalog(&reparsed), rendered);
+    assert_eq!(
+        render_policy_catalog(&reparsed).expect("reparsed policies render"),
+        rendered
+    );
 
     assert!(policies.iter().any(|policy| {
         policy.gate == GateId::Pg1
