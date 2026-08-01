@@ -18,10 +18,10 @@ use fmn_scene::{AssetRead, CommandKind, CommandRecord, EffectClass, Entry, Journ
 use fmn_studio::{
     BuildError, ChannelError, ChannelFailureKind, Checkpoint, CheckpointSource, CrashReport,
     FramingError, JournalReplay, LaunchError, ProtocolLimits, ProtocolVersion, RebuildDriver,
-    RequestEnvelope, ResponseEnvelope, ServiceError, StdWorkerLauncher, Supervisor,
-    SupervisorConfig, SupervisorReply, SupervisorRequest, TransportCapabilities, WorkerArtifact,
-    WorkerChannel, WorkerErrorCode, WorkerLauncher, WorkerResponse, WorkerServeOutcome,
-    WorkerService, read_response, serve_worker, write_request,
+    RequestEnvelope, ResponseEnvelope, ServiceError, StdWorkerLauncher, StudioDataKind, Supervisor,
+    SupervisorConfig, SupervisorError, SupervisorReply, SupervisorRequest, TransportCapabilities,
+    WorkerArtifact, WorkerChannel, WorkerErrorCode, WorkerLauncher, WorkerResponse,
+    WorkerServeOutcome, WorkerService, read_response, serve_worker, write_request,
 };
 
 fn lock_poisoned<T>(error: PoisonError<T>) -> T {
@@ -98,6 +98,7 @@ struct FakeState {
     wrong_build_handshake: bool,
     journal_segment: Option<(u64, Vec<u8>)>,
     checkpoint_response: Option<Checkpoint>,
+    inspection_scene: Option<String>,
     restored: Vec<Vec<u8>>,
     replayed: Vec<(u64, u64)>,
 }
@@ -218,11 +219,32 @@ impl WorkerChannel for FakeChannel {
                     state_hash: None,
                 })
             }
+            SupervisorRequest::Inspect { .. } => {
+                let scene = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(lock_poisoned)
+                    .inspection_scene
+                    .clone();
+                if let Some(scene) = scene {
+                    let bytes = br#"{"nodes":[]}"#.to_vec();
+                    WorkerResponse::StudioData {
+                        scene,
+                        kind: StudioDataKind::Inspection,
+                        digest: sha256(&bytes),
+                        bytes,
+                    }
+                } else {
+                    WorkerResponse::Ack {
+                        state_hash: None,
+                        journal_len: 0,
+                    }
+                }
+            }
             SupervisorRequest::Play { .. }
             | SupervisorRequest::Seek { .. }
             | SupervisorRequest::Scrub { .. }
             | SupervisorRequest::Event { .. }
-            | SupervisorRequest::Inspect { .. }
             | SupervisorRequest::Overlay { .. } => WorkerResponse::Ack {
                 state_hash: None,
                 journal_len: 0,
@@ -512,6 +534,55 @@ fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
     .to_bytes(limits)
     .expect("the locally synthesized crash report re-encodes under the same limits");
     assert_eq!(supervisor.crashes(), &[crash]);
+}
+
+#[test]
+fn scene_bearing_responses_are_correlated_to_the_request_scene() {
+    let state = Arc::new(Mutex::new(FakeState {
+        inspection_scene: Some("Other".to_owned()),
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
+    supervisor
+        .install_session("Demo", Journal::new())
+        .expect("session");
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+
+    let error = supervisor
+        .request(
+            SupervisorRequest::Inspect {
+                scene: "Demo".to_owned(),
+            },
+            &|_| true,
+        )
+        .expect_err("a response for another scene must not cross the supervisor boundary");
+    let SupervisorError::Channel(error) = error else {
+        std::panic::panic_any(format!(
+            "expected a channel correlation error, found {error}"
+        ));
+    };
+    assert_eq!(error.kind, ChannelFailureKind::Correlation);
+    assert_eq!(
+        error.detail,
+        "scene-bearing response did not match request scene"
+    );
+
+    state.lock().unwrap_or_else(lock_poisoned).inspection_scene = Some("Demo".to_owned());
+    let reply = supervisor
+        .request(
+            SupervisorRequest::Inspect {
+                scene: "Demo".to_owned(),
+            },
+            &|_| true,
+        )
+        .expect("the matching scene response remains valid");
+    let SupervisorReply::Worker(WorkerResponse::StudioData { scene, .. }) = reply else {
+        std::panic::panic_any("expected matching Studio data response");
+    };
+    // ubs:ignore - scene names are public routing identifiers, not secrets.
+    assert_eq!(scene, "Demo");
 }
 
 #[test]

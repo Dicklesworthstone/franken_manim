@@ -1218,6 +1218,19 @@ impl Supervisor {
             )
             .into());
         }
+        if let (Some(request_scene), Some(response_scene)) = (
+            supervisor_request_scene(&envelope.request),
+            worker_response_scene(&response.response),
+        ) {
+            // ubs:ignore - scene names are public routing identifiers, not secrets.
+            if request_scene != response_scene {
+                return Err(ChannelError::new(
+                    ChannelFailureKind::Correlation,
+                    "scene-bearing response did not match request scene",
+                )
+                .into());
+            }
+        }
         Ok(response.response)
     }
 
@@ -1388,6 +1401,39 @@ impl Supervisor {
         }
         worker.terminate();
         self.transports = None;
+    }
+}
+
+fn supervisor_request_scene(request: &SupervisorRequest) -> Option<&str> {
+    match request {
+        SupervisorRequest::Play { scene, .. }
+        | SupervisorRequest::Seek { scene, .. }
+        | SupervisorRequest::Scrub { scene, .. }
+        | SupervisorRequest::Event { scene, .. }
+        | SupervisorRequest::Inspect { scene }
+        | SupervisorRequest::Overlay { scene, .. } => Some(scene),
+        SupervisorRequest::RestoreCheckpoint(checkpoint) => Some(&checkpoint.scene),
+        SupervisorRequest::ReplayJournal(replay) => Some(&replay.scene),
+        SupervisorRequest::Hello { .. }
+        | SupervisorRequest::EnumerateScenes
+        | SupervisorRequest::Shutdown => None,
+    }
+}
+
+fn worker_response_scene(response: &WorkerResponse) -> Option<&str> {
+    match response {
+        WorkerResponse::Frame(frame) => Some(&frame.scene),
+        WorkerResponse::Checkpoint(checkpoint) => Some(&checkpoint.scene),
+        WorkerResponse::JournalSegment { scene, .. } | WorkerResponse::StudioData { scene, .. } => {
+            Some(scene)
+        }
+        WorkerResponse::Crash(report) => report.scene.as_deref(),
+        WorkerResponse::Hello { .. }
+        | WorkerResponse::Scenes(_)
+        | WorkerResponse::Ack { .. }
+        | WorkerResponse::ReplayComplete { .. }
+        | WorkerResponse::Error { .. }
+        | WorkerResponse::Bye => None,
     }
 }
 
