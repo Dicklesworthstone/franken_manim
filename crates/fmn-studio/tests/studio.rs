@@ -432,6 +432,58 @@ fn preencoded_kitty_png_is_validated_under_the_declared_pixel_budget() {
     assert!(refused_output.is_empty());
 }
 
+#[test]
+fn kitty_admits_the_exact_actual_encoded_byte_boundary() {
+    let rgba = [255, 0, 0, 255, 0, 255, 0, 255];
+    let png = encode_rgba8(2, 1, &rgba, CompressionLevel::Fast);
+
+    for kitty_chunk_bytes in [4096, 4] {
+        let generous = TerminalPreview::new(
+            TerminalProtocol::Kitty,
+            TuiLimits {
+                max_pixels: 2,
+                kitty_chunk_bytes,
+                ..TuiLimits::default()
+            },
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        generous.write_png(&mut expected, &png).unwrap();
+
+        let exact = TerminalPreview::new(
+            TerminalProtocol::Kitty,
+            TuiLimits {
+                max_pixels: 2,
+                max_encoded_bytes: expected.len(),
+                kitty_chunk_bytes,
+            },
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        exact
+            .write_png(&mut actual, &png)
+            .expect("the complete Kitty record fits the exact byte ceiling");
+        assert_eq!(actual, expected);
+
+        let one_byte_short = TerminalPreview::new(
+            TerminalProtocol::Kitty,
+            TuiLimits {
+                max_pixels: 2,
+                max_encoded_bytes: expected.len() - 1,
+                kitty_chunk_bytes,
+            },
+        )
+        .unwrap();
+        let mut refused = Vec::new();
+        assert!(matches!(
+            one_byte_short.write_png(&mut refused, &png),
+            Err(TuiError::EncodedLimit { limit, needed })
+                if limit == expected.len() - 1 && needed == expected.len()
+        ));
+        assert!(refused.is_empty());
+    }
+}
+
 #[cfg(feature = "metal")]
 #[test]
 fn studio_metal_feature_uses_the_truthful_preview_selector() {

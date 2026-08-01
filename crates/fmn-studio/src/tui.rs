@@ -147,9 +147,9 @@ fn validate_rgba(width: u32, height: u32, rgba: &[u8], limits: TuiLimits) -> Res
 }
 
 fn encode_kitty_png(png: &[u8], limits: TuiLimits) -> Result<Vec<u8>, TuiError> {
-    let (chunk_bytes, chunks, estimated) = kitty_encoded_size(png.len(), limits)?;
+    let (chunk_bytes, chunks, encoded_size) = kitty_encoded_size(png.len(), limits)?;
     let base64 = base64(png);
-    let mut out = Vec::with_capacity(estimated);
+    let mut out = Vec::with_capacity(encoded_size);
     for (index, chunk) in base64.as_bytes().chunks(chunk_bytes).enumerate() {
         out.extend_from_slice(b"\x1b_G");
         if index == 0 {
@@ -173,25 +173,34 @@ fn kitty_encoded_size(
     png_len: usize,
     limits: TuiLimits,
 ) -> Result<(usize, usize, usize), TuiError> {
+    const FIRST_CHUNK_FRAMING_BYTES: usize =
+        b"\x1b_G".len() + b"a=T,f=100,t=d,q=2,".len() + b"m=0;".len() + b"\x1b\\".len();
+    const FOLLOWING_CHUNK_FRAMING_BYTES: usize = b"\x1b_G".len() + b"m=0;".len() + b"\x1b\\".len();
+
     let chunk_bytes = limits.kitty_chunk_bytes & !3;
     let base64_bytes = png_len
         .div_ceil(3)
         .checked_mul(4)
         .ok_or(TuiError::EncodedSizeOverflow)?;
     let chunks = base64_bytes.div_ceil(chunk_bytes);
-    let framing_bytes = chunks
-        .checked_mul(32)
-        .ok_or(TuiError::EncodedSizeOverflow)?;
-    let estimated = base64_bytes
+    let framing_bytes = if chunks == 0 {
+        0
+    } else {
+        (chunks - 1)
+            .checked_mul(FOLLOWING_CHUNK_FRAMING_BYTES)
+            .and_then(|following| following.checked_add(FIRST_CHUNK_FRAMING_BYTES))
+            .ok_or(TuiError::EncodedSizeOverflow)?
+    };
+    let encoded_size = base64_bytes
         .checked_add(framing_bytes)
         .ok_or(TuiError::EncodedSizeOverflow)?;
-    if estimated > limits.max_encoded_bytes {
+    if encoded_size > limits.max_encoded_bytes {
         return Err(TuiError::EncodedLimit {
             limit: limits.max_encoded_bytes,
-            needed: estimated,
+            needed: encoded_size,
         });
     }
-    Ok((chunk_bytes, chunks, estimated))
+    Ok((chunk_bytes, chunks, encoded_size))
 }
 
 fn encode_sixel(
@@ -440,6 +449,19 @@ mod tests {
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn kitty_size_preflight_rejects_arithmetic_overflow() {
+        let limits = TuiLimits {
+            max_encoded_bytes: usize::MAX,
+            kitty_chunk_bytes: 4,
+            ..TuiLimits::default()
+        };
+        assert!(matches!(
+            kitty_encoded_size(usize::MAX, limits),
+            Err(TuiError::EncodedSizeOverflow)
+        ));
     }
 
     #[test]
