@@ -19,10 +19,10 @@
 //! - the operation is two-dimensional: `x` and `y` participate and output
 //!   `z` is zero, matching the Reference's `point[:2]` conversion.
 //!
-//! ## Admitted Stage-2 class
+//! ## Admitted Stage-2 classes
 //!
-//! `separated-control-hulls` is the first curve-aware class. Both operands
-//! must contain a nonzero-area contour and their complete quadratic
+//! `separated-control-hulls` (fm-8dx) is the first curve-aware class. Both
+//! operands must contain a nonzero-area contour and their complete quadratic
 //! control-point bounds must be strictly separated on `x` or `y`. A quadratic
 //! and its implicit fill-closing chord lie inside that control hull, so the
 //! filled sets cannot meet. Union/exclusion may therefore concatenate the
@@ -32,6 +32,21 @@
 //! tangencies, shared endpoints, every overlap class, and zero-area-only paths
 //! route to [`BooleanRoute::FlattenClip`]. Tests compare every admitted
 //! operation against the forced Stage-1 result on a point-in-fill grid.
+//!
+//! `transversal-interiors` (fm-qjy) is the second admitted class: every
+//! cross-operand piece intersection is a proper crossing strictly inside
+//! both pieces, proved by fat-line-pruned Bézier clipping, bounded Newton
+//! polish, and the crossing-sine screen; same-operand pieces may meet only
+//! at shared contour endpoints. The arrangement is built from split
+//! quadratics — exact in the parameterization, never claimed exact in
+//! coordinates — classified by ray-cast winding, and stitched by the same
+//! angular-sort face traversal as Stage 1. The degeneracy-class taxonomy,
+//! admission predicates, numerical bounds, and per-class proof obligations
+//! are specified in `docs/geometry/curve_booleans.md`; shared endpoints,
+//! tangencies, overlaps, and zero-area cases remain specified-but-unproved
+//! and route to [`BooleanRoute::FlattenClip`] permanently. All-line inputs
+//! also stay on Stage 1 by construction: flattening is exact for polygons,
+//! so the captured skia-pathops fixtures permanently exercise the fallback.
 //!
 //! Further curve-aware classes do not get a heuristic fast path. Each needs a
 //! written degeneracy specification and topology-aware differential proof
@@ -44,6 +59,8 @@ use fmn_core::types::Vec3;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+mod curve_boolean;
 
 type Point = [f64; 2];
 
@@ -89,6 +106,11 @@ pub enum BooleanRoute {
     /// Exact quadratic preservation proved by strictly separated control
     /// hulls.
     CurveAwareSeparated,
+    /// Quadratic preservation proved by the transversal-interiors class:
+    /// fat-line-pruned intersection, bounded Newton polish, exact
+    /// parameterization splitting, and curve stitching
+    /// (`docs/geometry/curve_booleans.md`).
+    CurveAwareTransversal,
     /// The certified quadratic-flattening and line-arrangement fallback.
     FlattenClip,
 }
@@ -274,6 +296,9 @@ pub fn path_boolean(
     validate_options_and_path(subject, BooleanOperand::Subject, options)?;
     validate_options_and_path(clip, BooleanOperand::Clip, options)?;
     if let Some(result) = try_curve_aware_separated(subject, clip, operation, options)? {
+        return Ok(result);
+    }
+    if let Some(result) = curve_boolean::try_transversal(subject, clip, operation, options) {
         return Ok(result);
     }
     flatten_clip_validated(subject, clip, operation, options)
@@ -466,8 +491,10 @@ fn project_paths(paths: &[&QuadPath]) -> Result<QuadPath, BooleanError> {
 ///
 /// Arbitrary bytes become at most two 32-curve paths. Every generated
 /// operation uses tight limits, so the probe may return a typed refusal but
-/// cannot request unbounded work. The boolean result is deliberately ignored:
-/// a fuzz harness is checking for panics, hangs, and invariant violations.
+/// cannot request unbounded work. Both the routed entry point (which may
+/// attempt a curve-aware class) and the forced fallback are exercised. The
+/// boolean results are deliberately ignored: a fuzz harness is checking for
+/// panics, hangs, and invariant violations.
 #[must_use]
 pub fn fuzz_probe(bytes: &[u8]) -> bool {
     let selector = bytes.first().copied().unwrap_or(0);
@@ -500,6 +527,7 @@ pub fn fuzz_probe(bytes: &[u8]) -> bool {
         ..BooleanOptions::default()
     };
     drop(path_boolean_flattened(&subject, &clip, operation, options));
+    drop(path_boolean(&subject, &clip, operation, options));
     true
 }
 
