@@ -48,12 +48,21 @@ classification phase decides which contours are boundaries.
 
 Admission additionally requires:
 
-- both operands have at least one nonzero-anchor-area contour (zero-area
-  inputs are C5);
-- at least one genuinely curved piece (handle off the chord) across the two
-  operands. All-line inputs lose nothing under flattening — Stage 1 is exact
-  for polygons — so they route to Stage 1 by construction and the captured
-  skia-pathops fixtures (all polygonal) permanently exercise Stage 1;
+- both operands have at least one contour whose exact quadratic boundary
+  integral has nonzero double-double sign (zero-area inputs are C5). This
+  admits genuine two-anchor lenses whose anchor shoelace is zero while their
+  curved boundary encloses area;
+- at least one genuinely curved piece across the two operands: a piece
+  whose handle is *meaningfully* off the chord, concretely
+  `|cross(p1−p0, p2−p0)| / |p2−p0| > maxᵢ resolution(pᵢ)`, where
+  `resolution([x,y]) = 256·ε·max(|x|,|y|)` (and the smallest positive f64 at
+  the origin). The threshold matters: `QuadPath` line segments and affine
+  transforms store handles through rounded arithmetic, so a geometric line's
+  handle can sit a few ulp off its chord — an exact-sign or chord-only test
+  would misread translated slanted polygons as curves. All-line inputs lose
+  nothing under flattening — Stage 1 is exact for polygons — so they route to
+  Stage 1 by construction and the captured skia-pathops fixtures (all
+  polygonal) permanently exercise Stage 1;
 - every piece is non-degenerate: `p0 ≠ p1`, `p1 ≠ p2`, `p0 ≠ p2` (endpoint
   derivatives nonzero, no closed-loop single pieces);
 - within one operand, all anchors are pairwise distinct except the closure
@@ -144,6 +153,23 @@ different nodes closer than `1e-9` in both parameters are merged; two roots
 on one piece closer than `1e-9` refuse the class (near-double root — C3
 territory).
 
+Two consequences of the pruning invariant are part of the contract:
+
+- The in-band set of the distance polynomial is computed from its cuts
+  against the band edges, and a contact at an isolated parameter (an
+  endpoint touch or a tangency against the band edge) has measure zero:
+  in-band cut *points* themselves extend the convex hull, and a cut that
+  rounds to just outside `[0, 1]` (an exact endpoint root) is admitted
+  within the root-merge band and clamped. A fat-line miss is then a
+  *proved* empty branch: it contributes no roots and is not a solver
+  failure. Only budget exhaustion, convergence stall past the bisection
+  bound, or a degenerate bisection refuses the pair.
+- When clipping collapses an interval to a single parameter, the contact
+  is resolved exactly rather than iterated on a degenerate subcurve:
+  point-on-curve incidence of the collapsed point against the other
+  piece is solved by per-axis quadratic root-finding (bounded,
+  cancellation-screened), and a miss prunes the node.
+
 ### 3.3 Bounded Newton polish
 
 Each clip root `(t, u)` seeds Newton iteration on `F(t, u) = A(t) − B(u) = 0`
@@ -197,18 +223,35 @@ the left normal of the mid-derivative by
 
 `offset = min(tolerance, chord, clearance) · 0.25`,
 
-where `clearance` lower-bounds the distance to every other atomic edge by the
-distance to that edge's control triangle (the curve lies inside its control
-hull, so hull distance bounds curve distance from below). An offset at or
-below the coordinate resolution of the sample, or a sample whose offset
-exceeds the clearance after repeated halving, refuses the class.
+where `clearance` lower-bounds the distance to every other atomic edge by its
+control hull (the curve lies inside that hull, so hull distance bounds curve
+distance from below). When the midpoint lies inside a broad control triangle,
+that zero bound is tightened through at most 8 levels of midpoint de Casteljau
+subdivision: the union of the child hulls still contains the complete curve,
+so the minimum child-hull distance remains a valid lower bound. A zero bound
+that survives the fixed depth, an offset at or below the coordinate resolution
+of the sample, or a sample whose offset exceeds the clearance after repeated
+halving refuses the class.
 
 Winding numbers at a sample are ray-cast: crossings of the ray `y = y_s`,
 `x > x_s` with each atomic edge are the roots of the edge's quadratic
 `y(t) = y_s` on the half-open interval `t ∈ [0, 1)`, signed by `y'(t)` —
 the same half-open convention as Stage 1, so split edges and unsplit pieces
-contribute identically. A ray exactly tangent to an edge (`y'(t) = 0` at a
-root) or passing exactly through it (`x(t) = x_s`) refuses the class.
+pieces contribute identically (a root within the snap band of `t = 1` is
+assigned to the next atomic edge, and a contact strictly behind the ray
+origin cannot affect the count, so its endpoint status is irrelevant).
+The quadratic is solved in cancellation-stable form; the naive formula
+maps the near-linear case (a line piece whose rounded midpoint handle
+leaves the second coefficient nonzero) to a spurious exact `t = 0`,
+which the endpoint rule would refuse for every retry. A ray whose
+discriminant vanishes within rounding of an edge apex, that is tangent
+to an edge (`y'(t)` vanishing within rounding at a root), or that passes
+exactly through it (`x(t) = x_s`) refuses the *sample*, and
+classification retries with a new offset. Retries halve the offset and
+add a deterministic tangential nudge (attempt index times `1e-3` of the
+offset): halving alone cannot move the ray height when the mid-normal is
+horizontal, and the nudge keeps the sample on the left face and inside
+the clearance ball around the midpoint.
 Crossing an atomic edge changes its operand's winding by the edge's unit
 contribution (admission excludes every multiplicity-carrying class), so the
 right-face winding is the left-face winding minus the contribution, and the
