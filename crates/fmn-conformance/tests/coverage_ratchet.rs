@@ -19,7 +19,16 @@ use fmn_conformance::ratchet::{
     Baseline, Pending, parse_trend_tsv, ratchet_violations, render_dashboard,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+const MAX_SUITE_LOCK_BYTES: u64 = 1024 * 1024;
+const MAX_BASELINE_BYTES: u64 = 16 * 1024;
+const MAX_TREND_BYTES: u64 = 1024 * 1024;
+const MAX_DASHBOARD_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CONSTRUCT_TABLE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CORPUS_BYTES: u64 = 64 * 1024 * 1024;
 
 fn repo_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -27,14 +36,32 @@ fn repo_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn repo_file(name: &str) -> Result<String, String> {
+fn read_utf8_bounded(reader: impl Read, label: &str, max_bytes: u64) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {label}: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(format!(
+            "{label} exceeds the {max_bytes}-byte resource limit"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("{label} is not UTF-8: {error}"))
+}
+
+fn file_utf8_bounded(path: &Path, label: &str, max_bytes: u64) -> Result<String, String> {
+    let file = File::open(path).map_err(|error| format!("cannot read {label}: {error}"))?;
+    read_utf8_bounded(file, label, max_bytes)
+}
+
+fn repo_file(name: &str, max_bytes: u64) -> Result<String, String> {
     let path = repo_path(name);
-    std::fs::read_to_string(&path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))
+    file_utf8_bounded(&path, name, max_bytes)
 }
 
 fn suite_lock_franken_markdown_rev() -> Result<String, String> {
-    let lock = repo_file("SUITE.lock")?;
+    let lock = repo_file("SUITE.lock", MAX_SUITE_LOCK_BYTES)?;
     for line in lock.lines() {
         let line = line.trim();
         if let Some((rev, _)) = line
@@ -48,7 +75,7 @@ fn suite_lock_franken_markdown_rev() -> Result<String, String> {
 }
 
 fn committed_baseline() -> Result<Baseline, String> {
-    Baseline::from_tsv(&repo_file("docs/ratchet/baseline.tsv")?)
+    Baseline::from_tsv(&repo_file("docs/ratchet/baseline.tsv", MAX_BASELINE_BYTES)?)
         .map_err(|error| format!("docs/ratchet/baseline.tsv is malformed: {error}"))
 }
 
@@ -69,7 +96,7 @@ fn baseline_names_the_current_franken_markdown_pin() -> Result<(), String> {
 #[test]
 fn dashboard_headline_matches_the_baseline() -> Result<(), String> {
     let baseline = committed_baseline()?;
-    let dashboard = repo_file("docs/ratchet/dashboard.md")?;
+    let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
     let [po, pu, lo, lu] = baseline.percentages();
     for needle in [
         format!("| **Parse** | {po:.3} % | {pu:.3} % |"),
@@ -87,7 +114,7 @@ fn dashboard_headline_matches_the_baseline() -> Result<(), String> {
 #[test]
 fn trend_is_monotone_and_ends_at_the_baseline() -> Result<(), String> {
     let baseline = committed_baseline()?;
-    let trend = parse_trend_tsv(&repo_file("docs/ratchet/trend.tsv")?)
+    let trend = parse_trend_tsv(&repo_file("docs/ratchet/trend.tsv", MAX_TREND_BYTES)?)
         .map_err(|error| format!("docs/ratchet/trend.tsv is malformed: {error}"))?;
     assert!(
         !trend.is_empty(),
@@ -110,7 +137,10 @@ fn trend_is_monotone_and_ends_at_the_baseline() -> Result<(), String> {
 
 #[test]
 fn every_non_tier1_construct_fails_with_its_named_tiered_error() -> Result<(), String> {
-    let table = repo_file("docs/g0/g0-4-corpus/construct_table.tsv")?;
+    let table = repo_file(
+        "docs/g0/g0-4-corpus/construct_table.tsv",
+        MAX_CONSTRUCT_TABLE_BYTES,
+    )?;
     let mut audited = 0_usize;
     for line in table.lines() {
         if line.starts_with('#') || line.trim().is_empty() || line.starts_with("rank\t") {
@@ -170,14 +200,24 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     let corpus_path = std::env::var("FMN_TEX_CORPUS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| repo_path("corpus/tex_corpus.jsonl"));
-    let Ok(data) = std::fs::read_to_string(&corpus_path) else {
-        eprintln!(
-            "corpus not present at {} — recompute skipped (the pin-coupling \
-             test still enforces re-runs at pin bumps)",
-            corpus_path.display()
-        );
-        return Ok(());
+    let corpus_file = match File::open(&corpus_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "corpus not present at {} — recompute skipped (the pin-coupling \
+                 test still enforces re-runs at pin bumps)",
+                corpus_path.display()
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot read corpus at {}: {error}",
+                corpus_path.display()
+            ));
+        }
     };
+    let data = read_utf8_bounded(corpus_file, "coverage corpus", MAX_CORPUS_BYTES)?;
     let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
     let committed = committed_baseline()?;
     let mut current = Baseline {
@@ -287,9 +327,13 @@ fn bless(
     // Trend: append (or start) — keyed by rev; re-blessing the same rev
     // replaces its row.
     let trend_path = dir.join("trend.tsv");
-    let mut trend = match std::fs::read_to_string(&trend_path) {
-        Ok(text) => parse_trend_tsv(&text)
-            .map_err(|error| format!("existing trend is malformed: {error}"))?,
+    let mut trend = match File::open(&trend_path) {
+        Ok(file) => parse_trend_tsv(&read_utf8_bounded(
+            file,
+            "existing coverage trend",
+            MAX_TREND_BYTES,
+        )?)
+        .map_err(|error| format!("existing trend is malformed: {error}"))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(format!("cannot read existing trend: {error}")),
     };
@@ -341,6 +385,17 @@ fn bless(
     std::fs::write(dir.join("dashboard.md"), dashboard)
         .map_err(|error| format!("dashboard: {error}"))?;
     Ok(())
+}
+
+#[test]
+fn authority_reader_checks_the_limit_before_text_validation() {
+    let error = read_utf8_bounded(
+        std::io::Cursor::new(vec![0xff_u8; 9]),
+        "fixture authority",
+        8,
+    )
+    .expect_err("limit-plus-one input must be refused");
+    assert_eq!(error, "fixture authority exceeds the 8-byte resource limit");
 }
 
 fn track_of(construct: &str) -> &'static str {
