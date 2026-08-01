@@ -399,6 +399,10 @@ impl FileSystem for FailNthWriteFs {
         self.inner.read(path)
     }
 
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.inner.read_bounded(path, max_bytes)
+    }
+
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
         self.inner.write_atomic(path, bytes)
     }
@@ -513,6 +517,10 @@ impl FileSystem for ChunkProbeFs {
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         self.inner.read(path)
+    }
+
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.inner.read_bounded(path, max_bytes)
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {

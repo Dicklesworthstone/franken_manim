@@ -1359,7 +1359,7 @@ fn read_optional_config(
     source: impl Into<String>,
 ) -> Result<Option<ConfigDocument>, CliError> {
     let source = source.into();
-    match fs.read_to_string(path) {
+    match fs.read_to_string_bounded(path, fmn_config::yaml::Limits::DEFAULT.max_bytes) {
         Ok(text) => Ok(Some(ConfigDocument { source, text })),
         Err(FsError::NotFound { .. }) => Ok(None),
         Err(error) => Err(CliError::new(
@@ -3135,6 +3135,24 @@ mod tests {
             render(parse_args(["--config_file", "/cfg/broken.yml"]).expect("valid command"));
         let error = resolve_render_config(&fs, &command).expect_err("invalid explicit config");
         assert!(error.message().contains("/cfg/broken.yml"));
+    }
+
+    #[test]
+    fn config_byte_budget_is_enforced_before_utf8_decoding() {
+        let fs = VirtualFs::new();
+        let limit = fmn_config::yaml::Limits::DEFAULT.max_bytes;
+        fs.insert("/cfg/exact.yml", vec![b'#'; limit]);
+        let exact = read_optional_config(&fs, Path::new("/cfg/exact.yml"), "exact")
+            .expect("an exact-limit config is readable")
+            .expect("the config exists");
+        assert_eq!(exact.text.len(), limit);
+
+        fs.insert("/cfg/oversized.yml", vec![0xff; limit + 1]);
+        let error = read_optional_config(&fs, Path::new("/cfg/oversized.yml"), "oversized")
+            .expect_err("a limit-plus-one config is refused");
+        assert_eq!(error.exit_name(), "config");
+        assert!(error.message().contains("exceeds the 1048576-byte limit"));
+        assert!(!error.message().contains("not UTF-8"));
     }
 
     #[test]

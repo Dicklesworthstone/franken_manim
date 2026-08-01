@@ -229,6 +229,9 @@ impl FileSystem for ReadOnlyFs {
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         self.inner.read(path)
     }
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.inner.read_bounded(path, max_bytes)
+    }
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
         if self.frozen.load(Ordering::Relaxed) {
             return Err(Self::deny(path));
@@ -304,6 +307,9 @@ impl FileSystem for CrashingFs {
     }
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         self.inner.read(path)
+    }
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.inner.read_bounded(path, max_bytes)
     }
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
         if self.crash_writes.load(Ordering::Relaxed) {

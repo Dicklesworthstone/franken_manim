@@ -105,6 +105,13 @@ pub enum FsError {
         /// The offending path.
         path: PathBuf,
     },
+    /// The file exceeded a caller-supplied byte limit.
+    TooLarge {
+        /// The offending path.
+        path: PathBuf,
+        /// Maximum admitted file size in bytes.
+        limit: usize,
+    },
     /// Any other I/O failure.
     Io {
         /// The path being accessed.
@@ -136,8 +143,49 @@ impl fmt::Display for FsError {
         match self {
             Self::NotFound { path } => write!(f, "not found: {}", path.display()),
             Self::NotUtf8 { path } => write!(f, "not UTF-8: {}", path.display()),
+            Self::TooLarge { path, limit } => write!(
+                f,
+                "file at {} exceeds the {limit}-byte limit",
+                path.display()
+            ),
             Self::Io { path, err } => write!(f, "I/O failure at {}: {err}", path.display()),
         }
+    }
+}
+
+enum BoundedRead {
+    Complete(Vec<u8>),
+    LimitExceeded,
+}
+
+/// Read no more than `max_bytes` payload bytes plus one refusal sentinel.
+fn read_stream_bounded(
+    reader: &mut impl std::io::Read,
+    max_bytes: usize,
+) -> std::io::Result<BoundedRead> {
+    const CHUNK_BYTES: usize = 8 * 1024;
+
+    let mut bytes = Vec::with_capacity(max_bytes.min(CHUNK_BYTES));
+    let mut chunk = [0_u8; CHUNK_BYTES];
+    loop {
+        let room = max_bytes - bytes.len();
+        let target = if room == 0 {
+            &mut chunk[..1]
+        } else {
+            &mut chunk[..room.min(CHUNK_BYTES)]
+        };
+        let read = match reader.read(target) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            return Ok(BoundedRead::Complete(bytes));
+        }
+        if room == 0 {
+            return Ok(BoundedRead::LimitExceeded);
+        }
+        bytes.extend_from_slice(&target[..read]);
     }
 }
 
@@ -270,6 +318,16 @@ pub trait FileSystem: Send + Sync {
     /// [`FsError::NotFound`] or [`FsError::Io`].
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError>;
 
+    /// Read a regular file subject to an allocation-enforced byte limit.
+    ///
+    /// Implementations must accept a file of exactly `max_bytes`, refuse a
+    /// larger file with [`FsError::TooLarge`], and must not allocate or copy
+    /// the complete file before enforcing the limit.
+    ///
+    /// # Errors
+    /// [`FsError::NotFound`], [`FsError::TooLarge`], or [`FsError::Io`].
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError>;
+
     /// Write `bytes` to `path` atomically: the destination either keeps its
     /// old contents or holds exactly `bytes`, never a torn intermediate.
     /// Parent directories are created as needed.
@@ -367,6 +425,19 @@ pub trait FileSystem: Send + Sync {
             path: path.to_path_buf(),
         })
     }
+
+    /// Read a byte-limited file and decode it as UTF-8.
+    ///
+    /// The size limit is enforced before UTF-8 decoding.
+    ///
+    /// # Errors
+    /// [`FsError`] from the bounded read, or [`FsError::NotUtf8`].
+    fn read_to_string_bounded(&self, path: &Path, max_bytes: usize) -> Result<String, FsError> {
+        let bytes = self.read_bounded(path, max_bytes)?;
+        String::from_utf8(bytes).map_err(|_| FsError::NotUtf8 {
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 /// The host filesystem, via `std::fs`. The engine's production capability.
@@ -414,6 +485,47 @@ impl FileSystem for StdFs {
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         std::fs::read(path).map_err(|err| io_error(path, err))
+    }
+
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        // Reject ordinary non-file nodes before opening them. The opened
+        // handle is classified again so a completed replacement race cannot
+        // turn a bounded read into an unbounded special-node read.
+        let metadata = std::fs::metadata(path).map_err(|error| io_error(path, error))?;
+        if !metadata.is_file() {
+            return Err(io_error(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "bounded reads require a regular file",
+                ),
+            ));
+        }
+        if metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(FsError::TooLarge {
+                path: path.to_path_buf(),
+                limit: max_bytes,
+            });
+        }
+
+        let mut file = std::fs::File::open(path).map_err(|error| io_error(path, error))?;
+        let opened_metadata = file.metadata().map_err(|error| io_error(path, error))?;
+        if !opened_metadata.is_file() {
+            return Err(io_error(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "bounded reads require a regular file",
+                ),
+            ));
+        }
+        match read_stream_bounded(&mut file, max_bytes).map_err(|error| io_error(path, error))? {
+            BoundedRead::Complete(bytes) => Ok(bytes),
+            BoundedRead::LimitExceeded => Err(FsError::TooLarge {
+                path: path.to_path_buf(),
+                limit: max_bytes,
+            }),
+        }
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
@@ -949,6 +1061,10 @@ impl FileSystem for VirtualFs {
     }
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        self.read_bounded(path, usize::MAX)
+    }
+
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
         self.with_state(|state| {
             if let Some(blocker) = virtual_file_ancestor(state, path) {
                 return Err(io_error(
@@ -960,7 +1076,14 @@ impl FileSystem for VirtualFs {
                 ));
             }
             if let Some(bytes) = state.files.get(path) {
-                Ok(bytes.clone())
+                if bytes.len() > max_bytes {
+                    Err(FsError::TooLarge {
+                        path: path.to_path_buf(),
+                        limit: max_bytes,
+                    })
+                } else {
+                    Ok(bytes.clone())
+                }
             } else if virtual_node_kind(state, path) == Some(FsNodeKind::Directory) {
                 Err(io_error(
                     path,
@@ -1352,6 +1475,43 @@ mod tests {
             fs.read_to_string(Path::new("/a/c.txt")).unwrap(),
             "replaced"
         );
+    }
+
+    #[test]
+    fn bounded_stream_accepts_the_limit_and_reads_one_refusal_sentinel() {
+        let mut exact = std::io::Cursor::new(b"abc");
+        let BoundedRead::Complete(bytes) = read_stream_bounded(&mut exact, 3).unwrap() else {
+            panic!("an exact-limit stream must be complete");
+        };
+        assert_eq!(bytes, b"abc");
+        assert_eq!(exact.position(), 3);
+
+        let mut oversized = std::io::Cursor::new(b"abcde");
+        assert!(matches!(
+            read_stream_bounded(&mut oversized, 3).unwrap(),
+            BoundedRead::LimitExceeded
+        ));
+        assert_eq!(oversized.position(), 4, "only one sentinel byte is read");
+    }
+
+    #[test]
+    fn virtual_fs_enforces_bounded_reads_before_copy_or_utf8_decode() {
+        let fs = VirtualFs::new();
+        fs.insert("/exact", b"abc".to_vec());
+        fs.insert("/oversized", vec![0xff; 4]);
+
+        assert_eq!(
+            fs.read_to_string_bounded(Path::new("/exact"), 3).unwrap(),
+            "abc"
+        );
+        assert!(matches!(
+            fs.read_to_string_bounded(Path::new("/oversized"), 3),
+            Err(FsError::TooLarge { limit: 3, .. })
+        ));
+        assert!(matches!(
+            fs.read_to_string_bounded(Path::new("/oversized"), 4),
+            Err(FsError::NotUtf8 { .. })
+        ));
     }
 
     #[test]
