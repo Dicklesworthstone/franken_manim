@@ -104,7 +104,20 @@ use fmn_scene::journal::{
     AssetRead, CommandKind, CommandRecord, EffectClass, Entry, Journal, ReproBundle,
 };
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+// Run logs are bounded evidence records, not a general-purpose JSON surface.
+// These ceilings leave ample room for the scenario catalog while ensuring
+// malformed artifacts cannot drive input-sized diagnostics or allocations.
+const MAX_LOG_ARTIFACT_BYTES: usize = 1_048_576;
+const MAX_LOG_ARTIFACT_BYTES_U64: u64 = 1_048_576;
+const MAX_LOG_LINE_BYTES: usize = 65_536;
+const MAX_LOG_RECORDS: usize = 4_096;
+const MAX_LOG_NAME_BYTES: usize = 256;
+const MAX_LOG_FIELD_KEY_BYTES: usize = 128;
+const MAX_LOG_STRING_BYTES: usize = 16_384;
+const MAX_LOG_EVENT_FIELDS: usize = 128;
 
 /// Canonical span (event) names for the e2e log contract.
 ///
@@ -477,6 +490,44 @@ impl LogRecord {
         }
     }
 
+    fn validate_limits(&self) -> Result<(), String> {
+        if self.name().len() > MAX_LOG_NAME_BYTES {
+            return Err(format!(
+                "record name exceeds the {MAX_LOG_NAME_BYTES}-byte limit"
+            ));
+        }
+        let Self::Event { fields, .. } = self else {
+            return Ok(());
+        };
+        if fields.len() > MAX_LOG_EVENT_FIELDS {
+            return Err(format!("event has more than {MAX_LOG_EVENT_FIELDS} fields"));
+        }
+        for (index, (key, value)) in fields.iter().enumerate() {
+            if key.len() > MAX_LOG_FIELD_KEY_BYTES {
+                return Err(format!(
+                    "field {} key exceeds the {MAX_LOG_FIELD_KEY_BYTES}-byte limit",
+                    index + 1
+                ));
+            }
+            if fields
+                .iter()
+                .take(index)
+                .any(|(previous, _)| previous == key)
+            {
+                return Err(format!("duplicate event field key at field {}", index + 1));
+            }
+            if let FieldValue::Str(value) = value
+                && value.len() > MAX_LOG_STRING_BYTES
+            {
+                return Err(format!(
+                    "field {} string exceeds the {MAX_LOG_STRING_BYTES}-byte limit",
+                    index + 1
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Serialize as one NDJSON line: `{"seq":N,"kind":"event",...}`.
     /// Key order is defined (the schema is order-defined, like every other
     /// canonical form in the project); the parser relies on it.
@@ -515,16 +566,21 @@ impl LogRecord {
     /// Parse one NDJSON line back into a record (the inverse of
     /// [`LogRecord::to_line`], strict about the defined key order).
     fn parse(line: &str) -> Result<Self, String> {
+        if line.len() > MAX_LOG_LINE_BYTES {
+            return Err(format!(
+                "record exceeds the {MAX_LOG_LINE_BYTES}-byte line limit"
+            ));
+        }
         let mut p = LineParser::new(line);
         p.expect(b'{')?;
         p.key("seq")?;
         let seq = p.uint()?;
         p.expect(b',')?;
         p.key("kind")?;
-        let kind = p.string()?;
+        let kind = p.string(16, "record kind")?;
         p.expect(b',')?;
         p.key("name")?;
-        let name = p.string()?;
+        let name = p.string(MAX_LOG_NAME_BYTES, "record name")?;
         let record = match kind.as_str() {
             "event" => {
                 p.expect(b',')?;
@@ -532,18 +588,27 @@ impl LogRecord {
                 p.expect(b'{')?;
                 let mut fields = Vec::new();
                 loop {
-                    p.skip_ws();
                     match p.bytes.get(p.pos) {
                         Some(b'}') => {
                             p.pos += 1;
                             break;
                         }
                         Some(_) => {
-                            let key = p.string()?;
+                            if fields.len() == MAX_LOG_EVENT_FIELDS {
+                                return Err(format!(
+                                    "event has more than {MAX_LOG_EVENT_FIELDS} fields"
+                                ));
+                            }
+                            let key = p.string(MAX_LOG_FIELD_KEY_BYTES, "field key")?;
+                            if fields
+                                .iter()
+                                .any(|(previous, _): &(String, FieldValue)| previous == &key)
+                            {
+                                return Err("duplicate event field key".to_string());
+                            }
                             p.expect(b':')?;
                             let value = p.value()?;
                             fields.push((key, value));
-                            p.skip_ws();
                             match p.bytes.get(p.pos) {
                                 Some(b',') => p.pos += 1,
                                 Some(b'}') => {
@@ -574,6 +639,10 @@ impl LogRecord {
         if !p.at_end() {
             return Err("trailing bytes after record".to_string());
         }
+        record.validate_limits()?;
+        if record.to_line() != line {
+            return Err("record is not in canonical NDJSON form".to_string());
+        }
         Ok(record)
     }
 }
@@ -597,9 +666,9 @@ fn escape_json_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
-/// A minimal recursive parser for the NDJSON line schema this module
-/// emits — strict about the defined key order, tolerant of insignificant
-/// whitespace, and refusing anything the serializer cannot produce.
+/// A minimal parser for the NDJSON line schema this module
+/// emits — strict about the defined key order and refusing anything the
+/// serializer cannot produce.
 struct LineParser<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -613,14 +682,8 @@ impl<'a> LineParser<'a> {
         }
     }
 
-    fn skip_ws(&mut self) {
-        while matches!(self.bytes.get(self.pos), Some(b' ' | b'\t')) {
-            self.pos += 1;
-        }
-    }
-
     fn expect(&mut self, byte: u8) -> Result<(), String> {
-        self.skip_ws();
+        // ubs:ignore — compares public JSON syntax, not secret material
         if self.bytes.get(self.pos) == Some(&byte) {
             self.pos += 1;
             Ok(())
@@ -629,14 +692,13 @@ impl<'a> LineParser<'a> {
         }
     }
 
-    fn at_end(&mut self) -> bool {
-        self.skip_ws();
+    fn at_end(&self) -> bool {
         self.pos >= self.bytes.len()
     }
 
-    fn string(&mut self) -> Result<String, String> {
+    fn string(&mut self, max_bytes: usize, label: &str) -> Result<String, String> {
         self.expect(b'"')?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.bytes.len().saturating_sub(self.pos).min(max_bytes));
         loop {
             let Some(&b) = self.bytes.get(self.pos) else {
                 return Err("unterminated string".to_string());
@@ -655,9 +717,6 @@ impl<'a> LineParser<'a> {
                     match esc {
                         b'"' => out.push(b'"'),
                         b'\\' => out.push(b'\\'),
-                        b'/' => out.push(b'/'),
-                        b'b' => out.push(0x08),
-                        b'f' => out.push(0x0C),
                         b'n' => out.push(b'\n'),
                         b'r' => out.push(b'\r'),
                         b't' => out.push(b'\t'),
@@ -672,7 +731,13 @@ impl<'a> LineParser<'a> {
                         _ => return Err(format!("invalid escape \\{}", esc as char)),
                     }
                 }
+                0x00..=0x1f => {
+                    return Err("unescaped control byte in string".to_string());
+                }
                 _ => out.push(b),
+            }
+            if out.len() > max_bytes {
+                return Err(format!("{label} exceeds the {max_bytes}-byte limit"));
             }
         }
     }
@@ -693,15 +758,14 @@ impl<'a> LineParser<'a> {
     }
 
     fn key(&mut self, expected: &str) -> Result<(), String> {
-        let found = self.string()?;
+        let found = self.string(MAX_LOG_FIELD_KEY_BYTES, "object key")?;
         if found != expected {
-            return Err(format!("expected key {expected:?}, found {found:?}"));
+            return Err(format!("expected key {expected:?}"));
         }
         self.expect(b':')
     }
 
     fn uint(&mut self) -> Result<u64, String> {
-        self.skip_ws();
         let start = self.pos;
         while matches!(self.bytes.get(self.pos), Some(b'0'..=b'9')) {
             self.pos += 1;
@@ -709,17 +773,30 @@ impl<'a> LineParser<'a> {
         if start == self.pos {
             return Err(format!("expected unsigned integer at byte {start}"));
         }
-        let digits = std::str::from_utf8(&self.bytes[start..self.pos])
-            .map_err(|_| "invalid integer bytes".to_string())?;
+        let digit_count = self.pos - start;
+        if digit_count > 20 {
+            return Err("unsigned integer exceeds 20 digits".to_string());
+        }
+        // ubs:ignore — checks public decimal syntax, not secret material
+        if digit_count > 1 && self.bytes.get(start) == Some(&b'0') {
+            return Err("unsigned integer has a leading zero".to_string());
+        }
+        let digit_bytes = self
+            .bytes
+            .get(start..self.pos)
+            .ok_or_else(|| "invalid integer range".to_string())?;
+        let digits =
+            std::str::from_utf8(digit_bytes).map_err(|_| "invalid integer bytes".to_string())?;
         digits
             .parse::<u64>()
-            .map_err(|_| format!("integer {digits:?} out of range"))
+            .map_err(|_| "unsigned integer is out of range".to_string())
     }
 
     fn value(&mut self) -> Result<FieldValue, String> {
-        self.skip_ws();
         match self.bytes.get(self.pos) {
-            Some(b'"') => Ok(FieldValue::Str(self.string()?)),
+            Some(b'"') => Ok(FieldValue::Str(
+                self.string(MAX_LOG_STRING_BYTES, "field string")?,
+            )),
             Some(b't') => {
                 self.literal("true")?;
                 Ok(FieldValue::Bool(true))
@@ -734,7 +811,11 @@ impl<'a> LineParser<'a> {
     }
 
     fn literal(&mut self, lit: &str) -> Result<(), String> {
-        if self.bytes[self.pos..].starts_with(lit.as_bytes()) {
+        let tail = self
+            .bytes
+            .get(self.pos..)
+            .ok_or_else(|| "invalid literal range".to_string())?;
+        if tail.starts_with(lit.as_bytes()) {
             self.pos += lit.len();
             Ok(())
         } else {
@@ -1771,6 +1852,7 @@ impl Runner {
 
         // A golden-drift drill always evaluates goldens in check mode:
         // the injected corruption must never be blessable.
+        // ubs:ignore — compares a non-secret internal enum
         let golden_mode = if spec.regression == Some(RegressionKind::GoldenDrift) {
             Mode::Check
         } else {
@@ -1939,11 +2021,7 @@ impl Runner {
                 self.log_dir.display()
             )
         })?;
-        let mut body = String::new();
-        for record in ctx.records() {
-            body.push_str(&record.to_line());
-            body.push('\n');
-        }
+        let body = render_log_artifact(ctx.records())?;
         let path = self.log_dir.join(format!("{name}.ndjson"));
         std::fs::write(&path, body)
             .map_err(|error| format!("could not write {}: {error}", path.display()))?;
@@ -1981,31 +2059,18 @@ impl Runner {
                 failure.reasons
             ));
         }
-        let body = match std::fs::read_to_string(&failure.log) {
-            Ok(body) => body,
-            Err(error) => {
-                return Status::HarnessError(format!(
-                    "failure log {} unreadable: {error}",
-                    failure.log.display()
-                ));
-            }
+        let records = match read_log_artifact(&failure.log) {
+            Ok(records) => records,
+            Err(detail) => return Status::HarnessError(format!("failure log invalid: {detail}")),
         };
         let mut saw_class = false;
-        for (index, line) in body.lines().enumerate() {
-            match LogRecord::parse(line) {
-                Ok(LogRecord::Event { name, fields, .. }) if name == spans::HARNESS_BEGIN => {
-                    saw_class = fields.iter().any(|(k, v)| {
-                        k == "class" && *v == FieldValue::Str(class.tag().to_string())
-                    });
-                }
-                Ok(_) => {}
-                Err(detail) => {
-                    return Status::HarnessError(format!(
-                        "failure log {} line {} does not parse: {detail}",
-                        failure.log.display(),
-                        index + 1
-                    ));
-                }
+        for record in records {
+            if let LogRecord::Event { name, fields, .. } = record
+                && name == spans::HARNESS_BEGIN
+            {
+                saw_class = fields
+                    .iter()
+                    .any(|(k, v)| k == "class" && *v == FieldValue::Str(class.tag().to_string()));
             }
         }
         if !saw_class {
@@ -2046,25 +2111,53 @@ impl Runner {
     }
 }
 
-/// Validate an on-disk NDJSON run-log artifact against the declared
-/// schema: every line parses as a record, and sequence numbers are
-/// gapless from zero. The runner validates in-memory at
-/// [`Assertion::NdjsonSchema`] time; this is the same check for an
-/// artifact after the fact.
-///
-/// # Errors
-/// A description of the first schema violation, or of the I/O failure.
-pub fn validate_log_artifact(path: &Path) -> Result<(), String> {
-    let body = std::fs::read_to_string(path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let mut expected_seq = 0u64;
-    let mut records = 0u64;
-    for (index, line) in body.lines().enumerate() {
+fn parse_log_artifact_body(path: &Path, body: &str) -> Result<Vec<LogRecord>, String> {
+    if body.len() > MAX_LOG_ARTIFACT_BYTES {
+        return Err(format!(
+            "{}: artifact exceeds the {MAX_LOG_ARTIFACT_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    if body.is_empty() {
+        return Err(format!("{}: empty log artifact", path.display()));
+    }
+    if !body.ends_with('\n') {
+        return Err(format!(
+            "{}: log artifact must end with one LF",
+            path.display()
+        ));
+    }
+    if body.as_bytes().contains(&b'\r') {
+        return Err(format!(
+            "{}: log artifact contains a carriage return",
+            path.display()
+        ));
+    }
+
+    let content = body
+        .strip_suffix('\n')
+        .ok_or_else(|| format!("{}: log artifact must end with one LF", path.display()))?;
+    if content.is_empty() {
+        return Err(format!("{}: empty log artifact", path.display()));
+    }
+    let mut parsed = Vec::new();
+    for (index, line) in content.split('\n').enumerate() {
         if line.is_empty() {
-            continue;
+            return Err(format!(
+                "{} line {}: blank records are forbidden",
+                path.display(),
+                index + 1
+            ));
+        }
+        if parsed.len() == MAX_LOG_RECORDS {
+            return Err(format!(
+                "{}: artifact has more than {MAX_LOG_RECORDS} records",
+                path.display()
+            ));
         }
         let record = LogRecord::parse(line)
             .map_err(|detail| format!("{} line {}: {detail}", path.display(), index + 1))?;
+        let expected_seq = u64::try_from(parsed.len()).unwrap_or(u64::MAX);
         if record.seq() != expected_seq {
             return Err(format!(
                 "{} line {}: sequence {}, expected {expected_seq}",
@@ -2073,13 +2166,54 @@ pub fn validate_log_artifact(path: &Path) -> Result<(), String> {
                 record.seq()
             ));
         }
-        expected_seq += 1;
-        records += 1;
+        parsed.push(record);
     }
-    if records == 0 {
-        return Err(format!("{}: empty log artifact", path.display()));
+    Ok(parsed)
+}
+
+fn read_log_artifact(path: &Path) -> Result<Vec<LogRecord>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "{}: log artifact is not a regular file",
+            path.display()
+        ));
     }
-    Ok(())
+    if metadata.len() > MAX_LOG_ARTIFACT_BYTES_U64 {
+        return Err(format!(
+            "{}: artifact exceeds the {MAX_LOG_ARTIFACT_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LOG_ARTIFACT_BYTES_U64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    if bytes.len() > MAX_LOG_ARTIFACT_BYTES {
+        return Err(format!(
+            "{}: artifact exceeds the {MAX_LOG_ARTIFACT_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    let body = std::str::from_utf8(&bytes)
+        .map_err(|_| format!("{}: log artifact is not UTF-8", path.display()))?;
+    parse_log_artifact_body(path, body)
+}
+
+/// Validate an on-disk NDJSON run-log artifact against the declared
+/// canonical schema: the bounded file is UTF-8 with LF-only framing and a
+/// final LF, every nonempty line exactly matches the serializer grammar,
+/// and sequence numbers are gapless from zero. Artifacts are limited to 1
+/// MiB, 4,096 records, and 64 KiB per record. The runner validates the same
+/// contract in-memory at [`Assertion::NdjsonSchema`] time.
+///
+/// # Errors
+/// A description of the first schema violation, or of the I/O failure.
+pub fn validate_log_artifact(path: &Path) -> Result<(), String> {
+    read_log_artifact(path).map(|_| ())
 }
 
 /// Static drill validation: the corruption must have something to bite
@@ -2174,16 +2308,20 @@ fn corrupt_log_for_drill(ctx: &mut RunCtx, logs: &[LogExpect]) -> (String, bool)
     }
 }
 
-/// The NDJSON schema check: every captured record serializes to a line
-/// that parses back identically, and sequence numbers are gapless.
-fn check_ndjson_roundtrip(records: &[LogRecord]) -> Result<(), String> {
+fn render_log_artifact(records: &[LogRecord]) -> Result<String, String> {
+    if records.is_empty() {
+        return Err("log artifact has no records".to_string());
+    }
+    if records.len() > MAX_LOG_RECORDS {
+        return Err(format!(
+            "log artifact has more than {MAX_LOG_RECORDS} records"
+        ));
+    }
+    let mut body = String::new();
     for (index, record) in records.iter().enumerate() {
-        let line = record.to_line();
-        let parsed = LogRecord::parse(&line)
-            .map_err(|detail| format!("line {} failed to parse: {detail}", index + 1))?;
-        if parsed != *record {
-            return Err(format!("line {} did not round-trip", index + 1));
-        }
+        record
+            .validate_limits()
+            .map_err(|detail| format!("line {}: {detail}", index + 1))?;
         let expect_seq = u64::try_from(index).unwrap_or(u64::MAX);
         if record.seq() != expect_seq {
             return Err(format!(
@@ -2192,8 +2330,39 @@ fn check_ndjson_roundtrip(records: &[LogRecord]) -> Result<(), String> {
                 record.seq()
             ));
         }
+        let line = record.to_line();
+        if line.len() > MAX_LOG_LINE_BYTES {
+            return Err(format!(
+                "line {} exceeds the {MAX_LOG_LINE_BYTES}-byte limit",
+                index + 1
+            ));
+        }
+        let parsed = LogRecord::parse(&line)
+            .map_err(|detail| format!("line {} failed to parse: {detail}", index + 1))?;
+        if parsed != *record {
+            return Err(format!("line {} did not round-trip", index + 1));
+        }
+        let next_len = body
+            .len()
+            .checked_add(line.len())
+            .and_then(|len| len.checked_add(1))
+            .ok_or_else(|| "log artifact size overflow".to_string())?;
+        if next_len > MAX_LOG_ARTIFACT_BYTES {
+            return Err(format!(
+                "log artifact exceeds the {MAX_LOG_ARTIFACT_BYTES}-byte limit"
+            ));
+        }
+        body.push_str(&line);
+        body.push('\n');
     }
-    Ok(())
+    Ok(body)
+}
+
+/// The NDJSON schema check: every captured record serializes to a bounded,
+/// canonical line that parses back identically, and sequence numbers are
+/// gapless.
+fn check_ndjson_roundtrip(records: &[LogRecord]) -> Result<(), String> {
+    render_log_artifact(records).map(|_| ())
 }
 
 #[cfg(test)]
@@ -2211,7 +2380,7 @@ mod tests {
             LogEvent::new("preflight")
                 .field("fonts", 3u64)
                 .field("ready", true)
-                .field("label", "quo\\ted \"text\"\nline"),
+                .field("label", "quo\\ted \"text\"\nline\u{000b}—done"),
         );
         ctx.counter("frames_emitted", 12);
         ctx.event(LogEvent::new("empty.fields"));
@@ -2226,6 +2395,118 @@ mod tests {
             LogRecord::parse("{\"kind\":\"event\",\"seq\":0,\"name\":\"x\",\"fields\":{}}")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn ndjson_rejects_noncanonical_json_spellings() {
+        let lines = [
+            r#" {"seq":0,"kind":"counter","name":"x","value":1}"#,
+            r#"{"seq":00,"kind":"counter","name":"x","value":1}"#,
+            r#"{"seq":0, "kind":"counter","name":"x","value":1}"#,
+            r#"{"seq":0,"kind":"counter","name":"x\/y","value":1}"#,
+            r#"{"seq":0,"kind":"counter","name":"\u0078","value":1}"#,
+            r#"{"seq":0,"kind":"counter","name":"x","value":1} "#,
+            r#"{"seq":0,"kind":"counter","name":"x\b","value":1}"#,
+            r#"{"seq":0,"kind":"event","name":"x","fields":{"a":1,"a":2}}"#,
+            r#"{"seq":184467440737095516150,"kind":"counter","name":"x","value":1}"#,
+        ];
+        for line in lines {
+            assert!(
+                LogRecord::parse(line).is_err(),
+                "noncanonical line was accepted: {line}"
+            );
+        }
+
+        let raw_control = format!(
+            "{{\"seq\":0,\"kind\":\"counter\",\"name\":\"x{}\",\"value\":1}}",
+            '\u{0001}'
+        );
+        assert!(LogRecord::parse(&raw_control).is_err());
+    }
+
+    #[test]
+    fn ndjson_enforces_line_and_field_limits_before_acceptance() {
+        let oversized_line = "x".repeat(MAX_LOG_LINE_BYTES + 1);
+        assert!(LogRecord::parse(&oversized_line).is_err());
+
+        let oversized_name = "n".repeat(MAX_LOG_NAME_BYTES + 1);
+        let line =
+            format!("{{\"seq\":0,\"kind\":\"counter\",\"name\":\"{oversized_name}\",\"value\":1}}");
+        assert!(LogRecord::parse(&line).is_err());
+
+        let oversized_value = "v".repeat(MAX_LOG_STRING_BYTES + 1);
+        let line = format!(
+            "{{\"seq\":0,\"kind\":\"event\",\"name\":\"x\",\"fields\":{{\"value\":\"{oversized_value}\"}}}}"
+        );
+        assert!(LogRecord::parse(&line).is_err());
+
+        let mut fields = String::new();
+        for index in 0..=MAX_LOG_EVENT_FIELDS {
+            if index > 0 {
+                fields.push(',');
+            }
+            fields.push_str(&format!("\"f{index}\":{index}"));
+        }
+        let line =
+            format!("{{\"seq\":0,\"kind\":\"event\",\"name\":\"x\",\"fields\":{{{fields}}}}}");
+        assert!(LogRecord::parse(&line).is_err());
+
+        let mut ctx = RunCtx::new(1);
+        ctx.event(LogEvent::new("duplicate").field("x", 1u64).field("x", 2u64));
+        assert!(check_ndjson_roundtrip(records(&ctx)).is_err());
+    }
+
+    #[test]
+    fn ndjson_artifact_framing_is_canonical_and_bounded() {
+        let path = Path::new("run.ndjson");
+        let first = LogRecord::Counter {
+            seq: 0,
+            name: "frames".to_string(),
+            value: 1,
+        }
+        .to_line();
+        let second = LogRecord::Counter {
+            seq: 1,
+            name: "frames".to_string(),
+            value: 2,
+        }
+        .to_line();
+        let canonical = format!("{first}\n{second}\n");
+        assert_eq!(
+            parse_log_artifact_body(path, &canonical)
+                .expect("canonical artifact parses")
+                .len(),
+            2
+        );
+
+        let malformed = [
+            canonical.trim_end_matches('\n').to_string(),
+            canonical.replace('\n', "\r\n"),
+            format!("{first}\n\n{second}\n"),
+            "\n".to_string(),
+            format!("{first}\n{first}\n"),
+        ];
+        for body in malformed {
+            assert!(
+                parse_log_artifact_body(path, &body).is_err(),
+                "malformed artifact was accepted"
+            );
+        }
+
+        let oversized = "x".repeat(MAX_LOG_ARTIFACT_BYTES + 1);
+        assert!(parse_log_artifact_body(path, &oversized).is_err());
+
+        let mut too_many = String::new();
+        for seq in 0..=MAX_LOG_RECORDS {
+            let record = LogRecord::Counter {
+                seq: u64::try_from(seq).unwrap_or(u64::MAX),
+                name: "n".to_string(),
+                value: 0,
+            };
+            too_many.push_str(&record.to_line());
+            too_many.push('\n');
+        }
+        assert!(parse_log_artifact_body(path, &too_many).is_err());
     }
 
     #[test]
