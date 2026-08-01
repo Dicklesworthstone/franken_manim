@@ -12,8 +12,8 @@ use fmn_mobject::{Mobject, Stage};
 use fmn_studio::{
     CapabilityToken, DebugLayerSet, DebugOverlaySnapshot, FrameEncoding, FrameHub, FramePayload,
     FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, NodeOverlay,
-    ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol, TileOverlay, TuiError,
-    TuiLimits, commit_timeline_frame, preview_timeline_frame,
+    ProtocolLimits, ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol,
+    TileOverlay, TuiError, TuiLimits, commit_timeline_frame, preview_timeline_frame,
 };
 
 #[test]
@@ -116,6 +116,49 @@ fn frame_hub_rejects_invalid_or_mismatched_png_without_history_mutation() {
         .expect_err("the host byte ceiling must precede PNG codec work");
     assert!(error.to_string().contains("host budget"));
     assert!(size_first.latest().is_none());
+}
+
+#[test]
+fn frame_hub_binds_png_decode_pixels_to_session_frame_budget() {
+    let width = 64u32;
+    let height = 64u32;
+    let rgba = vec![0; 64 * 64 * 4];
+    let png = encode_rgba8(width, height, &rgba, CompressionLevel::Fast);
+    assert!(
+        png.len() < rgba.len(),
+        "the fixture must exercise compression"
+    );
+    let stream = FrameStream {
+        scene: "Demo".to_owned(),
+        frame_index: 11,
+        width,
+        height,
+        stride: 0,
+        encoding: FrameEncoding::Png,
+        payload: FramePayload::Pipe {
+            digest: sha256(&png),
+            bytes: png.clone(),
+        },
+    };
+    let hub = FrameHub::new(1, png.len()).unwrap();
+    let compressed_only = ProtocolLimits {
+        max_frame_bytes: png.len(),
+        ..ProtocolLimits::default()
+    };
+    let error = hub
+        .publish(&stream, compressed_only)
+        .expect_err("decoded RGBA must stay within the negotiated frame budget");
+    assert!(error.to_string().contains("pixel budget"));
+    assert!(hub.latest().is_none());
+
+    let exact_decoded = ProtocolLimits {
+        max_frame_bytes: rgba.len(),
+        ..ProtocolLimits::default()
+    };
+    let published = hub
+        .publish(&stream, exact_decoded)
+        .expect("the exact decoded RGBA boundary is admitted");
+    assert_eq!(published.publication_sequence, 0);
 }
 
 #[test]

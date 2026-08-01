@@ -282,10 +282,13 @@ impl FrameHub {
                 if bytes.len() > self.max_png_bytes {
                     return Err(HostError::Frame("preview PNG exceeds the host budget"));
                 }
+                let declared_pixels = u64::from(frame.width) * u64::from(frame.height);
+                let decoded_pixel_limit =
+                    u64::try_from(limits.max_frame_bytes / 4).unwrap_or(u64::MAX);
                 let decoded = decode_png(
                     bytes,
                     &PngLimits {
-                        max_pixels: u64::from(frame.width) * u64::from(frame.height),
+                        max_pixels: declared_pixels.min(decoded_pixel_limit),
                         ..PngLimits::default()
                     },
                 )?;
