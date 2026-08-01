@@ -467,13 +467,7 @@ impl InspectorSnapshot {
             if index != 0 {
                 out.push(',');
             }
-            push_inspector_node(&mut out, node);
-            if out.len() > limits.max_json_bytes {
-                return Err(InspectError::JsonLimit {
-                    limit: limits.max_json_bytes,
-                    needed: out.len(),
-                });
-            }
+            push_inspector_node(&mut out, node, limits.max_json_bytes)?;
         }
         out.push_str("]}");
         if out.len() > limits.max_json_bytes {
@@ -734,13 +728,7 @@ impl DebugOverlaySnapshot {
             if index != 0 {
                 out.push(',');
             }
-            push_overlay_node(&mut out, node);
-            if out.len() > limits.max_json_bytes {
-                return Err(InspectError::JsonLimit {
-                    limit: limits.max_json_bytes,
-                    needed: out.len(),
-                });
-            }
+            push_overlay_node(&mut out, node, limits.max_json_bytes)?;
         }
         out.push_str("]}");
         if out.len() > limits.max_json_bytes {
@@ -864,15 +852,19 @@ fn winding(points: &[[f64; 3]]) -> WindingDirection {
     }
 }
 
-fn push_inspector_node(out: &mut String, node: &InspectorNode) {
+fn push_inspector_node(
+    out: &mut String,
+    node: &InspectorNode,
+    max_bytes: usize,
+) -> Result<(), InspectError> {
     out.push_str("{\"id\":");
     push_usize(out, node.id);
     out.push_str(",\"root\":");
     push_bool(out, node.root);
     out.push_str(",\"parents\":");
-    push_usize_array(out, &node.parents);
+    push_usize_array(out, &node.parents, max_bytes)?;
     out.push_str(",\"children\":");
-    push_usize_array(out, &node.children);
+    push_usize_array(out, &node.children, max_bytes)?;
     out.push_str(",\"pins\":");
     push_usize(out, node.pins);
     out.push_str(",\"z_index\":");
@@ -891,7 +883,7 @@ fn push_inspector_node(out: &mut String, node: &InspectorNode) {
             out.push(',');
         }
         out.push_str("{\"name\":\"");
-        push_json_escaped(out, &field.name);
+        push_json_escaped(out, &field.name, max_bytes)?;
         out.push_str("\",\"width\":");
         push_usize(out, field.width);
         out.push_str(",\"revision\":");
@@ -904,8 +896,10 @@ fn push_inspector_node(out: &mut String, node: &InspectorNode) {
                 out.push(',');
             }
             push_f32(out, value);
+            require_json_budget(out, max_bytes)?;
         }
         out.push_str("]}");
+        require_json_budget(out, max_bytes)?;
     }
     out.push_str("]},\"uniforms\":");
     push_uniforms(out, node.uniforms);
@@ -927,7 +921,7 @@ fn push_inspector_node(out: &mut String, node: &InspectorNode) {
             out.push_str(",\"source_bytes\":");
             push_usize(out, span.source_bytes);
             out.push_str(",\"excerpt\":\"");
-            push_json_escaped(out, &span.excerpt);
+            push_json_escaped(out, &span.excerpt, max_bytes)?;
             out.push_str("\",\"excerpt_truncated\":");
             push_bool(out, span.excerpt_truncated);
             out.push('}');
@@ -935,9 +929,14 @@ fn push_inspector_node(out: &mut String, node: &InspectorNode) {
         None => out.push_str("null"),
     }
     out.push('}');
+    require_json_budget(out, max_bytes)
 }
 
-fn push_overlay_node(out: &mut String, node: &NodeOverlay) {
+fn push_overlay_node(
+    out: &mut String,
+    node: &NodeOverlay,
+    max_bytes: usize,
+) -> Result<(), InspectError> {
     out.push_str("{\"id\":");
     push_usize(out, node.id);
     out.push_str(",\"total_points\":");
@@ -948,6 +947,7 @@ fn push_overlay_node(out: &mut String, node: &NodeOverlay) {
             out.push(',');
         }
         push_vec3(out, point);
+        require_json_budget(out, max_bytes)?;
     }
     out.push_str("],\"bounds\":");
     match &node.bounds {
@@ -976,6 +976,7 @@ fn push_overlay_node(out: &mut String, node: &NodeOverlay) {
         None => out.push_str("null"),
     }
     out.push('}');
+    require_json_budget(out, max_bytes)
 }
 
 fn push_uniforms(out: &mut String, uniforms: UniformSnapshot) {
@@ -1044,15 +1045,21 @@ fn push_u32_array<const N: usize>(out: &mut String, values: &[u32; N]) {
     out.push(']');
 }
 
-fn push_usize_array(out: &mut String, values: &[usize]) {
+fn push_usize_array(
+    out: &mut String,
+    values: &[usize],
+    max_bytes: usize,
+) -> Result<(), InspectError> {
     out.push('[');
     for (index, value) in values.iter().enumerate() {
         if index != 0 {
             out.push(',');
         }
         push_usize(out, *value);
+        require_json_budget(out, max_bytes)?;
     }
     out.push(']');
+    require_json_budget(out, max_bytes)
 }
 
 fn push_optional_f64(out: &mut String, value: Option<f64>) {
@@ -1086,7 +1093,7 @@ fn push_bool(out: &mut String, value: bool) {
     out.push_str(if value { "true" } else { "false" });
 }
 
-fn push_json_escaped(out: &mut String, raw: &str) {
+fn push_json_escaped(out: &mut String, raw: &str, max_bytes: usize) -> Result<(), InspectError> {
     for character in raw.chars() {
         match character {
             '"' => out.push_str("\\\""),
@@ -1099,6 +1106,19 @@ fn push_json_escaped(out: &mut String, raw: &str) {
             }
             character => out.push(character),
         }
+        require_json_budget(out, max_bytes)?;
+    }
+    Ok(())
+}
+
+fn require_json_budget(out: &str, max_bytes: usize) -> Result<(), InspectError> {
+    if out.len() > max_bytes {
+        Err(InspectError::JsonLimit {
+            limit: max_bytes,
+            needed: out.len(),
+        })
+    } else {
+        Ok(())
     }
 }
 

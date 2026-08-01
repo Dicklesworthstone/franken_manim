@@ -10,8 +10,8 @@ use fmn_hash::sha256;
 use fmn_mobject::{Mobject, Stage};
 use fmn_studio::{
     CapabilityToken, DebugLayerSet, DebugOverlaySnapshot, FrameEncoding, FrameHub, FramePayload,
-    FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, ScrubMode,
-    SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol, TileOverlay, TuiLimits,
+    FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, NodeOverlay,
+    ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol, TileOverlay, TuiLimits,
     commit_timeline_frame, preview_timeline_frame,
 };
 
@@ -162,6 +162,84 @@ fn overlay_json_budget_stops_during_tile_encoding() {
     assert_eq!(first_overrun.0, 256);
     assert!(first_overrun.1 > first_overrun.0);
     assert_eq!(first_overrun, overrun(1_000));
+}
+
+#[test]
+fn inspector_json_budget_stops_within_record_values() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+    stage.add_to_scene(root).unwrap();
+    let limits = InspectorLimits {
+        max_json_bytes: 4 * 1024,
+        ..InspectorLimits::default()
+    };
+    let template = InspectorSnapshot::capture(&stage, &SpanRegistry::new(), limits).unwrap();
+    assert!(template.to_json(limits).is_ok());
+    let overrun = |value_count| {
+        let mut inspection = template.clone();
+        let field = &mut inspection.nodes[0].fields[0];
+        field.values = vec![f32::MAX; value_count];
+        field.total_values = value_count;
+        match inspection.to_json(limits).unwrap_err() {
+            InspectError::JsonLimit { limit, needed } => (limit, needed),
+            error => panic!("unexpected inspector encoding error: {error}"),
+        }
+    };
+
+    let first_overrun = overrun(256);
+    assert_eq!(first_overrun.0, limits.max_json_bytes);
+    assert!(first_overrun.1 > first_overrun.0);
+    let trailing_overrun = overrun(1_000);
+    assert_eq!(first_overrun.0, trailing_overrun.0);
+    assert_eq!(
+        first_overrun.1.abs_diff(trailing_overrun.1),
+        256_usize
+            .to_string()
+            .len()
+            .abs_diff(1_000_usize.to_string().len())
+    );
+}
+
+#[test]
+fn overlay_json_budget_stops_within_control_points() {
+    let limits = InspectorLimits {
+        max_json_bytes: 4 * 1024,
+        ..InspectorLimits::default()
+    };
+    let snapshot = |point_count| DebugOverlaySnapshot {
+        version: 1,
+        layers: DebugLayerSet::CONTROL_POINTS,
+        tiles: Vec::new(),
+        nodes: vec![NodeOverlay {
+            id: 0,
+            control_points: vec![[f64::MAX; 3]; point_count],
+            total_points: point_count,
+            bounds: None,
+            winding: None,
+            center_z: None,
+            z_index: None,
+            depth_test: None,
+        }],
+        truncated: false,
+    };
+    assert!(snapshot(1).to_json(limits).is_ok());
+    let overrun = |point_count| match snapshot(point_count).to_json(limits).unwrap_err() {
+        InspectError::JsonLimit { limit, needed } => (limit, needed),
+        error => panic!("unexpected overlay encoding error: {error}"),
+    };
+
+    let first_overrun = overrun(64);
+    assert_eq!(first_overrun.0, limits.max_json_bytes);
+    assert!(first_overrun.1 > first_overrun.0);
+    let trailing_overrun = overrun(1_000);
+    assert_eq!(first_overrun.0, trailing_overrun.0);
+    assert_eq!(
+        first_overrun.1.abs_diff(trailing_overrun.1),
+        64_usize
+            .to_string()
+            .len()
+            .abs_diff(1_000_usize.to_string().len())
+    );
 }
 
 #[test]
