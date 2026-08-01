@@ -851,7 +851,7 @@ fn classify<'a>(
 /// tangent at the shared endpoint.
 fn departure_tangent(edges: &[AtomicEdge], half_edge: usize, vertex: usize) -> Point {
     let edge = edges[half_edge / 2];
-    if half_edge % 2 == 0 {
+    if half_edge.is_multiple_of(2) {
         debug_assert!(edge.from == vertex);
         sub(edge.quad.p1, edge.quad.p0)
     } else {
@@ -1008,7 +1008,11 @@ impl CurveGraph<'_> {
 
     fn next_boundary(&self, current: usize) -> Option<usize> {
         let edge = self.edges[current / 2];
-        let destination = if current % 2 == 0 { edge.to } else { edge.from };
+        let destination = if current.is_multiple_of(2) {
+            edge.to
+        } else {
+            edge.from
+        };
         let twin = current ^ 1;
         let outgoing = &self.outgoing[destination];
         let twin_position = outgoing.iter().position(|&edge| edge == twin)?;
