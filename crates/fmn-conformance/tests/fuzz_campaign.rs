@@ -37,6 +37,8 @@
 //!   corpus for human review and commit (the rig never commits and never
 //!   deletes; stale files are reported).
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -46,9 +48,39 @@ use fmn_conformance::fuzz::{
 
 // ---------------------------------------------------------------- shared
 
+const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+const MAX_CODEC_FIXTURE_BYTES: u64 = 1 << 21;
+
 /// The committed corpus root.
 fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fuzz_corpus")
+}
+
+fn read_bytes_bounded(reader: impl Read, label: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("reading {label}: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(format!(
+            "reading {label}: file exceeds the {max_bytes}-byte resource limit"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_utf8_bounded(reader: impl Read, label: &str, max_bytes: u64) -> Result<String, String> {
+    String::from_utf8(read_bytes_bounded(reader, label, max_bytes)?)
+        .map_err(|error| format!("reading {label}: not UTF-8: {error}"))
+}
+
+fn read_manifest(path: &Path) -> String {
+    let label = path.display().to_string();
+    let file = File::open(path)
+        .unwrap_or_else(|error| std::panic::panic_any(format!("opening {label}: {error}")));
+    read_utf8_bounded(file, &label, MAX_MANIFEST_BYTES)
+        .unwrap_or_else(|error| std::panic::panic_any(error))
 }
 
 /// Extract a stable outcome-class label from a typed error's `Debug`
@@ -76,7 +108,11 @@ fn codec_fixture(rel: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../fmn-codec/tests/fixtures")
         .join(rel);
-    std::fs::read(&path).expect("codec fixture is committed")
+    let label = path.display().to_string();
+    let file = File::open(&path)
+        .unwrap_or_else(|error| std::panic::panic_any(format!("opening {label}: {error}")));
+    read_bytes_bounded(file, &label, MAX_CODEC_FIXTURE_BYTES)
+        .unwrap_or_else(|error| std::panic::panic_any(error))
 }
 
 // ---------------------------------------------------------------- (a) TTF
@@ -1307,6 +1343,22 @@ fn run_checked(target: &dyn Target, spec: &CampaignSpec, cases: u32) -> fuzz::Ca
 
 // ---------------------------------------------------------------- tests
 
+#[test]
+fn authority_reader_checks_limit_before_text_validation() {
+    let oversized_invalid = std::io::Cursor::new(vec![0xff_u8; 9]);
+    let result = read_utf8_bounded(oversized_invalid, "synthetic authority", 8);
+    assert!(
+        matches!(&result, Err(error) if error.contains("exceeds the 8-byte resource limit") && !error.contains("UTF-8")),
+        "oversized input was not rejected before text validation: {result:?}"
+    );
+
+    assert_eq!(
+        read_utf8_bounded(std::io::Cursor::new(b"12345678"), "exact authority", 8),
+        Ok("12345678".to_owned()),
+        "an authority exactly at the byte limit must remain readable"
+    );
+}
+
 /// Driver determinism: identical (seed, case count) ⇒ identical reports,
 /// down to the interesting-input bytes. This is what makes the committed
 /// corpus checkable at all.
@@ -1334,8 +1386,7 @@ fn ci_campaign_matches_manifest_and_corpus() {
         return;
     }
     let manifest_path = corpus_root().join("MANIFEST.tsv");
-    let manifest_text = std::fs::read_to_string(&manifest_path)
-        .expect("fixtures/fuzz_corpus/MANIFEST.tsv is committed");
+    let manifest_text = read_manifest(&manifest_path);
     let manifest = fuzz::parse_manifest(&manifest_text).expect("manifest parses");
     assert_eq!(
         manifest.pending,
@@ -1437,8 +1488,8 @@ fn full_campaign_is_the_campaign_authority() {
         return;
     }
 
-    let manifest_text = std::fs::read_to_string(corpus_root().join("MANIFEST.tsv"))
-        .expect("fixtures/fuzz_corpus/MANIFEST.tsv is committed");
+    let manifest_path = corpus_root().join("MANIFEST.tsv");
+    let manifest_text = read_manifest(&manifest_path);
     let manifest = fuzz::parse_manifest(&manifest_text).expect("manifest parses");
     assert_eq!(
         manifest.rows.len(),
