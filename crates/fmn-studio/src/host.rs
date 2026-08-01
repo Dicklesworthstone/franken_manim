@@ -787,7 +787,8 @@ impl HostHandler {
     }
 
     fn stream_frames(&self, stream: &mut TcpStream, now: Duration) -> Result<(), HostError> {
-        if now.saturating_sub(lock(&self.auth).started) >= self.config.session_ttl {
+        let started = lock(&self.auth).started;
+        if now.saturating_sub(started) >= self.config.session_ttl {
             return Err(HostError::Expired);
         }
         let head = format!(
@@ -796,23 +797,23 @@ impl HostHandler {
         stream.write_all(head.as_bytes())?;
         let mut last = None;
         for _ in 0..self.config.max_stream_frames {
-            let Some(frame) = self
-                .frames
-                .wait_after(last, self.config.stream_idle_timeout)
-            else {
+            let elapsed = self.clock.monotonic().saturating_sub(started);
+            if elapsed >= self.config.session_ttl {
+                break;
+            }
+            let wait_timeout = self
+                .config
+                .stream_idle_timeout
+                .min(self.config.session_ttl - elapsed);
+            let Some(frame) = self.frames.wait_after(last, wait_timeout) else {
                 break;
             };
+            if self.clock.monotonic().saturating_sub(started) >= self.config.session_ttl {
+                break;
+            }
             stream.write_all(&FrameHub::multipart_part(&frame))?;
             stream.flush()?;
             last = Some(frame.publication_sequence);
-            if self
-                .clock
-                .monotonic()
-                .saturating_sub(lock(&self.auth).started)
-                >= self.config.session_ttl
-            {
-                break;
-            }
         }
         stream.write_all(&FrameHub::multipart_end())?;
         stream.flush()?;
@@ -1846,6 +1847,69 @@ mod tests {
             );
             server.join().unwrap();
         });
+    }
+
+    #[test]
+    fn multipart_stream_does_not_emit_a_frame_after_session_expiry() {
+        let (session, _) = test_session_with_protocol_limits(ProtocolLimits::default());
+        let fake_clock = Arc::new(FakeClock::new());
+        let clock: Arc<dyn Clock> = fake_clock.clone();
+        let frames = FrameHub::new(1, 1024).unwrap();
+        let config = StudioHostConfig {
+            session_ttl: Duration::from_secs(1),
+            stream_idle_timeout: Duration::from_secs(5),
+            max_frame_history: 1,
+            max_png_bytes: 1024,
+            max_stream_frames: 1,
+            ..StudioHostConfig::default()
+        };
+        let handler = HostHandler {
+            session,
+            frames: frames.clone(),
+            clock,
+            config,
+            authority: "127.0.0.1:42".to_owned(),
+            localhost_authority: "localhost:42".to_owned(),
+            auth: Arc::new(Mutex::new(AuthState {
+                token: CapabilityToken::new([0x66; TOKEN_BYTES]).unwrap(),
+                started: Duration::ZERO,
+                requests: VecDeque::new(),
+            })),
+        };
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+
+        std::thread::scope(|scope| {
+            let stream = scope.spawn(move || handler.stream_frames(&mut server, Duration::ZERO));
+            fake_clock.advance(Duration::from_secs(2));
+            let rgba = vec![0, 0, 0, 255];
+            frames
+                .publish(
+                    &FrameStream {
+                        scene: "Demo".to_owned(),
+                        frame_index: 7,
+                        width: 1,
+                        height: 1,
+                        stride: 4,
+                        encoding: FrameEncoding::Rgba8,
+                        payload: FramePayload::Pipe {
+                            digest: sha256(&rgba),
+                            bytes: rgba,
+                        },
+                    },
+                    ProtocolLimits::default(),
+                )
+                .unwrap();
+            assert!(stream.join().unwrap().is_ok());
+        });
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(find_bytes(&response, b"Content-Type: image/png").is_none());
+        assert!(response.ends_with(&FrameHub::multipart_end()));
     }
 
     #[test]
