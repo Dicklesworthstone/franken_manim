@@ -99,7 +99,7 @@
 //! expectations stay greppable across the suite.
 
 use crate::golden::{GoldenStore, Mode, Scope, Verdict};
-use fmn_hash::sha256::sha256;
+use fmn_hash::{serial::Limits as SerialLimits, sha256::sha256};
 use fmn_scene::journal::{
     AssetRead, CommandKind, CommandRecord, EffectClass, Entry, Journal, ReproBundle,
 };
@@ -111,7 +111,6 @@ use std::path::{Path, PathBuf};
 // These ceilings leave ample room for the scenario catalog while ensuring
 // malformed artifacts cannot drive input-sized diagnostics or allocations.
 const MAX_LOG_ARTIFACT_BYTES: usize = 1_048_576;
-const MAX_LOG_ARTIFACT_BYTES_U64: u64 = 1_048_576;
 const MAX_LOG_LINE_BYTES: usize = 65_536;
 const MAX_LOG_RECORDS: usize = 4_096;
 const MAX_LOG_NAME_BYTES: usize = 256;
@@ -2080,14 +2079,13 @@ impl Runner {
                 class.tag()
             ));
         }
-        let bytes = match std::fs::read(&failure.repro) {
+        let bytes = match read_bounded_file(
+            &failure.repro,
+            SerialLimits::DEFAULT.max_total,
+            "repro bundle",
+        ) {
             Ok(bytes) => bytes,
-            Err(error) => {
-                return Status::HarnessError(format!(
-                    "repro bundle {} unreadable: {error}",
-                    failure.repro.display()
-                ));
-            }
+            Err(detail) => return Status::HarnessError(detail),
         };
         let bundle = match ReproBundle::from_bytes(&bytes) {
             Ok(bundle) => bundle,
@@ -2171,33 +2169,40 @@ fn parse_log_artifact_body(path: &Path, body: &str) -> Result<Vec<LogRecord>, St
     Ok(parsed)
 }
 
-fn read_log_artifact(path: &Path) -> Result<Vec<LogRecord>, String> {
+fn read_bounded_file(path: &Path, max_bytes: usize, kind: &str) -> Result<Vec<u8>, String> {
+    let max_bytes_u64 = u64::try_from(max_bytes)
+        .map_err(|_| format!("{kind} byte limit is not representable as u64"))?;
     let metadata = std::fs::metadata(path)
-        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+        .map_err(|error| format!("could not inspect {kind} {}: {error}", path.display()))?;
     if !metadata.is_file() {
-        return Err(format!(
-            "{}: log artifact is not a regular file",
-            path.display()
-        ));
+        return Err(format!("{}: {kind} is not a regular file", path.display()));
     }
-    if metadata.len() > MAX_LOG_ARTIFACT_BYTES_U64 {
+    if metadata.len() > max_bytes_u64 {
         return Err(format!(
-            "{}: artifact exceeds the {MAX_LOG_ARTIFACT_BYTES}-byte limit",
-            path.display()
+            "{}: {kind} exceeds the {max_bytes}-byte limit",
+            path.display(),
         ));
     }
     let file = std::fs::File::open(path)
-        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+        .map_err(|error| format!("could not open {kind} {}: {error}", path.display()))?;
+    let read_limit = max_bytes_u64
+        .checked_add(1)
+        .ok_or_else(|| format!("{kind} byte limit cannot be incremented"))?;
     let mut bytes = Vec::new();
-    file.take(MAX_LOG_ARTIFACT_BYTES_U64 + 1)
+    file.take(read_limit)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    if bytes.len() > MAX_LOG_ARTIFACT_BYTES {
+        .map_err(|error| format!("could not read {kind} {}: {error}", path.display()))?;
+    if bytes.len() > max_bytes {
         return Err(format!(
-            "{}: artifact exceeds the {MAX_LOG_ARTIFACT_BYTES}-byte limit",
-            path.display()
+            "{}: {kind} exceeds the {max_bytes}-byte limit",
+            path.display(),
         ));
     }
+    Ok(bytes)
+}
+
+fn read_log_artifact(path: &Path) -> Result<Vec<LogRecord>, String> {
+    let bytes = read_bounded_file(path, MAX_LOG_ARTIFACT_BYTES, "log artifact")?;
     let body = std::str::from_utf8(&bytes)
         .map_err(|_| format!("{}: log artifact is not UTF-8", path.display()))?;
     parse_log_artifact_body(path, body)
@@ -2507,6 +2512,27 @@ mod tests {
             too_many.push('\n');
         }
         assert!(parse_log_artifact_body(path, &too_many).is_err());
+    }
+
+    #[test]
+    fn bounded_file_reader_checks_type_and_size_before_consuming() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("Cargo.toml");
+        let size = usize::try_from(
+            std::fs::metadata(&path)
+                .expect("crate manifest metadata")
+                .len(),
+        )
+        .expect("crate manifest size fits usize");
+        assert!(size > 0);
+        assert_eq!(
+            read_bounded_file(&path, size, "probe")
+                .expect("file at the exact limit reads")
+                .len(),
+            size
+        );
+        assert!(read_bounded_file(&path, size.saturating_sub(1), "probe").is_err());
+        assert!(read_bounded_file(&root, size, "probe").is_err());
     }
 
     #[test]
