@@ -11,7 +11,7 @@ use fmn_scene::{
     CaptureReason, EventDispatcher, EventError, EventListener, EventPayload, EventPropagation,
     EventTarget, EventType, HoldDecision, HoldKind, InputEvent, IntegrationError,
     InteractiveAction, InteractiveClipboard, InteractiveScene, Journal, Key, Modifiers,
-    MouseButton, REFERENCE_KEYBOARD_MAP, RuntimeConfig, Scene, SceneSink,
+    MouseButton, REFERENCE_KEYBOARD_MAP, RuntimeConfig, Scene, SceneError, SceneSink,
 };
 
 fn input(sequence: u64, payload: EventPayload) -> InputEvent {
@@ -768,6 +768,60 @@ fn cloneable_host_inbox_enters_the_same_serial_boundary() {
     assert_eq!(
         sink.packets[0].1.materialize_stage().get_center(mob)[0],
         3.0
+    );
+}
+
+#[test]
+fn post_play_dispatch_failure_still_advances_the_completed_play_count() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 1,
+            windowed: true,
+            skip_animations: true,
+            ..RuntimeConfig::default()
+        },
+        7,
+    )
+    .expect("scene");
+    scene
+        .queue_replay_events(&[InputEvent::new(
+            u64::MAX,
+            RationalTime::zero(30),
+            EventPayload::KeyPress {
+                key: Key::Character('r'),
+                modifiers: Modifiers::NONE,
+            },
+        )
+        .expect("terminal replay event")])
+        .expect("terminal sequence is admitted exactly once");
+
+    let inbox = scene.event_inbox();
+    let mut inject_after_last_frame_boundary = move |_stage: &Stage| {
+        inbox
+            .submit(EventPayload::KeyPress {
+                key: Key::Character('h'),
+                modifiers: Modifiers::NONE,
+            })
+            .expect("canonical host event");
+        true
+    };
+    let error = scene
+        .wait_until(
+            1.0,
+            &mut inject_after_last_frame_boundary,
+            &mut PacketSink::default(),
+        )
+        .expect_err("the post-play drain has no sequence left to assign");
+
+    assert!(matches!(
+        error,
+        SceneError::Event(EventError::SequenceExhausted)
+    ));
+    assert_eq!(scene.time().frames(), 1, "the segment completed one frame");
+    assert_eq!(
+        scene.play_count(),
+        1,
+        "a post-play adapter failure must not reuse the completed play index"
     );
 }
 

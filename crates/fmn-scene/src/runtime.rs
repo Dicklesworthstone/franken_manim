@@ -1381,19 +1381,17 @@ impl Scene {
         notify_sink: bool,
     ) -> Result<(), SceneError> {
         let result = if notify_sink {
-            if self.config.preview_while_skipping && self.skipping && self.config.windowed {
-                self.sync_stage_time();
-                self.dispatch_pending_events()?;
-                let preview = sink.capture(
-                    CaptureReason::SkippedPreview,
-                    FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
-                );
-                if let Err(error) = preview {
-                    self.play_count += 1;
-                    return Err(error.into());
+            (|| {
+                if self.config.preview_while_skipping && self.skipping && self.config.windowed {
+                    self.sync_stage_time();
+                    self.dispatch_pending_events()?;
+                    sink.capture(
+                        CaptureReason::SkippedPreview,
+                        FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
+                    )?;
                 }
-            }
-            self.emit_event(sink, LifecyclePhase::PostPlay, Some(kind))
+                self.emit_event(sink, LifecyclePhase::PostPlay, Some(kind))
+            })()
         } else {
             Ok(())
         };
