@@ -215,9 +215,10 @@ fn encode_sixel(
     }
 
     for band_y in (0..height_usize).step_by(6) {
+        let band_palette = band_palette(rgba, width_usize, height_usize, band_y);
         let mut any_color = false;
-        for (color, present) in used.iter().copied().enumerate() {
-            if !present || !band_uses_color(rgba, width_usize, height_usize, band_y, color) {
+        for (color, present) in band_palette.into_iter().enumerate() {
+            if !present {
                 continue;
             }
             if any_color {
@@ -249,17 +250,18 @@ fn encode_sixel(
     Ok(out)
 }
 
-fn band_uses_color(rgba: &[u8], width: usize, height: usize, band_y: usize, color: usize) -> bool {
-    for y in band_y..(band_y + 6).min(height) {
+fn band_palette(rgba: &[u8], width: usize, height: usize, band_y: usize) -> [bool; 216] {
+    let mut palette = [false; 216];
+    for y in band_y..band_y.saturating_add(6).min(height) {
         for x in 0..width {
             let at = (y * width + x) * 4;
             let pixel = &rgba[at..at + 4];
-            if pixel[3] >= 128 && usize::from(cube_index(pixel[0], pixel[1], pixel[2])) == color {
-                return true;
+            if pixel[3] >= 128 {
+                palette[usize::from(cube_index(pixel[0], pixel[1], pixel[2]))] = true;
             }
         }
     }
-    false
+    palette
 }
 
 const fn cube_index(red: u8, green: u8, blue: u8) -> u8 {
@@ -432,5 +434,35 @@ mod tests {
             .unwrap();
         assert!(sixel.starts_with(b"\x1bP0;0;0q"));
         assert!(sixel.ends_with(b"\x1b\\"));
+    }
+
+    #[test]
+    fn sixel_palette_discovery_is_band_local_and_byte_stable() {
+        let mut rgba = Vec::new();
+        for row in 0..12 {
+            let pixel = if row < 6 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 255, 0, 255]
+            };
+            rgba.extend_from_slice(&pixel);
+        }
+
+        let first = band_palette(&rgba, 1, 12, 0);
+        let second = band_palette(&rgba, 1, 12, 6);
+        assert_eq!(first.into_iter().filter(|present| *present).count(), 1);
+        assert!(first[180]);
+        assert_eq!(second.into_iter().filter(|present| *present).count(), 1);
+        assert!(second[30]);
+
+        let mut sixel = Vec::new();
+        TerminalPreview::new(TerminalProtocol::Sixel, TuiLimits::default())
+            .unwrap()
+            .write_rgba8(&mut sixel, 1, 12, &rgba)
+            .unwrap();
+        assert_eq!(
+            sixel,
+            b"\x1bP0;0;0q\"1;1;1;12#30;2;0;100;0#180;2;100;0;0#180~-#30~-\x1b\\"
+        );
     }
 }
