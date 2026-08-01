@@ -78,6 +78,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use fmn_core::constants::TAU;
@@ -579,6 +580,36 @@ pub struct FixtureCorpus {
 }
 
 const FIXTURE_MANIFEST_HEADER: &str = "# fmn npy fixture manifest v1";
+const MAX_FIXTURE_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_NPY_FIXTURE_BYTES: u64 = 16 * 1024 * 1024;
+
+fn read_bounded_artifact(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {kind}: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{kind} is not a regular file"));
+    }
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "{kind} is {} bytes, exceeding the {max_bytes}-byte limit",
+            metadata.len()
+        ));
+    }
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| format!("{kind} byte limit cannot be represented"))?;
+    let file = std::fs::File::open(path).map_err(|error| format!("cannot open {kind}: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {kind}: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(format!(
+            "{kind} grew beyond the {max_bytes}-byte limit while being read"
+        ));
+    }
+    Ok(bytes)
+}
 
 fn split_fixture_manifest_row(line: &str) -> Option<[&str; 5]> {
     let mut fields = line.split('\t');
@@ -610,11 +641,16 @@ impl FixtureCorpus {
     /// [`OracleError::Fixture`] if the manifest is unreadable or a row is
     /// malformed.
     pub fn load(root: &Path) -> Result<Self, OracleError> {
-        let text = std::fs::read_to_string(root.join("MANIFEST.tsv")).map_err(|e| {
-            OracleError::Fixture(format!(
-                "MANIFEST.tsv unreadable (regenerate with scripts/gen_npy_fixtures.py): {e}"
-            ))
-        })?;
+        let manifest_path = root.join("MANIFEST.tsv");
+        let bytes =
+            read_bounded_artifact(&manifest_path, MAX_FIXTURE_MANIFEST_BYTES, "MANIFEST.tsv")
+                .map_err(|detail| {
+                    OracleError::Fixture(format!(
+                        "{detail} (regenerate with scripts/gen_npy_fixtures.py)"
+                    ))
+                })?;
+        let text = String::from_utf8(bytes)
+            .map_err(|error| OracleError::Fixture(format!("MANIFEST.tsv is not UTF-8: {error}")))?;
         let mut lines = text.lines().enumerate();
         let Some((_, header)) = lines.next() else {
             return Err(OracleError::Fixture(
@@ -689,8 +725,9 @@ impl FixtureCorpus {
             .manifest
             .get(name)
             .ok_or_else(|| OracleError::Fixture(format!("{name} missing from MANIFEST.tsv")))?;
-        let bytes = std::fs::read(self.root.join(name))
-            .map_err(|e| OracleError::Fixture(format!("{name}: unreadable: {e}")))?;
+        let bytes =
+            read_bounded_artifact(&self.root.join(name), MAX_NPY_FIXTURE_BYTES, "NPY fixture")
+                .map_err(|detail| OracleError::Fixture(format!("{name}: {detail}")))?;
         let digest = sha256(&bytes).to_hex();
         // ubs:ignore — fixture-integrity hash comparison, not a secret
         if digest != row.sha256 {
@@ -761,4 +798,40 @@ pub const REFERENCE_QUAD: [Vec3; 3] = [[-1.0, 0.5, 0.25], [0.75, 2.0, -0.5], [2.
 #[must_use]
 pub fn reference_quad_point(t: f64) -> Vec3 {
     bezier::quadratic_point(REFERENCE_QUAD[0], REFERENCE_QUAD[1], REFERENCE_QUAD[2], t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_bounded_artifact;
+    use std::path::PathBuf;
+
+    #[test]
+    fn bounded_artifact_reader_checks_exact_size_oversize_and_file_type() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest = crate_root.join("Cargo.toml");
+        let size = std::fs::metadata(&manifest)
+            .expect("crate manifest metadata")
+            .len();
+        assert_eq!(
+            u64::try_from(
+                read_bounded_artifact(&manifest, size, "test artifact")
+                    .unwrap()
+                    .len()
+            )
+            .expect("manifest length fits u64"),
+            size,
+            "a file at the exact byte limit must be accepted"
+        );
+
+        let error = read_bounded_artifact(&manifest, size - 1, "test artifact")
+            .expect_err("an oversized file must be refused");
+        assert!(error.contains("exceeding"), "wrong oversize error: {error}");
+
+        let error = read_bounded_artifact(&crate_root, size, "test artifact")
+            .expect_err("a directory must be refused");
+        assert!(
+            error.contains("not a regular file"),
+            "wrong file-type error: {error}"
+        );
+    }
 }
