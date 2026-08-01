@@ -295,19 +295,27 @@ fn corrupt_manifests_are_named_errors() {
             "not a non-negative integer",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\npanel\tonly-two\n",
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\
+             panel\tonly-two\n",
             "expected 5 tab-separated fields",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\nPanel\ta/b.png\tc/d.png\tregression\tnote\n",
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\
+             Panel\ta/b.png\tc/d.png\tregression\tnote\n",
             "invalid panel id",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\npanel\t../escape.png\tc/d.png\tregression\tnote\n",
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\
+             panel\t../escape.png\tc/d.png\tregression\tnote\n",
             "invalid reference path",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\npanel\ta/b.png\tc/d.png\tlooks-good\tnote\n",
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\
+             panel\ta/b.png\tc/d.png\tlooks-good\tnote\n",
             "unknown verdict",
         ),
     ];
@@ -319,29 +327,35 @@ fn corrupt_manifests_are_named_errors() {
         );
     }
     let duplicate = "# fmn-look-gallery v1\n# revision: 1\n\
+        # columns: panel\treference\trender\tverdict\tchanged\n\
         panel\ta/b.png\tc/d.png\tregression\tnote\n\
         panel\ta/b.png\tc/d.png\tregression\tnote\n";
     let err = GalleryManifest::parse(duplicate).expect_err("duplicate panel must refuse");
     assert!(err.to_string().contains("duplicate panel"), "{err}");
-    let empty_note =
-        "# fmn-look-gallery v1\n# revision: 1\npanel\ta/b.png\tc/d.png\tregression\t\n";
+    let empty_note = "# fmn-look-gallery v1\n# revision: 1\n\
+        # columns: panel\treference\trender\tverdict\tchanged\n\
+        panel\ta/b.png\tc/d.png\tregression\t\n";
     let err = GalleryManifest::parse(empty_note).expect_err("empty change note must refuse");
     assert!(err.to_string().contains("empty change note"), "{err}");
 
-    let duplicate_revision = "# fmn-look-gallery v1\n# revision: 1\n# revision: 2\n";
+    let duplicate_revision = "# fmn-look-gallery v1\n# revision: 1\n\
+        # columns: panel\treference\trender\tverdict\tchanged\n\
+        # revision: 2\n";
     let err = GalleryManifest::parse(duplicate_revision)
         .expect_err("a manifest must have one authoritative revision line");
     assert!(
         matches!(
             err,
-            GalleryError::Corrupt { line: 3, ref detail }
+            GalleryError::Corrupt { line: 4, ref detail }
                 if detail.contains("duplicate revision line")
         ),
         "unexpected duplicate-revision refusal: {err}"
     );
 
     let mut over_fielded = String::from(
-        "# fmn-look-gallery v1\n# revision: 1\npanel\ta/b.png\tc/d.png\tregression\tnote",
+        "# fmn-look-gallery v1\n# revision: 1\n\
+         # columns: panel\treference\trender\tverdict\tchanged\n\
+         panel\ta/b.png\tc/d.png\tregression\tnote",
     );
     over_fielded.extend(std::iter::repeat_n('\t', 1_000_000));
     over_fielded.push('\n');
@@ -356,6 +370,71 @@ fn corrupt_manifests_are_named_errors() {
         err.to_string().len() < 200,
         "the refusal must not copy the malformed row into its diagnostic"
     );
+}
+
+#[test]
+fn noncanonical_manifest_spellings_are_refused() {
+    let canonical = "# fmn-look-gallery v1\n# revision: 1\n\
+        # columns: panel\treference\trender\tverdict\tchanged\n\
+        alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n";
+    GalleryManifest::parse(canonical).expect("canonical spelling parses");
+
+    let cases = [
+        (
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n",
+            "third line must be",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 1\n# columns: panel\treference\trender\n",
+            "third line must be",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 01\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n",
+            "canonical unsigned-decimal",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 1 \n\
+             # columns: panel\treference\trender\tverdict\tchanged\n",
+            "not a non-negative integer",
+        ),
+        (
+            "# fmn-look-gallery v1\r\n# revision: 1\r\n\
+             # columns: panel\treference\trender\tverdict\tchanged\r\n",
+            "carriage returns",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged",
+            "final LF",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\n",
+            "blank lines",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\
+             # extra metadata\n",
+            "unexpected comment line",
+        ),
+        (
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n\
+             beta\ta/b.png\tc/d.png\tat-least-as-good\tnote\n\
+             alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n",
+            "out of canonical order",
+        ),
+    ];
+    for (text, needle) in cases {
+        let error = GalleryManifest::parse(text).expect_err("noncanonical spelling must refuse");
+        assert!(
+            error.to_string().contains(needle),
+            "expected {needle:?} in: {error}"
+        );
+    }
 }
 
 #[test]
@@ -384,6 +463,7 @@ fn oversized_manifest_documents_are_refused_by_parse_and_load() {
     );
 
     let valid = "# fmn-look-gallery v1\n# revision: 1\n\
+        # columns: panel\treference\trender\tverdict\tchanged\n\
         panel\ta/b.png\tc/d.png\tat-least-as-good\tnote\n";
     let mut updated = GalleryManifest::parse(valid).expect("valid manifest");
     let before = updated.clone();
@@ -497,6 +577,7 @@ fn verdict_transitions_are_recorded_and_regressions_found() {
 #[test]
 fn verdict_updates_refuse_revision_rollover_without_partial_mutation() {
     let text = "# fmn-look-gallery v1\n# revision: 18446744073709551615\n\
+        # columns: panel\treference\trender\tverdict\tchanged\n\
         panel\ta/b.png\tc/d.png\tat-least-as-good\toriginal note\n";
     let mut manifest = GalleryManifest::parse(text).expect("maximum u64 revision is valid v1");
     let before = manifest.clone();
@@ -520,8 +601,11 @@ fn verdict_updates_refuse_revision_rollover_without_partial_mutation() {
 #[test]
 fn regressions_since_flags_new_regression_panels_only() {
     let parse = |rows: &str| {
-        GalleryManifest::parse(&format!("# fmn-look-gallery v1\n# revision: 1\n{rows}"))
-            .expect("well-formed")
+        GalleryManifest::parse(&format!(
+            "# fmn-look-gallery v1\n# revision: 1\n\
+             # columns: panel\treference\trender\tverdict\tchanged\n{rows}"
+        ))
+        .expect("well-formed")
     };
     let earlier = parse("alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n");
     // A panel entering at different-but-fine is a review item, not a regression.

@@ -658,16 +658,36 @@ impl GalleryManifest {
     ///
     /// # Errors
     /// [`GalleryError::Corrupt`] on any format violation: wrong header, bad
-    /// revision line, wrong field count, unknown verdict token, invalid panel
-    /// or path, duplicate panel.
+    /// revision or columns line, non-canonical line endings or row order,
+    /// wrong field count, unknown verdict token, invalid panel or path, or a
+    /// duplicate panel.
     pub fn parse(text: &str) -> Result<Self, GalleryError> {
         if text.len() > MAX_MANIFEST_BYTES {
             return Err(oversized_manifest());
         }
-        let mut revision = None;
+        if text.is_empty() {
+            return Err(GalleryError::Corrupt {
+                line: 1,
+                detail: "empty manifest".to_string(),
+            });
+        }
+        if let Some(offset) = text.find('\r') {
+            let line = text[..offset].bytes().filter(|byte| *byte == b'\n').count() + 1;
+            return Err(GalleryError::Corrupt {
+                line,
+                detail: "carriage returns are not canonical; use LF line endings".to_string(),
+            });
+        }
+        let Some(body) = text.strip_suffix('\n') else {
+            return Err(GalleryError::Corrupt {
+                line: text.bytes().filter(|byte| *byte == b'\n').count() + 1,
+                detail: "manifest must end with a final LF".to_string(),
+            });
+        };
+
         let mut rows: Vec<GalleryRow> = Vec::new();
-        let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
-        let mut lines = text.lines().enumerate();
+        let mut previous_panel: Option<&str> = None;
+        let mut lines = body.split('\n').enumerate();
         let Some((_, header)) = lines.next() else {
             return Err(GalleryError::Corrupt {
                 line: 1,
@@ -680,6 +700,47 @@ impl GalleryManifest {
                 detail: format!("first line must be {MANIFEST_HEADER:?}"),
             });
         }
+
+        let Some((_, revision_line)) = lines.next() else {
+            return Err(GalleryError::Corrupt {
+                line: 2,
+                detail: "missing '# revision: N' line".to_string(),
+            });
+        };
+        let revision_text = revision_line
+            .strip_prefix(MANIFEST_REVISION_PREFIX)
+            .ok_or_else(|| GalleryError::Corrupt {
+                line: 2,
+                detail: format!("second line must start with {MANIFEST_REVISION_PREFIX:?}"),
+            })?;
+        let revision = revision_text
+            .parse::<u64>()
+            .map_err(|_| GalleryError::Corrupt {
+                line: 2,
+                detail: format!("revision is not a non-negative integer: {revision_text:?}"),
+            })?;
+        if revision.to_string() != revision_text {
+            return Err(GalleryError::Corrupt {
+                line: 2,
+                detail: format!(
+                    "revision is not in canonical unsigned-decimal form: {revision_text:?}"
+                ),
+            });
+        }
+
+        let Some((_, columns)) = lines.next() else {
+            return Err(GalleryError::Corrupt {
+                line: 3,
+                detail: format!("missing columns line {MANIFEST_COLUMNS:?}"),
+            });
+        };
+        if columns != MANIFEST_COLUMNS {
+            return Err(GalleryError::Corrupt {
+                line: 3,
+                detail: format!("third line must be {MANIFEST_COLUMNS:?}"),
+            });
+        }
+
         for (index, line) in lines {
             let line_number = index + 1;
             let corrupt = |detail: String| GalleryError::Corrupt {
@@ -687,21 +748,17 @@ impl GalleryManifest {
                 detail,
             };
             if line.is_empty() {
-                continue;
+                return Err(corrupt("blank lines are not canonical".to_string()));
             }
-            if let Some(rest) = line.strip_prefix("# revision:") {
-                if revision.is_some() {
-                    return Err(corrupt(
-                        "duplicate revision line: format v1 requires exactly one".to_string(),
-                    ));
-                }
-                revision = Some(rest.trim().parse::<u64>().map_err(|_| {
-                    corrupt(format!("revision is not a non-negative integer: {rest:?}"))
-                })?);
-                continue;
+            if line.starts_with(MANIFEST_REVISION_PREFIX) {
+                return Err(corrupt(
+                    "duplicate revision line: format v1 requires exactly one".to_string(),
+                ));
             }
             if line.starts_with('#') {
-                continue;
+                return Err(corrupt(format!(
+                    "unexpected comment line {line:?}: format v1 has exactly three prelude lines"
+                )));
             }
             let Some([panel, reference, render, verdict, changed]) = split_gallery_row(line) else {
                 let field_count = line.split('\t').count();
@@ -715,9 +772,17 @@ impl GalleryManifest {
                     "invalid panel id {panel:?}: use only [a-z0-9._-], not starting with '.'"
                 )));
             }
-            if seen.insert(panel, ()).is_some() {
-                return Err(corrupt(format!("duplicate panel {panel:?}")));
+            if let Some(previous) = previous_panel {
+                if panel == previous {
+                    return Err(corrupt(format!("duplicate panel {panel:?}")));
+                }
+                if panel < previous {
+                    return Err(corrupt(format!(
+                        "panel {panel:?} is out of canonical order after {previous:?}"
+                    )));
+                }
             }
+            previous_panel = Some(panel);
             if !valid_repo_path(reference) {
                 return Err(corrupt(format!(
                     "invalid reference path {reference:?}: must be repo-relative and stay \
@@ -749,10 +814,6 @@ impl GalleryManifest {
                 changed: changed.to_string(),
             });
         }
-        let revision = revision.ok_or_else(|| GalleryError::Corrupt {
-            line: 2,
-            detail: "missing '# revision: N' line".to_string(),
-        })?;
         Ok(Self { revision, rows })
     }
 
