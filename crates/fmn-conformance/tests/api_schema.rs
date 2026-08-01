@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use fmn_conformance::schema::{
     Schema, Status, SymbolKind, generate_cli_rs, generate_cli_table_md, generate_config_rs,
-    generate_docs_md, generate_ledger_tsv,
+    generate_coverage_badge_svg, generate_docs_md, generate_ledger_tsv, generate_out_of_tier_tsv,
 };
 
 /// File-read envelope shared by `API_SCHEMA.tsv`, `API_OVERLAY.tsv`, and
@@ -494,6 +494,22 @@ fn the_generated_ledger_matches_the_schema() {
 }
 
 #[test]
+fn the_generated_out_of_tier_ledger_matches_the_schema() {
+    artifact(
+        "docs/api/out_of_tier.tsv",
+        &generate_out_of_tier_tsv(&schema()),
+    );
+}
+
+#[test]
+fn the_generated_coverage_badge_matches_the_schema() {
+    artifact(
+        "docs/api/parity_coverage.svg",
+        &generate_coverage_badge_svg(&schema()),
+    );
+}
+
+#[test]
 fn the_generated_cli_table_matches_the_schema() {
     artifact("docs/api/cli_flags.md", &generate_cli_table_md(&schema()));
 }
@@ -544,31 +560,91 @@ fn a_hand_edited_signature_fails_the_drift_gate() {
 }
 
 #[test]
-fn the_ledger_carries_every_symbol_and_its_tier() {
+fn the_ledger_carries_every_surface_and_its_review_contract() {
     let schema = schema();
     let ledger = generate_ledger_tsv(&schema);
     let rows = ledger
         .lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .count();
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .collect::<Vec<_>>();
     assert_eq!(
-        rows,
-        schema.symbols.len(),
-        "the Ledger must carry one row per symbol"
+        rows.len(),
+        schema.symbols.len()
+            + schema.flags.len()
+            + schema.native_flags.len()
+            + schema.subcommands.len()
+            + schema.config.len(),
+        "the Ledger must carry every Python, CLI, and config surface"
     );
+    assert!(
+        rows.iter().all(|row| row.len() == 10),
+        "every Ledger row must carry signature/defaults, status, evidence, tests, and notes"
+    );
+    for kind in ["cli_flag", "cli_command", "config_key"] {
+        assert!(
+            rows.iter().any(|row| row[3] == kind),
+            "the Ledger lost its {kind} surface"
+        );
+    }
     assert!(
         ledger.contains("\timproved\tBN-11"),
         "the seeded BN-11 rulings must reach the Ledger"
     );
-    // Unreviewed is the honest default and must be the bulk of the surface
-    // today; the Ledger's own bead ratchets it down.
-    let unreviewed = schema
-        .symbols
-        .iter()
-        .filter(|s| schema.status(s) == Status::Unreviewed)
-        .count();
-    assert!(
-        unreviewed > schema.symbols.len() / 2,
-        "the tier seeding claims more adjudication than has happened"
+
+    let note_ids = repo_file("docs/behavior_notes/README.md")
+        .lines()
+        .filter_map(|line| {
+            let first = line.strip_prefix('|')?.split('|').next()?.trim();
+            first.starts_with("BN-").then(|| first.to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for row in &rows {
+        let status = row[6];
+        let evidence = row[7];
+        let tests = row[8];
+        let notes = row[9];
+        if status == Status::Improved.as_str() {
+            assert!(
+                note_ids.contains(evidence),
+                "improved {}:{} cites missing Behavior Note {evidence}",
+                row[0],
+                row[1]
+            );
+        }
+        if matches!(status, "tiered" | "excluded") {
+            let ruling = schema.out_of_tier.get(evidence);
+            assert!(
+                ruling.is_some(),
+                "{status} {}:{} cites missing out-of-tier row {evidence}",
+                row[0],
+                row[1]
+            );
+            if let Some(ruling) = ruling {
+                assert_eq!(ruling.status.as_str(), status);
+            }
+        }
+        if status == Status::Unreviewed.as_str() {
+            assert_eq!((evidence, tests, notes), ("-", "-", "-"));
+        } else {
+            assert_ne!(tests, "-", "reviewed {}:{} lost tests", row[0], row[1]);
+            assert_ne!(notes, "-", "reviewed {}:{} lost notes", row[0], row[1]);
+        }
+    }
+
+    let status_total = [
+        Status::Same,
+        Status::Improved,
+        Status::Tiered,
+        Status::Excluded,
+        Status::Unreviewed,
+    ]
+    .into_iter()
+    .map(|status| schema.ledger_status_count(status))
+    .sum::<usize>();
+    assert_eq!(
+        status_total,
+        schema.ledger_row_count(),
+        "every Ledger row must belong to exactly one semantic tier"
     );
 }

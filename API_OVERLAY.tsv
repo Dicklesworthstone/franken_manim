@@ -17,6 +17,7 @@
 
 [meta]
 overlay_version	1
+ledger_reviewed_digest	d5cd403d271013cbbaaccb64eb155a49caf112abfa9a6e9aa39cc82e5c16084e
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -167,32 +168,60 @@ render.aa	RenderConfig	aa	aa_policy
 render.threads	RenderConfig	threads	thread_policy
 
 # ---------------------------------------------------------------------------
+# [config_status] — reviewed semantic rulings for config keys.
+#
+# Absent rows remain honestly `unreviewed`; the complete Ledger still carries
+# every key. A reviewed row uses the same evidence contract as [status].
+#
+# path	status	evidence	tests	notes
+[config_status]
+
+# ---------------------------------------------------------------------------
+# [out_of_tier] — the honest fringe (§16.6).
+#
+# Every tiered or excluded Ledger row cites one stable identity below. A row
+# is not merely a list of omissions: it records why the boundary is deliberate
+# and the concrete evidence or demand that reopens it.
+#
+# id	surface	status	rationale	revisit_trigger
+[out_of_tier]
+OOT-ARBITRARY-GLSL	custom shader folders and set_color_by_code	excluded	Arbitrary GLSL is outside the semantic compatibility claim and would bypass Lumen's governed renderer	A G4a allowlisted scene needs behavior no audited native adapter can express and OQ-8 is reopened by ADR
+OOT-CFF-CFF2	CFF and CFF2 user-font outlines	tiered	The bundled sovereign faces use glyf outlines; accepting another hostile font program needs upstream parser and fuzz coverage	Corpus-ranked demand plus an upstream fmd-font decoder with resource-budget and malformed-font Gauntlet evidence
+OOT-CLI-AUTORELOAD	--autoreload	tiered	Live reload is re-specified as supervised Studio worker restart and replay rather than in-process module mutation	A source-compatible G4a scene requires Reference reload behavior that supervisor replay cannot preserve
+OOT-CLI-EMBED	-e,--embed	tiered	Embed points exist through fmn-python or a Studio breakpoint, not as a native interpreter inside the Rust front door	A G4a scene uses embed semantics that neither fmn-python nor the Studio breakpoint can carry source-unedited
+OOT-COMPLEX-SCRIPT	complex-script shaping, bidi, and mark positioning	tiered	Latin, Greek, Cyrillic, and mathematics are first-class; complex shaping needs a larger upstream text contract	A corpus or supported user workflow requires Arabic, Indic, or bidi layout and fmd-font has fixture-backed shaping support
+OOT-EXOTIC-MEDIA-MESH	exotic image, media, and mesh formats	tiered	Owned native codecs and the OBJ subset cover the governed core; other media routes through the one ffmpeg boundary where applicable	A corpus-ranked format cannot use the declared native set or ffmpeg capability and has an owned bounded-parser design
+OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a documented no-op and analytic nonzero winding has no alternate earclip mode	Pinned-Reference evidence shows observable semantics beyond the accepted no-op
+OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
+
+# ---------------------------------------------------------------------------
 # [status] — the §16.1 semantic tier, per symbol.
 #
 # Vocabulary: same | improved | tiered | excluded | unreviewed.
-# `improved` carries a Behavior Note; `tiered` and `excluded` carry the
-# reason. Anything absent from this section reads as `unreviewed` — which is
-# the honest default for a surface of 2276 symbols nobody has adjudicated yet,
-# and the number the Parity Ledger (fm-iz4) ratchets down over the program.
+# `improved` carries a Behavior Note; `tiered` and `excluded` carry an
+# out-of-tier identity. Every reviewed row names executed tests and a concise
+# semantic note. Anything absent from this section reads as `unreviewed` — the
+# honest default across the 2276-symbol census, and the number the Parity
+# Ledger (fm-iz4) ratchets down over the program.
 #
 # Seeded here with the rulings that already exist in Appendix C and the
 # Behavior Notes, so the mechanism is exercised by real rows rather than by a
 # placeholder.
 #
-# symbol	status	evidence
+# symbol	status	evidence	tests	notes
 [status]
-manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03
-manimlib.mobject.mobject:Mobject.add_updater	improved	BN-07
-manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md
-manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11
-manimlib.animation.composition:Succession.interpolate	improved	BN-11
-manimlib.mobject.geometry:Arc	improved	BN-09
-manimlib.mobject.svg.brace:Brace	improved	BN-08
-manimlib.mobject.numbers:DecimalNumber	improved	BN-08
-manimlib.mobject.matrix:Matrix	improved	BN-08
-manimlib.scene.scene:Scene.add_sound	improved	BN-14
-manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	C-7 documented no-op; our fill never needed it
-manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	arbitrary GLSL is out of the compatibility claim (README Limitations)
+manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
+manimlib.mobject.mobject:Mobject.add_updater	improved	BN-07	crates/fmn-mobject/tests/dynamics.rs	call=true performs one corrected immediate update
+manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md	crates/fmn-mobject/tests/render_order.rs	preserves the declared insertion-first render-order contract
+manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
+manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
+manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_parity.rs	uses one output-scale arc-density rule that is never coarser
+manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
+manimlib.mobject.numbers:DecimalNumber	improved	BN-08	crates/fmn-library/src/numbers.rs#tests	uses native glyph layout and bounded incremental updates
+manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#tests	uses native delimiters and entry layout without TeX
+manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-conformance/tests/sound_pipeline.rs	places audio exactly on the rational sample grid
+manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
+manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
 
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
@@ -204,79 +233,79 @@ manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	ar
 # Rust and by [flag_interaction]; it is not inferred from argparse's sometimes
 # implicit `dest`.
 #
-# options	status	command	binding	note
+# options	status	evidence	command	binding	tests	note
 [flag_binding]
---autoreload	tiered	render	autoreload	re-specified as supervised Studio worker reload
---clear-cache	improved	global	clear_cache	safe content-store lifecycle operation
---config_file	same	global	config_file	defaults then user file then CLI precedence
---file_name	same	render	file_name	explicit output stem
---finder	improved	render	finder	portable reveal-in-file-manager action
---fps	same	render	fps	positive integer frame rate
---hd	same	render	hd	1080p resolution preset
---leave_progress_bars	same	render	leave_progress_bars	human progress policy
---log-level	same	global	log_level	stable log-level vocabulary
---pix_fmt	same	render	pix_fmt	explicit ffmpeg wire pixel format
---prerun	improved	render	prerun	deterministic count-only scene pass
---show_animation_progress	same	render	show_animation_progress	per-animation human progress
---subdivide	same	render	subdivide	one output per animation segment
---uhd	same	render	uhd	2160p resolution preset
---vcodec	same	render	vcodec	explicit ffmpeg encoder
---video_dir	same	render	video_dir	explicit output directory
--a,--write_all	same	render	write_all	select every scene in declaration order
--c,--color	same	render	background	explicit background color
--e,--embed	tiered	render	embed	Python front door or Studio breakpoint only
--f,--full_screen	same	render	full_screen	fullscreen interactive presentation
--i,--gif	same	render	gif	native GIF output
--l,--low_quality	same	render	low_quality	480p resolution preset
--m,--medium_quality	same	render	medium_quality	720p resolution preset
--n,--start_at_animation_number	improved	render	animation_range	validated start or half-open start,end play range
--o,--open	improved	render	open	portable host open action
--p,--presenter_mode	same	render	presenter_mode	presenter-controlled waits
--q,--quiet	same	global	quiet	suppress human decoration only
--r,--resolution	improved	render	resolution	validated WIDTHxHEIGHT override
--s,--skip_animations	same	render	skip_animations	capture the final state
--t,--transparent	improved	render	transparent	alpha-capable output negotiation
--v,--version	same	global	version	stable version report
--w,--write_file	same	render	write_file	durable output instead of preview-only
-file	same	render	file	scene source path
-scene_names	same	render	scene_names	explicit scene-name selection
+--autoreload	tiered	OOT-CLI-AUTORELOAD	render	autoreload	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
+--clear-cache	improved	BN-15	global	clear_cache	crates/fmn-cli/src/lib.rs#tests	safe content-store lifecycle operation
+--config_file	same	-	global	config_file	crates/fmn-cli/src/lib.rs#tests	defaults then user file then CLI precedence
+--file_name	same	-	render	file_name	crates/fmn-cli/src/lib.rs#tests	explicit output stem
+--finder	improved	BN-15	render	finder	crates/fmn-cli/src/lib.rs#tests	portable reveal-in-file-manager action
+--fps	same	-	render	fps	crates/fmn-cli/src/lib.rs#tests	positive integer frame rate
+--hd	same	-	render	hd	crates/fmn-cli/src/lib.rs#tests	1080p resolution preset
+--leave_progress_bars	same	-	render	leave_progress_bars	crates/fmn-cli/src/lib.rs#tests	human progress policy
+--log-level	same	-	global	log_level	crates/fmn-cli/src/lib.rs#tests	stable log-level vocabulary
+--pix_fmt	same	-	render	pix_fmt	crates/fmn-cli/src/lib.rs#tests	explicit ffmpeg wire pixel format
+--prerun	improved	BN-15	render	prerun	crates/fmn-cli/src/lib.rs#tests	deterministic count-only scene pass
+--show_animation_progress	same	-	render	show_animation_progress	crates/fmn-cli/src/lib.rs#tests	per-animation human progress
+--subdivide	same	-	render	subdivide	crates/fmn-cli/src/lib.rs#tests	one output per animation segment
+--uhd	same	-	render	uhd	crates/fmn-cli/src/lib.rs#tests	2160p resolution preset
+--vcodec	same	-	render	vcodec	crates/fmn-cli/src/lib.rs#tests	explicit ffmpeg encoder
+--video_dir	same	-	render	video_dir	crates/fmn-cli/src/lib.rs#tests	explicit output directory
+-a,--write_all	same	-	render	write_all	crates/fmn-cli/src/lib.rs#tests	select every scene in declaration order
+-c,--color	same	-	render	background	crates/fmn-cli/src/lib.rs#tests	explicit background color
+-e,--embed	tiered	OOT-CLI-EMBED	render	embed	crates/fmn-cli/src/lib.rs#tests	Python front door or Studio breakpoint only
+-f,--full_screen	same	-	render	full_screen	crates/fmn-cli/src/lib.rs#tests	fullscreen interactive presentation
+-i,--gif	same	-	render	gif	crates/fmn-cli/src/lib.rs#tests	native GIF output
+-l,--low_quality	same	-	render	low_quality	crates/fmn-cli/src/lib.rs#tests	480p resolution preset
+-m,--medium_quality	same	-	render	medium_quality	crates/fmn-cli/src/lib.rs#tests	720p resolution preset
+-n,--start_at_animation_number	improved	BN-15	render	animation_range	crates/fmn-cli/src/lib.rs#tests	validated start or half-open start,end play range
+-o,--open	improved	BN-15	render	open	crates/fmn-cli/src/lib.rs#tests	portable host open action
+-p,--presenter_mode	same	-	render	presenter_mode	crates/fmn-cli/src/lib.rs#tests	presenter-controlled waits
+-q,--quiet	same	-	global	quiet	crates/fmn-cli/src/lib.rs#tests	suppress human decoration only
+-r,--resolution	improved	BN-15	render	resolution	crates/fmn-cli/src/lib.rs#tests	validated WIDTHxHEIGHT override
+-s,--skip_animations	same	-	render	skip_animations	crates/fmn-cli/src/lib.rs#tests	capture the final state
+-t,--transparent	improved	BN-15	render	transparent	crates/fmn-cli/src/lib.rs#tests	alpha-capable output negotiation
+-v,--version	same	-	global	version	crates/fmn-cli/src/lib.rs#tests	stable version report
+-w,--write_file	same	-	render	write_file	crates/fmn-cli/src/lib.rs#tests	durable output instead of preview-only
+file	same	-	render	file	crates/fmn-cli/src/lib.rs#tests	scene source path
+scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit scene-name selection
 
 # ---------------------------------------------------------------------------
 # [native_flags] — FrankenManim additions. These are authored because they do
 # not exist in the pinned Reference and therefore cannot be extracted.
 #
-# options	action	nargs	default	type	command	binding	status	help
+# options	action	nargs	default	type	command	binding	status	evidence	tests	help
 [native_flags]
--h,--help	store_true	-	False	-	global	help	improved	Show command help and exit
---robot	store_true	-	False	-	global	robot	improved	Emit only schema-versioned NDJSON records
---reproducible	store_true	-	False	-	global	reproducible	improved	Select certified CPU rendering and canonical certified artifacts
---threads	store	-	-	usize	global	threads	improved	Bound render-team CPU threads
---ffmpeg	store	-	-	path	global	ffmpeg	improved	Absolute path to the optional ffmpeg executable
---cache-dir	store	-	-	path	global	cache_dir	improved	Explicit FrankenManim content-store root
---format	store	-	auto	output_format	render	format	improved	Select auto, png, png_sequence, gif, y4m, wav, or video output
---math-pack	store	-	default	pack	render	math_pack	improved	Select an fmd-math preamble pack
---budget-ms	store	-	-	u64	batch	budget_ms	improved	Wall-clock budget for the batch
---max-scenes	store	-	-	usize	batch	max_scenes	improved	Bound simultaneously active scene jobs
---fail-fast	store_true	-	False	-	batch	fail_fast	improved	Cancel remaining jobs after the first failure
---manifest-dir	store	-	-	path	batch	manifest_dir	improved	Write per-scene manifests under this directory
---require-ffmpeg	store_true	-	False	-	doctor	require_ffmpeg	improved	Exit with capability status when ffmpeg is unavailable
---bind	store	-	127.0.0.1	ip	studio	bind	improved	Loopback address for the Studio host
---port	store	-	0	u16	studio	port	improved	Studio TCP port, with zero selecting an ephemeral port
---no-browser	store_true	-	False	-	studio	no_browser	improved	Do not launch the host browser
---tui	store_true	-	False	-	studio	tui	improved	Attach the kitty or sixel terminal client
---checkpoint-frames	store	-	120	u64	studio	checkpoint_frames	improved	Maximum frames between replay checkpoints
---preview-codec	store	-	png	preview_codec	studio	preview_codec	improved	Select permanent multipart PNG or optional MJPEG preview
+-h,--help	store_true	-	False	-	global	help	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Show command help and exit
+--robot	store_true	-	False	-	global	robot	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Emit only schema-versioned NDJSON records
+--reproducible	store_true	-	False	-	global	reproducible	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select certified CPU rendering and canonical certified artifacts
+--threads	store	-	-	usize	global	threads	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound render-team CPU threads
+--ffmpeg	store	-	-	path	global	ffmpeg	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Absolute path to the optional ffmpeg executable
+--cache-dir	store	-	-	path	global	cache_dir	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Explicit FrankenManim content-store root
+--format	store	-	auto	output_format	render	format	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, or video output
+--math-pack	store	-	default	pack	render	math_pack	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select an fmd-math preamble pack
+--budget-ms	store	-	-	u64	batch	budget_ms	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Wall-clock budget for the batch
+--max-scenes	store	-	-	usize	batch	max_scenes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound simultaneously active scene jobs
+--fail-fast	store_true	-	False	-	batch	fail_fast	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Cancel remaining jobs after the first failure
+--manifest-dir	store	-	-	path	batch	manifest_dir	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Write per-scene manifests under this directory
+--require-ffmpeg	store_true	-	False	-	doctor	require_ffmpeg	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Exit with capability status when ffmpeg is unavailable
+--bind	store	-	127.0.0.1	ip	studio	bind	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Loopback address for the Studio host
+--port	store	-	0	u16	studio	port	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Studio TCP port, with zero selecting an ephemeral port
+--no-browser	store_true	-	False	-	studio	no_browser	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Do not launch the host browser
+--tui	store_true	-	False	-	studio	tui	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Attach the kitty or sixel terminal client
+--checkpoint-frames	store	-	120	u64	studio	checkpoint_frames	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Maximum frames between replay checkpoints
+--preview-codec	store	-	png	preview_codec	studio	preview_codec	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select permanent multipart PNG or optional MJPEG preview
 
 # ---------------------------------------------------------------------------
 # [subcommands] — the native command tree. `render` is also the default when
 # the first non-option token is not a command name.
 #
-# command	status	help
+# command	status	evidence	tests	help
 [subcommands]
-render	same	Render one or more selected scenes
-doctor	improved	Report capabilities and the derived ExecutionPlan
-batch	improved	Render a bounded multi-scene farm under asupersync
-studio	improved	Run the isolated-worker live Studio
+render	same	-	crates/fmn-cli/src/lib.rs#tests	Render one or more selected scenes
+doctor	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Report capabilities and the derived ExecutionPlan
+batch	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Render a bounded multi-scene farm under asupersync
+studio	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Run the isolated-worker live Studio
 
 # ---------------------------------------------------------------------------
 # [exit_codes] — stable process statuses shared by human and robot modes.

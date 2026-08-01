@@ -126,6 +126,20 @@ pub enum SchemaError {
         /// Human-readable statement of the invalid contract.
         detail: String,
     },
+    /// A semantic ruling does not carry evidence of the kind its status
+    /// requires, or names an absent out-of-tier entry.
+    EvidenceContract {
+        /// Human-readable statement of the invalid ruling.
+        detail: String,
+    },
+    /// The reviewed-identity checksum changed without the authored ratchet
+    /// authority changing with it.
+    ReviewRatchet {
+        /// Digest committed in `API_OVERLAY.tsv [meta]`.
+        expected: String,
+        /// Digest of the effective reviewed ledger rows.
+        actual: String,
+    },
 }
 
 impl fmt::Display for SchemaError {
@@ -172,6 +186,12 @@ impl fmt::Display for SchemaError {
             Self::ConfigCoverage { detail } => write!(f, "config-key coverage: {detail}"),
             Self::FlagCoverage { detail } => write!(f, "CLI flag coverage: {detail}"),
             Self::CliContract { detail } => write!(f, "CLI contract: {detail}"),
+            Self::EvidenceContract { detail } => write!(f, "ledger evidence: {detail}"),
+            Self::ReviewRatchet { expected, actual } => write!(
+                f,
+                "reviewed-ledger digest is {actual}, but API_OVERLAY.tsv records {expected}; \
+                 update the digest only with the written semantic amendment that explains the change"
+            ),
         }
     }
 }
@@ -215,6 +235,8 @@ const OVERLAY_SECTIONS: &[&str] = &[
     "param_canonical",
     "optional_config",
     "config_binding",
+    "config_status",
+    "out_of_tier",
     "status",
     "flag_binding",
     "native_flags",
@@ -222,7 +244,7 @@ const OVERLAY_SECTIONS: &[&str] = &[
     "exit_codes",
     "flag_interaction",
 ];
-const OVERLAY_META_KEYS: &[&str] = &["overlay_version"];
+const OVERLAY_META_KEYS: &[&str] = &["overlay_version", "ledger_reviewed_digest"];
 
 impl Sections {
     fn parse(
@@ -305,7 +327,7 @@ impl Sections {
                 if name.is_empty()
                     || name.len() > MAX_SCHEMA_SECTION_BYTES
                     || !name.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' // ubs:ignore -- public schema syntax, not secret data
                     })
                 {
                     return Err(SchemaError::Syntax {
@@ -731,11 +753,15 @@ pub struct FlagBinding {
     pub options: String,
     /// Same/improved/tiered/excluded ruling.
     pub status: Status,
+    /// Behavior Note or out-of-tier identity required by the ruling.
+    pub evidence: String,
     /// Command accepting the flag.
     pub command: CliCommand,
     /// Stable generated-parser field name.
     pub binding: String,
-    /// Evidence or user-facing semantic note.
+    /// Executed coverage that owns this reviewed ruling.
+    pub tests: String,
+    /// User-facing semantic note.
     pub note: String,
 }
 
@@ -758,6 +784,10 @@ pub struct NativeFlag {
     pub binding: String,
     /// Semantic status relative to the Reference surface.
     pub status: Status,
+    /// Behavior Note or out-of-tier identity required by the ruling.
+    pub evidence: String,
+    /// Executed coverage that owns this reviewed ruling.
+    pub tests: String,
     /// Help text.
     pub help: String,
 }
@@ -769,6 +799,10 @@ pub struct Subcommand {
     pub command: CliCommand,
     /// Semantic status relative to the Reference's single command.
     pub status: Status,
+    /// Behavior Note or out-of-tier identity required by the ruling.
+    pub evidence: String,
+    /// Executed coverage that owns this reviewed ruling.
+    pub tests: String,
     /// Help-table summary.
     pub help: String,
 }
@@ -869,6 +903,17 @@ impl ValueKind {
             "map" => Self::Map,
             _ => return None,
         })
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Int => "int",
+            Self::Float => "float",
+            Self::Str => "string",
+            Self::Tuple => "tuple",
+            Self::Map => "map",
+        }
     }
 }
 
@@ -972,6 +1017,34 @@ pub enum Status {
     Unreviewed,
 }
 
+/// Authored review fields attached to one Ledger surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerAnnotation {
+    /// Same/improved/tiered/excluded/unreviewed ruling.
+    pub status: Status,
+    /// Behavior Note, out-of-tier identity, or other authority.
+    pub evidence: String,
+    /// Executed coverage that owns the ruling.
+    pub tests: String,
+    /// Concise user-facing semantic statement.
+    pub notes: String,
+}
+
+/// One §16.6 out-of-tier ruling with the condition that can reopen it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutOfTier {
+    /// Stable `OOT-*` identity used from the Parity Ledger.
+    pub id: String,
+    /// User-facing surface or capability covered by the ruling.
+    pub surface: String,
+    /// Whether the surface is reduced (`tiered`) or absent (`excluded`).
+    pub status: Status,
+    /// Why the current boundary is honest and deliberate.
+    pub rationale: String,
+    /// Concrete evidence or demand that requires reconsideration.
+    pub revisit_trigger: String,
+}
+
 impl Status {
     fn parse(text: &str) -> Option<Self> {
         Some(match text {
@@ -994,6 +1067,72 @@ impl Status {
             Self::Excluded => "excluded",
             Self::Unreviewed => "unreviewed",
         }
+    }
+}
+
+fn is_behavior_note_id(text: &str) -> bool {
+    let Some(number) = text.strip_prefix("BN-") else {
+        return false;
+    };
+    number.len() >= 2
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && number.bytes().any(|byte| byte != b'0')
+        && (number.len() == 2 || !number.starts_with('0'))
+}
+
+fn is_out_of_tier_id(text: &str) -> bool {
+    let Some(name) = text.strip_prefix("OOT-") else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && !name.contains("--")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LedgerRow {
+    module: String,
+    symbol: String,
+    canonical: String,
+    kind: String,
+    exported: bool,
+    signature_defaults: String,
+    status: Status,
+    evidence: String,
+    tests: String,
+    notes: String,
+}
+
+impl LedgerRow {
+    fn line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            self.module,
+            self.symbol,
+            self.canonical,
+            self.kind,
+            u8::from(self.exported),
+            self.signature_defaults,
+            self.status.as_str(),
+            self.evidence,
+            self.tests,
+            self.notes
+        )
+    }
+
+    fn reviewed_identity_line(&self) -> Option<String> {
+        (self.status != Status::Unreviewed) // ubs:ignore -- public ledger enum, not secret data
+            .then(|| format!("{}\n", self.line()))
     }
 }
 
@@ -1026,8 +1165,15 @@ pub struct Schema {
     pub param_renames: Vec<ParamRename>,
     /// Config-key bindings, in emission order.
     pub bindings: Vec<Binding>,
+    /// Adjudicated semantic tiers for config keys; absent keys are honestly
+    /// unreviewed.
+    pub config_statuses: BTreeMap<String, LedgerAnnotation>,
     /// Adjudicated semantic tiers, by `module:Name`.
-    pub statuses: BTreeMap<String, (Status, String)>,
+    pub statuses: BTreeMap<String, LedgerAnnotation>,
+    /// The authored §16.6 fringe and its revisit triggers.
+    pub out_of_tier: BTreeMap<String, OutOfTier>,
+    /// Reviewed-identity digest committed in the overlay metadata.
+    pub reviewed_ledger_digest: String,
 }
 
 impl Schema {
@@ -1050,6 +1196,7 @@ impl Schema {
                 ),
             });
         }
+        // ubs:ignore -- public format version, not secret data
         if overlay_meta["overlay_version"] != "1" {
             return Err(SchemaError::Document {
                 file: ov.file,
@@ -1057,6 +1204,19 @@ impl Schema {
                     "unsupported overlay_version {:?}; expected \"1\"",
                     overlay_meta["overlay_version"]
                 ),
+            });
+        }
+        let reviewed_ledger_digest = &overlay_meta["ledger_reviewed_digest"];
+        if reviewed_ledger_digest.len() != 64
+            || !reviewed_ledger_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(SchemaError::Document {
+                file: ov.file,
+                detail:
+                    "ledger_reviewed_digest must be an exact 64-character lowercase hex identity"
+                        .to_owned(),
             });
         }
         if meta["generator"] != "scripts/gen_api_schema.py" {
@@ -1101,6 +1261,7 @@ impl Schema {
                 })?;
         let mut schema = Self {
             meta,
+            reviewed_ledger_digest: reviewed_ledger_digest.clone(),
             ..Self::default()
         };
 
@@ -1128,6 +1289,7 @@ impl Schema {
             .map(|symbol| symbol.name.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len();
+        // ubs:ignore -- public API census, not secret data
         if actual_exports != wildcard_exports {
             return Err(SchemaError::Document {
                 file: ex.file,
@@ -1278,6 +1440,94 @@ impl Schema {
             });
         }
 
+        let config_keys: std::collections::BTreeSet<String> =
+            schema.config.iter().map(|key| key.path.clone()).collect();
+
+        let mut config_status_identities = BTreeMap::new();
+        for row in ov.typed("config_status", 5)? {
+            let f = &row.fields;
+            if !config_keys.contains(&f[0]) {
+                return Err(SchemaError::DanglingOverlay {
+                    section: "config_status",
+                    key: f[0].clone(),
+                });
+            }
+            record_identity(
+                &mut config_status_identities,
+                ov.file,
+                row.line,
+                "config_status",
+                f[0].clone(),
+            )?;
+            let status = Status::parse(&f[1]).ok_or_else(|| SchemaError::Field {
+                file: ov.file,
+                line: row.line,
+                column: "status",
+                found: f[1].clone(),
+            })?;
+            schema.config_statuses.insert(
+                f[0].clone(),
+                LedgerAnnotation {
+                    status,
+                    evidence: f[2].clone(),
+                    tests: f[3].clone(),
+                    notes: f[4].clone(),
+                },
+            );
+        }
+
+        let mut out_of_tier_identities = BTreeMap::new();
+        for row in ov.typed("out_of_tier", 5)? {
+            let f = &row.fields;
+            if !is_out_of_tier_id(&f[0]) {
+                return Err(SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "out_of_tier id",
+                    found: f[0].clone(),
+                });
+            }
+            record_identity(
+                &mut out_of_tier_identities,
+                ov.file,
+                row.line,
+                "out_of_tier",
+                f[0].clone(),
+            )?;
+            let status = Status::parse(&f[2]).ok_or_else(|| SchemaError::Field {
+                file: ov.file,
+                line: row.line,
+                column: "status",
+                found: f[2].clone(),
+            })?;
+            if !matches!(status, Status::Tiered | Status::Excluded) {
+                return Err(SchemaError::EvidenceContract {
+                    detail: format!(
+                        "out-of-tier row `{}` has status `{}`; only tiered or excluded is valid",
+                        f[0], f[2]
+                    ),
+                });
+            }
+            if f[1] == NONE || f[3] == NONE || f[4] == NONE {
+                return Err(SchemaError::EvidenceContract {
+                    detail: format!(
+                        "out-of-tier row `{}` must name a surface, rationale, and revisit trigger",
+                        f[0]
+                    ),
+                });
+            }
+            schema.out_of_tier.insert(
+                f[0].clone(),
+                OutOfTier {
+                    id: f[0].clone(),
+                    surface: f[1].clone(),
+                    status,
+                    rationale: f[3].clone(),
+                    revisit_trigger: f[4].clone(),
+                },
+            );
+        }
+
         let mut binding_identities = BTreeMap::new();
         for row in ov.typed("config_binding", 4)? {
             let f = &row.fields;
@@ -1297,7 +1547,7 @@ impl Schema {
         }
 
         let mut status_identities = BTreeMap::new();
-        for row in ov.typed("status", 3)? {
+        for row in ov.typed("status", 5)? {
             let f = &row.fields;
             if !symbol_keys.contains(&f[0]) {
                 return Err(SchemaError::DanglingOverlay {
@@ -1318,10 +1568,18 @@ impl Schema {
                 column: "status",
                 found: f[1].clone(),
             })?;
-            schema.statuses.insert(f[0].clone(), (status, f[2].clone()));
+            schema.statuses.insert(
+                f[0].clone(),
+                LedgerAnnotation {
+                    status,
+                    evidence: f[2].clone(),
+                    tests: f[3].clone(),
+                    notes: f[4].clone(),
+                },
+            );
         }
 
-        for row in ov.typed("flag_binding", 5)? {
+        for row in ov.typed("flag_binding", 7)? {
             let f = &row.fields;
             schema.flag_bindings.push(FlagBinding {
                 options: f[0].clone(),
@@ -1331,18 +1589,20 @@ impl Schema {
                     column: "status",
                     found: f[1].clone(),
                 })?,
-                command: CliCommand::parse(&f[2]).ok_or_else(|| SchemaError::Field {
+                evidence: f[2].clone(),
+                command: CliCommand::parse(&f[3]).ok_or_else(|| SchemaError::Field {
                     file: ov.file,
                     line: row.line,
                     column: "command",
-                    found: f[2].clone(),
+                    found: f[3].clone(),
                 })?,
-                binding: f[3].clone(),
-                note: f[4].clone(),
+                binding: f[4].clone(),
+                tests: f[5].clone(),
+                note: f[6].clone(),
             });
         }
 
-        for row in ov.typed("native_flags", 9)? {
+        for row in ov.typed("native_flags", 11)? {
             let f = &row.fields;
             schema.native_flags.push(NativeFlag {
                 options: f[0].clone(),
@@ -1363,11 +1623,13 @@ impl Schema {
                     column: "status",
                     found: f[7].clone(),
                 })?,
-                help: f[8].clone(),
+                evidence: f[8].clone(),
+                tests: f[9].clone(),
+                help: f[10].clone(),
             });
         }
 
-        for row in ov.typed("subcommands", 3)? {
+        for row in ov.typed("subcommands", 5)? {
             let f = &row.fields;
             let command = CliCommand::parse(&f[0]).ok_or_else(|| SchemaError::Field {
                 file: ov.file,
@@ -1388,7 +1650,9 @@ impl Schema {
                     column: "status",
                     found: f[1].clone(),
                 })?,
-                help: f[2].clone(),
+                evidence: f[2].clone(),
+                tests: f[3].clone(),
+                help: f[4].clone(),
             });
         }
 
@@ -1418,6 +1682,15 @@ impl Schema {
         }
 
         schema.check_cli_contract()?;
+        schema.check_evidence_contract()?;
+        let actual = schema.ledger_reviewed_digest();
+        // ubs:ignore -- public integrity hash, not secret data
+        if actual != schema.reviewed_ledger_digest {
+            return Err(SchemaError::ReviewRatchet {
+                expected: schema.reviewed_ledger_digest.clone(),
+                actual,
+            });
+        }
         Ok(schema)
     }
 
@@ -1721,6 +1994,336 @@ impl Schema {
         }
     }
 
+    fn check_evidence_contract(&self) -> Result<(), SchemaError> {
+        let validate = |identity: &str,
+                        status: Status,
+                        evidence: &str,
+                        tests: &str,
+                        notes: &str| {
+            match status {
+                Status::Improved if !is_behavior_note_id(evidence) => {
+                    Err(SchemaError::EvidenceContract {
+                        detail: format!(
+                            "improved `{identity}` must cite a canonical BN-* identity, found `{evidence}`"
+                        ),
+                    })
+                }
+                Status::Tiered | Status::Excluded => {
+                    let Some(ruling) = self.out_of_tier.get(evidence) else {
+                        return Err(SchemaError::EvidenceContract {
+                            detail: format!(
+                                "{} `{identity}` must cite a declared OOT-* identity, found `{evidence}`",
+                                status.as_str()
+                            ),
+                        });
+                    };
+                    if ruling.status != status {
+                        return Err(SchemaError::EvidenceContract {
+                            detail: format!(
+                                "{} `{identity}` cites `{evidence}`, whose out-of-tier status is `{}`",
+                                status.as_str(),
+                                ruling.status.as_str()
+                            ),
+                        });
+                    }
+                    Ok(())
+                }
+                // ubs:ignore -- public evidence sentinel, not secret data
+                Status::Unreviewed if evidence != NONE => Err(SchemaError::EvidenceContract {
+                    detail: format!(
+                        "unreviewed `{identity}` must carry `{NONE}` evidence, found `{evidence}`"
+                    ),
+                }),
+                _ if evidence.is_empty() => Err(SchemaError::EvidenceContract {
+                    detail: format!("`{identity}` has empty evidence"),
+                }),
+                _ => Ok(()),
+            }?;
+            // ubs:ignore -- public ledger enum, not secret data
+            if status == Status::Unreviewed {
+                if tests != NONE || notes != NONE {
+                    return Err(SchemaError::EvidenceContract {
+                        detail: format!(
+                            "unreviewed `{identity}` must carry `{NONE}` tests and notes"
+                        ),
+                    });
+                }
+            } else if tests == NONE || notes == NONE {
+                return Err(SchemaError::EvidenceContract {
+                    detail: format!(
+                        "reviewed `{identity}` must name executed tests and a semantic note"
+                    ),
+                });
+            }
+            Ok(())
+        };
+
+        for (identity, annotation) in &self.statuses {
+            validate(
+                identity,
+                annotation.status,
+                &annotation.evidence,
+                &annotation.tests,
+                &annotation.notes,
+            )?;
+        }
+        for (identity, annotation) in &self.config_statuses {
+            validate(
+                &format!("config:{identity}"),
+                annotation.status,
+                &annotation.evidence,
+                &annotation.tests,
+                &annotation.notes,
+            )?;
+        }
+        for binding in &self.flag_bindings {
+            validate(
+                &format!("cli-flag:{}", binding.options),
+                binding.status,
+                &binding.evidence,
+                &binding.tests,
+                &binding.note,
+            )?;
+        }
+        for flag in &self.native_flags {
+            validate(
+                &format!("cli-flag:{}", flag.options),
+                flag.status,
+                &flag.evidence,
+                &flag.tests,
+                &flag.help,
+            )?;
+        }
+        for command in &self.subcommands {
+            validate(
+                &format!("cli-command:{}", command.command.as_str()),
+                command.status,
+                &command.evidence,
+                &command.tests,
+                &command.help,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn symbol_signature_defaults(&self, symbol: &Symbol) -> String {
+        let direct_owner = symbol.key();
+        let constructor_owner = (symbol.kind == SymbolKind::Class) // ubs:ignore -- public schema kind, not secret data
+            .then(|| format!("{direct_owner}.__init__"));
+        let mut params = self
+            .params
+            .iter()
+            .filter(|param| {
+                param.owner == direct_owner
+                    || constructor_owner
+                        .as_deref()
+                        .is_some_and(|owner| param.owner == owner)
+            })
+            .collect::<Vec<_>>();
+        params.sort_unstable_by_key(|param| param.ordinal);
+        if !params.is_empty() {
+            let rendered = params
+                .into_iter()
+                .map(|param| {
+                    let prefix = match param.kind {
+                        ParamKind::VarPositional => "*",
+                        ParamKind::VarKeyword => "**",
+                        _ => "",
+                    };
+                    let mut field = format!("{prefix}{}[{}]", param.name, param.kind.as_str());
+                    if let Some(annotation) = &param.annotation {
+                        let _ = write!(field, ":{annotation}");
+                    }
+                    if let Some(default) = &param.default {
+                        let _ = write!(field, "={default}");
+                    }
+                    field
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!("({rendered})");
+        }
+
+        symbol.detail.as_deref().map_or_else(
+            || NONE.to_owned(),
+            |detail| {
+                let label = match symbol.kind {
+                    SymbolKind::Class => "bases",
+                    SymbolKind::Attribute | SymbolKind::Constant => "default",
+                    _ => "detail",
+                };
+                format!("{label}={detail}")
+            },
+        )
+    }
+
+    fn flag_signature_defaults(
+        action: &str,
+        nargs: Option<&str>,
+        default: Option<&str>,
+        value_type: Option<&str>,
+    ) -> String {
+        let default = default.or_else(|| (action == "store_true").then_some("False"));
+        format!(
+            "action={action};nargs={};type={};default={}",
+            nargs.unwrap_or(NONE),
+            value_type.unwrap_or(NONE),
+            default.unwrap_or(NONE)
+        )
+    }
+
+    fn ledger_rows(&self) -> Vec<LedgerRow> {
+        let mut rows = Vec::with_capacity(
+            self.symbols.len()
+                + self.flags.len()
+                + self.native_flags.len()
+                + self.subcommands.len()
+                + self.config.len(),
+        );
+
+        rows.extend(self.symbols.iter().map(|symbol| {
+            let annotation = self.statuses.get(&symbol.key());
+            LedgerRow {
+                module: symbol.module.clone(),
+                symbol: symbol.name.clone(),
+                canonical: self.canonical_name(symbol),
+                kind: symbol.kind.as_str().to_owned(),
+                exported: symbol.exported,
+                signature_defaults: self.symbol_signature_defaults(symbol),
+                status: annotation.map_or(Status::Unreviewed, |row| row.status),
+                evidence: annotation.map_or_else(|| NONE.to_owned(), |row| row.evidence.clone()),
+                tests: annotation.map_or_else(|| NONE.to_owned(), |row| row.tests.clone()),
+                notes: annotation.map_or_else(|| NONE.to_owned(), |row| row.notes.clone()),
+            }
+        }));
+
+        for flag in &self.flags {
+            if let Some(binding) = self
+                .flag_bindings
+                .iter()
+                .find(|binding| binding.options == flag.options)
+            {
+                rows.push(LedgerRow {
+                    module: format!("fmn.cli.{}", binding.command.as_str()),
+                    symbol: binding.options.clone(),
+                    canonical: binding.binding.clone(),
+                    kind: "cli_flag".to_owned(),
+                    exported: false,
+                    signature_defaults: Self::flag_signature_defaults(
+                        &flag.action,
+                        flag.nargs.as_deref(),
+                        flag.default.as_deref(),
+                        flag.ty.as_deref(),
+                    ),
+                    status: binding.status,
+                    evidence: binding.evidence.clone(),
+                    tests: binding.tests.clone(),
+                    notes: binding.note.clone(),
+                });
+            }
+        }
+        rows.extend(self.native_flags.iter().map(|flag| LedgerRow {
+            module: format!("fmn.cli.{}", flag.command.as_str()),
+            symbol: flag.options.clone(),
+            canonical: flag.binding.clone(),
+            kind: "cli_flag".to_owned(),
+            exported: false,
+            signature_defaults: Self::flag_signature_defaults(
+                &flag.action,
+                flag.nargs.as_deref(),
+                flag.default.as_deref(),
+                flag.ty.as_deref(),
+            ),
+            status: flag.status,
+            evidence: flag.evidence.clone(),
+            tests: flag.tests.clone(),
+            notes: flag.help.clone(),
+        }));
+        rows.extend(self.subcommands.iter().map(|command| LedgerRow {
+            module: "fmn.cli".to_owned(),
+            symbol: command.command.as_str().to_owned(),
+            canonical: command.command.as_str().to_owned(),
+            kind: "cli_command".to_owned(),
+            exported: false,
+            signature_defaults: NONE.to_owned(),
+            status: command.status,
+            evidence: command.evidence.clone(),
+            tests: command.tests.clone(),
+            notes: command.help.clone(),
+        }));
+        rows.extend(self.config.iter().map(|key| {
+            let annotation = self.config_statuses.get(&key.path);
+            LedgerRow {
+                module: "fmn.config".to_owned(),
+                symbol: key.path.clone(),
+                canonical: key.path.clone(),
+                kind: "config_key".to_owned(),
+                exported: false,
+                signature_defaults: format!(
+                    "kind={};default={}",
+                    key.kind.as_str(),
+                    key.default.as_deref().unwrap_or(NONE)
+                ),
+                status: annotation.map_or(Status::Unreviewed, |row| row.status),
+                evidence: annotation.map_or_else(|| NONE.to_owned(), |row| row.evidence.clone()),
+                tests: annotation.map_or_else(|| NONE.to_owned(), |row| row.tests.clone()),
+                notes: annotation.map_or_else(|| NONE.to_owned(), |row| row.notes.clone()),
+            }
+        }));
+
+        rows.sort_unstable_by(|left, right| {
+            (&left.module, &left.symbol, &left.kind).cmp(&(
+                &right.module,
+                &right.symbol,
+                &right.kind,
+            ))
+        });
+        rows
+    }
+
+    /// SHA-256 over every reviewed Ledger row and out-of-tier ruling.
+    ///
+    /// Committing this value in `API_OVERLAY.tsv [meta]` makes any downgrade
+    /// or evidence rewrite an explicit authored policy change instead of
+    /// something artifact regeneration can hide.
+    #[must_use]
+    pub fn ledger_reviewed_digest(&self) -> String {
+        let mut material = String::new();
+        for row in self.ledger_rows() {
+            if let Some(line) = row.reviewed_identity_line() {
+                material.push_str(&line);
+            }
+        }
+        for ruling in self.out_of_tier.values() {
+            let _ = writeln!(
+                material,
+                "out_of_tier\t{}\t{}\t{}\t{}\t{}",
+                ruling.id,
+                ruling.surface,
+                ruling.status.as_str(),
+                ruling.rationale,
+                ruling.revisit_trigger
+            );
+        }
+        fmn_hash::sha256(material.as_bytes()).to_hex()
+    }
+
+    /// Number of rows in the complete Parity Ledger across every schema
+    /// surface.
+    #[must_use]
+    pub fn ledger_row_count(&self) -> usize {
+        self.ledger_rows().len()
+    }
+
+    /// Number of complete-Ledger rows carrying one semantic status.
+    #[must_use]
+    pub fn ledger_status_count(&self, status: Status) -> usize {
+        self.ledger_rows()
+            .iter()
+            .filter(|row| row.status == status)
+            .count()
+    }
+
     /// Symbols the wildcard surface binds — the import-surface inventory
     /// §1.6 says the Ledger has to enumerate, because `manimlib` has no
     /// `__all__` to trust.
@@ -1732,6 +2335,7 @@ impl Schema {
     /// Symbols of one kind.
     #[must_use]
     pub fn of_kind(&self, kind: SymbolKind) -> Vec<&Symbol> {
+        // ubs:ignore -- public schema kind, not secret data
         self.symbols.iter().filter(|s| s.kind == kind).collect()
     }
 
@@ -1754,7 +2358,7 @@ impl Schema {
     pub fn status(&self, symbol: &Symbol) -> Status {
         self.statuses
             .get(&symbol.key())
-            .map_or(Status::Unreviewed, |(status, _)| *status)
+            .map_or(Status::Unreviewed, |annotation| annotation.status)
     }
 
     /// The Reference commit the extracted layer was taken from.
@@ -1906,8 +2510,8 @@ pub fn generate_config_rs(schema: &Schema) -> String {
     out
 }
 
-/// Generate the Parity Ledger's rows (§16.1): one row per symbol, carrying
-/// the canonical name, the wildcard-export flag, and the semantic tier.
+/// Generate the Parity Ledger's rows (§16.1): Python symbols plus the CLI and
+/// config surfaces, carrying signatures/defaults and review evidence.
 ///
 /// fm-iz4 owns the Ledger itself; this is the machine-generated substrate it
 /// consumes, so the Ledger can never disagree with the schema about what the
@@ -1921,34 +2525,73 @@ pub fn generate_ledger_tsv(schema: &Schema) -> String {
     );
     out.push_str(
         "#\n\
-         # module\tsymbol\tcanonical\tkind\texported\tstatus\tevidence\n",
+         # module\tsymbol\tcanonical\tkind\texported\tsignature_defaults\tstatus\tevidence\ttests\tnotes\n",
     );
-    let mut rows: Vec<String> = schema
-        .symbols
-        .iter()
-        .map(|symbol| {
-            let (status, evidence) = schema
-                .statuses
-                .get(&symbol.key())
-                .map_or((Status::Unreviewed, NONE), |(s, e)| (*s, e.as_str()));
-            format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                symbol.module,
-                symbol.name,
-                schema.canonical_name(symbol),
-                symbol.kind.as_str(),
-                u8::from(symbol.exported),
-                status.as_str(),
-                evidence
-            )
-        })
-        .collect();
-    rows.sort_unstable();
-    for row in rows {
-        out.push_str(&row);
+    for row in schema.ledger_rows() {
+        out.push_str(&row.line());
         out.push('\n');
     }
     out
+}
+
+/// Generate the §16.6 out-of-tier ledger with a concrete revisit trigger for
+/// every honest fringe or excluded surface.
+#[must_use]
+pub fn generate_out_of_tier_tsv(schema: &Schema) -> String {
+    let mut out = banner(
+        Comment::PerLine("#"),
+        "The out-of-tier ledger (§16.6).",
+        schema.reference_commit(),
+    );
+    out.push_str(
+        "#\n\
+         # id\tsurface\tstatus\trationale\trevisit_trigger\n",
+    );
+    for ruling in schema.out_of_tier.values() {
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}",
+            ruling.id,
+            ruling.surface,
+            ruling.status.as_str(),
+            ruling.rationale,
+            ruling.revisit_trigger
+        );
+    }
+    out
+}
+
+/// Generate the honest reviewed-row coverage badge for the complete Ledger.
+#[must_use]
+pub fn generate_coverage_badge_svg(schema: &Schema) -> String {
+    let total = schema.ledger_row_count();
+    let unreviewed = schema.ledger_status_count(Status::Unreviewed);
+    let reviewed = total.saturating_sub(unreviewed);
+    let numerator = u128::try_from(reviewed).unwrap_or(0).saturating_mul(1_000);
+    let denominator = u128::try_from(total).unwrap_or(1).max(1);
+    let tenths = numerator / denominator;
+    let percentage = format!("{}.{}%", tenths / 10, tenths % 10);
+    let color = match tenths {
+        900.. => "#4c1",
+        750.. => "#97ca00",
+        500.. => "#a4a61d",
+        250.. => "#dfb317",
+        100.. => "#fe7d37",
+        _ => "#e05d44",
+    };
+    let value = format!("{reviewed}/{total} reviewed ({percentage})");
+    format!(
+        "<!-- GENERATED from the API schema; never hand-edit. Reference pin: {}; reviewed digest: {} -->\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"280\" height=\"20\" role=\"img\" aria-label=\"Parity Ledger: {value}\">\n\
+         <title>Parity Ledger: {value}</title>\n\
+         <linearGradient id=\"s\" x2=\"0\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#fff\" stop-opacity=\".7\"/><stop offset=\".1\" stop-color=\"#aaa\" stop-opacity=\".1\"/><stop offset=\".9\" stop-opacity=\".3\"/><stop offset=\"1\" stop-opacity=\".5\"/></linearGradient>\n\
+         <clipPath id=\"r\"><rect width=\"280\" height=\"20\" rx=\"3\"/></clipPath>\n\
+         <g clip-path=\"url(#r)\"><rect width=\"96\" height=\"20\" fill=\"#555\"/><rect x=\"96\" width=\"184\" height=\"20\" fill=\"{color}\"/><rect width=\"280\" height=\"20\" fill=\"url(#s)\"/></g>\n\
+         <g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,DejaVu Sans,sans-serif\" font-size=\"11\"><text x=\"48\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\">parity ledger</text><text x=\"48\" y=\"14\">parity ledger</text><text x=\"188\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\">{value}</text><text x=\"188\" y=\"14\">{value}</text></g>\n\
+         </svg>\n",
+        schema.reference_commit(),
+        schema.ledger_reviewed_digest()
+    )
 }
 
 /// Generate the CLI flag table (§13.6) — W9's normative source for the flag
@@ -1970,8 +2613,8 @@ pub fn generate_cli_table_md(schema: &Schema) -> String {
     );
     out.push_str(
         "## Reference flags\n\n\
-         | Options | Command | Binding | Status | Action | Default | Semantics |\n\
-         |---|---|---|---|---|---|---|\n",
+         | Options | Command | Binding | Status | Evidence | Action | Default | Semantics |\n\
+         |---|---|---|---|---|---|---|---|\n",
     );
     for flag in &schema.flags {
         let Some(binding) = schema
@@ -1990,11 +2633,12 @@ pub fn generate_cli_table_md(schema: &Schema) -> String {
         });
         let _ = writeln!(
             out,
-            "| `{}` | {} | `{}` | {} | {} | {} | {} |",
+            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} |",
             flag.options,
             binding.command.as_str(),
             binding.binding,
             binding.status.as_str(),
+            binding.evidence,
             flag.action,
             default,
             binding.note
@@ -2003,30 +2647,32 @@ pub fn generate_cli_table_md(schema: &Schema) -> String {
 
     out.push_str(
         "\n## Native flags\n\n\
-         | Options | Command | Binding | Status | Action | Default | Help |\n\
-         |---|---|---|---|---|---|---|\n",
+         | Options | Command | Binding | Status | Evidence | Action | Default | Help |\n\
+         |---|---|---|---|---|---|---|---|\n",
     );
     for flag in &schema.native_flags {
         let _ = writeln!(
             out,
-            "| `{}` | {} | `{}` | {} | {} | {} | {} |",
+            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} |",
             flag.options,
             flag.command.as_str(),
             flag.binding,
             flag.status.as_str(),
+            flag.evidence,
             flag.action,
             flag.default.as_deref().unwrap_or("—"),
             flag.help
         );
     }
 
-    out.push_str("\n## Commands\n\n| Command | Status | Meaning |\n|---|---|---|\n");
+    out.push_str("\n## Commands\n\n| Command | Status | Evidence | Meaning |\n|---|---|---|---|\n");
     for subcommand in &schema.subcommands {
         let _ = writeln!(
             out,
-            "| `{}` | {} | {} |",
+            "| `{}` | {} | {} | {} |",
             subcommand.command.as_str(),
             subcommand.status.as_str(),
+            subcommand.evidence,
             subcommand.help
         );
     }
@@ -2391,7 +3037,22 @@ pub fn generate_docs_md(schema: &Schema) -> String {
 
     let _ = writeln!(
         out,
-        "## Semantic tiers (§16.1)\n\n| Status | Symbols |\n|---|---|"
+        "## Parity Ledger coverage\n\nThe single Ledger contains {} rows: {} Python \
+         symbols, {} Reference CLI flags, {} FrankenManim-native CLI flags, {} \
+         CLI commands, and {} config keys. Its reviewed-identity ratchet is \
+         `{}`.\n",
+        schema.ledger_row_count(),
+        schema.symbols.len(),
+        schema.flags.len(),
+        schema.native_flags.len(),
+        schema.subcommands.len(),
+        schema.config.len(),
+        schema.ledger_reviewed_digest()
+    );
+
+    let _ = writeln!(
+        out,
+        "## Semantic tiers (§16.1)\n\n| Status | Ledger rows |\n|---|---|"
     );
     for status in [
         Status::Same,
@@ -2400,16 +3061,14 @@ pub fn generate_docs_md(schema: &Schema) -> String {
         Status::Excluded,
         Status::Unreviewed,
     ] {
-        let n = schema
-            .symbols
-            .iter()
-            .filter(|s| schema.status(s) == status)
-            .count();
+        let n = schema.ledger_status_count(status);
         let _ = writeln!(out, "| {} | {} |", status.as_str(), n);
     }
     out.push_str(
         "\n`unreviewed` is the honest default for a surface nobody has \
-         adjudicated yet; it is the number the Parity Ledger ratchets down.\n",
+         adjudicated yet; it is the number the Parity Ledger ratchets down. \
+         Every improved row resolves to a Behavior Note; every tiered or \
+         excluded row resolves to `docs/api/out_of_tier.tsv`.\n",
     );
 
     let _ = writeln!(
@@ -2453,14 +3112,17 @@ mod tests {
         [flags]\n-w,--write\twrite\tstore_true\t-\tFalse\t-\twrite it\n\n\
         [config]\ncamera.fps\tint\t30\t1\n";
 
-    const OVERLAY: &str = "[meta]\noverlay_version\t1\n\n\
+    const OVERLAY: &str = "[meta]\noverlay_version\t1\n\
+        ledger_reviewed_digest\t369fe193fc544ebe53abf947173452e5d86ae3645529f8ab9613c8f80ee6fb7a\n\n\
         [canonical]\nm:A.foo_listner\tfoo_listener\tC-9\t-\n\n\
         [param_canonical]\n\n\
         [config_binding]\ncamera.fps\tCameraConfig\tfps\tu32\n\n\
-        [status]\nm:A\timproved\tBN-01\n\n\
-        [flag_binding]\n-w,--write\tsame\trender\twrite\tkept\n\n\
-        [native_flags]\n-h,--help\tstore_true\t-\tFalse\t-\tglobal\thelp\timproved\tHelp\n\n\
-        [subcommands]\nrender\tsame\tRender scenes\n\n\
+        [config_status]\n\n\
+        [out_of_tier]\nOOT-FIXTURE\tfixture surface\ttiered\tbounded reason\tconcrete trigger\n\n\
+        [status]\nm:A\timproved\tBN-01\ttests/a.rs\tA is deliberately better\n\n\
+        [flag_binding]\n-w,--write\tsame\t-\trender\twrite\ttests/cli.rs\tkept\n\n\
+        [native_flags]\n-h,--help\tstore_true\t-\tFalse\t-\tglobal\thelp\timproved\tBN-15\ttests/cli.rs\tHelp\n\n\
+        [subcommands]\nrender\tsame\t-\ttests/cli.rs\tRender scenes\n\n\
         [exit_codes]\n0\tsuccess\tCompleted\n2\tusage\tBad arguments\n\n\
         [flag_interaction]\n";
 
@@ -2488,12 +3150,14 @@ mod tests {
         let method = s
             .symbols
             .iter()
+            // ubs:ignore -- public schema kind in a unit-test fixture
             .find(|x| x.kind == SymbolKind::Method)
             .unwrap();
         assert_eq!(s.canonical_name(method), "A.foo_listener");
         let class = s
             .symbols
             .iter()
+            // ubs:ignore -- public schema kind in a unit-test fixture
             .find(|x| x.kind == SymbolKind::Class)
             .unwrap();
         assert_eq!(
@@ -2509,15 +3173,81 @@ mod tests {
         let method = s
             .symbols
             .iter()
+            // ubs:ignore -- public schema kind in a unit-test fixture
             .find(|x| x.kind == SymbolKind::Method)
             .unwrap();
         assert_eq!(s.status(method), Status::Unreviewed);
         let class = s
             .symbols
             .iter()
+            // ubs:ignore -- public schema kind in a unit-test fixture
             .find(|x| x.kind == SymbolKind::Class)
             .unwrap();
         assert_eq!(s.status(class), Status::Improved);
+    }
+
+    #[test]
+    fn reviewed_rulings_require_structured_evidence_tests_and_notes() {
+        let bad_note = OVERLAY.replace("m:A\timproved\tBN-01", "m:A\timproved\tdocs/a.md");
+        let error = Schema::parse(EXTRACT, &bad_note).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::EvidenceContract { .. }),
+            "got {error}"
+        );
+        assert!(error.to_string().contains("BN-*"), "got {error}");
+
+        let no_tests = OVERLAY.replace("\ttests/a.rs\tA is deliberately better", "\t-\t-");
+        let error = Schema::parse(EXTRACT, &no_tests).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::EvidenceContract { .. }),
+            "got {error}"
+        );
+        assert!(error.to_string().contains("executed tests"), "got {error}");
+
+        let unknown_tier = OVERLAY.replace(
+            "m:A\timproved\tBN-01\ttests/a.rs\tA is deliberately better",
+            "m:A\ttiered\tOOT-MISSING\ttests/a.rs\tA is deliberately tiered",
+        );
+        let error = Schema::parse(EXTRACT, &unknown_tier).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::EvidenceContract { .. }),
+            "got {error}"
+        );
+        assert!(error.to_string().contains("declared OOT-*"), "got {error}");
+
+        let mismatched_tier = OVERLAY.replace(
+            "m:A\timproved\tBN-01\ttests/a.rs\tA is deliberately better",
+            "m:A\texcluded\tOOT-FIXTURE\ttests/a.rs\tA is deliberately excluded",
+        );
+        let error = Schema::parse(EXTRACT, &mismatched_tier).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::EvidenceContract { .. }),
+            "got {error}"
+        );
+        assert!(
+            error.to_string().contains("out-of-tier status is `tiered`"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn a_reviewed_status_cannot_drop_without_amending_the_ratchet() {
+        let downgraded = OVERLAY.replace(
+            "m:A\timproved\tBN-01\ttests/a.rs\tA is deliberately better",
+            "m:A\tunreviewed\t-\t-\t-",
+        );
+        let error = Schema::parse(EXTRACT, &downgraded).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::ReviewRatchet { .. }),
+            "got {error}"
+        );
+
+        let weakened_trigger = OVERLAY.replace("concrete trigger", "vague trigger");
+        let error = Schema::parse(EXTRACT, &weakened_trigger).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::ReviewRatchet { .. }),
+            "got {error}"
+        );
     }
 
     #[test]
@@ -2682,8 +3412,9 @@ mod tests {
              m:A.foo_listner\tother_listener\tC-9\tBN-duplicate",
         );
         let duplicate_status = OVERLAY.replace(
-            "m:A\timproved\tBN-01",
-            "m:A\timproved\tBN-01\nm:A\tsame\tBN-duplicate",
+            "m:A\timproved\tBN-01\ttests/a.rs\tA is deliberately better",
+            "m:A\timproved\tBN-01\ttests/a.rs\tA is deliberately better\n\
+             m:A\tsame\tdocs/a.md\ttests/a.rs\tduplicate",
         );
         for (file, overlay, section) in [
             (duplicate_meta.as_str(), OVERLAY, "meta"),
@@ -2759,7 +3490,10 @@ mod tests {
 
     #[test]
     fn every_extracted_flag_needs_exactly_one_authored_binding() {
-        let missing = OVERLAY.replace("-w,--write\tsame\trender\twrite\tkept\n", "");
+        let missing = OVERLAY.replace(
+            "-w,--write\tsame\t-\trender\twrite\ttests/cli.rs\tkept\n",
+            "",
+        );
         let err = Schema::parse(EXTRACT, &missing).unwrap_err(); // ubs:ignore — negative parser test
         assert!(matches!(err, SchemaError::FlagCoverage { .. }), "got {err}");
         assert!(err.to_string().contains("has no ruling"), "got {err}");
@@ -2894,6 +3628,7 @@ mod tests {
         for artifact in [
             generate_config_rs(&s),
             generate_ledger_tsv(&s),
+            generate_out_of_tier_tsv(&s),
             generate_cli_table_md(&s),
             generate_cli_rs(&s),
             generate_docs_md(&s),
@@ -2911,6 +3646,32 @@ mod tests {
         let s = schema();
         assert_eq!(generate_config_rs(&s), generate_config_rs(&schema()));
         assert_eq!(generate_ledger_tsv(&s), generate_ledger_tsv(&schema()));
+        assert_eq!(
+            generate_out_of_tier_tsv(&s),
+            generate_out_of_tier_tsv(&schema())
+        );
+        assert_eq!(
+            generate_coverage_badge_svg(&s),
+            generate_coverage_badge_svg(&schema())
+        );
         assert_eq!(generate_cli_rs(&s), generate_cli_rs(&schema()));
+    }
+
+    #[test]
+    fn complete_ledger_rows_carry_signatures_tests_and_notes() {
+        let s = schema();
+        let ledger = generate_ledger_tsv(&s);
+        let rows = ledger
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|line| line.split('\t').count() == 10));
+        assert!(ledger.contains("bases=object\timproved\tBN-01\ttests/a.rs"));
+        assert!(ledger.contains("self[positional_or_keyword]"));
+        assert!(ledger.contains("kind=int;default=30\tunreviewed\t-\t-\t-"));
+
+        let badge = generate_coverage_badge_svg(&s);
+        assert!(badge.contains("4/6 reviewed (66.6%)"), "{badge}");
     }
 }

@@ -27,17 +27,21 @@ Generated from `API_SCHEMA.tsv` (extracted from the pinned Reference) and `API_O
 
 `from manimlib import *` binds 665 names. The Reference declares no `__all__` (§1.6), so that number is the *computed* wildcard closure, leaked third-party imports included — enumerating it is the only way to know what the surface actually is.
 
+## Parity Ledger coverage
+
+The single Ledger contains 2482 rows: 2276 Python symbols, 34 Reference CLI flags, 19 FrankenManim-native CLI flags, 4 CLI commands, and 149 config keys. Its reviewed-identity ratchet is `d5cd403d271013cbbaaccb64eb155a49caf112abfa9a6e9aa39cc82e5c16084e`.
+
 ## Semantic tiers (§16.1)
 
-| Status | Symbols |
+| Status | Ledger rows |
 |---|---|
-| same | 1 |
-| improved | 9 |
-| tiered | 0 |
+| same | 27 |
+| improved | 38 |
+| tiered | 2 |
 | excluded | 2 |
-| unreviewed | 2264 |
+| unreviewed | 2413 |
 
-`unreviewed` is the honest default for a surface nobody has adjudicated yet; it is the number the Parity Ledger ratchets down.
+`unreviewed` is the honest default for a surface nobody has adjudicated yet; it is the number the Parity Ledger ratchets down. Every improved row resolves to a Behavior Note; every tiered or excluded row resolves to `docs/api/out_of_tier.tsv`.
 
 ## Canonical names (Appendix C, C-9)
 
