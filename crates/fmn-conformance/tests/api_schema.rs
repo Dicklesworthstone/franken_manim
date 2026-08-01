@@ -21,14 +21,20 @@
 //! which rewrites the artifacts in the working tree and never commits them —
 //! the same bless discipline as `UPDATE_GOLDENS=1` and `RATCHET_UPDATE=1`.
 
-#![allow(clippy::expect_used, clippy::panic)]
+#![allow(clippy::expect_used)]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use fmn_conformance::schema::{
     Schema, Status, SymbolKind, generate_cli_rs, generate_cli_table_md, generate_config_rs,
     generate_docs_md, generate_ledger_tsv,
 };
+
+/// File-read envelope shared by `API_SCHEMA.tsv`, `API_OVERLAY.tsv`, and
+/// `SUITE.lock`. The first two are parsed under the schema module's matching
+/// 8 MiB document limit; the much smaller lock rides the same authority cap.
+const MAX_SCHEMA_AUTHORITY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Repo-root-relative path (`CARGO_MANIFEST_DIR` is `crates/fmn-conformance`).
 fn repo_path(name: &str) -> PathBuf {
@@ -37,13 +43,49 @@ fn repo_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn read_utf8_with_limit(reader: impl Read, max_bytes: usize, name: &str) -> Result<String, String> {
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| format!("{name} byte limit cannot be represented"))?;
+    let read_limit = u64::try_from(read_limit)
+        .map_err(|_| format!("{name} byte limit does not fit the reader"))?;
+    let mut bytes = Vec::new();
+    reader
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("reading {name}: {error}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!("{name} exceeds the {max_bytes}-byte limit"));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("{name} is not UTF-8: {error}"))
+}
+
+fn read_bounded_utf8(path: &Path, max_bytes: usize, name: &str) -> Result<String, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {name}: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{name} is not a regular file"));
+    }
+    let max_bytes_u64 =
+        u64::try_from(max_bytes).map_err(|_| format!("{name} byte limit does not fit metadata"))?;
+    if metadata.len() > max_bytes_u64 {
+        return Err(format!(
+            "{name} is {} bytes, exceeding the {max_bytes}-byte limit",
+            metadata.len()
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|error| format!("opening {name}: {error}"))?;
+    read_utf8_with_limit(file, max_bytes, name)
+}
+
 fn repo_file(name: &str) -> String {
-    std::fs::read_to_string(repo_path(name)).unwrap_or_else(|e| panic!("reading {name}: {e}"))
+    read_bounded_utf8(&repo_path(name), MAX_SCHEMA_AUTHORITY_BYTES, name)
+        .expect("repository authority must be a bounded UTF-8 regular file")
 }
 
 fn schema() -> Schema {
     Schema::parse(&repo_file("API_SCHEMA.tsv"), &repo_file("API_OVERLAY.tsv"))
-        .unwrap_or_else(|e| panic!("{e}"))
+        .expect("the canonical API schema and overlay must parse")
 }
 
 /// Whether this run rewrites artifacts instead of checking them.
@@ -57,22 +99,29 @@ fn artifact(name: &str, generated: &str) {
     let path = repo_path(name);
     if blessing() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("mkdir {name}: {e}"));
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("creating parent for {name}: {error}"))
+                .expect("generated artifact parent must be creatable");
         }
-        std::fs::write(&path, generated).unwrap_or_else(|e| panic!("writing {name}: {e}"));
+        std::fs::write(&path, generated)
+            .map_err(|error| format!("writing {name}: {error}"))
+            .expect("generated artifact must be writable");
         return;
     }
-    let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "{name} is missing ({e}). Generate it with:\n  \
-             UPDATE_API_ARTIFACTS=1 cargo test -p fmn-conformance --test api_schema"
-        )
-    });
+    let committed = read_bounded_utf8(&path, generated.len(), name)
+        .map_err(|error| {
+            format!(
+                "{error}. Generate the artifact with:\n  \
+                 UPDATE_API_ARTIFACTS=1 cargo test -p fmn-conformance --test api_schema"
+            )
+        })
+        .expect("committed generated artifact must be bounded UTF-8");
     if committed == generated {
         return;
     }
     let (line, before, after) = first_difference(&committed, generated);
-    panic!(
+    assert!(
+        committed == generated,
         "{name} has drifted from the schema at line {line}.\n\
          \x20 committed:  {before}\n\
          \x20 schema says: {after}\n\n\
@@ -93,6 +142,56 @@ fn first_difference(a: &str, b: &str) -> (usize, String, String) {
     let shared = a.lines().count().min(b.lines().count());
     let tail = |s: &str| s.lines().nth(shared).unwrap_or("<end of file>").to_owned();
     (shared + 1, tail(a), tail(b))
+}
+
+#[test]
+fn bounded_utf8_reader_accepts_the_limit_and_checks_size_before_encoding() {
+    const LIMIT: usize = 8;
+
+    let exact = read_utf8_with_limit(
+        std::io::repeat(b'a').take(u64::try_from(LIMIT).expect("small test limit fits u64")),
+        LIMIT,
+        "test authority",
+    )
+    .expect("the exact byte limit must be accepted");
+    assert_eq!(exact, "a".repeat(LIMIT));
+
+    let mut oversized_invalid = vec![b'a'; LIMIT];
+    oversized_invalid.push(0xff);
+    let error = read_utf8_with_limit(&oversized_invalid[..], LIMIT, "test authority")
+        .expect_err("one byte beyond the limit must be refused");
+    assert_eq!(error, "test authority exceeds the 8-byte limit");
+
+    let error = read_utf8_with_limit(&[0xff][..], LIMIT, "test authority")
+        .expect_err("invalid UTF-8 within the envelope must be named");
+    assert!(error.contains("is not UTF-8"), "wrong UTF-8 error: {error}");
+}
+
+#[test]
+fn bounded_utf8_file_preflights_exact_size_oversize_and_file_type() {
+    let path = repo_path("Cargo.toml");
+    let size = usize::try_from(
+        std::fs::metadata(&path)
+            .expect("workspace manifest metadata")
+            .len(),
+    )
+    .expect("workspace manifest length fits usize");
+    let text = read_bounded_utf8(&path, size, "workspace manifest")
+        .expect("a regular UTF-8 file at the exact limit must be accepted");
+    assert_eq!(text.len(), size);
+
+    let error = read_bounded_utf8(
+        &path,
+        size.checked_sub(1)
+            .expect("workspace manifest is not empty"),
+        "workspace manifest",
+    )
+    .expect_err("the metadata preflight must refuse an oversized file");
+    assert!(error.contains("exceeding"), "wrong size error: {error}");
+
+    let error = read_bounded_utf8(&repo_path("."), size, "workspace root")
+        .expect_err("a directory must not be consumed as an authority");
+    assert_eq!(error, "workspace root is not a regular file");
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +448,7 @@ fn the_reference_spelling_survives_as_the_python_alias() {
 fn every_config_key_is_bound_exactly_once() {
     schema()
         .check_config_coverage()
-        .unwrap_or_else(|e| panic!("{e}"));
+        .expect("every config key must have exactly one authored binding");
 }
 
 #[test]
@@ -369,7 +468,7 @@ fn the_shipped_config_covers_the_references_key_surface() {
             .config
             .iter()
             .find(|c| c.path == native)
-            .unwrap_or_else(|| panic!("native key `{native}` missing"));
+            .expect("the native config-key census must be complete");
         assert!(
             !key.in_reference,
             "`{native}` is FrankenManim-native and must not claim Reference provenance"
