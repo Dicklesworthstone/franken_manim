@@ -25,7 +25,7 @@
 use fmn_hash::sha256;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -41,6 +41,15 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The lock-file format version tag; the first line of every lock file.
 const LOCK_HEADER_PREFIX: &str = "# fmn-golden-lock v1";
+
+/// Lock files are compact hash ledgers, not artifact containers. One MiB
+/// bounds malformed reads and canonical writes while leaving room for
+/// thousands of entries.
+const MAX_LOCK_FILE_BYTES: usize = 1024 * 1024;
+
+/// Suite and artifact names become filesystem path components. The cap keeps
+/// their derived lock, sidecar-directory, and `.actual` names portable.
+const MAX_NAME_BYTES: usize = 128;
 
 /// Which machines a lock file speaks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,9 +110,14 @@ pub enum Verdict {
 /// A rig failure. [`GoldenError::Drift`] is the one CI exists to surface.
 #[derive(Debug)]
 pub enum GoldenError {
-    /// The artifact or suite name contains characters outside
-    /// `[a-z0-9._-]` (names are path components; traversal is refused).
-    InvalidName(String),
+    /// The artifact or suite name is empty, oversized, or contains characters
+    /// outside `[a-z0-9._-]` (names are path components; traversal is
+    /// refused).
+    InvalidName {
+        /// Byte length of the rejected name; the input itself is not owned or
+        /// copied into diagnostics.
+        bytes: usize,
+    },
     /// Filesystem failure reading or writing the lock or a sidecar.
     Io {
         /// The path being read or written.
@@ -119,6 +133,13 @@ pub enum GoldenError {
         line: usize,
         /// What was wrong with it.
         detail: String,
+    },
+    /// A lock file exceeds the format envelope on read or canonical write.
+    LockTooLarge {
+        /// The lock file path.
+        path: PathBuf,
+        /// Maximum permitted byte length.
+        limit: usize,
     },
     /// The artifact does not match its lock (or has no entry). In check mode
     /// this is the merge-blocking failure; the actual bytes have been written
@@ -138,8 +159,12 @@ pub enum GoldenError {
 impl fmt::Display for GoldenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidName(name) => {
-                write!(f, "invalid golden name {name:?}: use only [a-z0-9._-]")
+            Self::InvalidName { bytes } => {
+                write!(
+                    f,
+                    "invalid golden name ({bytes} bytes): expected 1..={MAX_NAME_BYTES} bytes \
+                     using only [a-z0-9._-] and not starting with '.'"
+                )
             }
             Self::Io { path, err } => write!(f, "golden I/O failure at {}: {err}", path.display()),
             Self::Corrupt { path, line, detail } => {
@@ -149,6 +174,11 @@ impl fmt::Display for GoldenError {
                     path.display()
                 )
             }
+            Self::LockTooLarge { path, limit } => write!(
+                f,
+                "golden lock file {} exceeds the {limit}-byte format limit",
+                path.display()
+            ),
             Self::Drift {
                 name,
                 expected,
@@ -197,6 +227,7 @@ pub fn platform_key() -> String {
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
         && name.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
         })
@@ -232,7 +263,7 @@ impl GoldenStore {
     /// [`GoldenError::InvalidName`] if `suite` is not a safe path component.
     pub fn new(dir: impl Into<PathBuf>, suite: &str, scope: Scope) -> Result<Self, GoldenError> {
         if !valid_name(suite) {
-            return Err(GoldenError::InvalidName(suite.to_string()));
+            return Err(GoldenError::InvalidName { bytes: suite.len() });
         }
         let key = match scope {
             Scope::PerPlatform => platform_key(),
@@ -284,7 +315,7 @@ impl GoldenStore {
         mode: Mode,
     ) -> Result<Verdict, GoldenError> {
         if !valid_name(name) {
-            return Err(GoldenError::InvalidName(name.to_string()));
+            return Err(GoldenError::InvalidName { bytes: name.len() });
         }
         // Hold the guard across load-modify-write so parallel tests blessing
         // into one suite cannot lose entries. A poisoned guard means another
@@ -327,11 +358,28 @@ impl GoldenStore {
     /// malformed lock files.
     pub fn load_entries(&self) -> Result<BTreeMap<String, LockEntry>, GoldenError> {
         let path = self.lock_path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(err) => return Err(GoldenError::Io { path, err }),
         };
+        let mut bytes = Vec::new();
+        file.take((MAX_LOCK_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|err| GoldenError::Io {
+                path: path.clone(),
+                err,
+            })?;
+        if bytes.len() > MAX_LOCK_FILE_BYTES {
+            return Err(GoldenError::LockTooLarge {
+                path,
+                limit: MAX_LOCK_FILE_BYTES,
+            });
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|err| GoldenError::Io {
+            path: path.clone(),
+            err: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+        })?;
         let mut lines = text.lines().enumerate();
         let expected_header = self.lock_header();
         match lines.next() {
@@ -420,14 +468,9 @@ impl GoldenStore {
     /// renamed into place so a crash never leaves a torn lock.
     fn write_entries(&self, entries: &BTreeMap<String, LockEntry>) -> Result<(), GoldenError> {
         let path = self.lock_path();
+        let out = self.canonical_lock_text(entries, &path)?;
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
-        }
-        let mut out = String::new();
-        out.push_str(&self.lock_header());
-        out.push('\n');
-        for (name, entry) in entries {
-            out.push_str(&format!("{name}\t{}\t{}\n", entry.len, entry.sha256_hex));
         }
         let tmp = path.with_extension(format!(
             "lock.tmp.{}.{}",
@@ -436,6 +479,40 @@ impl GoldenStore {
         ));
         write_file(&tmp, out.as_bytes())?;
         std::fs::rename(&tmp, &path).map_err(|err| GoldenError::Io { path, err })
+    }
+
+    fn canonical_lock_text(
+        &self,
+        entries: &BTreeMap<String, LockEntry>,
+        path: &Path,
+    ) -> Result<String, GoldenError> {
+        let header = self.lock_header();
+        let mut len = header.len().saturating_add(1);
+        for (name, entry) in entries {
+            len = len
+                .saturating_add(name.len())
+                .saturating_add(entry.len.to_string().len())
+                .saturating_add(entry.sha256_hex.len())
+                .saturating_add(3);
+        }
+        if len > MAX_LOCK_FILE_BYTES {
+            return Err(GoldenError::LockTooLarge {
+                path: path.to_path_buf(),
+                limit: MAX_LOCK_FILE_BYTES,
+            });
+        }
+        let mut out = String::with_capacity(len);
+        out.push_str(&header);
+        out.push('\n');
+        for (name, entry) in entries {
+            out.push_str(name);
+            out.push('\t');
+            out.push_str(&entry.len.to_string());
+            out.push('\t');
+            out.push_str(&entry.sha256_hex);
+            out.push('\n');
+        }
+        Ok(out)
     }
 
     /// Write the drift sidecar and return its path.

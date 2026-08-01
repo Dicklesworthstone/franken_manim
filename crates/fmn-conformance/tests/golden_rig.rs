@@ -38,18 +38,20 @@ fn full_lifecycle_create_lock_drift_bless() {
     let err = store
         .check_with_mode("trivial", &v1, Mode::Check)
         .expect_err("unlocked artifact must fail in check mode");
-    let sidecar = match err {
-        GoldenError::Drift {
-            ref name,
-            expected: None,
-            ref sidecar,
-            ..
-        } => {
-            assert_eq!(name, "trivial");
-            sidecar.clone()
-        }
-        other => panic!("expected no-entry drift, got: {other}"),
+    assert!(
+        matches!(&err, GoldenError::Drift { expected: None, .. }),
+        "expected no-entry drift, got: {err}"
+    );
+    let GoldenError::Drift {
+        name,
+        expected: None,
+        sidecar,
+        ..
+    } = err
+    else {
+        return;
     };
+    assert_eq!(name, "trivial");
     assert_eq!(std::fs::read(&sidecar).expect("sidecar"), v1);
 
     // 2. LOCK: bless writes the lock entry; the rig never commits anything.
@@ -72,30 +74,43 @@ fn full_lifecycle_create_lock_drift_bless() {
     let err = store
         .check_with_mode("trivial", &v2, Mode::Check)
         .expect_err("drifted artifact must fail in check mode");
-    match err {
-        GoldenError::Drift {
-            expected: Some(ref e),
-            ref actual,
-            ref sidecar,
-            ..
-        } => {
-            assert_eq!(e.len, v1.len() as u64);
-            assert_eq!(actual.len, v2.len() as u64);
-            assert_ne!(e.sha256_hex, actual.sha256_hex);
-            assert_eq!(std::fs::read(sidecar).expect("sidecar"), v2);
-        }
-        other => panic!("expected drift with previous entry, got: {other}"),
-    }
+    assert!(
+        matches!(
+            &err,
+            GoldenError::Drift {
+                expected: Some(_),
+                ..
+            }
+        ),
+        "expected drift with previous entry, got: {err}"
+    );
+    let GoldenError::Drift {
+        expected: Some(expected),
+        actual,
+        sidecar,
+        ..
+    } = err
+    else {
+        return;
+    };
+    assert_eq!(expected.len, v1.len() as u64);
+    assert_eq!(actual.len, v2.len() as u64);
+    assert_ne!(expected.sha256_hex, actual.sha256_hex);
+    assert_eq!(std::fs::read(sidecar).expect("sidecar"), v2);
 
     // 5. BLESS: deliberate re-lock accepts the new bytes and reports what it
     //    replaced; a subsequent check passes.
     let verdict = store
         .check_with_mode("trivial", &v2, Mode::Bless)
         .expect("re-bless");
-    match verdict {
-        Verdict::Blessed { previous: Some(p) } => assert_eq!(p.len, v1.len() as u64),
-        other => panic!("expected replacing bless, got {other:?}"),
-    }
+    assert!(
+        matches!(&verdict, Verdict::Blessed { previous: Some(_) }),
+        "expected replacing bless, got {verdict:?}"
+    );
+    let Verdict::Blessed { previous: Some(p) } = verdict else {
+        return;
+    };
+    assert_eq!(p.len, v1.len() as u64);
     assert_eq!(
         store
             .check_with_mode("trivial", &v2, Mode::Check)
@@ -141,12 +156,23 @@ fn names_are_path_components_never_traversal() {
         assert!(
             matches!(
                 store.check_with_mode(bad, b"x", Mode::Check),
-                Err(GoldenError::InvalidName(_))
+                Err(GoldenError::InvalidName { .. })
             ),
             "name {bad:?} must be refused"
         );
     }
     assert!(GoldenStore::new(&dir, "../sneaky", Scope::PerPlatform).is_err());
+
+    let oversized = "a".repeat(129);
+    let error = store
+        .check_with_mode(&oversized, b"x", Mode::Check)
+        .expect_err("an oversized artifact name must be refused before ownership");
+    assert!(matches!(error, GoldenError::InvalidName { bytes: 129 }));
+    assert!(error.to_string().len() < 200);
+    assert!(matches!(
+        GoldenStore::new(&dir, &oversized, Scope::PerPlatform),
+        Err(GoldenError::InvalidName { bytes: 129 })
+    ));
 }
 
 #[test]
@@ -154,10 +180,11 @@ fn corrupt_lock_is_a_named_error_not_a_pass() {
     let dir = scratch("corrupt");
     let store = GoldenStore::new(&dir, "corrupt", Scope::PerPlatform).expect("store");
     std::fs::write(store.lock_path(), "not a lock header\n").expect("write");
-    match store.check_with_mode("x", b"x", Mode::Check) {
-        Err(GoldenError::Corrupt { line: 1, .. }) => {}
-        other => panic!("expected corrupt-lock error, got {other:?}"),
-    }
+    let result = store.check_with_mode("x", b"x", Mode::Check);
+    assert!(
+        matches!(&result, Err(GoldenError::Corrupt { line: 1, .. })),
+        "expected corrupt-lock error, got {result:?}"
+    );
 }
 
 #[test]
@@ -170,20 +197,23 @@ fn lock_identity_and_rows_are_strictly_parsed_with_bounded_refusals() {
 
     let assert_corrupt = |text: &str, expected_line: usize, needle: &str| {
         std::fs::write(&lock, text).expect("write malformed lock");
-        match store.load_entries() {
-            Err(GoldenError::Corrupt { line, detail, .. }) => {
-                assert_eq!(line, expected_line, "unexpected refusal: {detail}");
-                assert!(
-                    detail.contains(needle),
-                    "expected {needle:?} in refusal: {detail}"
-                );
-                assert!(
-                    detail.len() < 200,
-                    "refusal copied malformed input: {detail}"
-                );
-            }
-            other => panic!("expected corrupt-lock error, got {other:?}"),
-        }
+        let result = store.load_entries();
+        assert!(
+            matches!(&result, Err(GoldenError::Corrupt { .. })),
+            "expected corrupt-lock error, got {result:?}"
+        );
+        let Err(GoldenError::Corrupt { line, detail, .. }) = result else {
+            return;
+        };
+        assert_eq!(line, expected_line, "unexpected refusal: {detail}");
+        assert!(
+            detail.contains(needle),
+            "expected {needle:?} in refusal: {detail}"
+        );
+        assert!(
+            detail.len() < 200,
+            "refusal copied malformed input: {detail}"
+        );
     };
 
     assert_corrupt(
@@ -227,4 +257,52 @@ fn lock_identity_and_rows_are_strictly_parsed_with_bounded_refusals() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries["artifact"].len, 1);
     assert_eq!(entries["artifact"].sha256_hex, sha);
+}
+
+#[test]
+fn lock_document_envelope_bounds_reads_and_refuses_oversized_bless_atomically() {
+    const LIMIT: usize = 1024 * 1024;
+
+    let dir = scratch("document_envelope");
+    let store = GoldenStore::new(&dir, "bounded", Scope::Certified).expect("store");
+    let lock = store.lock_path();
+    std::fs::write(&lock, vec![b'x'; LIMIT + 1]).expect("write oversized lock");
+    let error = store
+        .load_entries()
+        .expect_err("an oversized lock must be refused");
+    assert!(matches!(
+        error,
+        GoldenError::LockTooLarge { limit: LIMIT, .. }
+    ));
+    assert!(error.to_string().len() < 200);
+
+    let sha = "00".repeat(32);
+    let mut canonical = String::from("# fmn-golden-lock v1 suite=bounded key=certified\n");
+    for index in 0_u32.. {
+        let row = format!("entry-{index:05}\t1\t{sha}\n");
+        if canonical.len() + row.len() > LIMIT {
+            break;
+        }
+        canonical.push_str(&row);
+    }
+    let new_name = "z".repeat(128);
+    let new_row_len = new_name.len() + 1 + 1 + 1 + 64 + 1;
+    assert!(
+        LIMIT - canonical.len() < new_row_len,
+        "the canonical fixture must leave less than one maximal row"
+    );
+    std::fs::write(&lock, canonical.as_bytes()).expect("write near-limit canonical lock");
+
+    let error = store
+        .check_with_mode(&new_name, b"x", Mode::Bless)
+        .expect_err("a bless that crosses the format envelope must be refused");
+    assert!(matches!(
+        error,
+        GoldenError::LockTooLarge { limit: LIMIT, .. }
+    ));
+    assert_eq!(
+        std::fs::read(&lock).expect("read unchanged lock"),
+        canonical.as_bytes(),
+        "a refused oversized bless must not rewrite the lock"
+    );
 }
