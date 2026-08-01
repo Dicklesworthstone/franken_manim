@@ -398,19 +398,19 @@ impl Journal {
     ///
     /// # Errors
     /// [`SerialError`] on size-limit overflow.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
+        let entry_count = wire_count(self.entries.len())?;
         let mut w = Writer::new(JOURNAL_SCHEMA);
-        w.put_u32(self.entries.len() as u32);
+        w.put_u32(entry_count);
         for entry in &self.entries {
             put_command(&mut w, &entry.command);
-            put_effect(&mut w, &entry.effect);
-            w.put_u32(entry.reads.len() as u32);
+            put_effect(&mut w, &entry.effect)?;
+            w.put_u32(wire_count(entry.reads.len())?);
             for read in &entry.reads {
                 w.put_str(&read.path);
                 w.put_digest(&read.digest);
             }
-            w.put_u32(entry.subprocesses.len() as u32);
+            w.put_u32(wire_count(entry.subprocesses.len())?);
             for sub in &entry.subprocesses {
                 w.put_str(&sub.tool_sha256_hex);
                 w.put_digest(&sub.argv_digest);
@@ -427,7 +427,7 @@ impl Journal {
             }
             w.put_digest(&entry.state_hash);
         }
-        w.put_u32(self.events.len() as u32);
+        w.put_u32(wire_count(self.events.len())?);
         for event in &self.events {
             put_input_event(&mut w, event);
         }
@@ -526,15 +526,15 @@ fn get_command(r: &mut Reader<'_>) -> Result<CommandRecord, JournalError> {
     })
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn put_effect(w: &mut Writer, effect: &EffectClass) {
+fn put_effect(w: &mut Writer, effect: &EffectClass) -> Result<(), SerialError> {
     match effect {
         EffectClass::Pure => {
             w.put_u8(0);
         }
         EffectClass::Stateful(tags) => {
+            let count = wire_count(tags.len())?;
             w.put_u8(1);
-            w.put_u32(tags.len() as u32);
+            w.put_u32(count);
             for tag in tags {
                 w.put_u8(tag.code());
             }
@@ -546,6 +546,7 @@ fn put_effect(w: &mut Writer, effect: &EffectClass) {
             w.put_u8(3);
         }
     }
+    Ok(())
 }
 
 fn get_effect(r: &mut Reader<'_>) -> Result<EffectClass, JournalError> {
@@ -595,6 +596,13 @@ fn require_collection_payload(
     } else {
         Ok(())
     }
+}
+
+fn wire_count(needed: usize) -> Result<u32, SerialError> {
+    u32::try_from(needed).map_err(|_| SerialError::SizeLimit {
+        limit: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+        needed,
+    })
 }
 
 fn put_input_event(w: &mut Writer, event: &InputEvent) {
@@ -913,14 +921,14 @@ impl ReproBundle {
     ///
     /// # Errors
     /// [`SerialError`] on size-limit overflow.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
+        let closure_count = wire_count(self.closure.len())?;
         let mut w = Writer::new(BUNDLE_SCHEMA);
         w.put_str(&self.scene_label);
         w.put_u64(self.seed);
         w.put_u32(self.fps.0);
         w.put_u32(self.fps.1);
-        w.put_u32(self.closure.len() as u32);
+        w.put_u32(closure_count);
         for read in &self.closure {
             w.put_str(&read.path);
             w.put_digest(&read.digest);
@@ -984,5 +992,23 @@ impl ReproBundle {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SerialError, wire_count};
+
+    #[test]
+    fn wire_count_accepts_u32_max_and_refuses_one_over() {
+        let max = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        assert_eq!(wire_count(max).unwrap(), u32::MAX);
+        if let Some(one_over) = max.checked_add(1) {
+            assert!(matches!(
+                wire_count(one_over),
+                Err(SerialError::SizeLimit { limit, needed })
+                    if limit == max && needed == one_over
+            ));
+        }
     }
 }
