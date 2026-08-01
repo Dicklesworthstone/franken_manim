@@ -1351,7 +1351,10 @@ impl Supervisor {
         }
         let message = bounded_channel_error_message(
             error,
-            self.config.protocol_limits.max_crash_message_bytes,
+            self.config
+                .protocol_limits
+                .max_crash_message_bytes
+                .min(self.config.protocol_limits.max_field_bytes),
         );
         CrashReport {
             scene: self.scene.clone(),

@@ -456,12 +456,17 @@ fn repeated_crash_history_evicts_oldest_and_zero_disables_retention() {
 }
 
 #[test]
-fn locally_synthesized_crash_message_is_bounded_before_lossy_stderr_conversion() {
+fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
     let state = Arc::new(Mutex::new(FakeState {
         channel_error_first_play: true,
         ..FakeState::default()
     }));
     let clock = Arc::new(FakeClock::new());
+    let limits = ProtocolLimits {
+        max_field_bytes: 64,
+        max_crash_message_bytes: 128,
+        ..ProtocolLimits::default()
+    };
     let mut supervisor = Supervisor::new(
         Box::new(FakeLauncher {
             state,
@@ -471,10 +476,7 @@ fn locally_synthesized_crash_message_is_bounded_before_lossy_stderr_conversion()
         clock.clone(),
         cache(clock.clone()),
         SupervisorConfig {
-            protocol_limits: ProtocolLimits {
-                max_crash_message_bytes: 64,
-                ..ProtocolLimits::default()
-            },
+            protocol_limits: limits,
             ..SupervisorConfig::default()
         },
     );
@@ -495,7 +497,7 @@ fn locally_synthesized_crash_message_is_bounded_before_lossy_stderr_conversion()
     let SupervisorReply::Recovered { crash, .. } = reply else {
         std::panic::panic_any("expected automatic recovery");
     };
-    assert!(crash.message.len() <= 64);
+    assert!(crash.message.len() <= limits.max_field_bytes);
     assert!(
         crash
             .message
@@ -503,6 +505,12 @@ fn locally_synthesized_crash_message_is_bounded_before_lossy_stderr_conversion()
     );
     assert!(crash.message.contains("stderr tail"));
     assert!(crash.message.contains('\u{fffd}'));
+    ResponseEnvelope {
+        request_id: 1,
+        response: WorkerResponse::Crash(crash.clone()),
+    }
+    .to_bytes(limits)
+    .expect("the locally synthesized crash report re-encodes under the same limits");
     assert_eq!(supervisor.crashes(), &[crash]);
 }
 
