@@ -507,11 +507,16 @@ fn parse_header_dict(header: &str) -> Result<(String, bool, Vec<usize>), NpyErro
                     detail: "unterminated shape tuple".to_string(),
                 })?;
                 let mut dims = Vec::with_capacity(MAX_DIMS);
-                let mut parts = tuple.split(',');
+                let mut parts = tuple.split(',').peekable();
                 while let Some(part) = parts.next() {
                     let part = part.trim();
                     if part.is_empty() {
-                        continue; // trailing comma in (n,)
+                        if parts.peek().is_none() && !dims.is_empty() {
+                            continue; // trailing comma in (n,)
+                        }
+                        return Err(NpyError::Header {
+                            detail: "shape tuple contains an empty dimension".to_string(),
+                        });
                     }
                     if dims.len() == MAX_DIMS {
                         let remaining = parts.filter(|part| !part.trim().is_empty()).count();
@@ -523,6 +528,11 @@ fn parse_header_dict(header: &str) -> Result<(String, bool, Vec<usize>), NpyErro
                     dims.push(part.parse::<usize>().map_err(|_| NpyError::Header {
                         detail: format!("bad shape dimension {part:?}"),
                     })?);
+                }
+                if dims.len() == 1 && !tuple.contains(',') {
+                    return Err(NpyError::Header {
+                        detail: "one-dimensional shape tuple requires a trailing comma".to_string(),
+                    });
                 }
                 if shape.replace(dims).is_some() {
                     return Err(NpyError::Header {
@@ -667,5 +677,22 @@ mod tests {
             error.to_string().len() < 128,
             "dimension-cap diagnostic must stay bounded: {error}"
         );
+    }
+
+    #[test]
+    fn malformed_shape_tuple_separators_are_refused() {
+        for shape in ["", ",1", "1,,2", "1,,", "1"] {
+            let header =
+                format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({shape}), }}");
+            assert!(
+                matches!(parse_header_dict(&header), Err(NpyError::Header { .. })),
+                "malformed shape tuple ({shape}) must be refused"
+            );
+        }
+
+        let (_, _, shape) =
+            parse_header_dict("{'descr': '<f8', 'fortran_order': False, 'shape': (1,), }")
+                .expect("canonical one-dimensional tuple parses");
+        assert_eq!(shape, vec![1]);
     }
 }
