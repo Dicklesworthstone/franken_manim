@@ -364,6 +364,80 @@ fn invalid_and_out_of_order_inputs_fail_before_scene_mutation() {
     ));
 }
 
+#[test]
+fn host_batch_sequence_exhaustion_is_atomic_at_the_terminal_id() {
+    let terminal_predecessor = InputEvent::new(
+        u64::MAX - 1,
+        RationalTime::zero(30),
+        EventPayload::KeyRelease {
+            key: Key::Character('r'),
+            modifiers: Modifiers::NONE,
+        },
+    )
+    .expect("terminal predecessor");
+
+    let mut single = Scene::default();
+    single
+        .queue_replay_events(std::slice::from_ref(&terminal_predecessor))
+        .expect("terminal predecessor is admitted");
+    assert_eq!(single.dispatch_pending_events().expect("predecessor"), 1);
+    let single_inbox = single.event_inbox();
+    single_inbox
+        .submit(EventPayload::KeyPress {
+            key: Key::Character('h'),
+            modifiers: Modifiers::NONE,
+        })
+        .expect("terminal host payload");
+    assert_eq!(single.dispatch_pending_events().expect("terminal event"), 1);
+    assert_eq!(single.recorded_events().len(), 2);
+    assert_eq!(single.recorded_events()[1].sequence, u64::MAX);
+    assert!(single_inbox.is_empty());
+
+    let mut refused = Scene::default();
+    refused
+        .queue_replay_events(&[terminal_predecessor])
+        .expect("terminal predecessor is admitted");
+    assert_eq!(refused.dispatch_pending_events().expect("predecessor"), 1);
+    let mob = refused
+        .add_mobject(rectangle(
+            [0.0; 3],
+            Srgb::from_hex("#FFFFFF").expect("fixture color"),
+        ))
+        .expect("root");
+    refused
+        .event_dispatcher_mut()
+        .add_listener(EventListener::new(
+            EventType::KeyPress,
+            EventTarget::Global,
+            move |_, _, _, stage| {
+                stage.shift(mob, [1.0, 0.0, 0.0]);
+                EventPropagation::Continue
+            },
+        ))
+        .expect("listener");
+    let refused_inbox = refused.event_inbox();
+    for key in ['h', 'v'] {
+        refused_inbox
+            .submit(EventPayload::KeyPress {
+                key: Key::Character(key),
+                modifiers: Modifiers::NONE,
+            })
+            .expect("host payload");
+    }
+
+    assert_eq!(
+        refused.dispatch_pending_events(),
+        Err(EventError::SequenceExhausted)
+    );
+    assert_eq!(
+        refused_inbox.len(),
+        2,
+        "an unsequencable batch must remain wholly pending"
+    );
+    assert_eq!(refused.recorded_events().len(), 1);
+    assert_eq!(refused.stage().get_center(mob), [0.0, 0.0, 0.0]);
+}
+
 fn scripted_scene() -> (InteractiveScene, Mob, Mob) {
     let mut scene = Scene::new(
         RuntimeConfig {

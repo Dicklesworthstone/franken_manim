@@ -1523,7 +1523,7 @@ impl Scene {
         self.preflight_done = false;
         self.event_dispatcher.reset_state();
         self.queued_events.clear();
-        let _ = self.event_inbox.drain();
+        self.event_inbox.clear();
         self.recorded_events.clear();
         self.next_event_sequence = Some(0);
         self.event_error = None;
@@ -1552,8 +1552,14 @@ fn drain_event_queue(
     }
 
     let mut candidate_sequence = *next_sequence;
+    let sequence_capacity =
+        candidate_sequence.map_or(0, |sequence| u128::from(u64::MAX - sequence) + 1);
+    let Some(payloads) = inbox.drain_if_at_most(sequence_capacity) else {
+        *event_error = Some(EventError::SequenceExhausted);
+        return 0;
+    };
     let mut host_events = Vec::new();
-    for payload in inbox.drain() {
+    for payload in payloads {
         let Some(sequence) = candidate_sequence else {
             *event_error = Some(EventError::SequenceExhausted);
             return 0;

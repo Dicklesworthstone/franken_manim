@@ -517,12 +517,23 @@ impl EventInbox {
         self.len() == 0
     }
 
-    pub(crate) fn drain(&self) -> Vec<EventPayload> {
+    pub(crate) fn drain_if_at_most(&self, capacity: u128) -> Option<Vec<EventPayload>> {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = u128::try_from(queue.len()).ok()?;
+        if pending > capacity {
+            return None;
+        }
+        Some(queue.drain(..).collect())
+    }
+
+    pub(crate) fn clear(&self) {
         self.queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .collect()
+            .clear();
     }
 }
 
