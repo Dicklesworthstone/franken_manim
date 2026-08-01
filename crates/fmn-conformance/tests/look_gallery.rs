@@ -263,7 +263,7 @@ fn committed_manifest_parses_and_round_trips_byte_for_byte() {
     );
     assert_eq!(manifest.rows.len(), 5, "five panels have committed renders");
     assert_eq!(
-        manifest.to_text(),
+        manifest.to_text().expect("canonical manifest serializes"),
         text,
         "the committed manifest must be in canonical form"
     );
@@ -366,23 +366,48 @@ fn oversized_manifest_documents_are_refused_by_parse_and_load() {
     assert!(
         matches!(
             parse_error,
-            GalleryError::Corrupt { line: 1, ref detail }
-                if detail.contains("1048576-byte format limit")
+            GalleryError::ManifestTooLarge { limit: 1_048_576 }
         ),
         "unexpected parse refusal: {parse_error}"
     );
 
     let path = scratch("oversized_manifest").join("look_gallery.tsv");
-    std::fs::write(&path, oversized).expect("write oversized manifest fixture");
+    std::fs::write(&path, oversized.as_bytes()).expect("write oversized manifest fixture");
     let load_error = GalleryManifest::load(&path)
         .expect_err("an oversized file-backed manifest must be refused");
     assert!(
         matches!(
             load_error,
-            GalleryError::Corrupt { line: 1, ref detail }
-                if detail.contains("1048576-byte format limit")
+            GalleryError::ManifestTooLarge { limit: 1_048_576 }
         ),
         "unexpected load refusal: {load_error}"
+    );
+
+    let valid = "# fmn-look-gallery v1\n# revision: 1\n\
+        panel\ta/b.png\tc/d.png\tat-least-as-good\tnote\n";
+    let mut updated = GalleryManifest::parse(valid).expect("valid manifest");
+    let before = updated.clone();
+    let update_error = updated
+        .record_verdict("panel", Verdict::Regression, &oversized)
+        .expect_err("an oversized verdict update must be refused");
+    assert!(matches!(
+        update_error,
+        GalleryError::ManifestTooLarge { limit: 1_048_576 }
+    ));
+    assert_eq!(updated, before, "a refused update must be atomic");
+
+    updated.rows[0].changed = oversized;
+    let refused_path = scratch("oversized_save").join("look_gallery.tsv");
+    let save_error = updated
+        .save(&refused_path)
+        .expect_err("an oversized in-memory manifest must not be written");
+    assert!(matches!(
+        save_error,
+        GalleryError::ManifestTooLarge { limit: 1_048_576 }
+    ));
+    assert!(
+        !refused_path.exists(),
+        "size validation must precede output-file creation"
     );
 }
 
@@ -454,7 +479,7 @@ fn verdict_transitions_are_recorded_and_regressions_found() {
     assert_eq!(reloaded, current);
     assert_eq!(
         std::fs::read_to_string(&path).expect("file bytes"),
-        current.to_text(),
+        current.to_text().expect("canonical manifest serializes"),
         "the file holds exactly the canonical text"
     );
 

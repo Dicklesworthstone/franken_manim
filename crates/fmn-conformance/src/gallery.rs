@@ -72,6 +72,9 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// The manifest format tag; the first line of every look-gallery TSV.
 pub const MANIFEST_HEADER: &str = "# fmn-look-gallery v1";
 
+const MANIFEST_REVISION_PREFIX: &str = "# revision: ";
+const MANIFEST_COLUMNS: &str = "# columns: panel\treference\trender\tverdict\tchanged";
+
 /// Maximum byte length of one look-gallery manifest. The ledger is a small,
 /// reviewed TSV; one MiB leaves ample growth room while keeping malformed
 /// file and in-memory inputs bounded before row ownership begins.
@@ -293,6 +296,12 @@ pub enum GalleryError {
         /// What was wrong with it.
         detail: String,
     },
+    /// The manifest exceeds the format envelope and therefore cannot be
+    /// parsed or emitted canonically.
+    ManifestTooLarge {
+        /// Maximum permitted UTF-8 byte length.
+        limit: usize,
+    },
     /// Filesystem failure reading or writing the manifest.
     Io {
         /// The path being read or written.
@@ -331,6 +340,12 @@ impl fmt::Display for GalleryError {
             ),
             Self::Corrupt { line, detail } => {
                 write!(f, "corrupt look-gallery manifest, line {line}: {detail}")
+            }
+            Self::ManifestTooLarge { limit } => {
+                write!(
+                    f,
+                    "look-gallery manifest exceeds the {limit}-byte format limit"
+                )
             }
             Self::Io { path, err } => {
                 write!(f, "look-gallery I/O failure at {}: {err}", path.display())
@@ -633,9 +648,8 @@ fn split_gallery_row(line: &str) -> Option<[&str; 5]> {
 }
 
 fn oversized_manifest() -> GalleryError {
-    GalleryError::Corrupt {
-        line: 1,
-        detail: format!("manifest exceeds the {MAX_MANIFEST_BYTES}-byte format limit"),
+    GalleryError::ManifestTooLarge {
+        limit: MAX_MANIFEST_BYTES,
     }
 }
 
@@ -769,36 +783,70 @@ impl GalleryManifest {
         Self::parse(text)
     }
 
+    fn serialized_len(&self) -> Result<usize, GalleryError> {
+        let revision = self.revision.to_string();
+        let mut len = MANIFEST_HEADER
+            .len()
+            .saturating_add(MANIFEST_REVISION_PREFIX.len())
+            .saturating_add(revision.len())
+            .saturating_add(MANIFEST_COLUMNS.len())
+            .saturating_add(3);
+        for row in &self.rows {
+            len = len
+                .saturating_add(row.panel.len())
+                .saturating_add(row.reference.len())
+                .saturating_add(row.render.len())
+                .saturating_add(row.verdict.token().len())
+                .saturating_add(row.changed.len())
+                .saturating_add(5);
+        }
+        if len > MAX_MANIFEST_BYTES {
+            Err(oversized_manifest())
+        } else {
+            Ok(len)
+        }
+    }
+
     /// The canonical text form: header, revision, column legend, rows sorted
     /// by panel. `to_text(parse(text))` is byte-identical for canonical input.
-    #[must_use]
-    pub fn to_text(&self) -> String {
+    ///
+    /// # Errors
+    /// [`GalleryError::ManifestTooLarge`] if the canonical document would
+    /// exceed the format envelope.
+    pub fn to_text(&self) -> Result<String, GalleryError> {
         let mut rows: Vec<&GalleryRow> = self.rows.iter().collect();
         rows.sort_by(|a, b| a.panel.cmp(&b.panel));
-        let mut out = String::new();
+        let mut out = String::with_capacity(self.serialized_len()?);
         out.push_str(MANIFEST_HEADER);
         out.push('\n');
-        out.push_str(&format!("# revision: {}\n", self.revision));
-        out.push_str("# columns: panel\treference\trender\tverdict\tchanged\n");
+        out.push_str(MANIFEST_REVISION_PREFIX);
+        out.push_str(&self.revision.to_string());
+        out.push('\n');
+        out.push_str(MANIFEST_COLUMNS);
+        out.push('\n');
         for row in rows {
-            out.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\n",
-                row.panel,
-                row.reference,
-                row.render,
-                row.verdict.token(),
-                row.changed
-            ));
+            out.push_str(&row.panel);
+            out.push('\t');
+            out.push_str(&row.reference);
+            out.push('\t');
+            out.push_str(&row.render);
+            out.push('\t');
+            out.push_str(row.verdict.token());
+            out.push('\t');
+            out.push_str(&row.changed);
+            out.push('\n');
         }
-        out
+        Ok(out)
     }
 
     /// Save the manifest atomically (tmp file in the same directory, then
     /// rename — the self-golden rig's pattern).
     ///
     /// # Errors
-    /// [`GalleryError::Io`] on any filesystem failure.
+    /// [`GalleryError::ManifestTooLarge`] if the canonical document exceeds
+    /// the format envelope; [`GalleryError::Io`] on any filesystem failure.
     pub fn save(&self, path: &Path) -> Result<(), GalleryError> {
+        let text = self.to_text()?;
         let io = |err| GalleryError::Io {
             path: path.to_path_buf(),
             err,
@@ -807,7 +855,7 @@ impl GalleryManifest {
         let tmp = path.with_extension(format!("tmp{sequence}"));
         {
             let mut file = std::fs::File::create(&tmp).map_err(io)?;
-            file.write_all(self.to_text().as_bytes()).map_err(io)?;
+            file.write_all(text.as_bytes()).map_err(io)?;
             file.sync_all().map_err(io)?;
         }
         std::fs::rename(&tmp, path).map_err(io)
@@ -819,7 +867,10 @@ impl GalleryManifest {
     /// [`GalleryError::UnknownPanel`] if the panel is not in the manifest;
     /// [`GalleryError::InvalidChangeNote`] if the note contains a tab or
     /// newline (or is empty); [`GalleryError::RevisionOverflow`] if the
-    /// manifest revision is already `u64::MAX`.
+    /// manifest revision is already `u64::MAX`;
+    /// [`GalleryError::ManifestTooLarge`] if the updated canonical document
+    /// would exceed the format envelope. Every refusal leaves `self`
+    /// unchanged.
     pub fn record_verdict(
         &mut self,
         panel: &str,
@@ -838,8 +889,20 @@ impl GalleryManifest {
             .revision
             .checked_add(1)
             .ok_or(GalleryError::RevisionOverflow)?;
-        let row = &mut self.rows[row_index];
+        let current_len = self.serialized_len()?;
+        let row = &self.rows[row_index];
         let from = row.verdict;
+        let next_len = current_len
+            .saturating_sub(self.revision.to_string().len())
+            .saturating_sub(row.verdict.token().len())
+            .saturating_sub(row.changed.len())
+            .saturating_add(next_revision.to_string().len())
+            .saturating_add(verdict.token().len())
+            .saturating_add(changed.len());
+        if next_len > MAX_MANIFEST_BYTES {
+            return Err(oversized_manifest());
+        }
+        let row = &mut self.rows[row_index];
         row.verdict = verdict;
         row.changed = changed.to_string();
         self.revision = next_revision;
