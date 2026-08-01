@@ -27,7 +27,7 @@ use fmn_conformance::perf_pg7::{
 };
 use fmn_hash::sha256;
 use fmn_platform::clock::StdClock;
-use fmn_platform::fs::StdFs;
+use fmn_platform::fs::{FileSystem as _, FsNodeKind, StdFs};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
@@ -231,11 +231,9 @@ fn verify_baseline(path: &OsStr) -> Result<String, CliError> {
         .observation
         .as_ref()
         .ok_or_else(|| CliError::data("target-only baseline has no raw observation to verify"))?;
-    let raw = read_utf8(
-        OsStr::new(&observation.source.path),
-        "raw observation",
-        MAX_RAW_BYTES,
-    )?;
+    let source_path = OsStr::new(&observation.source.path);
+    preflight_regular_input(source_path, "raw observation")?;
+    let raw = read_utf8(source_path, "raw observation", MAX_RAW_BYTES)?;
     let batch =
         MeasurementBatch::from_tsv(&raw).map_err(|error| CliError::data(error.to_string()))?;
     baseline
@@ -793,6 +791,59 @@ fn validate_output_parent(path: &OsStr, label: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+fn preflight_regular_input(path: &OsStr, label: &str) -> Result<(), CliError> {
+    preflight_regular_input_with(path, label, |candidate| {
+        StdFs
+            .node_kind_no_follow(candidate)
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn preflight_regular_input_with(
+    path: &OsStr,
+    label: &str,
+    mut node_kind: impl FnMut(&Path) -> Result<Option<FsNodeKind>, String>,
+) -> Result<(), CliError> {
+    let mut components = Path::new(path).components().peekable();
+    if components.peek().is_none() {
+        return Err(CliError::data(format!("{label} path is empty")));
+    }
+
+    let mut cursor = PathBuf::new();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(CliError::data(format!(
+                "{label} is not a canonical relative path"
+            )));
+        };
+        cursor.push(name);
+        let Some(kind) = node_kind(&cursor)
+            .map_err(|error| CliError::data(format!("cannot inspect {label}: {error}")))?
+        else {
+            return Err(CliError::data(format!(
+                "{label} path component is missing: {cursor:?}"
+            )));
+        };
+        if kind == FsNodeKind::Link {
+            return Err(CliError::data(format!(
+                "{label} contains a symbolic link or reparse point at {cursor:?}"
+            )));
+        }
+        if components.peek().is_some() {
+            if kind != FsNodeKind::Directory {
+                return Err(CliError::data(format!(
+                    "{label} parent component is not a directory: {cursor:?}"
+                )));
+            }
+        } else if kind != FsNodeKind::RegularFile {
+            return Err(CliError::data(format!(
+                "{label} is not a regular file: {cursor:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn write_new(path: &OsStr, bytes: &[u8], label: &str) -> Result<(), CliError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -1082,6 +1133,55 @@ mod tests {
             validate_output_parent(OsStr::new("src/../new-output.tsv"), "test output").unwrap_err();
         assert_eq!(error.kind, "data");
         assert!(error.detail.contains("canonical relative path"));
+    }
+
+    #[test]
+    fn replay_source_preflight_requires_a_no_follow_regular_file_walk() {
+        const SOURCE: &str = "tests/artifacts/perf/run/raw.tsv";
+        let leaf = Path::new(SOURCE);
+        let ordinary = |candidate: &Path| {
+            Ok::<_, String>(Some(if candidate == leaf {
+                FsNodeKind::RegularFile
+            } else {
+                FsNodeKind::Directory
+            }))
+        };
+        preflight_regular_input_with(OsStr::new(SOURCE), "raw observation", ordinary).unwrap();
+
+        for (override_path, override_kind, expected) in [
+            (
+                "tests/artifacts",
+                Some(FsNodeKind::Link),
+                "symbolic link or reparse point",
+            ),
+            (
+                SOURCE,
+                Some(FsNodeKind::Link),
+                "symbolic link or reparse point",
+            ),
+            (SOURCE, Some(FsNodeKind::Other), "not a regular file"),
+            (
+                "tests/artifacts/perf/run",
+                None,
+                "path component is missing",
+            ),
+        ] {
+            let override_path = Path::new(override_path);
+            let error =
+                preflight_regular_input_with(OsStr::new(SOURCE), "raw observation", |candidate| {
+                    if candidate == override_path {
+                        Ok(override_kind)
+                    } else {
+                        ordinary(candidate)
+                    }
+                })
+                .unwrap_err();
+            assert!(error.detail.contains(expected), "{}", error.detail);
+        }
+
+        preflight_regular_input(OsStr::new("Cargo.toml"), "test input").unwrap();
+        let error = preflight_regular_input(OsStr::new("src"), "test input").unwrap_err();
+        assert!(error.detail.contains("not a regular file"));
     }
 
     #[test]

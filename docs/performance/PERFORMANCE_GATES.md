@@ -83,7 +83,11 @@ provides NDJSON-only policy, evidence, and producer commands:
 - `verify-baseline <baseline.tsv>` validates a versioned observed baseline,
   loads its declared repository-relative raw-sample source, requires the
   canonical `fmn-perf-samples/1` schema, recomputes its robust statistics, and
-  verifies identity, producer commit, and exact digest.
+  verifies identity, producer commit, and exact digest. Every source component
+  is classified without following its final node immediately before the read;
+  links, Windows reparse points, special nodes, and wrong-kind components are
+  refused. Safe `std` cannot bind that check to the subsequent path-based open,
+  so replay assumes the checkout is not concurrently retargeted by its owner.
 - `pg2-definitions` reports the exact compiled benchmark-definition and C7/C10
   configuration digests for both canonical raster workloads.
 - `pg5-definitions` reports the exact compiled corpus lock, semantic
