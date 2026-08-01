@@ -1357,11 +1357,12 @@ impl Supervisor {
     }
 
     fn channel_crash_report(&self, error: &ChannelError) -> CrashReport {
-        let mut journal_tail = self.journal.to_bytes().unwrap_or_default();
-        if journal_tail.len() > self.config.protocol_limits.max_crash_tail_bytes {
-            let keep_from = journal_tail.len() - self.config.protocol_limits.max_crash_tail_bytes;
-            journal_tail.drain(..keep_from);
-        }
+        let journal_bytes = self.journal.to_bytes().unwrap_or_default();
+        let tail_len = journal_bytes
+            .len()
+            .min(self.config.protocol_limits.max_crash_tail_bytes);
+        let mut journal_tail = Vec::with_capacity(tail_len);
+        journal_tail.extend_from_slice(&journal_bytes[journal_bytes.len() - tail_len..]);
         let message = bounded_channel_error_message(
             error,
             self.config

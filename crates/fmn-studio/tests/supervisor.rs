@@ -479,16 +479,60 @@ fn repeated_crash_history_evicts_oldest_and_zero_disables_retention() {
 
 #[test]
 fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
-    let state = Arc::new(Mutex::new(FakeState {
-        channel_error_first_play: true,
-        ..FakeState::default()
-    }));
-    let clock = Arc::new(FakeClock::new());
     let limits = ProtocolLimits {
         max_field_bytes: 64,
         max_crash_message_bytes: 128,
         ..ProtocolLimits::default()
     };
+    let (crash, _) = recover_from_channel_error(Journal::new(), limits);
+    assert!(crash.message.len() <= limits.max_field_bytes);
+    assert!(
+        crash
+            .message
+            .starts_with("worker channel Closed: short diagnostic")
+    );
+    assert!(crash.message.contains("stderr tail"));
+    assert!(crash.message.contains('\u{fffd}'));
+    ResponseEnvelope {
+        request_id: 1,
+        response: WorkerResponse::Crash(crash),
+    }
+    .to_bytes(limits)
+    .expect("the locally synthesized crash report re-encodes under the same limits");
+}
+
+#[test]
+fn locally_synthesized_crash_tail_releases_the_full_journal_allocation() {
+    for tail_limit in [16, 0] {
+        let journal = make_journal(8, None);
+        let journal_bytes = journal.to_bytes().expect("journal encodes");
+        assert!(journal_bytes.len() > tail_limit);
+        let expected_tail = journal_bytes[journal_bytes.len() - tail_limit..].to_vec();
+        let limits = ProtocolLimits {
+            max_crash_tail_bytes: tail_limit,
+            ..ProtocolLimits::default()
+        };
+
+        let (crash, retained_tail_capacity) = recover_from_channel_error(journal, limits);
+        assert_eq!(crash.journal_tail, expected_tail);
+        assert!(
+            crash.journal_tail.capacity() <= tail_limit,
+            "returned tail retained capacity {} above limit {tail_limit}",
+            crash.journal_tail.capacity()
+        );
+        assert!(
+            retained_tail_capacity <= tail_limit,
+            "history tail retained capacity {retained_tail_capacity} above limit {tail_limit}"
+        );
+    }
+}
+
+fn recover_from_channel_error(journal: Journal, limits: ProtocolLimits) -> (CrashReport, usize) {
+    let state = Arc::new(Mutex::new(FakeState {
+        channel_error_first_play: true,
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
     let mut supervisor = Supervisor::new(
         Box::new(FakeLauncher {
             state,
@@ -503,7 +547,7 @@ fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
         },
     );
     supervisor
-        .install_session("Demo", Journal::new())
+        .install_session("Demo", journal)
         .expect("session");
     let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
     supervisor.build_and_start(&mut builder).expect("start");
@@ -519,21 +563,9 @@ fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
     let SupervisorReply::Recovered { crash, .. } = reply else {
         std::panic::panic_any("expected automatic recovery");
     };
-    assert!(crash.message.len() <= limits.max_field_bytes);
-    assert!(
-        crash
-            .message
-            .starts_with("worker channel Closed: short diagnostic")
-    );
-    assert!(crash.message.contains("stderr tail"));
-    assert!(crash.message.contains('\u{fffd}'));
-    ResponseEnvelope {
-        request_id: 1,
-        response: WorkerResponse::Crash(crash.clone()),
-    }
-    .to_bytes(limits)
-    .expect("the locally synthesized crash report re-encodes under the same limits");
-    assert_eq!(supervisor.crashes(), &[crash]);
+    assert_eq!(supervisor.crashes().first(), Some(&crash));
+    let retained_tail_capacity = supervisor.crashes()[0].journal_tail.capacity();
+    (crash, retained_tail_capacity)
 }
 
 #[test]
