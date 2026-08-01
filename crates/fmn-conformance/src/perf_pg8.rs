@@ -546,7 +546,10 @@ fn scenario_sample(scenario: Pg8Scenario, observation: &Pg8Observation) -> Sampl
                     "pure-Rust twin reported zero elapsed nanoseconds",
                 );
             }
-            observation.elapsed_ns.saturating_mul(1_000_000) / reference_ns
+            let Some(numerator) = observation.elapsed_ns.checked_mul(1_000_000) else {
+                return Sample::invalid(u64::MAX, "ratio numerator exceeds the u128 range");
+            };
+            numerator / reference_ns
         }
         Pg8Scenario::PerFrameCallback
         | Pg8Scenario::PointTransformCallback
@@ -717,6 +720,17 @@ mod tests {
         );
         assert_eq!(ratio.invalid_reason, None);
         assert_eq!(ratio.value, 1_100_000);
+        assert_eq!(
+            scenario_sample(
+                Pg8Scenario::NativeBuiltins,
+                &Pg8Observation {
+                    elapsed_ns: u128::MAX,
+                    reference_ns: Some(u128::MAX),
+                    invalid_reason: None,
+                },
+            ),
+            Sample::invalid(u64::MAX, "ratio numerator exceeds the u128 range")
+        );
     }
 
     #[test]
@@ -724,13 +738,13 @@ mod tests {
         let sample = scenario_sample(
             Pg8Scenario::PerFrameCallback,
             &Pg8Observation {
-                elapsed_ns: 42,
+                elapsed_ns: u128::MAX,
                 reference_ns: None,
                 invalid_reason: Some("host preemption".to_owned()),
             },
         );
         assert_eq!(sample.invalid_reason.as_deref(), Some("host preemption"));
-        assert_eq!(sample.value, 42);
+        assert_eq!(sample.value, u64::MAX);
     }
 
     #[test]
