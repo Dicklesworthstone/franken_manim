@@ -722,6 +722,12 @@ impl DebugOverlaySnapshot {
             out.push_str(",\"interior\":");
             push_usize(&mut out, tile.interior);
             out.push('}');
+            if out.len() > limits.max_json_bytes {
+                return Err(InspectError::JsonLimit {
+                    limit: limits.max_json_bytes,
+                    needed: out.len(),
+                });
+            }
         }
         out.push_str("],\"nodes\":[");
         for (index, node) in self.nodes.iter().enumerate() {

@@ -10,9 +10,9 @@ use fmn_hash::sha256;
 use fmn_mobject::{Mobject, Stage};
 use fmn_studio::{
     CapabilityToken, DebugLayerSet, DebugOverlaySnapshot, FrameEncoding, FrameHub, FramePayload,
-    FrameStream, InspectorLimits, InspectorSnapshot, NativeSpanBinding, ScrubMode, SpanKind,
-    SpanRegistry, TerminalPreview, TerminalProtocol, TuiLimits, commit_timeline_frame,
-    preview_timeline_frame,
+    FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, ScrubMode,
+    SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol, TileOverlay, TuiLimits,
+    commit_timeline_frame, preview_timeline_frame,
 };
 
 #[test]
@@ -128,6 +128,40 @@ fn inspector_and_debug_overlays_follow_visible_family_order() {
         DebugOverlaySnapshot::capture(&stage, None, DebugLayerSet::WINDING, bounded).unwrap();
     assert!(bounded_overlays.truncated);
     assert_eq!(bounded_overlays.nodes[1].winding, None);
+}
+
+#[test]
+fn overlay_json_budget_stops_during_tile_encoding() {
+    let limits = InspectorLimits {
+        max_json_bytes: 256,
+        ..InspectorLimits::default()
+    };
+    let overrun = |tile_count| {
+        let overlays = DebugOverlaySnapshot {
+            version: 1,
+            layers: DebugLayerSet::TILES,
+            tiles: (0..tile_count)
+                .map(|index| TileOverlay {
+                    index,
+                    rect: [0, 0, 1, 1],
+                    draws: 1,
+                    partial: 1,
+                    interior: 0,
+                })
+                .collect(),
+            nodes: Vec::new(),
+            truncated: false,
+        };
+        match overlays.to_json(limits).unwrap_err() {
+            InspectError::JsonLimit { limit, needed } => (limit, needed),
+            error => panic!("unexpected overlay encoding error: {error}"),
+        }
+    };
+
+    let first_overrun = overrun(8);
+    assert_eq!(first_overrun.0, 256);
+    assert!(first_overrun.1 > first_overrun.0);
+    assert_eq!(first_overrun, overrun(1_000));
 }
 
 #[test]
