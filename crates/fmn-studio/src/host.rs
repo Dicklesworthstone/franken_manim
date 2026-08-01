@@ -691,6 +691,10 @@ impl HostHandler {
         if !peer.ip().is_loopback() {
             return Err(HostError::Forbidden("peer is not loopback"));
         }
+        // Some platforms propagate the listener's nonblocking mode to accepted
+        // sockets. Client handling is deliberately blocking and bounded by the
+        // read/write deadlines installed immediately below.
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(self.config.request_timeout))?;
         stream.set_write_timeout(Some(self.config.request_timeout))?;
         let request = match read_http_request(&mut stream, &self.config) {
@@ -1789,6 +1793,48 @@ mod tests {
             client
                 .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
+            assert!(
+                result_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .is_ok()
+            );
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn client_handler_normalizes_inherited_nonblocking_mode() {
+        let host = bind_test_host(StudioHostConfig::default(), 1, 8).unwrap();
+        let address = host.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).unwrap();
+        let (server, peer) = host.listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let handler = host.handler.clone();
+
+        std::thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let server_barrier = Arc::clone(&barrier);
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let server = scope.spawn(move || {
+                server_barrier.wait();
+                result_tx.send(handler.handle_stream(server, peer)).unwrap();
+            });
+
+            barrier.wait();
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+
+            client
+                .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
             let mut response = Vec::new();
             client.read_to_end(&mut response).unwrap();
             assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
