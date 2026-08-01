@@ -350,6 +350,44 @@ fn malformed_semantics_fail_before_crossing_the_pipe() {
 }
 
 #[test]
+fn crash_messages_use_their_specific_limit_before_ownership() {
+    let limits = ProtocolLimits {
+        max_crash_message_bytes: 4,
+        ..ProtocolLimits::default()
+    };
+    let report = CrashReport {
+        scene: None,
+        message: "12345".to_owned(),
+        journal_tail: Vec::new(),
+        state_hash: None,
+    };
+    assert_eq!(
+        response(7, WorkerResponse::Crash(report)).to_bytes(limits),
+        Err(ProtocolError::PayloadLimit {
+            field: "crash message",
+            limit: 4,
+            needed: 5,
+        })
+    );
+
+    let mut writer = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+    writer.put_u64(8);
+    writer.put_u8(7);
+    writer.put_bool(false);
+    writer.put_str("12345");
+    writer.put_bytes(&[]);
+    writer.put_bool(false);
+    assert_eq!(
+        ResponseEnvelope::from_bytes(&writer.finish().unwrap(), limits),
+        Err(ProtocolError::PayloadLimit {
+            field: "crash message",
+            limit: 4,
+            needed: 5,
+        })
+    );
+}
+
+#[test]
 fn length_framing_round_trips_and_rejects_oversize_before_allocation() {
     let limits = ProtocolLimits::default();
     let request = request(1, SupervisorRequest::EnumerateScenes);

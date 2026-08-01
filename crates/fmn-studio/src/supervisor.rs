@@ -482,6 +482,7 @@ impl WorkerChannel for ChildPipeChannel {
                 });
             }
         };
+        // ubs:ignore - request IDs are public correlation integers, not secrets.
         if response.request_id != request_id {
             let error = ChannelError {
                 kind: ChannelFailureKind::Correlation,
@@ -527,6 +528,9 @@ pub struct SupervisorConfig {
     pub supervisor_build_id: Digest,
     /// Replace a crashed/closed worker automatically.
     pub auto_restart: bool,
+    /// Most recent crash reports retained in memory. Zero disables history;
+    /// the current crash is still returned to the caller.
+    pub max_crash_reports: usize,
 }
 
 impl Default for SupervisorConfig {
@@ -539,6 +543,7 @@ impl Default for SupervisorConfig {
                 concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).as_bytes(),
             ),
             auto_restart: true,
+            max_crash_reports: 16,
         }
     }
 }
@@ -797,6 +802,17 @@ impl Supervisor {
         &self.crashes
     }
 
+    fn retain_crash(&mut self, report: CrashReport) {
+        let limit = self.config.max_crash_reports;
+        if limit == 0 {
+            return;
+        }
+        while self.crashes.len() >= limit {
+            self.crashes.remove(0);
+        }
+        self.crashes.push(report);
+    }
+
     /// Negotiated frame transports.
     #[must_use]
     pub const fn transports(&self) -> Option<TransportCapabilities> {
@@ -924,7 +940,7 @@ impl Supervisor {
         asset_ok: &dyn Fn(&AssetRead) -> bool,
     ) -> Result<SupervisorReply, SupervisorError> {
         let started = self.clock.monotonic();
-        self.crashes.push(report.clone());
+        self.retain_crash(report.clone());
         let artifact = self.artifact.clone().ok_or(SupervisorError::NoWorker)?;
         let incoming: Vec<CommandRecord> = self
             .journal
@@ -968,6 +984,7 @@ impl Supervisor {
                 return Err(error.into());
             }
         };
+        // ubs:ignore - request IDs are public correlation integers, not secrets.
         if response.request_id != request.request_id {
             worker.terminate();
             return Err(SupervisorError::Handshake(
@@ -1058,7 +1075,7 @@ impl Supervisor {
                     return Err(SupervisorError::WorkerRefusal { code, message });
                 }
                 WorkerResponse::Crash(report) => {
-                    self.crashes.push(report);
+                    self.retain_crash(report);
                     return Err(SupervisorError::UnexpectedResponse(
                         "worker crashed while restoring a checkpoint",
                     ));
@@ -1147,7 +1164,7 @@ impl Supervisor {
                 Err(SupervisorError::WorkerRefusal { code, message })
             }
             WorkerResponse::Crash(report) => {
-                self.crashes.push(report);
+                self.retain_crash(report);
                 Err(SupervisorError::UnexpectedResponse(
                     "worker crashed during journal replay",
                 ))
@@ -1165,6 +1182,7 @@ impl Supervisor {
         };
         let worker = self.worker.as_mut().ok_or(SupervisorError::NoWorker)?;
         let response = worker.exchange(&envelope, self.config.request_timeout)?;
+        // ubs:ignore - request IDs are public correlation integers, not secrets.
         if response.request_id != envelope.request_id {
             return Err(ChannelError::new(
                 ChannelFailureKind::Correlation,
@@ -1180,6 +1198,7 @@ impl Supervisor {
 
     fn accept_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<(), SupervisorError> {
         let scene = self.scene.as_deref().ok_or(SupervisorError::NoSession)?;
+        // ubs:ignore - scene names are public routing identifiers, not secrets.
         if checkpoint.scene != scene {
             return Err(SupervisorError::InvalidSession(
                 "worker pushed a checkpoint for a different scene",
@@ -1215,6 +1234,7 @@ impl Supervisor {
         bytes: &[u8],
     ) -> Result<(), SupervisorError> {
         let current_scene = self.scene.as_deref().ok_or(SupervisorError::NoSession)?;
+        // ubs:ignore - scene names are public routing identifiers, not secrets.
         if scene != current_scene {
             return Err(SupervisorError::InvalidSession(
                 "worker pushed a journal for a different scene",
@@ -1249,6 +1269,7 @@ impl Supervisor {
             .checkpoint_cache
             .put_blob(&state)
             .ok()
+            // ubs:ignore - this digest is a public state integrity identifier.
             .filter(|digest| *digest == state_hash);
         StoredCheckpoint {
             state_hash,
@@ -1303,12 +1324,10 @@ impl Supervisor {
             let keep_from = journal_tail.len() - self.config.protocol_limits.max_crash_tail_bytes;
             journal_tail.drain(..keep_from);
         }
-        let stderr = String::from_utf8_lossy(&error.stderr_tail);
-        let message = if stderr.is_empty() {
-            error.to_string()
-        } else {
-            format!("{error}; stderr tail: {stderr}")
-        };
+        let message = bounded_channel_error_message(
+            error,
+            self.config.protocol_limits.max_crash_message_bytes,
+        );
         CrashReport {
             scene: self.scene.clone(),
             message,
@@ -1342,6 +1361,41 @@ impl Supervisor {
         worker.terminate();
         self.transports = None;
     }
+}
+
+fn bounded_channel_error_message(error: &ChannelError, limit: usize) -> String {
+    let limit = limit.max(1);
+    let mut message = String::with_capacity(limit.min(256));
+    push_str_bounded(&mut message, "worker channel ", limit);
+    push_str_bounded(&mut message, channel_failure_name(error.kind), limit);
+    push_str_bounded(&mut message, ": ", limit);
+    push_str_bounded(&mut message, &error.detail, limit);
+    if !error.stderr_tail.is_empty() {
+        push_str_bounded(&mut message, "; stderr tail: ", limit);
+        let remaining = limit.saturating_sub(message.len());
+        let take = remaining.min(error.stderr_tail.len());
+        let stderr = String::from_utf8_lossy(&error.stderr_tail[..take]);
+        push_str_bounded(&mut message, &stderr, limit);
+    }
+    message
+}
+
+const fn channel_failure_name(kind: ChannelFailureKind) -> &'static str {
+    match kind {
+        ChannelFailureKind::Closed => "Closed",
+        ChannelFailureKind::Timeout => "Timeout",
+        ChannelFailureKind::Io => "Io",
+        ChannelFailureKind::Protocol => "Protocol",
+        ChannelFailureKind::Correlation => "Correlation",
+    }
+}
+
+fn push_str_bounded(output: &mut String, value: &str, limit: usize) {
+    let mut end = limit.saturating_sub(output.len()).min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&value[..end]);
 }
 
 impl Drop for Supervisor {

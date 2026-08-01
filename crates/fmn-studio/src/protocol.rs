@@ -65,6 +65,8 @@ pub struct ProtocolLimits {
     pub max_checkpoint_bytes: usize,
     /// Maximum serialized journal or journal segment.
     pub max_journal_bytes: usize,
+    /// Maximum crash-report diagnostic string.
+    pub max_crash_message_bytes: usize,
     /// Maximum crash-report journal tail.
     pub max_crash_tail_bytes: usize,
     /// Maximum scene names in one enumeration response.
@@ -92,6 +94,7 @@ impl Default for ProtocolLimits {
             max_frame_bytes: 32 * 1024 * 1024,
             max_checkpoint_bytes: 64 * 1024 * 1024,
             max_journal_bytes: 64 * 1024 * 1024,
+            max_crash_message_bytes: 64 * 1024,
             max_crash_tail_bytes: 1024 * 1024,
             max_scenes: 4096,
             max_replay_hashes: 1_000_000,
@@ -487,6 +490,11 @@ impl CrashReport {
         if self.message.is_empty() {
             return Err(ProtocolError::Malformed("empty crash message"));
         }
+        limit_payload(
+            "crash message",
+            self.message.len(),
+            limits.max_crash_message_bytes,
+        )?;
         limit_payload(
             "crash journal tail",
             self.journal_tail.len(),
@@ -1802,7 +1810,7 @@ fn get_crash(
     };
     Ok(CrashReport {
         scene,
-        message: reader.get_str()?.to_owned(),
+        message: bounded_string(reader, "crash message", limits.max_crash_message_bytes)?,
         journal_tail: bounded_bytes(reader, "crash journal tail", limits.max_crash_tail_bytes)?,
         state_hash: get_optional_digest(reader)?,
     })
@@ -1836,6 +1844,16 @@ fn bounded_bytes(
     let bytes = reader.get_bytes()?;
     limit_payload(field, bytes.len(), limit)?;
     Ok(bytes.to_vec())
+}
+
+fn bounded_string(
+    reader: &mut Reader<'_>,
+    field: &'static str,
+    limit: usize,
+) -> Result<String, ProtocolError> {
+    let value = reader.get_str()?;
+    limit_payload(field, value.len(), limit)?;
+    Ok(value.to_owned())
 }
 
 fn count(raw: u32, field: &'static str, limit: usize) -> Result<usize, ProtocolError> {

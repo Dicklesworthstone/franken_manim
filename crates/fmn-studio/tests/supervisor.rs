@@ -91,6 +91,8 @@ struct FakeState {
     launches: usize,
     terminated: usize,
     crash_first_play: bool,
+    crash_every_play: bool,
+    channel_error_first_play: bool,
     diverge_next_replay: bool,
     skew_handshake: bool,
     wrong_build_handshake: bool,
@@ -115,7 +117,9 @@ impl WorkerLauncher for FakeLauncher {
         let mut state = self.state.lock().unwrap_or_else(lock_poisoned);
         state.launches += 1;
         let launch = state.launches;
-        let crash_on_play = state.crash_first_play && launch == 1;
+        let crash_every_play = state.crash_every_play;
+        let crash_on_play = crash_every_play || (state.crash_first_play && launch == 1);
+        let channel_error_on_play = state.channel_error_first_play && launch == 1;
         drop(state);
         Ok(Box::new(FakeChannel {
             state: Arc::clone(&self.state),
@@ -123,6 +127,12 @@ impl WorkerLauncher for FakeLauncher {
             exchange_cost: self.exchange_cost,
             build_id: artifact.build_id,
             crash_on_play,
+            crash_message: if crash_every_play {
+                format!("scripted scene panic {launch}")
+            } else {
+                "scripted scene panic".to_owned()
+            },
+            channel_error_on_play,
             terminated: false,
         }))
     }
@@ -134,6 +144,8 @@ struct FakeChannel {
     exchange_cost: Duration,
     build_id: Digest,
     crash_on_play: bool,
+    crash_message: String,
+    channel_error_on_play: bool,
     terminated: bool,
 }
 
@@ -144,6 +156,15 @@ impl WorkerChannel for FakeChannel {
         _timeout: Duration,
     ) -> Result<ResponseEnvelope, ChannelError> {
         self.clock.advance(self.exchange_cost);
+        if self.channel_error_on_play && matches!(&request.request, SupervisorRequest::Play { .. })
+        {
+            self.channel_error_on_play = false;
+            return Err(ChannelError {
+                kind: ChannelFailureKind::Closed,
+                detail: "short diagnostic".to_owned(),
+                stderr_tail: vec![0xff; 4096],
+            });
+        }
         let response = match &request.request {
             SupervisorRequest::Hello { .. } => {
                 let skew = self
@@ -192,7 +213,7 @@ impl WorkerChannel for FakeChannel {
                 self.crash_on_play = false;
                 WorkerResponse::Crash(CrashReport {
                     scene: Some("Demo".to_owned()),
-                    message: "scripted scene panic".to_owned(),
+                    message: self.crash_message.clone(),
                     journal_tail: b"scripted journal tail".to_vec(),
                     state_hash: None,
                 })
@@ -364,6 +385,125 @@ fn worker_crash_auto_restarts_restores_warm_checkpoint_and_parent_survives() {
             .expect("replacement answers"),
         SupervisorReply::Worker(WorkerResponse::Scenes(vec!["Demo".to_owned()]))
     );
+}
+
+fn repeating_crash_supervisor(max_crash_reports: usize) -> Supervisor {
+    let state = Arc::new(Mutex::new(FakeState {
+        crash_every_play: true,
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = Supervisor::new(
+        Box::new(FakeLauncher {
+            state,
+            clock: Arc::clone(&clock),
+            exchange_cost: Duration::from_millis(1),
+        }),
+        clock.clone(),
+        cache(clock.clone()),
+        SupervisorConfig {
+            max_crash_reports,
+            ..SupervisorConfig::default()
+        },
+    );
+    supervisor
+        .install_session("Demo", Journal::new())
+        .expect("session");
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+    supervisor
+}
+
+#[test]
+fn repeated_crash_history_evicts_oldest_and_zero_disables_retention() {
+    let mut bounded = repeating_crash_supervisor(2);
+    for launch in 1..=3 {
+        let reply = bounded
+            .request(
+                SupervisorRequest::Play {
+                    scene: "Demo".to_owned(),
+                    command: command(launch),
+                },
+                &|_| true,
+            )
+            .expect("supervisor recovers");
+        let SupervisorReply::Recovered { crash, .. } = reply else {
+            std::panic::panic_any("expected automatic recovery");
+        };
+        assert_eq!(crash.message, format!("scripted scene panic {launch}"));
+    }
+    assert_eq!(
+        bounded
+            .crashes()
+            .iter()
+            .map(|report| report.message.as_str())
+            .collect::<Vec<_>>(),
+        ["scripted scene panic 2", "scripted scene panic 3"]
+    );
+
+    let mut disabled = repeating_crash_supervisor(0);
+    let reply = disabled
+        .request(
+            SupervisorRequest::Play {
+                scene: "Demo".to_owned(),
+                command: command(1),
+            },
+            &|_| true,
+        )
+        .expect("supervisor recovers without retaining history");
+    assert!(matches!(reply, SupervisorReply::Recovered { .. }));
+    assert!(disabled.crashes().is_empty());
+}
+
+#[test]
+fn locally_synthesized_crash_message_is_bounded_before_lossy_stderr_conversion() {
+    let state = Arc::new(Mutex::new(FakeState {
+        channel_error_first_play: true,
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = Supervisor::new(
+        Box::new(FakeLauncher {
+            state,
+            clock: Arc::clone(&clock),
+            exchange_cost: Duration::from_millis(1),
+        }),
+        clock.clone(),
+        cache(clock.clone()),
+        SupervisorConfig {
+            protocol_limits: ProtocolLimits {
+                max_crash_message_bytes: 64,
+                ..ProtocolLimits::default()
+            },
+            ..SupervisorConfig::default()
+        },
+    );
+    supervisor
+        .install_session("Demo", Journal::new())
+        .expect("session");
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+    let reply = supervisor
+        .request(
+            SupervisorRequest::Play {
+                scene: "Demo".to_owned(),
+                command: command(1),
+            },
+            &|_| true,
+        )
+        .expect("supervisor recovers");
+    let SupervisorReply::Recovered { crash, .. } = reply else {
+        std::panic::panic_any("expected automatic recovery");
+    };
+    assert!(crash.message.len() <= 64);
+    assert!(
+        crash
+            .message
+            .starts_with("worker channel Closed: short diagnostic")
+    );
+    assert!(crash.message.contains("stderr tail"));
+    assert!(crash.message.contains('\u{fffd}'));
+    assert_eq!(supervisor.crashes(), &[crash]);
 }
 
 #[test]
