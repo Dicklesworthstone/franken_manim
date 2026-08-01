@@ -452,6 +452,11 @@ impl StudioWorkerSession {
             return Err(HostError::Configuration("empty Studio scene name"));
         }
         let protocol_limits = supervisor.protocol_limits();
+        if scene.len() > protocol_limits.max_field_bytes {
+            return Err(HostError::Configuration(
+                "Studio scene name exceeds protocol field budget",
+            ));
+        }
         Ok(Self {
             scene,
             protocol_limits,
@@ -1664,9 +1669,9 @@ mod tests {
 
     use crate::supervisor::{StdWorkerLauncher, SupervisorConfig};
 
-    fn test_session_with_protocol_limits(
+    fn test_supervisor_with_protocol_limits(
         limits: ProtocolLimits,
-    ) -> (Arc<StudioWorkerSession>, Arc<dyn Clock>) {
+    ) -> (Supervisor, Arc<dyn Clock>) {
         let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
         let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
         let cache = Store::open(
@@ -1693,6 +1698,13 @@ mod tests {
                 ..SupervisorConfig::default()
             },
         );
+        (supervisor, clock)
+    }
+
+    fn test_session_with_protocol_limits(
+        limits: ProtocolLimits,
+    ) -> (Arc<StudioWorkerSession>, Arc<dyn Clock>) {
+        let (supervisor, clock) = test_supervisor_with_protocol_limits(limits);
         let session =
             Arc::new(StudioWorkerSession::new("Demo", supervisor, Arc::new(|_| true)).unwrap());
         (session, clock)
@@ -1925,6 +1937,24 @@ mod tests {
         client.shutdown(std::net::Shutdown::Both).unwrap();
         server.shutdown(std::net::Shutdown::Both).unwrap();
         drop(client);
+    }
+
+    #[test]
+    fn worker_session_scene_name_obeys_the_protocol_field_budget() {
+        let limits = ProtocolLimits {
+            max_field_bytes: 4,
+            ..ProtocolLimits::default()
+        };
+        let (exact_supervisor, _) = test_supervisor_with_protocol_limits(limits);
+        assert!(StudioWorkerSession::new("Demo", exact_supervisor, Arc::new(|_| true)).is_ok());
+
+        let (oversized_supervisor, _) = test_supervisor_with_protocol_limits(limits);
+        assert!(matches!(
+            StudioWorkerSession::new("Demos", oversized_supervisor, Arc::new(|_| true)),
+            Err(HostError::Configuration(
+                "Studio scene name exceeds protocol field budget"
+            ))
+        ));
     }
 
     #[test]
