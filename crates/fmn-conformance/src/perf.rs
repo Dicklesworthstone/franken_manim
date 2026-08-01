@@ -67,6 +67,8 @@ const MAX_RAW_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POLICY_ROWS: usize = 4_096;
 const MAX_POLICY_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_BASELINE_BYTES: usize = 64 * 1024;
+const MAX_REPORT_FINDINGS: usize = 32;
+const MAX_REPORT_BYTES: usize = 256 * 1024;
 const MAX_TOKEN_BYTES: usize = 160;
 const MAX_DETAIL_BYTES: usize = 1_024;
 const MAX_EVIDENCE_PATH_BYTES: usize = 512;
@@ -2163,10 +2165,60 @@ impl GateReport {
         }
     }
 
+    /// Validate report invariants and resource bounds.
+    ///
+    /// # Errors
+    /// Returns a typed error for an unknown schema, malformed robot tokens,
+    /// inconsistent statistics, or an oversized finding set.
+    pub fn validate(&self) -> Result<(), PerfError> {
+        if self.schema != REPORT_SCHEMA {
+            return Err(PerfError::Report(format!(
+                "schema must be {REPORT_SCHEMA:?}"
+            )));
+        }
+        validate_report_token("scenario", &self.scenario)?;
+        if let Some(stats) = self.stats {
+            stats
+                .validate()
+                .map_err(|error| PerfError::Report(error.to_string()))?;
+        }
+        if self.stats.is_none() && self.baseline_median.is_some() {
+            return Err(PerfError::Report(
+                "baseline_median requires current statistics".to_owned(),
+            ));
+        }
+        if self.regression_bps.is_some() && (self.stats.is_none() || self.baseline_median.is_none())
+        {
+            return Err(PerfError::Report(
+                "regression_bps requires current statistics and baseline_median".to_owned(),
+            ));
+        }
+        if self.findings.len() > MAX_REPORT_FINDINGS {
+            return Err(PerfError::Report(format!(
+                "{} findings exceed the {MAX_REPORT_FINDINGS}-finding limit",
+                self.findings.len()
+            )));
+        }
+        for finding in &self.findings {
+            validate_report_token("finding code", finding.code)?;
+            if finding.detail.is_empty() || finding.detail.len() > MAX_DETAIL_BYTES {
+                return Err(PerfError::Report(format!(
+                    "finding detail length must be 1..={MAX_DETAIL_BYTES}, got {}",
+                    finding.detail.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Stable line-oriented robot output: one summary then zero or more
     /// findings. Human decoration is never mixed into these lines.
-    #[must_use]
-    pub fn to_ndjson(&self) -> String {
+    ///
+    /// # Errors
+    /// Returns a typed error before allocating output for invalid public state,
+    /// or if the canonical report exceeds its document limit.
+    pub fn to_ndjson(&self) -> Result<String, PerfError> {
+        self.validate()?;
         let mut output = String::new();
         let _ = write!(
             output,
@@ -2217,11 +2269,17 @@ impl GateReport {
                 escape_json(&finding.detail),
             );
         }
-        output
+        if output.len() > MAX_REPORT_BYTES {
+            return Err(PerfError::Report(format!(
+                "rendered report is {} bytes, exceeding the {MAX_REPORT_BYTES}-byte limit",
+                output.len()
+            )));
+        }
+        Ok(output)
     }
 }
 
-/// Malformed policy, baseline, run, or evidence.
+/// Malformed policy, baseline, run, evidence, or robot report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PerfError {
     /// Policy invariant.
@@ -2241,6 +2299,8 @@ pub enum PerfError {
     Samples(String),
     /// Artifact identity/path.
     Evidence(String),
+    /// Robot report invariant or resource envelope.
+    Report(String),
 }
 
 impl fmt::Display for PerfError {
@@ -2257,6 +2317,7 @@ impl fmt::Display for PerfError {
             Self::Identity(detail) => write!(formatter, "performance identity: {detail}"),
             Self::Samples(detail) => write!(formatter, "performance samples: {detail}"),
             Self::Evidence(detail) => write!(formatter, "performance evidence: {detail}"),
+            Self::Report(detail) => write!(formatter, "performance report: {detail}"),
         }
     }
 }
@@ -2499,20 +2560,34 @@ where
 }
 
 fn validate_token(name: &'static str, value: &str) -> Result<(), PerfError> {
+    if let Some(detail) = portable_token_error(name, value) {
+        return Err(PerfError::Identity(detail));
+    }
+    Ok(())
+}
+
+fn validate_report_token(name: &'static str, value: &str) -> Result<(), PerfError> {
+    if let Some(detail) = portable_token_error(name, value) {
+        return Err(PerfError::Report(detail));
+    }
+    Ok(())
+}
+
+fn portable_token_error(name: &str, value: &str) -> Option<String> {
     if value.is_empty() || value.len() > MAX_TOKEN_BYTES {
-        return Err(PerfError::Identity(format!(
+        return Some(format!(
             "{name} length must be 1..={MAX_TOKEN_BYTES}, got {}",
             value.len()
-        )));
+        ));
     }
     if !value.bytes().all(|byte| {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
     }) {
-        return Err(PerfError::Identity(format!(
+        return Some(format!(
             "{name} is not a lowercase portable token: {value:?}"
-        )));
+        ));
     }
-    Ok(())
+    None
 }
 
 fn validate_detail(name: &'static str, value: &str) -> Result<(), PerfError> {
@@ -3599,10 +3674,100 @@ mod tests {
             "fixture",
             "quote \" and newline\nstay data".to_owned(),
         );
-        let output = report.to_ndjson();
+        let output = report.to_ndjson().unwrap();
         assert_eq!(output.lines().count(), 2);
         assert!(output.contains("quote \\\" and newline\\nstay data"));
         assert!(!output.contains("newline\nstay"));
+    }
+
+    #[test]
+    fn report_writer_rejects_invalid_or_oversized_public_state() {
+        let report = GateReport::inconclusive(
+            &policy(),
+            key().digest(),
+            "fixture",
+            "bounded detail".to_owned(),
+        );
+
+        let mut bad_schema = report.clone();
+        bad_schema.schema = "fmn-perf-report/0\"";
+        assert!(
+            bad_schema
+                .to_ndjson()
+                .unwrap_err()
+                .to_string()
+                .contains("schema must be")
+        );
+
+        let mut oversized_scenario = report.clone();
+        oversized_scenario.scenario = "x".repeat(MAX_REPORT_BYTES);
+        assert!(
+            oversized_scenario
+                .to_ndjson()
+                .unwrap_err()
+                .to_string()
+                .contains("scenario length")
+        );
+
+        let mut bad_code = report.clone();
+        bad_code.findings[0].code = "bad\"\n";
+        assert!(
+            bad_code
+                .to_ndjson()
+                .unwrap_err()
+                .to_string()
+                .contains("finding code is not a lowercase portable token")
+        );
+
+        let mut bad_stats = report.clone();
+        bad_stats.stats = Some(RobustStats {
+            total_samples: 2,
+            valid_samples: 1,
+            invalid_samples: 0,
+            min: 1,
+            median: 1,
+            p95: 1,
+            p99: 1,
+            max: 1,
+            mad: 0,
+            mad_bps: 0,
+        });
+        assert!(
+            bad_stats
+                .to_ndjson()
+                .unwrap_err()
+                .to_string()
+                .contains("sample counts disagree")
+        );
+
+        let mut oversized_detail = report.clone();
+        oversized_detail.findings[0].detail = "x".repeat(MAX_REPORT_BYTES);
+        assert!(
+            oversized_detail
+                .to_ndjson()
+                .unwrap_err()
+                .to_string()
+                .contains("finding detail length")
+        );
+
+        let mut too_many = report.clone();
+        too_many.findings =
+            vec![Finding::new("fixture", "bounded detail".to_owned()); MAX_REPORT_FINDINGS + 1];
+        assert!(
+            too_many
+                .to_ndjson()
+                .unwrap_err()
+                .to_string()
+                .contains("finding limit")
+        );
+
+        let mut maximum = report;
+        maximum.scenario = "s".repeat(MAX_TOKEN_BYTES);
+        maximum.findings =
+            vec![Finding::new("f", "\u{1f}".repeat(MAX_DETAIL_BYTES)); MAX_REPORT_FINDINGS];
+        let output = maximum.to_ndjson().unwrap();
+        assert!(output.len() <= MAX_REPORT_BYTES);
+        assert_eq!(output.lines().count(), MAX_REPORT_FINDINGS + 1);
     }
 
     #[test]
