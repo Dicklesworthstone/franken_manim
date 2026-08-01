@@ -172,6 +172,14 @@ impl fmt::Display for TopologyError {
 
 impl std::error::Error for TopologyError {}
 
+/// Allocation and iteration ceiling for one kernel CPU-list document.
+///
+/// This is intentionally far above the scheduler profiles the project
+/// targets while keeping a compact range from expanding across the complete
+/// `u32` domain.
+const MAX_CPU_LIST_ENTRIES: usize = 16 * 1024;
+const MAX_INVALID_LIST_PREVIEW_BYTES: usize = 128;
+
 /// Parse a kernel CPU list (`"0-7,64-71"`) into ascending ids.
 ///
 /// # Errors
@@ -190,8 +198,11 @@ pub fn parse_cpu_list(s: &str) -> Result<Vec<u32>, TopologyError> {
             if a > b {
                 return Err(invalid_list(s));
             }
+            let additional = u64::from(b) - u64::from(a) + 1;
+            reserve_cpu_list_entries(&mut out, additional)?;
             out.extend(a..=b);
         } else {
+            reserve_cpu_list_entries(&mut out, 1)?;
             out.push(part.parse().map_err(|_| invalid_list(s))?);
         }
     }
@@ -200,10 +211,32 @@ pub fn parse_cpu_list(s: &str) -> Result<Vec<u32>, TopologyError> {
     Ok(out)
 }
 
-fn invalid_list(s: &str) -> TopologyError {
-    TopologyError::Invalid {
-        detail: format!("malformed CPU list {s:?}"),
+fn reserve_cpu_list_entries(out: &mut Vec<u32>, additional: u64) -> Result<(), TopologyError> {
+    let additional = usize::try_from(additional).map_err(|_| cpu_list_limit())?;
+    let needed = out
+        .len()
+        .checked_add(additional)
+        .ok_or_else(cpu_list_limit)?;
+    if needed > MAX_CPU_LIST_ENTRIES {
+        return Err(cpu_list_limit());
     }
+    out.reserve(additional);
+    Ok(())
+}
+
+fn cpu_list_limit() -> TopologyError {
+    TopologyError::Invalid {
+        detail: format!("CPU list expands beyond the {MAX_CPU_LIST_ENTRIES}-entry limit"),
+    }
+}
+
+fn invalid_list(s: &str) -> TopologyError {
+    let detail = if s.len() <= MAX_INVALID_LIST_PREVIEW_BYTES {
+        format!("malformed CPU list {s:?}")
+    } else {
+        format!("malformed CPU list ({} input bytes)", s.len())
+    };
+    TopologyError::Invalid { detail }
 }
 
 /// Render ascending CPU ids as a compact kernel-style list (`"0-7,64-71"`),
@@ -215,7 +248,7 @@ pub fn format_cpu_list(cpus: &[u32]) -> String {
     while i < cpus.len() {
         let start = cpus[i];
         let mut end = start;
-        while i + 1 < cpus.len() && cpus[i + 1] == end + 1 {
+        while i + 1 < cpus.len() && end.checked_add(1) == Some(cpus[i + 1]) {
             i += 1;
             end = cpus[i];
         }
@@ -284,6 +317,9 @@ pub fn detect_simd_tier() -> SimdTier {
 const SYS_CPU: &str = "/sys/devices/system/cpu";
 const SYS_NODE: &str = "/sys/devices/system/node";
 const PROC_MEMINFO: &str = "/proc/meminfo";
+const MAX_TOPOLOGY_SCALAR_BYTES: usize = 4 * 1024;
+const MAX_CPU_LIST_BYTES: usize = 1024 * 1024;
+const MAX_MEMINFO_BYTES: usize = 1024 * 1024;
 
 impl HardwareTopology {
     /// Logical CPU count.
@@ -365,18 +401,38 @@ impl HardwareTopology {
     /// Windows-model constructor the synthetic tests drive.
     ///
     /// # Errors
-    /// [`TopologyError::Invalid`] if any group exceeds 64 CPUs or the total
-    /// is zero.
+    /// [`TopologyError::Invalid`] if a group is empty or exceeds 64 CPUs, or
+    /// if the aggregate topology is empty or exceeds its resource budget.
     pub fn from_group_sizes(sizes: &[u32]) -> Result<Self, TopologyError> {
-        let total: u32 = sizes.iter().sum();
-        if total == 0 {
+        if sizes.is_empty() {
             return Err(TopologyError::Invalid {
                 detail: "zero logical CPUs".to_string(),
+            });
+        }
+        if sizes.contains(&0) {
+            return Err(TopologyError::Invalid {
+                detail: "processor groups must contain at least one CPU".to_string(),
             });
         }
         if let Some(&too_big) = sizes.iter().find(|&&s| s > 64) {
             return Err(TopologyError::Invalid {
                 detail: format!("processor group of {too_big} CPUs exceeds the 64-CPU limit"),
+            });
+        }
+        let total = sizes
+            .iter()
+            .try_fold(0_u32, |total, &size| total.checked_add(size))
+            .ok_or_else(|| TopologyError::Invalid {
+                detail: "processor-group CPU total exceeds u32".to_string(),
+            })?;
+        let total_entries = usize::try_from(total).map_err(|_| TopologyError::Invalid {
+            detail: "processor-group CPU total exceeds addressable memory".to_string(),
+        })?;
+        if total_entries > MAX_CPU_LIST_ENTRIES {
+            return Err(TopologyError::Invalid {
+                detail: format!(
+                    "processor-group CPU total exceeds the {MAX_CPU_LIST_ENTRIES}-CPU limit"
+                ),
             });
         }
         let mut topo = Self::fallback(total);
@@ -580,7 +636,7 @@ fn group_by_split(ids: &[u32]) -> Vec<ProcessorGroup> {
 }
 
 fn read_string(fs: &dyn FileSystem, path: &Path) -> Result<String, TopologyError> {
-    match fs.read_to_string(path) {
+    match fs.read_to_string_bounded(path, MAX_CPU_LIST_BYTES) {
         Ok(s) => Ok(s),
         Err(FsError::NotFound { .. }) => Err(TopologyError::Missing {
             path: path.to_path_buf(),
@@ -592,12 +648,22 @@ fn read_string(fs: &dyn FileSystem, path: &Path) -> Result<String, TopologyError
     }
 }
 
+fn read_optional_string(fs: &dyn FileSystem, path: &Path, max_bytes: usize) -> Option<String> {
+    fs.read_to_string_bounded(path, max_bytes).ok()
+}
+
 fn read_optional_u32(fs: &dyn FileSystem, path: &Path) -> Option<u32> {
-    fs.read_to_string(path).ok()?.trim().parse().ok()
+    read_optional_string(fs, path, MAX_TOPOLOGY_SCALAR_BYTES)?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn read_optional_u64(fs: &dyn FileSystem, path: &Path) -> Option<u64> {
-    fs.read_to_string(path).ok()?.trim().parse().ok()
+    read_optional_string(fs, path, MAX_TOPOLOGY_SCALAR_BYTES)?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Collect deduplicated L2/L3 cache domains from every CPU's cache indexes.
@@ -614,20 +680,22 @@ fn read_cache_domains(fs: &dyn FileSystem, ids: &[u32]) -> (Vec<CacheDomain>, Ve
                 continue;
             }
             let cache_type = fs
-                .read_to_string(&base.join("type"))
+                .read_to_string_bounded(&base.join("type"), MAX_TOPOLOGY_SCALAR_BYTES)
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
             if cache_type != "Unified" && cache_type != "Data" {
                 continue;
             }
-            let Ok(shared) = fs.read_to_string(&base.join("shared_cpu_list")) else {
+            let Ok(shared) =
+                fs.read_to_string_bounded(&base.join("shared_cpu_list"), MAX_CPU_LIST_BYTES)
+            else {
                 continue;
             };
             let Ok(cpus) = parse_cpu_list(&shared) else {
                 continue;
             };
             let size_bytes = fs
-                .read_to_string(&base.join("size"))
+                .read_to_string_bounded(&base.join("size"), MAX_TOPOLOGY_SCALAR_BYTES)
                 .ok()
                 .and_then(|s| parse_cache_size(s.trim()));
             let domain = CacheDomain {
@@ -650,9 +718,9 @@ fn read_cache_domains(fs: &dyn FileSystem, ids: &[u32]) -> (Vec<CacheDomain>, Ve
 /// Parse a sysfs cache size (`"32768K"`, `"32M"`) into bytes.
 fn parse_cache_size(s: &str) -> Option<u64> {
     if let Some(k) = s.strip_suffix('K') {
-        k.parse::<u64>().ok().map(|v| v * 1024)
+        k.parse::<u64>().ok()?.checked_mul(1024)
     } else if let Some(m) = s.strip_suffix('M') {
-        m.parse::<u64>().ok().map(|v| v * 1024 * 1024)
+        m.parse::<u64>().ok()?.checked_mul(1024 * 1024)
     } else {
         s.parse::<u64>().ok()
     }
@@ -664,7 +732,7 @@ fn read_numa_nodes(fs: &dyn FileSystem) -> Option<Vec<NumaNode>> {
     let mut nodes = Vec::new();
     for id in 0..1024u32 {
         let path = PathBuf::from(SYS_NODE).join(format!("node{id}/cpulist"));
-        match fs.read_to_string(&path) {
+        match fs.read_to_string_bounded(&path, MAX_CPU_LIST_BYTES) {
             Ok(list) => {
                 if let Ok(cpus) = parse_cpu_list(&list) {
                     nodes.push(NumaNode { id, cpus });
@@ -678,11 +746,13 @@ fn read_numa_nodes(fs: &dyn FileSystem) -> Option<Vec<NumaNode>> {
 
 /// `MemTotal` from `/proc/meminfo`, in bytes.
 fn read_meminfo_total(fs: &dyn FileSystem) -> Option<u64> {
-    let text = fs.read_to_string(Path::new(PROC_MEMINFO)).ok()?;
+    let text = fs
+        .read_to_string_bounded(Path::new(PROC_MEMINFO), MAX_MEMINFO_BYTES)
+        .ok()?;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
-            return Some(kb * 1024);
+            return kb.checked_mul(1024);
         }
     }
     None
@@ -706,6 +776,19 @@ mod tests {
         }
         assert!(parse_cpu_list("3-1").is_err());
         assert!(parse_cpu_list("a-b").is_err());
+
+        let exact = format!("0-{}", MAX_CPU_LIST_ENTRIES - 1);
+        assert_eq!(parse_cpu_list(&exact).unwrap().len(), MAX_CPU_LIST_ENTRIES);
+        let over = format!("0-{MAX_CPU_LIST_ENTRIES}");
+        assert!(matches!(
+            parse_cpu_list(&over),
+            Err(TopologyError::Invalid { detail }) if detail.contains("entry limit")
+        ));
+        assert!(parse_cpu_list("0-4294967295").is_err());
+        assert_eq!(
+            format_cpu_list(&[u32::MAX, u32::MAX]),
+            "4294967295,4294967295"
+        );
     }
 
     #[test]
@@ -716,6 +799,9 @@ mod tests {
         assert_eq!(windows_group_split(128), vec![64, 64]);
         assert_eq!(windows_group_split(192), vec![64, 64, 64]);
         assert_eq!(windows_group_split(0), vec![0]);
+        assert!(HardwareTopology::from_group_sizes(&[0, 1]).is_err());
+        let too_many = vec![64; MAX_CPU_LIST_ENTRIES / 64 + 1];
+        assert!(HardwareTopology::from_group_sizes(&too_many).is_err());
     }
 
     #[test]
@@ -724,5 +810,31 @@ mod tests {
         assert_eq!(parse_cache_size("32M"), Some(32 * 1024 * 1024));
         assert_eq!(parse_cache_size("512"), Some(512));
         assert_eq!(parse_cache_size("x"), None);
+        assert_eq!(parse_cache_size(&format!("{}K", u64::MAX)), None);
+        assert_eq!(parse_cache_size(&format!("{}M", u64::MAX)), None);
+    }
+
+    #[test]
+    fn topology_file_limits_and_memory_overflow_degrade_precisely() {
+        use crate::fs::VirtualFs;
+
+        let oversized = VirtualFs::new();
+        oversized.insert(
+            PathBuf::from(SYS_CPU).join("online"),
+            vec![b'0'; MAX_CPU_LIST_BYTES + 1],
+        );
+        assert!(matches!(
+            HardwareTopology::detect_linux(&oversized),
+            Err(TopologyError::Parse { detail, .. }) if detail.contains("byte limit")
+        ));
+
+        let overflow = VirtualFs::new();
+        overflow.insert(PathBuf::from(SYS_CPU).join("online"), b"0\n".to_vec());
+        overflow.insert(
+            PROC_MEMINFO,
+            format!("MemTotal: {} kB\n", u64::MAX).into_bytes(),
+        );
+        let topology = HardwareTopology::detect_linux(&overflow).unwrap();
+        assert_eq!(topology.total_memory_bytes, None);
     }
 }
