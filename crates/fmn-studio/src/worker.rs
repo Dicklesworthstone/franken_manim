@@ -390,16 +390,20 @@ fn crash_report(
     payload: Box<dyn Any + Send>,
     limits: ProtocolLimits,
 ) -> CrashReport {
-    let message = panic_message(payload, limits.max_crash_message_bytes);
+    let message = panic_message(
+        payload,
+        effective_field_limit(limits.max_crash_message_bytes, limits),
+    );
     let scene = catch_unwind(AssertUnwindSafe(|| service.active_scene()))
         .ok()
         .flatten()
         .filter(|scene| !scene.is_empty() && scene.len() <= limits.max_field_bytes)
         .map(str::to_owned);
+    let tail_limit = effective_field_limit(limits.max_crash_tail_bytes, limits);
     let journal_tail = catch_unwind(AssertUnwindSafe(|| service.journal_tail())).map_or_else(
         |_| Vec::new(),
         |tail| {
-            let keep_from = tail.len().saturating_sub(limits.max_crash_tail_bytes);
+            let keep_from = tail.len().saturating_sub(tail_limit);
             tail.get(keep_from..).unwrap_or_default().to_vec()
         },
     );
@@ -439,8 +443,8 @@ fn bounded_owned_message(mut message: String, fallback: &str, limit: usize) -> S
     message
 }
 
-fn error_message_limit(limits: ProtocolLimits) -> usize {
-    limits.max_error_message_bytes.min(limits.max_field_bytes)
+fn effective_field_limit(specific_limit: usize, limits: ProtocolLimits) -> usize {
+    specific_limit.min(limits.max_field_bytes)
 }
 
 fn worker_error(
@@ -451,7 +455,11 @@ fn worker_error(
 ) -> WorkerResponse {
     WorkerResponse::Error {
         code,
-        message: bounded_owned_message(message.into(), fallback, error_message_limit(limits)),
+        message: bounded_owned_message(
+            message.into(),
+            fallback,
+            effective_field_limit(limits.max_error_message_bytes, limits),
+        ),
     }
 }
 

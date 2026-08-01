@@ -996,6 +996,72 @@ fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
 }
 
 #[test]
+fn worker_bounds_crash_context_to_the_generic_field_budget() {
+    let limits = ProtocolLimits {
+        max_field_bytes: 5,
+        max_crash_message_bytes: 32,
+        max_crash_tail_bytes: 32,
+        ..ProtocolLimits::default()
+    };
+    let build_id = sha256(b"field-bounded crash worker");
+    let mut input = Vec::new();
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::Hello {
+                version: fmn_studio::CURRENT_VERSION,
+                supervisor_build: sha256(b"supervisor"),
+                max_frame_bytes: 1024,
+            },
+        },
+        limits,
+    )
+    .expect("hello");
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 2,
+            request: SupervisorRequest::EnumerateScenes,
+        },
+        limits,
+    )
+    .expect("command");
+
+    let mut output = Vec::new();
+    let mut service = PanicService {
+        build_id,
+        negotiated_frame_budget: None,
+        panic_message: Some("ééé".to_owned()),
+        active_scene: Some("Demo".to_owned()),
+        journal_tail: b"abcdef".to_vec(),
+    };
+    let outcome = serve_worker(
+        &mut service,
+        &mut std::io::Cursor::new(input),
+        &mut output,
+        limits,
+    )
+    .expect("worker emits field-bounded crash context");
+    let WorkerServeOutcome::Crashed(report) = outcome else {
+        std::panic::panic_any("expected crash outcome");
+    };
+    assert_eq!(report.message, "éé");
+    assert_eq!(report.journal_tail, b"bcdef");
+
+    let mut output = std::io::Cursor::new(output);
+    assert!(matches!(
+        read_response(&mut output, limits)
+            .expect("hello response")
+            .response,
+        WorkerResponse::Hello { .. }
+    ));
+    let crash = read_response(&mut output, limits).expect("crash response");
+    assert_eq!(crash.request_id, 2);
+    assert_eq!(crash.response, WorkerResponse::Crash(report));
+}
+
+#[test]
 fn worker_omits_invalid_scene_and_copies_the_bounded_journal_suffix() {
     let limits = ProtocolLimits {
         max_crash_tail_bytes: 3,
