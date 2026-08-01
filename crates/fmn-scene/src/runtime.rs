@@ -1068,6 +1068,7 @@ impl Scene {
                 "wait duration must be finite and non-negative",
             ));
         }
+        self.clock.segment(duration).map_err(AnimError::Clock)?;
         self.pre_play(SegmentKind::Wait, &[], sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
 

@@ -5,7 +5,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fmn_anim::{SegmentKind, fade_transform, prepare_animation, replacement_transform};
+use fmn_anim::{
+    AnimError, ClockError, SegmentKind, fade_transform, prepare_animation, replacement_transform,
+};
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_mobject::animate::AnimateArgs;
 use fmn_mobject::{Mobject, SceneState, Stage, StageError, UpdaterFn, UpdaterKindTag};
@@ -713,6 +715,50 @@ fn off_grid_or_nonfinite_state_time_is_refused() {
             "an in-memory SceneState belongs to a different scene"
         ))
     ));
+}
+
+#[test]
+fn unrepresentable_wait_is_refused_before_lifecycle_side_effects() {
+    let mut scene = Scene::default();
+    let mob = scene.add_mobject(point()).expect("root");
+    let updater_calls = Rc::new(RefCell::new(0usize));
+    let seen_updater_calls = Rc::clone(&updater_calls);
+    scene
+        .stage_mut()
+        .add_updater(
+            mob,
+            move |stage, me| {
+                *seen_updater_calls.borrow_mut() += 1;
+                stage.shift(me, [1.0, 0.0, 0.0]);
+            },
+            false,
+        )
+        .expect("updater");
+    let preflight_calls = Rc::new(RefCell::new(0usize));
+    let seen_preflight_calls = Rc::clone(&preflight_calls);
+    scene
+        .set_preflight_hook(move |_stage, _roots| {
+            *seen_preflight_calls.borrow_mut() += 1;
+            Ok(())
+        })
+        .expect("preflight hook");
+    let mut sink = RecordingSink::default();
+
+    let error = scene
+        .wait(Some(1e18), &mut sink)
+        .expect_err("duration cannot fit the rational frame counter");
+
+    assert!(matches!(
+        error,
+        SceneError::Animation(AnimError::Clock(ClockError::RunTimeTooLong))
+    ));
+    assert_eq!(*preflight_calls.borrow(), 0);
+    assert_eq!(*updater_calls.borrow(), 0);
+    assert!(sink.events.is_empty());
+    assert!(sink.captures.is_empty());
+    assert_eq!(scene.time().frames(), 0);
+    assert_eq!(scene.play_count(), 0);
+    assert_eq!(scene.stage().get_center(mob), [0.0, 0.0, 0.0]);
 }
 
 #[test]
