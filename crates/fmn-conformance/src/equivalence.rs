@@ -36,6 +36,9 @@
 //! [`budget_v1_failures`] returns a human-legible message per violated
 //! bound; the test asserts the list is empty. **A budget violation fails
 //! the suite — this is the merge blocker for engine arithmetic changes.**
+//! Non-finite values and values outside a metric's mathematical domain are
+//! failures before threshold comparison, so invalid arithmetic cannot make
+//! every floating-point comparison false and pass the blocker.
 //! Loosening a bound means editing the `fmn-render` constant with an
 //! adjudicated re-measurement in its doc comment, never editing a scene to
 //! fit. Thread count is not part of an engine identity (C10): the suite
@@ -72,12 +75,19 @@ pub struct Divergence {
 }
 
 /// The budget-v1 verdict for one measured divergence: one human-legible
-/// message per violated bound, empty when the candidate passes. The test
-/// fails on any message — this is the engine-change blocker.
+/// message per violated bound or invalid metric domain, empty when the
+/// candidate passes. The test fails on any message — this is the
+/// engine-change blocker.
 #[must_use]
 pub fn budget_v1_failures(scene: &str, tier: Tier, measured: &Divergence) -> Vec<String> {
     let mut failures = Vec::new();
-    if measured.maximum > FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR {
+    if !measured.maximum.is_finite() || measured.maximum < 0.0 {
+        failures.push(format!(
+            "{scene} {} max={} is not a finite non-negative channel error",
+            tier.name(),
+            measured.maximum,
+        ));
+    } else if measured.maximum > FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR {
         failures.push(format!(
             "{scene} {} max={} at {:?} (certified {}, fast {}) exceeds \
              FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR={FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR}",
@@ -88,7 +98,13 @@ pub fn budget_v1_failures(scene: &str, tier: Tier, measured: &Divergence) -> Vec
             measured.candidate_at_maximum,
         ));
     }
-    if measured.rms > FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR {
+    if !measured.rms.is_finite() || measured.rms < 0.0 {
+        failures.push(format!(
+            "{scene} {} rms={} is not a finite non-negative channel error",
+            tier.name(),
+            measured.rms,
+        ));
+    } else if measured.rms > FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR {
         failures.push(format!(
             "{scene} {} rms={} exceeds \
              FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR={FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR}",
@@ -96,7 +112,13 @@ pub fn budget_v1_failures(scene: &str, tier: Tier, measured: &Divergence) -> Vec
             measured.rms,
         ));
     }
-    if measured.ssim < FAST_VISUAL_BUDGET_V1_MIN_SSIM {
+    if !measured.ssim.is_finite() || !(-1.0..=1.0).contains(&measured.ssim) {
+        failures.push(format!(
+            "{scene} {} ssim={} is outside the finite [-1, 1] metric domain",
+            tier.name(),
+            measured.ssim,
+        ));
+    } else if measured.ssim < FAST_VISUAL_BUDGET_V1_MIN_SSIM {
         failures.push(format!(
             "{scene} {} ssim={} is below \
              FAST_VISUAL_BUDGET_V1_MIN_SSIM={FAST_VISUAL_BUDGET_V1_MIN_SSIM}",
@@ -105,4 +127,71 @@ pub fn budget_v1_failures(scene: &str, tier: Tier, measured: &Divergence) -> Vec
         ));
     }
     failures
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Divergence, budget_v1_failures};
+    use fmn_render::engine::Tier;
+
+    fn identical() -> Divergence {
+        Divergence {
+            maximum: 0.0,
+            maximum_at: (0, 0, 0),
+            reference_at_maximum: 0.0,
+            candidate_at_maximum: 0.0,
+            rms: 0.0,
+            ssim: 1.0,
+        }
+    }
+
+    #[test]
+    fn finite_identical_measurement_passes() {
+        assert!(budget_v1_failures("identical", Tier::Scalar, &identical()).is_empty());
+    }
+
+    fn assert_invalid(case: &str, measured: Divergence) {
+        assert!(
+            !budget_v1_failures(case, Tier::Scalar, &measured).is_empty(),
+            "invalid metric passed budget v1: {case}"
+        );
+    }
+
+    #[test]
+    fn invalid_metric_domains_fail_closed() {
+        for (case, maximum) in [
+            ("nan maximum", f64::NAN),
+            ("infinite maximum", f64::INFINITY),
+            ("negative maximum", -0.25),
+        ] {
+            assert_invalid(
+                case,
+                Divergence {
+                    maximum,
+                    ..identical()
+                },
+            );
+        }
+        for (case, rms) in [
+            ("nan rms", f64::NAN),
+            ("infinite rms", f64::INFINITY),
+            ("negative rms", -0.25),
+        ] {
+            assert_invalid(case, Divergence { rms, ..identical() });
+        }
+        for (case, ssim) in [
+            ("nan ssim", f64::NAN),
+            ("infinite ssim", f64::INFINITY),
+            ("ssim above one", 1.01),
+            ("ssim below minus one", -1.01),
+        ] {
+            assert_invalid(
+                case,
+                Divergence {
+                    ssim,
+                    ..identical()
+                },
+            );
+        }
+    }
 }
