@@ -257,6 +257,21 @@ pub enum ThreeDError {
     IndexOutOfBounds,
     /// UV resolution did not match the vertex count.
     ResolutionMismatch,
+    /// A UV grid would require vertices beyond the `u32` index contract.
+    VertexCapacityExceeded {
+        /// Vertices implied by the requested resolution.
+        vertices: u64,
+    },
+    /// A UV grid's triangle indices do not fit this target address space.
+    IndexCapacityExceeded {
+        /// Indices required by the Reference's six-index cell pattern.
+        indices: u64,
+    },
+    /// A preflighted UV-grid index buffer could not be reserved.
+    AllocationFailed {
+        /// Indices required by the Reference's six-index cell pattern.
+        indices: u64,
+    },
     /// A vertex or draw parameter contained NaN or infinity.
     NonFinite,
     /// Dot radius was not positive.
@@ -290,6 +305,17 @@ impl std::fmt::Display for ThreeDError {
             Self::ResolutionMismatch => {
                 f.write_str("surface UV resolution does not match its vertex count")
             }
+            Self::VertexCapacityExceeded { vertices } => write!(
+                f,
+                "surface UV resolution needs {vertices} vertices, exceeding u32 index capacity"
+            ),
+            Self::IndexCapacityExceeded { indices } => write!(
+                f,
+                "surface UV grid needs {indices} indices, exceeding this target address space"
+            ),
+            Self::AllocationFailed { indices } => {
+                write!(f, "could not reserve {indices} surface UV-grid indices")
+            }
             Self::NonFinite => f.write_str("3D draw data must be finite"),
             Self::InvalidRadius => f.write_str("true-dot radius must be positive"),
             Self::InvalidAntiAliasWidth => {
@@ -319,6 +345,32 @@ impl std::fmt::Display for ThreeDError {
 
 impl std::error::Error for ThreeDError {}
 
+fn checked_uv_grid_layout(resolution: (u32, u32)) -> Result<(u64, u64), ThreeDError> {
+    let (nu, nv) = resolution;
+    let vertices = u64::from(nu) * u64::from(nv);
+    if vertices > u64::from(u32::MAX) + 1 {
+        return Err(ThreeDError::VertexCapacityExceeded { vertices });
+    }
+    if nu == 0 || nv == 0 {
+        return Ok((vertices, 0));
+    }
+    let indices = u64::from(nu - 1)
+        .checked_mul(u64::from(nv - 1))
+        .and_then(|cells| cells.checked_mul(6))
+        .ok_or(ThreeDError::VertexCapacityExceeded { vertices })?;
+    Ok((vertices, indices))
+}
+
+fn allocate_indices(indices: u64) -> Result<Vec<u32>, ThreeDError> {
+    let requested =
+        usize::try_from(indices).map_err(|_| ThreeDError::IndexCapacityExceeded { indices })?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(requested)
+        .map_err(|_| ThreeDError::AllocationFailed { indices })?;
+    Ok(values)
+}
+
 impl SurfaceMesh {
     /// Validate an explicitly indexed mesh.
     pub fn new(vertices: Vec<SurfaceVertex>, indices: Vec<u32>) -> Result<Self, ThreeDError> {
@@ -346,16 +398,12 @@ impl SurfaceMesh {
     ) -> Result<Self, ThreeDError> {
         validate_vertices(&vertices)?;
         let (nu, nv) = resolution;
-        let expected = u64::from(nu) * u64::from(nv);
+        let (expected, index_count) = checked_uv_grid_layout(resolution)?;
         if usize::try_from(expected).ok() != Some(vertices.len()) {
             return Err(ThreeDError::ResolutionMismatch);
         }
-        let mut indices = Vec::new();
+        let mut indices = allocate_indices(index_count)?;
         if nu > 0 && nv > 0 {
-            let count = u64::from(nu - 1)
-                .saturating_mul(u64::from(nv - 1))
-                .saturating_mul(6);
-            indices.reserve(usize::try_from(count).unwrap_or(0));
             for u in 0..nu - 1 {
                 for v in 0..nv - 1 {
                     let top_left = u * nv + v;
@@ -2983,6 +3031,30 @@ mod tests {
             ThreeDJob::new(&camera, &[ThreeDDraw::TrueDot(dot)], Tiling::default())
                 .expect_err("negative AA width must be rejected"),
             ThreeDError::InvalidAntiAliasWidth
+        );
+    }
+
+    #[test]
+    fn uv_grid_index_preflight_checks_exact_capacity_and_allocation_boundaries() {
+        let exact = checked_uv_grid_layout((65_536, 65_536));
+        assert_eq!(
+            exact,
+            Ok((
+                u64::from(u32::MAX) + 1,
+                u64::from(65_535u32) * u64::from(65_535u32) * 6,
+            ))
+        );
+
+        let vertices = u64::from(65_537u32) * u64::from(65_536u32);
+        assert_eq!(
+            checked_uv_grid_layout((65_537, 65_536)),
+            Err(ThreeDError::VertexCapacityExceeded { vertices })
+        );
+
+        let indices = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+        assert_eq!(
+            allocate_indices(indices),
+            Err(ThreeDError::AllocationFailed { indices })
         );
     }
 
