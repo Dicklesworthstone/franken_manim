@@ -88,8 +88,7 @@ impl TerminalPreview {
                 write_kitty_png(writer, &png, self.limits)?;
             }
             TerminalProtocol::Sixel => {
-                let encoded = encode_sixel(width, height, rgba, self.limits)?;
-                writer.write_all(&encoded)?;
+                write_sixel(writer, width, height, rgba, self.limits)?;
             }
         }
         writer.flush()?;
@@ -214,42 +213,29 @@ fn kitty_encoded_size(
     Ok((chunk_bytes, chunks, encoded_size))
 }
 
-fn encode_sixel(
+fn write_sixel(
+    writer: &mut impl Write,
     width: u32,
     height: u32,
     rgba: &[u8],
     limits: TuiLimits,
-) -> Result<Vec<u8>, TuiError> {
-    let width_usize = usize::try_from(width).map_err(|_| TuiError::DimensionOverflow)?;
-    let height_usize = usize::try_from(height).map_err(|_| TuiError::DimensionOverflow)?;
-    let mut used = [false; 216];
-    for pixel in rgba.as_chunks::<4>().0 {
-        if pixel[3] >= 128 {
-            used[usize::from(cube_index(pixel[0], pixel[1], pixel[2]))] = true;
-        }
-    }
+) -> Result<(), TuiError> {
+    const PIXEL_WRITE_BUFFER_BYTES: usize = 4096;
 
-    let mut out = Vec::new();
-    extend_bounded(&mut out, b"\x1bP0;0;0q", limits)?;
-    extend_bounded(
-        &mut out,
-        format!("\"1;1;{width};{height}").as_bytes(),
-        limits,
-    )?;
-    for (index, present) in used.iter().copied().enumerate() {
+    let (width_usize, height_usize, used) = sixel_preflight(width, height, rgba, limits)?;
+    writer.write_all(b"\x1bP0;0;0q")?;
+    write!(writer, "\"1;1;{width};{height}")?;
+    for (index, present) in used.into_iter().enumerate() {
         if !present {
             continue;
         }
         let red = (index / 36) * 20;
         let green = ((index / 6) % 6) * 20;
         let blue = (index % 6) * 20;
-        extend_bounded(
-            &mut out,
-            format!("#{index};2;{red};{green};{blue}").as_bytes(),
-            limits,
-        )?;
+        write!(writer, "#{index};2;{red};{green};{blue}")?;
     }
 
+    let mut pixels = [0u8; PIXEL_WRITE_BUFFER_BYTES];
     for band_y in (0..height_usize).step_by(6) {
         let band_palette = band_palette(rgba, width_usize, height_usize, band_y);
         let mut any_color = false;
@@ -258,10 +244,11 @@ fn encode_sixel(
                 continue;
             }
             if any_color {
-                push_bounded(&mut out, b'$', limits)?;
+                writer.write_all(b"$")?;
             }
             any_color = true;
-            extend_bounded(&mut out, format!("#{color}").as_bytes(), limits)?;
+            write!(writer, "#{color}")?;
+            let mut pixel_len = 0;
             for x in 0..width_usize {
                 let mut bits = 0u8;
                 for bit in 0..6 {
@@ -277,13 +264,85 @@ fn encode_sixel(
                         bits |= 1 << bit;
                     }
                 }
-                push_bounded(&mut out, 63 + bits, limits)?;
+                pixels[pixel_len] = 63 + bits;
+                pixel_len += 1;
+                if pixel_len == pixels.len() {
+                    writer.write_all(&pixels)?;
+                    pixel_len = 0;
+                }
+            }
+            if pixel_len != 0 {
+                writer.write_all(&pixels[..pixel_len])?;
             }
         }
-        push_bounded(&mut out, b'-', limits)?;
+        writer.write_all(b"-")?;
     }
-    extend_bounded(&mut out, b"\x1b\\", limits)?;
-    Ok(out)
+    writer.write_all(b"\x1b\\")?;
+    Ok(())
+}
+
+fn sixel_preflight(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    limits: TuiLimits,
+) -> Result<(usize, usize, [bool; 216]), TuiError> {
+    let width_usize = usize::try_from(width).map_err(|_| TuiError::DimensionOverflow)?;
+    let height_usize = usize::try_from(height).map_err(|_| TuiError::DimensionOverflow)?;
+    let mut used = [false; 216];
+    for pixel in rgba.as_chunks::<4>().0 {
+        if pixel[3] >= 128 {
+            used[usize::from(cube_index(pixel[0], pixel[1], pixel[2]))] = true;
+        }
+    }
+
+    let mut encoded_size = b"\x1bP0;0;0q".len();
+    add_sixel_size(
+        &mut encoded_size,
+        b"\"1;1;".len() + decimal_digits(width_usize) + 1 + decimal_digits(height_usize),
+    )?;
+    for (index, present) in used.iter().copied().enumerate() {
+        if !present {
+            continue;
+        }
+        let red = (index / 36) * 20;
+        let green = ((index / 6) % 6) * 20;
+        let blue = (index % 6) * 20;
+        add_sixel_size(
+            &mut encoded_size,
+            1 + decimal_digits(index)
+                + b";2;".len()
+                + decimal_digits(red)
+                + 1
+                + decimal_digits(green)
+                + 1
+                + decimal_digits(blue),
+        )?;
+    }
+
+    for band_y in (0..height_usize).step_by(6) {
+        let band_palette = band_palette(rgba, width_usize, height_usize, band_y);
+        let mut any_color = false;
+        for (color, present) in band_palette.into_iter().enumerate() {
+            if !present {
+                continue;
+            }
+            if any_color {
+                add_sixel_size(&mut encoded_size, 1)?;
+            }
+            any_color = true;
+            add_sixel_size(&mut encoded_size, 1 + decimal_digits(color) + width_usize)?;
+        }
+        add_sixel_size(&mut encoded_size, 1)?;
+    }
+    add_sixel_size(&mut encoded_size, b"\x1b\\".len())?;
+    if encoded_size > limits.max_encoded_bytes {
+        return Err(TuiError::EncodedLimit {
+            limit: limits.max_encoded_bytes,
+            needed: encoded_size,
+        });
+    }
+    Ok((width_usize, height_usize, used))
 }
 
 fn band_palette(rgba: &[u8], width: usize, height: usize, band_y: usize) -> [bool; 216] {
@@ -307,23 +366,20 @@ const fn cube_index(red: u8, green: u8, blue: u8) -> u8 {
     red * 36 + green * 6 + blue
 }
 
-fn extend_bounded(out: &mut Vec<u8>, bytes: &[u8], limits: TuiLimits) -> Result<(), TuiError> {
-    let needed = out
-        .len()
-        .checked_add(bytes.len())
+fn add_sixel_size(total: &mut usize, additional: usize) -> Result<(), TuiError> {
+    *total = total
+        .checked_add(additional)
         .ok_or(TuiError::EncodedSizeOverflow)?;
-    if needed > limits.max_encoded_bytes {
-        return Err(TuiError::EncodedLimit {
-            limit: limits.max_encoded_bytes,
-            needed,
-        });
-    }
-    out.extend_from_slice(bytes);
     Ok(())
 }
 
-fn push_bounded(out: &mut Vec<u8>, byte: u8, limits: TuiLimits) -> Result<(), TuiError> {
-    extend_bounded(out, &[byte], limits)
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 fn base64_block(bytes: &[u8]) -> [u8; 4] {
@@ -577,5 +633,51 @@ mod tests {
             sixel,
             b"\x1bP0;0;0q\"1;1;1;12#30;2;0;100;0#180;2;100;0;0#180~-#30~-\x1b\\"
         );
+    }
+
+    #[test]
+    fn sixel_streams_as_bounded_writes_after_exact_preflight() {
+        let rgba = [255, 0, 0, 255].repeat(64);
+        let generous = TerminalPreview::new(TerminalProtocol::Sixel, TuiLimits::default()).unwrap();
+        let mut expected = Vec::new();
+        generous.write_rgba8(&mut expected, 64, 1, &rgba).unwrap();
+
+        let exact = TerminalPreview::new(
+            TerminalProtocol::Sixel,
+            TuiLimits {
+                max_pixels: 64,
+                max_encoded_bytes: expected.len(),
+                ..TuiLimits::default()
+            },
+        )
+        .unwrap();
+        let mut observed = BoundedWriteObserver {
+            max_write: 64,
+            ..BoundedWriteObserver::default()
+        };
+        exact.write_rgba8(&mut observed, 64, 1, &rgba).unwrap();
+        assert_eq!(observed.bytes, expected);
+        assert!(observed.largest_write <= observed.max_write);
+        assert!(expected.len() > observed.max_write);
+
+        let one_byte_short = TerminalPreview::new(
+            TerminalProtocol::Sixel,
+            TuiLimits {
+                max_pixels: 64,
+                max_encoded_bytes: expected.len() - 1,
+                ..TuiLimits::default()
+            },
+        )
+        .unwrap();
+        let mut refused = BoundedWriteObserver {
+            max_write: 64,
+            ..BoundedWriteObserver::default()
+        };
+        assert!(matches!(
+            one_byte_short.write_rgba8(&mut refused, 64, 1, &rgba),
+            Err(TuiError::EncodedLimit { limit, needed })
+                if limit == expected.len() - 1 && needed == expected.len()
+        ));
+        assert!(refused.bytes.is_empty());
     }
 }
