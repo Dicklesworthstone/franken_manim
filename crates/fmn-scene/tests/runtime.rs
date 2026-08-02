@@ -897,7 +897,7 @@ fn three_d_defaults_depth_and_ambient_rotation_are_snapshotted_stage_state() {
     assert_eq!(scene.samples(), 4);
     assert!(scene.always_depth_test());
     let expected = CameraOrientation::from_degrees(-30.0, 70.0, 0.0);
-    let actual = scene.orientation();
+    let actual = scene.orientation().expect("camera orientation");
     assert!((actual.theta - expected.theta).abs() < 1e-15);
     assert!((actual.phi - expected.phi).abs() < 1e-15);
     let mut camera_config = scene
@@ -935,7 +935,10 @@ fn three_d_defaults_depth_and_ambient_rotation_are_snapshotted_stage_state() {
     scene
         .wait(Some(0.5), &mut NullSceneSink)
         .expect("clock advances");
-    assert!((scene.orientation().theta - (expected.theta + 0.5)).abs() < 1e-12);
+    assert!(
+        (scene.orientation().expect("rotated orientation").theta - (expected.theta + 0.5)).abs()
+            < 1e-12
+    );
 
     let state = scene.state().expect("state");
     scene
@@ -944,7 +947,10 @@ fn three_d_defaults_depth_and_ambient_rotation_are_snapshotted_stage_state() {
     scene
         .restore_state(&state)
         .expect("restores camera trackers");
-    assert!((scene.orientation().theta - (expected.theta + 0.5)).abs() < 1e-12);
+    assert!(
+        (scene.orientation().expect("restored orientation").theta - (expected.theta + 0.5)).abs()
+            < 1e-12
+    );
 }
 
 #[test]
@@ -973,26 +979,55 @@ fn three_d_add_refuses_a_stale_batch_before_mutating_live_members() {
 }
 
 #[test]
-fn three_d_orientation_refuses_a_broken_tracker_before_partial_mutation() {
-    let mut scene = ThreeDScene::default();
-    let before = scene.orientation();
-    let phi = scene
-        .stage()
-        .family(scene.camera_root())
-        .get(2)
-        .copied()
-        .expect("phi tracker");
-    scene.stage_mut().delete(phi).expect("delete phi tracker");
+fn three_d_camera_surfaces_refuse_every_broken_tracker_before_mutation() {
+    for broken_index in 0..3 {
+        let mut scene = ThreeDScene::default();
+        let family = scene.stage().family(scene.camera_root());
+        let trackers = [
+            *family.get(1).expect("theta tracker"),
+            *family.get(2).expect("phi tracker"),
+            *family.get(3).expect("gamma tracker"),
+        ];
+        let before = trackers.map(|tracker| scene.stage().tracker_value(tracker));
+        let broken_tracker = *trackers
+            .get(broken_index)
+            .expect("broken tracker index is in range");
+        scene
+            .stage_mut()
+            .delete(broken_tracker)
+            .expect("delete camera tracker");
 
-    assert!(matches!(
-        scene.set_orientation(CameraOrientation::from_degrees(10.0, 20.0, 30.0)),
-        Err(SceneError::Stage(StageError::StaleHandle))
-    ));
-    assert_eq!(
-        scene.orientation().theta.to_bits(),
-        before.theta.to_bits(),
-        "theta must not mutate before the missing phi tracker is refused"
-    );
+        assert!(matches!(
+            scene.orientation(),
+            Err(SceneError::Stage(StageError::StaleHandle))
+        ));
+        assert!(matches!(
+            scene.camera_frame(),
+            Err(SceneError::Stage(StageError::StaleHandle))
+        ));
+        assert!(matches!(
+            scene.three_d_camera_config(),
+            Err(SceneError::Stage(StageError::StaleHandle))
+        ));
+        assert!(matches!(
+            scene.three_d_camera(fmn_render::CameraConfig::default()),
+            Err(SceneError::Stage(StageError::StaleHandle))
+        ));
+        assert!(matches!(
+            scene.set_orientation(CameraOrientation::from_degrees(10.0, 20.0, 30.0)),
+            Err(SceneError::Stage(StageError::StaleHandle))
+        ));
+
+        for (index, (tracker, before_value)) in trackers.into_iter().zip(before).enumerate() {
+            if index != broken_index {
+                assert_eq!(
+                    scene.stage().tracker_value(tracker),
+                    before_value,
+                    "a surviving camera tracker must not mutate before refusal"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Default)]

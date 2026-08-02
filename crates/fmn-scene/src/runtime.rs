@@ -1725,13 +1725,28 @@ impl ThreeDScene {
     }
 
     /// Current camera orientation.
-    #[must_use]
-    pub fn orientation(&self) -> CameraOrientation {
-        CameraOrientation {
-            theta: self.scene.stage.tracker_value(self.theta).unwrap_or(0.0),
-            phi: self.scene.stage.tracker_value(self.phi).unwrap_or(0.0),
-            gamma: self.scene.stage.tracker_value(self.gamma).unwrap_or(0.0),
-        }
+    ///
+    /// # Errors
+    /// Returns [`StageError::StaleHandle`] if any camera handle is dead or no
+    /// longer names a scalar tracker.
+    pub fn orientation(&self) -> Result<CameraOrientation, SceneError> {
+        Ok(CameraOrientation {
+            theta: self
+                .scene
+                .stage
+                .tracker_value(self.theta)
+                .ok_or(StageError::StaleHandle)?,
+            phi: self
+                .scene
+                .stage
+                .tracker_value(self.phi)
+                .ok_or(StageError::StaleHandle)?,
+            gamma: self
+                .scene
+                .stage
+                .tracker_value(self.gamma)
+                .ok_or(StageError::StaleHandle)?,
+        })
     }
 
     /// Materialize the tracker-backed orientation as a Lumen camera frame.
@@ -1740,7 +1755,7 @@ impl ThreeDScene {
     /// value is an immutable capture input, so render workers never read the
     /// live Stage while projecting.
     pub fn camera_frame(&self) -> Result<CameraFrame, SceneError> {
-        let orientation = self.orientation();
+        let orientation = self.orientation()?;
         let mut frame = CameraFrame::default();
         frame.set_euler_angles(
             Some(orientation.theta),
@@ -1774,7 +1789,7 @@ impl ThreeDScene {
         &self,
         mut config: RenderCameraConfig,
     ) -> Result<ThreeDCamera, SceneError> {
-        let orientation = self.orientation();
+        let orientation = self.orientation()?;
         config.frame.set_euler_angles(
             Some(orientation.theta),
             Some(orientation.phi),
@@ -1796,12 +1811,7 @@ impl ThreeDScene {
                 "camera orientation angles must be finite",
             ));
         }
-        if [self.theta, self.phi, self.gamma]
-            .iter()
-            .any(|&tracker| self.scene.stage.tracker_value(tracker).is_none())
-        {
-            return Err(StageError::StaleHandle.into());
-        }
+        self.orientation()?;
         self.scene
             .stage
             .set_tracker_value(self.theta, orientation.theta)?;
