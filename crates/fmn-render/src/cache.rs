@@ -427,6 +427,12 @@ mod tests {
         }
     }
 
+    fn tile_at(binning: &Binning, x: u32, y: u32) -> usize {
+        binning
+            .tile_of(x, y)
+            .expect("test coordinate is inside the viewport")
+    }
+
     fn output() -> OutputTransform {
         OutputTransform {
             viewport: viewport(),
@@ -622,8 +628,8 @@ mod tests {
         let (mut stage, mobs) = scene();
         let mut c = Compositor::new();
         let (_, binning) = c.frame(&stage, 0, output());
-        let left = binning.tile_of(40, 40);
-        let entered = binning.tile_of(15, 100);
+        let left = tile_at(&binning, 40, 40);
+        let entered = tile_at(&binning, 15, 100);
         let key_left = c.cache.key(left).expect("cached");
         let key_entered = c.cache.key(entered);
 
@@ -785,7 +791,7 @@ mod tests {
         let (mut stage, mobs) = scene();
         let mut c = Compositor::new();
         let (_, binning) = c.frame(&stage, 0, output());
-        let tile = binning.tile_of(40, 40);
+        let tile = tile_at(&binning, 40, 40);
         assert!(c.cache.key(tile).is_some());
 
         let _view = stage
@@ -808,7 +814,7 @@ mod tests {
         let (mut stage, mobs) = scene();
         let mut c = Compositor::new();
         let (_, binning) = c.frame(&stage, 0, output());
-        let tile = binning.tile_of(40, 40);
+        let tile = tile_at(&binning, 40, 40);
         assert!(c.cache.get(tile).is_some());
 
         stage.remove_from_scene(mobs[0]);
@@ -855,7 +861,7 @@ mod tests {
         let (mut stage, _) = scene();
         let mut c = Compositor::new();
         let (_, binning) = c.frame(&stage, 0, output());
-        let far = binning.tile_of(90, 90);
+        let far = tile_at(&binning, 90, 90);
         let key_far = c.cache.key(far).expect("cached");
 
         // Add an object far away, and *behind* both — so it lands first in the
@@ -879,7 +885,7 @@ mod tests {
         plan.sync(&stage, 0);
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
-        let tile = binning.tile_of(40, 40);
+        let tile = tile_at(&binning, 40, 40);
         let a = TileKey::build(&binning, &plan, tile, 0, output()).expect("cacheable");
         let b = TileKey::build(&binning, &plan, tile, 9, output()).expect("cacheable");
         assert_eq!(a.diff(&b), vec!["camera"]);
@@ -932,7 +938,7 @@ mod tests {
         plan.sync(&stage, 0);
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
-        let tile = binning.tile_of(40, 40);
+        let tile = tile_at(&binning, 40, 40);
         assert!(TileKey::build(&binning, &plan, tile, 0, output()).is_some());
 
         let mut moved = output();
@@ -981,7 +987,7 @@ mod tests {
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
         let mut cache = TileCache::<u32>::new();
-        let valid_tile = binning.tile_of(40, 40);
+        let valid_tile = tile_at(&binning, 40, 40);
         let key = TileKey::build(&binning, &plan, valid_tile, 0, output())
             .expect("valid tile is cacheable");
         cache.store(valid_tile, key, 7);
