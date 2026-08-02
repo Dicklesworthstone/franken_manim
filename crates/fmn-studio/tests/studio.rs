@@ -260,6 +260,64 @@ fn inspector_and_debug_overlays_follow_visible_family_order() {
 }
 
 #[test]
+fn inspector_bounds_source_excerpts_across_the_snapshot() {
+    let first = Mobject::from_points(&[[0.0, 0.0, 0.0]]);
+    let second = Mobject::from_points(&[[1.0, 0.0, 0.0]]);
+    let third = Mobject::from_points(&[[2.0, 0.0, 0.0]]);
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::group(vec![first, second, third]));
+    stage.add_to_scene(root).unwrap();
+    let children = stage.get(root).unwrap().submobjects().to_vec();
+
+    let source: Arc<str> = Arc::from("abcdα");
+    let bindings = children
+        .iter()
+        .enumerate()
+        .map(|(submobject_index, _)| NativeSpanBinding {
+            submobject_index,
+            start: 0,
+            end: source.len(),
+            kind: SpanKind::TextGlyph,
+        })
+        .collect::<Vec<_>>();
+    let mut spans = SpanRegistry::new();
+    spans.bind_native(source, &children, &bindings).unwrap();
+
+    let limits = InspectorLimits {
+        max_source_excerpt_bytes: 5,
+        max_total_source_excerpt_bytes: 5,
+        ..InspectorLimits::default()
+    };
+    let inspection = InspectorSnapshot::capture(&stage, &spans, limits).unwrap();
+    let source_spans = inspection
+        .nodes
+        .iter()
+        .filter_map(|node| node.source_span.as_ref())
+        .collect::<Vec<_>>();
+
+    assert_eq!(source_spans.len(), 3);
+    assert_eq!(source_spans[0].excerpt, "abcd");
+    assert_eq!(source_spans[1].excerpt, "a");
+    assert_eq!(source_spans[2].excerpt, "");
+    assert_eq!(
+        source_spans
+            .iter()
+            .map(|span| span.excerpt.len())
+            .sum::<usize>(),
+        limits.max_total_source_excerpt_bytes
+    );
+    assert!(source_spans.iter().all(|span| span.start == 0));
+    assert!(source_spans.iter().all(|span| span.end == "abcdα".len()));
+    assert!(
+        source_spans
+            .iter()
+            .all(|span| span.source_bytes == "abcdα".len())
+    );
+    assert!(source_spans.iter().all(|span| span.excerpt_truncated));
+    assert!(inspection.truncated);
+}
+
+#[test]
 fn overlay_json_budget_stops_during_tile_encoding() {
     let limits = InspectorLimits {
         max_json_bytes: 256,

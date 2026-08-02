@@ -41,6 +41,8 @@ pub struct InspectorLimits {
     pub max_tiles: usize,
     /// Maximum source excerpt bytes attached to one node.
     pub max_source_excerpt_bytes: usize,
+    /// Maximum source excerpt bytes copied across one inspection.
+    pub max_total_source_excerpt_bytes: usize,
     /// Maximum encoded JSON document.
     pub max_json_bytes: usize,
 }
@@ -59,6 +61,7 @@ impl Default for InspectorLimits {
             max_total_points: 250_000,
             max_tiles: 1_000_000,
             max_source_excerpt_bytes: 4096,
+            max_total_source_excerpt_bytes: 8 * 1024 * 1024,
             max_json_bytes: 8 * 1024 * 1024,
         }
     }
@@ -77,6 +80,7 @@ impl InspectorLimits {
             || self.max_total_points == 0
             || self.max_tiles == 0
             || self.max_source_excerpt_bytes == 0
+            || self.max_total_source_excerpt_bytes == 0
             || self.max_json_bytes == 0
         {
             Err(InspectError::InvalidLimits)
@@ -351,6 +355,7 @@ impl InspectorSnapshot {
             .collect();
         let mut total_links = 0usize;
         let mut total_values = 0usize;
+        let mut total_source_excerpt_bytes = 0usize;
         let mut truncated = traversal_truncated;
         let mut nodes = Vec::with_capacity(handles.len());
         for (id, mob) in handles.iter().copied().enumerate() {
@@ -425,6 +430,17 @@ impl InspectorSnapshot {
             }
             let placement = entry.placement();
             let bounds = stage.get_bounding_box(mob);
+            let source_excerpt_bytes = limits
+                .max_total_source_excerpt_bytes
+                .saturating_sub(total_source_excerpt_bytes)
+                .min(limits.max_source_excerpt_bytes);
+            let source_span = span_snapshot(spans.spans.get(&mob), source_excerpt_bytes);
+            if let Some(source_span) = &source_span {
+                total_source_excerpt_bytes += source_span.excerpt.len();
+                if source_span.excerpt_truncated {
+                    truncated = true;
+                }
+            }
             nodes.push(InspectorNode {
                 id,
                 root: root_set.contains(&mob),
@@ -441,7 +457,7 @@ impl InspectorSnapshot {
                 placement_linear: placement.linear(),
                 placement_translation: placement.translation(),
                 bounds: [bounds.min, bounds.mid, bounds.max],
-                source_span: span_snapshot(spans.spans.get(&mob), limits),
+                source_span,
             });
         }
         Ok(Self {
@@ -803,13 +819,10 @@ fn visible_handles(
 
 fn span_snapshot(
     span: Option<&RegisteredSpan>,
-    limits: InspectorLimits,
+    max_excerpt_bytes: usize,
 ) -> Option<SourceSpanSnapshot> {
     let span = span?;
-    let intended_end = span
-        .start
-        .saturating_add(limits.max_source_excerpt_bytes)
-        .min(span.end);
+    let intended_end = span.start.saturating_add(max_excerpt_bytes).min(span.end);
     let mut excerpt_end = intended_end;
     while excerpt_end > span.start && !span.source.is_char_boundary(excerpt_end) {
         excerpt_end -= 1;
