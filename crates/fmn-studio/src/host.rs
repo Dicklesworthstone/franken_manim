@@ -710,6 +710,7 @@ impl HostHandler {
         stream.set_write_timeout(Some(self.config.request_timeout))?;
         let request = match read_http_request(&mut stream, &self.config) {
             Ok(request) => request,
+            Err(error @ HostError::RequestStorageAllocationFailed { .. }) => return Err(error),
             Err(error) => {
                 write_http_response(
                     &mut stream,
@@ -1049,7 +1050,8 @@ fn read_http_request(
     reader: &mut impl Read,
     config: &StudioHostConfig,
 ) -> Result<HttpRequest, HostError> {
-    let mut bytes = Vec::with_capacity(config.max_header_bytes.min(4096));
+    let mut bytes = Vec::new();
+    reserve_request_storage(&mut bytes, config.max_header_bytes.min(4096))?;
     let header_end = loop {
         if let Some(index) = find_bytes(&bytes, b"\r\n\r\n") {
             break index + 4;
@@ -1064,6 +1066,7 @@ fn read_http_request(
         if count == 0 {
             return Err(HostError::BadRequest("request ended before headers"));
         }
+        reserve_request_storage(&mut bytes, count)?;
         bytes.extend_from_slice(&chunk[..count]);
     };
     let header_bytes = &bytes[..header_end - 4];
@@ -1142,15 +1145,31 @@ fn read_http_request(
         return Err(HostError::BadRequest("HTTP pipelining is forbidden"));
     }
     let already_read = bytes.len();
+    reserve_request_storage(&mut bytes, total - already_read)?;
     bytes.resize(total, 0);
     reader.read_exact(&mut bytes[already_read..])?;
+    bytes.copy_within(header_end..total, 0);
+    bytes.truncate(content_length);
     Ok(HttpRequest {
         method,
         path,
         query,
         headers,
-        body: bytes[header_end..].to_vec(),
+        body: bytes,
     })
+}
+
+fn reserve_request_storage(bytes: &mut Vec<u8>, additional: usize) -> Result<(), HostError> {
+    let requested = bytes
+        .len()
+        .checked_add(additional)
+        .ok_or(HostError::BadRequest("request size overflow"))?;
+    bytes
+        .try_reserve_exact(additional)
+        .map_err(|error| HostError::RequestStorageAllocationFailed {
+            bytes: requested,
+            error,
+        })
 }
 
 fn parse_target(target: &str) -> Result<(String, Vec<(String, String)>), HostError> {
@@ -1615,6 +1634,13 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Storage for one bounded HTTP request could not be reserved.
+    RequestStorageAllocationFailed {
+        /// Total request-buffer bytes requested at the refusal point.
+        bytes: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
 }
 
 impl HostError {
@@ -1630,9 +1656,9 @@ impl HostError {
             | Self::FramePng(_)
             | Self::UnexpectedWorkerResponse
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
-            Self::Configuration(_) | Self::ClientStorageAllocationFailed { .. } => {
-                Some((500, "Internal Server Error"))
-            }
+            Self::Configuration(_)
+            | Self::ClientStorageAllocationFailed { .. }
+            | Self::RequestStorageAllocationFailed { .. } => Some((500, "Internal Server Error")),
             Self::Io(_) => None,
         }
     }
@@ -1662,6 +1688,10 @@ impl fmt::Display for HostError {
                 f,
                 "Studio could not reserve storage for {clients} client handlers: {error}"
             ),
+            Self::RequestStorageAllocationFailed { bytes, error } => write!(
+                f,
+                "Studio could not reserve {bytes} bytes for one HTTP request: {error}"
+            ),
         }
     }
 }
@@ -1674,6 +1704,7 @@ impl std::error::Error for HostError {
             Self::Supervisor(error) => Some(error),
             Self::FramePng(error) => Some(error),
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
+            Self::RequestStorageAllocationFailed { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -1783,6 +1814,21 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Err(std::io::Error::from(ErrorKind::BrokenPipe))
+        }
+    }
+
+    struct HeaderThenPanic {
+        header: Vec<u8>,
+        served: bool,
+    }
+
+    impl Read for HeaderThenPanic {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            assert!(!self.served, "request body was read after storage refusal");
+            self.served = true;
+            assert!(self.header.len() <= bytes.len());
+            bytes[..self.header.len()].copy_from_slice(&self.header);
+            Ok(self.header.len())
         }
     }
 
@@ -2037,6 +2083,51 @@ mod tests {
         assert_eq!(request.method, Method::Post);
         assert_eq!(request.path, "/api/scrub");
         assert_eq!(request.body, b"frame=17&commit=true");
+    }
+
+    #[test]
+    fn strict_parser_preserves_a_partially_prefetched_body() {
+        let config = StudioHostConfig::default();
+        let bytes = b"POST /api/scrub HTTP/1.1\r\nHost: 127.0.0.1:42\r\nContent-Length: 20\r\n\r\nframe=17&commit=true";
+        let header_end = find_bytes(bytes, b"\r\n\r\n").unwrap() + 4;
+        let split = header_end + 3;
+        let mut reader =
+            Cursor::new(bytes[..split].to_vec()).chain(Cursor::new(bytes[split..].to_vec()));
+
+        let request = read_http_request(&mut reader, &config).unwrap();
+
+        assert_eq!(request.path, "/api/scrub");
+        assert_eq!(request.body, b"frame=17&commit=true");
+    }
+
+    #[test]
+    fn request_storage_overflow_is_typed_before_the_body_read() {
+        let content_length = isize::MAX as usize;
+        let header = format!(
+            "POST /api/event HTTP/1.1\r\nHost: localhost\r\nContent-Length: {content_length}\r\n\r\n"
+        )
+        .into_bytes();
+        let requested_bytes = header.len().checked_add(content_length).unwrap();
+        let mut reader = HeaderThenPanic {
+            header,
+            served: false,
+        };
+        let config = StudioHostConfig {
+            max_header_bytes: usize::MAX,
+            max_body_bytes: usize::MAX,
+            ..StudioHostConfig::default()
+        };
+
+        let result = read_http_request(&mut reader, &config);
+
+        assert!(matches!(
+            &result,
+            Err(HostError::RequestStorageAllocationFailed { bytes, .. })
+                if *bytes == requested_bytes // ubs:ignore - request sizes are public test values.
+        ));
+        let error = result.err().unwrap();
+        assert_eq!(error.http_status(), Some((500, "Internal Server Error")));
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]
