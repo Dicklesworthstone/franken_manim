@@ -238,6 +238,27 @@ pub enum TileWork {
     RasterizeUncached,
 }
 
+/// A tile-cache planning request that does not name a tile in its binning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TilePlanError {
+    /// The requested tile index.
+    pub tile: usize,
+    /// The number of tiles available in the supplied binning.
+    pub tile_count: usize,
+}
+
+impl std::fmt::Display for TilePlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tile {} is outside a binning with {} tiles",
+            self.tile, self.tile_count
+        )
+    }
+}
+
+impl std::error::Error for TilePlanError {}
+
 impl<T> TileCache<T> {
     /// An empty cache.
     #[must_use]
@@ -262,6 +283,10 @@ impl<T> TileCache<T> {
     /// rasterization entirely rather than re-rasterizing-and-comparing" is a
     /// property of this function returning [`TileWork::Reuse`] without the caller
     /// ever producing a second version to compare against.
+    ///
+    /// # Errors
+    /// Returns [`TilePlanError`] before reading or mutating cache state when
+    /// `tile` is outside `binning`.
     pub fn plan_tile(
         &mut self,
         binning: &Binning,
@@ -269,28 +294,32 @@ impl<T> TileCache<T> {
         tile: usize,
         camera: u64,
         output: OutputTransform,
-    ) -> TileWork {
+    ) -> Result<TileWork, TilePlanError> {
+        let tile_count = binning.tile_count();
+        if tile >= tile_count {
+            return Err(TilePlanError { tile, tile_count });
+        }
         if binning.tile(tile).is_empty() {
             // An empty tile is not a cache entry: it has no contents to reuse,
             // and keeping one would let a stale payload outlive the commands
             // that produced it.
             self.entries.remove(&tile);
             self.stats.empty += 1;
-            return TileWork::Empty;
+            return Ok(TileWork::Empty);
         }
         let Some(key) = TileKey::build(binning, plan, tile, camera, output) else {
             self.entries.remove(&tile);
             self.stats.poisoned += 1;
-            return TileWork::RasterizeUncached;
+            return Ok(TileWork::RasterizeUncached);
         };
         match self.entries.get(&tile) {
             Some((cached, _)) if *cached == key => {
                 self.stats.hits += 1;
-                TileWork::Reuse
+                Ok(TileWork::Reuse)
             }
             _ => {
                 self.stats.misses += 1;
-                TileWork::Rasterize(key)
+                Ok(TileWork::Rasterize(key))
             }
         }
     }
@@ -346,13 +375,16 @@ impl<T> TileCache<T> {
 ///
 /// The convenience form of [`TileCache::plan_tile`], and the shape the frame
 /// loop will call: one pass, counters for §17.2, and a decision per tile.
+///
+/// # Errors
+/// Propagates any [`TilePlanError`] from per-tile planning.
 pub fn plan_frame<T>(
     cache: &mut TileCache<T>,
     binning: &Binning,
     plan: &RenderPlan,
     camera: u64,
     output: OutputTransform,
-) -> Vec<TileWork> {
+) -> Result<Vec<TileWork>, TilePlanError> {
     cache.begin_frame();
     (0..binning.tile_count())
         .map(|t| cache.plan_tile(binning, plan, t, camera, output))
@@ -495,7 +527,8 @@ mod tests {
             self.plan.sync(stage, camera);
             let binning = Binning::build(&self.plan, out.viewport, Tiling::default(), out.map)
                 .expect("bounded test binning");
-            let work = plan_frame(&mut self.cache, &binning, &self.plan, camera, out);
+            let work = plan_frame(&mut self.cache, &binning, &self.plan, camera, out)
+                .expect("binning supplies its own valid tile range");
             // Rasterize the misses, exactly as an engine would, and store what
             // it would have produced.
             for (t, w) in work.iter().enumerate() {
@@ -795,7 +828,8 @@ mod tests {
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
 
-        let work = plan_frame(&mut cache, &binning, &plan, 0, output());
+        let work = plan_frame(&mut cache, &binning, &plan, 0, output())
+            .expect("binning supplies its own valid tile range");
         let mut painted = Vec::new();
         for (t, w) in work.iter().enumerate() {
             if let TileWork::Rasterize(key) = w {
@@ -804,7 +838,8 @@ mod tests {
             }
         }
 
-        let again = plan_frame(&mut cache, &binning, &plan, 0, output());
+        let again = plan_frame(&mut cache, &binning, &plan, 0, output())
+            .expect("binning supplies its own valid tile range");
         for t in painted {
             assert_eq!(again[t], TileWork::Reuse);
             assert_eq!(cache.get(t), Some(&vec![t as u8; 16]));
@@ -936,6 +971,42 @@ mod tests {
             None,
             "the fallible key builder must reject a tile outside the grid",
         );
+    }
+
+    #[test]
+    fn invalid_tile_planning_is_typed_and_atomic() {
+        let (stage, _) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+        let mut cache = TileCache::<u32>::new();
+        let valid_tile = binning.tile_of(40, 40);
+        let key = TileKey::build(&binning, &plan, valid_tile, 0, output())
+            .expect("valid tile is cacheable");
+        cache.store(valid_tile, key, 7);
+        let before_stats = cache.stats();
+        let before_len = cache.len();
+        let before_key = cache.key(valid_tile);
+
+        let invalid = binning.tile_count();
+        let error = cache
+            .plan_tile(&binning, &plan, invalid, 0, output())
+            .expect_err("one-past-grid tile must be refused");
+        assert_eq!(
+            error,
+            TilePlanError {
+                tile: invalid,
+                tile_count: invalid,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("tile {invalid} is outside a binning with {invalid} tiles")
+        );
+        assert_eq!(cache.stats(), before_stats, "refusal must not count work");
+        assert_eq!(cache.len(), before_len, "refusal must not evict entries");
+        assert_eq!(cache.key(valid_tile), before_key);
     }
 
     #[test]
