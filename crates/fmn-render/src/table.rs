@@ -37,10 +37,10 @@
 //! repeated graph nodes and copied decorations.
 
 use crate::hint::Hint;
-use fmn_core::types::Vec3;
+use fmn_core::types::{Vec3, canonicalize_f64};
 use fmn_geom::arclength::{ArcLengthTable, quadratic_arc_length};
 use fmn_geom::quadpath::QuadPath;
-use fmn_hash::Digest;
+use fmn_hash::{Digest, Schema, Sha256};
 use fmn_mobject::{BoundingBox, JointType, Mob, Placement, Uniforms};
 use std::collections::HashMap;
 
@@ -680,6 +680,35 @@ impl ShapeTable {
     }
 }
 
+const SHAPE_SCHEMA: Schema = Schema::new(*b"FMNR", 1, 1, 0);
+
+/// Hash the fixed FMNR framing around one already-canonical coordinate stream.
+///
+/// The callback must write exactly `point_count * 3` encoded `f64` values. It
+/// stays private so the only production caller derives both the count and the
+/// values from the same slice. Keeping the framing separate also lets the
+/// over-envelope regression feed repeated encoded blocks without allocating an
+/// enormous outline.
+fn framed_shape_digest(point_count: u64, write_coordinates: impl FnOnce(&mut Sha256)) -> Digest {
+    let coordinate_bytes = point_count.saturating_mul(3 * 8);
+    let payload_len = 8u64.saturating_add(coordinate_bytes);
+
+    let mut document = Sha256::new();
+    document.update(&SHAPE_SCHEMA.magic);
+    document.update(&SHAPE_SCHEMA.id.to_le_bytes());
+    document.update(&SHAPE_SCHEMA.major.to_le_bytes());
+    document.update(&SHAPE_SCHEMA.minor.to_le_bytes());
+    document.update(&0u16.to_le_bytes()); // flags
+    document.update(&0u16.to_le_bytes()); // reserved
+    document.update(&payload_len.to_le_bytes());
+    document.update(&point_count.to_le_bytes());
+    write_coordinates(&mut document);
+
+    let checksum = document.clone().finalize();
+    document.update(checksum.as_bytes());
+    document.finalize()
+}
+
 /// The content address of an outline: object-space points, canonically hashed.
 ///
 /// Uses `fmn-hash`'s versioned envelope rather than an ad-hoc byte dump, so the
@@ -694,18 +723,16 @@ impl ShapeTable {
 /// — without it, interning would find nothing in a real formula.
 #[must_use]
 pub fn shape_digest(points: &[Vec3]) -> Digest {
-    const SCHEMA: fmn_hash::Schema = fmn_hash::Schema::new(*b"FMNR", 1, 1, 0);
     let origin = points.first().copied().unwrap_or([0.0; 3]);
-    let mut w = fmn_hash::Writer::new(SCHEMA);
-    w.put_u64(points.len() as u64);
-    for p in points {
-        for k in 0..3 {
-            w.put_f64(p[k] - origin[k]);
+    let point_count = u64::try_from(points.len()).unwrap_or(u64::MAX);
+    framed_shape_digest(point_count, |document| {
+        for point in points {
+            for coordinate in 0..3 {
+                let relative = canonicalize_f64(point[coordinate] - origin[coordinate]);
+                document.update(&relative.to_bits().to_le_bytes());
+            }
         }
-    }
-    w.finish()
-        .map(|bytes| fmn_hash::sha256(&bytes))
-        .unwrap_or_else(|_| fmn_hash::sha256(&[]))
+    })
 }
 
 /// Build a [`Shape`] from an object-space path.
@@ -844,6 +871,7 @@ pub fn compile_shape(
 mod tests {
     use super::*;
     use fmn_core::constants::TAU;
+    use fmn_hash::{Limits, Writer, sha256};
 
     fn style_with(width: f32) -> Style {
         Style {
@@ -859,6 +887,61 @@ mod tests {
         p.add_line_to([1.0, 1.0, 0.0], false).unwrap();
         p.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         p
+    }
+
+    fn legacy_shape_digest(points: &[Vec3]) -> Digest {
+        let origin = points.first().copied().unwrap_or([0.0; 3]);
+        let mut writer = Writer::new(SHAPE_SCHEMA);
+        writer.put_u64(points.len() as u64);
+        for point in points {
+            for coordinate in 0..3 {
+                writer.put_f64(point[coordinate] - origin[coordinate]);
+            }
+        }
+        sha256(&writer.finish().expect("small shape identity document"))
+    }
+
+    #[test]
+    fn streaming_shape_identity_preserves_in_envelope_document_digests() {
+        let fixtures = [
+            Vec::new(),
+            vec![[1.0, -0.0, f64::NAN]],
+            tri().points().to_vec(),
+        ];
+        for points in fixtures {
+            assert_eq!(shape_digest(&points), legacy_shape_digest(&points));
+        }
+    }
+
+    #[test]
+    fn over_envelope_shape_identity_never_uses_the_empty_digest_fallback() {
+        const HEADER_BYTES: u64 = 24;
+        const CHECKSUM_BYTES: u64 = 32;
+        const COUNT_BYTES: u64 = 8;
+        const BYTES_PER_POINT: u64 = 3 * 8;
+        const BLOCK_BYTES: usize = 1 << 20;
+
+        let max_total = u64::try_from(Limits::DEFAULT.max_total).expect("limit fits u64");
+        let framed_fixed = HEADER_BYTES + CHECKSUM_BYTES + COUNT_BYTES;
+        let point_count = (max_total - framed_fixed) / BYTES_PER_POINT + 1;
+        let coordinate_bytes = point_count * BYTES_PER_POINT;
+        assert!(framed_fixed + coordinate_bytes > max_total);
+
+        let zeroes = vec![0u8; BLOCK_BYTES];
+        let digest = framed_shape_digest(point_count, |document| {
+            let mut remaining = coordinate_bytes;
+            while remaining >= BLOCK_BYTES as u64 {
+                document.update(&zeroes);
+                remaining -= BLOCK_BYTES as u64;
+            }
+            let tail = usize::try_from(remaining).expect("tail is smaller than one block");
+            document.update(&zeroes[..tail]);
+        });
+        assert_ne!(
+            digest,
+            sha256(&[]),
+            "the old over-limit fallback collapsed every such outline here"
+        );
     }
 
     #[test]
