@@ -58,8 +58,8 @@ pub use engine::{
     FrameJobError, RENDERER_VERSION, Tier, frame_digest,
 };
 pub use fill::{
-    FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, MonoTableError, MonoTableLimits,
-    RationalPiece, RowScratch,
+    FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, MonoTableError,
+    MonoTableLimits, RationalPiece, RowScratch,
 };
 pub use hint::Hint;
 pub use plan::{RenderPlan, RenderPlanLimits, SyncError, SyncStats};

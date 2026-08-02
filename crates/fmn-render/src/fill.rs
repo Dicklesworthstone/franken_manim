@@ -511,7 +511,10 @@ impl MonoTable {
             let end = subpath_starts
                 .get(index + 1)
                 .map_or(segments.len(), |value| *value as usize);
-            let (lo, hi) = ((start as usize).min(segments.len()), end.min(segments.len()));
+            let (lo, hi) = (
+                (start as usize).min(segments.len()),
+                end.min(segments.len()),
+            );
             if lo >= hi {
                 continue;
             }
@@ -559,12 +562,12 @@ impl MonoTable {
                 resource: "monotone pieces",
                 requested: layout.pieces,
             })?;
-        curves.try_reserve(layout.max_subpath_segments).map_err(|_| {
-            MonoTableError::AllocationFailed {
+        curves
+            .try_reserve(layout.max_subpath_segments)
+            .map_err(|_| MonoTableError::AllocationFailed {
                 resource: "monotone subpath scratch",
                 requested: layout.max_subpath_segments,
-            }
-        })?;
+            })?;
 
         Self::append_segments(out, curves, segments, subpath_starts, map);
         debug_assert_eq!(out.len(), final_piece_count);
@@ -626,20 +629,19 @@ impl MonoTable {
                 requested: shapes.len(),
             })?;
         let mut curves = crate::arena::Pool::default();
-        curves.try_reserve(max_subpath_segments).map_err(|_| {
-            MonoTableError::AllocationFailed {
+        curves
+            .try_reserve(max_subpath_segments)
+            .map_err(|_| MonoTableError::AllocationFailed {
                 resource: "monotone subpath scratch",
                 requested: max_subpath_segments,
-            }
-        })?;
+            })?;
 
         for (shape, layout) in shapes.iter().zip(layouts) {
-            let first = u32::try_from(pieces.len()).map_err(|_| {
-                MonoTableError::IndexCapacityExceeded {
+            let first =
+                u32::try_from(pieces.len()).map_err(|_| MonoTableError::IndexCapacityExceeded {
                     resource: "monotone pieces",
                     requested: pieces.len(),
-                }
-            })?;
+                })?;
             let lo = (shape.first_segment as usize).min(segments.len());
             let hi = (lo + shape.segment_count as usize).min(segments.len());
             let own = &segments[lo..hi];
@@ -686,7 +688,10 @@ impl MonoTable {
             let end = subpath_starts
                 .get(index + 1)
                 .map_or(segments.len(), |value| *value as usize);
-            let (lo, hi) = ((start as usize).min(segments.len()), end.min(segments.len()));
+            let (lo, hi) = (
+                (start as usize).min(segments.len()),
+                end.min(segments.len()),
+            );
             if lo >= hi {
                 continue;
             }
@@ -3545,8 +3550,7 @@ mod tests {
     #[test]
     fn monotone_table_piece_and_byte_limits_are_exact_and_atomic() {
         let plan = doubly_turning_curve_plan();
-        let table_bytes = 4 * std::mem::size_of::<MonoPiece>()
-            + std::mem::size_of::<(u32, u32)>();
+        let table_bytes = 4 * std::mem::size_of::<MonoPiece>() + std::mem::size_of::<(u32, u32)>();
         let exact = MonoTableLimits {
             max_pieces: 4,
             max_table_bytes: table_bytes,

@@ -1003,7 +1003,9 @@ impl std::fmt::Display for FrameJobError {
             Self::MonoPlanMismatch => {
                 f.write_str("monotone table geometry does not match the render plan")
             }
-            Self::MonoTable(error) => write!(f, "could not derive frame-local monotone pieces: {error}"),
+            Self::MonoTable(error) => {
+                write!(f, "could not derive frame-local monotone pieces: {error}")
+            }
             Self::BinningMapMismatch => f.write_str("binning screen map does not match the frame"),
             Self::BinningViewportMismatch => {
                 f.write_str("binning viewport does not match the frame")
@@ -4242,8 +4244,7 @@ mod tests {
             origin: [cfg.map.origin[0] + 1.0, cfg.map.origin[1]],
             ..cfg.map
         };
-        let moved_mono =
-            MonoTable::build(&plan, moved_map).expect("bounded moved monotone table");
+        let moved_mono = MonoTable::build(&plan, moved_map).expect("bounded moved monotone table");
         assert!(matches!(
             FrameJob::new(&plan, &moved_mono, &binning, cfg),
             Err(FrameJobError::MonoMapMismatch)
