@@ -712,6 +712,131 @@ fn top_level_selection_transforms_a_shared_descendant_once() {
 }
 
 #[test]
+fn hierarchy_selection_recolors_an_overlapping_child_once() {
+    let mut scene = Scene::default();
+    let parent = scene.stage_mut().add(rectangle(
+        [-2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    let child = scene
+        .stage_mut()
+        .add(rectangle([0.0; 3], Srgb::from_hex("#FFFFFF").unwrap()));
+    scene.stage_mut().attach(parent, child).unwrap();
+    scene.stage_mut().add_to_scene(parent).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers::CONTROL,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 2);
+    assert_eq!(interactive.selection(), vec![parent, child]);
+
+    let color_source = interactive.stage_mut().add(rectangle(
+        [4.0, 0.0, 0.0],
+        Srgb::from_hex("#0000FF").unwrap(),
+    ));
+    interactive.stage_mut().add_to_scene(color_source).unwrap();
+    let before = interactive
+        .stage()
+        .get(child)
+        .and_then(|entry| entry.buffer.field_revision("fill_rgba"))
+        .unwrap();
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseRelease {
+            point: [4.0, 0.0, 0.0],
+            button: MouseButton::Left,
+            modifiers: Modifiers::NONE,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 2);
+
+    let after = interactive
+        .stage()
+        .get(child)
+        .and_then(|entry| entry.buffer.field_revision("fill_rgba"))
+        .unwrap();
+    assert_eq!(after - before, 4, "one gesture must write each record once");
+    assert_eq!(
+        fill_color(interactive.stage(), child),
+        fill_color(interactive.stage(), color_source)
+    );
+}
+
+#[test]
+fn top_level_selection_recolors_a_shared_descendant_once() {
+    let mut scene = Scene::default();
+    let left = scene.stage_mut().add(Mobject::new());
+    let right = scene.stage_mut().add(Mobject::new());
+    let shared = scene
+        .stage_mut()
+        .add(rectangle([0.0; 3], Srgb::from_hex("#FFFFFF").unwrap()));
+    scene.stage_mut().attach(left, shared).unwrap();
+    scene.stage_mut().attach(right, shared).unwrap();
+    scene.stage_mut().add_many_to_scene(&[left, right]).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    assert_eq!(interactive.selection(), vec![left, right]);
+
+    let color_source = interactive.stage_mut().add(rectangle(
+        [4.0, 0.0, 0.0],
+        Srgb::from_hex("#0000FF").unwrap(),
+    ));
+    interactive.stage_mut().add_to_scene(color_source).unwrap();
+    let before = interactive
+        .stage()
+        .get(shared)
+        .and_then(|entry| entry.buffer.field_revision("fill_rgba"))
+        .unwrap();
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseRelease {
+            point: [4.0, 0.0, 0.0],
+            button: MouseButton::Left,
+            modifiers: Modifiers::NONE,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 2);
+
+    let after = interactive
+        .stage()
+        .get(shared)
+        .and_then(|entry| entry.buffer.field_revision("fill_rgba"))
+        .unwrap();
+    assert_eq!(after - before, 4, "one gesture must write each record once");
+    assert_eq!(
+        fill_color(interactive.stage(), shared),
+        fill_color(interactive.stage(), color_source)
+    );
+}
+
+#[test]
 fn hierarchy_deselection_preserves_marks_from_the_remaining_parent() {
     let mut scene = Scene::default();
     let parent = scene.stage_mut().add(rectangle(

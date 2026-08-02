@@ -721,9 +721,7 @@ impl InteractionState {
         let Some(color) = read_color(stage, source) else {
             return;
         };
-        for selected in &self.selection {
-            write_color(stage, *selected, color);
-        }
+        write_color(stage, &self.selection, color);
     }
 
     fn replace_clipboard(&mut self, stage: &mut Stage, replacement: InteractiveClipboard) {
@@ -996,8 +994,16 @@ fn read_color(stage: &Stage, mob: Mob) -> Option<Srgb> {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn write_color(stage: &mut Stage, mob: Mob, color: Srgb) {
-    for member in stage.family(mob) {
+fn write_color(stage: &mut Stage, mobs: &[Mob], color: Srgb) {
+    let mut members = Vec::new();
+    for &mob in mobs {
+        for member in stage.family(mob) {
+            if !members.contains(&member) {
+                members.push(member);
+            }
+        }
+    }
+    for member in members {
         let Some(entry) = stage.get_mut(member) else {
             continue;
         };
