@@ -535,7 +535,8 @@ fn native_preview_unavailability_uses_the_cpu_visible_studio_stream() {
         config.viewport,
         fmn_render::Tiling::default(),
         config.map,
-    );
+    )
+    .expect("bounded Studio test binning");
     let output = renderer.render(&plan, &mono, &binning, config).unwrap();
     let frame = output
         .into_stream()

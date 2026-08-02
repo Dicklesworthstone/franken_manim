@@ -72,7 +72,8 @@ fn render_frame(stage: &Stage) -> Result<Vec<u8>, ScenarioError> {
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
     binning
         .prune_occluded(&plan)
         .map_err(|e| ScenarioError::new(e.to_string()))?;

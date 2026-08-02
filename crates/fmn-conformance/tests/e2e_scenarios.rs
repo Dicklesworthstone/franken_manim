@@ -340,7 +340,8 @@ fn render_packet(
         .map_err(|_| fail("negative frame index reached the renderer"))?;
     plan.sync(&stage, revision);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
     binning
         .prune_occluded(&plan)
         .map_err(|error| fail(format!("occlusion pruning matches the plan: {error}")))?;
@@ -1031,7 +1032,8 @@ fn render_certified_doc(stage: &Stage) -> Vec<u8> {
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
     binning
         .prune_occluded(&plan)
         .expect("occlusion pruning matches the plan");
@@ -1215,7 +1217,8 @@ fn pg5_direct_schedule_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     let mut plan = RenderPlan::new();
     plan.sync(&built.stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
     binning
         .prune_occluded(&plan)
         .map_err(|error| fail(format!("PG-5 binning: {error}")))?;
@@ -1240,6 +1243,7 @@ fn pg5_direct_schedule_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         digests
             .iter()
             .skip(1)
+            // ubs:ignore — public frame self-goldens, not authentication material.
             .filter(|&&digest| digest != reference)
             .count(),
     )
@@ -1284,7 +1288,8 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     let mut plan = RenderPlan::new();
     plan.sync(&built.stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
     binning
         .prune_occluded(&plan)
         .map_err(|error| fail(format!("PG-6 binning: {error}")))?;
@@ -1311,6 +1316,7 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
             frame_digest(&frame).map_err(|error| fail(format!("PG-6 measured digest: {error}")))?;
         (digest, job.allocation_stats())
     };
+    // ubs:ignore — public deterministic artifact identity, not authentication material.
     let digest_equal = warm_digest == measured_digest;
     let allocation_free = measured.heap_allocs_this_frame == 0;
     ctx.record_asset(

@@ -113,7 +113,8 @@ fn render_probe_frame() -> Vec<u8> {
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded wasm smoke binning");
     binning.prune_occluded(&plan).expect("binning prune");
     let job = FrameJob::new(&plan, &mono, &binning, config).expect("frame job");
     // threads = 1: the wasm32 configuration. (`effective_threads` would
@@ -132,7 +133,8 @@ pub fn render_probe_digest() -> u64 {
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded wasm smoke binning");
     binning.prune_occluded(&plan).expect("binning prune");
     let job = FrameJob::new(&plan, &mono, &binning, config).expect("frame job");
     let frame = job.render(1).expect("render");
@@ -161,7 +163,8 @@ pub fn render_probe_is_not_background() -> bool {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
         let mono = MonoTable::build(&plan, config.map);
-        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+            .expect("bounded wasm smoke binning");
         binning.prune_occluded(&plan).expect("binning prune");
         let job = FrameJob::new(&plan, &mono, &binning, config).expect("frame job");
         let frame = job.render(1).expect("render");

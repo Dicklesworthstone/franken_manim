@@ -440,7 +440,8 @@ mod tests {
             out: OutputTransform,
         ) -> (CacheStats, Binning) {
             self.plan.sync(stage, camera);
-            let binning = Binning::build(&self.plan, out.viewport, Tiling::default(), out.map);
+            let binning = Binning::build(&self.plan, out.viewport, Tiling::default(), out.map)
+                .expect("bounded test binning");
             let work = plan_frame(&mut self.cache, &binning, &self.plan, camera, out);
             // Rasterize the misses, exactly as an engine would, and store what
             // it would have produced.
@@ -738,7 +739,8 @@ mod tests {
         let mut cache = TileCache::<Vec<u8>>::new();
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
-        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
 
         let work = plan_frame(&mut cache, &binning, &plan, 0, output());
         let mut painted = Vec::new();
@@ -787,7 +789,8 @@ mod tests {
         let (stage, _) = scene();
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
-        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let tile = binning.tile_of(40, 40);
         let a = TileKey::build(&binning, &plan, tile, 0, output()).expect("cacheable");
         let b = TileKey::build(&binning, &plan, tile, 9, output()).expect("cacheable");
@@ -800,7 +803,8 @@ mod tests {
         let (mut stage, mobs) = scene();
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
-        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let tile = binning.tile_of(40, 40);
         assert!(TileKey::build(&binning, &plan, tile, 0, output()).is_some());
 

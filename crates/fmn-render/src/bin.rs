@@ -140,26 +140,78 @@ pub struct Viewport {
     pub height: u32,
 }
 
+/// Hard bounds for the temporary and retained tables built by [`Binning`].
+///
+/// The defaults comfortably cover 8K frames at the standard 16-pixel tile
+/// size and the certified 96-worker profile, while refusing scheduling choices
+/// whose table products would dominate the frame itself. Callers with an
+/// intentionally larger, provisioned workload can pass explicit limits through
+/// [`Binning::build_with_limits`] or
+/// [`Binning::build_partitioned_with_limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinningLimits {
+    /// Maximum fine or coarse tiles in one grid.
+    pub max_tiles: u64,
+    /// Maximum painter-ordered instances in one plan.
+    pub max_instances: u64,
+    /// Maximum fine or coarse instance-to-tile references.
+    pub max_tile_references: u64,
+    /// Maximum cells across the partition-by-fine-tile count table.
+    pub max_partition_cells: u64,
+    /// Maximum conservatively estimated bytes across all binning tables.
+    pub max_working_bytes: u64,
+}
+
+impl Default for BinningLimits {
+    fn default() -> Self {
+        Self {
+            max_tiles: 1 << 20,
+            max_instances: 1 << 20,
+            max_tile_references: 1 << 24,
+            max_partition_cells: 1 << 24,
+            max_working_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
 /// A uniform grid over the viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Grid {
     tile: u32,
     cols: u32,
     rows: u32,
+    count: usize,
 }
 
 impl Grid {
-    fn new(viewport: Viewport, tile: u32) -> Grid {
+    fn new(
+        viewport: Viewport,
+        tile: u32,
+        level: &'static str,
+        limits: BinningLimits,
+    ) -> Result<Grid, BinningError> {
         let tile = tile.max(1);
-        Grid {
+        let cols = viewport.width.div_ceil(tile);
+        let rows = viewport.height.div_ceil(tile);
+        let count = u64::from(cols)
+            .checked_mul(u64::from(rows))
+            .ok_or(BinningError::CountOverflow { resource: level })?;
+        check_limit(level, count, limits.max_tiles)?;
+        check_limit(level, count, u64::from(u32::MAX))?;
+        let count = usize::try_from(count).map_err(|_| BinningError::AddressSpace {
+            resource: level,
+            requested: count,
+        })?;
+        Ok(Grid {
             tile,
-            cols: viewport.width.div_ceil(tile),
-            rows: viewport.height.div_ceil(tile),
-        }
+            cols,
+            rows,
+            count,
+        })
     }
 
     fn count(&self) -> usize {
-        self.cols as usize * self.rows as usize
+        self.count
     }
 
     /// The inclusive tile-index span an AABB touches, clamped to the grid.
@@ -171,8 +223,8 @@ impl Grid {
         if self.cols == 0 || self.rows == 0 {
             return None;
         }
-        let w = (self.cols * self.tile) as f64;
-        let h = (self.rows * self.tile) as f64;
+        let w = f64::from(self.cols) * f64::from(self.tile);
+        let h = f64::from(self.rows) * f64::from(self.tile);
         if aabb[2] < 0.0 || aabb[3] < 0.0 || aabb[0] > w || aabb[1] > h {
             return None;
         }
@@ -193,8 +245,8 @@ impl Grid {
         [
             f64::from(tx),
             f64::from(ty),
-            f64::from((tx + self.tile).min(viewport.width)),
-            f64::from((ty + self.tile).min(viewport.height)),
+            f64::from(tx.saturating_add(self.tile).min(viewport.width)),
+            f64::from(ty.saturating_add(self.tile).min(viewport.height)),
         ]
     }
 }
@@ -221,9 +273,38 @@ impl PruneReport {
     }
 }
 
-/// A binning operation was paired with a different synchronized plan.
+/// A binning build or pruning pass could not preserve its resource or identity
+/// contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinningError {
+    /// A declared count exceeded its explicit workload limit.
+    LimitExceeded {
+        /// The table or work axis being bounded.
+        resource: &'static str,
+        /// Count or bytes requested.
+        requested: u64,
+        /// Configured maximum.
+        limit: u64,
+    },
+    /// Arithmetic for a table or work count overflowed before allocation.
+    CountOverflow {
+        /// The table or work axis whose count overflowed.
+        resource: &'static str,
+    },
+    /// A representable wire count does not fit this target's address space.
+    AddressSpace {
+        /// The table or work axis being converted.
+        resource: &'static str,
+        /// Elements requested.
+        requested: u64,
+    },
+    /// The allocator refused a preflighted table reservation.
+    AllocationFailed {
+        /// The table being reserved.
+        resource: &'static str,
+        /// Elements requested.
+        requested: u64,
+    },
     /// The painter-ordered plan no longer matches the one whose command lists
     /// this binning stores.
     PlanMismatch,
@@ -232,12 +313,110 @@ pub enum BinningError {
 impl std::fmt::Display for BinningError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::LimitExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "binning {resource} needs {requested}, exceeding the limit {limit}"
+            ),
+            Self::CountOverflow { resource } => {
+                write!(f, "binning {resource} count overflowed")
+            }
+            Self::AddressSpace {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "binning {resource} count {requested} exceeds this target address space"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "could not reserve {requested} elements for binning {resource}"
+            ),
             Self::PlanMismatch => f.write_str("binning was derived from a different render plan"),
         }
     }
 }
 
 impl std::error::Error for BinningError {}
+
+fn check_limit(resource: &'static str, requested: u64, limit: u64) -> Result<(), BinningError> {
+    if requested > limit {
+        return Err(BinningError::LimitExceeded {
+            resource,
+            requested,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn checked_usize(resource: &'static str, requested: u64) -> Result<usize, BinningError> {
+    usize::try_from(requested).map_err(|_| BinningError::AddressSpace {
+        resource,
+        requested,
+    })
+}
+
+fn try_with_capacity<T>(resource: &'static str, requested: usize) -> Result<Vec<T>, BinningError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(requested)
+        .map_err(|_| BinningError::AllocationFailed {
+            resource,
+            requested: u64::try_from(requested).unwrap_or(u64::MAX),
+        })?;
+    Ok(values)
+}
+
+fn try_filled<T: Clone>(
+    resource: &'static str,
+    requested: usize,
+    value: T,
+) -> Result<Vec<T>, BinningError> {
+    let mut values = try_with_capacity(resource, requested)?;
+    values.resize(requested, value);
+    Ok(values)
+}
+
+fn checked_product(resource: &'static str, left: u64, right: u64) -> Result<u64, BinningError> {
+    left.checked_mul(right)
+        .ok_or(BinningError::CountOverflow { resource })
+}
+
+fn checked_sum(resource: &'static str, left: u64, right: u64) -> Result<u64, BinningError> {
+    left.checked_add(right)
+        .ok_or(BinningError::CountOverflow { resource })
+}
+
+fn table_bytes<T>(resource: &'static str, count: u64) -> Result<u64, BinningError> {
+    checked_product(
+        resource,
+        count,
+        u64::try_from(std::mem::size_of::<T>()).unwrap_or(u64::MAX),
+    )
+}
+
+fn add_table_bytes<T>(
+    total: &mut u64,
+    resource: &'static str,
+    count: u64,
+) -> Result<(), BinningError> {
+    *total = checked_sum(resource, *total, table_bytes::<T>(resource, count)?)?;
+    Ok(())
+}
+
+fn span_cells(span: (u32, u32, u32, u32)) -> Result<u64, BinningError> {
+    let (x0, y0, x1, y1) = span;
+    let cols = u64::from(x1 - x0) + 1;
+    let rows = u64::from(y1 - y0) + 1;
+    checked_product("tile references", cols, rows)
+}
 
 /// Per-fine-tile command lists in CSR form, with §10.4's class per command.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -267,9 +446,32 @@ pub struct Binning {
 
 impl Binning {
     /// Bin a synchronized plan, serially.
-    #[must_use]
-    pub fn build(plan: &RenderPlan, viewport: Viewport, tiling: Tiling, map: ScreenMap) -> Binning {
-        Binning::build_partitioned(plan, viewport, tiling, map, 1)
+    ///
+    /// # Errors
+    /// [`BinningError`] if any derived table exceeds the default resource
+    /// limits or cannot be reserved.
+    pub fn build(
+        plan: &RenderPlan,
+        viewport: Viewport,
+        tiling: Tiling,
+        map: ScreenMap,
+    ) -> Result<Binning, BinningError> {
+        Binning::build_with_limits(plan, viewport, tiling, map, BinningLimits::default())
+    }
+
+    /// Bin a synchronized plan under explicit resource limits.
+    ///
+    /// # Errors
+    /// [`BinningError`] if a grid, membership table, partition table, working
+    /// set, or allocator reservation exceeds `limits`.
+    pub fn build_with_limits(
+        plan: &RenderPlan,
+        viewport: Viewport,
+        tiling: Tiling,
+        map: ScreenMap,
+        limits: BinningLimits,
+    ) -> Result<Binning, BinningError> {
+        Binning::build_partitioned_with_limits(plan, viewport, tiling, map, 1, limits)
     }
 
     /// Bin a synchronized plan as if across `partitions` workers.
@@ -281,47 +483,234 @@ impl Binning {
     /// Nothing depends on which partition would have finished first, so the
     /// output is byte-identical at every partition count — including counts that
     /// do not divide the work evenly.
-    #[must_use]
     pub fn build_partitioned(
         plan: &RenderPlan,
         viewport: Viewport,
         tiling: Tiling,
         map: ScreenMap,
         partitions: usize,
-    ) -> Binning {
-        let partitions = partitions.max(1);
-        let fine = Grid::new(viewport, tiling.fine_tile);
-        let coarse = Grid::new(viewport, tiling.macro_tile.max(tiling.fine_tile));
+    ) -> Result<Binning, BinningError> {
+        Binning::build_partitioned_with_limits(
+            plan,
+            viewport,
+            tiling,
+            map,
+            partitions,
+            BinningLimits::default(),
+        )
+    }
+
+    /// Partitioned binning under explicit resource limits.
+    ///
+    /// Empty partitions do not affect output, so a requested partition count
+    /// above the number of instances is normalized away before table sizing.
+    ///
+    /// # Errors
+    /// [`BinningError`] before any proportional allocation or tile traversal
+    /// whose declared work exceeds `limits`.
+    pub fn build_partitioned_with_limits(
+        plan: &RenderPlan,
+        viewport: Viewport,
+        tiling: Tiling,
+        map: ScreenMap,
+        partitions: usize,
+        limits: BinningLimits,
+    ) -> Result<Binning, BinningError> {
+        let fine = Grid::new(viewport, tiling.fine_tile, "fine tiles", limits)?;
+        let coarse = Grid::new(
+            viewport,
+            tiling.macro_tile.max(tiling.fine_tile),
+            "macro tiles",
+            limits,
+        )?;
         let instances = plan.shapes().instances();
+        let instance_count = u64::try_from(instances.len()).unwrap_or(u64::MAX);
+        check_limit("instances", instance_count, limits.max_instances)?;
+        check_limit("instances", instance_count, u64::from(u32::MAX))?;
+        let partitions = partitions.max(1).min(instances.len().max(1));
+        let partition_count = u64::try_from(partitions).unwrap_or(u64::MAX);
+        let fine_count = u64::try_from(fine.count()).unwrap_or(u64::MAX);
+        let partition_cells = checked_product("partition cells", partition_count, fine_count)?;
+        check_limit(
+            "partition cells",
+            partition_cells,
+            limits.max_partition_cells,
+        )?;
+
+        let mut initial_bytes = 0u64;
+        add_table_bytes::<Option<[f64; 4]>>(&mut initial_bytes, "screen bounds", instance_count)?;
+        add_table_bytes::<usize>(
+            &mut initial_bytes,
+            "macrotile counts",
+            u64::try_from(coarse.count()).unwrap_or(u64::MAX),
+        )?;
+        check_limit("working bytes", initial_bytes, limits.max_working_bytes)?;
 
         // Screen AABBs, once per instance. Object bounds are the control-polygon
         // hull, which contains the curve, so this is conservative by
         // construction rather than by a fudge factor.
-        let boxes: Vec<Option<[f64; 4]>> = instances
-            .iter()
-            .map(|inst| screen_aabb(plan, inst, map))
-            .collect();
+        let mut boxes = try_with_capacity("screen bounds", instances.len())?;
+        boxes.extend(instances.iter().map(|inst| screen_aabb(plan, inst, map)));
 
         // ---- level one: macrotiles. Nothing is emitted from this pass; it
         // exists so the fine pass sees a short list per region.
-        let mut macro_members: Vec<Vec<u32>> = vec![Vec::new(); coarse.count()];
+        let mut macro_counts = try_filled("macrotile counts", coarse.count(), 0usize)?;
+        let mut macro_reference_count = 0u64;
+        for aabb in &boxes {
+            let Some(aabb) = aabb else { continue };
+            let Some((x0, y0, x1, y1)) = coarse.span(*aabb) else {
+                continue;
+            };
+            macro_reference_count = checked_sum(
+                "macrotile references",
+                macro_reference_count,
+                span_cells((x0, y0, x1, y1))?,
+            )?;
+            check_limit(
+                "macrotile references",
+                macro_reference_count,
+                limits.max_tile_references,
+            )?;
+            for ty in y0..=y1 {
+                for tx in x0..=x1 {
+                    let index = ty as usize * coarse.cols as usize + tx as usize;
+                    macro_counts[index] =
+                        macro_counts[index]
+                            .checked_add(1)
+                            .ok_or(BinningError::CountOverflow {
+                                resource: "macrotile member count",
+                            })?;
+                }
+            }
+        }
+        let macro_hits = macro_counts.iter().filter(|&&count| count != 0).count();
+
+        let mut preliminary_bytes = initial_bytes;
+        add_table_bytes::<Vec<u32>>(
+            &mut preliminary_bytes,
+            "macrotile rows",
+            u64::try_from(coarse.count()).unwrap_or(u64::MAX),
+        )?;
+        add_table_bytes::<u32>(
+            &mut preliminary_bytes,
+            "macrotile references",
+            macro_reference_count,
+        )?;
+        check_limit("working bytes", preliminary_bytes, limits.max_working_bytes)?;
+
+        let mut macro_members = try_filled("macrotile rows", coarse.count(), Vec::<u32>::new())?;
+        for (members, &count) in macro_members.iter_mut().zip(&macro_counts) {
+            members
+                .try_reserve_exact(count)
+                .map_err(|_| BinningError::AllocationFailed {
+                    resource: "macrotile references",
+                    requested: u64::try_from(count).unwrap_or(u64::MAX),
+                })?;
+        }
         for (i, aabb) in boxes.iter().enumerate() {
             let Some(aabb) = aabb else { continue };
             let Some((x0, y0, x1, y1)) = coarse.span(*aabb) else {
                 continue;
             };
+            let instance = u32::try_from(i).map_err(|_| BinningError::AddressSpace {
+                resource: "instance index",
+                requested: u64::try_from(i).unwrap_or(u64::MAX),
+            })?;
             for ty in y0..=y1 {
                 for tx in x0..=x1 {
-                    macro_members[(ty * coarse.cols + tx) as usize].push(i as u32);
+                    let index = ty as usize * coarse.cols as usize + tx as usize;
+                    macro_members[index].push(instance);
                 }
             }
         }
-        let macro_hits = macro_members.iter().filter(|m| !m.is_empty()).count();
 
         // Which fine tiles each instance actually lands in — derived through the
         // macrotiles, so an instance is only tested against fine tiles inside
         // macrotiles that already accepted it.
-        let mut per_instance: Vec<Vec<u32>> = vec![Vec::new(); instances.len()];
+        let mut counting_bytes = preliminary_bytes;
+        add_table_bytes::<usize>(&mut counting_bytes, "instance tile counts", instance_count)?;
+        check_limit("working bytes", counting_bytes, limits.max_working_bytes)?;
+        let mut fine_counts = try_filled("instance tile counts", instances.len(), 0usize)?;
+        let mut fine_reference_count = 0u64;
+        for (m, members) in macro_members.iter().enumerate() {
+            if members.is_empty() {
+                continue;
+            }
+            let mrect = coarse.rect(m, viewport);
+            let fx0 = (mrect[0] / f64::from(fine.tile)).floor() as u32;
+            let fy0 = (mrect[1] / f64::from(fine.tile)).floor() as u32;
+            let fx1 = (((mrect[2] - 1.0).max(mrect[0]) / f64::from(fine.tile)).floor() as u32)
+                .min(fine.cols.saturating_sub(1));
+            let fy1 = (((mrect[3] - 1.0).max(mrect[1]) / f64::from(fine.tile)).floor() as u32)
+                .min(fine.rows.saturating_sub(1));
+            for &i in members {
+                let Some(aabb) = boxes[i as usize] else {
+                    continue;
+                };
+                let Some((x0, y0, x1, y1)) = fine.span(aabb) else {
+                    continue;
+                };
+                let span = (x0.max(fx0), y0.max(fy0), x1.min(fx1), y1.min(fy1));
+                if span.0 > span.2 || span.1 > span.3 {
+                    continue;
+                }
+                let cells = span_cells(span)?;
+                fine_reference_count =
+                    checked_sum("fine tile references", fine_reference_count, cells)?;
+                check_limit(
+                    "fine tile references",
+                    fine_reference_count,
+                    limits.max_tile_references,
+                )?;
+                let index = i as usize;
+                fine_counts[index] = fine_counts[index]
+                    .checked_add(checked_usize("fine tile references", cells)?)
+                    .ok_or(BinningError::CountOverflow {
+                        resource: "instance tile count",
+                    })?;
+            }
+        }
+        check_limit(
+            "fine tile references",
+            fine_reference_count,
+            u64::from(u32::MAX),
+        )?;
+
+        let mut working_bytes = counting_bytes;
+        add_table_bytes::<Vec<u32>>(&mut working_bytes, "instance tile rows", instance_count)?;
+        add_table_bytes::<u32>(
+            &mut working_bytes,
+            "fine tile references",
+            fine_reference_count,
+        )?;
+        add_table_bytes::<(usize, usize)>(&mut working_bytes, "partition ranges", partition_count)?;
+        add_table_bytes::<Vec<u32>>(&mut working_bytes, "partition count rows", partition_count)?;
+        add_table_bytes::<u32>(&mut working_bytes, "partition count cells", partition_cells)?;
+        add_table_bytes::<Vec<u32>>(&mut working_bytes, "partition cursor rows", partition_count)?;
+        add_table_bytes::<u32>(
+            &mut working_bytes,
+            "partition cursor cells",
+            partition_cells,
+        )?;
+        add_table_bytes::<u32>(
+            &mut working_bytes,
+            "tile offsets",
+            checked_sum("tile offsets", fine_count, 1)?,
+        )?;
+        add_table_bytes::<u32>(&mut working_bytes, "draw indices", fine_reference_count)?;
+        add_table_bytes::<u32>(&mut working_bytes, "class flags", fine_reference_count)?;
+        check_limit("working bytes", working_bytes, limits.max_working_bytes)?;
+
+        let mut per_instance =
+            try_filled("instance tile rows", instances.len(), Vec::<u32>::new())?;
+        for (tiles, &count) in per_instance.iter_mut().zip(&fine_counts) {
+            tiles
+                .try_reserve_exact(count)
+                .map_err(|_| BinningError::AllocationFailed {
+                    resource: "fine tile references",
+                    requested: u64::try_from(count).unwrap_or(u64::MAX),
+                })?;
+        }
         for (m, members) in macro_members.iter().enumerate() {
             if members.is_empty() {
                 continue;
@@ -342,7 +731,13 @@ impl Binning {
                 };
                 for ty in y0.max(fy0)..=y1.min(fy1) {
                     for tx in x0.max(fx0)..=x1.min(fx1) {
-                        per_instance[i as usize].push(ty * fine.cols + tx);
+                        let tile = u64::from(ty) * u64::from(fine.cols) + u64::from(tx);
+                        per_instance[i as usize].push(u32::try_from(tile).map_err(|_| {
+                            BinningError::AddressSpace {
+                                resource: "fine tile index",
+                                requested: tile,
+                            }
+                        })?);
                     }
                 }
             }
@@ -351,20 +746,26 @@ impl Binning {
         // ---- count → prefix → scatter, partitioned.
         let n = fine.count();
         let chunk = instances.len().div_ceil(partitions).max(1);
-        let ranges: Vec<(usize, usize)> = (0..partitions)
-            .map(|p| {
-                let lo = (p * chunk).min(instances.len());
-                let hi = ((p + 1) * chunk).min(instances.len());
-                (lo, hi)
-            })
-            .collect();
+        let mut ranges = try_with_capacity("partition ranges", partitions)?;
+        for p in 0..partitions {
+            let lo = (p * chunk).min(instances.len());
+            let hi = ((p + 1) * chunk).min(instances.len());
+            ranges.push((lo, hi));
+        }
 
         // counts[p][t]: how many commands partition p contributes to tile t.
-        let mut counts: Vec<Vec<u32>> = vec![vec![0; n]; ranges.len()];
+        let mut counts = try_with_capacity("partition count rows", ranges.len())?;
+        for _ in &ranges {
+            counts.push(try_filled("partition count cells", n, 0u32)?);
+        }
         for (p, &(lo, hi)) in ranges.iter().enumerate() {
             for tiles in per_instance.iter().take(hi).skip(lo) {
                 for &t in tiles {
-                    counts[p][t as usize] += 1;
+                    counts[p][t as usize] = counts[p][t as usize].checked_add(1).ok_or(
+                        BinningError::CountOverflow {
+                            resource: "commands per partition tile",
+                        },
+                    )?;
                 }
             }
         }
@@ -372,31 +773,52 @@ impl Binning {
         // Offsets: tiles in index order, and within a tile the partitions in
         // partition order. That second clause is what keeps a tile's run in
         // painter order at any partition count.
-        let mut offsets = Vec::with_capacity(n + 1);
-        let mut cursors: Vec<Vec<u32>> = vec![vec![0; n]; ranges.len()];
+        let offset_count = n.checked_add(1).ok_or(BinningError::CountOverflow {
+            resource: "tile offsets",
+        })?;
+        let mut offsets = try_with_capacity("tile offsets", offset_count)?;
+        let mut cursors = try_with_capacity("partition cursor rows", ranges.len())?;
+        for _ in &ranges {
+            cursors.push(try_filled("partition cursor cells", n, 0u32)?);
+        }
         let mut running = 0u32;
         offsets.push(0);
-        for (t, cursor) in (0..n).zip(std::iter::repeat(())).map(|(t, ())| (t, t)) {
+        for t in 0..n {
             for p in 0..ranges.len() {
-                cursors[p][cursor] = running;
-                running += counts[p][t];
+                cursors[p][t] = running;
+                running = running
+                    .checked_add(counts[p][t])
+                    .ok_or(BinningError::CountOverflow {
+                        resource: "CSR command count",
+                    })?;
             }
             offsets.push(running);
         }
 
-        let mut draws = vec![0u32; running as usize];
+        let draw_count = usize::try_from(running).map_err(|_| BinningError::AddressSpace {
+            resource: "draw indices",
+            requested: u64::from(running),
+        })?;
+        let mut draws = try_filled("draw indices", draw_count, 0u32)?;
         for (p, &(lo, hi)) in ranges.iter().enumerate() {
             for (i, tiles) in per_instance.iter().enumerate().take(hi).skip(lo) {
                 for &t in tiles {
                     let slot = cursors[p][t as usize] as usize;
-                    draws[slot] = i as u32;
-                    cursors[p][t as usize] += 1;
+                    draws[slot] = u32::try_from(i).map_err(|_| BinningError::AddressSpace {
+                        resource: "instance index",
+                        requested: u64::try_from(i).unwrap_or(u64::MAX),
+                    })?;
+                    cursors[p][t as usize] = cursors[p][t as usize].checked_add(1).ok_or(
+                        BinningError::CountOverflow {
+                            resource: "partition cursor",
+                        },
+                    )?;
                 }
             }
         }
 
         // ---- §10.4's class, per command.
-        let mut flags = vec![CLASS_PARTIAL; draws.len()];
+        let mut flags = try_filled("class flags", draws.len(), CLASS_PARTIAL)?;
         for t in 0..n {
             let rect = fine.rect(t, viewport);
             for k in offsets[t] as usize..offsets[t + 1] as usize {
@@ -407,7 +829,7 @@ impl Binning {
             }
         }
 
-        Binning {
+        Ok(Binning {
             tiling,
             viewport,
             map,
@@ -418,7 +840,7 @@ impl Binning {
             flags,
             macro_hits,
             macro_count: coarse.count(),
-        }
+        })
     }
 
     /// The tiling this binning used.
@@ -522,9 +944,9 @@ impl Binning {
             after: 0,
             tiles_touched: 0,
         };
-        let mut offsets = Vec::with_capacity(self.offsets.len());
-        let mut draws = Vec::with_capacity(self.draws.len());
-        let mut flags = Vec::with_capacity(self.flags.len());
+        let mut offsets = try_with_capacity("pruned tile offsets", self.offsets.len())?;
+        let mut draws = try_with_capacity("pruned draw indices", self.draws.len())?;
+        let mut flags = try_with_capacity("pruned class flags", self.flags.len())?;
         offsets.push(0u32);
 
         for t in 0..self.fine.count() {
@@ -543,7 +965,12 @@ impl Binning {
             }
             draws.extend_from_slice(&self.draws[start..hi]);
             flags.extend_from_slice(&self.flags[start..hi]);
-            offsets.push(draws.len() as u32);
+            offsets.push(
+                u32::try_from(draws.len()).map_err(|_| BinningError::AddressSpace {
+                    resource: "pruned draw indices",
+                    requested: u64::try_from(draws.len()).unwrap_or(u64::MAX),
+                })?,
+            );
         }
 
         report.after = draws.len();
@@ -869,6 +1296,239 @@ mod tests {
     }
 
     #[test]
+    fn binning_limits_accept_exact_boundaries_and_refuse_one_over() {
+        let plan = synced(&scene(&[(16.0, 16.0, 32.0, 32.0, 1.0)]));
+        let viewport = Viewport {
+            width: 32,
+            height: 32,
+        };
+        let tiling = Tiling {
+            macro_tile: 32,
+            fine_tile: 16,
+        };
+        let mut limits = BinningLimits {
+            max_tiles: 4,
+            max_instances: 1,
+            max_tile_references: 4,
+            max_partition_cells: 4,
+            max_working_bytes: BinningLimits::default().max_working_bytes,
+        };
+        let exact =
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits)
+                .expect("exact limits");
+        assert_eq!(exact.tile_count(), 4);
+        assert_eq!(exact.draws().len(), 4);
+
+        limits.max_tiles = 3;
+        assert_eq!(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits,),
+            Err(BinningError::LimitExceeded {
+                resource: "fine tiles",
+                requested: 4,
+                limit: 3,
+            })
+        );
+        limits.max_tiles = 4;
+        limits.max_tile_references = 3;
+        assert_eq!(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits,),
+            Err(BinningError::LimitExceeded {
+                resource: "fine tile references",
+                requested: 4,
+                limit: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn each_count_axis_has_a_typed_preallocation_refusal() {
+        let viewport = Viewport {
+            width: 32,
+            height: 32,
+        };
+        let tiling = Tiling {
+            macro_tile: 32,
+            fine_tile: 16,
+        };
+        let single = synced(&scene(&[(16.0, 16.0, 16.0, 16.0, 1.0)]));
+        let mut limits = BinningLimits {
+            max_instances: 0,
+            ..BinningLimits::default()
+        };
+        assert_eq!(
+            Binning::build_with_limits(&single, viewport, tiling, ScreenMap::default(), limits,),
+            Err(BinningError::LimitExceeded {
+                resource: "instances",
+                requested: 1,
+                limit: 0,
+            })
+        );
+
+        limits.max_instances = BinningLimits::default().max_instances;
+        limits.max_partition_cells = 3;
+        assert_eq!(
+            Binning::build_partitioned_with_limits(
+                &single,
+                viewport,
+                tiling,
+                ScreenMap::default(),
+                96,
+                limits,
+            ),
+            Err(BinningError::LimitExceeded {
+                resource: "partition cells",
+                requested: 4,
+                limit: 3,
+            })
+        );
+
+        let pair = synced(&scene(&[
+            (8.0, 8.0, 8.0, 8.0, 1.0),
+            (24.0, 24.0, 8.0, 8.0, 1.0),
+        ]));
+        limits.max_partition_cells = BinningLimits::default().max_partition_cells;
+        limits.max_tile_references = 1;
+        assert_eq!(
+            Binning::build_with_limits(&pair, viewport, tiling, ScreenMap::default(), limits,),
+            Err(BinningError::LimitExceeded {
+                resource: "macrotile references",
+                requested: 2,
+                limit: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn default_limits_admit_the_certified_8k_partition_grid() -> Result<(), BinningError> {
+        let limits = BinningLimits::default();
+        let fine = Grid::new(
+            Viewport {
+                width: 7680,
+                height: 4320,
+            },
+            Tiling::default().fine_tile,
+            "fine tiles",
+            limits,
+        )?;
+        assert_eq!(fine.count(), 129_600);
+        let partition_cells = checked_product(
+            "partition cells",
+            u64::try_from(fine.count()).unwrap_or(u64::MAX),
+            96,
+        )?;
+        assert_eq!(partition_cells, 12_441_600);
+        assert!(partition_cells <= limits.max_partition_cells);
+        let count_and_cursor_bytes = checked_product(
+            "partition table bytes",
+            table_bytes::<u32>("partition count cells", partition_cells)?,
+            2,
+        )?;
+        assert!(count_and_cursor_bytes < limits.max_working_bytes);
+        Ok(())
+    }
+
+    fn required_working_bytes(
+        result: Result<Binning, BinningError>,
+        limit: u64,
+        phase: &str,
+    ) -> Result<u64, String> {
+        match result {
+            Err(BinningError::LimitExceeded {
+                resource: "working bytes",
+                requested,
+                limit: actual_limit,
+            }) if actual_limit == limit => Ok(requested),
+            other => Err(format!("unexpected {phase}-budget result: {other:?}")),
+        }
+    }
+
+    #[test]
+    fn binning_working_byte_limit_is_checked_before_each_table_phase() -> Result<(), String> {
+        let plan = synced(&scene(&[(16.0, 16.0, 32.0, 32.0, 1.0)]));
+        let viewport = Viewport {
+            width: 32,
+            height: 32,
+        };
+        let tiling = Tiling {
+            macro_tile: 32,
+            fine_tile: 16,
+        };
+        let mut limits = BinningLimits {
+            max_working_bytes: 0,
+            ..BinningLimits::default()
+        };
+        let initial = required_working_bytes(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits),
+            0,
+            "initial",
+        )?;
+        limits.max_working_bytes = initial;
+        let macro_tables = required_working_bytes(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits),
+            initial,
+            "macrotile",
+        )?;
+        assert!(macro_tables > initial);
+        limits.max_working_bytes = macro_tables;
+        let fine_counts = required_working_bytes(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits),
+            macro_tables,
+            "fine-count",
+        )?;
+        assert!(fine_counts > macro_tables);
+        limits.max_working_bytes = fine_counts;
+        let full = required_working_bytes(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits),
+            fine_counts,
+            "full",
+        )?;
+        assert!(full > fine_counts);
+        limits.max_working_bytes = full;
+        assert!(
+            Binning::build_with_limits(&plan, viewport, tiling, ScreenMap::default(), limits,)
+                .is_ok()
+        );
+        limits.max_working_bytes = full - 1;
+        assert!(matches!(
+            Binning::build_with_limits(
+                &plan,
+                viewport,
+                tiling,
+                ScreenMap::default(),
+                limits,
+            ),
+            Err(BinningError::LimitExceeded {
+                resource: "working bytes",
+                requested,
+                limit,
+            }) if requested == full && limit + 1 == full
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn maximal_viewport_is_a_typed_preallocation_refusal() {
+        assert!(matches!(
+            Binning::build(
+                &RenderPlan::new(),
+                Viewport {
+                    width: u32::MAX,
+                    height: u32::MAX,
+                },
+                Tiling {
+                    macro_tile: 1,
+                    fine_tile: 1,
+                },
+                ScreenMap::default(),
+            ),
+            Err(BinningError::LimitExceeded {
+                resource: "fine tiles",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_stroke_is_binned_to_the_tiles_its_width_reaches() {
         // §10.3's per-draw width expansion, as a test rather than a sentence.
         // The line's hull is the single row y = 64, which lands on a tile
@@ -886,7 +1546,8 @@ mod tests {
             macro_tile: 128,
             fine_tile: 16,
         };
-        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default())
+            .expect("bounded test binning");
 
         let listed = |x: u32, y: u32| !b.tile(b.tile_of(x, y)).is_empty();
         assert!(listed(64, 64), "the centreline's own tile row is missing");
@@ -911,7 +1572,8 @@ mod tests {
             macro_tile: 128,
             fine_tile: 16,
         };
-        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default())
+            .expect("bounded test binning");
         assert!(
             !b.tile(b.tile_of(64, 47)).is_empty(),
             "the miter-tip tile is absent"
@@ -929,7 +1591,8 @@ mod tests {
             macro_tile: 128,
             fine_tile: 16,
         };
-        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default())
+            .expect("bounded test binning");
         // The rect spans x,y in [48, 80]: tiles 3..=5 on each axis and no more.
         assert!(!b.tile(b.tile_of(48, 48)).is_empty());
         assert!(
@@ -950,7 +1613,8 @@ mod tests {
             scale: -1.0,
             origin: [0.0, 0.0],
         };
-        let b = Binning::build(&plan, viewport(), Tiling::default(), flipped);
+        let b = Binning::build(&plan, viewport(), Tiling::default(), flipped)
+            .expect("bounded test binning");
         assert!(
             !b.draws().is_empty(),
             "a y-flip binned the whole scene out of existence"
@@ -966,7 +1630,8 @@ mod tests {
             (100.0, 100.0, 100.0, 100.0, 1.0),
         ]);
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         assert!(!b.draws().is_empty());
         for t in 0..b.tile_count() {
             let run = b.tile(t);
@@ -997,7 +1662,8 @@ mod tests {
             Tiling::default(),
             ScreenMap::default(),
             1,
-        );
+        )
+        .expect("bounded serial test binning");
         for partitions in [1, 2, 3, 4, 5, 7, 16, 64] {
             let parallel = Binning::build_partitioned(
                 &plan,
@@ -1005,7 +1671,8 @@ mod tests {
                 Tiling::default(),
                 ScreenMap::default(),
                 partitions,
-            );
+            )
+            .expect("bounded partitioned test binning");
             assert_eq!(
                 parallel.offsets(),
                 serial.offsets(),
@@ -1098,7 +1765,7 @@ mod tests {
                 fine_tile: 32,
             },
         ] {
-            let b = Binning::build(&plan, viewport(), tiling, map);
+            let b = Binning::build(&plan, viewport(), tiling, map).expect("bounded test binning");
             for y in (0..256).step_by(7) {
                 for x in (0..256).step_by(5) {
                     assert_eq!(
@@ -1118,7 +1785,8 @@ mod tests {
         // macrotiles empty.
         let stage = scene(&[(20.0, 20.0, 20.0, 20.0, 1.0)]);
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let (hits, total) = b.macro_occupancy();
         assert!(total > 1, "the viewport must span several macrotiles");
         assert!(
@@ -1133,7 +1801,8 @@ mod tests {
         // clamped span would put a command in the border tiles.
         let stage = scene(&[(-500.0, -500.0, 40.0, 40.0, 1.0)]);
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         assert!(b.draws().is_empty(), "{:?}", b.draws());
     }
 
@@ -1141,7 +1810,8 @@ mod tests {
     fn a_tile_inside_an_opaque_rectangle_is_classified_interior() {
         let stage = scene(&[(128.0, 128.0, 200.0, 200.0, 1.0)]);
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         // The centre tile is deep inside; a corner tile is not.
         let centre = b.tile_of(128, 128);
         assert_eq!(b.tile_flags(centre), &[CLASS_INTERIOR]);
@@ -1164,7 +1834,8 @@ mod tests {
             (128.0, 128.0, 40.0, 40.0, 0.5),
         ]);
         let plan = synced(&stage);
-        let before = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let before = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let mut after = before.clone();
         let report = after.prune_occluded(&plan).expect("matching plan");
 
@@ -1202,7 +1873,8 @@ mod tests {
             (128.0, 128.0, 220.0, 220.0, 0.5),
         ]);
         let plan = synced(&stage);
-        let mut b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let mut b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let report = b.prune_occluded(&plan).expect("matching plan");
         assert_eq!(report.before, report.after, "{report:?}");
     }
@@ -1216,7 +1888,8 @@ mod tests {
             viewport(),
             Tiling::default(),
             ScreenMap::default(),
-        );
+        )
+        .expect("bounded test binning");
         let before = binning.clone();
 
         // Same table and instance cardinalities, different placement. Index-only
@@ -1240,7 +1913,8 @@ mod tests {
             (200.0, 200.0, 100.0, 100.0, 1.0),
         ]);
         let plan = synced(&stage);
-        let before = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let before = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let mut after = before.clone();
         after.prune_occluded(&plan).expect("matching plan");
 
@@ -1264,7 +1938,8 @@ mod tests {
             (128.0, 128.0, 200.0, 200.0, 1.0),
         ]);
         let plan = synced(&stage);
-        let mut b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let mut b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         b.prune_occluded(&plan).expect("matching plan");
         let centre = b.tile_of(128, 128);
         assert_eq!(b.tile(centre), &[1], "only the cover survives, and it does");
@@ -1287,7 +1962,8 @@ mod tests {
             Tiling::default(),
             ScreenMap::default(),
             1,
-        );
+        )
+        .expect("bounded reference test binning");
         reference
             .prune_occluded(&plan)
             .expect("matching reference plan");
@@ -1298,7 +1974,8 @@ mod tests {
                 Tiling::default(),
                 ScreenMap::default(),
                 partitions,
-            );
+            )
+            .expect("bounded partitioned test binning");
             other.prune_occluded(&plan).expect("matching plan");
             assert_eq!(other.offsets(), reference.offsets());
             assert_eq!(other.draws(), reference.draws());
@@ -1336,7 +2013,8 @@ mod tests {
         let mob = stage.add(Mobject::from_buffer(buffer));
         stage.add_to_scene(mob).expect("live");
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         assert!(
             b.flags().iter().all(|f| *f == CLASS_PARTIAL),
             "a concave outline claimed to cover a tile"
@@ -1356,7 +2034,8 @@ mod tests {
         );
         stage.add_to_scene(mob).expect("live");
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         // Dead centre: inside. On the diagonal near the rim: not.
         assert_eq!(b.tile_flags(b.tile_of(128, 128)), &[CLASS_INTERIOR]);
         let rim = b.tile_of(128 + 96, 128);
@@ -1384,7 +2063,8 @@ mod tests {
             "the two rectangles are one outline — the interning must still fire"
         );
 
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         let near = b.tile_of(40, 40);
         let far = b.tile_of(200, 200);
         assert_eq!(b.tile(near), &[0], "instance 0 belongs at (40,40)");
@@ -1398,7 +2078,8 @@ mod tests {
     #[test]
     fn an_empty_plan_bins_to_an_empty_but_valid_csr() {
         let plan = RenderPlan::new();
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         assert_eq!(b.offsets().len(), b.tile_count() + 1);
         assert!(b.draws().is_empty());
         assert_eq!(*b.offsets().last().expect("non-empty"), 0);
@@ -1411,7 +2092,8 @@ mod tests {
             (180.0, 180.0, 90.0, 90.0, 0.5),
         ]);
         let plan = synced(&stage);
-        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default());
+        let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
         assert_eq!(b.offsets().len(), b.tile_count() + 1);
         assert_eq!(
             *b.offsets().last().expect("non-empty") as usize,

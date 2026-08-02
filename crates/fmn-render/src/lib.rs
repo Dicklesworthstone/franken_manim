@@ -43,7 +43,7 @@ pub mod texture;
 pub mod three_d;
 
 pub use arena::{AllocStats, FrameArena};
-pub use bin::{Binning, BinningError, ScreenMap, Tiling, Viewport};
+pub use bin::{Binning, BinningError, BinningLimits, ScreenMap, Tiling, Viewport};
 pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
 pub use camera::{
     CAMERA_FRAME_Z_INDEX, Camera, CameraConfig, CameraError, CameraFrame, ClipPoint,

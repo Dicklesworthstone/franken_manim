@@ -158,7 +158,7 @@ fn render_gradient_fills() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map);
+    let mut binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map)?;
     binning.prune_occluded(&plan)?;
     Ok(FrameJob::new(&plan, &mono, &binning, config)?.render(4)?)
 }

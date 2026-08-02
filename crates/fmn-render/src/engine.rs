@@ -2965,7 +2965,8 @@ mod tests {
         let mut plan = RenderPlan::new();
         plan.sync(stage, 0);
         let mono = MonoTable::build(&plan, cfg.map);
-        let binning = Binning::build(&plan, cfg.viewport, tiling, cfg.map);
+        let binning =
+            Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded test binning");
         (plan, mono, binning)
     }
 
@@ -3858,7 +3859,8 @@ mod tests {
 
         let render = |plan: &RenderPlan| {
             let mono = MonoTable::build(plan, cfg.map);
-            let binning = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map);
+            let binning = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map)
+                .expect("bounded test binning");
             FrameJob::new(plan, &mono, &binning, cfg)
                 .expect("matching frame artifacts")
                 .render(1)
@@ -4236,7 +4238,8 @@ mod tests {
         ));
 
         // Binning consumes the map independently for AABBs and interior flags.
-        let moved_binning = Binning::build(&plan, cfg.viewport, default_tiling(), moved_map);
+        let moved_binning = Binning::build(&plan, cfg.viewport, default_tiling(), moved_map)
+            .expect("bounded test binning");
         assert!(matches!(
             FrameJob::new(&plan, &mono, &moved_binning, cfg),
             Err(FrameJobError::BinningMapMismatch)
@@ -4248,7 +4251,8 @@ mod tests {
             width: cfg.viewport.width - 1,
             height: cfg.viewport.height,
         };
-        let near_binning = Binning::build(&plan, near_viewport, default_tiling(), cfg.map);
+        let near_binning = Binning::build(&plan, near_viewport, default_tiling(), cfg.map)
+            .expect("bounded test binning");
         assert_eq!(near_binning.tile_count(), binning.tile_count());
         assert!(matches!(
             FrameJob::new(&plan, &mono, &near_binning, cfg),
@@ -4353,7 +4357,8 @@ mod tests {
             FrameJob::new(&plan, &mono, &binning, cfg),
             Err(FrameJobError::BinningPlanMismatch)
         ));
-        let viewed_binning = Binning::build(&plan, cfg.viewport, default_tiling(), cfg.map);
+        let viewed_binning = Binning::build(&plan, cfg.viewport, default_tiling(), cfg.map)
+            .expect("bounded test binning");
         let viewed =
             FrameJob::new(&plan, &mono, &viewed_binning, cfg).expect("matching viewed artifacts");
         assert_eq!(

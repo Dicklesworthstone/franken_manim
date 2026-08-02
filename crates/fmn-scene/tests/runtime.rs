@@ -1538,7 +1538,8 @@ mod wasm_tier1_determinism_proxy {
         let camera_revision = u64::try_from(packet.frame_index()).expect("frame index");
         plan.sync(&stage, camera_revision);
         let mono = MonoTable::build(&plan, config.map);
-        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+            .expect("bounded scene test binning");
         binning.prune_occluded(&plan).expect("prune");
         let job = FrameJob::new(&plan, &mono, &binning, config).expect("job");
         let frame = job.render(1).expect("render");
@@ -1617,7 +1618,8 @@ mod wasm_tier1_determinism_proxy {
             let mut plan = RenderPlan::new();
             plan.sync(&stage, 0);
             let mono = MonoTable::build(&plan, config.map);
-            let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+            let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+                .expect("bounded scene test binning");
             binning.prune_occluded(&plan).expect("prune");
             let job = FrameJob::new(&plan, &mono, &binning, config).expect("job");
             let frame = job.render(1).expect("render");

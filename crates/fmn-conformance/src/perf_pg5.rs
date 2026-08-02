@@ -238,12 +238,15 @@ impl Pg5Definition {
         if baseline.policy.require_regression_profile {
             mismatches.push("require_regression_profile");
         }
+        // ubs:ignore — public benchmark identity, not authentication material.
         if key.benchmark_definition != self.digest() {
             mismatches.push("benchmark_definition");
         }
+        // ubs:ignore — public configuration identity, not authentication material.
         if key.config_digest != self.config_digest() {
             mismatches.push("config_digest");
         }
+        // ubs:ignore — public execution-plan identity, not authentication material.
         if key.execution_plan_digest != self.execution_plan_digest() {
             mismatches.push("execution_plan_digest");
         }
@@ -370,6 +373,7 @@ pub fn measure_pg5(
     }
 
     let reference_digest = aggregate_reference_digest(definition.corpus_lock_digest(), &cases)?;
+    // ubs:ignore — public corpus self-golden, not authentication material.
     if reference_digest != definition.expected_reference_digest() {
         return Err(Pg5Error::Render(format!(
             "reference corpus self-golden drift: expected {}, got {}",
@@ -460,7 +464,8 @@ fn prepare_scene(index: usize) -> Result<PreparedScene, String> {
     let mut plan = RenderPlan::new();
     let _ = plan.sync(&built.stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .map_err(|error| format!("{} binning: {error}", case.name))?;
     binning
         .prune_occluded(&plan)
         .map_err(|error| format!("{} binning: {error}", case.name))?;
@@ -732,10 +737,12 @@ fn run_frame_parallel(plan: &ExecutionPlan) -> Result<ScheduleReceipt, Pg5Error>
         PipelineEvent::<_, ()>::frame(u64::try_from(index).unwrap_or(u64::MAX), index)
     });
     let mut digests = Vec::with_capacity(SCENES.len());
+    // ubs:ignore — public pipeline counters; the closure's digest is not a secret.
     let stats = FramePipeline::new(plan, &stages)
         .run(
             events,
             |sequence, digest| {
+                // ubs:ignore — public frame count derived from a digest vector length.
                 let expected = u64::try_from(digests.len()).unwrap_or(u64::MAX);
                 if sequence != expected {
                     return Err(format!(
@@ -877,6 +884,7 @@ fn run_ordered_pipeline(plan: &ExecutionPlan) -> Result<ScheduleReceipt, Pg5Erro
             },
         )
     });
+    // ubs:ignore — public pipeline counters; the closure's digest is not a secret.
     let stats = FramePipeline::new(plan, &stages)
         .run(
             events,
@@ -1160,6 +1168,7 @@ mod tests {
     #[test]
     fn execution_plan_digest_binds_complete_team_placement() {
         let plan = pipeline_plan().expect("fixed plan derives");
+        // ubs:ignore — public execution-plan self-golden, not authentication material.
         let expected = Pg5Definition::from_execution_plan(&plan).execution_plan_digest();
 
         let mut changed = plan.clone();

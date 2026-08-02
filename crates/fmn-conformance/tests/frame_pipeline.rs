@@ -222,7 +222,8 @@ fn prepare_profiled(
             ProfilePhase::Binning,
             fmn_runtime::ProfileLane::prepare(),
         );
-        let mut binning = Binning::build(&plan, config.viewport, tiling, config.map);
+        let mut binning = Binning::build(&plan, config.viewport, tiling, config.map)
+            .expect("bounded conformance binning");
         binning
             .prune_occluded(&plan)
             .expect("binning belongs to this render plan");

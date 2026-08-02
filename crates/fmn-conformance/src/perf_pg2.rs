@@ -277,9 +277,11 @@ impl Pg2Definition {
         if baseline.policy.max_invalid_samples != PG2_MAX_INVALID_SAMPLES {
             mismatches.push("max_invalid_samples");
         }
+        // ubs:ignore — public benchmark identity, not authentication material.
         if key.benchmark_definition != self.digest() {
             mismatches.push("benchmark_definition");
         }
+        // ubs:ignore — public configuration identity, not authentication material.
         if key.config_digest != self.config_digest() {
             mismatches.push("config_digest");
         }
@@ -380,6 +382,7 @@ pub fn measure_pg2(
     ));
     let golden_start = Instant::now();
     let prime_digest = frame_digest(&frame).map_err(|error| Pg2Error::Render(error.to_string()))?;
+    // ubs:ignore — public frame self-golden, not authentication material.
     if prime_digest != definition.expected_frame_digest() {
         return Err(Pg2Error::Render(format!(
             "{} self-golden drift: expected {}, got {}",
@@ -415,6 +418,7 @@ pub fn measure_pg2(
 
     let result_digest =
         frame_digest(&frame).map_err(|error| Pg2Error::Render(error.to_string()))?;
+    // ubs:ignore — public deterministic frame identity, not authentication material.
     if result_digest != prime_digest {
         return Err(Pg2Error::Render(format!(
             "{} result changed during the measurement: prime {}, final {}",
@@ -494,7 +498,8 @@ impl Fixture {
         phases.push(PhaseTiming::new("mono-table-build", mono_start.elapsed()));
 
         let binning_start = Instant::now();
-        let binning = Binning::build(&plan, config.viewport, tiling(), config.map);
+        let binning = Binning::build(&plan, config.viewport, tiling(), config.map)
+            .map_err(|error| Pg2Error::Fixture(error.to_string()))?;
         phases.push(PhaseTiming::new("binning-build", binning_start.elapsed()));
 
         Ok((

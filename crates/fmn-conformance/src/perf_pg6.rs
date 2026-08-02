@@ -188,9 +188,11 @@ impl Pg6Definition {
         if baseline.policy.require_regression_profile {
             mismatches.push("require_regression_profile");
         }
+        // ubs:ignore — public benchmark identity, not authentication material.
         if key.benchmark_definition != self.digest() {
             mismatches.push("benchmark_definition");
         }
+        // ubs:ignore — public configuration identity, not authentication material.
         if key.config_digest != self.config_digest() {
             mismatches.push("config_digest");
         }
@@ -294,7 +296,8 @@ pub fn measure_pg6(
         let mut plan = RenderPlan::new();
         let _ = plan.sync(&built.stage, 0);
         let mono = MonoTable::build(&plan, config.map);
-        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+            .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
         binning
             .prune_occluded(&plan)
             .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
@@ -336,6 +339,7 @@ pub fn measure_pg6(
                 frame_digest(&frame).map_err(|error| Pg6Error::Render(error.to_string()))?;
             (digest, stats)
         };
+        // ubs:ignore — public deterministic frame identity, not authentication material.
         if measured_frame_digest != warm_frame_digest {
             return Err(Pg6Error::Render(format!(
                 "{} changed across arena reuse: warm {}, measured {}",
@@ -374,6 +378,7 @@ pub fn measure_pg6(
     }
 
     let result_digest = aggregate_result_digest(definition.corpus_lock_digest(), &cases)?;
+    // ubs:ignore — public corpus self-golden, not authentication material.
     if result_digest != definition.expected_result_digest() {
         return Err(Pg6Error::Render(format!(
             "corpus result self-golden drift: expected {}, got {}",

@@ -146,7 +146,8 @@ fn render_frame(
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
-    let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+    let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
+        .expect("bounded certified-engine binning");
     binning.prune_occluded(&plan).expect("matching plan");
     let job = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
         .expect("matching frame artifacts");
@@ -609,7 +610,8 @@ fn metal_annex_stays_inside_budget_and_reuses_its_surfaces() {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
         let mono = MonoTable::build(&plan, cfg.map);
-        let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+        let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
+            .expect("bounded certified-engine binning");
         binning.prune_occluded(&plan).expect("matching plan");
 
         let (first, first_report) = renderer
@@ -999,7 +1001,8 @@ fn metal_annex_pg_a_reports_the_empty_floor_beside_the_corpus() {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
         let mono = MonoTable::build(&plan, cfg.map);
-        let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+        let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
+            .expect("bounded certified-engine binning");
         binning.prune_occluded(&plan).expect("matching plan");
 
         for format in [PixelFormat::Rgba8, PixelFormat::Nv12, PixelFormat::P010] {
@@ -1418,7 +1421,8 @@ fn the_corpus_actually_exercises_what_it_claims() {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
         let mono = MonoTable::build(&plan, cfg.map);
-        let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+        let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
+            .expect("bounded certified-engine binning");
         assert!(!binning.draws().is_empty(), "{name} binned to nothing");
         assert!(!mono.is_empty(), "{name} compiled no fill geometry");
     }
@@ -1454,7 +1458,8 @@ fn the_engine_identity_reaches_the_input_closure() {
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
-    let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+    let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
+        .expect("bounded certified-engine binning");
     let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("matching frame artifacts");
     assert_eq!(job.journal_digest(), certified);
     assert_eq!(job.identity(), EngineIdentity::certified());

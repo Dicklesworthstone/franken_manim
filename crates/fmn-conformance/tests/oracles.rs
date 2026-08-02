@@ -470,7 +470,8 @@ fn render(stage: &Stage) -> fmn_frame::FrameBuffer {
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, cfg.map);
-    let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map);
+    let binning =
+        Binning::build(&plan, cfg.viewport, TILING, cfg.map).expect("bounded conformance binning");
     FrameJob::with_identity(&plan, &mono, &binning, cfg, EngineIdentity::certified())
         .expect("matching frame artifacts")
         .render(1)

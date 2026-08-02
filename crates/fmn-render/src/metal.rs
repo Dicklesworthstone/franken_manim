@@ -2599,7 +2599,8 @@ mod tests {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0);
         let mono = MonoTable::build(&plan, config.map);
-        let binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map);
+        let binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map)
+            .expect("bounded test binning");
         let expected =
             render_cpu_rgba8(&plan, &mono, &binning, config, 1).expect("CPU comparison frame");
         let preview = renderer

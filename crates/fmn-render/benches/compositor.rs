@@ -131,7 +131,8 @@ impl StrokeFixture {
                 fine_tile: 16,
             },
             config.map,
-        );
+        )
+        .expect("bounded benchmark binning");
         Self {
             plan,
             mono,
@@ -190,7 +191,8 @@ impl Fixture {
                 fine_tile: 16,
             },
             config.map,
-        );
+        )
+        .expect("bounded benchmark binning");
         Self {
             plan,
             mono,

@@ -469,7 +469,8 @@ pub(crate) fn render_stage_rgba8_into(
     let mut plan = RenderPlan::new();
     plan.sync(stage, camera_revision);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .map_err(|e| SurfaceError::new("binning", e))?;
     binning
         .prune_occluded(&plan)
         .map_err(|e| SurfaceError::new("binning", e))?;

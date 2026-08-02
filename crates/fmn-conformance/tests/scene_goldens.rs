@@ -42,7 +42,8 @@ fn render_frame(stage: &Stage, identity: EngineIdentity, threads: usize) -> Fram
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0);
     let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
     binning
         .prune_occluded(&plan)
         .expect("occlusion pruning matches the plan");

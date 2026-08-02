@@ -142,7 +142,8 @@ fn prepare_without_reservation(
     let mut plan = RenderPlan::new();
     plan.sync(&stage, spec.sequence);
     let mono = MonoTable::build(&plan, config.map);
-    let binning = Binning::build(&plan, config.viewport, tiling, config.map);
+    let binning = Binning::build(&plan, config.viewport, tiling, config.map)
+        .expect("bounded conformance binning");
     (plan, mono, binning, config)
 }
 
