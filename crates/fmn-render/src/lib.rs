@@ -76,7 +76,8 @@ pub use texture::{
 pub use three_d::{
     DARK_SHIFT, GLOW_DOT_FACTOR, SURFACE_SHADING, SurfaceDraw, SurfaceMaterial, SurfaceMesh,
     SurfaceVertex, TRUE_DOT_AA_WIDTH, TextureMaterial, ThreeDDraw, ThreeDError, ThreeDJob,
-    TrueDotDraw, VectorDraw, finalize_color, smoothstep, true_dot_alpha, unit_normal,
+    ThreeDPreparationLimits, TrueDotDraw, VectorDraw, finalize_color, smoothstep, true_dot_alpha,
+    unit_normal,
 };
 
 /// Thread fan-out clamp (W5 wasm tier 1, fm-l97).

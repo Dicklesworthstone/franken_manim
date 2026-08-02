@@ -1761,7 +1761,39 @@ pub enum RationalError {
     /// a **capability error naming the cause** rather than a silently clamped
     /// picture — the same posture D2 takes for a missing ffmpeg.
     CrossesHorizon,
+    /// Flattening would append more monotone pieces than the caller admitted.
+    PieceLimitExceeded {
+        /// Inclusive piece ceiling for this append.
+        limit: usize,
+        /// Exact number of pieces requested so far.
+        requested: usize,
+    },
+    /// A bounded flattening buffer could not be reserved.
+    AllocationFailed {
+        /// Stable buffer name.
+        resource: &'static str,
+        /// Elements requested from that buffer.
+        requested: usize,
+    },
 }
+
+impl std::fmt::Display for RationalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CrossesHorizon => f.write_str("rational curve crosses the camera horizon"),
+            Self::PieceLimitExceeded { limit, requested } => write!(
+                f,
+                "rational flattening needs {requested} pieces, exceeding the limit {limit}"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(f, "could not reserve {requested} rows for {resource}"),
+        }
+    }
+}
+
+impl std::error::Error for RationalError {}
 
 /// What a flattening pass did.
 ///
@@ -1987,6 +2019,21 @@ pub fn append_rational(
     tolerance_px: f64,
     out: &mut Vec<MonoPiece>,
 ) -> Result<FlattenReport, RationalError> {
+    append_rational_with_limit(piece, tolerance_px, out, usize::MAX)
+}
+
+/// [`append_rational`] with an inclusive limit on pieces appended by this call.
+///
+/// Both the fixed-depth traversal stack and each exact monotone append are
+/// reserved before mutation. A caller can therefore compose this primitive
+/// into an aggregate preparation budget without an allocator abort or a
+/// partially published result.
+pub(crate) fn append_rational_with_limit(
+    piece: &RationalPiece,
+    tolerance_px: f64,
+    out: &mut Vec<MonoPiece>,
+    max_additional_pieces: usize,
+) -> Result<FlattenReport, RationalError> {
     if !piece.weight_is_definite() {
         return Err(RationalError::CrossesHorizon);
     }
@@ -1999,7 +2046,17 @@ pub fn append_rational(
     let before = out.len();
     // Explicit stack rather than recursion: the depth cap is then a property of
     // the data structure instead of a promise about the call stack.
-    let mut stack: Vec<(RationalPiece, u32)> = vec![(*piece, 0)];
+    let stack_capacity = usize::try_from(FLATTEN_MAX_DEPTH)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
+    let mut stack: Vec<(RationalPiece, u32)> = Vec::new();
+    stack
+        .try_reserve_exact(stack_capacity)
+        .map_err(|_| RationalError::AllocationFailed {
+            resource: "rational flattening stack",
+            requested: stack_capacity,
+        })?;
+    stack.push((*piece, 0));
     while let Some((cur, depth)) = stack.pop() {
         let deviation = cur.deviation_px();
         report.depth = report.depth.max(depth);
@@ -2009,6 +2066,29 @@ pub fn append_rational(
             }
             report.error_px = report.error_px.max(deviation);
             let q = cur.integral_approximation();
+            let additional = monotone_piece_count(q.p0, q.p1, q.p2);
+            let Some(requested) = out.len().saturating_sub(before).checked_add(additional) else {
+                out.truncate(before);
+                return Err(RationalError::PieceLimitExceeded {
+                    limit: max_additional_pieces,
+                    requested: usize::MAX,
+                });
+            };
+            if requested > max_additional_pieces {
+                out.truncate(before);
+                return Err(RationalError::PieceLimitExceeded {
+                    limit: max_additional_pieces,
+                    requested,
+                });
+            }
+            if out.try_reserve_exact(additional).is_err() {
+                let total = out.len().saturating_add(additional);
+                out.truncate(before);
+                return Err(RationalError::AllocationFailed {
+                    resource: "rational monotone pieces",
+                    requested: total,
+                });
+            }
             split_monotone(q.p0, q.p1, q.p2, out);
             continue;
         }
@@ -3783,6 +3863,31 @@ mod tests {
         // interpolation of a quadratic *is* that quadratic.
         let q = piece.integral_approximation();
         assert!((q.p1[0] - 7.0).abs() < 1e-12 && (q.p1[1] - 9.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rational_piece_limit_is_exact_and_refusal_preserves_the_destination() {
+        let piece = RationalPiece::affine([0.0, 0.0], [0.5, 0.5], [1.0, 1.0]);
+        let sentinel = MonoPiece {
+            p0: [-1.0, -1.0],
+            p1: [-0.5, -0.5],
+            p2: [0.0, 0.0],
+        };
+        let mut exact = vec![sentinel];
+        let report = append_rational_with_limit(&piece, 1e-6, &mut exact, 1)
+            .expect("one monotone piece fits its exact limit");
+        assert_eq!(report.pieces, 1);
+        assert_eq!(exact.len(), 2);
+
+        let mut refused = vec![sentinel];
+        assert_eq!(
+            append_rational_with_limit(&piece, 1e-6, &mut refused, 0),
+            Err(RationalError::PieceLimitExceeded {
+                limit: 0,
+                requested: 1,
+            })
+        );
+        assert_eq!(refused, vec![sentinel]);
     }
 
     #[test]

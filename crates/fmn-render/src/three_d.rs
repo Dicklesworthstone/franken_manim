@@ -13,6 +13,7 @@
 //! surfaces retain its fragment-lighting and two-texture `dark_shift`
 //! crossfade. `dark_shift` is deliberately absent from [`finalize_color`].
 
+use std::collections::TryReserveError;
 use std::sync::{Mutex, PoisonError};
 
 use fmn_core::color::{LinearRgba, PremulRgba};
@@ -21,8 +22,9 @@ use fmn_frame::{
     FrameBuffer, FrameError, FrameLayout, PixelFormat, transfer::srgb_decode as srgb_eotf,
 };
 
+use crate::arena::{Pool, Sink};
 use crate::bin::{ScreenMap, Tiling};
-use crate::camera::{Camera, EdgeSampleLimit};
+use crate::camera::{Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
 use crate::plan::RenderPlan;
 use crate::stroke::{aa_coverage, stroke_rgba_at};
@@ -37,6 +39,44 @@ pub const DARK_SHIFT: f64 = 0.2;
 pub const GLOW_DOT_FACTOR: f64 = 2.0;
 /// True-dot silhouette AA width in output pixels.
 pub const TRUE_DOT_AA_WIDTH: f64 = 2.0;
+
+/// Admission limits for camera-bound 3D preparation.
+///
+/// These bounds cover the retained rows published by one [`ThreeDJob`]. The
+/// defaults match the million-command ceiling used by the retained 2D plan and
+/// allow four-way geometric amplification before refusing derived curves,
+/// fill pieces, or raster triangles. Callers with a deliberately larger,
+/// provisioned scene can use [`ThreeDJob::new_with_limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreeDPreparationLimits {
+    /// Maximum painter-ordered commands, including clipped-empty commands.
+    pub max_draws: u64,
+    /// Maximum projected stroke-curve pieces across vector commands.
+    pub max_projected_curves: u64,
+    /// Maximum monotone fill pieces across vector commands.
+    pub max_fill_pieces: u64,
+    /// Maximum clipped raster triangles across surfaces and true dots.
+    pub max_raster_triangles: u64,
+    /// Maximum logical bytes admitted across retained rows and owned
+    /// preparation buffers.
+    ///
+    /// Temporary buffers are charged when created and are not credited back
+    /// during the same compile, making this a conservative bound on peak
+    /// ownership rather than an allocator-capacity estimate.
+    pub max_working_bytes: u64,
+}
+
+impl Default for ThreeDPreparationLimits {
+    fn default() -> Self {
+        Self {
+            max_draws: 1 << 20,
+            max_projected_curves: 1 << 22,
+            max_fill_pieces: 1 << 22,
+            max_raster_triangles: 1 << 22,
+            max_working_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
 
 fn add(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
@@ -272,6 +312,27 @@ pub enum ThreeDError {
         /// Indices required by the Reference's six-index cell pattern.
         indices: u64,
     },
+    /// Aggregate camera-bound preparation exceeded a declared ceiling.
+    PreparationLimitExceeded {
+        /// Stable retained resource name.
+        resource: &'static str,
+        /// Inclusive configured ceiling.
+        limit: u64,
+        /// Exact requested amount.
+        requested: u64,
+    },
+    /// Aggregate preparation size arithmetic overflowed before allocation.
+    PreparationSizeOverflow {
+        /// Stable resource name.
+        resource: &'static str,
+    },
+    /// The allocator refused a fully preflighted preparation reservation.
+    PreparationAllocationFailed {
+        /// Stable destination name.
+        resource: &'static str,
+        /// Exact total row count requested.
+        requested: u64,
+    },
     /// A vertex or draw parameter contained NaN or infinity.
     NonFinite,
     /// Dot radius was not positive.
@@ -316,6 +377,24 @@ impl std::fmt::Display for ThreeDError {
             Self::AllocationFailed { indices } => {
                 write!(f, "could not reserve {indices} surface UV-grid indices")
             }
+            Self::PreparationLimitExceeded {
+                resource,
+                limit,
+                requested,
+            } => write!(
+                f,
+                "3D {resource} needs {requested}, exceeding the configured limit {limit}"
+            ),
+            Self::PreparationSizeOverflow { resource } => {
+                write!(f, "3D {resource} size overflowed during preparation")
+            }
+            Self::PreparationAllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "could not reserve {requested} rows for 3D {resource} preparation"
+            ),
             Self::NonFinite => f.write_str("3D draw data must be finite"),
             Self::InvalidRadius => f.write_str("true-dot radius must be positive"),
             Self::InvalidAntiAliasWidth => {
@@ -344,6 +423,288 @@ impl std::fmt::Display for ThreeDError {
 }
 
 impl std::error::Error for ThreeDError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparationRows {
+    Draws,
+    ProjectedCurves,
+    FillPieces,
+    RasterTriangles,
+}
+
+impl PreparationRows {
+    const fn resource(self) -> &'static str {
+        match self {
+            Self::Draws => "draw rows",
+            Self::ProjectedCurves => "projected curves",
+            Self::FillPieces => "fill pieces",
+            Self::RasterTriangles => "raster triangles",
+        }
+    }
+
+    const fn limit(self, limits: ThreeDPreparationLimits) -> u64 {
+        match self {
+            Self::Draws => limits.max_draws,
+            Self::ProjectedCurves => limits.max_projected_curves,
+            Self::FillPieces => limits.max_fill_pieces,
+            Self::RasterTriangles => limits.max_raster_triangles,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparationBudget {
+    limits: ThreeDPreparationLimits,
+    draws: u64,
+    projected_curves: u64,
+    fill_pieces: u64,
+    raster_triangles: u64,
+    working_bytes: u64,
+}
+
+impl PreparationBudget {
+    const fn new(limits: ThreeDPreparationLimits) -> Self {
+        Self {
+            limits,
+            draws: 0,
+            projected_curves: 0,
+            fill_pieces: 0,
+            raster_triangles: 0,
+            working_bytes: 0,
+        }
+    }
+
+    const fn rows(&self, resource: PreparationRows) -> u64 {
+        match resource {
+            PreparationRows::Draws => self.draws,
+            PreparationRows::ProjectedCurves => self.projected_curves,
+            PreparationRows::FillPieces => self.fill_pieces,
+            PreparationRows::RasterTriangles => self.raster_triangles,
+        }
+    }
+
+    fn set_rows(&mut self, resource: PreparationRows, rows: u64) {
+        match resource {
+            PreparationRows::Draws => self.draws = rows,
+            PreparationRows::ProjectedCurves => self.projected_curves = rows,
+            PreparationRows::FillPieces => self.fill_pieces = rows,
+            PreparationRows::RasterTriangles => self.raster_triangles = rows,
+        }
+    }
+
+    fn admitted<T>(
+        &self,
+        resource: PreparationRows,
+        additional: usize,
+    ) -> Result<(u64, u64), ThreeDError> {
+        let additional =
+            u64::try_from(additional).map_err(|_| ThreeDError::PreparationSizeOverflow {
+                resource: resource.resource(),
+            })?;
+        let requested = self.rows(resource).checked_add(additional).ok_or(
+            ThreeDError::PreparationSizeOverflow {
+                resource: resource.resource(),
+            },
+        )?;
+        let limit = resource.limit(self.limits);
+        if requested > limit {
+            return Err(ThreeDError::PreparationLimitExceeded {
+                resource: resource.resource(),
+                limit,
+                requested,
+            });
+        }
+        if resource == PreparationRows::ProjectedCurves && requested > u64::from(u32::MAX) {
+            return Err(ThreeDError::PreparationLimitExceeded {
+                resource: "projected curve indices",
+                limit: u64::from(u32::MAX),
+                requested,
+            });
+        }
+        let row_bytes = u64::try_from(std::mem::size_of::<T>()).map_err(|_| {
+            ThreeDError::PreparationSizeOverflow {
+                resource: "preparation working bytes",
+            }
+        })?;
+        let additional_bytes =
+            additional
+                .checked_mul(row_bytes)
+                .ok_or(ThreeDError::PreparationSizeOverflow {
+                    resource: "preparation working bytes",
+                })?;
+        let working_bytes = self.working_bytes.checked_add(additional_bytes).ok_or(
+            ThreeDError::PreparationSizeOverflow {
+                resource: "preparation working bytes",
+            },
+        )?;
+        if working_bytes > self.limits.max_working_bytes {
+            return Err(ThreeDError::PreparationLimitExceeded {
+                resource: "preparation working bytes",
+                limit: self.limits.max_working_bytes,
+                requested: working_bytes,
+            });
+        }
+        Ok((requested, working_bytes))
+    }
+
+    fn reserve_rows<T>(
+        &mut self,
+        output: &mut Vec<T>,
+        resource: PreparationRows,
+        additional: usize,
+    ) -> Result<(), ThreeDError> {
+        let (requested, working_bytes) = self.admitted::<T>(resource, additional)?;
+        output.try_reserve_exact(additional).map_err(|_| {
+            ThreeDError::PreparationAllocationFailed {
+                resource: resource.resource(),
+                requested,
+            }
+        })?;
+        self.set_rows(resource, requested);
+        self.working_bytes = working_bytes;
+        Ok(())
+    }
+
+    fn charge_rows<T>(
+        &mut self,
+        resource: PreparationRows,
+        additional: usize,
+    ) -> Result<(), ThreeDError> {
+        let (requested, working_bytes) = self.admitted::<T>(resource, additional)?;
+        self.set_rows(resource, requested);
+        self.working_bytes = working_bytes;
+        Ok(())
+    }
+
+    fn remaining_rows<T>(&self, resource: PreparationRows) -> usize {
+        let absolute_limit = if resource == PreparationRows::ProjectedCurves {
+            resource.limit(self.limits).min(u64::from(u32::MAX))
+        } else {
+            resource.limit(self.limits)
+        };
+        let count = absolute_limit.saturating_sub(self.rows(resource));
+        let row_bytes = u64::try_from(std::mem::size_of::<T>()).unwrap_or(u64::MAX);
+        let bytes = self
+            .limits
+            .max_working_bytes
+            .saturating_sub(self.working_bytes)
+            .checked_div(row_bytes)
+            .unwrap_or(u64::MAX);
+        usize::try_from(count.min(bytes)).unwrap_or(usize::MAX)
+    }
+
+    fn reserve_retained<T>(
+        &mut self,
+        output: &mut Vec<T>,
+        resource: &'static str,
+        additional: usize,
+    ) -> Result<(), ThreeDError> {
+        let working_bytes = self.admitted_buffer::<T>(resource, additional)?;
+        let requested = output
+            .len()
+            .checked_add(additional)
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(u64::MAX);
+        output.try_reserve_exact(additional).map_err(|_| {
+            ThreeDError::PreparationAllocationFailed {
+                resource,
+                requested,
+            }
+        })?;
+        self.working_bytes = working_bytes;
+        Ok(())
+    }
+
+    fn charge_buffer<T>(
+        &mut self,
+        resource: &'static str,
+        additional: usize,
+    ) -> Result<(), ThreeDError> {
+        self.working_bytes = self.admitted_buffer::<T>(resource, additional)?;
+        Ok(())
+    }
+
+    fn admitted_buffer<T>(
+        &self,
+        resource: &'static str,
+        additional: usize,
+    ) -> Result<u64, ThreeDError> {
+        let additional_u64 = u64::try_from(additional)
+            .map_err(|_| ThreeDError::PreparationSizeOverflow { resource })?;
+        let row_bytes = u64::try_from(std::mem::size_of::<T>()).map_err(|_| {
+            ThreeDError::PreparationSizeOverflow {
+                resource: "preparation working bytes",
+            }
+        })?;
+        let additional_bytes =
+            additional_u64
+                .checked_mul(row_bytes)
+                .ok_or(ThreeDError::PreparationSizeOverflow {
+                    resource: "preparation working bytes",
+                })?;
+        let working_bytes = self.working_bytes.checked_add(additional_bytes).ok_or(
+            ThreeDError::PreparationSizeOverflow {
+                resource: "preparation working bytes",
+            },
+        )?;
+        if working_bytes > self.limits.max_working_bytes {
+            return Err(ThreeDError::PreparationLimitExceeded {
+                resource: "preparation working bytes",
+                limit: self.limits.max_working_bytes,
+                requested: working_bytes,
+            });
+        }
+        Ok(working_bytes)
+    }
+
+    fn remaining_buffer_rows<T>(&self) -> usize {
+        let row_bytes = u64::try_from(std::mem::size_of::<T>()).unwrap_or(u64::MAX);
+        let rows = self
+            .limits
+            .max_working_bytes
+            .saturating_sub(self.working_bytes)
+            .checked_div(row_bytes)
+            .unwrap_or(u64::MAX);
+        usize::try_from(rows).unwrap_or(usize::MAX)
+    }
+}
+
+fn reserve_temporary<T>(
+    budget: &mut PreparationBudget,
+    output: &mut Vec<T>,
+    resource: &'static str,
+    additional: usize,
+) -> Result<(), ThreeDError> {
+    budget.reserve_retained(output, resource, additional)
+}
+
+fn camera_preparation_error(
+    error: CameraError,
+    budget: &PreparationBudget,
+    clip_piece_bytes: u64,
+) -> ThreeDError {
+    match error {
+        CameraError::ClipLimitExceeded { requested, .. } => {
+            let requested = u64::try_from(requested)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(2)
+                .saturating_mul(clip_piece_bytes);
+            ThreeDError::PreparationLimitExceeded {
+                resource: "preparation working bytes",
+                limit: budget.limits.max_working_bytes,
+                requested: budget.working_bytes.saturating_add(requested),
+            }
+        }
+        CameraError::AllocationFailed {
+            resource,
+            requested,
+        } => ThreeDError::PreparationAllocationFailed {
+            resource,
+            requested: u64::try_from(requested).unwrap_or(u64::MAX),
+        },
+        _ => ThreeDError::NonFinite,
+    }
+}
 
 fn checked_uv_grid_layout(resolution: (u32, u32)) -> Result<(u64, u64), ThreeDError> {
     let (nu, nv) = resolution;
@@ -797,12 +1158,23 @@ pub(crate) struct CompiledDraw<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CompiledVectorSlot(Vec<CompiledVector>);
+
+impl CompiledVectorSlot {
+    fn get(&self) -> &CompiledVector {
+        self.0
+            .first()
+            .expect("a published vector slot contains exactly one row")
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum CompiledPrimitive<'a> {
     Triangles {
         triangles: Vec<RasterTriangle>,
         shader: Shader<'a>,
     },
-    Vector(Box<CompiledVector>),
+    Vector(CompiledVectorSlot),
 }
 
 /// Camera-bound, clipped, tiled 3D frame.
@@ -813,6 +1185,7 @@ pub struct ThreeDJob<'a> {
     tiling: Tiling,
     sample_grid: u32,
     camera_revision: u64,
+    preparation_bytes: u64,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -822,12 +1195,29 @@ impl<'a> ThreeDJob<'a> {
         draws: &[ThreeDDraw<'a>],
         tiling: Tiling,
     ) -> Result<Self, ThreeDError> {
-        let mut compiled = Vec::with_capacity(draws.len());
+        Self::new_with_limits(camera, draws, tiling, ThreeDPreparationLimits::default())
+    }
+
+    /// Compile painter-ordered primitives under explicit aggregate limits.
+    ///
+    /// Every retained output buffer is admitted and reserved before its rows
+    /// are appended. Failure therefore returns a typed error without publishing
+    /// a partial job; successful compilation preserves the same painter order
+    /// and arithmetic as [`ThreeDJob::new`].
+    pub fn new_with_limits(
+        camera: &'a Camera,
+        draws: &[ThreeDDraw<'a>],
+        tiling: Tiling,
+        limits: ThreeDPreparationLimits,
+    ) -> Result<Self, ThreeDError> {
+        let mut budget = PreparationBudget::new(limits);
+        let mut compiled = Vec::new();
+        budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
         for draw in draws {
             compiled.push(match *draw {
-                ThreeDDraw::Vector(vector) => compile_vector(camera, vector)?,
-                ThreeDDraw::Surface(surface) => compile_surface(camera, surface)?,
-                ThreeDDraw::TrueDot(dot) => compile_dot(camera, dot)?,
+                ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
+                ThreeDDraw::Surface(surface) => compile_surface(camera, surface, &mut budget)?,
+                ThreeDDraw::TrueDot(dot) => compile_dot(camera, dot, &mut budget)?,
             });
         }
         let sample_grid = match camera.edge_sample_limit() {
@@ -841,6 +1231,7 @@ impl<'a> ThreeDJob<'a> {
             tiling,
             sample_grid,
             camera_revision: camera.revision(),
+            preparation_bytes: budget.working_bytes,
         })
     }
 
@@ -848,6 +1239,12 @@ impl<'a> ThreeDJob<'a> {
     #[must_use]
     pub fn draw_count(&self) -> usize {
         self.draws.len()
+    }
+
+    /// Conservative logical bytes admitted while preparing this job.
+    #[must_use]
+    pub const fn preparation_bytes(&self) -> u64 {
+        self.preparation_bytes
     }
 
     /// Fine-tile schedule.
@@ -1016,7 +1413,7 @@ impl<'a> ThreeDJob<'a> {
                     CompiledPrimitive::Vector(vector) => {
                         scratch.mark_vector_boundaries(
                             self.camera,
-                            vector,
+                            vector.get(),
                             rectangle,
                             width,
                             height,
@@ -1046,7 +1443,7 @@ impl<'a> ThreeDJob<'a> {
                 CompiledPrimitive::Vector(vector) => {
                     scratch.raster_vector(
                         self.camera,
-                        vector,
+                        vector.get(),
                         draw.depth_test,
                         rectangle,
                         width,
@@ -1070,6 +1467,7 @@ impl<'a> ThreeDJob<'a> {
 fn compile_vector<'a>(
     camera: &'a Camera,
     draw: VectorDraw<'a>,
+    budget: &mut PreparationBudget,
 ) -> Result<CompiledDraw<'a>, ThreeDError> {
     let instance = draw
         .plan
@@ -1107,34 +1505,35 @@ fn compile_vector<'a>(
     // out of that calculation so two translated instances cannot acquire
     // different floating-point normals through cancellation of large
     // coordinates.
-    let mut linear_segments: Vec<Segment> = source
-        .iter()
-        .map(|segment| Segment {
+    let mut world_segments = Vec::new();
+    reserve_temporary(
+        budget,
+        &mut world_segments,
+        "transformed vector segments",
+        source.len(),
+    )?;
+    for segment in source {
+        world_segments.push(Segment {
             p0: instance.placement.apply_vector(segment.p0),
             p1: instance.placement.apply_vector(segment.p1),
             p2: instance.placement.apply_vector(segment.p2),
             s0: segment.s0,
             s1: segment.s1,
-        })
-        .collect();
+        });
+    }
     // Preserve retained spans only for structurally proven similarities. A
     // general affine map changes relative curve lengths and must take the
     // scalar arc-length oracle before gradients and stroke ramps consume them.
     if !retains_normalized_arc_length(instance.placement) {
-        reparameterize_arc_length(&mut linear_segments);
+        reparameterize_arc_length(&mut world_segments);
     }
-    let normal = shape_unit_normal(&linear_segments, &shape.subpath_starts);
+    let normal = shape_unit_normal(&world_segments, &shape.subpath_starts);
     let translation = instance.placement.translation();
-    let world_segments: Vec<Segment> = linear_segments
-        .iter()
-        .map(|segment| Segment {
-            p0: add(segment.p0, translation),
-            p1: add(segment.p1, translation),
-            p2: add(segment.p2, translation),
-            s0: segment.s0,
-            s1: segment.s1,
-        })
-        .collect();
+    for segment in &mut world_segments {
+        segment.p0 = add(segment.p0, translation);
+        segment.p1 = add(segment.p1, translation);
+        segment.p2 = add(segment.p2, translation);
+    }
 
     let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
     let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
@@ -1143,31 +1542,83 @@ fn compile_vector<'a>(
     let mut curves = Vec::new();
     let mut curve_starts = Vec::new();
     let starts = &shape.subpath_starts;
+    let world_segment_count =
+        u32::try_from(world_segments.len()).map_err(|_| ThreeDError::PreparationLimitExceeded {
+            resource: "vector segment indices",
+            limit: u64::from(u32::MAX),
+            requested: u64::try_from(world_segments.len()).unwrap_or(u64::MAX),
+        })?;
     for (subpath, &start) in starts.iter().enumerate() {
         let end = starts
             .get(subpath + 1)
             .copied()
-            .unwrap_or(world_segments.len() as u32)
-            .min(world_segments.len() as u32);
+            .unwrap_or(world_segment_count)
+            .min(world_segment_count);
         let subpath = &world_segments[start as usize..end as usize];
         if draws_fill {
-            let controls: Vec<[Vec3; 3]> = subpath
-                .iter()
-                .map(|segment| [segment.p0, segment.p1, segment.p2])
-                .collect();
-            for clipped in camera
-                .project_fill_contour(&controls, style.is_fixed_in_frame, style.clip_planes)
-                .map_err(|_| ThreeDError::NonFinite)?
-            {
+            let mut controls = Vec::new();
+            reserve_temporary(
+                budget,
+                &mut controls,
+                "fill-contour controls",
+                subpath.len(),
+            )?;
+            for segment in subpath {
+                controls.push([segment.p0, segment.p1, segment.p2]);
+            }
+            let byte_clip_limit = budget.remaining_buffer_rows::<ClippedFillQuadratic>() / 2;
+            let clipped_contour = camera
+                .project_fill_contour(
+                    &controls,
+                    style.is_fixed_in_frame,
+                    style.clip_planes,
+                    byte_clip_limit,
+                )
+                .map_err(|error| {
+                    camera_preparation_error(
+                        error,
+                        budget,
+                        u64::try_from(std::mem::size_of::<ClippedFillQuadratic>())
+                            .unwrap_or(u64::MAX),
+                    )
+                })?;
+            let clip_rows = clipped_contour.len().checked_mul(2).ok_or(
+                ThreeDError::PreparationSizeOverflow {
+                    resource: "fill-contour clipping",
+                },
+            )?;
+            budget.charge_buffer::<ClippedFillQuadratic>("fill-contour clipping", clip_rows)?;
+            for clipped in clipped_contour {
                 let rational = RationalPiece {
                     p: clipped.screen_controls(camera.pixel_shape()),
                 };
-                let report = fill::append_rational(
+                let piece_limit = budget.remaining_rows::<MonoPiece>(PreparationRows::FillPieces);
+                let report = fill::append_rational_with_limit(
                     &rational,
                     PERSPECTIVE_VECTOR_TOLERANCE_PX,
                     &mut fill_pieces,
+                    piece_limit,
                 )
-                .map_err(|_| ThreeDError::UnclippedHorizon)?;
+                .map_err(|error| match error {
+                    fill::RationalError::CrossesHorizon => ThreeDError::UnclippedHorizon,
+                    fill::RationalError::PieceLimitExceeded { requested, .. } => {
+                        ThreeDError::PreparationLimitExceeded {
+                            resource: PreparationRows::FillPieces.resource(),
+                            limit: budget.limits.max_fill_pieces,
+                            requested: budget
+                                .fill_pieces
+                                .saturating_add(u64::try_from(requested).unwrap_or(u64::MAX)),
+                        }
+                    }
+                    fill::RationalError::AllocationFailed {
+                        resource,
+                        requested,
+                    } => ThreeDError::PreparationAllocationFailed {
+                        resource,
+                        requested: u64::try_from(requested).unwrap_or(u64::MAX),
+                    },
+                })?;
+                budget.charge_rows::<MonoPiece>(PreparationRows::FillPieces, report.pieces)?;
                 if report.capped {
                     return Err(ThreeDError::PerspectiveToleranceExceeded);
                 }
@@ -1176,8 +1627,9 @@ fn compile_vector<'a>(
 
         let mut run_last_world: Option<Vec3> = None;
         for segment in subpath {
+            let byte_clip_limit = budget.remaining_buffer_rows::<ClippedQuadratic>() / 2;
             let projected = camera
-                .project_quadratic(
+                .project_quadratic_with_limit(
                     [segment.p0, segment.p1, segment.p2],
                     style.is_fixed_in_frame,
                     // User planes clip the stroke *surface* below. Keeping the
@@ -1185,8 +1637,23 @@ fn compile_vector<'a>(
                     // cuts: distance to a centerline point just outside the
                     // plane can still define a legal fragment just inside it.
                     [[0.0; 4]; 4],
+                    byte_clip_limit,
                 )
-                .map_err(|_| ThreeDError::NonFinite)?;
+                .map_err(|error| {
+                    camera_preparation_error(
+                        error,
+                        budget,
+                        u64::try_from(std::mem::size_of::<ClippedQuadratic>()).unwrap_or(u64::MAX),
+                    )
+                })?;
+            let clip_rows =
+                projected
+                    .len()
+                    .checked_mul(2)
+                    .ok_or(ThreeDError::PreparationSizeOverflow {
+                        resource: "projected quadratic clipping",
+                    })?;
+            budget.charge_buffer::<ClippedQuadratic>("projected quadratic clipping", clip_rows)?;
             for clipped in projected {
                 let rational = RationalPiece {
                     p: clipped.screen_controls(camera.pixel_shape()),
@@ -1194,24 +1661,37 @@ fn compile_vector<'a>(
                 let starts_run =
                     run_last_world.is_none_or(|point| !points_close(point, clipped.world[0]));
                 if starts_run {
-                    curve_starts.push(curves.len() as u32);
+                    let start = u32::try_from(curves.len()).map_err(|_| {
+                        ThreeDError::PreparationLimitExceeded {
+                            resource: "projected curve indices",
+                            limit: u64::from(u32::MAX),
+                            requested: u64::try_from(curves.len())
+                                .unwrap_or(u64::MAX)
+                                .saturating_add(1),
+                        }
+                    })?;
+                    reserve_temporary(budget, &mut curve_starts, "projected curve starts", 1)?;
+                    curve_starts.push(start);
                 }
                 let s0 = segment_s_at(segment, clipped.source_t[0]);
                 let s1 = segment_s_at(segment, clipped.source_t[1]);
-                append_projected_curves(rational, clipped.world, s0, s1, 0, &mut curves)?;
+                append_projected_curves(rational, clipped.world, s0, s1, 0, &mut curves, budget)?;
                 run_last_world = Some(clipped.world[2]);
             }
         }
     }
 
-    let screen_segments: Vec<Segment> = curves.iter().map(|piece| piece.screen).collect();
-    let mut joins = crate::stroke::join_wedges(
-        &screen_segments,
-        &curve_starts,
-        &style,
-        unit_screen_map(),
-        [0.0; 2],
-    );
+    let mut screen_segments = Vec::new();
+    reserve_temporary(
+        budget,
+        &mut screen_segments,
+        "projected screen segments",
+        curves.len(),
+    )?;
+    for piece in &curves {
+        screen_segments.push(piece.screen);
+    }
+    let mut joins = build_join_wedges(&screen_segments, &curve_starts, &style, budget)?;
     for join in &mut joins {
         if let Some(curve) = curves.iter().min_by(|a, b| {
             let distance = |piece: &ProjectedCurvePiece| {
@@ -1256,23 +1736,30 @@ fn compile_vector<'a>(
         return Err(ThreeDError::NonPlanarVectorShading);
     }
     let field = if draws_fill && !fill::fill_is_flat(&style) {
-        fill_plane.and_then(|plane| PlanarGradientField::build(&world_segments, plane))
+        match fill_plane {
+            Some(plane) => PlanarGradientField::build(&world_segments, plane, budget)?,
+            None => None,
+        }
     } else {
         None
     };
     let bounds = vector_bounds(camera, &style, normal, &fill_pieces, &curves);
+    let vector = CompiledVector {
+        fill: fill_pieces,
+        curves,
+        joins,
+        field,
+        style,
+        normal,
+        fill_plane,
+        draws_fill,
+        draws_stroke,
+    };
+    let mut vector_rows = Vec::new();
+    budget.reserve_retained(&mut vector_rows, "compiled vector rows", 1)?;
+    vector_rows.push(vector);
     Ok(CompiledDraw {
-        primitive: CompiledPrimitive::Vector(Box::new(CompiledVector {
-            fill: fill_pieces,
-            curves,
-            joins,
-            field,
-            style,
-            normal,
-            fill_plane,
-            draws_fill,
-            draws_stroke,
-        })),
+        primitive: CompiledPrimitive::Vector(CompiledVectorSlot(vector_rows)),
         depth_test: style.depth_test,
         bounds,
     })
@@ -1283,6 +1770,73 @@ fn unit_screen_map() -> ScreenMap {
         scale: 1.0,
         origin: [0.0; 2],
     }
+}
+
+#[derive(Debug, Default)]
+struct CountingSink {
+    rows: usize,
+}
+
+impl<T> Sink<T> for CountingSink {
+    fn len(&self) -> usize {
+        self.rows
+    }
+
+    fn try_reserve(&mut self, _additional: usize) -> Result<(), TryReserveError> {
+        Ok(())
+    }
+
+    fn put(&mut self, _value: T) {
+        self.rows += 1;
+    }
+}
+
+fn build_join_wedges(
+    segments: &[Segment],
+    subpath_starts: &[u32],
+    style: &Style,
+    budget: &mut PreparationBudget,
+) -> Result<Vec<crate::stroke::JoinWedge>, ThreeDError> {
+    if matches!(
+        style.joint_type,
+        fmn_mobject::JointType::Auto | fmn_mobject::JointType::NoJoint
+    ) {
+        return Ok(Vec::new());
+    }
+
+    let mut pairs: Pool<(usize, usize)> = Pool::default();
+    budget.charge_buffer::<(usize, usize)>("join corner pairs", segments.len())?;
+    pairs
+        .try_reserve(segments.len())
+        .map_err(|_| ThreeDError::PreparationAllocationFailed {
+            resource: "join corner pairs",
+            requested: u64::try_from(segments.len()).unwrap_or(u64::MAX),
+        })?;
+    let mut count = CountingSink::default();
+    crate::stroke::join_wedges_into(
+        &mut count,
+        &mut pairs,
+        segments,
+        subpath_starts,
+        style,
+        unit_screen_map(),
+        [0.0; 2],
+    );
+
+    let mut joins = Vec::new();
+    budget.reserve_retained(&mut joins, "join wedges", count.rows)?;
+    pairs.clear();
+    crate::stroke::join_wedges_into(
+        &mut joins,
+        &mut pairs,
+        segments,
+        subpath_starts,
+        style,
+        unit_screen_map(),
+        [0.0; 2],
+    );
+    debug_assert_eq!(joins.len(), count.rows);
+    Ok(joins)
 }
 
 fn points_close(a: Vec3, b: Vec3) -> bool {
@@ -1315,10 +1869,12 @@ fn append_projected_curves(
     s1: f64,
     depth: u32,
     output: &mut Vec<ProjectedCurvePiece>,
+    budget: &mut PreparationBudget,
 ) -> Result<(), ThreeDError> {
     let error = rational.deviation_px();
     if error <= PERSPECTIVE_VECTOR_TOLERANCE_PX {
         let curve = rational.integral_approximation();
+        budget.reserve_rows(output, PreparationRows::ProjectedCurves, 1)?;
         output.push(ProjectedCurvePiece {
             screen: Segment {
                 p0: [curve.p0[0], curve.p0[1], 0.0],
@@ -1346,8 +1902,24 @@ fn append_projected_curves(
         0.5
     };
     let middle = s0 + (s1 - s0) * fraction;
-    append_projected_curves(rational_left, world_left, s0, middle, depth + 1, output)?;
-    append_projected_curves(rational_right, world_right, middle, s1, depth + 1, output)
+    append_projected_curves(
+        rational_left,
+        world_left,
+        s0,
+        middle,
+        depth + 1,
+        output,
+        budget,
+    )?;
+    append_projected_curves(
+        rational_right,
+        world_right,
+        middle,
+        s1,
+        depth + 1,
+        output,
+        budget,
+    )
 }
 
 fn split_world_quadratic(world: [Vec3; 3], t: f64) -> ([Vec3; 3], [Vec3; 3]) {
@@ -1360,25 +1932,34 @@ fn split_world_quadratic(world: [Vec3; 3], t: f64) -> ([Vec3; 3], [Vec3; 3]) {
 
 fn shape_unit_normal(segments: &[Segment], subpath_starts: &[u32]) -> Vec3 {
     let mut area = [0.0; 3];
+    let add_edge = |area: &mut Vec3, p0: Vec3, p1: Vec3| {
+        area[0] += 0.5 * (p0[1] + p1[1]) * (p1[2] - p0[2]);
+        area[1] += 0.5 * (p0[2] + p1[2]) * (p1[0] - p0[0]);
+        area[2] += 0.5 * (p0[0] + p1[0]) * (p1[1] - p0[1]);
+    };
     for (subpath, &start) in subpath_starts.iter().enumerate() {
         let end = subpath_starts
             .get(subpath + 1)
             .copied()
-            .unwrap_or(segments.len() as u32);
-        let lo = (start as usize).min(segments.len());
-        let hi = (end as usize).min(segments.len());
+            .map_or(segments.len(), |end| {
+                usize::try_from(end).unwrap_or(usize::MAX)
+            });
+        let lo = usize::try_from(start)
+            .unwrap_or(usize::MAX)
+            .min(segments.len());
+        let hi = end.min(segments.len());
         if lo >= hi {
             continue;
         }
-        let mut anchors: Vec<Vec3> = segments[lo..hi].iter().map(|segment| segment.p0).collect();
-        anchors.push(segments[hi - 1].p2);
-        for index in 0..anchors.len() {
-            let p0 = anchors[index];
-            let p1 = anchors[(index + 1) % anchors.len()];
-            area[0] += 0.5 * (p0[1] + p1[1]) * (p1[2] - p0[2]);
-            area[1] += 0.5 * (p0[2] + p1[2]) * (p1[0] - p0[0]);
-            area[2] += 0.5 * (p0[0] + p1[0]) * (p1[1] - p0[1]);
+        let first = segments[lo].p0;
+        let mut previous = first;
+        for segment in &segments[lo + 1..hi] {
+            add_edge(&mut area, previous, segment.p0);
+            previous = segment.p0;
         }
+        let end = segments[hi - 1].p2;
+        add_edge(&mut area, previous, end);
+        add_edge(&mut area, end, first);
     }
     normalize(area).unwrap_or_else(|| {
         segments.first().map_or([0.0, 0.0, 1.0], |segment| {
@@ -1404,7 +1985,11 @@ fn vector_is_planar(segments: &[Segment], normal: Vec3) -> bool {
 }
 
 impl PlanarGradientField {
-    fn build(segments: &[Segment], plane: [f64; 4]) -> Option<Self> {
+    fn build(
+        segments: &[Segment],
+        plane: [f64; 4],
+        budget: &mut PreparationBudget,
+    ) -> Result<Option<Self>, ThreeDError> {
         let normal = [plane[0], plane[1], plane[2]];
         let absolute = [normal[0].abs(), normal[1].abs(), normal[2].abs()];
         let reference = if absolute[0] <= absolute[1] && absolute[0] <= absolute[2] {
@@ -1414,38 +1999,55 @@ impl PlanarGradientField {
         } else {
             [0.0, 0.0, 1.0]
         };
-        let u = normalize(cross(reference, normal))?;
-        let v = normalize(cross(normal, u))?;
+        let Some(u) = normalize(cross(reference, normal)) else {
+            return Ok(None);
+        };
+        let Some(v) = normalize(cross(normal, u)) else {
+            return Ok(None);
+        };
         let origin = mul(normal, -plane[3]);
         let coordinates = |point: Vec3| {
             let relative = sub(point, origin);
             [dot(relative, u), dot(relative, v), 0.0]
         };
-        let planar_segments: Vec<Segment> = segments
-            .iter()
-            .map(|segment| Segment {
+        let mut planar_segments = Vec::new();
+        reserve_temporary(
+            budget,
+            &mut planar_segments,
+            "planar gradient segments",
+            segments.len(),
+        )?;
+        for segment in segments {
+            planar_segments.push(Segment {
                 p0: coordinates(segment.p0),
                 p1: coordinates(segment.p1),
                 p2: coordinates(segment.p2),
                 s0: segment.s0,
                 s1: segment.s1,
-            })
-            .collect();
+            });
+        }
         let mut points = Vec::new();
         let mut params = Vec::new();
+        let stations = if planar_segments.is_empty() {
+            0
+        } else {
+            fill::GRADIENT_STATIONS
+        };
+        budget.reserve_retained(&mut points, "gradient station points", stations)?;
+        budget.reserve_retained(&mut params, "gradient station parameters", stations)?;
         GradientField::build_into(
             &mut points,
             &mut params,
             &planar_segments,
             unit_screen_map(),
         );
-        Some(Self {
+        Ok(Some(Self {
             points,
             params,
             origin,
             u,
             v,
-        })
+        }))
     }
 
     fn param_at(&self, world: Vec3) -> f64 {
@@ -1518,6 +2120,7 @@ fn vector_bounds(
 fn compile_surface<'a>(
     camera: &'a Camera,
     draw: SurfaceDraw<'a>,
+    budget: &mut PreparationBudget,
 ) -> Result<CompiledDraw<'a>, ThreeDError> {
     if !draw.is_fixed_in_frame.is_finite()
         || !finite3(draw.shading)
@@ -1571,7 +2174,8 @@ fn compile_surface<'a>(
             draw.is_fixed_in_frame,
             draw.clip_planes,
             &mut triangles,
-        );
+            budget,
+        )?;
     }
     let shader = match draw.material {
         SurfaceMaterial::VertexColor => Shader::Gouraud,
@@ -1589,7 +2193,11 @@ fn compile_surface<'a>(
     })
 }
 
-fn compile_dot<'a>(camera: &'a Camera, draw: TrueDotDraw) -> Result<CompiledDraw<'a>, ThreeDError> {
+fn compile_dot<'a>(
+    camera: &'a Camera,
+    draw: TrueDotDraw,
+    budget: &mut PreparationBudget,
+) -> Result<CompiledDraw<'a>, ThreeDError> {
     if !finite3(draw.center)
         || !finite3(draw.shading)
         || ![
@@ -1653,7 +2261,8 @@ fn compile_dot<'a>(camera: &'a Camera, draw: TrueDotDraw) -> Result<CompiledDraw
             draw.is_fixed_in_frame,
             draw.clip_planes,
             &mut triangles,
-        );
+            budget,
+        )?;
     }
     Ok(CompiledDraw {
         bounds: union_bounds(&triangles),
@@ -1681,60 +2290,80 @@ fn append_clipped_triangle(
     fixed: f64,
     clip_planes: [[f64; 4]; 4],
     output: &mut Vec<RasterTriangle>,
-) {
-    let mut polygon = triangle.to_vec();
+    budget: &mut PreparationBudget,
+) -> Result<(), ThreeDError> {
+    const MAX_CLIPPED_POLYGON_VERTICES: usize = 3 + 4 + 6;
+
+    let mut polygon = [triangle[0]; MAX_CLIPPED_POLYGON_VERTICES];
+    polygon[..3].copy_from_slice(triangle);
+    let mut polygon_len = 3;
     for plane in clip_planes {
         if plane[..3].iter().all(|value| *value == 0.0) {
             continue;
         }
-        polygon = clip_world_polygon(&polygon, |vertex| {
+        (polygon, polygon_len) = clip_world_polygon(&polygon[..polygon_len], |vertex| {
             let point = vertex.attributes.world;
             point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
-        });
-        if polygon.len() < 3 {
-            return;
+        })?;
+        if polygon_len < 3 {
+            return Ok(());
         }
     }
-    let mut projected: Vec<ProjectedVertex> = polygon
-        .into_iter()
-        .map(|vertex| ProjectedVertex {
+
+    let first = ProjectedVertex {
+        clip: camera.project(polygon[0].attributes.world, fixed).clip,
+        attributes: polygon[0].attributes,
+    };
+    let mut projected = [first; MAX_CLIPPED_POLYGON_VERTICES];
+    for (slot, vertex) in projected[..polygon_len]
+        .iter_mut()
+        .zip(&polygon[..polygon_len])
+    {
+        *slot = ProjectedVertex {
             clip: camera.project(vertex.attributes.world, fixed).clip,
             attributes: vertex.attributes,
-        })
-        .collect();
+        };
+    }
+    let mut projected_len = polygon_len;
     for plane in 0..6 {
-        projected = clip_projected_polygon(&projected, |vertex| {
-            let [x, y, z, w] = vertex.clip;
-            match plane {
-                0 => x + w,
-                1 => w - x,
-                2 => y + w,
-                3 => w - y,
-                4 => z + w,
-                _ => w - z,
-            }
-        });
-        if projected.len() < 3 {
-            return;
+        (projected, projected_len) =
+            clip_projected_polygon(&projected[..projected_len], |vertex| {
+                let [x, y, z, w] = vertex.clip;
+                match plane {
+                    0 => x + w,
+                    1 => w - x,
+                    2 => y + w,
+                    3 => w - y,
+                    4 => z + w,
+                    _ => w - z,
+                }
+            })?;
+        if projected_len < 3 {
+            return Ok(());
         }
     }
     let first = projected[0];
-    for index in 1..projected.len() - 1 {
+    for index in 1..projected_len - 1 {
         let vertices = [first, projected[index], projected[index + 1]];
         if let Some(triangle) = raster_triangle(vertices, camera.pixel_shape()) {
+            budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
             output.push(triangle);
         }
     }
+    Ok(())
 }
 
 fn clip_world_polygon(
     input: &[WorldVertex],
     distance: impl Fn(&WorldVertex) -> f64,
-) -> Vec<WorldVertex> {
-    let mut output = Vec::with_capacity(input.len() + 1);
+) -> Result<([WorldVertex; 13], usize), ThreeDError> {
     let Some(mut previous) = input.last().copied() else {
-        return output;
+        return Err(ThreeDError::PreparationSizeOverflow {
+            resource: "world clipping polygon",
+        });
     };
+    let mut output = [previous; 13];
+    let mut output_len = 0;
     let mut previous_distance = distance(&previous);
     for &current in input {
         let current_distance = distance(&current);
@@ -1742,27 +2371,40 @@ fn clip_world_polygon(
         let current_inside = current_distance >= 0.0;
         if previous_inside != current_inside {
             let alpha = previous_distance / (previous_distance - current_distance);
-            output.push(WorldVertex {
-                attributes: previous.attributes.lerp(current.attributes, alpha),
-            });
+            push_fixed(
+                &mut output,
+                &mut output_len,
+                WorldVertex {
+                    attributes: previous.attributes.lerp(current.attributes, alpha),
+                },
+                "world clipping polygon",
+            )?;
         }
         if current_inside {
-            output.push(current);
+            push_fixed(
+                &mut output,
+                &mut output_len,
+                current,
+                "world clipping polygon",
+            )?;
         }
         previous = current;
         previous_distance = current_distance;
     }
-    output
+    Ok((output, output_len))
 }
 
 fn clip_projected_polygon(
     input: &[ProjectedVertex],
     distance: impl Fn(&ProjectedVertex) -> f64,
-) -> Vec<ProjectedVertex> {
-    let mut output = Vec::with_capacity(input.len() + 1);
+) -> Result<([ProjectedVertex; 13], usize), ThreeDError> {
     let Some(mut previous) = input.last().copied() else {
-        return output;
+        return Err(ThreeDError::PreparationSizeOverflow {
+            resource: "projected clipping polygon",
+        });
     };
+    let mut output = [previous; 13];
+    let mut output_len = 0;
     let mut previous_distance = distance(&previous);
     for &current in input {
         let current_distance = distance(&current);
@@ -1770,15 +2412,39 @@ fn clip_projected_polygon(
         let current_inside = current_distance >= 0.0;
         if previous_inside != current_inside {
             let alpha = previous_distance / (previous_distance - current_distance);
-            output.push(previous.lerp(current, alpha));
+            push_fixed(
+                &mut output,
+                &mut output_len,
+                previous.lerp(current, alpha),
+                "projected clipping polygon",
+            )?;
         }
         if current_inside {
-            output.push(current);
+            push_fixed(
+                &mut output,
+                &mut output_len,
+                current,
+                "projected clipping polygon",
+            )?;
         }
         previous = current;
         previous_distance = current_distance;
     }
-    output
+    Ok((output, output_len))
+}
+
+fn push_fixed<T: Copy, const N: usize>(
+    output: &mut [T; N],
+    len: &mut usize,
+    value: T,
+    resource: &'static str,
+) -> Result<(), ThreeDError> {
+    let Some(slot) = output.get_mut(*len) else {
+        return Err(ThreeDError::PreparationSizeOverflow { resource });
+    };
+    *slot = value;
+    *len += 1;
+    Ok(())
 }
 
 fn raster_triangle(
@@ -2895,7 +3561,7 @@ mod tests {
         job.draws
             .first()
             .and_then(|draw| match &draw.primitive {
-                CompiledPrimitive::Vector(vector) => Some(vector.as_ref()),
+                CompiledPrimitive::Vector(vector) => Some(vector.get()),
                 CompiledPrimitive::Triangles { .. } => None,
             })
             .expect("fixture must compile as a retained vector")
@@ -3056,6 +3722,276 @@ mod tests {
             allocate_indices(indices),
             Err(ThreeDError::AllocationFailed { indices })
         );
+    }
+
+    #[test]
+    fn preparation_limits_accept_exact_vector_counts_and_preserve_frame_bits() {
+        let camera = camera();
+        let points = path_points(
+            &[
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &points,
+            [0.2, 0.4, 0.6, 1.0],
+            [0.9, 0.3, 0.1, 1.0],
+            2.0,
+            camera.revision(),
+            |_| {},
+        );
+        let draws = [ThreeDDraw::Vector(VectorDraw::new(&plan, 0))];
+        let baseline = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("default job");
+        let baseline_vector = compiled_vector(&baseline);
+        let curves = u64::try_from(baseline_vector.curves.len()).expect("curve count fits u64");
+        let pieces = u64::try_from(baseline_vector.fill.len()).expect("piece count fits u64");
+        let working_bytes = baseline.preparation_bytes();
+        assert!(
+            curves > 0 && pieces > 0,
+            "fixture must exercise both limits"
+        );
+
+        let exact = ThreeDPreparationLimits {
+            max_draws: 1,
+            max_projected_curves: curves,
+            max_fill_pieces: pieces,
+            max_raster_triangles: 0,
+            max_working_bytes: working_bytes,
+        };
+        let bounded = ThreeDJob::new_with_limits(&camera, &draws, Tiling::default(), exact)
+            .expect("exact row limits");
+        assert_eq!(compiled_vector(&bounded).curves.len(), curves as usize);
+        assert_eq!(compiled_vector(&bounded).fill.len(), pieces as usize);
+        let baseline_frame = baseline.render(1).expect("baseline frame");
+        let bounded_frame = bounded.render(1).expect("bounded frame");
+        assert_eq!(baseline_frame.plane(0), bounded_frame.plane(0));
+
+        let byte_error = ThreeDJob::new_with_limits(
+            &camera,
+            &draws,
+            Tiling::default(),
+            ThreeDPreparationLimits {
+                max_working_bytes: working_bytes - 1,
+                ..exact
+            },
+        )
+        .expect_err("one byte below the exact preparation boundary");
+        assert!(matches!(
+            byte_error,
+            ThreeDError::PreparationLimitExceeded {
+                resource: "preparation working bytes",
+                limit,
+                requested,
+            } if limit == working_bytes - 1 && requested > limit
+        ));
+
+        let curve_error = ThreeDJob::new_with_limits(
+            &camera,
+            &draws,
+            Tiling::default(),
+            ThreeDPreparationLimits {
+                max_projected_curves: curves - 1,
+                ..exact
+            },
+        )
+        .expect_err("one curve below the exact boundary");
+        assert!(matches!(
+            curve_error,
+            ThreeDError::PreparationLimitExceeded {
+                resource: "projected curves",
+                limit,
+                requested,
+            } if limit == curves - 1 && requested > limit
+        ));
+
+        let fill_error = ThreeDJob::new_with_limits(
+            &camera,
+            &draws,
+            Tiling::default(),
+            ThreeDPreparationLimits {
+                max_fill_pieces: pieces - 1,
+                ..exact
+            },
+        )
+        .expect_err("one fill piece below the exact boundary");
+        assert!(matches!(
+            fill_error,
+            ThreeDError::PreparationLimitExceeded {
+                resource: "fill pieces",
+                limit,
+                requested,
+            } if limit == pieces - 1 && requested > limit
+        ));
+    }
+
+    #[test]
+    fn zero_retained_limits_allow_a_fully_clipped_vector() {
+        let camera = camera();
+        let points = path_points(
+            &[
+                [1_000.0, -1.0, 0.0],
+                [1_002.0, -1.0, 0.0],
+                [1_002.0, 1.0, 0.0],
+                [1_000.0, 1.0, 0.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &points,
+            [0.2, 0.4, 0.6, 1.0],
+            [0.9, 0.3, 0.1, 1.0],
+            2.0,
+            camera.revision(),
+            |_| {},
+        );
+        let draws = [ThreeDDraw::Vector(VectorDraw::new(&plan, 0))];
+        let job = ThreeDJob::new_with_limits(
+            &camera,
+            &draws,
+            Tiling::default(),
+            ThreeDPreparationLimits {
+                max_draws: 1,
+                max_projected_curves: 0,
+                max_fill_pieces: 0,
+                max_raster_triangles: 0,
+                max_working_bytes: u64::MAX,
+            },
+        )
+        .expect("transient clip fragments do not consume retained-row limits");
+        let vector = compiled_vector(&job);
+        assert!(vector.curves.is_empty());
+        assert!(vector.fill.is_empty());
+    }
+
+    #[test]
+    fn draw_and_working_byte_limits_are_checked_before_publication() {
+        let camera = camera();
+        let mut dot = TrueDotDraw::new([0.0; 3], 0.25, color("#FFFFFF", 1.0));
+        dot.clip_planes[0] = [1.0, 0.0, 0.0, -1000.0];
+        let draws = [ThreeDDraw::TrueDot(dot)];
+        let draw_bytes =
+            u64::try_from(std::mem::size_of::<CompiledDraw<'_>>()).expect("draw row size fits u64");
+        let exact = ThreeDPreparationLimits {
+            max_draws: 1,
+            max_projected_curves: 0,
+            max_fill_pieces: 0,
+            max_raster_triangles: 0,
+            max_working_bytes: draw_bytes,
+        };
+        let job = ThreeDJob::new_with_limits(&camera, &draws, Tiling::default(), exact)
+            .expect("one clipped-empty draw fits its exact row bytes");
+        assert_eq!(job.draw_count(), 1);
+        assert_eq!(job.preparation_bytes(), draw_bytes);
+
+        assert!(matches!(
+            ThreeDJob::new_with_limits(
+                &camera,
+                &draws,
+                Tiling::default(),
+                ThreeDPreparationLimits {
+                    max_draws: 0,
+                    ..exact
+                },
+            ),
+            Err(ThreeDError::PreparationLimitExceeded {
+                resource: "draw rows",
+                limit: 0,
+                requested: 1,
+            })
+        ));
+        assert!(matches!(
+            ThreeDJob::new_with_limits(
+                &camera,
+                &draws,
+                Tiling::default(),
+                ThreeDPreparationLimits {
+                    max_working_bytes: draw_bytes - 1,
+                    ..exact
+                },
+            ),
+            Err(ThreeDError::PreparationLimitExceeded {
+                resource: "preparation working bytes",
+                limit,
+                requested,
+            }) if limit == draw_bytes - 1 && requested == draw_bytes
+        ));
+    }
+
+    #[test]
+    fn clipped_surface_amplification_obeys_the_triangle_budget() {
+        let camera = camera();
+        let white = color("#FFFFFF", 1.0);
+        let mesh = SurfaceMesh::new(
+            vec![
+                vertex([-2.0, -1.0, 0.0], [0.0, 0.0, 1.0], white),
+                vertex([2.0, -1.0, 0.0], [0.0, 0.0, 1.0], white),
+                vertex([2.0, 1.0, 0.0], [0.0, 0.0, 1.0], white),
+            ],
+            vec![0, 1, 2],
+        )
+        .expect("one source triangle");
+        let mut surface = SurfaceDraw::new(&mesh);
+        surface.shading = [0.0; 3];
+        surface.clip_planes[0] = [1.0, 0.0, 0.0, 0.0];
+        let draws = [ThreeDDraw::Surface(surface)];
+        let exact = ThreeDPreparationLimits {
+            max_draws: 1,
+            max_projected_curves: 0,
+            max_fill_pieces: 0,
+            max_raster_triangles: 2,
+            max_working_bytes: u64::MAX,
+        };
+        let job = ThreeDJob::new_with_limits(&camera, &draws, Tiling::default(), exact)
+            .expect("the clipped quad expands to exactly two triangles");
+        assert!(matches!(
+            &job.draws[0].primitive,
+            CompiledPrimitive::Triangles { triangles, .. } if triangles.len() == 2
+        ));
+
+        assert!(matches!(
+            ThreeDJob::new_with_limits(
+                &camera,
+                &draws,
+                Tiling::default(),
+                ThreeDPreparationLimits {
+                    max_raster_triangles: 1,
+                    ..exact
+                },
+            ),
+            Err(ThreeDError::PreparationLimitExceeded {
+                resource: "raster triangles",
+                limit: 1,
+                requested: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn allocator_refusal_is_typed_and_leaves_the_budget_unpublished() {
+        let limits = ThreeDPreparationLimits {
+            max_draws: u64::MAX,
+            max_projected_curves: u64::MAX,
+            max_fill_pieces: u64::MAX,
+            max_raster_triangles: u64::MAX,
+            max_working_bytes: u64::MAX,
+        };
+        let mut budget = PreparationBudget::new(limits);
+        let mut rows: Vec<u8> = Vec::new();
+        let requested = usize::MAX;
+        assert!(matches!(
+            budget.reserve_rows(&mut rows, PreparationRows::Draws, requested),
+            Err(ThreeDError::PreparationAllocationFailed {
+                resource: "draw rows",
+                requested: value,
+            }) if value == u64::try_from(requested).unwrap_or(u64::MAX)
+        ));
+        assert!(rows.is_empty());
+        assert_eq!(budget.draws, 0);
+        assert_eq!(budget.working_bytes, 0);
     }
 
     #[test]

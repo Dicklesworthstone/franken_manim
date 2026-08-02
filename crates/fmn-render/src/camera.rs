@@ -47,6 +47,22 @@ pub enum CameraError {
     InvalidEulerAxes,
     /// Frames per second was zero.
     ZeroFrameRate,
+    /// Exact camera clipping exceeded a caller-declared piece ceiling.
+    ClipLimitExceeded {
+        /// Stable clipping buffer name.
+        resource: &'static str,
+        /// Inclusive piece ceiling.
+        limit: usize,
+        /// Exact requested piece count.
+        requested: usize,
+    },
+    /// A bounded camera-clipping buffer could not be reserved.
+    AllocationFailed {
+        /// Stable clipping buffer name.
+        resource: &'static str,
+        /// Elements requested from that buffer.
+        requested: usize,
+    },
 }
 
 impl std::fmt::Display for CameraError {
@@ -64,6 +80,18 @@ impl std::fmt::Display for CameraError {
                 f.write_str("camera Euler axes must be a valid three-axis scipy sequence")
             }
             Self::ZeroFrameRate => f.write_str("camera frame rate must be nonzero"),
+            Self::ClipLimitExceeded {
+                resource,
+                limit,
+                requested,
+            } => write!(
+                f,
+                "{resource} needs {requested} pieces, exceeding the limit {limit}"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(f, "could not reserve {requested} rows for {resource}"),
         }
     }
 }
@@ -729,6 +757,18 @@ impl Camera {
         is_fixed_in_frame: f64,
         user_planes: [[f64; 4]; 4],
     ) -> Result<Vec<ClippedQuadratic>, CameraError> {
+        self.project_quadratic_with_limit(world, is_fixed_in_frame, user_planes, usize::MAX)
+    }
+
+    /// [`Camera::project_quadratic`] with an inclusive intermediate-piece
+    /// ceiling for aggregate 3D preparation.
+    pub(crate) fn project_quadratic_with_limit(
+        &self,
+        world: [Vec3; 3],
+        is_fixed_in_frame: f64,
+        user_planes: [[f64; 4]; 4],
+        max_pieces: usize,
+    ) -> Result<Vec<ClippedQuadratic>, CameraError> {
         if !is_fixed_in_frame.is_finite()
             || world.iter().any(|point| !finite3(*point))
             || user_planes
@@ -738,36 +778,51 @@ impl Camera {
         {
             return Err(CameraError::NonFinite);
         }
+        let mut pieces = Vec::new();
+        pieces
+            .try_reserve_exact(1)
+            .map_err(|_| CameraError::AllocationFailed {
+                resource: "projected quadratic clipping",
+                requested: 1,
+            })?;
         let clip = world.map(|point| self.project(point, is_fixed_in_frame).clip);
-        let mut pieces = vec![ClippedQuadratic {
+        pieces.push(ClippedQuadratic {
             world,
             clip,
             source_t: [0.0, 1.0],
-        }];
+        });
         for plane in user_planes {
             if plane[..3].iter().all(|component| *component == 0.0) {
                 continue;
             }
-            pieces = clip_quadratics(pieces, |piece| {
-                piece.world.map(|point| {
-                    point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
-                })
-            });
+            pieces = clip_quadratics(
+                pieces,
+                |piece| {
+                    piece.world.map(|point| {
+                        point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
+                    })
+                },
+                max_pieces,
+            )?;
         }
         for plane in 0..6 {
-            pieces = clip_quadratics(pieces, |piece| {
-                piece.clip.map(|point| {
-                    let [x, y, z, w] = point;
-                    match plane {
-                        0 => x + w,
-                        1 => w - x,
-                        2 => y + w,
-                        3 => w - y,
-                        4 => z + w,
-                        _ => w - z,
-                    }
-                })
-            });
+            pieces = clip_quadratics(
+                pieces,
+                |piece| {
+                    piece.clip.map(|point| {
+                        let [x, y, z, w] = point;
+                        match plane {
+                            0 => x + w,
+                            1 => w - x,
+                            2 => y + w,
+                            3 => w - y,
+                            4 => z + w,
+                            _ => w - z,
+                        }
+                    })
+                },
+                max_pieces,
+            )?;
         }
         Ok(pieces)
     }
@@ -790,6 +845,7 @@ impl Camera {
         world: &[[Vec3; 3]],
         is_fixed_in_frame: f64,
         user_planes: [[f64; 4]; 4],
+        max_pieces: usize,
     ) -> Result<Vec<ClippedFillQuadratic>, CameraError> {
         if !is_fixed_in_frame.is_finite()
             || world.iter().flatten().any(|point| !finite3(*point))
@@ -803,16 +859,37 @@ impl Camera {
         let Some(first) = world.first() else {
             return Ok(Vec::new());
         };
-        let mut contour: Vec<ClippedFillQuadratic> = world
-            .iter()
-            .map(|control| ClippedFillQuadratic {
-                world: *control,
-                clip: control.map(|point| self.project(point, is_fixed_in_frame).clip),
-            })
-            .collect();
         let start = first[0];
         let end = world.last().map_or(first[2], |last| last[2]);
-        if !point3_close(end, start) {
+        let closes_contour = !point3_close(end, start);
+        let requested = world.len().checked_add(usize::from(closes_contour)).ok_or(
+            CameraError::ClipLimitExceeded {
+                resource: "fill-contour clipping",
+                limit: max_pieces,
+                requested: usize::MAX,
+            },
+        )?;
+        if requested > max_pieces {
+            return Err(CameraError::ClipLimitExceeded {
+                resource: "fill-contour clipping",
+                limit: max_pieces,
+                requested,
+            });
+        }
+        let mut contour = Vec::new();
+        contour
+            .try_reserve_exact(requested)
+            .map_err(|_| CameraError::AllocationFailed {
+                resource: "fill-contour clipping",
+                requested,
+            })?;
+        for control in world {
+            contour.push(ClippedFillQuadratic {
+                world: *control,
+                clip: control.map(|point| self.project(point, is_fixed_in_frame).clip),
+            });
+        }
+        if closes_contour {
             contour.push(fill_boundary_line(
                 end,
                 self.project(end, is_fixed_in_frame).clip,
@@ -824,26 +901,34 @@ impl Camera {
             if plane[..3].iter().all(|component| *component == 0.0) {
                 continue;
             }
-            contour = clip_fill_contour(contour, |piece| {
-                piece.world.map(|point| {
-                    point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
-                })
-            });
+            contour = clip_fill_contour(
+                contour,
+                |piece| {
+                    piece.world.map(|point| {
+                        point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]
+                    })
+                },
+                max_pieces,
+            )?;
         }
         for plane in 0..6 {
-            contour = clip_fill_contour(contour, |piece| {
-                piece.clip.map(|point| {
-                    let [x, y, z, w] = point;
-                    match plane {
-                        0 => x + w,
-                        1 => w - x,
-                        2 => y + w,
-                        3 => w - y,
-                        4 => z + w,
-                        _ => w - z,
-                    }
-                })
-            });
+            contour = clip_fill_contour(
+                contour,
+                |piece| {
+                    piece.clip.map(|point| {
+                        let [x, y, z, w] = point;
+                        match plane {
+                            0 => x + w,
+                            1 => w - x,
+                            2 => y + w,
+                            3 => w - y,
+                            4 => z + w,
+                            _ => w - z,
+                        }
+                    })
+                },
+                max_pieces,
+            )?;
         }
         Ok(contour)
     }
@@ -953,77 +1038,146 @@ impl ClippedFillQuadratic {
 fn clip_quadratics(
     input: Vec<ClippedQuadratic>,
     distances: impl Fn(&ClippedQuadratic) -> [f64; 3],
-) -> Vec<ClippedQuadratic> {
+    max_pieces: usize,
+) -> Result<Vec<ClippedQuadratic>, CameraError> {
     let mut output = Vec::new();
     for piece in input {
         let distance = distances(&piece);
-        let mut cuts = vec![0.0, 1.0];
-        cuts.extend(roots_in_unit_interval(distance));
-        cuts.sort_by(f64::total_cmp);
-        cuts.dedup_by(|a, b| (*a - *b).abs() <= 64.0 * f64::EPSILON);
+        let (roots, root_count) = roots_in_unit_interval(distance);
+        let mut cuts = [0.0; 4];
+        cuts[0] = 0.0;
+        cuts[1..1 + root_count].copy_from_slice(&roots[..root_count]);
+        cuts[1 + root_count] = 1.0;
         let scale = distance
             .iter()
             .fold(1.0f64, |largest, value| largest.max(value.abs()));
         let tolerance = 64.0 * f64::EPSILON * scale;
-        for pair in cuts.windows(2) {
+        for pair in cuts[..root_count + 2].windows(2) {
             let (a, b) = (pair[0], pair[1]);
             if b - a <= 64.0 * f64::EPSILON {
                 continue;
             }
             let midpoint = 0.5 * (a + b);
             if bernstein_scalar(distance, midpoint) >= -tolerance {
-                output.push(quadratic_span(piece, a, b));
+                push_clipped_piece(
+                    &mut output,
+                    quadratic_span(piece, a, b),
+                    "projected quadratic clipping",
+                    max_pieces,
+                )?;
             }
         }
     }
-    output
+    Ok(output)
 }
 
 fn clip_fill_contour(
     input: Vec<ClippedFillQuadratic>,
     distances: impl Fn(&ClippedFillQuadratic) -> [f64; 3],
-) -> Vec<ClippedFillQuadratic> {
+    max_pieces: usize,
+) -> Result<Vec<ClippedFillQuadratic>, CameraError> {
     let mut visible = Vec::new();
     for piece in input {
         let distance = distances(&piece);
-        let mut cuts = vec![0.0, 1.0];
-        cuts.extend(roots_in_unit_interval(distance));
-        cuts.sort_by(f64::total_cmp);
-        cuts.dedup_by(|a, b| (*a - *b).abs() <= 64.0 * f64::EPSILON);
+        let (roots, root_count) = roots_in_unit_interval(distance);
+        let mut cuts = [0.0; 4];
+        cuts[0] = 0.0;
+        cuts[1..1 + root_count].copy_from_slice(&roots[..root_count]);
+        cuts[1 + root_count] = 1.0;
         let scale = distance
             .iter()
             .fold(1.0f64, |largest, value| largest.max(value.abs()));
         let tolerance = 64.0 * f64::EPSILON * scale;
-        for pair in cuts.windows(2) {
+        for pair in cuts[..root_count + 2].windows(2) {
             let (a, b) = (pair[0], pair[1]);
             if b - a <= 64.0 * f64::EPSILON {
                 continue;
             }
             let midpoint = 0.5 * (a + b);
             if bernstein_scalar(distance, midpoint) >= -tolerance {
-                visible.push(fill_quadratic_span(piece, a, b));
+                push_clipped_piece(
+                    &mut visible,
+                    fill_quadratic_span(piece, a, b),
+                    "fill-contour clipping",
+                    max_pieces,
+                )?;
             }
         }
     }
     if visible.is_empty() {
-        return visible;
+        return Ok(visible);
     }
 
-    let mut closed = Vec::with_capacity(visible.len().saturating_mul(2));
+    let capacity = visible
+        .len()
+        .checked_mul(2)
+        .ok_or(CameraError::ClipLimitExceeded {
+            resource: "closed fill-contour clipping",
+            limit: max_pieces,
+            requested: usize::MAX,
+        })?;
+    let mut closed = Vec::new();
+    closed
+        .try_reserve_exact(capacity.min(max_pieces))
+        .map_err(|_| CameraError::AllocationFailed {
+            resource: "closed fill-contour clipping",
+            requested: capacity.min(max_pieces),
+        })?;
     for index in 0..visible.len() {
         let current = visible[index];
         let next = visible[(index + 1) % visible.len()];
-        closed.push(current);
+        push_clipped_piece(
+            &mut closed,
+            current,
+            "closed fill-contour clipping",
+            max_pieces,
+        )?;
         if !point4_close(current.clip[2], next.clip[0]) {
-            closed.push(fill_boundary_line(
-                current.world[2],
-                current.clip[2],
-                next.world[0],
-                next.clip[0],
-            ));
+            push_clipped_piece(
+                &mut closed,
+                fill_boundary_line(
+                    current.world[2],
+                    current.clip[2],
+                    next.world[0],
+                    next.clip[0],
+                ),
+                "closed fill-contour clipping",
+                max_pieces,
+            )?;
         }
     }
-    closed
+    Ok(closed)
+}
+
+fn push_clipped_piece<T>(
+    output: &mut Vec<T>,
+    value: T,
+    resource: &'static str,
+    limit: usize,
+) -> Result<(), CameraError> {
+    let requested = output
+        .len()
+        .checked_add(1)
+        .ok_or(CameraError::ClipLimitExceeded {
+            resource,
+            limit,
+            requested: usize::MAX,
+        })?;
+    if requested > limit {
+        return Err(CameraError::ClipLimitExceeded {
+            resource,
+            limit,
+            requested,
+        });
+    }
+    output
+        .try_reserve(1)
+        .map_err(|_| CameraError::AllocationFailed {
+            resource,
+            requested,
+        })?;
+    output.push(value);
+    Ok(())
 }
 
 fn fill_boundary_line(
@@ -1071,26 +1225,28 @@ fn bernstein_scalar(control: [f64; 3], t: f64) -> f64 {
     u * u * control[0] + 2.0 * u * t * control[1] + t * t * control[2]
 }
 
-fn roots_in_unit_interval(control: [f64; 3]) -> Vec<f64> {
+fn roots_in_unit_interval(control: [f64; 3]) -> ([f64; 2], usize) {
     let [p0, p1, p2] = control;
     let a = p0 - 2.0 * p1 + p2;
     let b = 2.0 * (p1 - p0);
     let c = p0;
     let scale = a.abs().max(b.abs()).max(c.abs()).max(1.0);
     let tolerance = 64.0 * f64::EPSILON * scale;
-    let mut roots = Vec::with_capacity(2);
+    let mut roots = [0.0; 2];
+    let mut count = 0;
     if a.abs() <= tolerance {
         if b.abs() > tolerance {
             let root = -c / b;
             if root > 0.0 && root < 1.0 {
-                roots.push(root);
+                roots[count] = root;
+                count += 1;
             }
         }
-        return roots;
+        return (roots, count);
     }
     let discriminant = b * b - 4.0 * a * c;
     if discriminant < -tolerance * scale {
-        return roots;
+        return (roots, count);
     }
     let root_discriminant = discriminant.max(0.0).sqrt();
     let q = -0.5
@@ -1102,18 +1258,22 @@ fn roots_in_unit_interval(control: [f64; 3]) -> Vec<f64> {
     if q == 0.0 {
         let root = -b / (2.0 * a);
         if root > 0.0 && root < 1.0 {
-            roots.push(root);
+            roots[count] = root;
+            count += 1;
         }
-        return roots;
+        return (roots, count);
     }
     for root in [q / a, c / q] {
         if root > 0.0 && root < 1.0 {
-            roots.push(root);
+            roots[count] = root;
+            count += 1;
         }
     }
-    roots.sort_by(f64::total_cmp);
-    roots.dedup_by(|a, b| (*a - *b).abs() <= 64.0 * f64::EPSILON);
-    roots
+    roots[..count].sort_by(f64::total_cmp);
+    if count == 2 && (roots[0] - roots[1]).abs() <= 64.0 * f64::EPSILON {
+        count = 1;
+    }
+    (roots, count)
 }
 
 fn quadratic_span(piece: ClippedQuadratic, a: f64, b: f64) -> ClippedQuadratic {
