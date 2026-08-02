@@ -267,26 +267,36 @@ impl Revisions {
 /// The type exists so a dependency is declared once, at construction, and cannot
 /// drift from the check — the failure mode being an artifact that compares the
 /// wrong axes and is either rebuilt every frame or never.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dependency {
     built_at: Revisions,
-    axes: Vec<Axis>,
+    axes: [Axis; Axis::ALL.len()],
+    axis_count: u8,
 }
 
 impl Dependency {
     /// Declare that an artifact built at `built_at` depends on `axes`.
     #[must_use]
     pub fn new(built_at: Revisions, axes: &[Axis]) -> Dependency {
-        let mut axes = axes.to_vec();
-        axes.sort_unstable();
-        axes.dedup();
-        Dependency { built_at, axes }
+        let mut canonical = [Axis::Topology; Axis::ALL.len()];
+        let mut axis_count = 0usize;
+        for axis in Axis::ALL {
+            if axes.contains(&axis) {
+                canonical[axis_count] = axis;
+                axis_count += 1;
+            }
+        }
+        Dependency {
+            built_at,
+            axes: canonical,
+            axis_count: axis_count as u8,
+        }
     }
 
     /// The axes this artifact depends on.
     #[must_use]
     pub fn axes(&self) -> &[Axis] {
-        &self.axes
+        &self.axes[..usize::from(self.axis_count)]
     }
 
     /// The revision vector the artifact was built at.
@@ -298,7 +308,7 @@ impl Dependency {
     /// Is the artifact stale against `now`?
     #[must_use]
     pub fn is_stale(&self, now: &Revisions) -> bool {
-        self.built_at.differs_on(now, &self.axes)
+        self.built_at.differs_on(now, self.axes())
     }
 
     /// Record that the artifact has been rebuilt at `now`.
@@ -639,6 +649,18 @@ mod tests {
             !dep.is_stale(&translated),
             "placement must not stale a geometry-only artifact"
         );
+    }
+
+    #[test]
+    fn dependency_axes_are_canonical_and_heap_free() {
+        fn assert_copy<T: Copy>() {}
+
+        assert_copy::<Dependency>();
+        let dep = Dependency::new(
+            Revisions::default(),
+            &[Axis::Style, Axis::Geometry, Axis::Style, Axis::Topology],
+        );
+        assert_eq!(dep.axes(), &[Axis::Topology, Axis::Geometry, Axis::Style]);
     }
 
     #[test]
