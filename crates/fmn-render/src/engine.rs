@@ -96,7 +96,7 @@
 //! existing `compositor` benchmark keep the exact production boundary
 //! reproducible for a future structure-of-arrays layout.
 
-use crate::arena::{AllocStats, FrameArena, PoolRange};
+use crate::arena::{AllocStats, FrameArena, PoolRange, PoolRangeError};
 use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
 use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
@@ -965,6 +965,16 @@ pub enum FrameJobError {
     /// Frame-local affine geometry exceeded a monotone-table resource or
     /// representation boundary.
     MonoTable(fill::MonoTableError),
+    /// A frame-local pool outgrew the compact coordinates carried by prepared
+    /// draws. No range is truncated or consumed after this refusal.
+    ArenaIndexCapacityExceeded {
+        /// Pool whose coordinates could not be represented.
+        resource: &'static str,
+        /// First requested row.
+        start: u64,
+        /// Number of requested rows.
+        len: u64,
+    },
     /// The tile command lists were scattered under another screen mapping.
     BinningMapMismatch,
     /// The tile command lists cover a different exact viewport.
@@ -1006,6 +1016,14 @@ impl std::fmt::Display for FrameJobError {
             Self::MonoTable(error) => {
                 write!(f, "could not derive frame-local monotone pieces: {error}")
             }
+            Self::ArenaIndexCapacityExceeded {
+                resource,
+                start,
+                len,
+            } => write!(
+                f,
+                "frame-local {resource} range at {start} with length {len} exceeds u32 coordinates"
+            ),
             Self::BinningMapMismatch => f.write_str("binning screen map does not match the frame"),
             Self::BinningViewportMismatch => {
                 f.write_str("binning viewport does not match the frame")
@@ -1015,6 +1033,16 @@ impl std::fmt::Display for FrameJobError {
                 f,
                 "retained instance {instance} requires camera projection; render it through ThreeDJob"
             ),
+        }
+    }
+}
+
+impl From<PoolRangeError> for FrameJobError {
+    fn from(error: PoolRangeError) -> Self {
+        Self::ArenaIndexCapacityExceeded {
+            resource: error.resource,
+            start: error.start,
+            len: error.len,
         }
     }
 }
@@ -1332,14 +1360,17 @@ impl<'a> FrameJob<'a> {
                     .any(|component| *component != 0.0)
                 || style.scale_stroke_with_zoom
                 || style.depth_test;
-            let transformed_segments = (!inst.placement.is_translation()).then(|| {
-                let range = arena.segments.extend(segs.iter().map(|segment| Segment {
-                    p0: inst.placement.apply_vector(segment.p0),
-                    p1: inst.placement.apply_vector(segment.p1),
-                    p2: inst.placement.apply_vector(segment.p2),
-                    s0: segment.s0,
-                    s1: segment.s1,
-                }));
+            let transformed_segments = if !inst.placement.is_translation() {
+                let range = arena.segments.extend(
+                    "transformed segment rows",
+                    segs.iter().map(|segment| Segment {
+                        p0: inst.placement.apply_vector(segment.p0),
+                        p1: inst.placement.apply_vector(segment.p1),
+                        p2: inst.placement.apply_vector(segment.p2),
+                        s0: segment.s0,
+                        s1: segment.s1,
+                    }),
+                )?;
                 let transformed = arena.segments.slice_mut(range);
                 // Exact signed-axis similarities preserve normalized spans;
                 // general affine maps take the scalar arc-length oracle.
@@ -1356,8 +1387,10 @@ impl<'a> FrameJob<'a> {
                         }
                     }
                 }
-                range
-            });
+                Some(range)
+            } else {
+                None
+            };
             let effective_segments: &[Segment] = match transformed_segments {
                 Some(range) => arena.segments.slice(range),
                 None => segs,
@@ -1393,7 +1426,7 @@ impl<'a> FrameJob<'a> {
                     fill::MonoTableLimits::default(),
                 )
                 .map_err(FrameJobError::MonoTable)?;
-                Some(arena.pieces.range_from(start))
+                Some(arena.pieces.range_from("monotone piece rows", start)?)
             } else {
                 None
             };
@@ -1428,9 +1461,9 @@ impl<'a> FrameJob<'a> {
                     map,
                     translate,
                 );
-                arena.joins.range_from(start)
+                arena.joins.range_from("join rows", start)?
             };
-            let stroke = draws_stroke.then(|| {
+            let stroke = if draws_stroke {
                 let start = arena.stroke_segments.len();
                 let slab = stroke::PreparedStroke::prepare_into(
                     &mut arena.stroke_segments,
@@ -1440,11 +1473,15 @@ impl<'a> FrameJob<'a> {
                     translate,
                     straight_segments,
                 );
-                StrokeRef {
-                    segments: arena.stroke_segments.range_from(start),
+                Some(StrokeRef {
+                    segments: arena
+                        .stroke_segments
+                        .range_from("prepared stroke rows", start)?,
                     slab,
-                }
-            });
+                })
+            } else {
+                None
+            };
             let field = if draws_fill && !flat {
                 let points_start = arena.gradient_points.len();
                 let params_start = arena.gradient_params.len();
@@ -1455,8 +1492,12 @@ impl<'a> FrameJob<'a> {
                     map,
                 );
                 Some(FieldRef {
-                    points: arena.gradient_points.range_from(points_start),
-                    params: arena.gradient_params.range_from(params_start),
+                    points: arena
+                        .gradient_points
+                        .range_from("gradient point rows", points_start)?,
+                    params: arena
+                        .gradient_params
+                        .range_from("gradient parameter rows", params_start)?,
                 })
             } else {
                 None
@@ -1497,7 +1538,7 @@ impl<'a> FrameJob<'a> {
             .width
             .div_ceil(binning.tiling().fine_tile.max(1));
 
-        Ok((arena.draws.range_from(draws_start), cols))
+        Ok((arena.draws.range_from("draw rows", draws_start)?, cols))
     }
 
     /// The engine identity this frame will claim.

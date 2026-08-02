@@ -76,6 +76,40 @@ pub(crate) struct PoolRange {
     pub(crate) len: u32,
 }
 
+/// A frame-local pool range cannot be represented by [`PoolRange`].
+///
+/// The compact `u32` coordinates are intentional: one range is carried by
+/// every prepared draw. Conversion into that representation must nevertheless
+/// be checked, because the frame pools aggregate rows across every retained
+/// instance and can therefore be wider than any one retained table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PoolRangeError {
+    /// Pool whose range could not be represented.
+    pub(crate) resource: &'static str,
+    /// First requested row.
+    pub(crate) start: u64,
+    /// Number of requested rows.
+    pub(crate) len: u64,
+}
+
+fn compact_range(
+    resource: &'static str,
+    start: u64,
+    len: u64,
+) -> Result<PoolRange, PoolRangeError> {
+    let start = u32::try_from(start).map_err(|_| PoolRangeError {
+        resource,
+        start,
+        len,
+    })?;
+    let len = u32::try_from(len).map_err(|_| PoolRangeError {
+        resource,
+        start: u64::from(start),
+        len,
+    })?;
+    Ok(PoolRange { start, len })
+}
+
 /// An append target for the geometry builders: `Vec` for the retained and
 /// test paths, [`Pool`] for the engine's per-frame path.
 ///
@@ -187,22 +221,31 @@ impl<T> Pool<T> {
     }
 
     /// Append a whole iterator, returning the range it landed in.
-    pub(crate) fn extend(&mut self, values: impl IntoIterator<Item = T>) -> PoolRange {
+    pub(crate) fn extend(
+        &mut self,
+        resource: &'static str,
+        values: impl IntoIterator<Item = T>,
+    ) -> Result<PoolRange, PoolRangeError> {
         let start = self.buf.len();
         for value in values {
             self.put(value);
         }
-        self.range_from(start)
+        self.range_from(resource, start)
     }
 
     /// The range `[start, len)` — the second half of every "record, append,
     /// range" construction.
-    pub(crate) fn range_from(&self, start: usize) -> PoolRange {
+    pub(crate) fn range_from(
+        &self,
+        resource: &'static str,
+        start: usize,
+    ) -> Result<PoolRange, PoolRangeError> {
         debug_assert!(start <= self.buf.len());
-        PoolRange {
-            start: start as u32,
-            len: (self.buf.len() - start) as u32,
-        }
+        compact_range(
+            resource,
+            u64::try_from(start).unwrap_or(u64::MAX),
+            u64::try_from(self.buf.len() - start).unwrap_or(u64::MAX),
+        )
     }
 
     /// Resolve a range to its slice.
@@ -242,6 +285,43 @@ impl<T> Pool<T> {
     /// Growth events since [`Pool::begin_frame`].
     pub(crate) fn allocs(&self) -> u64 {
         self.allocs.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PoolRange, PoolRangeError, compact_range};
+
+    #[test]
+    fn compact_ranges_accept_the_exact_coordinate_boundary() {
+        assert_eq!(
+            compact_range("test rows", u64::from(u32::MAX), u64::from(u32::MAX)),
+            Ok(PoolRange {
+                start: u32::MAX,
+                len: u32::MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn compact_ranges_refuse_start_or_length_truncation() {
+        let past = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            compact_range("test rows", past, 1),
+            Err(PoolRangeError {
+                resource: "test rows",
+                start: past,
+                len: 1,
+            })
+        );
+        assert_eq!(
+            compact_range("test rows", 1, past),
+            Err(PoolRangeError {
+                resource: "test rows",
+                start: 1,
+                len: past,
+            })
+        );
     }
 }
 
