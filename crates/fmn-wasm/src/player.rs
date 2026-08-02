@@ -38,7 +38,7 @@ use fmn_scene::timeline_bundle::{TIMELINE_BUNDLE_SCHEMA, bundle_engine_version};
 use wasm_bindgen::JsError;
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::render_stage_rgba8;
+use crate::{render_stage_rgba8, render_stage_rgba8_into, rgba8_output_len};
 
 /// Every refusal the player can produce, named per the contract.
 #[derive(Debug)]
@@ -84,6 +84,17 @@ pub enum PlayerError {
     },
     /// The viewport was never set (or was set invalid).
     Viewport(&'static str),
+    /// A caller-owned RGBA8 destination does not match the viewport.
+    DestinationLength {
+        /// Bytes supplied by the caller.
+        got: usize,
+        /// Exact bytes required by the viewport.
+        expected: usize,
+        /// Active viewport width.
+        width: u32,
+        /// Active viewport height.
+        height: u32,
+    },
     /// The render path refused.
     Render(String),
 }
@@ -114,6 +125,15 @@ impl std::fmt::Display for PlayerError {
                 write!(f, "frame index {index} out of range 0..{total}")
             }
             Self::Viewport(what) => write!(f, "viewport: {what}"),
+            Self::DestinationLength {
+                got,
+                expected,
+                width,
+                height,
+            } => write!(
+                f,
+                "render_into destination is {got} bytes; expected {expected} ({width}x{height}x4)"
+            ),
             Self::Render(e) => write!(f, "render: {e}"),
         }
     }
@@ -367,6 +387,32 @@ impl PlayerCore {
         render_stage_rgba8(&stage, self.width, self.height, revision)
             .map_err(|e| PlayerError::Render(e.to_string()))
     }
+
+    fn render_index_into(&self, index: u32, dst: &mut [u8]) -> Result<(), PlayerError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(PlayerError::Viewport("set_viewport before rendering"));
+        }
+        if index >= self.frame_count() {
+            return Err(PlayerError::FrameOutOfRange {
+                index,
+                total: self.frame_count(),
+            });
+        }
+        let expected = rgba8_output_len(self.width, self.height)
+            .map_err(|e| PlayerError::Render(e.to_string()))?;
+        if dst.len() != expected {
+            return Err(PlayerError::DestinationLength {
+                got: dst.len(),
+                expected,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        let stage = self.stage_at(index)?;
+        let revision = u64::from(index) + 1;
+        render_stage_rgba8_into(&stage, self.width, self.height, revision, dst)
+            .map_err(|e| PlayerError::Render(e.to_string()))
+    }
 }
 
 /// A loaded FMTL/1 timeline bundle, ready to scrub and render frames to
@@ -513,18 +559,7 @@ impl FmnPlayer {
     /// `JsError` for a wrong-length destination, unset viewport,
     /// out-of-range index, or a render failure.
     pub fn render_into(&self, index: u32, dst: &mut [u8]) -> Result<(), JsError> {
-        let pixels = self.core.render_index(index)?;
-        if dst.len() != pixels.len() {
-            return Err(JsError::new(&format!(
-                "render_into destination is {} bytes; expected {} ({}x{}x4)",
-                dst.len(),
-                pixels.len(),
-                self.core.width,
-                self.core.height
-            )));
-        }
-        dst.copy_from_slice(&pixels);
-        Ok(())
+        Ok(self.core.render_index_into(index, dst)?)
     }
 }
 
@@ -605,6 +640,48 @@ mod tests {
                 "frame {index} differs across identical loads"
             );
         }
+    }
+
+    #[test]
+    fn tier2_caller_storage_is_identical_bounded_and_range_typed() {
+        let mut core = loaded();
+        core.set_viewport(64, 36).expect("viewport");
+        let expected = core.render_index(0).expect("allocating render");
+        let mut scratch = vec![0xA5; expected.len()];
+        let storage = scratch.as_ptr();
+        let capacity = scratch.capacity();
+
+        for index in [0, core.frame_count() / 2, core.frame_count() - 1] {
+            let expected = core.render_index(index).expect("allocating render");
+            let owned_after_expected = crate::owned_rgba8_output_allocations();
+            core.render_index_into(index, &mut scratch)
+                .expect("caller render");
+            assert_eq!(scratch, expected, "frame {index} differs by destination");
+            assert_eq!(scratch.as_ptr(), storage, "caller storage moved");
+            assert_eq!(scratch.capacity(), capacity, "caller capacity changed");
+            assert_eq!(
+                crate::owned_rgba8_output_allocations(),
+                owned_after_expected,
+                "render_into routed through an owned RGBA8 frame"
+            );
+        }
+
+        let mut short = vec![0; scratch.len() - 1];
+        let renders_before = crate::rasterized_surface_count();
+        assert!(matches!(
+            core.render_index_into(0, &mut short),
+            Err(PlayerError::DestinationLength {
+                got,
+                expected,
+                width: 64,
+                height: 36,
+            }) if got + 1 == expected
+        ));
+        assert_eq!(crate::rasterized_surface_count(), renders_before);
+        assert!(matches!(
+            core.render_index_into(core.frame_count(), &mut short),
+            Err(PlayerError::FrameOutOfRange { .. })
+        ));
     }
 
     #[test]

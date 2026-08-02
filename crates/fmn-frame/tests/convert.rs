@@ -2,7 +2,9 @@
 //! format round-trips within documented precision, certified-conversion
 //! determinism, and stride honoring in every kernel.
 
-use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
+use fmn_frame::convert::{
+    rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, rgba16f_to_rgba8_slice, swap_rb8,
+};
 use fmn_frame::half::{f16_from_f32, f16_to_f64};
 use fmn_frame::transfer::{TransferTables, quantize8, srgb_decode, srgb_encode, tables};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
@@ -229,6 +231,45 @@ fn certified_conversion_anchors() {
     assert_eq!(&dst.plane(0)[..4], &[255, 188, 0, 128]);
     // NaN → 0, negative clamps to 0, +inf clamps to 255.
     assert_eq!(&dst.plane(0)[4..8], &[0, 0, 255, 255]);
+}
+
+#[test]
+fn certified_slice_destination_matches_owned_storage_and_refuses_wrong_lengths() {
+    let mut src = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba16F, 3, 2).unwrap());
+    for y in 0..2 {
+        for x in 0..3 {
+            put_f16_px(
+                &mut src,
+                x,
+                y,
+                [
+                    (x as f32 + 1.0) / 4.0,
+                    (y as f32 + 1.0) / 3.0,
+                    (x as f32 + y as f32) / 5.0,
+                    1.0,
+                ],
+            );
+        }
+    }
+    let mut owned = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, 3, 2).unwrap());
+    rgba16f_to_rgba8(&src, &mut owned).unwrap();
+
+    let mut borrowed = vec![0xA5; owned.as_bytes().len()];
+    rgba16f_to_rgba8_slice(&src, &mut borrowed).unwrap();
+    assert_eq!(borrowed, owned.as_bytes());
+
+    for got in [borrowed.len() - 1, borrowed.len() + 1] {
+        let mut wrong = vec![0x5A; got];
+        let before = wrong.clone();
+        assert_eq!(
+            rgba16f_to_rgba8_slice(&src, &mut wrong),
+            Err(FrameError::BufferLengthMismatch {
+                expected: borrowed.len(),
+                got,
+            })
+        );
+        assert_eq!(wrong, before, "length refusal must not touch the slice");
+    }
 }
 
 #[test]

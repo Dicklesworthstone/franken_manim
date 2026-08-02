@@ -3,9 +3,11 @@
 //!
 //! Three kernels and a swizzle:
 //!
-//! - [`rgba16f_to_rgba8`] — linear-light RGBA16F → sRGB RGBA8, the
-//!   certified canonical-output conversion: pure table lookup in fixed
-//!   row-major order, bit-exact on every platform (W5CERT's rules).
+//! - [`rgba16f_to_rgba8`] / [`rgba16f_to_rgba8_slice`] — linear-light
+//!   RGBA16F → sRGB RGBA8, the certified canonical-output conversion:
+//!   pure table lookup in fixed row-major order, bit-exact on every
+//!   platform (W5CERT's rules). The slice form writes a tight frame into
+//!   caller-owned storage without allocating an output frame.
 //! - [`rgba_to_nv12`] / [`rgba_to_p010`] — RGB → BT.709 Y′CbCr 4:2:0
 //!   in Q16.16 integer fixed point with defined rounding; standard-mode
 //!   kernels (they feed ffmpeg, whose products are uncertified by
@@ -126,6 +128,34 @@ fn check_dims(src: &FrameBuffer, dst: &FrameBuffer) -> Result<(), FrameError> {
     Ok(())
 }
 
+fn check_rgba16f_source(src: &FrameBuffer) -> Result<(), FrameError> {
+    if src.layout().format() != PixelFormat::Rgba16F {
+        return Err(FrameError::FormatMismatch {
+            expected: "Rgba16F source",
+            got: src.layout().format(),
+        });
+    }
+    Ok(())
+}
+
+fn rgba16f_to_rgba8_rows(src: &FrameBuffer, dst: &mut [u8], dst_stride: usize) {
+    let width = src.layout().width() as usize;
+    let height = src.layout().height() as usize;
+    let src_stride = src.layout().stride(0);
+    let t = tables();
+
+    let src_plane = src.plane(0);
+    for y in 0..height {
+        let s_row = &src_plane[y * src_stride..y * src_stride + width * 8];
+        let d_row = &mut dst[y * dst_stride..y * dst_stride + width * 4];
+        let (src_pixels, src_tail) = s_row.as_chunks::<8>();
+        let (dst_pixels, dst_tail) = d_row.as_chunks_mut::<4>();
+        debug_assert!(src_tail.is_empty());
+        debug_assert!(dst_tail.is_empty());
+        convert_rgba16f_pixels(src_pixels, dst_pixels, t);
+    }
+}
+
 /// Linear-light RGBA16F → sRGB-encoded RGBA8, the certified
 /// canonical-output kernel.
 ///
@@ -135,12 +165,7 @@ fn check_dims(src: &FrameBuffer, dst: &FrameBuffer) -> Result<(), FrameError> {
 /// infinite, and NaN samples included). Fixed traversal order,
 /// no arithmetic on the hot path — bit-exact by construction.
 pub fn rgba16f_to_rgba8(src: &FrameBuffer, dst: &mut FrameBuffer) -> Result<(), FrameError> {
-    if src.layout().format() != PixelFormat::Rgba16F {
-        return Err(FrameError::FormatMismatch {
-            expected: "Rgba16F source",
-            got: src.layout().format(),
-        });
-    }
+    check_rgba16f_source(src)?;
     if dst.layout().format() != PixelFormat::Rgba8 {
         return Err(FrameError::FormatMismatch {
             expected: "Rgba8 destination",
@@ -148,24 +173,40 @@ pub fn rgba16f_to_rgba8(src: &FrameBuffer, dst: &mut FrameBuffer) -> Result<(), 
         });
     }
     check_dims(src, dst)?;
-
-    let width = src.layout().width() as usize;
-    let height = src.layout().height() as usize;
-    let src_stride = src.layout().stride(0);
     let dst_stride = dst.layout().stride(0);
-    let t = tables();
-
-    let src_plane = src.plane(0);
     let dst_plane = dst.plane_mut(0);
-    for y in 0..height {
-        let s_row = &src_plane[y * src_stride..y * src_stride + width * 8];
-        let d_row = &mut dst_plane[y * dst_stride..y * dst_stride + width * 4];
-        let (src_pixels, src_tail) = s_row.as_chunks::<8>();
-        let (dst_pixels, dst_tail) = d_row.as_chunks_mut::<4>();
-        debug_assert!(src_tail.is_empty());
-        debug_assert!(dst_tail.is_empty());
-        convert_rgba16f_pixels(src_pixels, dst_pixels, t);
+    rgba16f_to_rgba8_rows(src, dst_plane, dst_stride);
+    Ok(())
+}
+
+/// Convert a linear-light RGBA16F frame directly into a caller-owned tight
+/// sRGB RGBA8 byte slice.
+///
+/// This is the borrowed-output form of [`rgba16f_to_rgba8`]. It applies the
+/// same table-driven kernel and D-23 top-row-first traversal without creating
+/// an RGBA8 [`FrameBuffer`]. The destination must contain exactly
+/// `width * height * 4` bytes; both short and oversized slices are refused
+/// before any destination byte is written.
+///
+/// # Errors
+/// [`FrameError::FormatMismatch`] unless `src` is RGBA16F,
+/// [`FrameError::TooLarge`] if the tight RGBA8 geometry overflows, or
+/// [`FrameError::BufferLengthMismatch`] unless `dst` has the exact tight size.
+pub fn rgba16f_to_rgba8_slice(src: &FrameBuffer, dst: &mut [u8]) -> Result<(), FrameError> {
+    check_rgba16f_source(src)?;
+    let dst_stride = PixelFormat::Rgba8
+        .min_row_bytes(src.layout().width(), 0)
+        .ok_or(FrameError::TooLarge)?;
+    let expected = dst_stride
+        .checked_mul(src.layout().height() as usize)
+        .ok_or(FrameError::TooLarge)?;
+    if dst.len() != expected {
+        return Err(FrameError::BufferLengthMismatch {
+            expected,
+            got: dst.len(),
+        });
     }
+    rgba16f_to_rgba8_rows(src, dst, dst_stride);
     Ok(())
 }
 

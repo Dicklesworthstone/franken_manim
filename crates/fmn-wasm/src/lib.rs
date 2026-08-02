@@ -45,8 +45,8 @@ use fmn_anim::{FramePacket, prepare_animation};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, DEFAULT_STROKE_WIDTH, TAU, TEAL_B, WHITE};
 use fmn_core::types::Vec3;
-use fmn_frame::convert::rgba16f_to_rgba8;
-use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
+use fmn_frame::convert::rgba16f_to_rgba8_slice;
+use fmn_frame::{FrameLayout, PixelFormat};
 use fmn_geom::bezier::{arc_n_components, quadratic_points_for_arc};
 use fmn_geom::quadpath::QuadPath;
 use fmn_mobject::record::RecordBuffer;
@@ -92,6 +92,36 @@ const FRAME_HEIGHT_UNITS: f64 = 8.0;
 /// Pixel-dimension ceiling: enough headroom for a 4K canvas, small enough
 /// that a hostile or mistaken dimension cannot allocate absurd buffers.
 const MAX_DIMENSION: u32 = 4096;
+
+#[cfg(test)]
+std::thread_local! {
+    static OWNED_RGBA8_OUTPUT_ALLOCATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static RASTERIZED_SURFACES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+fn note_owned_rgba8_output_allocation() {
+    #[cfg(test)]
+    OWNED_RGBA8_OUTPUT_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+}
+
+fn note_rasterized_surface() {
+    #[cfg(test)]
+    RASTERIZED_SURFACES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn owned_rgba8_output_allocations() -> usize {
+    OWNED_RGBA8_OUTPUT_ALLOCATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn rasterized_surface_count() -> usize {
+    RASTERIZED_SURFACES.with(std::cell::Cell::get)
+}
 
 /// The scene kinds [`FmnScene::new`] accepts. This is the whole "scene
 /// description language" — deliberately a closed set of landed primitive
@@ -407,6 +437,51 @@ fn frame_config(width: u32, height: u32) -> FrameConfig {
     )
 }
 
+fn rgba8_output_len(width: u32, height: u32) -> Result<usize, SurfaceError> {
+    FrameLayout::tight(PixelFormat::Rgba8, width, height)
+        .map(|layout| layout.total_bytes())
+        .map_err(|e| SurfaceError::new("rgba8 layout", e))
+}
+
+fn validate_rgba8_destination(width: u32, height: u32, dst: &[u8]) -> Result<(), SurfaceError> {
+    let expected = rgba8_output_len(width, height)?;
+    if dst.len() != expected {
+        return Err(SurfaceError(format!(
+            "render_into destination is {} bytes; expected {expected} ({width}x{height}x4)",
+            dst.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Render one materialized stage directly into a caller-owned tight sRGB
+/// RGBA8 slice, top row first. Destination geometry is validated before any
+/// render-plan derivation or raster work.
+pub(crate) fn render_stage_rgba8_into(
+    stage: &Stage,
+    width: u32,
+    height: u32,
+    camera_revision: u64,
+    dst: &mut [u8],
+) -> Result<(), SurfaceError> {
+    validate_rgba8_destination(width, height, dst)?;
+    let config = frame_config(width, height);
+    let mut plan = RenderPlan::new();
+    plan.sync(stage, camera_revision);
+    let mono = MonoTable::build(&plan, config.map);
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
+    binning
+        .prune_occluded(&plan)
+        .map_err(|e| SurfaceError::new("binning", e))?;
+    let job =
+        FrameJob::new(&plan, &mono, &binning, config).map_err(|e| SurfaceError::new("job", e))?;
+    note_rasterized_surface();
+    let frame = job
+        .render(RENDER_THREADS)
+        .map_err(|e| SurfaceError::new("render", e))?;
+    rgba16f_to_rgba8_slice(&frame, dst).map_err(|e| SurfaceError::new("transfer", e))
+}
+
 /// Render one materialized stage to sRGB RGBA8 through the tier-1 Lumen
 /// path, top row first (D-23's orientation rule — `ImageData` wants
 /// exactly this). Shared by the packet renderer and the tier-2 player
@@ -418,24 +493,15 @@ pub(crate) fn render_stage_rgba8(
     height: u32,
     camera_revision: u64,
 ) -> Result<Vec<u8>, SurfaceError> {
-    let config = frame_config(width, height);
-    let mut plan = RenderPlan::new();
-    plan.sync(stage, camera_revision);
-    let mono = MonoTable::build(&plan, config.map);
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map);
-    binning
-        .prune_occluded(&plan)
-        .map_err(|e| SurfaceError::new("binning", e))?;
-    let job =
-        FrameJob::new(&plan, &mono, &binning, config).map_err(|e| SurfaceError::new("job", e))?;
-    let frame = job
-        .render(RENDER_THREADS)
-        .map_err(|e| SurfaceError::new("render", e))?;
-    let layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)
-        .map_err(|e| SurfaceError::new("rgba8 layout", e))?;
-    let mut rgba8 = FrameBuffer::new(layout);
-    rgba16f_to_rgba8(&frame, &mut rgba8).map_err(|e| SurfaceError::new("transfer", e))?;
-    Ok(rgba8.as_bytes().to_vec())
+    let len = rgba8_output_len(width, height)?;
+    let mut rgba8 = Vec::new();
+    rgba8
+        .try_reserve_exact(len)
+        .map_err(|_| SurfaceError(format!("could not allocate {len}-byte RGBA8 output frame")))?;
+    rgba8.resize(len, 0);
+    note_owned_rgba8_output_allocation();
+    render_stage_rgba8_into(stage, width, height, camera_revision, &mut rgba8)?;
+    Ok(rgba8)
 }
 
 /// Render one captured packet to sRGB RGBA8, top row first (D-23's
@@ -451,6 +517,27 @@ fn render_packet_rgba8(build: &SceneBuild, index: usize) -> Result<Vec<u8>, Surf
     let camera_revision = u64::try_from(packet.frame_index())
         .map_err(|_| SurfaceError("negative frame index reached the renderer".to_string()))?;
     render_stage_rgba8(&stage, build.width, build.height, camera_revision)
+}
+
+/// Render one captured packet directly into caller storage. Frame range is
+/// validated first; destination length is then checked before the packet's
+/// snapshot is materialized.
+fn render_packet_rgba8_into(
+    build: &SceneBuild,
+    index: usize,
+    dst: &mut [u8],
+) -> Result<(), SurfaceError> {
+    let Some(packet) = build.packets.get(index) else {
+        return Err(SurfaceError(format!(
+            "frame index {index} out of range 0..{}",
+            build.packets.len()
+        )));
+    };
+    validate_rgba8_destination(build.width, build.height, dst)?;
+    let stage = packet.materialize_stage();
+    let camera_revision = u64::try_from(packet.frame_index())
+        .map_err(|_| SurfaceError("negative frame index reached the renderer".to_string()))?;
+    render_stage_rgba8_into(&stage, build.width, build.height, camera_revision, dst)
 }
 
 /// A constructed scene, ready to render frames to RGBA8 pixels.
@@ -520,18 +607,7 @@ impl FmnScene {
     /// `JsError` for a wrong-length destination, out-of-range index, or a
     /// render failure.
     pub fn render_into(&self, index: u32, dst: &mut [u8]) -> Result<(), JsError> {
-        let pixels = render_packet_rgba8(&self.build, index as usize)?;
-        if dst.len() != pixels.len() {
-            return Err(JsError::new(&format!(
-                "render_into destination is {} bytes; expected {} ({}x{}x4)",
-                dst.len(),
-                pixels.len(),
-                self.build.width,
-                self.build.height
-            )));
-        }
-        dst.copy_from_slice(&pixels);
-        Ok(())
+        Ok(render_packet_rgba8_into(&self.build, index as usize, dst)?)
     }
 }
 
@@ -607,6 +683,50 @@ mod tests {
         scene.render_into(0, &mut scratch).expect("render_into");
         assert_eq!(scratch, pixels);
         assert!(FmnScene::scene_kinds().contains(&"orbit_duet".to_string()));
+    }
+
+    #[test]
+    fn tier1_caller_storage_is_identical_and_avoids_owned_rgba8_frames() {
+        let build = build_scene("orbit_duet", 64, 36).expect("construct");
+        let expected = render_packet_rgba8(&build, 0).expect("allocating render");
+        let owned_before = owned_rgba8_output_allocations();
+        let mut scratch = vec![0xA5; expected.len()];
+        let storage = scratch.as_ptr();
+        let capacity = scratch.capacity();
+
+        for index in [0, build.packets.len() / 2, build.packets.len() - 1] {
+            let expected = render_packet_rgba8(&build, index).expect("allocating render");
+            let owned_after_expected = owned_rgba8_output_allocations();
+            render_packet_rgba8_into(&build, index, &mut scratch).expect("caller render");
+            assert_eq!(scratch, expected, "frame {index} differs by destination");
+            assert_eq!(scratch.as_ptr(), storage, "caller storage moved");
+            assert_eq!(scratch.capacity(), capacity, "caller capacity changed");
+            assert_eq!(
+                owned_rgba8_output_allocations(),
+                owned_after_expected,
+                "render_into routed through an owned RGBA8 frame"
+            );
+        }
+        assert_eq!(
+            owned_rgba8_output_allocations(),
+            owned_before + 3,
+            "only the three allocating convenience renders should own RGBA8 frames"
+        );
+    }
+
+    #[test]
+    fn tier1_caller_storage_length_refuses_before_rasterization() {
+        let build = build_scene("circle_shift", 32, 18).expect("construct");
+        let mut short = vec![0; 32 * 18 * 4 - 1];
+        let renders_before = rasterized_surface_count();
+        let error = render_packet_rgba8_into(&build, 0, &mut short)
+            .expect_err("short destination must refuse");
+        assert!(error.to_string().contains("expected 2304 (32x18x4)"));
+        assert_eq!(
+            rasterized_surface_count(),
+            renders_before,
+            "wrong-length storage must refuse before rasterization"
+        );
     }
 
     /// The R19 artifact-size budget: if the release wasm artifact has been

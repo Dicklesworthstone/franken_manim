@@ -96,6 +96,13 @@ pub enum FrameError {
     },
     /// Source and destination dimensions differ.
     DimensionMismatch,
+    /// A caller-owned byte slice does not match the exact tight frame size.
+    BufferLengthMismatch {
+        /// Bytes required by the frame geometry.
+        expected: usize,
+        /// Bytes supplied by the caller.
+        got: usize,
+    },
     /// The requested conversion is a typed refusal, never a silent
     /// substitution.
     UnsupportedConversion(&'static str),
@@ -141,6 +148,9 @@ impl std::fmt::Display for FrameError {
             }
             Self::DimensionMismatch => {
                 write!(f, "source and destination dimensions differ")
+            }
+            Self::BufferLengthMismatch { expected, got } => {
+                write!(f, "frame buffer needs exactly {expected} bytes, got {got}")
             }
             Self::UnsupportedConversion(what) => write!(f, "unsupported conversion: {what}"),
         }
