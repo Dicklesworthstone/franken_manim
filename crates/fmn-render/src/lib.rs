@@ -61,7 +61,7 @@ pub use fill::{
     FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, RationalPiece, RowScratch,
 };
 pub use hint::Hint;
-pub use plan::{RenderPlan, SyncStats};
+pub use plan::{RenderPlan, SyncError, SyncStats};
 pub use revision::{Axis, Dependency, Revisions};
 pub use stroke::{JoinWedge, MITER_LIMIT};
 pub use table::{Instance, Segment, Shape, ShapeTable, Style, StyleTable};

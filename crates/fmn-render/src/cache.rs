@@ -533,7 +533,9 @@ mod tests {
             camera: u64,
             out: OutputTransform,
         ) -> (CacheStats, Binning) {
-            self.plan.sync(stage, camera);
+            self.plan
+                .sync(stage, camera)
+                .expect("valid compositor fixture");
             let binning = Binning::build(&self.plan, out.viewport, Tiling::default(), out.map)
                 .expect("bounded test binning");
             let work = plan_frame(&mut self.cache, &binning, &self.plan, camera, out)
@@ -833,7 +835,7 @@ mod tests {
         let (stage, _) = scene();
         let mut cache = TileCache::<Vec<u8>>::new();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid cache fixture");
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
 
@@ -885,7 +887,7 @@ mod tests {
     fn the_key_reports_which_part_moved() {
         let (stage, _) = scene();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid cache fixture");
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
         let tile = tile_at(&binning, 40, 40);
@@ -908,7 +910,7 @@ mod tests {
         }
 
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 17);
+        plan.sync(&stage, 17).expect("valid cache fixture");
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
         let tile = (0..binning.tile_count())
@@ -943,7 +945,7 @@ mod tests {
     fn stale_binning_is_never_admitted_to_the_tile_cache() {
         let (mut stage, mobs) = scene();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid cache fixture");
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
         let tile = tile_at(&binning, 40, 40);
@@ -965,7 +967,7 @@ mod tests {
 
         stage.set_z_index(mobs[0], 10, false);
         stage.add_to_scene(mobs[0]).expect("live");
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid cache fixture");
         assert!(
             TileKey::build(&binning, &plan, tile, 0, output()).is_none(),
             "stale command indices must never become reusable cache keys"
@@ -976,7 +978,7 @@ mod tests {
     fn an_out_of_range_tile_is_not_cacheable() {
         let (stage, _) = scene();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid cache fixture");
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
 
@@ -991,7 +993,7 @@ mod tests {
     fn invalid_tile_planning_is_typed_and_atomic() {
         let (stage, _) = scene();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid cache fixture");
         let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
         let mut cache = TileCache::<u32>::new();

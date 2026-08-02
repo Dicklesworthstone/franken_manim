@@ -30,7 +30,6 @@
 //! library, because every probe exists to exercise wasm-specific capability
 //! implementations.
 #![forbid(unsafe_code)]
-
 #![cfg(target_arch = "wasm32")]
 
 use std::time::Duration;
@@ -111,7 +110,7 @@ fn render_probe_frame() -> Vec<u8> {
     let stage = probe_stage();
     let config = frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(&stage, 0);
+    plan.sync(&stage, 0).expect("valid wasm smoke fixture");
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded wasm smoke binning");
@@ -131,7 +130,7 @@ pub fn render_probe_digest() -> u64 {
     let stage = probe_stage();
     let config = frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(&stage, 0);
+    plan.sync(&stage, 0).expect("valid wasm smoke fixture");
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded wasm smoke binning");
@@ -161,7 +160,8 @@ pub fn render_probe_is_not_background() -> bool {
         let stage = Stage::new();
         let config = frame_config();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0)
+            .expect("valid empty wasm smoke fixture");
         let mono = MonoTable::build(&plan, config.map);
         let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
             .expect("bounded wasm smoke binning");

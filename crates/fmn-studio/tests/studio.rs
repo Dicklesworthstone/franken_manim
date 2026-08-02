@@ -528,7 +528,7 @@ fn native_preview_unavailability_uses_the_cpu_visible_studio_stream() {
         fmn_core::color::Srgb::from_rgb8(12, 18, 24).to_linear(1.0),
     );
     let mut plan = fmn_render::RenderPlan::new();
-    plan.sync(&stage, 0);
+    plan.sync(&stage, 0).expect("valid Studio preview fixture");
     let mono = fmn_render::MonoTable::build(&plan, config.map);
     let binning = fmn_render::Binning::build(
         &plan,

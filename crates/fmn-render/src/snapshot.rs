@@ -220,7 +220,7 @@ pub fn hint_names_are_distinct(hints: &[Hint]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::RenderPlan;
+    use crate::plan::{RenderPlan, SyncStats};
     use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage, Uniforms};
 
     /// The fixture scene the golden below pins.
@@ -290,10 +290,14 @@ mod tests {
         stage
     }
 
+    fn sync_valid(plan: &mut RenderPlan, stage: &Stage, camera: u64) -> SyncStats {
+        plan.sync(stage, camera).expect("valid snapshot fixture")
+    }
+
     fn synced() -> RenderPlan {
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         plan
     }
 
@@ -351,9 +355,9 @@ mod tests {
         // saving.
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let first = digest(&plan).expect("encodes");
-        let stats = plan.sync(&stage, 0);
+        let stats = sync_valid(&mut plan, &stage, 0);
         assert_eq!(stats.shapes_compiled, 0, "the second sync must reuse");
         assert_eq!(digest(&plan).expect("encodes"), first);
     }
@@ -364,7 +368,7 @@ mod tests {
         // be sensitive to the thing it locks.
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let before = digest(&plan).expect("encodes");
 
         let mut stage2 = fixture();
@@ -375,7 +379,7 @@ mod tests {
             .buffer
             .write(2, "point", &[7.0, 7.0, 0.0]);
         let mut plan2 = RenderPlan::new();
-        plan2.sync(&stage2, 0);
+        sync_valid(&mut plan2, &stage2, 0);
         assert_ne!(digest(&plan2).expect("encodes"), before);
     }
 
@@ -383,7 +387,7 @@ mod tests {
     fn the_snapshot_moves_when_only_the_placement_moves() {
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let before = digest(&plan).expect("encodes");
 
         let mut moved = fixture();
@@ -395,7 +399,7 @@ mod tests {
             point_revision
         );
         let mut moved_plan = RenderPlan::new();
-        moved_plan.sync(&moved, 0);
+        sync_valid(&mut moved_plan, &moved, 0);
 
         assert_ne!(digest(&moved_plan).expect("encodes"), before);
     }
@@ -404,7 +408,7 @@ mod tests {
     fn the_snapshot_moves_when_only_a_style_moves() {
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let before = digest(&plan).expect("encodes");
 
         let mut stage2 = fixture();
@@ -415,7 +419,7 @@ mod tests {
             .buffer
             .write(0, "stroke_rgba", &[0.0, 1.0, 0.0, 1.0]);
         let mut plan2 = RenderPlan::new();
-        plan2.sync(&stage2, 0);
+        sync_valid(&mut plan2, &stage2, 0);
         assert_ne!(digest(&plan2).expect("encodes"), before);
     }
 
@@ -423,7 +427,7 @@ mod tests {
     fn the_snapshot_moves_when_each_render_uniform_moves() {
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let before = digest(&plan).expect("encodes");
 
         let cases = [
@@ -482,7 +486,7 @@ mod tests {
             let mob = changed.draw_plan().items()[0].mob;
             *changed.uniforms_mut(mob).expect("live") = uniforms;
             let mut changed_plan = RenderPlan::new();
-            changed_plan.sync(&changed, 0);
+            sync_valid(&mut changed_plan, &changed, 0);
             assert_ne!(
                 digest(&changed_plan).expect("encodes"),
                 before,
@@ -497,7 +501,7 @@ mod tests {
         // no geometry and no style changed.
         let stage = fixture();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let before = digest(&plan).expect("encodes");
 
         let mut stage2 = fixture();
@@ -505,7 +509,7 @@ mod tests {
         stage2.set_z_index(mob, 5, false);
         stage2.add_to_scene(mob).expect("live");
         let mut plan2 = RenderPlan::new();
-        plan2.sync(&stage2, 0);
+        sync_valid(&mut plan2, &stage2, 0);
         assert_ne!(digest(&plan2).expect("encodes"), before);
     }
 

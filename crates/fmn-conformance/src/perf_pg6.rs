@@ -294,7 +294,8 @@ pub fn measure_pg6(
     for case in SCENES {
         let built = (case.build)(corpus);
         let mut plan = RenderPlan::new();
-        let _ = plan.sync(&built.stage, 0);
+        plan.sync(&built.stage, 0)
+            .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
         let mono = MonoTable::build(&plan, config.map);
         let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
             .map_err(|error| Pg6Error::Fixture(error.to_string()))?;

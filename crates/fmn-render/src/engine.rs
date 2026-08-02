@@ -2971,7 +2971,7 @@ mod tests {
     /// Compile the three derived structures a frame needs.
     fn derive(stage: &Stage, cfg: FrameConfig, tiling: Tiling) -> (RenderPlan, MonoTable, Binning) {
         let mut plan = RenderPlan::new();
-        plan.sync(stage, 0);
+        plan.sync(stage, 0).expect("valid engine fixture");
         let mono = MonoTable::build(&plan, cfg.map);
         let binning =
             Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded test binning");
@@ -3841,16 +3841,20 @@ mod tests {
         let mut retained_stage = Stage::new();
         scene(&mut retained_stage);
         let mut retained = RenderPlan::new();
-        retained.sync(&retained_stage, 0);
+        retained
+            .sync(&retained_stage, 0)
+            .expect("valid retained fixture");
         newcomer(&mut retained_stage);
-        retained.sync(&retained_stage, 0);
+        retained
+            .sync(&retained_stage, 0)
+            .expect("valid retained fixture");
 
         // Fresh: the same final scene, compiled in one pass.
         let mut fresh_stage = Stage::new();
         scene(&mut fresh_stage);
         newcomer(&mut fresh_stage);
         let mut fresh = RenderPlan::new();
-        fresh.sync(&fresh_stage, 0);
+        fresh.sync(&fresh_stage, 0).expect("valid fresh fixture");
 
         // The precondition, asserted rather than assumed: the two plans really
         // do assign different table indices to the same painter position. Without
@@ -4272,7 +4276,7 @@ mod tests {
         // reinterpreted under the new order.
         stage.set_z_index(mobs[0], 100, false);
         stage.add_to_scene(mobs[0]).expect("live");
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid engine fixture");
         assert!(matches!(
             FrameJob::new(&plan, &mono, &binning, cfg),
             Err(FrameJobError::BinningPlanMismatch)
@@ -4359,7 +4363,7 @@ mod tests {
             .buffer
             .export_field_view("point", true)
             .expect("point field");
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid engine fixture");
         assert!(plan.shapes().instances()[0].hint_unsafe);
         assert!(matches!(
             FrameJob::new(&plan, &mono, &binning, cfg),

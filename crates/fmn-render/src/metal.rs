@@ -2597,7 +2597,7 @@ mod tests {
             },
         );
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid Metal fixture");
         let mono = MonoTable::build(&plan, config.map);
         let binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map)
             .expect("bounded test binning");

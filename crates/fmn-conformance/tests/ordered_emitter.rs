@@ -140,7 +140,8 @@ fn prepare_without_reservation(
 
     let config = frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(&stage, spec.sequence);
+    plan.sync(&stage, spec.sequence)
+        .expect("valid ordered-emitter fixture");
     let mono = MonoTable::build(&plan, config.map);
     let binning = Binning::build(&plan, config.viewport, tiling, config.map)
         .expect("bounded conformance binning");

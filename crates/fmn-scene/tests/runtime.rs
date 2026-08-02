@@ -1536,7 +1536,8 @@ mod wasm_tier1_determinism_proxy {
         let config = frame_config();
         let mut plan = RenderPlan::new();
         let camera_revision = u64::try_from(packet.frame_index()).expect("frame index");
-        plan.sync(&stage, camera_revision);
+        plan.sync(&stage, camera_revision)
+            .expect("valid scene runtime fixture");
         let mono = MonoTable::build(&plan, config.map);
         let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
             .expect("bounded scene test binning");
@@ -1616,7 +1617,7 @@ mod wasm_tier1_determinism_proxy {
             let stage = Stage::default();
             let config = frame_config();
             let mut plan = RenderPlan::new();
-            plan.sync(&stage, 0);
+            plan.sync(&stage, 0).expect("valid empty scene fixture");
             let mono = MonoTable::build(&plan, config.map);
             let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
                 .expect("bounded scene test binning");

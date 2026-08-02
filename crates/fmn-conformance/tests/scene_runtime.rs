@@ -99,7 +99,8 @@ fn render(packet: &FramePacket, threads: usize) -> Result<Vec<u8>, IntegrationEr
     let mut plan = RenderPlan::new();
     let camera_revision = u64::try_from(packet.frame_index())
         .map_err(|_| IntegrationError::new("lumen", "negative frame index reached the renderer"))?;
-    plan.sync(&stage, camera_revision);
+    plan.sync(&stage, camera_revision)
+        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");

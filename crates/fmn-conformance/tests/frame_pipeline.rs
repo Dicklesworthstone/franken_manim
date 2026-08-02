@@ -203,7 +203,8 @@ fn prepare_profiled(
             fmn_runtime::ProfileLane::prepare(),
         );
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, spec.sequence);
+        plan.sync(&stage, spec.sequence)
+            .expect("valid frame-pipeline fixture");
         plan
     };
     let mono = {

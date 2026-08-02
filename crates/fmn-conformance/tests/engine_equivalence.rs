@@ -40,7 +40,8 @@ const FAST_THREADS: usize = 4;
 fn render_frame(stage: &Stage, identity: EngineIdentity, threads: usize) -> FrameBuffer {
     let config = frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(stage, 0);
+    plan.sync(stage, 0)
+        .expect("valid engine-equivalence fixture");
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");

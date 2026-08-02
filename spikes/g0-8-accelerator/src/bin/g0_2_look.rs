@@ -156,7 +156,7 @@ fn render_gradient_fills() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
         Srgb::from_rgb8(0x33, 0x33, 0x33).to_linear(1.0),
     );
     let mut plan = RenderPlan::new();
-    plan.sync(&stage, 0);
+    plan.sync(&stage, 0)?;
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map)?;
     binning.prune_occluded(&plan)?;

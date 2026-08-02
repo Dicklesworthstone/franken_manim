@@ -144,7 +144,7 @@ fn render_frame(
 ) -> FrameBuffer {
     let cfg = config().with_aa_policy(aa);
     let mut plan = RenderPlan::new();
-    plan.sync(stage, 0);
+    plan.sync(stage, 0).expect("valid certified-engine fixture");
     let mono = MonoTable::build(&plan, cfg.map);
     let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
         .expect("bounded certified-engine binning");
@@ -608,7 +608,8 @@ fn metal_annex_stays_inside_budget_and_reuses_its_surfaces() {
         let certified = render_frame(&stage, EngineIdentity::certified(), 1, AaPolicy::Adaptive);
         let cfg = config();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0)
+            .expect("valid certified-engine fixture");
         let mono = MonoTable::build(&plan, cfg.map);
         let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
             .expect("bounded certified-engine binning");
@@ -999,7 +1000,8 @@ fn metal_annex_pg_a_reports_the_empty_floor_beside_the_corpus() {
     for (case, stage) in [("empty", Stage::new()), ("composite", composite())] {
         let cfg = config();
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0)
+            .expect("valid certified-engine fixture");
         let mono = MonoTable::build(&plan, cfg.map);
         let mut binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
             .expect("bounded certified-engine binning");
@@ -1282,7 +1284,8 @@ fn the_corpus_actually_exercises_what_it_claims() {
     let cfg = config();
 
     let mut plan = RenderPlan::new();
-    plan.sync(&caps_and_joins(), 0);
+    plan.sync(&caps_and_joins(), 0)
+        .expect("valid caps-and-joins fixture");
     assert_eq!(
         plan.shapes().instances().len(),
         15,
@@ -1334,7 +1337,7 @@ fn the_corpus_actually_exercises_what_it_claims() {
     assert_ne!(all_joints(JointType::Bevel), all_joints(JointType::Miter));
 
     let mut plan = RenderPlan::new();
-    plan.sync(&fills(), 0);
+    plan.sync(&fills(), 0).expect("valid fills fixture");
     assert!(
         plan.styles()
             .rows()
@@ -1403,7 +1406,7 @@ fn the_corpus_actually_exercises_what_it_claims() {
     );
 
     let mut plan = RenderPlan::new();
-    plan.sync(&composite(), 0);
+    plan.sync(&composite(), 0).expect("valid composite fixture");
     assert!(
         plan.styles().rows().iter().any(|s| s.stroke_behind),
         "no backstroke, so R-5's other branch is untested"
@@ -1419,7 +1422,8 @@ fn the_corpus_actually_exercises_what_it_claims() {
     // viewport renders a background nobody would notice was empty.
     for (name, stage) in corpus() {
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0)
+            .expect("valid certified-engine corpus fixture");
         let mono = MonoTable::build(&plan, cfg.map);
         let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
             .expect("bounded certified-engine binning");
@@ -1456,7 +1460,7 @@ fn the_engine_identity_reaches_the_input_closure() {
     // downstream can journal an identity the render did not use.
     let stage = fills();
     let mut plan = RenderPlan::new();
-    plan.sync(&stage, 0);
+    plan.sync(&stage, 0).expect("valid fills fixture");
     let mono = MonoTable::build(&plan, cfg.map);
     let binning = Binning::build(&plan, cfg.viewport, TILING, cfg.map)
         .expect("bounded certified-engine binning");

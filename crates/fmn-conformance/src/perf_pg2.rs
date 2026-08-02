@@ -490,7 +490,8 @@ impl Fixture {
         let config = frame_config(scenario);
         let plan_start = Instant::now();
         let mut plan = RenderPlan::new();
-        let _ = plan.sync(&stage, 0);
+        plan.sync(&stage, 0)
+            .map_err(|error| Pg2Error::Fixture(format!("render plan: {error}")))?;
         phases.push(PhaseTiming::new("render-plan-sync", plan_start.elapsed()));
 
         let mono_start = Instant::now();

@@ -462,7 +462,8 @@ fn prepare_scene(index: usize) -> Result<PreparedScene, String> {
     let built = (case.build)(scene_goldens::corpus());
     let config = scene_goldens::frame_config();
     let mut plan = RenderPlan::new();
-    let _ = plan.sync(&built.stage, 0);
+    plan.sync(&built.stage, 0)
+        .map_err(|error| format!("{} render plan: {error}", case.name))?;
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .map_err(|error| format!("{} binning: {error}", case.name))?;

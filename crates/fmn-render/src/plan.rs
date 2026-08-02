@@ -29,7 +29,7 @@ use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
 use crate::table::{Instance, Segment, ShapeTable, Style, StyleTable, compile_shape, shape_digest};
 use fmn_core::types::Vec3;
-use fmn_geom::quadpath::QuadPath;
+use fmn_geom::{GeomError, quadpath::QuadPath};
 use fmn_hash::{Digest, Sha256};
 use fmn_mobject::{Mob, Placement, RecordBuffer, Stage};
 use std::collections::HashMap;
@@ -58,6 +58,36 @@ const STYLE_VIEW_FIELDS: [&str; 4] = [
     "fill_rgba",
     "fill_border_width",
 ];
+
+/// A retained-plan synchronization could not represent scene geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncError {
+    /// One renderable's point run violated Chisel's shared-anchor layout.
+    InvalidGeometry {
+        /// The renderable whose geometry was rejected.
+        mob: Mob,
+        /// Chisel's precise representation error.
+        source: GeomError,
+    },
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidGeometry { mob, source } => {
+                write!(f, "cannot compile geometry for {mob:?}: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SyncError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidGeometry { source, .. } => Some(source),
+        }
+    }
+}
 
 fn writable_view_affects_any(buffer: &RecordBuffer, fields: &[&str]) -> bool {
     fields
@@ -216,9 +246,35 @@ impl RenderPlan {
     /// scene state, deliberately uncached there so that this cache can be
     /// checked against it — and for each renderable either reuses its retained
     /// compilation or rebuilds exactly the part whose axes moved.
-    pub fn sync(&mut self, stage: &Stage, camera: u64) -> SyncStats {
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] before mutating the retained plan when a renderable
+    /// has geometry that cannot satisfy the shared-anchor path contract.
+    pub fn sync(&mut self, stage: &Stage, camera: u64) -> Result<SyncStats, SyncError> {
         let mut stats = SyncStats::default();
         let plan = stage.draw_plan();
+
+        // `QuadPath::from_points` currently has one whole-run validation: a
+        // nonempty shared-anchor run must be odd. Check every renderable before
+        // clearing the old instance table so a refusal is atomic. Reading only
+        // schema metadata and record counts preserves the retained plan's
+        // promise not to materialize unchanged point columns.
+        for item in plan.items() {
+            let mob = item.mob;
+            let Some(entry) = stage.get(mob) else {
+                continue;
+            };
+            if entry.buffer.schema().field_width("point") != Some(3) {
+                continue;
+            }
+            let len = entry.buffer.len();
+            if len != 0 && len.is_multiple_of(2) {
+                return Err(SyncError::InvalidGeometry {
+                    mob,
+                    source: GeomError::EvenPointCount { len },
+                });
+            }
+        }
 
         // Instances are painter order, and painter order is a property of the
         // frame rather than of any object, so the list is rebuilt every frame.
@@ -284,10 +340,10 @@ impl RenderPlan {
                         -local_origin[1],
                         -local_origin[2],
                     ]);
+                    let path = QuadPath::from_points(local)
+                        .map_err(|source| SyncError::InvalidGeometry { mob, source })?;
                     let segments_out = &mut self.segments;
                     let index = self.shapes.intern_shape(digest, || {
-                        let path =
-                            QuadPath::from_points(local).unwrap_or_else(|_| QuadPath::default());
                         let (shape, mut segs) = compile_shape(digest, &path, hint, first_segment);
                         segments_out.append(&mut segs);
                         shape
@@ -366,7 +422,7 @@ impl RenderPlan {
             self.geometry_key = self.compute_geometry_identity();
         }
         self.plan_key = self.compute_identity(self.geometry_key);
-        stats
+        Ok(stats)
     }
 
     /// The segment table.
@@ -671,6 +727,10 @@ mod tests {
         (stage, mobs)
     }
 
+    fn sync_valid(plan: &mut RenderPlan, stage: &Stage, camera: u64) -> SyncStats {
+        plan.sync(stage, camera).expect("valid test scene")
+    }
+
     #[test]
     fn a_first_sync_compiles_and_a_second_reads_no_points() {
         // The claim the whole module exists for. Not "recompiles less" —
@@ -679,13 +739,13 @@ mod tests {
         let (stage, _) = staged(3);
         let mut plan = RenderPlan::new();
 
-        let first = plan.sync(&stage, 0);
+        let first = sync_valid(&mut plan, &stage, 0);
         assert_eq!(first.visited, 3);
         assert_eq!(first.shapes_compiled, 1, "three copies of one outline");
         assert_eq!(first.shapes_shared, 2);
         assert_eq!(first.shapes_reused, 0);
 
-        let second = plan.sync(&stage, 0);
+        let second = sync_valid(&mut plan, &stage, 0);
         assert_eq!(second.visited, 3);
         assert_eq!(second.shapes_compiled, 0);
         assert_eq!(second.shapes_shared, 0);
@@ -694,11 +754,47 @@ mod tests {
     }
 
     #[test]
+    fn malformed_shared_anchor_geometry_is_named_and_atomic() {
+        let (mut stage, _) = staged(1);
+        let mut plan = RenderPlan::new();
+        sync_valid(&mut plan, &stage, 0);
+
+        let before_segments = plan.segments().to_vec();
+        let before_styles = plan.styles().rows().to_vec();
+        let before_shapes = plan.shapes().shapes().to_vec();
+        let before_instances = plan.shapes().instances().to_vec();
+        let before_stats = plan.stats();
+        let before_geometry = plan.geometry_identity();
+        let before_identity = plan.identity();
+        let before_retained = plan.retained.len();
+
+        let malformed = stage.add(vmobject(&[[20.0, 0.0, 0.0], [21.0, 0.0, 0.0]]));
+        stage.add_to_scene(malformed).expect("live");
+        assert_eq!(
+            plan.sync(&stage, 0)
+                .expect_err("even point run must be refused"),
+            SyncError::InvalidGeometry {
+                mob: malformed,
+                source: fmn_geom::GeomError::EvenPointCount { len: 2 },
+            }
+        );
+
+        assert_eq!(plan.segments(), before_segments);
+        assert_eq!(plan.styles().rows(), before_styles);
+        assert_eq!(plan.shapes().shapes(), before_shapes);
+        assert_eq!(plan.shapes().instances(), before_instances);
+        assert_eq!(plan.stats(), before_stats);
+        assert_eq!(plan.geometry_identity(), before_geometry);
+        assert_eq!(plan.identity(), before_identity);
+        assert_eq!(plan.retained.len(), before_retained);
+    }
+
+    #[test]
     fn writable_views_refresh_exactly_the_render_fields_they_expose() {
         let (mut stage, mobs) = staged(1);
         let mob = mobs[0];
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
 
         let point_view = stage
             .get_mut(mob)
@@ -707,7 +803,7 @@ mod tests {
             .export_field_view("point", true)
             .expect("point field");
         for _ in 0..2 {
-            let stats = plan.sync(&stage, 0);
+            let stats = sync_valid(&mut plan, &stage, 0);
             assert_eq!(stats.shapes_reused, 0);
             assert_eq!(
                 stats.shapes_shared, 1,
@@ -723,11 +819,11 @@ mod tests {
         // Detaching the writable point view conservatively advances its field
         // revision, so the final state is observed once more before ordinary
         // reuse resumes.
-        let detached = plan.sync(&stage, 0);
+        let detached = sync_valid(&mut plan, &stage, 0);
         assert_eq!(detached.shapes_reused, 0);
         assert_eq!(detached.shapes_shared, 1);
         assert!(!plan.shapes().instances()[0].hint_unsafe);
-        assert_eq!(plan.sync(&stage, 0).shapes_reused, 1);
+        assert_eq!(sync_valid(&mut plan, &stage, 0).shapes_reused, 1);
 
         let style_view = stage
             .get_mut(mob)
@@ -736,7 +832,7 @@ mod tests {
             .export_field_view("fill_rgba", true)
             .expect("fill field");
         for _ in 0..2 {
-            let stats = plan.sync(&stage, 0);
+            let stats = sync_valid(&mut plan, &stage, 0);
             assert_eq!(stats.shapes_reused, 1);
             assert_eq!(stats.styles_rebuilt, 1);
             let instance = plan.shapes().instances()[0];
@@ -749,7 +845,7 @@ mod tests {
         drop(style_view);
 
         let whole_view = stage.get_mut(mob).expect("live").buffer.export_view(true);
-        let stats = plan.sync(&stage, 0);
+        let stats = sync_valid(&mut plan, &stage, 0);
         assert_eq!(stats.shapes_reused, 0);
         assert_eq!(stats.shapes_shared, 1);
         assert_eq!(stats.styles_rebuilt, 1);
@@ -791,7 +887,7 @@ mod tests {
         let mob = stage.add(Mobject::from_buffer(buffer));
         stage.add_to_scene(mob).expect("live");
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
 
         let metadata_view = stage
             .get_mut(mob)
@@ -799,7 +895,7 @@ mod tests {
             .buffer
             .export_field_view("user_metadata", true)
             .expect("custom field");
-        let stats = plan.sync(&stage, 0);
+        let stats = sync_valid(&mut plan, &stage, 0);
         assert_eq!(stats.shapes_reused, 1);
         assert_eq!(stats.styles_rebuilt, 0);
         assert!(!plan.shapes().instances()[0].volatile);
@@ -811,7 +907,7 @@ mod tests {
         // §10.8's instancing dedup, stated as the acceptance criterion does.
         let (stage, _) = staged(8);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         assert_eq!(plan.shapes().shapes().len(), 1);
         assert_eq!(plan.shapes().instances().len(), 8);
         assert!((plan.shapes().instances_per_shape() - 8.0).abs() < 1e-12);
@@ -825,7 +921,7 @@ mod tests {
         // coefficients".
         let (mut stage, mobs) = staged(2);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
 
         stage
             .get_mut(mobs[0])
@@ -833,7 +929,7 @@ mod tests {
             .buffer
             .write(0, "stroke_rgba", &[1.0, 0.0, 0.0, 1.0]);
 
-        let after = plan.sync(&stage, 0);
+        let after = sync_valid(&mut plan, &stage, 0);
         assert_eq!(after.shapes_compiled, 0, "no outline may recompile");
         assert_eq!(after.shapes_reused, 2);
         assert_eq!(after.styles_rebuilt, 1, "exactly the one that changed");
@@ -846,8 +942,8 @@ mod tests {
         // geometry cannot depend on the camera, so the axis must not reach it.
         let (stage, _) = staged(4);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
-        let after = plan.sync(&stage, 99);
+        sync_valid(&mut plan, &stage, 0);
+        let after = sync_valid(&mut plan, &stage, 99);
         assert_eq!(after.shapes_compiled, 0);
         assert_eq!(after.styles_rebuilt, 0);
         assert_eq!(after.shapes_reused, 4);
@@ -859,11 +955,11 @@ mod tests {
         let mob = mobs[0];
         let point_revision = stage.get(mob).unwrap().buffer.field_revision("point");
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let geometry = plan.geometry_identity();
 
         stage.shift(mob, [7.0, -3.0, 0.5]);
-        let translated = plan.sync(&stage, 0);
+        let translated = sync_valid(&mut plan, &stage, 0);
         assert_eq!(translated.shapes_reused, 1);
         assert_eq!(translated.shapes_compiled, 0);
         assert_eq!(translated.shapes_shared, 0);
@@ -884,7 +980,7 @@ mod tests {
             Some([7.0, -3.0, 0.5]),
             None,
         );
-        let rotated = plan.sync(&stage, 0);
+        let rotated = sync_valid(&mut plan, &stage, 0);
         assert_eq!(
             rotated.shapes_reused, 1,
             "linear placement is screen-derived state, not a reshape"
@@ -897,7 +993,7 @@ mod tests {
     fn moving_one_point_recompiles_exactly_one_outline() {
         let (mut stage, mobs) = staged(3);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
 
         stage
             .get_mut(mobs[1])
@@ -905,7 +1001,7 @@ mod tests {
             .buffer
             .write(2, "point", &[500.0, 500.0, 0.0]);
 
-        let after = plan.sync(&stage, 0);
+        let after = sync_valid(&mut plan, &stage, 0);
         assert_eq!(after.shapes_reused, 2, "the untouched two are reused");
         assert_eq!(
             after.shapes_compiled + after.shapes_shared,
@@ -925,13 +1021,13 @@ mod tests {
         // must.
         let (mut stage, mobs) = staged(3);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let before: Vec<Mob> = plan.shapes().instances().iter().map(|i| i.mob).collect();
 
         stage.set_z_index(mobs[0], 10, false);
         stage.add_to_scene(mobs[0]).expect("live");
 
-        let after = plan.sync(&stage, 0);
+        let after = sync_valid(&mut plan, &stage, 0);
         assert_eq!(after.shapes_compiled, 0);
         assert_eq!(after.shapes_reused, 3);
         let now: Vec<Mob> = plan.shapes().instances().iter().map(|i| i.mob).collect();
@@ -943,10 +1039,10 @@ mod tests {
     fn leaving_the_scene_drops_the_retained_entry() {
         let (mut stage, mobs) = staged(3);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
 
         stage.remove_from_scene(mobs[2]);
-        let after = plan.sync(&stage, 0);
+        let after = sync_valid(&mut plan, &stage, 0);
         assert_eq!(after.visited, 2);
         assert_eq!(after.dropped, 1);
         assert_eq!(plan.shapes().instances().len(), 2);
@@ -956,7 +1052,7 @@ mod tests {
     fn instances_carry_painter_order_and_the_placement_that_positions_them() {
         let (stage, mobs) = staged(3);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let instances = plan.shapes().instances();
         assert_eq!(instances.len(), 3);
         for (i, inst) in instances.iter().enumerate() {
@@ -980,7 +1076,7 @@ mod tests {
         // the tile — which is exactly what the cache's first test harness did.
         let (mut stage, mobs) = staged(2);
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
         let shapes: Vec<u32> = plan.shapes().instances().iter().map(|i| i.shape).collect();
         let styles: Vec<u32> = plan.shapes().instances().iter().map(|i| i.style).collect();
 
@@ -993,7 +1089,7 @@ mod tests {
         ]));
         stage.set_z_index(newcomer, -5, false);
         stage.add_to_scene(newcomer).expect("live");
-        plan.sync(&stage, 0);
+        sync_valid(&mut plan, &stage, 0);
 
         let instances = plan.shapes().instances();
         assert_eq!(instances.len(), 3);
@@ -1016,7 +1112,7 @@ mod tests {
         let group = stage.add(Mobject::new());
         stage.add_to_scene(group).expect("live");
         let mut plan = RenderPlan::new();
-        let stats = plan.sync(&stage, 0);
+        let stats = sync_valid(&mut plan, &stage, 0);
         assert_eq!(stats.shapes_compiled, 0);
         assert_eq!(plan.shapes().instances().len(), 0);
     }

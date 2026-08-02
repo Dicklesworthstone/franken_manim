@@ -338,7 +338,8 @@ fn render_packet(
     let mut plan = RenderPlan::new();
     let revision = u64::try_from(packet.frame_index())
         .map_err(|_| fail("negative frame index reached the renderer"))?;
-    plan.sync(&stage, revision);
+    plan.sync(&stage, revision)
+        .map_err(|error| fail(format!("render plan accepts packet geometry: {error}")))?;
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
@@ -1030,7 +1031,8 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 fn render_certified_doc(stage: &Stage) -> Vec<u8> {
     let config = scene_goldens::frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(stage, 0);
+    plan.sync(stage, 0)
+        .expect("valid certified document fixture");
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
@@ -1215,7 +1217,8 @@ fn pg5_direct_schedule_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     let built = (case.build)(scene_goldens::corpus());
     let config = scene_goldens::frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(&built.stage, 0);
+    plan.sync(&built.stage, 0)
+        .map_err(|error| fail(format!("{} render plan: {error}", case.name)))?;
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
@@ -1286,7 +1289,8 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     let built = (case.build)(scene_goldens::corpus());
     let config = scene_goldens::frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(&built.stage, 0);
+    plan.sync(&built.stage, 0)
+        .map_err(|error| fail(format!("{} render plan: {error}", case.name)))?;
     let mono = MonoTable::build(&plan, config.map);
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");

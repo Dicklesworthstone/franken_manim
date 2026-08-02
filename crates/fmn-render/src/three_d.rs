@@ -2858,7 +2858,8 @@ mod tests {
         configure(stage.uniforms_mut(mob).expect("live mobject"));
         stage.add_to_scene(mob).expect("rooted");
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, camera_revision);
+        plan.sync(&stage, camera_revision)
+            .expect("valid vector fixture");
         plan
     }
 
@@ -2891,7 +2892,8 @@ mod tests {
         configure(stage.uniforms_mut(mob).expect("live mobject"));
         stage.add_to_scene(mob).expect("rooted");
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, camera_revision);
+        plan.sync(&stage, camera_revision)
+            .expect("valid gradient vector fixture");
         plan
     }
 

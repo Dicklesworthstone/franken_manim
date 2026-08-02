@@ -3195,7 +3195,7 @@ mod tests {
             mobs.push(mob);
         }
         let mut plan = RenderPlan::new();
-        plan.sync(&stage, 0);
+        plan.sync(&stage, 0).expect("valid fill fixture");
         assert_eq!(plan.shapes().shapes().len(), 1, "one interned outline");
 
         let table = MonoTable::build(&plan, unit());

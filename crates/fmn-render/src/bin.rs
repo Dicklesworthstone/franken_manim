@@ -1270,7 +1270,7 @@ mod tests {
 
     fn synced(stage: &Stage) -> RenderPlan {
         let mut plan = RenderPlan::new();
-        plan.sync(stage, 0);
+        plan.sync(stage, 0).expect("valid binning fixture");
         plan
     }
 
@@ -2085,7 +2085,7 @@ mod tests {
     fn a_concave_outline_never_claims_to_cover_a_tile() {
         // The convexity clause is load-bearing: an L covers some of its bounding
         // tiles and not others, and the corner test alone cannot tell which.
-        let l: Vec<[f64; 3]> = [
+        let vertices: Vec<[f64; 3]> = [
             [20.0, 20.0],
             [120.0, 20.0],
             [220.0, 20.0],
@@ -2102,6 +2102,16 @@ mod tests {
         .iter()
         .map(|p| [p[0], p[1], 0.0])
         .collect();
+        let mut l = Vec::with_capacity(2 * vertices.len() - 1);
+        l.push(vertices[0]);
+        for pair in vertices.windows(2) {
+            l.push([
+                0.5 * (pair[0][0] + pair[1][0]),
+                0.5 * (pair[0][1] + pair[1][1]),
+                0.5 * (pair[0][2] + pair[1][2]),
+            ]);
+            l.push(pair[1]);
+        }
         let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), l.len()).unwrap();
         for (i, p) in l.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);
@@ -2113,6 +2123,10 @@ mod tests {
         let plan = synced(&stage);
         let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
+        assert!(
+            !b.flags().is_empty(),
+            "the concave fixture must reach tiles"
+        );
         assert!(
             b.flags().iter().all(|f| *f == CLASS_PARTIAL),
             "a concave outline claimed to cover a tile"
