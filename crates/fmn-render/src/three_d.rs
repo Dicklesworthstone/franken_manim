@@ -853,6 +853,11 @@ impl<'a> ThreeDJob<'a> {
     }
 
     /// Render into a caller-owned Rgba16F frame.
+    ///
+    /// # Errors
+    /// Returns [`FrameError::FormatMismatch`] or [`FrameError::DimensionMismatch`]
+    /// for a mismatched destination, and [`FrameError::TooLarge`] if covered
+    /// scratch geometry is not addressable or cannot be reserved.
     pub fn render_into(
         &self,
         threads: usize,
@@ -873,26 +878,43 @@ impl<'a> ThreeDJob<'a> {
             return Err(FrameError::DimensionMismatch);
         }
 
-        let tile = self.tiling.fine_tile.max(1) as usize;
+        let scheduling_tile = self.tiling.fine_tile.max(1);
+        let scratch_width = usize::try_from(scheduling_tile.min(self.camera.pixel_width().max(1)))
+            .map_err(|_| FrameError::TooLarge)?;
+        let scratch_height =
+            usize::try_from(scheduling_tile.min(self.camera.pixel_height().max(1)))
+                .map_err(|_| FrameError::TooLarge)?;
+        let scratch_pixels = scratch_width
+            .checked_mul(scratch_height)
+            .ok_or(FrameError::TooLarge)?;
         let stride = destination.layout().stride(0);
-        let band_bytes = stride.checked_mul(tile).ok_or(FrameError::TooLarge)?;
+        let band_bytes = stride
+            .checked_mul(scratch_height)
+            .ok_or(FrameError::TooLarge)?;
         let plane = destination.plane_mut(0);
         let mut bands: Vec<(usize, &mut [u8])> = plane.chunks_mut(band_bytes).enumerate().collect();
 
         if threads <= 1 {
-            let mut scratch = TileScratch::new(tile, self.sample_grid);
+            let mut scratch = TileScratch::new(scratch_pixels, self.sample_grid)?;
             for (band, bytes) in bands {
                 self.render_band(&mut scratch, band, bytes, stride);
             }
             return Ok(());
         }
 
+        let mut scratches = Vec::new();
+        scratches
+            .try_reserve_exact(threads)
+            .map_err(|_| FrameError::TooLarge)?;
+        for _ in 0..threads {
+            scratches.push(TileScratch::new(scratch_pixels, self.sample_grid)?);
+        }
         bands.reverse();
         let queue = Mutex::new(bands);
         std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| {
-                    let mut scratch = TileScratch::new(tile, self.sample_grid);
+            let queue = &queue;
+            for mut scratch in scratches {
+                scope.spawn(move || {
                     loop {
                         let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
                         let Some((band, bytes)) = next else { break };
@@ -2372,7 +2394,7 @@ fn source_over_premul(source: PremulRgba, destination: PremulRgba) -> PremulRgba
 }
 
 struct TileScratch {
-    tile: usize,
+    max_pixels: usize,
     sample_grid: u32,
     samples_per_pixel: usize,
     boundary: Vec<bool>,
@@ -2380,23 +2402,37 @@ struct TileScratch {
     depth: Vec<f32>,
 }
 
+fn scratch_buffer<T: Clone>(len: usize, value: T) -> Result<Vec<T>, FrameError> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(len)
+        .map_err(|_| FrameError::TooLarge)?;
+    buffer.resize(len, value);
+    Ok(buffer)
+}
+
 impl TileScratch {
-    fn new(tile: usize, sample_grid: u32) -> Self {
-        let samples_per_pixel = (sample_grid * sample_grid) as usize;
-        let pixels = tile.saturating_mul(tile);
-        Self {
-            tile,
+    fn new(max_pixels: usize, sample_grid: u32) -> Result<Self, FrameError> {
+        let sample_edge = usize::try_from(sample_grid).map_err(|_| FrameError::TooLarge)?;
+        let samples_per_pixel = sample_edge
+            .checked_mul(sample_edge)
+            .ok_or(FrameError::TooLarge)?;
+        let samples = max_pixels
+            .checked_mul(samples_per_pixel)
+            .ok_or(FrameError::TooLarge)?;
+        Ok(Self {
+            max_pixels,
             sample_grid,
             samples_per_pixel,
-            boundary: vec![false; pixels],
-            color: vec![PremulRgba::TRANSPARENT; pixels.saturating_mul(samples_per_pixel)],
-            depth: vec![1.0; pixels.saturating_mul(samples_per_pixel)],
-        }
+            boundary: scratch_buffer(max_pixels, false)?,
+            color: scratch_buffer(samples, PremulRgba::TRANSPARENT)?,
+            depth: scratch_buffer(samples, 1.0)?,
+        })
     }
 
     fn clear(&mut self, width: usize, height: usize, background: LinearRgba) {
-        debug_assert!(width <= self.tile && height <= self.tile);
         let pixels = width * height;
+        debug_assert!(pixels <= self.max_pixels);
         self.boundary[..pixels].fill(false);
         self.color[..pixels * self.samples_per_pixel].fill(background.premultiply());
         self.depth[..pixels * self.samples_per_pixel].fill(1.0);
@@ -2951,6 +2987,40 @@ mod tests {
     }
 
     #[test]
+    fn oversized_scheduling_tiles_size_scratch_to_the_covered_rectangle() {
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (1, 1),
+            samples: 4,
+            background: color("#204080", 1.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .expect("tiny camera");
+        let oversized = ThreeDJob::new(
+            &camera,
+            &[],
+            Tiling {
+                macro_tile: u32::MAX,
+                fine_tile: u32::MAX,
+            },
+        )
+        .expect("oversized scheduling tile");
+        let ordinary = ThreeDJob::new(&camera, &[], Tiling::default()).expect("ordinary schedule");
+        let expected = ordinary.render(1).expect("ordinary tiny frame");
+
+        for threads in [1, 4] {
+            let actual = oversized
+                .render(threads)
+                .expect("one covered pixel cannot inherit square tile scratch");
+            assert_eq!(actual.layout(), expected.layout());
+            assert_eq!(
+                actual.plane(0),
+                expected.plane(0),
+                "scratch extent changed frame bytes at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
     fn kept_lighting_formula_brightens_and_shadows_without_dark_shift() {
         let base = Srgb {
             r: 0.2,
@@ -3253,7 +3323,7 @@ mod tests {
         };
 
         let background = color("#000000", 1.0);
-        let mut scratch = TileScratch::new(1, 1);
+        let mut scratch = TileScratch::new(1, 1).expect("one-pixel scratch");
         scratch.clear(1, 1, background);
         scratch.depth[0] = threshold;
         scratch.raster_vector(
@@ -3329,7 +3399,7 @@ mod tests {
             "the actual four-by-four raster lattice must observe this edge"
         );
 
-        let mut scratch = TileScratch::new(1, 4);
+        let mut scratch = TileScratch::new(1, 4).expect("one-pixel supersample scratch");
         scratch.mark_vector_boundaries(&camera, vector, [16, 10, 17, 11], 1, 1);
         assert!(
             scratch.boundary[0],

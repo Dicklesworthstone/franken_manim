@@ -21,7 +21,7 @@
 //!   `forbid(unsafe_code)` a `Vec` grows only by allocating, so the count is
 //!   exact and there is no allocator shim anywhere in the proof.
 //! - **The worker pool** ([`crate::engine::WorkerPool`], owned here): one
-//!   scratch slot per requested worker and (kernel, tile width), sized
+//!   scratch slot per requested worker and (kernel, covered row width), sized
 //!   synchronously before fan-out and returned when the render finishes.
 //!   Steady state creates none, independent of worker-start order.
 //!
@@ -57,8 +57,8 @@ pub struct AllocStats {
     /// "the arena buffer is allocated exactly once".
     pub arena_buffer_bytes: usize,
     /// Worker scratch slots the pool currently holds: one per requested worker
-    /// and (kernel, tile width), bounded in practice by the largest worker team
-    /// the execution plan admits.
+    /// and (kernel, covered row width), bounded in practice by the largest
+    /// worker team and viewport the execution plan admits.
     pub pool_slots: usize,
 }
 
@@ -274,10 +274,10 @@ pub struct FrameArena {
     pub(crate) join_pairs: Pool<(usize, usize)>,
     /// Construction scratch for `pieces_for_segments_into`'s control points.
     pub(crate) piece_curves: Pool<[[f64; 2]; 3]>,
-    /// Worker row scratch, keyed on kernel and tile width. Sized by use: a
-    /// render team of `t` threads converges to exactly `t` slots after the
-    /// warm-up frame, which is how the execution plan's team geometry bounds
-    /// the pool.
+    /// Worker row scratch, keyed on kernel and maximum covered row width. Sized
+    /// by use: a render team of `t` threads converges to exactly `t` slots after
+    /// the warm-up frame, which is how the execution plan's team geometry
+    /// bounds the pool.
     pub(crate) workers: WorkerPool,
 }
 

@@ -1629,7 +1629,8 @@ impl<'a> FrameJob<'a> {
     /// # Errors
     /// [`FrameError::FormatMismatch`] unless `dst` is `Rgba16F`;
     /// [`FrameError::DimensionMismatch`] unless it matches the configured
-    /// viewport.
+    /// viewport; [`FrameError::TooLarge`] if the covered band-byte product is
+    /// not addressable.
     pub fn render_into(&self, threads: usize, dst: &mut FrameBuffer) -> Result<(), FrameError> {
         self.render_into_profiled(threads, dst).map(|_| ())
     }
@@ -1699,7 +1700,11 @@ impl<'a> FrameJob<'a> {
             return Err(FrameError::DimensionMismatch);
         }
 
-        let tile = self.binning.tiling().fine_tile.max(1) as usize;
+        let scheduling_tile = self.binning.tiling().fine_tile.max(1);
+        let scratch_width = usize::try_from(scheduling_tile.min(self.config.viewport.width.max(1)))
+            .map_err(|_| FrameError::TooLarge)?;
+        let band_rows = usize::try_from(scheduling_tile.min(self.config.viewport.height.max(1)))
+            .map_err(|_| FrameError::TooLarge)?;
         // Size the requested team before any worker can begin draining the
         // queue. Lazy creation inside spawned closures made warm-up depend on
         // scheduling: one fast worker could finish and return its slot before
@@ -1708,9 +1713,9 @@ impl<'a> FrameJob<'a> {
         // every subsequent checkout allocation-free for the same geometry.
         self.arena()
             .workers
-            .prepare::<K>(tile, self.cols as usize, threads.max(1));
+            .prepare::<K>(scratch_width, self.cols as usize, threads.max(1));
         let stride = dst.layout().stride(0);
-        let band_bytes = stride * tile;
+        let band_bytes = stride.checked_mul(band_rows).ok_or(FrameError::TooLarge)?;
         let plane = dst.plane_mut(0);
 
         // `chunks_mut` is the whole safety argument: it yields provably disjoint
@@ -1720,7 +1725,10 @@ impl<'a> FrameJob<'a> {
         // the mutex — so no per-frame `Vec` of band slices is ever
         // materialized (PG-6 site 2, fm-e9h).
         if threads <= 1 {
-            let mut worker = self.arena().workers.checkout::<K>(tile, self.cols as usize);
+            let mut worker = self
+                .arena()
+                .workers
+                .checkout::<K>(scratch_width, self.cols as usize);
             for (band, bytes) in plane.chunks_mut(band_bytes).enumerate() {
                 self.render_band::<K>(&mut worker, band, bytes, stride);
             }
@@ -1734,7 +1742,10 @@ impl<'a> FrameJob<'a> {
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| {
-                    let mut worker = self.arena().workers.checkout::<K>(tile, self.cols as usize);
+                    let mut worker = self
+                        .arena()
+                        .workers
+                        .checkout::<K>(scratch_width, self.cols as usize);
                     loop {
                         let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
                         let Some((band, bytes)) = next else { break };
@@ -2306,11 +2317,11 @@ fn effective_aa_band(style: &Style) -> f64 {
 /// per band, or — critically for PG-6 — per `render_into` call.
 ///
 /// PG-6 forbids steady-state per-frame heap allocation. A worker's buffers are
-/// sized for the widest tile the frame can present and then reused for every
-/// band it takes; the [`WorkerPool`] keeps the whole worker alive across
+/// sized for the widest covered tile row the frame can present and then reused
+/// for every band it takes; the [`WorkerPool`] keeps the whole worker alive across
 /// frames, so the allocation happens once at pool warm-up and never again.
 struct Worker<K: PixelKernel> {
-    /// The tile width the row buffers are sized for — the pool's key.
+    /// The maximum covered row width the buffers are sized for — the pool's key.
     tile: usize,
     /// The row accumulator, premultiplied linear light.
     acc: Vec<K::Pixel>,
@@ -2348,7 +2359,7 @@ impl<K: PixelKernel> Worker<K> {
     }
 }
 
-/// The worker-scratch pool: one slot per (kernel, tile width), reused across
+/// The worker-scratch pool: one slot per (kernel, covered row width), reused across
 /// [`FrameJob::render_into`] calls (PG-6 site 3, fm-e9h).
 ///
 /// Owned by the [`FrameArena`], so on the [`FrameJob::new_in`] path a slot's
@@ -2356,13 +2367,13 @@ impl<K: PixelKernel> Worker<K> {
 /// every later render. There is one sub-pool per monomorphized kernel rather
 /// than any type erasure: the pool serves exactly the four kernels this
 /// module compiles, and the typed slot keeps `#![forbid(unsafe_code)]`
-/// absolute. The pool is keyed on tile width because the row buffers are;
+/// absolute. The pool is keyed on maximum covered row width because the buffers are;
 /// `tile_classes` is resized on checkout when the column count differs.
 ///
 /// Sizing is by use, which is sizing by the execution plan one level down:
 /// a render team of `t` threads synchronously installs exactly `t` slots on
 /// the first frame, and the pool never grows past the largest team it has
-/// served for that kernel and tile width.
+/// served for that kernel and covered row width.
 pub(crate) struct WorkerPool {
     certified_scalar: KernelSlots<CertifiedScalar>,
     certified_tier: KernelSlots<CertifiedBuildTier>,
@@ -3165,6 +3176,59 @@ mod tests {
         let measured_stats = measured.allocation_stats();
         assert_eq!(measured_stats.pool_slots, 4);
         assert_eq!(measured_stats.heap_allocs_this_frame, 0);
+    }
+
+    #[test]
+    fn oversized_scheduling_tiles_size_scratch_to_the_covered_row() {
+        let stage = Stage::new();
+        let cfg = FrameConfig::new(
+            Viewport {
+                width: 1,
+                height: 1,
+            },
+            ScreenMap::default(),
+            LinearRgba {
+                r: 0.125,
+                g: 0.25,
+                b: 0.5,
+                a: 1.0,
+            },
+        );
+        let oversized = Tiling {
+            macro_tile: u32::MAX,
+            fine_tile: u32::MAX,
+        };
+        let (plan, mono, oversized_binning) = derive(&stage, cfg, oversized);
+        let ordinary_binning = Binning::build(&plan, cfg.viewport, Tiling::default(), cfg.map)
+            .expect("ordinary tiny-frame binning");
+        let mut arena = FrameArena::new();
+
+        let mut oversized_frame = FrameBuffer::new(cfg.layout().expect("tiny layout"));
+        let oversized_job = FrameJob::new_in(&mut arena, &plan, &mono, &oversized_binning, cfg)
+            .expect("matching oversized-tile artifacts");
+        oversized_job
+            .render_into(1, &mut oversized_frame)
+            .expect("one covered pixel cannot inherit the requested tile allocation");
+        assert_eq!(oversized_job.allocation_stats().pool_slots, 1);
+        let oversized_digest = frame_digest(&oversized_frame).expect("oversized-tile digest");
+        drop(oversized_job);
+
+        let mut ordinary_frame = FrameBuffer::new(cfg.layout().expect("tiny layout"));
+        let ordinary_job = FrameJob::new_in(&mut arena, &plan, &mono, &ordinary_binning, cfg)
+            .expect("matching ordinary artifacts");
+        ordinary_job
+            .render_into(1, &mut ordinary_frame)
+            .expect("ordinary tiny frame");
+        assert_eq!(
+            ordinary_job.allocation_stats().heap_allocs_this_frame,
+            0,
+            "both schedules cover the same one-pixel scratch width"
+        );
+        assert_eq!(
+            frame_digest(&ordinary_frame).expect("ordinary digest"),
+            oversized_digest,
+            "scratch sizing is not a semantic tiling choice"
+        );
     }
 
     /// The brute-force reference: the same tiling and the same classification,
