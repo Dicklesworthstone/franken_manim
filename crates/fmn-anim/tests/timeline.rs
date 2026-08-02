@@ -8,12 +8,15 @@
 
 use fmn_anim::animation::{AnimError, Animation};
 use fmn_anim::purity::SegmentKind;
-use fmn_anim::timeline::{Step, TIMELINE_SCHEMA, Timeline, TimelineError, TimelinePlan};
+use fmn_anim::timeline::{
+    PlannedSegment, Step, TIMELINE_SCHEMA, Timeline, TimelineError, TimelinePlan,
+};
 use fmn_anim::{
-    AnimationGroup, FramePacket, RationalFrameClock, Succession, play_segment, prepare_animation,
-    wait_segment,
+    AnimationGroup, ClockError, FramePacket, RationalFrameClock, Succession, play_segment,
+    prepare_animation, wait_segment,
 };
 use fmn_core::rng::RngRoot;
+use fmn_hash::Writer;
 use fmn_mobject::animate::AnimateArgs;
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -46,6 +49,32 @@ fn shift_animation(stage: &mut Stage, mob: Mob, dx: f64, run_time: f64) -> Box<d
 
 fn rng() -> RngRoot {
     RngRoot::from_seed(42)
+}
+
+fn encoded_plan(
+    fps: u32,
+    segments: &[(SegmentKind, f64, i64, i64)],
+    labels: &[(&str, u64, i64)],
+) -> Vec<u8> {
+    let mut writer = Writer::new(TIMELINE_SCHEMA);
+    writer.put_u32(fps);
+    writer.put_u32(u32::try_from(segments.len()).expect("small segment table"));
+    for &(kind, run_time, base_frame, n_frames) in segments {
+        writer.put_u8(match kind {
+            SegmentKind::Play => 0,
+            SegmentKind::Wait => 1,
+        });
+        writer.put_f64(run_time);
+        writer.put_i64(base_frame);
+        writer.put_i64(n_frames);
+    }
+    writer.put_u32(u32::try_from(labels.len()).expect("small label table"));
+    for &(name, segment, frame) in labels {
+        writer.put_str(name);
+        writer.put_u64(segment);
+        writer.put_i64(frame);
+    }
+    writer.finish().expect("forged plan is correctly framed")
 }
 
 /// The record plane and independent placement of one mobject, as raw bits.
@@ -230,6 +259,25 @@ fn locate_and_frame_at_time_agree_with_the_grid() {
     assert_eq!(plan.frame_at_time(f64::NAN), 1, "total, never a panic");
 }
 
+#[test]
+fn a_public_planned_segment_reports_end_frame_overflow() {
+    let ordinary = PlannedSegment {
+        kind: SegmentKind::Wait,
+        run_time: 0.25,
+        base_frame: 2,
+        n_frames: 3,
+    };
+    assert_eq!(ordinary.end_frame(), Some(5));
+
+    let overflowing = PlannedSegment {
+        kind: SegmentKind::Wait,
+        run_time: 1.0,
+        base_frame: i64::MAX,
+        n_frames: 1,
+    };
+    assert_eq!(overflowing.end_frame(), None);
+}
+
 // -------------------------------------------------------- canonical bytes
 
 #[test]
@@ -286,6 +334,107 @@ fn corrupt_bytes_are_a_named_error() {
     assert!(TimelinePlan::from_bytes(&[]).is_err());
     assert!(TimelinePlan::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     assert_eq!(TIMELINE_SCHEMA.magic, *b"FMNA");
+}
+
+#[test]
+fn decoded_plans_refuse_impossible_clock_segment_and_label_state() {
+    let cases = [
+        (encoded_plan(0, &[], &[]), "fps"),
+        (
+            encoded_plan(8, &[(SegmentKind::Wait, f64::INFINITY, 0, 0)], &[]),
+            "segment run time",
+        ),
+        (
+            encoded_plan(8, &[(SegmentKind::Wait, 0.25, 1, 2)], &[]),
+            "segment base frame",
+        ),
+        (
+            encoded_plan(8, &[(SegmentKind::Wait, 0.25, 0, 3)], &[]),
+            "segment frame count",
+        ),
+        (
+            encoded_plan(8, &[(SegmentKind::Wait, 0.25, 0, 2)], &[("outside", 2, 2)]),
+            "label segment index",
+        ),
+        (
+            encoded_plan(8, &[(SegmentKind::Wait, 0.25, 0, 2)], &[("wrong", 0, 2)]),
+            "label frame",
+        ),
+        (
+            encoded_plan(
+                8,
+                &[
+                    (SegmentKind::Wait, 0.125, 0, 1),
+                    (SegmentKind::Wait, 0.125, 1, 1),
+                ],
+                &[("later", 1, 2), ("earlier", 0, 1)],
+            ),
+            "label order",
+        ),
+    ];
+
+    for (bytes, expected) in cases {
+        assert!(matches!(
+            TimelinePlan::from_bytes(&bytes),
+            Err(TimelineError::Malformed(actual)) if actual == expected
+        ));
+    }
+}
+
+#[test]
+fn cumulative_frame_overflow_is_a_typed_refusal_for_compile_and_plan_load() {
+    let run_time = (i64::MAX / 2) as f64;
+    let n_frames = RationalFrameClock::new(1)
+        .expect("fps")
+        .segment(run_time)
+        .expect("one segment is representable")
+        .n_frames();
+    assert!(n_frames.checked_add(n_frames).is_none());
+
+    let mut timeline = Timeline::new(1).expect("fps");
+    timeline.wait(run_time).expect("first step");
+    timeline
+        .wait(run_time)
+        .expect("second step is individually valid");
+    assert_eq!(
+        timeline.compile().unwrap_err(),
+        AnimError::Clock(ClockError::FrameCounterOverflow)
+    );
+
+    let bytes = encoded_plan(
+        1,
+        &[
+            (SegmentKind::Wait, run_time, 0, n_frames),
+            (SegmentKind::Wait, run_time, n_frames, n_frames),
+        ],
+        &[],
+    );
+    assert!(matches!(
+        TimelinePlan::from_bytes(&bytes),
+        Err(TimelineError::Malformed("segment frame range"))
+    ));
+}
+
+#[test]
+fn labels_on_zero_frame_tails_resolve_to_the_existing_boundary() {
+    let mut empty = Timeline::new(FPS).expect("fps");
+    empty.label("only");
+    empty.wait(0.0).expect("zero-frame wait");
+    let empty = empty.compile().expect("compiles");
+    assert_eq!(empty.total_frames(), 0);
+    assert_eq!(empty.frame_of_label("only"), Some(0));
+
+    let mut tail = Timeline::new(FPS).expect("fps");
+    tail.wait(0.25).expect("two frames");
+    tail.label("tail");
+    tail.wait(0.0).expect("zero-frame tail");
+    let tail = tail.compile().expect("compiles");
+    assert_eq!(tail.total_frames(), 2);
+    assert_eq!(tail.frame_of_label("tail"), Some(2));
+    assert_eq!(
+        TimelinePlan::from_bytes(&tail.to_bytes().expect("encodes")).expect("decodes"),
+        tail
+    );
 }
 
 // ------------------------------------------------------ seek == playthrough

@@ -64,7 +64,7 @@ use fmn_hash::{Digest, SerialError, sha256};
 use fmn_mobject::{Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation};
-use crate::clock::{FrameSample, RationalFrameClock};
+use crate::clock::{ClockError, FrameSample, RationalFrameClock};
 use crate::frame::{
     FramePacket, advance_play, open_play, play_segment, wait_segment, wait_segment_upto,
 };
@@ -162,10 +162,12 @@ pub struct PlannedSegment {
 }
 
 impl PlannedSegment {
-    /// The global frame index of this segment's last frame.
+    /// The global frame index of this segment's last frame, or `None` when
+    /// independently constructed public fields do not fit in the frame
+    /// counter. Compiled and decoded plans validate this range up front.
     #[must_use]
-    pub fn end_frame(&self) -> i64 {
-        self.base_frame + self.n_frames
+    pub fn end_frame(&self) -> Option<i64> {
+        self.base_frame.checked_add(self.n_frames)
     }
 }
 
@@ -176,10 +178,34 @@ pub struct Label {
     pub name: String,
     /// The segment index the label marks.
     pub segment: usize,
-    /// The global frame the label resolves to: the first frame of its
-    /// segment (or the timeline's end, for a label authored after the last
-    /// step).
+    /// The global frame the label resolves to: the first emitted frame at
+    /// or after its segment, or the timeline's existing end when no later
+    /// segment emits a frame.
     pub frame: i64,
+}
+
+fn label_frame_at_or_after(
+    segments: &[PlannedSegment],
+    segment_index: usize,
+    total_frames: i64,
+) -> Option<i64> {
+    let tail = segments.get(segment_index..)?;
+    match tail.iter().find(|segment| segment.n_frames > 0) {
+        Some(segment) => segment.base_frame.checked_add(1),
+        None => Some(total_frames),
+    }
+}
+
+fn decoded_clock_error(error: ClockError) -> TimelineError {
+    match error {
+        ClockError::ZeroFps => TimelineError::Malformed("fps"),
+        ClockError::NonFiniteRunTime | ClockError::RunTimeTooLong => {
+            TimelineError::Malformed("segment run time")
+        }
+        ClockError::NegativeFrameAdvance | ClockError::FrameCounterOverflow => {
+            TimelineError::Malformed("segment frame range")
+        }
+    }
 }
 
 /// A compiled timeline: the frame schedule and its labels. Serializable,
@@ -213,7 +239,10 @@ impl TimelinePlan {
     /// Total frames the timeline emits.
     #[must_use]
     pub fn total_frames(&self) -> i64 {
-        self.segments.last().map_or(0, PlannedSegment::end_frame)
+        self.segments
+            .last()
+            .and_then(PlannedSegment::end_frame)
+            .unwrap_or(0)
     }
 
     /// The exact duration of the schedule on the frame grid, in seconds.
@@ -231,7 +260,7 @@ impl TimelinePlan {
         }
         self.segments
             .iter()
-            .position(|s| frame > s.base_frame && frame <= s.end_frame())
+            .position(|s| frame > s.base_frame && s.end_frame().is_some_and(|end| frame <= end))
             .map(|index| (index, frame - self.segments[index].base_frame))
     }
 
@@ -306,7 +335,9 @@ impl TimelinePlan {
             UnknownPolicy::Strict,
         )?;
         let fps = reader.get_u32()?;
-        let segment_count = reader.get_u32()? as usize;
+        let mut clock = RationalFrameClock::new(fps).map_err(decoded_clock_error)?;
+        let segment_count = usize::try_from(reader.get_u32()?)
+            .map_err(|_| TimelineError::Malformed("segment count"))?;
         let mut segments = Vec::new();
         for _ in 0..segment_count {
             let kind = match reader.get_u8()? {
@@ -314,23 +345,49 @@ impl TimelinePlan {
                 1 => SegmentKind::Wait,
                 _ => return Err(TimelineError::Malformed("segment kind")),
             };
-            segments.push(PlannedSegment {
+            let segment = PlannedSegment {
                 kind,
                 run_time: reader.get_f64()?,
                 base_frame: reader.get_i64()?,
                 n_frames: reader.get_i64()?,
-            });
+            };
+            if segment.base_frame != clock.now().frames() {
+                return Err(TimelineError::Malformed("segment base frame"));
+            }
+            let expected = clock
+                .segment(segment.run_time)
+                .map_err(decoded_clock_error)?;
+            if segment.n_frames != expected.n_frames() {
+                return Err(TimelineError::Malformed("segment frame count"));
+            }
+            clock
+                .advance_frames(segment.n_frames)
+                .map_err(decoded_clock_error)?;
+            segments.push(segment);
         }
-        let label_count = reader.get_u32()? as usize;
+        let total_frames = clock.now().frames();
+        let label_count = usize::try_from(reader.get_u32()?)
+            .map_err(|_| TimelineError::Malformed("label count"))?;
         let mut labels = Vec::new();
+        let mut previous_label_segment = None;
         for _ in 0..label_count {
             let name = reader.get_str()?.to_owned();
             let segment = usize::try_from(reader.get_u64()?)
                 .map_err(|_| TimelineError::Malformed("label segment index"))?;
+            let frame = reader.get_i64()?;
+            let expected_frame = label_frame_at_or_after(&segments, segment, total_frames)
+                .ok_or(TimelineError::Malformed("label segment index"))?;
+            if previous_label_segment.is_some_and(|previous| segment < previous) {
+                return Err(TimelineError::Malformed("label order"));
+            }
+            if frame != expected_frame {
+                return Err(TimelineError::Malformed("label frame"));
+            }
+            previous_label_segment = Some(segment);
             labels.push(Label {
                 name,
                 segment,
-                frame: reader.get_i64()?,
+                frame,
             });
         }
         reader.finish()?;
@@ -441,9 +498,8 @@ impl Timeline {
     /// # Errors
     /// [`AnimError::Clock`] for a step whose run time the clock refuses.
     pub fn compile(&self) -> Result<TimelinePlan, AnimError> {
-        let clock = RationalFrameClock::new(self.fps).map_err(AnimError::Clock)?;
+        let mut clock = RationalFrameClock::new(self.fps).map_err(AnimError::Clock)?;
         let mut segments = Vec::with_capacity(self.steps.len());
-        let mut base_frame = 0;
         for step in &self.steps {
             let run_time = step.run_time();
             let n_frames = clock
@@ -453,20 +509,20 @@ impl Timeline {
             segments.push(PlannedSegment {
                 kind: step.kind(),
                 run_time,
-                base_frame,
+                base_frame: clock.now().frames(),
                 n_frames,
             });
-            base_frame += n_frames;
+            clock.advance_frames(n_frames).map_err(AnimError::Clock)?;
         }
+        let total_frames = clock.now().frames();
         let labels = self
             .labels
             .iter()
             .map(|(name, index)| Label {
                 name: name.clone(),
                 segment: *index,
-                frame: segments
-                    .get(*index)
-                    .map_or(base_frame, |s| s.base_frame + 1),
+                frame: label_frame_at_or_after(&segments, *index, total_frames)
+                    .unwrap_or(total_frames),
             })
             .collect();
         Ok(TimelinePlan {
