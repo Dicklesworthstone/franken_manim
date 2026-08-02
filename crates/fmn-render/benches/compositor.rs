@@ -270,7 +270,7 @@ fn benchmark_column_roots(bench: &mut Bencher, width: u32) {
             p2: [x2, 0.968_75],
         });
     }
-    let mut scratch = RowScratch::for_tile(width);
+    let mut scratch = RowScratch::for_tile(width).expect("benchmark row scratch");
     bench.iter(|| {
         black_box(scratch.fill_row(black_box(&pieces), [0.0, 0.0], 0, 0, width));
     });

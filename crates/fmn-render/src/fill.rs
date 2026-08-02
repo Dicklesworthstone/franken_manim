@@ -103,6 +103,7 @@
 use crate::bin::ScreenMap;
 use crate::plan::{GeometryIdentity, RenderPlan};
 use crate::table::{Instance, Segment};
+use fmn_frame::FrameError;
 
 // ----------------------------------------------------------------- arithmetic
 
@@ -1626,15 +1627,31 @@ pub struct RowScratch {
 }
 
 impl RowScratch {
-    /// Scratch sized for a tile `tile` pixels wide.
-    #[must_use]
-    pub fn for_tile(tile: u32) -> RowScratch {
-        let w = tile as usize;
-        RowScratch {
-            cells: vec![0.0; w + 1],
-            out: vec![0.0; w],
-            crossings: vec![0; w],
+    pub(crate) fn try_for_width(width: usize) -> Result<RowScratch, FrameError> {
+        fn zeroed<T: Clone>(len: usize, value: T) -> Result<Vec<T>, FrameError> {
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(len)
+                .map_err(|_| FrameError::TooLarge)?;
+            values.resize(len, value);
+            Ok(values)
         }
+
+        let cell_count = width.checked_add(1).ok_or(FrameError::TooLarge)?;
+        Ok(RowScratch {
+            cells: zeroed(cell_count, 0.0)?,
+            out: zeroed(width, 0.0)?,
+            crossings: zeroed(width, 0)?,
+        })
+    }
+
+    /// Scratch sized for a tile `tile` pixels wide.
+    ///
+    /// # Errors
+    /// Returns [`FrameError::TooLarge`] when the row-buffer layout is not
+    /// addressable or its allocation is refused.
+    pub fn for_tile(tile: u32) -> Result<RowScratch, FrameError> {
+        RowScratch::try_for_width(tile as usize)
     }
 
     /// Grow to hold a `width`-pixel row, if it does not already.
@@ -3089,7 +3106,7 @@ mod tests {
     /// Total coverage over a pixel window, tile by tile — the integral the area
     /// oracles compare against.
     fn total_coverage(pieces: &[MonoPiece], w: u32, h: u32, tile: u32) -> f64 {
-        let mut scratch = RowScratch::for_tile(tile);
+        let mut scratch = RowScratch::for_tile(tile).expect("coverage tile scratch");
         let mut sum = 0.0;
         for y in 0..h {
             let mut x = 0;
@@ -3160,6 +3177,18 @@ mod tests {
     }
 
     #[test]
+    fn row_scratch_fallible_constructor_checks_layout_before_allocation() {
+        assert_eq!(
+            RowScratch::try_for_width(usize::MAX).expect_err("overflowing cell count"),
+            FrameError::TooLarge
+        );
+        let scratch = RowScratch::try_for_width(16).expect("small row scratch");
+        assert_eq!(scratch.cells.len(), 17);
+        assert_eq!(scratch.out.len(), 16);
+        assert_eq!(scratch.crossings.len(), 16);
+    }
+
+    #[test]
     fn a_rectangle_covers_exactly_its_area() {
         // The simplest oracle, and the one that catches a sign error before any
         // curve is involved: an axis-aligned box on non-integer bounds.
@@ -3197,7 +3226,7 @@ mod tests {
             unit(),
         );
         assert_eq!(boundary_crossings_at_cell(&simple, [0.0, 0.0], 5, 5), 1);
-        let mut scratch = RowScratch::for_tile(1);
+        let mut scratch = RowScratch::for_tile(1).expect("one-pixel scratch");
         let (_, crossings) = scratch.fill_row_classified(&simple, [0.0, 0.0], 5, 5, 6);
         assert_eq!(crossings, &[1]);
 
@@ -3347,7 +3376,7 @@ mod tests {
         // width that puts pieces across tile edges.
         let path = circle_path(20.4, 19.6, 12.3, 16);
         let pieces = pieces_of_path(&path, unit());
-        let mut scratch = RowScratch::for_tile(8);
+        let mut scratch = RowScratch::for_tile(8).expect("eight-pixel scratch");
         let mut worst = 0.0f64;
         for y in 0..40 {
             let mut x = 0;
@@ -3388,8 +3417,8 @@ mod tests {
         let b = pieces_of_path(&split, unit());
         assert!(b.len() > a.len(), "the subdivision must add pieces");
 
-        let mut sa = RowScratch::for_tile(16);
-        let mut sb = RowScratch::for_tile(16);
+        let mut sa = RowScratch::for_tile(16).expect("first row scratch");
+        let mut sb = RowScratch::for_tile(16).expect("second row scratch");
         let mut worst = 0.0f64;
         for y in 0..48 {
             let ra = sa.fill_row(&a, [0.0, 0.0], y, 0, 48).to_vec();
@@ -3414,8 +3443,8 @@ mod tests {
         let here = pieces_of_path(&path, unit());
         let there = pieces_of_path(&circle_path(16.0 + 7.0, 16.0 + 5.0, 9.5, 16), unit());
 
-        let mut s1 = RowScratch::for_tile(16);
-        let mut s2 = RowScratch::for_tile(16);
+        let mut s1 = RowScratch::for_tile(16).expect("source row scratch");
+        let mut s2 = RowScratch::for_tile(16).expect("translated row scratch");
         let mut worst = 0.0f64;
         for y in 0..40 {
             let a = s1.fill_row(&here, [7.0, 5.0], y, 0, 40).to_vec();
@@ -3536,7 +3565,7 @@ mod tests {
         // same bytes as drawing (G0-8b F13) — and the general path must agree
         // wherever the classification is true, or the fast path would be a
         // different picture rather than the same one sooner.
-        let mut scratch = RowScratch::for_tile(16);
+        let mut scratch = RowScratch::for_tile(16).expect("interior row scratch");
         let row = scratch.interior_row(0, 16).to_vec();
         assert_eq!(row.len(), 16);
         for v in &row {
@@ -3555,7 +3584,7 @@ mod tests {
 
     #[test]
     fn an_empty_piece_list_covers_nothing() {
-        let mut scratch = RowScratch::for_tile(8);
+        let mut scratch = RowScratch::for_tile(8).expect("empty row scratch");
         let row = scratch.fill_row(&[], [0.0, 0.0], 3, 0, 8);
         assert!(row.iter().all(|v| *v == 0.0));
         assert_eq!(coverage_at_cell::<f64>(&[], [0.0, 0.0], 3, 4), 0.0);
@@ -4702,7 +4731,7 @@ mod tests {
 
     /// Per-pixel coverage from the general path over the same window.
     fn general_grid(pieces: &[MonoPiece], w: u32, h: u32) -> Vec<f64> {
-        let mut scratch = RowScratch::for_tile(w);
+        let mut scratch = RowScratch::for_tile(w).expect("general-grid row scratch");
         let mut out = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             out.extend_from_slice(scratch.fill_row(pieces, [0.0, 0.0], y, 0, w));

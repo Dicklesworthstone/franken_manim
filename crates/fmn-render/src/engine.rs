@@ -111,7 +111,7 @@ pub use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_hash::{Digest, Schema, Writer};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 
 // A binary that requires an improvised subset must not journal itself as the
 // portable tier. ADR-0016 supports only the exact SUITE.lock feature sets.
@@ -1754,7 +1754,7 @@ impl<'a> FrameJob<'a> {
         // every subsequent checkout allocation-free for the same geometry.
         self.arena()
             .workers
-            .prepare::<K>(scratch_width, self.cols as usize, threads.max(1));
+            .prepare::<K>(scratch_width, self.cols as usize, threads.max(1))?;
         let stride = dst.layout().stride(0);
         let band_bytes = stride.checked_mul(band_rows).ok_or(FrameError::TooLarge)?;
         let plane = dst.plane_mut(0);
@@ -2386,17 +2386,61 @@ impl<K: PixelKernel> Worker<K> {
     /// sees worker warm-up exactly once.
     const SCRATCH_ALLOCATIONS: u64 = 7;
 
-    fn new(tile: usize, cols: usize) -> Worker<K> {
-        Worker {
+    fn preflight(tile: usize, cols: usize) -> Result<(), FrameError> {
+        fn check_len<T>(len: usize) -> Result<(), FrameError> {
+            let element = std::mem::size_of::<T>();
+            if element != 0 && len > isize::MAX as usize / element {
+                return Err(FrameError::TooLarge);
+            }
+            Ok(())
+        }
+
+        let cells = tile.checked_add(1).ok_or(FrameError::TooLarge)?;
+        check_len::<K::Pixel>(tile)?;
+        check_len::<f64>(tile)?;
+        check_len::<u8>(tile)?;
+        check_len::<f64>(cells)?;
+        check_len::<f64>(tile)?;
+        check_len::<u8>(tile)?;
+        check_len::<CoverageClass>(cols)
+    }
+
+    fn try_new(tile: usize, cols: usize) -> Result<Worker<K>, FrameError> {
+        fn zeroed<T: Clone>(len: usize, value: T) -> Result<Vec<T>, FrameError> {
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(len)
+                .map_err(|_| FrameError::TooLarge)?;
+            values.resize(len, value);
+            Ok(values)
+        }
+
+        Self::preflight(tile, cols)?;
+        Ok(Worker {
             tile,
-            acc: vec![K::from_premul(PremulRgba::TRANSPARENT); tile],
-            cov: vec![0.0; tile],
-            edges: vec![0; tile],
-            scratch: RowScratch::for_tile(tile as u32),
-            tile_classes: vec![CoverageClass::Empty; cols],
+            acc: zeroed(tile, K::from_premul(PremulRgba::TRANSPARENT))?,
+            cov: zeroed(tile, 0.0)?,
+            edges: zeroed(tile, 0)?,
+            scratch: RowScratch::try_for_width(tile)?,
+            tile_classes: zeroed(cols, CoverageClass::Empty)?,
             stats: AaStats::default(),
             marker: std::marker::PhantomData,
+        })
+    }
+
+    fn resize_tile_classes(&mut self, cols: usize) -> Result<bool, FrameError> {
+        if self.tile_classes.len() == cols {
+            return Ok(false);
         }
+        Self::preflight(self.tile, cols)?;
+        let capacity = self.tile_classes.capacity();
+        if self.tile_classes.len() < cols {
+            self.tile_classes
+                .try_reserve_exact(cols - self.tile_classes.len())
+                .map_err(|_| FrameError::TooLarge)?;
+        }
+        self.tile_classes.resize(cols, CoverageClass::Empty);
+        Ok(self.tile_classes.capacity() != capacity)
     }
 }
 
@@ -2436,12 +2480,14 @@ impl std::fmt::Debug for WorkerPool {
 /// One kernel's idle workers.
 pub(crate) struct KernelSlots<K: PixelKernel> {
     slots: Mutex<Vec<Worker<K>>>,
+    available: Condvar,
 }
 
 impl<K: PixelKernel> Default for KernelSlots<K> {
     fn default() -> Self {
         KernelSlots {
             slots: Mutex::new(Vec::new()),
+            available: Condvar::new(),
         }
     }
 }
@@ -2489,62 +2535,72 @@ impl WorkerPool {
     /// independent of which worker the scheduler starts first. Existing slots
     /// are also brought to the current column count here, so checkout cannot
     /// discover a late `tile_classes` growth after the warm frame.
-    fn prepare<K: PixelKernel>(&self, tile: usize, cols: usize, workers: usize) {
+    fn prepare<K: PixelKernel>(
+        &self,
+        tile: usize,
+        cols: usize,
+        workers: usize,
+    ) -> Result<(), FrameError> {
+        Worker::<K>::preflight(tile, cols)?;
         let sub = K::sub_pool(self);
         let mut slots = sub.slots.lock().unwrap_or_else(PoisonError::into_inner);
         let mut matching = 0usize;
         for worker in slots.iter_mut().filter(|worker| worker.tile == tile) {
             matching += 1;
-            if worker.tile_classes.len() != cols {
-                if worker.tile_classes.capacity() < cols {
-                    self.allocs
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                worker.tile_classes.resize(cols, CoverageClass::Empty);
+            if worker.resize_tile_classes(cols)? {
+                self.allocs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        while matching < workers {
+
+        let additional = workers.saturating_sub(matching);
+        if additional == 0 {
+            return Ok(());
+        }
+        // Preserve capacity for every checked-out slot as well as the workers
+        // added here. Returning a worker in `Drop` must never discover a need
+        // to grow the idle vector after destination rendering has begun.
+        let checked_out_capacity = slots.capacity().saturating_sub(slots.len());
+        let reserve = checked_out_capacity
+            .checked_add(additional)
+            .ok_or(FrameError::TooLarge)?;
+        let capacity = slots.capacity();
+        slots
+            .try_reserve_exact(reserve)
+            .map_err(|_| FrameError::TooLarge)?;
+        if slots.capacity() != capacity {
+            self.allocs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        for _ in 0..additional {
+            let worker = Worker::<K>::try_new(tile, cols)?;
+            slots.push(worker);
             self.allocs.fetch_add(
                 Worker::<K>::SCRATCH_ALLOCATIONS,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            if slots.len() == slots.capacity() {
-                self.allocs
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            slots.push(Worker::<K>::new(tile, cols));
-            matching += 1;
         }
+        Ok(())
     }
 
-    /// Take a worker for `tile`, creating one on first use; `cols` re-sizes
-    /// the per-tile class row if the grid changed under a reused slot.
+    /// Take a prepared worker for `tile`, waiting when another render call has
+    /// borrowed the whole matching team.
     fn checkout<K: PixelKernel>(&self, tile: usize, cols: usize) -> PooledWorker<'_, K> {
         let sub = K::sub_pool(self);
-        let mut worker = {
-            let mut slots = sub.slots.lock().unwrap_or_else(PoisonError::into_inner);
-            match slots.iter().position(|idle| idle.tile == tile) {
-                Some(index) => slots.swap_remove(index),
-                None => {
-                    self.allocs.fetch_add(
-                        Worker::<K>::SCRATCH_ALLOCATIONS,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    Worker::<K>::new(tile, cols)
-                }
+        let mut slots = sub.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut worker = loop {
+            if let Some(index) = slots.iter().position(|idle| idle.tile == tile) {
+                break slots.swap_remove(index);
             }
+            slots = sub
+                .available
+                .wait(slots)
+                .unwrap_or_else(PoisonError::into_inner);
         };
         worker.stats = AaStats::default();
-        if worker.tile_classes.len() != cols {
-            if worker.tile_classes.capacity() < cols {
-                self.allocs
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            worker.tile_classes.resize(cols, CoverageClass::Empty);
-        }
+        debug_assert_eq!(worker.tile_classes.len(), cols);
         PooledWorker {
             pool: sub,
-            allocs: &self.allocs,
             worker: Some(worker),
         }
     }
@@ -2553,7 +2609,6 @@ impl WorkerPool {
 /// A checked-out worker; returns to its sub-pool on drop.
 struct PooledWorker<'a, K: PixelKernel> {
     pool: &'a KernelSlots<K>,
-    allocs: &'a std::sync::atomic::AtomicU64,
     worker: Option<Worker<K>>,
 }
 
@@ -2581,11 +2636,10 @@ impl<K: PixelKernel> Drop for PooledWorker<'_, K> {
                 .slots
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if slots.len() == slots.capacity() {
-                self.allocs
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+            debug_assert!(slots.len() < slots.capacity());
             slots.push(worker);
+            drop(slots);
+            self.pool.available.notify_one();
         }
     }
 }
@@ -3220,6 +3274,36 @@ mod tests {
     }
 
     #[test]
+    fn worker_pool_refuses_unrepresentable_warmup_atomically() {
+        for (tile, cols, workers) in [(usize::MAX, 1, 1), (1, usize::MAX, 1), (1, 1, usize::MAX)] {
+            let pool = WorkerPool::new();
+            assert_eq!(
+                pool.prepare::<CertifiedScalar>(tile, cols, workers),
+                Err(FrameError::TooLarge)
+            );
+            assert_eq!(pool.slots(), 0);
+            assert_eq!(pool.allocs(), 0);
+        }
+    }
+
+    #[test]
+    fn returning_prepared_workers_never_grows_the_idle_pool() {
+        let pool = WorkerPool::new();
+        pool.prepare::<CertifiedScalar>(1, 1, 1)
+            .expect("first scratch key");
+        let first = pool.checkout::<CertifiedScalar>(1, 1);
+        pool.prepare::<CertifiedScalar>(2, 1, 1)
+            .expect("second scratch key while the first is checked out");
+        let second = pool.checkout::<CertifiedScalar>(2, 1);
+
+        pool.begin_frame();
+        drop(first);
+        drop(second);
+        assert_eq!(pool.allocs(), 0);
+        assert_eq!(pool.slots(), 2);
+    }
+
+    #[test]
     fn oversized_scheduling_tiles_size_scratch_to_the_covered_row() {
         let stage = Stage::new();
         let cfg = FrameConfig::new(
@@ -3286,7 +3370,7 @@ mod tests {
         let mut buffer = FrameBuffer::new(cfg.layout().expect("layout"));
         let stride = buffer.layout().stride(0);
         let bg = cfg.background.premultiply();
-        let mut scratch = RowScratch::for_tile(tile);
+        let mut scratch = RowScratch::for_tile(tile).expect("reference row scratch");
         let mut cov = vec![0.0f64; tile as usize];
 
         let rows = cfg.viewport.height.div_ceil(tile);
