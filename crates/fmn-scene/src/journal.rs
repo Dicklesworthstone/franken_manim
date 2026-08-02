@@ -451,6 +451,9 @@ impl Journal {
         for _ in 0..count {
             let command = get_command(&mut r)?;
             let effect = get_effect(&mut r)?;
+            if command.kind == CommandKind::Custom && effect != EffectClass::Opaque {
+                return Err(JournalError::Malformed("custom command effect"));
+            }
             let read_count = r.get_u32()? as usize;
             require_collection_payload(&r, "asset read", read_count, MIN_ASSET_READ_BYTES)?;
             let mut reads = Vec::with_capacity(read_count.min(4096));
@@ -997,7 +1000,12 @@ impl ReproBundle {
 
 #[cfg(test)]
 mod tests {
-    use super::{SerialError, wire_count};
+    use fmn_hash::sha256::sha256;
+
+    use super::{
+        CommandKind, CommandRecord, EffectClass, Entry, Journal, JournalError, SerialError,
+        wire_count,
+    };
 
     #[test]
     fn wire_count_accepts_u32_max_and_refuses_one_over() {
@@ -1010,5 +1018,31 @@ mod tests {
                     if limit == max && needed == one_over
             ));
         }
+    }
+
+    #[test]
+    fn decoded_custom_command_cannot_claim_replayable_effect() {
+        let forged = Journal {
+            entries: vec![Entry {
+                command: CommandRecord {
+                    kind: CommandKind::Custom,
+                    identity: sha256(b"custom"),
+                    label: "custom".to_string(),
+                },
+                effect: EffectClass::Pure,
+                reads: Vec::new(),
+                subprocesses: Vec::new(),
+                checkpoint: None,
+                state_hash: sha256(b"state"),
+            }],
+            events: Vec::new(),
+        }
+        .to_bytes()
+        .unwrap();
+
+        assert!(matches!(
+            Journal::from_bytes(&forged),
+            Err(JournalError::Malformed("custom command effect"))
+        ));
     }
 }
