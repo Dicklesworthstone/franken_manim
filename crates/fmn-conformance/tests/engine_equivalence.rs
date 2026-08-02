@@ -42,7 +42,7 @@ fn render_frame(stage: &Stage, identity: EngineIdentity, threads: usize) -> Fram
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0)
         .expect("valid engine-equivalence fixture");
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map).expect("bounded equivalence monotone table");
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
     binning

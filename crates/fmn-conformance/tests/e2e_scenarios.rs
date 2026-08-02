@@ -340,7 +340,8 @@ fn render_packet(
         .map_err(|_| fail("negative frame index reached the renderer"))?;
     plan.sync(&stage, revision)
         .map_err(|error| fail(format!("render plan accepts packet geometry: {error}")))?;
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map)
+        .map_err(|error| fail(format!("monotone table accepts packet geometry: {error}")))?;
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
     binning
@@ -1033,7 +1034,8 @@ fn render_certified_doc(stage: &Stage) -> Vec<u8> {
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0)
         .expect("valid certified document fixture");
-    let mono = MonoTable::build(&plan, config.map);
+    let mono =
+        MonoTable::build(&plan, config.map).expect("bounded certified document monotone table");
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
     binning
@@ -1219,7 +1221,8 @@ fn pg5_direct_schedule_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     let mut plan = RenderPlan::new();
     plan.sync(&built.stage, 0)
         .map_err(|error| fail(format!("{} render plan: {error}", case.name)))?;
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map)
+        .map_err(|error| fail(format!("PG-5 monotone table: {error}")))?;
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
     binning
@@ -1291,7 +1294,8 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     let mut plan = RenderPlan::new();
     plan.sync(&built.stage, 0)
         .map_err(|error| fail(format!("{} render plan: {error}", case.name)))?;
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map)
+        .map_err(|error| fail(format!("PG-6 monotone table: {error}")))?;
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
     binning

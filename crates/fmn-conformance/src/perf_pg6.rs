@@ -296,7 +296,8 @@ pub fn measure_pg6(
         let mut plan = RenderPlan::new();
         plan.sync(&built.stage, 0)
             .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
-        let mono = MonoTable::build(&plan, config.map);
+        let mono = MonoTable::build(&plan, config.map)
+            .map_err(|error| Pg6Error::Fixture(format!("{} monotone table: {error}", case.name)))?;
         let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
             .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
         binning

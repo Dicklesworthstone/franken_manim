@@ -495,7 +495,8 @@ impl Fixture {
         phases.push(PhaseTiming::new("render-plan-sync", plan_start.elapsed()));
 
         let mono_start = Instant::now();
-        let mono = MonoTable::build(&plan, config.map);
+        let mono = MonoTable::build(&plan, config.map)
+            .map_err(|error| Pg2Error::Fixture(format!("monotone table: {error}")))?;
         phases.push(PhaseTiming::new("mono-table-build", mono_start.elapsed()));
 
         let binning_start = Instant::now();

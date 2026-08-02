@@ -123,7 +123,8 @@ impl StrokeFixture {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0)
             .expect("valid stroke benchmark fixture");
-        let mono = MonoTable::build(&plan, config.map);
+        let mono =
+            MonoTable::build(&plan, config.map).expect("bounded stroke benchmark monotone table");
         let binning = Binning::build(
             &plan,
             config.viewport,
@@ -183,7 +184,8 @@ impl Fixture {
         );
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0).expect("valid fill benchmark fixture");
-        let mono = MonoTable::build(&plan, config.map);
+        let mono =
+            MonoTable::build(&plan, config.map).expect("bounded fill benchmark monotone table");
         let binning = Binning::build(
             &plan,
             config.viewport,

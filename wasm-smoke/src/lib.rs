@@ -111,7 +111,7 @@ fn render_probe_frame() -> Vec<u8> {
     let config = frame_config();
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0).expect("valid wasm smoke fixture");
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map).expect("bounded wasm smoke monotone table");
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded wasm smoke binning");
     binning.prune_occluded(&plan).expect("binning prune");
@@ -131,7 +131,7 @@ pub fn render_probe_digest() -> u64 {
     let config = frame_config();
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0).expect("valid wasm smoke fixture");
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map).expect("bounded wasm smoke monotone table");
     let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
         .expect("bounded wasm smoke binning");
     binning.prune_occluded(&plan).expect("binning prune");
@@ -162,7 +162,8 @@ pub fn render_probe_is_not_background() -> bool {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0)
             .expect("valid empty wasm smoke fixture");
-        let mono = MonoTable::build(&plan, config.map);
+        let mono =
+            MonoTable::build(&plan, config.map).expect("bounded empty monotone table");
         let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
             .expect("bounded wasm smoke binning");
         binning.prune_occluded(&plan).expect("binning prune");

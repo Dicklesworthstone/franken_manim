@@ -214,7 +214,7 @@ fn prepare_profiled(
             ProfilePhase::GeometryCompile,
             fmn_runtime::ProfileLane::prepare(),
         );
-        MonoTable::build(&plan, config.map)
+        MonoTable::build(&plan, config.map).expect("bounded frame-pipeline monotone table")
     };
     let binning = {
         let _span = profile.span(

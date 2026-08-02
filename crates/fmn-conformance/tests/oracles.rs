@@ -469,7 +469,7 @@ fn render(stage: &Stage) -> fmn_frame::FrameBuffer {
     let cfg = frame_config();
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0).expect("valid rendering-oracle fixture");
-    let mono = MonoTable::build(&plan, cfg.map);
+    let mono = MonoTable::build(&plan, cfg.map).expect("bounded rendering-oracle monotone table");
     let binning =
         Binning::build(&plan, cfg.viewport, TILING, cfg.map).expect("bounded conformance binning");
     FrameJob::with_identity(&plan, &mono, &binning, cfg, EngineIdentity::certified())

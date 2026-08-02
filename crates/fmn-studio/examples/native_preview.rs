@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0)?;
-    let mono = MonoTable::build(&plan, map);
+    let mono = MonoTable::build(&plan, map)?;
     let binning = Binning::build(&plan, viewport, Tiling::default(), map)?;
 
     let mut presented = 0usize;
