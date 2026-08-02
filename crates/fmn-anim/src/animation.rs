@@ -606,15 +606,38 @@ pub trait Animation {
         mobs
     }
 
-    /// Every live mobject the animation may read, copy, or publish.
+    /// Every authored mobject the animation may read, copy, or publish.
     ///
     /// Unlike [`Animation::all_mobjects`], this inventory is not a zipped
-    /// interpolation row and has no positional contract. Proscenium calls it
-    /// before `begin()` so Scribe can preflight otherwise-unrooted static
-    /// content. Animations with auxiliary handles (for example a Transform
-    /// target or a path) must extend the default inventory.
+    /// interpolation row and has no positional contract. It deliberately
+    /// excludes begin-time products such as `starting_mobject`: timeline seek
+    /// restores an earlier stage while reusing animation values, so products
+    /// from the abandoned future are expected to be stale and will be rebuilt
+    /// by the next `begin()`. Proscenium calls this before `begin()` so Scribe
+    /// can preflight otherwise-unrooted static content. Animations with
+    /// authored auxiliary handles (for example a Transform target or a path)
+    /// must extend the default inventory.
     fn preflight_mobjects(&self) -> Vec<Mob> {
-        self.all_mobjects()
+        vec![self.state().mobject()]
+    }
+
+    /// Refuse begin-time inputs that can be checked without mutating the
+    /// animation or the stage.
+    ///
+    /// Choreo runs this before the play lifecycle becomes externally
+    /// observable. The default covers the canonical animation state: every
+    /// preflight handle must still be live, and a declared time span must be
+    /// non-hollow. Composition operators extend the check recursively over
+    /// their members. Concrete animations may override this when their
+    /// [`Animation::setup`] hook has additional read-only refusals; an error
+    /// that can only arise while setup mutates is still contained by the
+    /// driver's stage transaction.
+    ///
+    /// # Errors
+    /// [`AnimError::StaleHandle`] for a dead preflight handle, or
+    /// [`AnimError::InvalidTimeSpan`] for `end <= start`.
+    fn validate_begin(&self, stage: &Stage) -> Result<(), AnimError> {
+        validate_begin_state(self.state(), stage, self.preflight_mobjects())
     }
 
     /// Interpolate one zipped family row (`mobs` follows
@@ -814,6 +837,26 @@ pub trait Animation {
     }
 }
 
+/// The canonical, non-mutating begin checks shared by leaf animations and
+/// composition containers.
+pub(crate) fn validate_begin_state(
+    state: &AnimState,
+    stage: &Stage,
+    mobjects: impl IntoIterator<Item = Mob>,
+) -> Result<(), AnimError> {
+    for mobject in mobjects {
+        if !stage.contains(mobject) {
+            return Err(AnimError::StaleHandle(mobject));
+        }
+    }
+    if let Some((start, end)) = state.config.time_span
+        && end <= start
+    {
+        return Err(AnimError::InvalidTimeSpan { start, end });
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------- MethodAnimation
 
 /// The concrete animation a built `.animate` chain becomes (the
@@ -902,6 +945,10 @@ impl Animation for MethodAnimation {
         }
         mobs.push(self.target);
         mobs
+    }
+
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        vec![self.state.mobject(), self.target]
     }
 
     /// Straight field and affine-placement lerp `start → target` written into

@@ -6,7 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fmn_anim::{
-    AnimError, ClockError, SegmentKind, fade_transform, prepare_animation, replacement_transform,
+    AnimError, ClockError, SegmentKind, Succession, fade_transform, prepare_animation,
+    replacement_transform,
 };
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_mobject::animate::AnimateArgs;
@@ -762,6 +763,138 @@ fn durable_scene_state_restores_adjacent_large_frames_exactly() {
         .expect("durable restore");
     assert_eq!(restored.time().frames(), expected_frame);
     assert_eq!(restored.state_bytes().expect("re-encode"), bytes);
+}
+
+#[test]
+fn invalid_nested_play_setup_is_refused_before_lifecycle_or_stage_mutation() {
+    let mut scene = Scene::default();
+    let first = scene.add_mobject(point()).expect("first root");
+    let later = scene.add_mobject(point()).expect("later root");
+    let later_target = scene.stage_mut().add(point());
+    scene.stage_mut().shift(later_target, [3.0, 0.0, 0.0]);
+    let updater_calls = Rc::new(RefCell::new(0usize));
+    let seen_updater_calls = Rc::clone(&updater_calls);
+    let updater_id = scene
+        .stage_mut()
+        .add_updater(
+            first,
+            move |_stage, _me| *seen_updater_calls.borrow_mut() += 1,
+            false,
+        )
+        .expect("updater");
+
+    let builder = first
+        .animate()
+        .set_anim_args(AnimateArgs {
+            run_time: Some(0.25),
+            rate_func: Some(fmn_core::rate::linear),
+            ..AnimateArgs::default()
+        })
+        .and_then(|builder| builder.shift([1.0, 0.0, 0.0]))
+        .expect("records");
+    let mut first_animation =
+        prepare_animation(builder, scene.stage_mut()).expect("first animation");
+    first_animation.state_mut().config.suspend_mobject_updating = true;
+    let later_animation = Box::new(replacement_transform(later, later_target));
+    let succession = Succession::new(scene.stage_mut(), vec![first_animation, later_animation])
+        .expect("succession");
+    let group = succession.group();
+    scene
+        .stage_mut()
+        .delete(later_target)
+        .expect("stale later target");
+
+    let before = scene.stage().snapshot_bytes().expect("begin state encodes");
+    let before_roots = scene.mobjects().to_vec();
+    let preflight_calls = Rc::new(RefCell::new(0usize));
+    let seen_preflight_calls = Rc::clone(&preflight_calls);
+    scene
+        .set_preflight_hook(move |_stage, _roots| {
+            *seen_preflight_calls.borrow_mut() += 1;
+            Ok(())
+        })
+        .expect("preflight hook");
+    let mut sink = RecordingSink::default();
+
+    let error = scene
+        .play(
+            vec![Box::new(succession)],
+            PlayOverrides::default(),
+            &mut sink,
+        )
+        .expect_err("a later succession target is stale");
+
+    assert!(matches!(
+        error,
+        SceneError::Animation(AnimError::StaleHandle(handle)) if handle == later_target
+    ));
+    assert_eq!(*preflight_calls.borrow(), 0);
+    assert_eq!(*updater_calls.borrow(), 0);
+    assert!(sink.events.is_empty());
+    assert!(sink.captures.is_empty());
+    assert_eq!(scene.time().frames(), 0);
+    assert_eq!(scene.play_count(), 0);
+    assert_eq!(scene.mobjects(), before_roots);
+    assert_eq!(scene.stage().updater_ids(first), vec![updater_id]);
+    assert!(!scene.stage().is_updating_suspended(first));
+    assert!(!scene.stage().is_animating(first));
+    assert!(!scene.stage().is_animating(later));
+    assert!(!scene.stage().is_animating(group));
+    assert_eq!(
+        scene
+            .stage()
+            .snapshot_bytes()
+            .expect("refused state encodes"),
+        before,
+        "the complete arena is unchanged"
+    );
+}
+
+#[test]
+fn unrepresentable_play_is_refused_before_lifecycle_side_effects() {
+    let mut scene = Scene::default();
+    let mob = scene.add_mobject(point()).expect("root");
+    let builder = mob.animate().shift([1.0, 0.0, 0.0]).expect("records");
+    let animation = prepare_animation(builder, scene.stage_mut()).expect("animation");
+    let before = scene.stage().snapshot_bytes().expect("begin state encodes");
+    let preflight_calls = Rc::new(RefCell::new(0usize));
+    let seen_preflight_calls = Rc::clone(&preflight_calls);
+    scene
+        .set_preflight_hook(move |_stage, _roots| {
+            *seen_preflight_calls.borrow_mut() += 1;
+            Ok(())
+        })
+        .expect("preflight hook");
+    let mut sink = RecordingSink::default();
+
+    let error = scene
+        .play(
+            vec![animation],
+            PlayOverrides {
+                run_time: Some(1e18),
+                ..PlayOverrides::default()
+            },
+            &mut sink,
+        )
+        .expect_err("run time cannot fit the rational frame counter");
+
+    assert!(matches!(
+        error,
+        SceneError::Animation(AnimError::Clock(ClockError::RunTimeTooLong))
+    ));
+    assert_eq!(*preflight_calls.borrow(), 0);
+    assert!(sink.events.is_empty());
+    assert!(sink.captures.is_empty());
+    assert_eq!(scene.time().frames(), 0);
+    assert_eq!(scene.play_count(), 0);
+    assert!(!scene.stage().is_animating(mob));
+    assert_eq!(
+        scene
+            .stage()
+            .snapshot_bytes()
+            .expect("refused state encodes"),
+        before
+    );
 }
 
 #[test]

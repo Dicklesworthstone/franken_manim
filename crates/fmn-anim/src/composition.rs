@@ -53,7 +53,7 @@ use fmn_mobject::{Mob, Mobject, Stage};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, clip,
-    time_spanned_alpha,
+    time_spanned_alpha, validate_begin_state,
 };
 
 /// The Reference's `DEFAULT_LAGGED_START_LAG_RATIO`.
@@ -339,6 +339,18 @@ macro_rules! composite_common {
                 }
             }
             out
+        }
+
+        /// Validate the container and every nested member before the scene
+        /// publishes its play lifecycle. This is especially load-bearing for
+        /// `Succession`: later members begin just in time, but their static
+        /// handles and timing contracts are knowable before frame zero.
+        fn validate_begin(&self, stage: &Stage) -> Result<(), AnimError> {
+            validate_begin_state(&self.state, stage, [self.state.mobject()])?;
+            for animation in &self.animations {
+                animation.validate_begin(stage)?;
+            }
+            Ok(())
         }
 
         /// Pure only if every member is pure — the conservative rule (R20)

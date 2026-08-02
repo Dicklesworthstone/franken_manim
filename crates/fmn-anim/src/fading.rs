@@ -410,11 +410,7 @@ impl Animation for FadeTransform {
     }
 
     fn preflight_mobjects(&self) -> Vec<Mob> {
-        let mut mobs = self.all_mobjects();
-        if !mobs.contains(&self.to_add_on_completion) {
-            mobs.push(self.to_add_on_completion);
-        }
-        mobs
+        vec![self.state.mobject(), self.to_add_on_completion]
     }
 
     fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64) {

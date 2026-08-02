@@ -611,11 +611,7 @@ impl Animation for Transform {
     }
 
     fn preflight_mobjects(&self) -> Vec<Mob> {
-        let mut mobs = self.all_mobjects();
-        if !mobs.contains(&self.target) {
-            mobs.push(self.target);
-        }
-        mobs
+        vec![self.state.mobject(), self.target]
     }
 
     fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64) {

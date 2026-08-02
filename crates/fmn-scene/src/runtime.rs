@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use fmn_anim::{
     AnimError, Animation, FramePacket, ImpureEffect, Purity, RateFunc, RationalFrameClock,
-    RationalTime, SegmentKind, SegmentReport, play_segment_with_boundary,
+    RationalTime, SegmentKind, SegmentReport, play_segment_with_boundary, validate_play,
     wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
@@ -952,6 +952,7 @@ impl Scene {
                 overrides.lag_ratio,
             );
         }
+        validate_play(&self.stage, &self.clock, &animations)?;
         let animation_anchors: Vec<Mob> = animations
             .iter()
             .flat_map(|animation| animation.preflight_mobjects())

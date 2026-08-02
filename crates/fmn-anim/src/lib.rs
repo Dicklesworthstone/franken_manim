@@ -87,7 +87,8 @@ pub use fading::{
 };
 pub use frame::{
     FramePacket, OpenSegment, advance_play, advance_play_with_boundary, open_play, play_segment,
-    play_segment_with_boundary, wait_segment, wait_segment_upto, wait_segment_with_boundary,
+    play_segment_with_boundary, validate_play, wait_segment, wait_segment_upto,
+    wait_segment_with_boundary,
 };
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{

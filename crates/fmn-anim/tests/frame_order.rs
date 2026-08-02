@@ -7,7 +7,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fmn_anim::frame::{FramePacket, play_segment, wait_segment, wait_segment_with_boundary};
-use fmn_anim::{Animation, FrameSample, RationalFrameClock, RationalTime, prepare_animation};
+use fmn_anim::{
+    AnimConfig, AnimError, AnimState, Animation, FrameSample, RationalFrameClock, RationalTime,
+    prepare_animation,
+};
 use fmn_core::rng::RngRoot;
 use fmn_mobject::animate::AnimateArgs;
 use fmn_mobject::{Mob, Mobject, Stage};
@@ -39,7 +42,73 @@ fn rng() -> RngRoot {
     RngRoot::from_seed(42)
 }
 
+/// A custom setup hook that mutates the arena before refusing. Static
+/// validation cannot predict arbitrary extension behavior, so the driver
+/// transaction must contain it.
+struct MutatingBeginFailure {
+    state: AnimState,
+}
+
+impl Animation for MutatingBeginFailure {
+    fn state(&self) -> &AnimState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut AnimState {
+        &mut self.state
+    }
+
+    fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        let mobject = self.state.mobject();
+        stage.shift(mobject, [9.0, 0.0, 0.0]);
+        let transient = stage.add(Mobject::new());
+        stage.add_to_scene(transient).expect("transient root");
+        Err(AnimError::EmptyMobject)
+    }
+
+    fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {}
+}
+
 // ---------------------------------------------------------- the six steps
+
+#[test]
+fn failed_begin_restores_the_stage_before_any_frame_is_emitted() {
+    let mut stage = Stage::new();
+    let first = square(&mut stage);
+    let failing = square(&mut stage);
+    stage.add_to_scene(first).expect("first root");
+    stage.add_to_scene(failing).expect("failing root");
+    let mut animations: Vec<Box<dyn Animation>> = vec![
+        shift_animation(&mut stage, first, 2.0, 1.0),
+        Box::new(MutatingBeginFailure {
+            state: AnimState::new(failing, AnimConfig::default()),
+        }),
+    ];
+    let before = stage.snapshot_bytes().expect("begin state encodes");
+    let mut clock = RationalFrameClock::new(30).expect("fps");
+    let mut emitted = 0;
+
+    let error = play_segment(
+        &mut stage,
+        &mut clock,
+        &rng(),
+        &mut animations,
+        false,
+        &mut |_| emitted += 1,
+    )
+    .expect_err("the second begin refuses");
+
+    assert_eq!(error, AnimError::EmptyMobject);
+    assert_eq!(clock.now().frames(), 0);
+    assert_eq!(emitted, 0);
+    assert_eq!(
+        stage.snapshot_bytes().expect("restored state encodes"),
+        before,
+        "earlier begins and the failing hook leave no arena mutation"
+    );
+    assert!(!stage.is_animating(first));
+    assert!(!stage.is_animating(failing));
+}
 
 #[test]
 fn scene_updaters_observe_post_interpolation_state() {

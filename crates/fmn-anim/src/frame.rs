@@ -193,16 +193,26 @@ fn begin_animations(
     stage: &mut Stage,
     animations: &mut [Box<dyn Animation>],
 ) -> Result<(), AnimError> {
-    for animation in animations.iter_mut() {
-        animation.begin(stage)?;
-        let mobject = animation.state().mobject();
-        if !in_scene_family(stage, mobject) {
-            stage
-                .add_to_scene(mobject)
-                .map_err(|_| AnimError::StaleHandle(mobject))?;
+    let before_begin = stage.snapshot();
+    let result = (|| {
+        for animation in animations.iter_mut() {
+            animation.begin(stage)?;
+            let mobject = animation.state().mobject();
+            if !in_scene_family(stage, mobject) {
+                stage
+                    .add_to_scene(mobject)
+                    .map_err(|_| AnimError::StaleHandle(mobject))?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            stage.restore(&before_begin);
+            Err(error)
         }
     }
-    Ok(())
 }
 
 /// One sample's stepping plan. Playback and skip both step one frame at
@@ -276,6 +286,44 @@ struct Prologue {
     run_time: f64,
 }
 
+/// Validate a play segment without beginning an animation or changing the
+/// stage or clock.
+///
+/// Proscenium uses this before emitting `PrePlay`; the Choreo drivers repeat
+/// it at their public boundary so direct callers receive the same refusal.
+/// Validation walks nested compositions through [`Animation::validate_begin`]
+/// and asks the rational clock to prove the longest run time fits its frame
+/// counter.
+///
+/// # Errors
+/// A begin-time validation error, or [`AnimError::Clock`] when the longest
+/// run time cannot be represented by `clock`.
+pub fn validate_play(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    animations: &[Box<dyn Animation>],
+) -> Result<(), AnimError> {
+    plan_play(stage, clock, animations).map(|_| ())
+}
+
+/// The read-only half of a play prologue: validate its closure and derive
+/// the exact frame segment before `begin` can mutate the arena.
+fn plan_play(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    animations: &[Box<dyn Animation>],
+) -> Result<(FrameSegment, f64), AnimError> {
+    for animation in animations {
+        animation.validate_begin(stage)?;
+    }
+    let run_time = animations
+        .iter()
+        .map(|animation| animation.get_run_time())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
+    Ok((segment, run_time))
+}
+
 /// The opening of every play segment, whole or partial.
 fn play_prologue(
     stage: &mut Stage,
@@ -283,14 +331,8 @@ fn play_prologue(
     animations: &mut [Box<dyn Animation>],
     skip: bool,
 ) -> Result<Prologue, AnimError> {
+    let (segment, run_time) = plan_play(stage, clock, animations)?;
     begin_animations(stage, animations)?;
-    // The Reference's np.max over get_run_time (begin already widened each
-    // animation's own run_time in place).
-    let run_time = animations
-        .iter()
-        .map(|a| a.get_run_time())
-        .fold(f64::NEG_INFINITY, f64::max);
-    let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
     let purity = classify_play(stage, animations);
     let base_frame = clock.now().frames();
     let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
