@@ -13,9 +13,10 @@
 //! - **Fixed little-endian** for every integer and float, on every host.
 //! - **Defined field order** — encoding is positional, driven by the call
 //!   order of the [`Writer`] put-methods, never by map iteration.
-//! - **Float canonicalization** at the boundary: `-0.0 → +0.0` and every NaN
-//!   collapses to the one canonical quiet NaN (via `fmn-core`), so
-//!   bit-for-bit-different-but-equal floats hash identically.
+//! - **Primitive canonicalization** at the boundary: booleans have exactly the
+//!   `0`/`1` encodings, while `-0.0 → +0.0` and every NaN collapses to the one
+//!   canonical quiet NaN (via `fmn-core`). Readers reject alternate encodings,
+//!   so bit-for-bit-different-but-equal values cannot acquire distinct hashes.
 //! - **Self-describing header**: a 4-byte magic, a schema id, and a
 //!   `major.minor` version, so a reader validates *what* it is decoding before
 //!   it decodes.
@@ -198,6 +199,28 @@ pub enum Error {
         /// How many bytes were left unconsumed.
         remaining: usize,
     },
+    /// A reserved header field was nonzero, so the document is not canonical.
+    NonZeroHeaderField {
+        /// Header field name (`"flags"` or `"reserved"`).
+        field: &'static str,
+        /// Nonzero value found in the document.
+        value: u16,
+    },
+    /// A boolean used a byte other than its canonical `0`/`1` encoding.
+    NonCanonicalBool {
+        /// Byte found in the document.
+        value: u8,
+    },
+    /// An `f32` used non-canonical zero or NaN bits.
+    NonCanonicalF32 {
+        /// IEEE-754 bits found in the document.
+        bits: u32,
+    },
+    /// An `f64` used non-canonical zero or NaN bits.
+    NonCanonicalF64 {
+        /// IEEE-754 bits found in the document.
+        bits: u64,
+    },
     /// A string field was not valid UTF-8.
     InvalidUtf8,
 }
@@ -237,12 +260,38 @@ impl fmt::Display for Error {
             Self::TrailingData { remaining } => {
                 write!(f, "{remaining} trailing bytes under strict policy")
             }
+            Self::NonZeroHeaderField { field, value } => {
+                write!(
+                    f,
+                    "reserved header field {field} must be zero, found {value}"
+                )
+            }
+            Self::NonCanonicalBool { value } => {
+                write!(f, "boolean byte must be 0 or 1, found {value}")
+            }
+            Self::NonCanonicalF32 { bits } => {
+                write!(f, "f32 bits 0x{bits:08x} are not canonical")
+            }
+            Self::NonCanonicalF64 { bits } => {
+                write!(f, "f64 bits 0x{bits:016x} are not canonical")
+            }
             Self::InvalidUtf8 => f.write_str("string field is not valid UTF-8"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+fn checked_wire_len(value: u64, limit: usize) -> Result<usize, Error> {
+    let needed = usize::try_from(value).map_err(|_| Error::SizeLimit {
+        limit,
+        needed: usize::MAX,
+    })?;
+    if needed > limit {
+        return Err(Error::SizeLimit { limit, needed });
+    }
+    Ok(needed)
+}
 
 /// Builds a canonical document by appending fields in a fixed order.
 ///
@@ -424,8 +473,9 @@ pub struct Reader<'a> {
 impl<'a> Reader<'a> {
     /// Validate framing and open a document for reading.
     ///
-    /// Checks the magic, schema id, major version, size limit, and checksum,
-    /// and — under [`UnknownPolicy::Strict`] — rejects a newer minor.
+    /// Checks the magic, schema id, major version, canonical reserved fields,
+    /// size limit, and checksum, and — under [`UnknownPolicy::Strict`] — rejects
+    /// a newer minor.
     ///
     /// # Errors
     /// Any framing, version, size, or integrity failure (see [`Error`]).
@@ -484,10 +534,25 @@ impl<'a> Reader<'a> {
             });
         }
         let flags = u16::from_le_bytes([head[12], head[13]]);
-        // head[14..16] reserved.
-        let payload_len = u64::from_le_bytes([
-            head[16], head[17], head[18], head[19], head[20], head[21], head[22], head[23],
-        ]) as usize;
+        if flags != 0 {
+            return Err(Error::NonZeroHeaderField {
+                field: "flags",
+                value: flags,
+            });
+        }
+        let reserved = u16::from_le_bytes([head[14], head[15]]);
+        if reserved != 0 {
+            return Err(Error::NonZeroHeaderField {
+                field: "reserved",
+                value: reserved,
+            });
+        }
+        let payload_len = checked_wire_len(
+            u64::from_le_bytes([
+                head[16], head[17], head[18], head[19], head[20], head[21], head[22], head[23],
+            ]),
+            limits.max_total,
+        )?;
 
         // The declared payload length must land exactly on the checksum.
         let expected_total = FRAME_LEN.checked_add(payload_len).ok_or(Error::SizeLimit {
@@ -563,12 +628,17 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
 
-    /// Read a `bool` (any nonzero byte is `true`).
+    /// Read a canonically encoded `bool` (`0` or `1`).
     ///
     /// # Errors
-    /// [`Error::UnexpectedEof`] if the payload is exhausted.
+    /// [`Error::UnexpectedEof`] if the payload is exhausted, or
+    /// [`Error::NonCanonicalBool`] for any byte other than `0` or `1`.
     pub fn get_bool(&mut self) -> Result<bool, Error> {
-        Ok(self.get_u8()? != 0)
+        match self.get_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(Error::NonCanonicalBool { value }),
+        }
     }
 
     /// Consume exactly `N` bytes into an owned fixed array. `copy_from_slice`
@@ -622,20 +692,32 @@ impl<'a> Reader<'a> {
         Ok(i64::from_le_bytes(self.take_array::<8>()?))
     }
 
-    /// Read an `f32` from its little-endian IEEE-754 bits.
+    /// Read an `f32` from its canonical little-endian IEEE-754 bits.
     ///
     /// # Errors
-    /// [`Error::UnexpectedEof`] if fewer than 4 bytes remain.
+    /// [`Error::UnexpectedEof`] if fewer than 4 bytes remain, or
+    /// [`Error::NonCanonicalF32`] for negative zero or a non-canonical NaN.
     pub fn get_f32(&mut self) -> Result<f32, Error> {
-        Ok(f32::from_bits(self.get_u32()?))
+        let bits = self.get_u32()?;
+        let value = f32::from_bits(bits);
+        if canonicalize_f32(value).to_bits() != bits {
+            return Err(Error::NonCanonicalF32 { bits });
+        }
+        Ok(value)
     }
 
-    /// Read an `f64` from its little-endian IEEE-754 bits.
+    /// Read an `f64` from its canonical little-endian IEEE-754 bits.
     ///
     /// # Errors
-    /// [`Error::UnexpectedEof`] if fewer than 8 bytes remain.
+    /// [`Error::UnexpectedEof`] if fewer than 8 bytes remain, or
+    /// [`Error::NonCanonicalF64`] for negative zero or a non-canonical NaN.
     pub fn get_f64(&mut self) -> Result<f64, Error> {
-        Ok(f64::from_bits(self.get_u64()?))
+        let bits = self.get_u64()?;
+        let value = f64::from_bits(bits);
+        if canonicalize_f64(value).to_bits() != bits {
+            return Err(Error::NonCanonicalF64 { bits });
+        }
+        Ok(value)
     }
 
     /// Read a length-prefixed byte field, enforcing [`Limits::max_field`].
@@ -644,13 +726,7 @@ impl<'a> Reader<'a> {
     /// [`Error::SizeLimit`] if the declared length exceeds the field cap, or
     /// [`Error::UnexpectedEof`] if the payload is too short.
     pub fn get_bytes(&mut self) -> Result<&'a [u8], Error> {
-        let len = self.get_u64()? as usize;
-        if len > self.limits.max_field {
-            return Err(Error::SizeLimit {
-                limit: self.limits.max_field,
-                needed: len,
-            });
-        }
+        let len = checked_wire_len(self.get_u64()?, self.limits.max_field)?;
         self.take(len)
     }
 
@@ -731,6 +807,22 @@ mod tests {
         w.finish().expect("encode")
     }
 
+    fn reseal(doc: &mut [u8]) {
+        let checksum_start = doc.len() - CHECKSUM_LEN;
+        let mut h = Sha256::new();
+        h.update(&doc[..checksum_start]);
+        let checksum = h.finalize();
+        doc[checksum_start..].copy_from_slice(checksum.as_bytes());
+    }
+
+    fn raw_payload(bytes: &[u8]) -> Vec<u8> {
+        let mut w = Writer::new(TEST);
+        for byte in bytes {
+            w.put_u8(*byte);
+        }
+        w.finish().expect("raw test payload encodes")
+    }
+
     #[test]
     fn round_trip_all_primitives() {
         let doc = sample();
@@ -783,6 +875,71 @@ mod tests {
             Reader::open(&doc, wrong_major, Limits::DEFAULT, UnknownPolicy::Strict),
             Err(Error::MajorMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn reserved_header_words_are_zero_under_every_policy() {
+        for (offset, field, value) in [(12, "flags", 3_u16), (14, "reserved", 5_u16)] {
+            let mut doc = sample();
+            doc[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            reseal(&mut doc);
+
+            for policy in [UnknownPolicy::Strict, UnknownPolicy::Lenient] {
+                assert_eq!(
+                    Reader::open(&doc, TEST, Limits::DEFAULT, policy).err(),
+                    Some(Error::NonZeroHeaderField { field, value })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bool_encoding_is_unique_and_complete() {
+        let doc = raw_payload(&[0, 1]);
+        let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+        assert!(!r.get_bool().unwrap());
+        assert!(r.get_bool().unwrap());
+        r.finish().unwrap();
+
+        for value in 2..=u8::MAX {
+            let doc = raw_payload(&[value]);
+            let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+            assert_eq!(r.get_bool(), Err(Error::NonCanonicalBool { value }));
+        }
+    }
+
+    #[test]
+    fn floats_reject_negative_zero_and_noncanonical_nan_bits() {
+        for bits in [(-0.0_f32).to_bits(), 0x7fc0_0001, 0xffc0_0000] {
+            let doc = raw_payload(&bits.to_le_bytes());
+            let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+            assert_eq!(r.get_f32(), Err(Error::NonCanonicalF32 { bits }));
+        }
+
+        for bits in [
+            (-0.0_f64).to_bits(),
+            0x7ff8_0000_0000_0001,
+            0xfff8_0000_0000_0000,
+        ] {
+            let doc = raw_payload(&bits.to_le_bytes());
+            let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+            assert_eq!(r.get_f64(), Err(Error::NonCanonicalF64 { bits }));
+        }
+    }
+
+    #[test]
+    fn canonical_nan_bits_are_admitted() {
+        let f32_value = canonicalize_f32(f32::NAN);
+        let doc = raw_payload(&f32_value.to_bits().to_le_bytes());
+        let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+        assert_eq!(r.get_f32().unwrap().to_bits(), f32_value.to_bits());
+        r.finish().unwrap();
+
+        let f64_value = canonicalize_f64(f64::NAN);
+        let doc = raw_payload(&f64_value.to_bits().to_le_bytes());
+        let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+        assert_eq!(r.get_f64().unwrap().to_bits(), f64_value.to_bits());
+        r.finish().unwrap();
     }
 
     #[test]
@@ -845,6 +1002,30 @@ mod tests {
                 needed: 9
             })
         );
+    }
+
+    #[test]
+    fn wire_lengths_are_bounded_before_target_width_conversion() {
+        let wraps_on_32_bit = u64::from(u32::MAX) + 1;
+
+        let mut doc = Writer::new(TEST).finish().unwrap();
+        doc[16..24].copy_from_slice(&wraps_on_32_bit.to_le_bytes());
+        reseal(&mut doc);
+        assert!(matches!(
+            Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict),
+            Err(Error::SizeLimit { limit, needed })
+                if limit == Limits::DEFAULT.max_total && needed > limit
+        ));
+
+        let mut w = Writer::new(TEST);
+        w.put_u64(wraps_on_32_bit);
+        let doc = w.finish().unwrap();
+        let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+        assert!(matches!(
+            r.get_bytes(),
+            Err(Error::SizeLimit { limit, needed })
+                if limit == Limits::DEFAULT.max_field && needed > limit
+        ));
     }
 
     #[test]
