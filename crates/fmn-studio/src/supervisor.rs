@@ -126,6 +126,15 @@ pub enum LaunchError {
     },
     /// A requested standard pipe was absent.
     MissingPipe(&'static str),
+    /// A worker-pipe helper thread could not be started.
+    ThreadSpawn {
+        /// Pipe role whose helper thread was refused.
+        role: &'static str,
+        /// Number of helper threads already started and cleaned up.
+        started: usize,
+        /// Host thread-start failure.
+        error: std::io::Error,
+    },
 }
 
 impl fmt::Display for LaunchError {
@@ -140,6 +149,14 @@ impl fmt::Display for LaunchError {
                 )
             }
             Self::MissingPipe(pipe) => write!(f, "scene worker launched without its {pipe} pipe"),
+            Self::ThreadSpawn {
+                role,
+                started,
+                error,
+            } => write!(
+                f,
+                "cannot start scene-worker {role} pipe thread after {started} started: {error}"
+            ),
         }
     }
 }
@@ -147,7 +164,7 @@ impl fmt::Display for LaunchError {
 impl std::error::Error for LaunchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn { error, .. } => Some(error),
+            Self::Spawn { error, .. } | Self::ThreadSpawn { error, .. } => Some(error),
             Self::InvalidArtifact(_) | Self::MissingPipe(_) => None,
         }
     }
@@ -259,12 +276,43 @@ enum PipeEvent {
     WriteFailed(FramingError),
 }
 
+trait ThreadSpawner {
+    fn spawn<F>(&self, role: &'static str, work: F) -> std::io::Result<JoinHandle<()>>
+    where
+        F: FnOnce() + Send + 'static;
+}
+
+struct NativeThreadSpawner;
+
+impl ThreadSpawner for NativeThreadSpawner {
+    fn spawn<F>(&self, _role: &'static str, work: F) -> std::io::Result<JoinHandle<()>>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        std::thread::Builder::new().spawn(work)
+    }
+}
+
 impl WorkerLauncher for StdWorkerLauncher {
     fn launch(
         &mut self,
         artifact: &WorkerArtifact,
         limits: ProtocolLimits,
     ) -> Result<Box<dyn WorkerChannel>, LaunchError> {
+        self.launch_with_spawner(artifact, limits, &NativeThreadSpawner)
+    }
+}
+
+impl StdWorkerLauncher {
+    fn launch_with_spawner<Spawner>(
+        &mut self,
+        artifact: &WorkerArtifact,
+        limits: ProtocolLimits,
+        spawner: &Spawner,
+    ) -> Result<Box<dyn WorkerChannel>, LaunchError>
+    where
+        Spawner: ThreadSpawner,
+    {
         artifact.validate()?;
         let mut command = std::process::Command::new(&artifact.executable);
         command
@@ -308,55 +356,80 @@ impl WorkerLauncher for StdWorkerLauncher {
         // cancellable by the request deadline instead of blocking the Studio
         // inside `write_all`.
         let (event_tx, event_rx) = mpsc::sync_channel(1);
-        let response_tx = event_tx.clone();
-        let response_thread = std::thread::spawn(move || {
-            loop {
-                let response = read_response(&mut stdout, limits);
-                let terminal = response.is_err();
-                if response_tx.send(PipeEvent::Response(response)).is_err() || terminal {
-                    break;
-                }
-            }
-        });
         let (request_tx, request_rx) = mpsc::sync_channel::<Vec<u8>>(1);
-        let writer_thread = std::thread::spawn(move || {
-            while let Ok(request) = request_rx.recv() {
-                if let Err(error) = write_document(&mut stdin, &request, limits) {
-                    let _ = event_tx.send(PipeEvent::WriteFailed(error));
-                    break;
-                }
-            }
-        });
-
         let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let mut channel = ChildPipeChannel {
+            child: Some(child),
+            request_tx: None,
+            event_rx: Some(event_rx),
+            writer_thread: None,
+            response_thread: None,
+            stderr_thread: None,
+            stderr_tail: Arc::clone(&tail),
+            limits,
+        };
+
+        let response_tx = event_tx.clone();
+        let response_thread = spawner
+            .spawn("response", move || {
+                loop {
+                    let response = read_response(&mut stdout, limits);
+                    let terminal = response.is_err();
+                    if response_tx.send(PipeEvent::Response(response)).is_err() || terminal {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| LaunchError::ThreadSpawn {
+                role: "response",
+                started: 0,
+                error,
+            })?;
+        channel.response_thread = Some(response_thread);
+
+        let writer_thread = spawner
+            .spawn("request", move || {
+                while let Ok(request) = request_rx.recv() {
+                    if let Err(error) = write_document(&mut stdin, &request, limits) {
+                        let _ = event_tx.send(PipeEvent::WriteFailed(error));
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| LaunchError::ThreadSpawn {
+                role: "request",
+                started: 1,
+                error,
+            })?;
+        channel.writer_thread = Some(writer_thread);
+        channel.request_tx = Some(request_tx);
+
         let tail_writer = Arc::clone(&tail);
         let tail_cap = self.stderr_tail_bytes;
-        let stderr_thread = std::thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match stderr.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => {
-                        let mut tail = tail_writer.lock().unwrap_or_else(lock_poisoned);
-                        tail.extend(&buffer[..count]);
-                        while tail.len() > tail_cap {
-                            tail.pop_front();
+        let stderr_thread = spawner
+            .spawn("stderr", move || {
+                let mut buffer = [0u8; 8192];
+                loop {
+                    match stderr.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => {
+                            let mut tail = tail_writer.lock().unwrap_or_else(lock_poisoned);
+                            tail.extend(&buffer[..count]);
+                            while tail.len() > tail_cap {
+                                tail.pop_front();
+                            }
                         }
                     }
                 }
-            }
-        });
+            })
+            .map_err(|error| LaunchError::ThreadSpawn {
+                role: "stderr",
+                started: 2,
+                error,
+            })?;
+        channel.stderr_thread = Some(stderr_thread);
 
-        Ok(Box::new(ChildPipeChannel {
-            child: Some(child),
-            request_tx: Some(request_tx),
-            event_rx: Some(event_rx),
-            writer_thread: Some(writer_thread),
-            response_thread: Some(response_thread),
-            stderr_thread: Some(stderr_thread),
-            stderr_tail: tail,
-            limits,
-        }))
+        Ok(Box::new(channel))
     }
 }
 
@@ -1522,5 +1595,139 @@ fn push_str_bounded(output: &mut String, value: &str, limit: usize) {
 impl Drop for Supervisor {
     fn drop(&mut self) {
         self.stop_worker(false);
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const FIXTURE_ENV: &str = "FMN_STUDIO_STARTUP_FIXTURE";
+    const FIXTURE_TEST: &str = "supervisor::startup_tests::startup_process_fixture";
+
+    struct ActiveThread {
+        live: Arc<AtomicUsize>,
+    }
+
+    impl Drop for ActiveThread {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct RefusingThreadSpawner {
+        refuse_at: usize,
+        attempts: AtomicUsize,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl RefusingThreadSpawner {
+        fn new(refuse_at: usize) -> Self {
+            Self {
+                refuse_at,
+                attempts: AtomicUsize::new(0),
+                live: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+
+        fn live(&self) -> usize {
+            self.live.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ThreadSpawner for RefusingThreadSpawner {
+        fn spawn<F>(&self, role: &'static str, work: F) -> std::io::Result<JoinHandle<()>>
+        where
+            F: FnOnce() + Send + 'static,
+        {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == self.refuse_at {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+
+            self.live.fetch_add(1, Ordering::SeqCst);
+            let active = ActiveThread {
+                live: Arc::clone(&self.live),
+            };
+            NativeThreadSpawner.spawn(role, move || {
+                let _active = active;
+                work();
+            })
+        }
+    }
+
+    fn startup_fixture_artifact() -> WorkerArtifact {
+        WorkerArtifact {
+            executable: std::env::current_exe().expect("current test executable"),
+            argv: vec![
+                "--exact".to_owned(),
+                FIXTURE_TEST.to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            env: vec![(FIXTURE_ENV.to_owned(), "1".to_owned())],
+            cwd: None,
+            build_id: sha256(b"pipe thread startup fixture"),
+        }
+    }
+
+    fn assert_startup_refusal(refuse_at: usize, expected_role: &'static str) {
+        let mut launcher = StdWorkerLauncher::default();
+        let spawner = RefusingThreadSpawner::new(refuse_at);
+        let started = Instant::now();
+        let result = launcher.launch_with_spawner(
+            &startup_fixture_artifact(),
+            ProtocolLimits::default(),
+            &spawner,
+        );
+        assert!(result.is_err(), "refused helper thread was accepted");
+        let error = result.err().expect("typed startup refusal");
+
+        assert!(matches!(
+            &error,
+            LaunchError::ThreadSpawn {
+                role,
+                started,
+                error,
+            } if *role == expected_role
+                && *started == refuse_at
+                && error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(error.to_string().contains(expected_role));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(spawner.attempts(), refuse_at + 1);
+        assert_eq!(spawner.live(), 0, "started helper threads were not joined");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "startup cleanup waited for the 30-second fixture"
+        );
+    }
+
+    #[test]
+    fn first_pipe_thread_refusal_is_typed_and_reaps_the_worker() {
+        assert_startup_refusal(0, "response");
+    }
+
+    #[test]
+    fn intermediate_pipe_thread_refusal_joins_the_response_reader() {
+        assert_startup_refusal(1, "request");
+    }
+
+    #[test]
+    fn final_pipe_thread_refusal_joins_both_started_threads() {
+        assert_startup_refusal(2, "stderr");
+    }
+
+    #[test]
+    fn startup_process_fixture() {
+        if std::env::var(FIXTURE_ENV).as_deref() == Ok("1") {
+            std::thread::sleep(Duration::from_secs(30));
+        }
     }
 }
