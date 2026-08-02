@@ -399,27 +399,35 @@ impl FrameHub {
         self.inner.changed.notify_all();
     }
 
-    /// One multipart body part for `frame`.
-    #[must_use]
-    pub fn multipart_part(frame: &PngFrame) -> Vec<u8> {
-        let header = format!(
-            "--{MULTIPART_BOUNDARY}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nX-FMN-Publication-Sequence: {}\r\nX-FMN-Frame-Index: {}\r\nX-FMN-SHA256: {}\r\n\r\n",
-            frame.png.len(),
-            frame.publication_sequence,
-            frame.frame_index,
-            digest_hex(&frame.digest)
-        );
-        let mut part = Vec::with_capacity(header.len() + frame.png.len() + 2);
-        part.extend_from_slice(header.as_bytes());
-        part.extend_from_slice(&frame.png);
-        part.extend_from_slice(b"\r\n");
-        part
+    /// Write one multipart body part without copying the retained PNG payload.
+    pub fn write_multipart_part(writer: &mut impl Write, frame: &PngFrame) -> std::io::Result<()> {
+        let mut header = [0u8; 512];
+        let header_len = {
+            let mut cursor = std::io::Cursor::new(header.as_mut_slice());
+            write!(
+                cursor,
+                "--{MULTIPART_BOUNDARY}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nX-FMN-Publication-Sequence: {}\r\nX-FMN-Frame-Index: {}\r\nX-FMN-SHA256: ",
+                frame.png.len(),
+                frame.publication_sequence,
+                frame.frame_index,
+            )?;
+            for &byte in frame.digest.as_bytes() {
+                cursor.write_all(&[hex_digit_byte(byte >> 4), hex_digit_byte(byte & 0x0f)])?;
+            }
+            cursor.write_all(b"\r\n\r\n")?;
+            usize::try_from(cursor.position())
+                .map_err(|_| std::io::Error::other("multipart header length overflows usize"))?
+        };
+        writer.write_all(&header[..header_len])?;
+        writer.write_all(&frame.png)?;
+        writer.write_all(b"\r\n")
     }
 
-    /// Closing multipart delimiter.
-    #[must_use]
-    pub fn multipart_end() -> Vec<u8> {
-        format!("--{MULTIPART_BOUNDARY}--\r\n").into_bytes()
+    /// Write the closing multipart delimiter.
+    pub fn write_multipart_end(writer: &mut impl Write) -> std::io::Result<()> {
+        writer.write_all(b"--")?;
+        writer.write_all(MULTIPART_BOUNDARY.as_bytes())?;
+        writer.write_all(b"--\r\n")
     }
 }
 
@@ -830,11 +838,11 @@ impl HostHandler {
             if self.clock.monotonic().saturating_sub(started) >= self.config.session_ttl {
                 break;
             }
-            stream.write_all(&FrameHub::multipart_part(&frame))?;
+            FrameHub::write_multipart_part(stream, &frame)?;
             stream.flush()?;
             last = Some(frame.publication_sequence);
         }
-        stream.write_all(&FrameHub::multipart_end())?;
+        FrameHub::write_multipart_end(stream)?;
         stream.flush()?;
         Ok(())
     }
@@ -1566,9 +1574,13 @@ fn digest_hex(digest: &Digest) -> String {
 }
 
 const fn hex_digit(nibble: u8) -> char {
+    hex_digit_byte(nibble) as char
+}
+
+const fn hex_digit_byte(nibble: u8) -> u8 {
     match nibble {
-        0..=9 => (b'0' + nibble) as char,
-        _ => (b'a' + nibble - 10) as char,
+        0..=9 => b'0' + nibble,
+        _ => b'a' + nibble - 10,
     }
 }
 
@@ -2124,7 +2136,9 @@ mod tests {
         client.read_to_end(&mut response).unwrap();
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(find_bytes(&response, b"Content-Type: image/png").is_none());
-        assert!(response.ends_with(&FrameHub::multipart_end()));
+        let mut multipart_end = Vec::new();
+        FrameHub::write_multipart_end(&mut multipart_end).unwrap();
+        assert!(response.ends_with(&multipart_end));
     }
 
     #[test]

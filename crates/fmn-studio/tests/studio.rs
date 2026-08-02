@@ -2,6 +2,7 @@
 //! ids and overlays, transient-vs-committed timeline seeks, terminal protocol
 //! bytes, and a real pseudoterminal write on Unix.
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use fmn_anim::Timeline;
@@ -15,6 +16,26 @@ use fmn_studio::{
     ProtocolLimits, ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol,
     TileOverlay, TuiError, TuiLimits, commit_timeline_frame, preview_timeline_frame,
 };
+
+struct PayloadWitness<'a> {
+    payload: &'a [u8],
+    saw_borrowed_payload: bool,
+    bytes: Vec<u8>,
+}
+
+impl Write for PayloadWitness<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if std::ptr::eq(bytes, self.payload) {
+            self.saw_borrowed_payload = true;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[test]
 fn capability_is_explicit_fixed_width_and_redacted() {
@@ -47,9 +68,18 @@ fn frame_hub_validates_converts_and_bounds_multipart_png() {
     assert_eq!(frame.digest, sha256(&frame.png));
     assert_eq!(frame.publication_sequence, 0);
     assert_eq!(hub.latest().unwrap().frame_index, 7);
-    let part = FrameHub::multipart_part(&frame);
-    assert!(part.starts_with(b"--fmn-frame\r\nContent-Type: image/png\r\n"));
-    assert!(part.ends_with(b"\r\n"));
+    let mut part = PayloadWitness {
+        payload: &frame.png,
+        saw_borrowed_payload: false,
+        bytes: Vec::new(),
+    };
+    FrameHub::write_multipart_part(&mut part, &frame).unwrap();
+    assert!(part.saw_borrowed_payload);
+    assert!(
+        part.bytes
+            .starts_with(b"--fmn-frame\r\nContent-Type: image/png\r\n")
+    );
+    assert!(part.bytes.ends_with(b"\r\n"));
 
     let mut scrubbed = stream;
     scrubbed.frame_index = 2;
