@@ -37,9 +37,9 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
         through `path`, every other field linear, locked fields skipped,
         computed in f64 and stored at record precision. **Export rule: the
         writer PROVES reconstructibility before marking a segment kind 0 —
-        it computes one mid-segment frame through the engine and through
-        record-lerp, and requires bit-identity; any segment failing the
-        proof exports as kind 1 instead. Never guessed.**
+        it computes every emitted frame through the engine and through
+        record-lerp, and requires bit-identity; any segment failing the proof
+        exports as kind 1 instead. Never guessed.**
    c. If `kind == 1`:
       - `frames: u32`, then per frame: `snapshot: bytes` (verbatim as above).
 
@@ -55,6 +55,13 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
   payload's mandatory field prefixes → `PlanInconsistent`, before reservation.
 - Allocator refusal while reserving a payload-validated table →
   `AllocationFailed`; loading fails without constructing a partial player.
+- A compiled export plan above `BundleExportLimits::max_frames` →
+  `FrameLimitExceeded`, before frame one and before scene mutation. The
+  production default is 1,000,000 frames.
+- Capture/proof tables and canonical snapshot bytes above the exporter's
+  cumulative `BundleExportLimits::max_capture_bytes` budget →
+  `CaptureLimitExceeded`; a failed bounded destination reservation →
+  `AllocationFailed`. The production capture default is 256 MiB.
 
 ## Determinism
 

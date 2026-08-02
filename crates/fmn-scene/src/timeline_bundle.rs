@@ -47,7 +47,7 @@ use fmn_anim::{AnimError, PathFunc, RateFunc, RationalFrameClock, rate_from_tag,
 use fmn_core::rng::RngRoot;
 use fmn_core::types::{canonicalize_f32, canonicalize_f64};
 use fmn_hash::SerialError;
-use fmn_hash::serial::{Schema, Writer};
+use fmn_hash::serial::{Limits, Schema, Writer};
 use fmn_mobject::persist::PersistError;
 use fmn_mobject::{Snapshot, Stage};
 use fmn_render::engine::EngineIdentity;
@@ -55,6 +55,41 @@ use fmn_render::engine::EngineIdentity;
 /// The canonical container schema for an FMTL/1 timeline bundle — the
 /// §6.7 registration for the timeline-bundle format family, id 1.
 pub const TIMELINE_BUNDLE_SCHEMA: Schema = Schema::new(*b"FMTL", 1, 0, 0);
+
+/// Default whole-export work ceiling. One million frames is more than nine
+/// hours at 30 fps, while remaining a finite bound the exporter can reject
+/// from the compiled plan before it advances the scene.
+pub const DEFAULT_MAX_BUNDLE_EXPORT_FRAMES: u64 = 1_000_000;
+
+/// Resource limits for one timeline-bundle export.
+///
+/// `max_frames` bounds semantic frame work. `max_capture_bytes` bounds the
+/// cumulative destination tables and canonical snapshot bytes materialized
+/// while capturing and proving segments. Charging is cumulative even when a
+/// pure segment later releases its proof frames, so it bounds both peak
+/// retained memory and total snapshot-serialization work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BundleExportLimits {
+    /// Maximum total frames admitted by the compiled plan.
+    pub max_frames: u64,
+    /// Maximum cumulative bytes charged to capture/proof accumulation.
+    pub max_capture_bytes: usize,
+}
+
+impl BundleExportLimits {
+    /// Production defaults: one million frames and the canonical
+    /// container's 256 MiB total-size ceiling for capture/proof storage.
+    pub const DEFAULT: Self = Self {
+        max_frames: DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,
+        max_capture_bytes: Limits::DEFAULT.max_total,
+    };
+}
+
+impl Default for BundleExportLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// The engine identity string recorded as the bundle's `engine_version`:
 /// [`EngineIdentity::certified`]'s canonical closure string (see the
@@ -77,6 +112,30 @@ pub enum BundleError {
     /// The driver's segment report disagrees with the compiled plan —
     /// the two share one clock math, so a drift here is an engine bug.
     PlanDrift(&'static str),
+    /// The compiled plan exceeds the declared whole-export work budget.
+    /// This refusal happens before frame one and before scene mutation.
+    FrameLimitExceeded {
+        /// Frames scheduled by the compiled plan.
+        frames: u64,
+        /// Maximum frames admitted by the active limits.
+        max_frames: u64,
+    },
+    /// Capture/proof accumulation exceeds its cumulative byte budget.
+    CaptureLimitExceeded {
+        /// The table or snapshot allocation being charged.
+        context: &'static str,
+        /// Cumulative bytes the operation would require.
+        needed: usize,
+        /// Active cumulative byte ceiling.
+        limit: usize,
+    },
+    /// A bounded, precharged destination reservation failed.
+    AllocationFailed {
+        /// Destination table being reserved.
+        context: &'static str,
+        /// Elements requested after count validation.
+        requested: usize,
+    },
 }
 
 impl std::fmt::Display for BundleError {
@@ -86,6 +145,22 @@ impl std::fmt::Display for BundleError {
             Self::Serial(e) => write!(f, "bundle serialization refused: {e}"),
             Self::Persist(e) => write!(f, "snapshot round-trip failed during proof: {e}"),
             Self::PlanDrift(what) => write!(f, "segment report drifts from the plan: {what}"),
+            Self::FrameLimitExceeded { frames, max_frames } => write!(
+                f,
+                "timeline bundle needs {frames} frames, exceeding the {max_frames}-frame export budget"
+            ),
+            Self::CaptureLimitExceeded {
+                context,
+                needed,
+                limit,
+            } => write!(
+                f,
+                "timeline bundle {context} needs {needed} cumulative bytes, exceeding the {limit}-byte capture budget"
+            ),
+            Self::AllocationFailed { context, requested } => write!(
+                f,
+                "timeline bundle {context} could not reserve {requested} validated entries"
+            ),
         }
     }
 }
@@ -96,7 +171,10 @@ impl std::error::Error for BundleError {
             Self::Anim(e) => Some(e),
             Self::Serial(e) => Some(e),
             Self::Persist(e) => Some(e),
-            Self::PlanDrift(_) => None,
+            Self::PlanDrift(_)
+            | Self::FrameLimitExceeded { .. }
+            | Self::CaptureLimitExceeded { .. }
+            | Self::AllocationFailed { .. } => None,
         }
     }
 }
@@ -110,6 +188,62 @@ impl From<AnimError> for BundleError {
 impl From<SerialError> for BundleError {
     fn from(e: SerialError) -> Self {
         Self::Serial(e)
+    }
+}
+
+/// Cumulative capture/proof allocation account. It deliberately never
+/// refunds a charge: released pure-proof frames reduce peak memory, while the
+/// monotone account also bounds total serialization work across segments.
+struct CaptureBudget {
+    limit: usize,
+    charged: usize,
+}
+
+impl CaptureBudget {
+    fn new(limit: usize) -> Self {
+        Self { limit, charged: 0 }
+    }
+
+    fn charge(&mut self, additional: usize, context: &'static str) -> Result<(), BundleError> {
+        let needed =
+            self.charged
+                .checked_add(additional)
+                .ok_or(BundleError::CaptureLimitExceeded {
+                    context,
+                    needed: usize::MAX,
+                    limit: self.limit,
+                })?;
+        if needed > self.limit {
+            return Err(BundleError::CaptureLimitExceeded {
+                context,
+                needed,
+                limit: self.limit,
+            });
+        }
+        self.charged = needed;
+        Ok(())
+    }
+
+    fn reserve_exact<T>(
+        &mut self,
+        destination: &mut Vec<T>,
+        additional: usize,
+        context: &'static str,
+    ) -> Result<(), BundleError> {
+        let bytes = additional.checked_mul(std::mem::size_of::<T>()).ok_or(
+            BundleError::CaptureLimitExceeded {
+                context,
+                needed: usize::MAX,
+                limit: self.limit,
+            },
+        )?;
+        self.charge(bytes, context)?;
+        destination
+            .try_reserve_exact(additional)
+            .map_err(|_| BundleError::AllocationFailed {
+                context,
+                requested: additional,
+            })
     }
 }
 
@@ -164,62 +298,93 @@ fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, RateFunc)>
     }
 }
 
-/// The canonical fingerprint of everything interpolation can write in a
-/// stage's rooted forest — record schema and columns, placements, numeric
-/// uniforms, z-order, family structure — with floats canonicalized by the
-/// container's own rule, so the comparison asks the honest question: "do
-/// the bundle's canonical bytes reproduce this frame?" Handles and arena
-/// ordinals are deliberately absent (they are process-local); the walk
-/// order is the deterministic roots-then-family depth-first order.
-fn rooted_fingerprint(stage: &Stage, out: &mut Vec<u8>) {
-    for root in stage.roots() {
-        for mob in stage.family(*root) {
-            let Some(entry) = stage.get(mob) else {
-                continue;
+fn canonical_f32_slices_equal(left: &[f32], right: &[f32]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(&left, &right)| {
+            canonicalize_f32(left).to_bits() == canonicalize_f32(right).to_bits()
+        })
+}
+
+fn canonical_f64_equal(left: f64, right: f64) -> bool {
+    canonicalize_f64(left).to_bits() == canonicalize_f64(right).to_bits()
+}
+
+/// Compare everything interpolation can write in two rooted forests without
+/// constructing whole-frame fingerprints. Handles and arena ordinals remain
+/// deliberately absent (they are process-local); record data, placements,
+/// numeric uniforms, z-order, roots, and family structure compare in their
+/// deterministic traversal order after container float canonicalization.
+fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
+    if left.roots().len() != right.roots().len() {
+        return false;
+    }
+    for (&left_root, &right_root) in left.roots().iter().zip(right.roots()) {
+        let left_family = left.family(left_root);
+        let right_family = right.family(right_root);
+        if left_family.len() != right_family.len() {
+            return false;
+        }
+        for (left_mob, right_mob) in left_family.into_iter().zip(right_family) {
+            let (Some(left_entry), Some(right_entry)) = (left.get(left_mob), right.get(right_mob))
+            else {
+                return false;
             };
-            let schema = entry.buffer.schema();
-            out.extend_from_slice(&(schema.fields().len() as u64).to_le_bytes());
-            for field in schema.fields() {
-                out.extend_from_slice(field.name.as_bytes());
-                out.extend_from_slice(&(field.width as u64).to_le_bytes());
-                if let Some(column) = entry.buffer.read_column(&field.name) {
-                    for value in column {
-                        out.extend_from_slice(&canonicalize_f32(value).to_bits().to_le_bytes());
-                    }
+            let left_fields = left_entry.buffer.schema().fields();
+            let right_fields = right_entry.buffer.schema().fields();
+            if left_fields.len() != right_fields.len() {
+                return false;
+            }
+            for (left_field, right_field) in left_fields.iter().zip(right_fields) {
+                if left_field != right_field {
+                    return false;
+                }
+                match (
+                    left_entry.buffer.read_column(&left_field.name),
+                    right_entry.buffer.read_column(&right_field.name),
+                ) {
+                    (Some(left_column), Some(right_column))
+                        if canonical_f32_slices_equal(&left_column, &right_column) => {}
+                    _ => return false,
                 }
             }
-            for coefficient in entry.placement().coefficients() {
-                out.extend_from_slice(&canonicalize_f64(coefficient).to_bits().to_le_bytes());
+            if !left_entry
+                .placement()
+                .coefficients()
+                .into_iter()
+                .zip(right_entry.placement().coefficients())
+                .all(|(left, right)| canonical_f64_equal(left, right))
+            {
+                return false;
             }
-            let uniforms = entry.uniforms();
-            out.extend_from_slice(
-                &canonicalize_f64(uniforms.is_fixed_in_frame)
-                    .to_bits()
-                    .to_le_bytes(),
-            );
-            for lane in uniforms.shading {
-                out.extend_from_slice(&canonicalize_f64(lane).to_bits().to_le_bytes());
+            let left_uniforms = left_entry.uniforms();
+            let right_uniforms = right_entry.uniforms();
+            if !canonical_f64_equal(
+                left_uniforms.is_fixed_in_frame,
+                right_uniforms.is_fixed_in_frame,
+            ) || !left_uniforms
+                .shading
+                .into_iter()
+                .zip(right_uniforms.shading)
+                .all(|(left, right)| canonical_f64_equal(left, right))
+                || !left_uniforms
+                    .clip_planes
+                    .into_iter()
+                    .flatten()
+                    .zip(right_uniforms.clip_planes.into_iter().flatten())
+                    .all(|(left, right)| canonical_f64_equal(left, right))
+                || !canonical_f64_equal(
+                    left_uniforms.anti_alias_width,
+                    right_uniforms.anti_alias_width,
+                )
+                || left_uniforms.joint_type != right_uniforms.joint_type
+                || left.z_index(left_mob) != right.z_index(right_mob)
+                || left_entry.submobjects().len() != right_entry.submobjects().len()
+            {
+                return false;
             }
-            for plane in uniforms.clip_planes {
-                for coefficient in plane {
-                    out.extend_from_slice(&canonicalize_f64(coefficient).to_bits().to_le_bytes());
-                }
-            }
-            out.extend_from_slice(
-                &canonicalize_f64(uniforms.anti_alias_width)
-                    .to_bits()
-                    .to_le_bytes(),
-            );
-            out.push(match uniforms.joint_type {
-                fmn_mobject::JointType::NoJoint => 0,
-                fmn_mobject::JointType::Auto => 1,
-                fmn_mobject::JointType::Bevel => 2,
-                fmn_mobject::JointType::Miter => 3,
-            });
-            out.extend_from_slice(&stage.z_index(mob).to_le_bytes());
-            out.extend_from_slice(&(entry.submobjects().len() as u64).to_le_bytes());
         }
     }
+    true
 }
 
 /// The export-time proof (the contract's bold rule): reconstruct every
@@ -231,7 +396,7 @@ fn prove_pure_segment(
     end_bytes: &[u8],
     path: PathFunc,
     rate: &RateFunc,
-    packets: &[FramePacket],
+    frame_bytes: &[Vec<u8>],
     run_time: f64,
     fps: u32,
 ) -> Result<bool, BundleError> {
@@ -245,30 +410,105 @@ fn prove_pure_segment(
     let end = Snapshot::from_bytes(end_bytes, &binding)
         .map_err(BundleError::Persist)?
         .snapshot;
-    for (index, packet) in packets.iter().enumerate() {
+    for (index, bytes) in frame_bytes.iter().enumerate() {
         let frame = i64::try_from(index + 1).unwrap_or(i64::MAX);
         // The engine's divisor chain, exactly: segment-local rational time
         // converted once, divided by the (nomination-verified) run time.
         let alpha = (frame as f64 / f64::from(fps)) / run_time;
         let reconstructed = interpolate_between(&begin, &end, bundle_sub_alpha(alpha, rate), path);
-        let engine = packet.materialize_stage();
-        let mut engine_bits = Vec::new();
-        rooted_fingerprint(&engine, &mut engine_bits);
-        let mut reconstructed_bits = Vec::new();
-        rooted_fingerprint(&reconstructed, &mut reconstructed_bits);
-        if engine_bits != reconstructed_bits {
+        let engine = Snapshot::from_bytes(bytes, &binding)
+            .map_err(BundleError::Persist)?
+            .snapshot
+            .materialize();
+        if !rooted_states_equal(&engine, &reconstructed) {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
+fn capture_snapshot_bytes(
+    snapshot: &Snapshot,
+    budget: &mut CaptureBudget,
+    context: &'static str,
+) -> Result<Vec<u8>, BundleError> {
+    let bytes = snapshot.to_bytes()?;
+    budget.charge(bytes.len(), context)?;
+    Ok(bytes)
+}
+
+fn clone_snapshot_bytes(
+    bytes: &[u8],
+    budget: &mut CaptureBudget,
+    context: &'static str,
+) -> Result<Vec<u8>, BundleError> {
+    budget.charge(bytes.len(), context)?;
+    let mut cloned = Vec::new();
+    cloned
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| BundleError::AllocationFailed {
+            context,
+            requested: bytes.len(),
+        })?;
+    cloned.extend_from_slice(bytes);
+    Ok(cloned)
+}
+
+fn classify_captured_segment(
+    begin: Vec<u8>,
+    mut frames: Vec<Vec<u8>>,
+    path: PathFunc,
+    rate: &RateFunc,
+    run_time: f64,
+    fps: u32,
+    budget: &mut CaptureBudget,
+) -> Result<SegmentEntry, BundleError> {
+    let path_tag =
+        fmn_anim::path_tag(path).ok_or(BundleError::PlanDrift("nominated path is untaggable"))?;
+    let rate_tag = rate_tag(rate).ok_or(BundleError::PlanDrift("nominated rate is untaggable"))?;
+
+    if frames.is_empty() {
+        let end = clone_snapshot_bytes(&begin, budget, "frameless pure end snapshot")?;
+        return if prove_pure_segment(&begin, &end, path, rate, &frames, run_time, fps)? {
+            Ok(SegmentEntry::Pure {
+                begin,
+                end,
+                path: path_tag,
+                rate: rate_tag,
+            })
+        } else {
+            Ok(SegmentEntry::Stateful { frames })
+        };
+    }
+
+    let proven = {
+        let end = frames.last().ok_or(BundleError::PlanDrift(
+            "captured segment lost its last frame",
+        ))?;
+        prove_pure_segment(&begin, end, path, rate, &frames, run_time, fps)?
+    };
+    if proven {
+        let end = frames.pop().ok_or(BundleError::PlanDrift(
+            "captured segment lost its last frame",
+        ))?;
+        Ok(SegmentEntry::Pure {
+            begin,
+            end,
+            path: path_tag,
+            rate: rate_tag,
+        })
+    } else {
+        Ok(SegmentEntry::Stateful { frames })
+    }
+}
+
 /// Export an authored timeline as one canonical FMTL/1 document.
 ///
-/// The timeline is consumed: its schedule is compiled first (pure — the
-/// plan that nests into the bundle), then its steps drive the public
-/// segment drivers against `stage` in authored order, capturing every
-/// frame packet and segment report. Per segment, in plan order:
+/// The timeline is consumed: its schedule is compiled and budget-checked
+/// first (pure — the plan that nests into the bundle), then its steps drive
+/// the public segment drivers against `stage` in authored order. Each packet
+/// is serialized immediately into budgeted canonical snapshot bytes; whole
+/// `FramePacket` tables are never retained. Per segment, in plan order:
 ///
 /// - **Nominated pure segments** (see [`nominate`]) run the export-time
 ///   proof ([`prove_pure_segment`]); passing segments export as kind 0
@@ -279,39 +519,102 @@ fn prove_pure_segment(
 ///   snapshot per emitted frame.
 ///
 /// # Errors
-/// [`BundleError`] — driver failures, container size limits, a snapshot
-/// round-trip failure during the proof, or a report/plan drift (all
-/// named; this function never panics on scene input).
+/// [`BundleError`] — resource-limit refusals, driver failures, container size
+/// limits, a snapshot round-trip failure during the proof, or a report/plan
+/// drift (all named; this function never panics on scene input).
 pub fn export_timeline_bundle(
     timeline: Timeline,
     stage: &mut Stage,
     rng: &RngRoot,
 ) -> Result<Vec<u8>, BundleError> {
+    export_timeline_bundle_with_limits(timeline, stage, rng, BundleExportLimits::DEFAULT)
+}
+
+/// Export with explicit frame-work and capture-memory limits.
+///
+/// The compiled plan is checked against `limits.max_frames` before the first
+/// frame mutates `stage`. Capture tables and canonical snapshots are charged
+/// cumulatively against `limits.max_capture_bytes` before retention, and all
+/// proportional table reservations are fallible.
+///
+/// # Errors
+/// As [`export_timeline_bundle`], plus the explicit resource variants of
+/// [`BundleError`].
+pub fn export_timeline_bundle_with_limits(
+    timeline: Timeline,
+    stage: &mut Stage,
+    rng: &RngRoot,
+    limits: BundleExportLimits,
+) -> Result<Vec<u8>, BundleError> {
     let plan = timeline.compile()?;
+    let total_frames = u64::try_from(plan.total_frames())
+        .map_err(|_| BundleError::PlanDrift("compiled plan has a negative frame total"))?;
+    let host_frame_limit = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+    let max_frames = limits.max_frames.min(host_frame_limit);
+    if total_frames > max_frames {
+        return Err(BundleError::FrameLimitExceeded {
+            frames: total_frames,
+            max_frames,
+        });
+    }
     let fps = timeline.fps();
     let (mut steps, _labels) = timeline.into_steps();
+    if steps.len() != plan.segments().len() {
+        return Err(BundleError::PlanDrift("compiled segment count"));
+    }
 
+    let mut budget = CaptureBudget::new(limits.max_capture_bytes);
     let mut clock = RationalFrameClock::new(fps).map_err(AnimError::Clock)?;
-    let mut entries: Vec<SegmentEntry> = Vec::with_capacity(steps.len());
+    let mut entries: Vec<SegmentEntry> = Vec::new();
+    budget.reserve_exact(&mut entries, steps.len(), "segment entry table")?;
     for (index, step) in steps.iter_mut().enumerate() {
-        let mut packets: Vec<FramePacket> = Vec::new();
-        let mut capture = |packet: FramePacket| packets.push(packet);
-        let report = match step {
-            Step::Play(animations) => {
-                play_segment(stage, &mut clock, rng, animations, false, &mut capture)?
-            }
-            Step::Wait(duration) => {
-                wait_segment(stage, &mut clock, rng, *duration, None, false, &mut capture)?
-            }
-        };
         let planned = plan.segments().get(index).ok_or(BundleError::PlanDrift(
             "the run produced more segments than the plan",
         ))?;
+        let expected_frames = usize::try_from(planned.n_frames)
+            .map_err(|_| BundleError::PlanDrift("segment frame count exceeds host width"))?;
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        budget.reserve_exact(&mut frames, expected_frames, "captured frame table")?;
+        let mut capture_error = None;
+        let report = {
+            let mut capture = |packet: FramePacket| {
+                if capture_error.is_some() {
+                    return;
+                }
+                if frames.len() >= expected_frames {
+                    capture_error = Some(BundleError::PlanDrift(
+                        "the run emitted more frames than the plan",
+                    ));
+                    return;
+                }
+                match packet.state().to_bytes() {
+                    Ok(bytes) => match budget.charge(bytes.len(), "captured frame snapshot") {
+                        Ok(()) => frames.push(bytes),
+                        Err(error) => capture_error = Some(error),
+                    },
+                    Err(error) => capture_error = Some(BundleError::Serial(error)),
+                }
+            };
+            match step {
+                Step::Play(animations) => {
+                    play_segment(stage, &mut clock, rng, animations, false, &mut capture)?
+                }
+                Step::Wait(duration) => {
+                    wait_segment(stage, &mut clock, rng, *duration, None, false, &mut capture)?
+                }
+            }
+        };
+        if let Some(error) = capture_error {
+            return Err(error);
+        }
         if report.base_frame != planned.base_frame {
             return Err(BundleError::PlanDrift("segment base frame"));
         }
         if report.n_frames != planned.n_frames {
             return Err(BundleError::PlanDrift("segment frame count"));
+        }
+        if frames.len() != expected_frames {
+            return Err(BundleError::PlanDrift("captured frame count"));
         }
 
         let entry = match nominate(step, &report) {
@@ -319,47 +622,26 @@ pub fn export_timeline_bundle(
                 let begin_bytes = report
                     .begin_state
                     .as_ref()
-                    .map(|snapshot| snapshot.to_bytes())
+                    .map(|snapshot| {
+                        capture_snapshot_bytes(snapshot, &mut budget, "pure begin snapshot")
+                    })
                     .transpose()?;
-                // The end state is the segment's last emitted frame —
-                // pre-finish, so teardown bookkeeping (unlock, remover,
-                // replacement) never enters the bundle. A frameless
-                // segment's end is its begin.
-                let end_bytes = match packets.last() {
-                    Some(packet) => Some(packet.state().to_bytes()?),
-                    None => begin_bytes.clone(),
-                };
-                match (begin_bytes, end_bytes) {
-                    (Some(begin), Some(end)) => {
-                        let path_tag = fmn_anim::path_tag(path)
-                            .ok_or(BundleError::PlanDrift("nominated path is untaggable"))?;
-                        let rate_tag = rate_tag(&rate)
-                            .ok_or(BundleError::PlanDrift("nominated rate is untaggable"))?;
-                        if prove_pure_segment(
-                            &begin,
-                            &end,
-                            path,
-                            &rate,
-                            &packets,
-                            planned.run_time,
-                            fps,
-                        )? {
-                            SegmentEntry::Pure {
-                                begin,
-                                end,
-                                path: path_tag,
-                                rate: rate_tag,
-                            }
-                        } else {
-                            stateful_entry(&packets)?
-                        }
-                    }
+                match begin_bytes {
+                    Some(begin) => classify_captured_segment(
+                        begin,
+                        frames,
+                        path,
+                        &rate,
+                        planned.run_time,
+                        fps,
+                        &mut budget,
+                    )?,
                     // A pure segment with no recorded begin state (a
                     // frameless schedule entry) records nothing at all.
-                    _ => stateful_entry(&packets)?,
+                    None => SegmentEntry::Stateful { frames },
                 }
             }
-            None => stateful_entry(&packets)?,
+            None => SegmentEntry::Stateful { frames },
         };
         entries.push(entry);
     }
@@ -400,16 +682,6 @@ fn wire_count(needed: usize) -> Result<u32, SerialError> {
         limit: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
         needed,
     })
-}
-
-/// The kind-1 record of a captured segment: every frame's canonical
-/// snapshot bytes, in emission order.
-fn stateful_entry(packets: &[FramePacket]) -> Result<SegmentEntry, BundleError> {
-    let mut frames = Vec::with_capacity(packets.len());
-    for packet in packets {
-        frames.push(packet.state().to_bytes()?);
-    }
-    Ok(SegmentEntry::Stateful { frames })
 }
 
 #[cfg(test)]
@@ -511,6 +783,74 @@ mod tests {
                     if limit == max && needed == one_over
             ));
         }
+    }
+
+    #[test]
+    fn export_frame_budget_refuses_before_frame_one() {
+        let (mut stage, mob) = stage_with_mob();
+        let updater_calls = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let observed_calls = std::rc::Rc::clone(&updater_calls);
+        stage
+            .add_updater(
+                mob,
+                move |_stage, _mob| observed_calls.set(observed_calls.get() + 1),
+                false,
+            )
+            .expect("updater registers");
+        let before = stage.snapshot().to_bytes().expect("snapshot");
+        let mut timeline = Timeline::new(1).expect("fps");
+        timeline.wait(2.0).expect("wait step");
+        let rng = RngRoot::from_seed(0);
+        let limits = BundleExportLimits {
+            max_frames: 1,
+            ..BundleExportLimits::DEFAULT
+        };
+
+        let error = export_timeline_bundle_with_limits(timeline, &mut stage, &rng, limits)
+            .expect_err("two frames must exceed the one-frame export budget");
+        assert!(matches!(
+            error,
+            BundleError::FrameLimitExceeded {
+                frames: 2,
+                max_frames: 1
+            }
+        ));
+        assert_eq!(
+            updater_calls.get(),
+            0,
+            "plan-level refusal must not enter the driver's initial updater pass"
+        );
+        assert_eq!(
+            stage.snapshot().to_bytes().expect("snapshot after refusal"),
+            before,
+            "plan-level refusal must happen before frame-one mutation"
+        );
+    }
+
+    #[test]
+    fn captured_snapshot_accumulation_obeys_the_memory_budget() {
+        let mut stage = Stage::new();
+        let mut timeline = Timeline::new(1).expect("fps");
+        timeline.wait(1.0).expect("wait step");
+        let rng = RngRoot::from_seed(0);
+        let table_bytes = std::mem::size_of::<SegmentEntry>()
+            .checked_add(std::mem::size_of::<Vec<u8>>())
+            .expect("two small table entries fit");
+        let limits = BundleExportLimits {
+            max_capture_bytes: table_bytes,
+            ..BundleExportLimits::DEFAULT
+        };
+
+        let error = export_timeline_bundle_with_limits(timeline, &mut stage, &rng, limits)
+            .expect_err("the first encoded snapshot must exceed the table-only budget");
+        assert!(matches!(
+            error,
+            BundleError::CaptureLimitExceeded {
+                context: "captured frame snapshot",
+                needed,
+                limit
+            } if needed > limit && limit == table_bytes
+        ));
     }
 
     #[test]

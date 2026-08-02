@@ -51,5 +51,6 @@ pub use runtime::{
     SceneStateRestore, SoundRequest, ThreeDAddOptions, ThreeDScene,
 };
 pub use timeline_bundle::{
-    BundleError, TIMELINE_BUNDLE_SCHEMA, bundle_engine_version, export_timeline_bundle,
+    BundleError, BundleExportLimits, DEFAULT_MAX_BUNDLE_EXPORT_FRAMES, TIMELINE_BUNDLE_SCHEMA,
+    bundle_engine_version, export_timeline_bundle, export_timeline_bundle_with_limits,
 };
