@@ -7,7 +7,7 @@
 //! Scene operations always cross the [`Supervisor`] boundary into the
 //! disposable worker.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -602,8 +602,8 @@ impl StudioHost {
 
     /// Serve concurrent bounded connections until `shutdown` is set.
     pub fn serve_until(&self, shutdown: &AtomicBool) -> Result<(), HostError> {
+        let mut clients = client_handle_storage(self.handler.config.max_clients)?;
         self.listener.set_nonblocking(true)?;
-        let mut clients = Vec::new();
         let serve_result = loop {
             if let Err(error) = reap_finished_clients(&mut clients) {
                 break Err(error);
@@ -651,6 +651,17 @@ impl StudioHost {
         let join_result = join_clients(&mut clients);
         serve_result.and(blocking_result).and(join_result)
     }
+}
+
+fn client_handle_storage(max_clients: usize) -> Result<Vec<JoinHandle<()>>, HostError> {
+    let mut clients = Vec::new();
+    clients.try_reserve_exact(max_clients).map_err(|error| {
+        HostError::ClientStorageAllocationFailed {
+            clients: max_clients,
+            error,
+        }
+    })?;
+    Ok(clients)
 }
 
 fn reap_finished_clients(clients: &mut Vec<JoinHandle<()>>) -> Result<(), HostError> {
@@ -1597,6 +1608,13 @@ pub enum HostError {
     UnexpectedWorkerResponse,
     /// A bounded client handler panicked before it could be joined.
     ClientThreadPanicked,
+    /// The complete bounded client-handle table could not be reserved.
+    ClientStorageAllocationFailed {
+        /// Maximum simultaneous clients requested by host policy.
+        clients: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
 }
 
 impl HostError {
@@ -1612,7 +1630,9 @@ impl HostError {
             | Self::FramePng(_)
             | Self::UnexpectedWorkerResponse
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
-            Self::Configuration(_) => Some((500, "Internal Server Error")),
+            Self::Configuration(_) | Self::ClientStorageAllocationFailed { .. } => {
+                Some((500, "Internal Server Error"))
+            }
             Self::Io(_) => None,
         }
     }
@@ -1638,6 +1658,10 @@ impl fmt::Display for HostError {
                 f.write_str("worker returned an unexpected Studio response")
             }
             Self::ClientThreadPanicked => f.write_str("Studio client handler panicked"),
+            Self::ClientStorageAllocationFailed { clients, error } => write!(
+                f,
+                "Studio could not reserve storage for {clients} client handlers: {error}"
+            ),
         }
     }
 }
@@ -1649,6 +1673,7 @@ impl std::error::Error for HostError {
             Self::Protocol(error) => Some(error),
             Self::Supervisor(error) => Some(error),
             Self::FramePng(error) => Some(error),
+            Self::ClientStorageAllocationFailed { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -1766,6 +1791,79 @@ mod tests {
         let mut client = DisconnectedClient::default();
         write_connection_limit_response(&mut client);
         assert_eq!(client.write_attempts, 1);
+    }
+
+    #[test]
+    fn client_handle_storage_reserves_the_complete_bound() {
+        let clients = client_handle_storage(16).unwrap();
+        assert!(clients.is_empty());
+        assert!(clients.capacity() >= 16);
+    }
+
+    #[test]
+    fn client_handle_storage_refuses_capacity_overflow() {
+        let result = client_handle_storage(usize::MAX);
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(matches!(
+            &error,
+            HostError::ClientStorageAllocationFailed {
+                clients: usize::MAX,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains(&usize::MAX.to_string()));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn client_handle_storage_refusal_leaves_the_listener_blocking() {
+        let config = StudioHostConfig {
+            max_clients: usize::MAX,
+            ..StudioHostConfig::default()
+        };
+        let host = bind_test_host(config, 1, 8).unwrap();
+        let shutdown = AtomicBool::new(true);
+        assert!(matches!(
+            host.serve_until(&shutdown),
+            Err(HostError::ClientStorageAllocationFailed {
+                clients: usize::MAX,
+                ..
+            })
+        ));
+        let address = host.local_addr().unwrap();
+
+        std::thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let server_barrier = Arc::clone(&barrier);
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let server = scope.spawn(move || {
+                server_barrier.wait();
+                result_tx.send(host.serve_once()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
+            assert!(
+                result_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .is_ok()
+            );
+            server.join().unwrap();
+        });
     }
 
     #[test]
