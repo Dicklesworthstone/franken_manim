@@ -431,9 +431,7 @@ impl InteractionState {
                 delta[1] = 0.0;
             }
         }
-        for mob in &self.selection {
-            stage.shift(*mob, delta);
-        }
+        stage.shift_many(&self.selection, delta);
     }
 
     fn prepare_resize(&mut self, stage: &Stage, mouse: Vec3, about_corner: bool) {
@@ -470,9 +468,7 @@ impl InteractionState {
                 }
                 let absolute = (component / reference).abs().max(1.0e-6);
                 let incremental = absolute / gesture.last_scale[axis];
-                for mob in &self.selection {
-                    stage.stretch_about(*mob, incremental, axis, Some(gesture.pivot), None);
-                }
+                stage.stretch_many_about_point(&self.selection, incremental, axis, gesture.pivot);
                 gesture.last_scale[axis] = absolute;
             }
         } else {
@@ -482,9 +478,7 @@ impl InteractionState {
             }
             let absolute = (norm(vector) / reference_norm).max(1.0e-6);
             let incremental = absolute / gesture.last_scale[0];
-            for mob in &self.selection {
-                stage.scale_about(*mob, incremental, Some(gesture.pivot), None);
-            }
+            stage.scale_many_about_point(&self.selection, incremental, gesture.pivot);
             gesture.last_scale = [absolute; 3];
         }
     }
@@ -496,9 +490,7 @@ impl InteractionState {
         self.save_undo(stage);
         let amount = if large { NUDGE * 10.0 } else { NUDGE };
         let delta = scaled(direction, amount);
-        for mob in &self.selection {
-            stage.shift(*mob, delta);
-        }
+        stage.shift_many(&self.selection, delta);
     }
 
     fn gather_new_selection(&mut self, stage: &mut Stage) {

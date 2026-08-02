@@ -580,6 +580,138 @@ fn select_grab_resize_color_and_mobject_paste_have_scene_state_outcomes() {
 }
 
 #[test]
+fn hierarchy_selection_transforms_an_overlapping_child_once() {
+    let mut scene = Scene::default();
+    let parent = scene.stage_mut().add(rectangle(
+        [-2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    let child = scene.stage_mut().add(rectangle(
+        [2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    scene.stage_mut().attach(parent, child).unwrap();
+    scene.stage_mut().add_to_scene(parent).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers::CONTROL,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 2);
+    assert_eq!(interactive.selection(), vec![parent, child]);
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::ArrowRight,
+            modifiers: Modifiers::NONE,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    assert!((interactive.stage().get_center(child)[0] - 2.05).abs() < 1.0e-12);
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('z'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::MouseMotion {
+            point: [2.5, 0.0, 0.0],
+            delta: [2.5, 0.0, 0.0],
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseMotion {
+            point: [5.0, 0.0, 0.0],
+            delta: [2.5, 0.0, 0.0],
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::KeyRelease {
+            key: Key::Character('t'),
+            modifiers: Modifiers::NONE,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 5);
+    assert!((interactive.stage().get_center(child)[0] - 4.0).abs() < 1.0e-12);
+}
+
+#[test]
+fn top_level_selection_transforms_a_shared_descendant_once() {
+    let mut scene = Scene::default();
+    let left = scene.stage_mut().add(Mobject::new());
+    let right = scene.stage_mut().add(Mobject::new());
+    let shared = scene
+        .stage_mut()
+        .add(rectangle([0.0; 3], Srgb::from_hex("#FFFFFF").unwrap()));
+    scene.stage_mut().attach(left, shared).unwrap();
+    scene.stage_mut().attach(right, shared).unwrap();
+    scene.stage_mut().add_many_to_scene(&[left, right]).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    assert_eq!(interactive.selection(), vec![left, right]);
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::ArrowRight,
+            modifiers: Modifiers::NONE,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+    assert!((interactive.stage().get_center(shared)[0] - 0.05).abs() < 1.0e-12);
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('z'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::MouseMotion {
+            point: [0.5, 0.5, 0.0],
+            delta: [0.5, 0.5, 0.0],
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseMotion {
+            point: [1.0, 1.5, 0.0],
+            delta: [0.5, 1.0, 0.0],
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyRelease {
+            key: Key::Character('t'),
+            modifiers: Modifiers::NONE,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 5);
+    let bounds = interactive.stage().get_bounding_box(shared);
+    assert!((bounds.width() - 2.0).abs() < 1.0e-12);
+    assert!((bounds.height() - 3.0).abs() < 1.0e-12);
+}
+
+#[test]
 fn clipboard_replacement_and_undo_keep_templates_live_and_bounded() {
     let (mut interactive, selected, _) = scripted_scene();
     let selected_child = interactive.stage_mut().add(Mobject::new());

@@ -563,15 +563,16 @@ impl Stage {
         }
     }
 
-    /// Compose one world-space affine operation over every family member.
-    ///
-    /// `affine` acts after each member's current placement. Object-space points
-    /// and their field revisions stay untouched unless a live record view pins
-    /// the authoritative buffer. In that case the operation bakes through the
-    /// existing generation so V3's engine-write visibility remains true for
-    /// zero-copy NumPy views.
-    pub fn apply_affine(&mut self, mob: Mob, affine: Placement) -> &mut Self {
-        for member in self.family(mob) {
+    fn apply_affine_many(&mut self, mobs: &[Mob], affine: Placement) -> &mut Self {
+        let mut members = Vec::new();
+        for &mob in mobs {
+            for member in self.family(mob) {
+                if !members.contains(&member) {
+                    members.push(member);
+                }
+            }
+        }
+        for member in members {
             let has_live_view = self
                 .get(member)
                 .is_some_and(|entry| entry.buffer.live_view_count() > 0);
@@ -591,6 +592,17 @@ impl Stage {
             }
         }
         self
+    }
+
+    /// Compose one world-space affine operation over every family member.
+    ///
+    /// `affine` acts after each member's current placement. Object-space points
+    /// and their field revisions stay untouched unless a live record view pins
+    /// the authoritative buffer. In that case the operation bakes through the
+    /// existing generation so V3's engine-write visibility remains true for
+    /// zero-copy NumPy views.
+    pub fn apply_affine(&mut self, mob: Mob, affine: Placement) -> &mut Self {
+        self.apply_affine_many(&[mob], affine)
     }
 
     /// The Reference's `apply_points_function` made public: apply `f` to
@@ -675,7 +687,16 @@ impl Stage {
 
     /// Shift every point by `vector`.
     pub fn shift(&mut self, mob: Mob, vector: Vec3) -> &mut Self {
-        self.apply_affine(mob, Placement::from_translation(vector))
+        self.shift_many(&[mob], vector)
+    }
+
+    /// Shift the union of several families, visiting shared members once.
+    ///
+    /// This is the aggregate `Group(*mobjects).shift(...)` rule used by
+    /// interactive multi-selection: overlapping selections and diamond-shared
+    /// descendants must not receive the same translation more than once.
+    pub fn shift_many(&mut self, mobs: &[Mob], vector: Vec3) -> &mut Self {
+        self.apply_affine_many(mobs, Placement::from_translation(vector))
     }
 
     /// Scale about the box center (Reference default `about_edge=ORIGIN`).
@@ -702,6 +723,20 @@ impl Stage {
         self.apply_affine(mob, affine)
     }
 
+    /// Uniformly scale the union of several families about one shared point.
+    ///
+    /// Family members reachable through multiple roots are transformed once.
+    pub fn scale_many_about_point(
+        &mut self,
+        mobs: &[Mob],
+        factor: f64,
+        about_point: Vec3,
+    ) -> &mut Self {
+        let factor = factor.max(MIN_SCALE_FACTOR);
+        let linear = [[factor, 0.0, 0.0], [0.0, factor, 0.0], [0.0, 0.0, factor]];
+        self.apply_affine_many(mobs, Placement::about(linear, about_point))
+    }
+
     /// Stretch along one axis about the box center.
     pub fn stretch(&mut self, mob: Mob, factor: f64, dim: usize) -> &mut Self {
         self.stretch_about(mob, factor, dim, None, Some(ORIGIN))
@@ -724,6 +759,21 @@ impl Stage {
             |p| Placement::about(linear, p),
         );
         self.apply_affine(mob, affine)
+    }
+
+    /// Stretch the union of several families along one axis about one point.
+    ///
+    /// Family members reachable through multiple roots are transformed once.
+    pub fn stretch_many_about_point(
+        &mut self,
+        mobs: &[Mob],
+        factor: f64,
+        dim: usize,
+        about_point: Vec3,
+    ) -> &mut Self {
+        let mut linear: Mat3 = Placement::IDENTITY.linear();
+        linear[dim][dim] = factor;
+        self.apply_affine_many(mobs, Placement::about(linear, about_point))
     }
 
     /// Move the box center to the origin.
