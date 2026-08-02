@@ -163,6 +163,7 @@ impl Key {
             0 => Self::Character(
                 char::from_u32(value).ok_or(EventError::Malformed("key character"))?,
             ),
+            1..=8 if value != 0 => return Err(EventError::Malformed("key payload")),
             1 => Self::Backspace,
             2 => Self::ArrowLeft,
             3 => Self::ArrowUp,
@@ -906,6 +907,32 @@ fn target_matches(target: EventTarget, point: Option<Vec3>, stage: &Stage) -> bo
             (0..3).all(|axis| {
                 point[axis] >= bounds.min[axis] - BUFFER && point[axis] <= bounds.max[axis] + BUFFER
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_key_tags_require_the_canonical_zero_payload() {
+        let fixed = [
+            (1, Key::Backspace),
+            (2, Key::ArrowLeft),
+            (3, Key::ArrowUp),
+            (4, Key::ArrowRight),
+            (5, Key::ArrowDown),
+            (6, Key::Escape),
+            (7, Key::Enter),
+            (8, Key::Tab),
+        ];
+        for (tag, key) in fixed {
+            assert_eq!(Key::from_code(tag, 0), Ok(key));
+            assert_eq!(
+                Key::from_code(tag, 1),
+                Err(EventError::Malformed("key payload"))
+            );
         }
     }
 }
