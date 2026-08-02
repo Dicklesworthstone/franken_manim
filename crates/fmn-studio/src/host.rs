@@ -256,10 +256,17 @@ impl FrameHub {
         if max_history == 0 || max_png_bytes < 8 {
             return Err(HostError::Configuration("invalid frame-hub budget"));
         }
+        let mut frames = VecDeque::new();
+        frames.try_reserve_exact(max_history).map_err(|error| {
+            HostError::FrameHistoryStorageAllocationFailed {
+                frames: max_history,
+                error,
+            }
+        })?;
         Ok(Self {
             inner: Arc::new(FrameHubInner {
                 state: Mutex::new(FrameHubState {
-                    frames: VecDeque::new(),
+                    frames,
                     next_publication_sequence: 0,
                     closed: false,
                 }),
@@ -351,10 +358,10 @@ impl FrameHub {
             digest: sha256(&png),
             png,
         });
-        state.frames.push_back(Arc::clone(&published));
-        while state.frames.len() > self.max_history {
+        if state.frames.len() == self.max_history {
             state.frames.pop_front();
         }
+        state.frames.push_back(Arc::clone(&published));
         self.inner.changed.notify_all();
         Ok(published)
     }
@@ -1641,6 +1648,13 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Storage for the bounded preview-frame history could not be reserved.
+    FrameHistoryStorageAllocationFailed {
+        /// Complete history bound requested by host policy.
+        frames: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
 }
 
 impl HostError {
@@ -1658,7 +1672,10 @@ impl HostError {
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
             Self::Configuration(_)
             | Self::ClientStorageAllocationFailed { .. }
-            | Self::RequestStorageAllocationFailed { .. } => Some((500, "Internal Server Error")),
+            | Self::RequestStorageAllocationFailed { .. }
+            | Self::FrameHistoryStorageAllocationFailed { .. } => {
+                Some((500, "Internal Server Error"))
+            }
             Self::Io(_) => None,
         }
     }
@@ -1692,6 +1709,10 @@ impl fmt::Display for HostError {
                 f,
                 "Studio could not reserve {bytes} bytes for one HTTP request: {error}"
             ),
+            Self::FrameHistoryStorageAllocationFailed { frames, error } => write!(
+                f,
+                "Studio could not reserve storage for {frames} preview frames: {error}"
+            ),
         }
     }
 }
@@ -1705,6 +1726,7 @@ impl std::error::Error for HostError {
             Self::FramePng(error) => Some(error),
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
+            Self::FrameHistoryStorageAllocationFailed { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -1860,6 +1882,55 @@ mod tests {
         ));
         assert!(error.to_string().contains(&usize::MAX.to_string()));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn frame_history_storage_refuses_capacity_overflow() {
+        let result = FrameHub::new(usize::MAX, 8);
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(matches!(
+            &error,
+            HostError::FrameHistoryStorageAllocationFailed {
+                frames: usize::MAX,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains(&usize::MAX.to_string()));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn frame_history_capacity_is_stable_across_eviction() {
+        let frames = FrameHub::new(1, 1024).unwrap();
+        let initial_capacity = lock(&frames.inner.state).frames.capacity();
+        assert!(initial_capacity >= 1);
+
+        for frame_index in 0..3 {
+            let rgba = vec![u8::try_from(frame_index).unwrap(), 0, 0, 255];
+            frames
+                .publish(
+                    &FrameStream {
+                        scene: "Demo".to_owned(),
+                        frame_index,
+                        width: 1,
+                        height: 1,
+                        stride: 4,
+                        encoding: FrameEncoding::Rgba8,
+                        payload: FramePayload::Pipe {
+                            digest: sha256(&rgba),
+                            bytes: rgba,
+                        },
+                    },
+                    ProtocolLimits::default(),
+                )
+                .unwrap();
+        }
+
+        let state = lock(&frames.inner.state);
+        assert_eq!(state.frames.capacity(), initial_capacity);
+        assert_eq!(state.frames.len(), 1);
+        assert_eq!(state.frames.front().unwrap().frame_index, 2);
     }
 
     #[test]
