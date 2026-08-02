@@ -7,6 +7,7 @@
 //! Scene operations always cross the [`Supervisor`] boundary into the
 //! disposable worker.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
@@ -317,20 +318,13 @@ impl FrameHub {
                     .map_err(|_| HostError::Frame("RGBA stride overflows usize"))?;
                 let height = usize::try_from(frame.height)
                     .map_err(|_| HostError::Frame("RGBA height overflows usize"))?;
-                let tight_len = tight_stride
-                    .checked_mul(height)
-                    .ok_or(HostError::Frame("RGBA tight buffer size overflow"))?;
-                // ubs:ignore - stride equality is not a secret comparison.
-                let rgba = if stride == tight_stride {
-                    bytes.clone()
-                } else {
-                    let mut tight = Vec::with_capacity(tight_len);
-                    for row in bytes.chunks_exact(stride) {
-                        tight.extend_from_slice(&row[..tight_stride]);
-                    }
-                    tight
-                };
-                encode_rgba8(frame.width, frame.height, &rgba, CompressionLevel::Fast)
+                let rgba = compact_rgba_rows(bytes, stride, tight_stride, height)?;
+                encode_rgba8(
+                    frame.width,
+                    frame.height,
+                    rgba.as_ref(),
+                    CompressionLevel::Fast,
+                )
             }
             (_, FramePayload::SharedMemory { .. }) => {
                 return Err(HostError::Frame(
@@ -429,6 +423,41 @@ impl FrameHub {
         writer.write_all(MULTIPART_BOUNDARY.as_bytes())?;
         writer.write_all(b"--\r\n")
     }
+}
+
+fn compact_rgba_rows(
+    bytes: &[u8],
+    stride: usize,
+    tight_stride: usize,
+    height: usize,
+) -> Result<Cow<'_, [u8]>, HostError> {
+    let padded_len = stride
+        .checked_mul(height)
+        .ok_or(HostError::Frame("RGBA padded buffer size overflow"))?;
+    let tight_len = tight_stride
+        .checked_mul(height)
+        .ok_or(HostError::Frame("RGBA tight buffer size overflow"))?;
+    // ubs:ignore - frame-layout values are public metadata.
+    if stride < tight_stride || bytes.len() != padded_len {
+        return Err(HostError::Frame("RGBA staging layout is inconsistent"));
+    }
+    // ubs:ignore - stride equality is not a secret comparison.
+    if stride == tight_stride {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let mut tight = reserve_frame_storage(tight_len)?;
+    for row in bytes.chunks_exact(stride) {
+        tight.extend_from_slice(&row[..tight_stride]);
+    }
+    Ok(Cow::Owned(tight))
+}
+
+fn reserve_frame_storage(bytes: usize) -> Result<Vec<u8>, HostError> {
+    let mut storage = Vec::new();
+    storage
+        .try_reserve_exact(bytes)
+        .map_err(|error| HostError::FrameStorageAllocationFailed { bytes, error })?;
+    Ok(storage)
 }
 
 impl Drop for FrameHub {
@@ -1667,6 +1696,13 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Staging storage for one validated preview frame could not be reserved.
+    FrameStorageAllocationFailed {
+        /// Complete staging byte count.
+        bytes: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
 }
 
 impl HostError {
@@ -1685,9 +1721,8 @@ impl HostError {
             Self::Configuration(_)
             | Self::ClientStorageAllocationFailed { .. }
             | Self::RequestStorageAllocationFailed { .. }
-            | Self::FrameHistoryStorageAllocationFailed { .. } => {
-                Some((500, "Internal Server Error"))
-            }
+            | Self::FrameHistoryStorageAllocationFailed { .. }
+            | Self::FrameStorageAllocationFailed { .. } => Some((500, "Internal Server Error")),
             Self::Io(_) => None,
         }
     }
@@ -1725,6 +1760,10 @@ impl fmt::Display for HostError {
                 f,
                 "Studio could not reserve storage for {frames} preview frames: {error}"
             ),
+            Self::FrameStorageAllocationFailed { bytes, error } => write!(
+                f,
+                "Studio could not reserve {bytes} bytes of preview-frame staging storage: {error}"
+            ),
         }
     }
 }
@@ -1739,6 +1778,7 @@ impl std::error::Error for HostError {
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
             Self::FrameHistoryStorageAllocationFailed { error, .. } => Some(error),
+            Self::FrameStorageAllocationFailed { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -1943,6 +1983,40 @@ mod tests {
         assert_eq!(state.frames.capacity(), initial_capacity);
         assert_eq!(state.frames.len(), 1);
         assert_eq!(state.frames.front().unwrap().frame_index, 2);
+    }
+
+    #[test]
+    fn rgba_staging_borrows_tight_rows_and_compacts_padding() {
+        let tight_input = [
+            1, 2, 3, 4, 5, 6, 7, 8, //
+            9, 10, 11, 12, 13, 14, 15, 16,
+        ];
+        let tight = compact_rgba_rows(&tight_input, 8, 8, 2).unwrap();
+        assert!(matches!(&tight, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(tight.as_ref(), tight_input.as_slice()));
+
+        let padded_input = [
+            1, 2, 3, 4, 5, 6, 7, 8, 90, 91, 92, 93, //
+            9, 10, 11, 12, 13, 14, 15, 16, 94, 95, 96, 97,
+        ];
+        let compact = compact_rgba_rows(&padded_input, 12, 8, 2).unwrap();
+        assert!(matches!(&compact, std::borrow::Cow::Owned(_)));
+        assert_eq!(compact.as_ref(), tight_input);
+    }
+
+    #[test]
+    fn rgba_staging_capacity_refusal_is_typed() {
+        let result = reserve_frame_storage(usize::MAX);
+        assert!(matches!(
+            &result,
+            Err(HostError::FrameStorageAllocationFailed {
+                bytes: usize::MAX,
+                ..
+            })
+        ));
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains(&usize::MAX.to_string()));
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]
