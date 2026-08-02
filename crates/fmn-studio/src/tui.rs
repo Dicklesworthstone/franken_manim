@@ -82,14 +82,16 @@ impl TerminalPreview {
         rgba: &[u8],
     ) -> Result<(), TuiError> {
         validate_rgba(width, height, rgba, self.limits)?;
-        let encoded = match self.protocol {
+        match self.protocol {
             TerminalProtocol::Kitty => {
                 let png = encode_rgba8(width, height, rgba, CompressionLevel::Fast);
-                encode_kitty_png(&png, self.limits)?
+                write_kitty_png(writer, &png, self.limits)?;
             }
-            TerminalProtocol::Sixel => encode_sixel(width, height, rgba, self.limits)?,
-        };
-        writer.write_all(&encoded)?;
+            TerminalProtocol::Sixel => {
+                let encoded = encode_sixel(width, height, rgba, self.limits)?;
+                writer.write_all(&encoded)?;
+            }
+        }
         writer.flush()?;
         Ok(())
     }
@@ -111,8 +113,7 @@ impl TerminalPreview {
                 ..PngLimits::default()
             },
         )?;
-        let encoded = encode_kitty_png(png, self.limits)?;
-        writer.write_all(&encoded)?;
+        write_kitty_png(writer, png, self.limits)?;
         writer.flush()?;
         Ok(())
     }
@@ -146,27 +147,37 @@ fn validate_rgba(width: u32, height: u32, rgba: &[u8], limits: TuiLimits) -> Res
     Ok(())
 }
 
-fn encode_kitty_png(png: &[u8], limits: TuiLimits) -> Result<Vec<u8>, TuiError> {
-    let (chunk_bytes, chunks, encoded_size) = kitty_encoded_size(png.len(), limits)?;
-    let base64 = base64(png);
-    let mut out = Vec::with_capacity(encoded_size);
-    for (index, chunk) in base64.as_bytes().chunks(chunk_bytes).enumerate() {
-        out.extend_from_slice(b"\x1b_G");
+fn write_kitty_png(writer: &mut impl Write, png: &[u8], limits: TuiLimits) -> Result<(), TuiError> {
+    const BASE64_WRITE_BUFFER_BYTES: usize = 4096;
+
+    let (chunk_bytes, chunks, _) = kitty_encoded_size(png.len(), limits)?;
+    let raw_chunk_bytes = (chunk_bytes / 4)
+        .checked_mul(3)
+        .ok_or(TuiError::EncodedSizeOverflow)?;
+    let mut encoded = [0u8; BASE64_WRITE_BUFFER_BYTES];
+    debug_assert_eq!(png.chunks(raw_chunk_bytes).len(), chunks);
+    for (index, chunk) in png.chunks(raw_chunk_bytes).enumerate() {
+        writer.write_all(b"\x1b_G")?;
         if index == 0 {
-            out.extend_from_slice(b"a=T,f=100,t=d,q=2,");
+            writer.write_all(b"a=T,f=100,t=d,q=2,")?;
         }
         let more = index + 1 < chunks;
-        out.extend_from_slice(if more { b"m=1;" } else { b"m=0;" });
-        out.extend_from_slice(chunk);
-        out.extend_from_slice(b"\x1b\\");
+        writer.write_all(if more { b"m=1;" } else { b"m=0;" })?;
+        let mut encoded_len = 0;
+        for block in chunk.chunks(3) {
+            if encoded_len == encoded.len() {
+                writer.write_all(&encoded)?;
+                encoded_len = 0;
+            }
+            encoded[encoded_len..encoded_len + 4].copy_from_slice(&base64_block(block));
+            encoded_len += 4;
+        }
+        if encoded_len != 0 {
+            writer.write_all(&encoded[..encoded_len])?;
+        }
+        writer.write_all(b"\x1b\\")?;
     }
-    if out.len() > limits.max_encoded_bytes {
-        return Err(TuiError::EncodedLimit {
-            limit: limits.max_encoded_bytes,
-            needed: out.len(),
-        });
-    }
-    Ok(out)
+    Ok(())
 }
 
 fn kitty_encoded_size(
@@ -315,31 +326,26 @@ fn push_bounded(out: &mut Vec<u8>, byte: u8, limits: TuiLimits) -> Result<(), Tu
     extend_bounded(out, &[byte], limits)
 }
 
-fn base64(bytes: &[u8]) -> String {
+fn base64_block(bytes: &[u8]) -> [u8; 4] {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-        out.push(char::from(ALPHABET[usize::from(first >> 2)]));
-        out.push(char::from(
-            ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))],
-        ));
-        if chunk.len() > 1 {
-            out.push(char::from(
-                ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))],
-            ));
+    debug_assert!((1..=3).contains(&bytes.len()));
+    let first = bytes[0];
+    let second = bytes.get(1).copied().unwrap_or(0);
+    let third = bytes.get(2).copied().unwrap_or(0);
+    [
+        ALPHABET[usize::from(first >> 2)],
+        ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))],
+        if bytes.len() > 1 {
+            ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))]
         } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(char::from(ALPHABET[usize::from(third & 0x3f)]));
+            b'='
+        },
+        if bytes.len() > 2 {
+            ALPHABET[usize::from(third & 0x3f)]
         } else {
-            out.push('=');
-        }
-    }
-    out
+            b'='
+        },
+    ]
 }
 
 /// Terminal adapter failure.
@@ -443,12 +449,71 @@ impl From<PngError> for TuiError {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct BoundedWriteObserver {
+        bytes: Vec<u8>,
+        max_write: usize,
+        largest_write: usize,
+    }
+
+    impl Write for BoundedWriteObserver {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.largest_write = self.largest_write.max(bytes.len());
+            if bytes.len() > self.max_write {
+                return Err(std::io::Error::other("aggregate terminal write"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn base64_vectors_are_canonical() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64_block(b"f"), *b"Zg==");
+        assert_eq!(base64_block(b"fo"), *b"Zm8=");
+        assert_eq!(base64_block(b"foo"), *b"Zm9v");
+
+        let limits = TuiLimits {
+            kitty_chunk_bytes: 4,
+            ..TuiLimits::default()
+        };
+        let mut framed = Vec::new();
+        write_kitty_png(&mut framed, b"foobar", limits).unwrap();
+        assert_eq!(
+            framed,
+            b"\x1b_Ga=T,f=100,t=d,q=2,m=1;Zm9v\x1b\\\x1b_Gm=0;YmFy\x1b\\"
+        );
+    }
+
+    #[test]
+    fn kitty_streams_png_as_bounded_writes() {
+        let png = encode_rgba8(
+            2,
+            1,
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+            CompressionLevel::Fast,
+        );
+        let limits = TuiLimits {
+            kitty_chunk_bytes: 8,
+            ..TuiLimits::default()
+        };
+        let preview = TerminalPreview::new(TerminalProtocol::Kitty, limits).unwrap();
+        let mut expected = Vec::new();
+        preview.write_png(&mut expected, &png).unwrap();
+
+        let mut observed = BoundedWriteObserver {
+            max_write: 32,
+            ..BoundedWriteObserver::default()
+        };
+        preview.write_png(&mut observed, &png).unwrap();
+
+        assert_eq!(observed.bytes, expected);
+        assert!(observed.largest_write <= observed.max_write);
+        assert!(expected.len() > observed.max_write);
     }
 
     #[test]
