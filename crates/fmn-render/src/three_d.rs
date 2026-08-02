@@ -26,6 +26,7 @@ use fmn_frame::{
 use crate::arena::{Pool, Sink};
 use crate::bin::{ScreenMap, Tiling};
 use crate::camera::{Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit};
+use crate::engine::{NativeScopedSpawner, ScopedSpawner, run_scoped_workers};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
 use crate::plan::RenderPlan;
 use crate::stroke::{aa_coverage, stroke_rgba_at};
@@ -1305,11 +1306,22 @@ impl<'a> ThreeDJob<'a> {
     /// # Errors
     /// Returns [`FrameError::FormatMismatch`] or [`FrameError::DimensionMismatch`]
     /// for a mismatched destination, and [`FrameError::TooLarge`] if covered
-    /// scratch geometry is not addressable or cannot be reserved.
+    /// scratch geometry is not addressable or cannot be reserved. Returns
+    /// [`FrameError::WorkerSpawnFailed`] if the host cannot start the complete
+    /// requested CPU render team.
     pub fn render_into(
         &self,
         threads: usize,
         destination: &mut FrameBuffer,
+    ) -> Result<(), FrameError> {
+        self.render_into_with_spawner(threads, destination, &NativeScopedSpawner)
+    }
+
+    fn render_into_with_spawner<S: ScopedSpawner>(
+        &self,
+        threads: usize,
+        destination: &mut FrameBuffer,
+        spawner: &S,
     ) -> Result<(), FrameError> {
         // W5 wasm tier 1: collapses to 1 on wasm32 (no spawnable threads);
         // the identity on native. See crate::effective_threads.
@@ -1357,19 +1369,14 @@ impl<'a> ThreeDJob<'a> {
         // iterator itself is the queue, so no frame-local vector of borrowed
         // slices is materialized.
         let queue = Mutex::new(plane.chunks_mut(band_bytes).enumerate());
-        std::thread::scope(|scope| {
-            let queue = &queue;
-            for _ in 0..workers {
-                scope.spawn(move || {
-                    let mut scratch = self.scratch_pool.checkout();
-                    loop {
-                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
-                        let Some((band, bytes)) = next else { break };
-                        self.render_band(&mut scratch, band, bytes, stride);
-                    }
-                });
+        run_scoped_workers(workers, spawner, || {
+            let mut scratch = self.scratch_pool.checkout();
+            loop {
+                let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
+                let Some((band, bytes)) = next else { break };
+                self.render_band(&mut scratch, band, bytes, stride);
             }
-        });
+        })?;
         Ok(())
     }
 
@@ -4051,6 +4058,28 @@ mod tests {
         assert_eq!(pool.prepare(1, 1, usize::MAX), Err(FrameError::TooLarge));
         assert_eq!(pool.slots(), 0);
         assert_eq!(pool.heap_allocs(), 0);
+    }
+
+    #[test]
+    fn refused_3d_worker_start_leaves_destination_untouched() {
+        let camera = camera();
+        let dot = TrueDotDraw::new([0.0; 3], 0.4, color("#FFFFFF", 1.0));
+        let draws = [ThreeDDraw::TrueDot(dot)];
+        let job = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("prepared dot");
+        let mut destination = FrameBuffer::new(job.layout().expect("layout"));
+        destination.plane_mut(0).fill(0xA5);
+        let untouched = destination.plane(0).to_vec();
+        let spawner = crate::engine::test_support::RefusingScopedSpawner::new(1);
+
+        assert_eq!(
+            job.render_into_with_spawner(4, &mut destination, &spawner),
+            Err(FrameError::WorkerSpawnFailed {
+                requested: 4,
+                spawned: 1,
+            })
+        );
+        assert_eq!(spawner.attempts(), 2);
+        assert_eq!(destination.plane(0), untouched);
     }
 
     #[test]

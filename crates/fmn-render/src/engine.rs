@@ -113,6 +113,122 @@ use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_hash::{Digest, Schema, Writer};
 use std::sync::{Condvar, Mutex, PoisonError};
 
+pub(crate) trait ScopedSpawner {
+    fn spawn<'scope, 'env: 'scope, F>(
+        &self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: F,
+    ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+    where
+        F: FnOnce() + Send + 'scope;
+}
+
+pub(crate) struct NativeScopedSpawner;
+
+impl ScopedSpawner for NativeScopedSpawner {
+    fn spawn<'scope, 'env: 'scope, F>(
+        &self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: F,
+    ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+    where
+        F: FnOnce() + Send + 'scope,
+    {
+        std::thread::Builder::new().spawn_scoped(scope, work)
+    }
+}
+
+/// Start a complete scoped worker team before permitting any worker to run.
+///
+/// Already-started workers wait behind `start`; if a later spawn is refused,
+/// every waiter is cancelled and the scope joins them before the typed error
+/// reaches the caller. This keeps destination storage untouched on startup
+/// failure without hiding panics from worker code itself.
+pub(crate) fn run_scoped_workers<S, F>(
+    workers: usize,
+    spawner: &S,
+    work: F,
+) -> Result<(), FrameError>
+where
+    S: ScopedSpawner,
+    F: Fn() + Sync,
+{
+    debug_assert!(workers > 1);
+    let start = (Mutex::new(None), Condvar::new());
+    let work = &work;
+    let failed_after = std::thread::scope(|scope| {
+        let mut failure = None;
+        for spawned in 0..workers {
+            let start = &start;
+            let result = spawner.spawn(scope, move || {
+                let mut state = start.0.lock().unwrap_or_else(PoisonError::into_inner);
+                while state.is_none() {
+                    state = start.1.wait(state).unwrap_or_else(PoisonError::into_inner);
+                }
+                let run = *state == Some(true);
+                drop(state);
+                if run {
+                    work();
+                }
+            });
+            if result.is_err() {
+                failure = Some(spawned);
+                break;
+            }
+        }
+        *start.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(failure.is_none());
+        start.1.notify_all();
+        failure
+    });
+    failed_after.map_or(Ok(()), |spawned| {
+        Err(FrameError::WorkerSpawnFailed {
+            requested: workers,
+            spawned,
+        })
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{NativeScopedSpawner, ScopedSpawner};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) struct RefusingScopedSpawner {
+        refuse_at: usize,
+        attempts: AtomicUsize,
+    }
+
+    impl RefusingScopedSpawner {
+        pub(crate) const fn new(refuse_at: usize) -> Self {
+            Self {
+                refuse_at,
+                attempts: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ScopedSpawner for RefusingScopedSpawner {
+        fn spawn<'scope, 'env: 'scope, F>(
+            &self,
+            scope: &'scope std::thread::Scope<'scope, 'env>,
+            work: F,
+        ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+        where
+            F: FnOnce() + Send + 'scope,
+        {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            if attempt == self.refuse_at {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            NativeScopedSpawner.spawn(scope, work)
+        }
+    }
+}
+
 // A binary that requires an improvised subset must not journal itself as the
 // portable tier. ADR-0016 supports only the exact SUITE.lock feature sets.
 #[cfg(all(
@@ -1671,7 +1787,8 @@ impl<'a> FrameJob<'a> {
     /// [`FrameError::FormatMismatch`] unless `dst` is `Rgba16F`;
     /// [`FrameError::DimensionMismatch`] unless it matches the configured
     /// viewport; [`FrameError::TooLarge`] if the covered band-byte product is
-    /// not addressable.
+    /// not addressable; or [`FrameError::WorkerSpawnFailed`] if the host cannot
+    /// start the complete requested CPU render team.
     pub fn render_into(&self, threads: usize, dst: &mut FrameBuffer) -> Result<(), FrameError> {
         self.render_into_profiled(threads, dst).map(|_| ())
     }
@@ -1711,6 +1828,15 @@ impl<'a> FrameJob<'a> {
         &self,
         threads: usize,
         dst: &mut FrameBuffer,
+    ) -> Result<AaStats, FrameError> {
+        self.render_into_profiled_with_spawner::<K, _>(threads, dst, &NativeScopedSpawner)
+    }
+
+    fn render_into_profiled_with_spawner<K: PixelKernel, S: ScopedSpawner>(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+        spawner: &S,
     ) -> Result<AaStats, FrameError> {
         // W5 wasm tier 1: collapses to 1 on wasm32 (no spawnable threads);
         // the identity on native. See crate::effective_threads.
@@ -1780,25 +1906,21 @@ impl<'a> FrameJob<'a> {
         // band's bytes do not depend on who computed them.
         let queue = Mutex::new(plane.chunks_mut(band_bytes).enumerate());
         let stats = Mutex::new(AaStats::default());
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| {
-                    let mut worker = self
-                        .arena()
-                        .workers
-                        .checkout::<K>(scratch_width, self.cols as usize);
-                    loop {
-                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
-                        let Some((band, bytes)) = next else { break };
-                        self.render_band::<K>(&mut worker, band, bytes, stride);
-                    }
-                    stats
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .merge(worker.stats);
-                });
+        run_scoped_workers(threads, spawner, || {
+            let mut worker = self
+                .arena()
+                .workers
+                .checkout::<K>(scratch_width, self.cols as usize);
+            loop {
+                let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
+                let Some((band, bytes)) = next else { break };
+                self.render_band::<K>(&mut worker, band, bytes, stride);
             }
-        });
+            stats
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .merge(worker.stats);
+        })?;
         Ok(stats.into_inner().unwrap_or_else(PoisonError::into_inner))
     }
 
@@ -3284,6 +3406,34 @@ mod tests {
             assert_eq!(pool.slots(), 0);
             assert_eq!(pool.allocs(), 0);
         }
+    }
+
+    #[test]
+    fn refused_2d_worker_start_leaves_destination_untouched() {
+        let stage = Stage::new();
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let mut arena = FrameArena::new();
+        let job = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+            .expect("matching frame artifacts");
+        let mut destination = FrameBuffer::new(cfg.layout().expect("layout"));
+        destination.plane_mut(0).fill(0xA5);
+        let untouched = destination.plane(0).to_vec();
+        let spawner = crate::engine::test_support::RefusingScopedSpawner::new(1);
+
+        assert_eq!(
+            job.render_into_profiled_with_spawner::<CertifiedScalar, _>(
+                4,
+                &mut destination,
+                &spawner,
+            ),
+            Err(FrameError::WorkerSpawnFailed {
+                requested: 4,
+                spawned: 1,
+            })
+        );
+        assert_eq!(spawner.attempts(), 2);
+        assert_eq!(destination.plane(0), untouched);
     }
 
     #[test]

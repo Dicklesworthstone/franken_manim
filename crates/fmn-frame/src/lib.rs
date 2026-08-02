@@ -83,6 +83,13 @@ pub enum FrameError {
     },
     /// Layout arithmetic overflowed — the frame cannot exist in memory.
     TooLarge,
+    /// The host refused part of a requested CPU render team.
+    WorkerSpawnFailed {
+        /// Total workers required before rendering could begin.
+        requested: usize,
+        /// Workers successfully started before the refusal.
+        spawned: usize,
+    },
     /// A buffer with a foreign layout was released into a pool.
     ForeignBuffer,
     /// More buffers were released than the pool owns.
@@ -139,6 +146,10 @@ impl std::fmt::Display for FrameError {
                 "plane {plane} stride {stride} is not a multiple of the {sample_size}-byte sample"
             ),
             Self::TooLarge => write!(f, "frame layout overflows addressable memory"),
+            Self::WorkerSpawnFailed { requested, spawned } => write!(
+                f,
+                "CPU render team requested {requested} workers, but only {spawned} could be started"
+            ),
             Self::ForeignBuffer => {
                 write!(f, "buffer layout does not match the pool's layout")
             }
@@ -158,3 +169,20 @@ impl std::fmt::Display for FrameError {
 }
 
 impl std::error::Error for FrameError {}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameError;
+
+    #[test]
+    fn worker_spawn_refusal_names_the_partial_team() {
+        assert_eq!(
+            FrameError::WorkerSpawnFailed {
+                requested: 4,
+                spawned: 1,
+            }
+            .to_string(),
+            "CPU render team requested 4 workers, but only 1 could be started"
+        );
+    }
+}
