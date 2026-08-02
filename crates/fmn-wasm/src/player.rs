@@ -19,7 +19,9 @@
 //! mismatch is [`PlayerError::EngineMismatch`] and is checked FIRST,
 //! before any other field is interpreted; any disagreement between the
 //! container's tags and the nested FMNA/5 plan is
-//! [`PlayerError::PlanInconsistent`].
+//! [`PlayerError::PlanInconsistent`]. A schedule wider than the player's
+//! public `u32` frame surface and a failed bounded reservation have their
+//! own typed refusals.
 //!
 //! Frame indices at this boundary are 0-based (`0 .. frame_count - 1`),
 //! matching [`crate::FmnScene`]; the nested plan's 1-based global frame is
@@ -57,6 +59,20 @@ pub enum PlayerError {
     /// The container's tags disagree with the nested plan (fps, segment
     /// count, kind/path/rate tags, recorded frame counts).
     PlanInconsistent(&'static str),
+    /// The nested plan is valid, but its total cannot be represented by
+    /// the player's public `u32` frame-index surface.
+    FrameCountUnrepresentable {
+        /// Frames the validated plan schedules.
+        frames: i64,
+    },
+    /// Reserving a count already checked against the encoded payload
+    /// failed. The process remains alive and the bundle is refused.
+    AllocationFailed {
+        /// The destination table being reserved.
+        context: &'static str,
+        /// Elements the validated table requires.
+        requested: usize,
+    },
     /// A segment snapshot payload failed its canonical decode.
     Snapshot(PersistError),
     /// A frame index outside `0 .. frame_count`.
@@ -82,6 +98,16 @@ impl std::fmt::Display for PlayerError {
             ),
             Self::PlanInconsistent(what) => {
                 write!(f, "bundle disagrees with its nested plan: {what}")
+            }
+            Self::FrameCountUnrepresentable { frames } => write!(
+                f,
+                "timeline has {frames} frames, exceeding the player API's u32 range"
+            ),
+            Self::AllocationFailed { context, requested } => {
+                write!(
+                    f,
+                    "{context} could not reserve {requested} validated entries"
+                )
             }
             Self::Snapshot(e) => write!(f, "segment snapshot refused: {e}"),
             Self::FrameOutOfRange { index, total } => {
@@ -123,6 +149,7 @@ enum SegmentData {
 pub(crate) struct PlayerCore {
     plan: TimelinePlan,
     segments: Vec<SegmentData>,
+    frame_count: u32,
     engine_version: String,
     width: u32,
     height: u32,
@@ -160,12 +187,33 @@ impl PlayerCore {
         if plan.fps() != fps {
             return Err(PlayerError::PlanInconsistent("fps"));
         }
-        let segment_count = reader.get_u32().map_err(PlayerError::Malformed)? as usize;
+        let plan_frame_count = plan.total_frames();
+        let frame_count = u32::try_from(plan_frame_count).map_err(|_| {
+            PlayerError::FrameCountUnrepresentable {
+                frames: plan_frame_count,
+            }
+        })?;
+        let segment_count = usize::try_from(reader.get_u32().map_err(PlayerError::Malformed)?)
+            .map_err(|_| PlayerError::PlanInconsistent("segment count exceeds host width"))?;
         if segment_count != plan.segments().len() {
             return Err(PlayerError::PlanInconsistent("segment count"));
         }
+        // Every segment entry starts with at least its one-byte kind tag.
+        // Prove that the payload can carry the table before asking the
+        // allocator for storage proportional to its declared count.
+        if segment_count > reader.remaining() {
+            return Err(PlayerError::PlanInconsistent(
+                "segment table exceeds payload",
+            ));
+        }
         let binding = Stage::new();
-        let mut segments = Vec::with_capacity(segment_count);
+        let mut segments = Vec::new();
+        segments
+            .try_reserve_exact(segment_count)
+            .map_err(|_| PlayerError::AllocationFailed {
+                context: "segment table",
+                requested: segment_count,
+            })?;
         for planned in plan.segments() {
             let kind = reader.get_u8().map_err(PlayerError::Malformed)?;
             let segment = match kind {
@@ -199,7 +247,24 @@ impl PlayerCore {
                             "stateful segment frame count",
                         ));
                     }
-                    let mut frames = Vec::with_capacity(frame_count as usize);
+                    // Each snapshot is a length-prefixed bytes field, so
+                    // eight bytes per frame is a strict encoded minimum.
+                    // Check it before converting or reserving the table.
+                    let frame_count = usize::try_from(frame_count).map_err(|_| {
+                        PlayerError::PlanInconsistent("stateful frame count exceeds host width")
+                    })?;
+                    if frame_count > reader.remaining() / std::mem::size_of::<u64>() {
+                        return Err(PlayerError::PlanInconsistent(
+                            "stateful frame table exceeds payload",
+                        ));
+                    }
+                    let mut frames = Vec::new();
+                    frames.try_reserve_exact(frame_count).map_err(|_| {
+                        PlayerError::AllocationFailed {
+                            context: "stateful frame table",
+                            requested: frame_count,
+                        }
+                    })?;
                     for _ in 0..frame_count {
                         let bytes = reader.get_bytes().map_err(PlayerError::Malformed)?;
                         frames.push(
@@ -218,6 +283,7 @@ impl PlayerCore {
         Ok(Self {
             plan,
             segments,
+            frame_count,
             engine_version: found,
             width: 0,
             height: 0,
@@ -239,7 +305,7 @@ impl PlayerCore {
     }
 
     fn frame_count(&self) -> u32 {
-        u32::try_from(self.plan.total_frames()).unwrap_or(u32::MAX)
+        self.frame_count
     }
 
     /// Reconstruct the stage at 0-based frame `index` — the contract's
@@ -467,6 +533,38 @@ mod tests {
     use super::*;
     use crate::demo_bundle::{demo_bundle, demo_scene};
 
+    fn encoded_single_wait_plan(fps: u32, run_time: f64, n_frames: i64) -> Vec<u8> {
+        let mut writer = fmn_hash::serial::Writer::new(fmn_anim::timeline::TIMELINE_SCHEMA);
+        writer.put_u32(fps);
+        writer.put_u32(1);
+        writer.put_u8(1);
+        writer.put_f64(run_time);
+        writer.put_i64(0);
+        writer.put_i64(n_frames);
+        writer.put_u32(0);
+        writer.finish().expect("forged plan is correctly framed")
+    }
+
+    fn single_segment_bundle(
+        fps: u32,
+        plan: &[u8],
+        kind: Option<u8>,
+        stateful_frame_count: Option<u32>,
+    ) -> Vec<u8> {
+        let mut writer = fmn_hash::serial::Writer::new(TIMELINE_BUNDLE_SCHEMA);
+        writer.put_str(&bundle_engine_version());
+        writer.put_u32(fps);
+        writer.put_bytes(plan);
+        writer.put_u32(1);
+        if let Some(kind) = kind {
+            writer.put_u8(kind);
+        }
+        if let Some(frame_count) = stateful_frame_count {
+            writer.put_u32(frame_count);
+        }
+        writer.finish().expect("forged bundle is correctly framed")
+    }
+
     fn loaded() -> PlayerCore {
         let bytes = demo_bundle().expect("demo bundle exports");
         PlayerCore::load(&bytes).expect("demo bundle loads")
@@ -542,6 +640,63 @@ mod tests {
         assert!(
             matches!(truncated, Err(PlayerError::Malformed(_))),
             "a truncated container is the serial reader's error"
+        );
+    }
+
+    #[test]
+    fn stateful_frame_table_is_preflighted_before_reservation() {
+        const FRAME_COUNT: u32 = 4_096;
+        let plan = encoded_single_wait_plan(1, f64::from(FRAME_COUNT), i64::from(FRAME_COUNT));
+        let bytes = single_segment_bundle(1, &plan, Some(1), Some(FRAME_COUNT));
+
+        let error = PlayerCore::load(&bytes)
+            .err()
+            .expect("a frame table with no snapshot fields must refuse");
+        assert!(
+            matches!(
+                error,
+                PlayerError::PlanInconsistent("stateful frame table exceeds payload")
+            ),
+            "payload preflight must win over a later reader EOF, got {error}"
+        );
+    }
+
+    #[test]
+    fn segment_table_is_preflighted_before_reservation() {
+        let plan = encoded_single_wait_plan(1, 1.0, 1);
+        let bytes = single_segment_bundle(1, &plan, None, None);
+
+        let error = PlayerCore::load(&bytes)
+            .err()
+            .expect("a segment table with no kind field must refuse");
+        assert!(
+            matches!(
+                error,
+                PlayerError::PlanInconsistent("segment table exceeds payload")
+            ),
+            "segment payload preflight must win over a later reader EOF, got {error}"
+        );
+    }
+
+    #[test]
+    fn plans_above_the_player_frame_width_refuse_without_saturation() {
+        let frame_count = i64::from(u32::MAX) + 1;
+        let run_time = f64::from(u32::MAX) + 1.0;
+        let plan = encoded_single_wait_plan(1, run_time, frame_count);
+        // The entry is deliberately otherwise invalid: representability is
+        // a plan-level prerequisite and must refuse before entry decoding.
+        let bytes = single_segment_bundle(1, &plan, Some(7), None);
+
+        let error = PlayerCore::load(&bytes)
+            .err()
+            .expect("a plan wider than the public frame index must refuse");
+        assert!(
+            matches!(
+                error,
+                PlayerError::FrameCountUnrepresentable { frames }
+                    if frames == frame_count
+            ),
+            "plan-width refusal must preserve the validated count, got {error}"
         );
     }
 
@@ -758,6 +913,11 @@ mod tests {
         writer.put_bytes(&plan);
         writer.put_u32(segments);
         writer.put_u8(7);
+        for _ in 1..segments {
+            // Satisfy the table's one-byte-per-entry lower bound so the
+            // first entry's unknown tag remains the decisive refusal.
+            writer.put_u8(0);
+        }
         let forged = writer.finish().expect("small enough");
         assert!(matches!(
             PlayerCore::load(&forged),

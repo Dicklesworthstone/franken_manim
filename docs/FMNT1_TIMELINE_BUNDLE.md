@@ -49,6 +49,12 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
 - `engine_version` mismatch → `EngineMismatch { wanted, found }`.
 - `fps`/`segments` disagreement with the nested plan → `PlanInconsistent`.
 - Unknown `kind`/`path`/`rate` tag → `PlanInconsistent`.
+- A nested plan whose total cannot fit the player's public `u32` frame-count
+  surface → `FrameCountUnrepresentable` (never saturation).
+- A declared segment or stateful-frame table that cannot fit the remaining
+  payload's mandatory field prefixes → `PlanInconsistent`, before reservation.
+- Allocator refusal while reserving a payload-validated table →
+  `AllocationFailed`; loading fails without constructing a partial player.
 
 ## Determinism
 
