@@ -279,24 +279,26 @@ impl Dependency {
     #[must_use]
     pub fn new(built_at: Revisions, axes: &[Axis]) -> Dependency {
         let mut canonical = [Axis::Topology; Axis::ALL.len()];
-        let mut axis_count = 0usize;
+        let mut axis_count = 0u8;
         for axis in Axis::ALL {
-            if axes.contains(&axis) {
-                canonical[axis_count] = axis;
+            if axes.contains(&axis)
+                && let Some(slot) = canonical.get_mut(usize::from(axis_count))
+            {
+                *slot = axis;
                 axis_count += 1;
             }
         }
         Dependency {
             built_at,
             axes: canonical,
-            axis_count: axis_count as u8,
+            axis_count,
         }
     }
 
     /// The axes this artifact depends on.
     #[must_use]
     pub fn axes(&self) -> &[Axis] {
-        &self.axes[..usize::from(self.axis_count)]
+        self.axes.get(..usize::from(self.axis_count)).unwrap_or(&[])
     }
 
     /// The revision vector the artifact was built at.

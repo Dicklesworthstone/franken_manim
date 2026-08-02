@@ -64,12 +64,12 @@ const STYLE_VIEW_FIELDS: [&str; 4] = [
 
 /// Admission limits for one retained-plan synchronization.
 ///
-/// The instance default matches [`crate::bin::BinningLimits`]. The retained
-/// geometry ceiling admits sixteen maximum-size Chisel paths while bounding
-/// append-only outline history to a few hundred MiB rather than letting a
-/// continuously changing object grow until allocator failure. Callers with a
-/// deliberately larger, provisioned scene can pass explicit limits through
-/// [`RenderPlan::sync_with_limits`]; the `u32` table width remains absolute.
+/// The instance default matches [`crate::bin::BinningLimits`]. The hard retained
+/// geometry ceiling admits sixteen maximum-size Chisel paths, while the smaller
+/// unreachable-row budgets reclaim mutation history at a named safe point long
+/// before that ceiling. Callers with a deliberately larger, provisioned scene
+/// can pass explicit limits through [`RenderPlan::sync_with_limits`]; the `u32`
+/// table width remains absolute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderPlanLimits {
     /// Maximum painter-ordered instances produced by one sync.
@@ -82,6 +82,15 @@ pub struct RenderPlanLimits {
     pub max_retained_shapes: u64,
     /// Maximum distinct retained style rows.
     pub max_retained_styles: u64,
+    /// Maximum compiled segment rows no live retained entry references.
+    ///
+    /// Exceeding this budget schedules a deterministic rebuild at the next sync
+    /// safe point. The hard retained-row limits above remain absolute.
+    pub max_unreachable_segments: u64,
+    /// Maximum compiled shape rows no live retained entry references.
+    pub max_unreachable_shapes: u64,
+    /// Maximum style rows no live retained entry references.
+    pub max_unreachable_styles: u64,
 }
 
 impl Default for RenderPlanLimits {
@@ -92,8 +101,61 @@ impl Default for RenderPlanLimits {
             max_retained_segments: 1 << 20,
             max_retained_shapes: 1 << 20,
             max_retained_styles: 1 << 20,
+            max_unreachable_segments: 1 << 16,
+            max_unreachable_shapes: 1 << 12,
+            max_unreachable_styles: 1 << 12,
         }
     }
+}
+
+/// A named generation of one retained plan's compacted table layout.
+///
+/// Ordinary synchronization preserves the epoch and every live shape/style
+/// index. A deterministic reclamation rebuild advances it exactly once, making
+/// that exceptional index transition observable to traces and performance
+/// evidence without weakening the content identities on derived artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RenderPlanEpoch(u64);
+
+impl RenderPlanEpoch {
+    /// The monotone generation number.
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Why a retained-plan safe point rebuilt its interned tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionReason {
+    /// Unreachable historical rows exceeded a declared retention budget.
+    UnreachableBudget,
+    /// Append-only admission hit a hard retained-row or index boundary while
+    /// reclaimable historical rows existed.
+    AdmissionBoundary,
+}
+
+/// One named retained-table epoch transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionStats {
+    /// Layout generation that was replaced.
+    pub from_epoch: RenderPlanEpoch,
+    /// Layout generation installed by the safe point.
+    pub to_epoch: RenderPlanEpoch,
+    /// Trigger that selected the exceptional rebuild.
+    pub reason: CompactionReason,
+    /// Shape rows retained before the rebuild.
+    pub shapes_before: usize,
+    /// Shape rows retained after the rebuild.
+    pub shapes_after: usize,
+    /// Segment rows retained before the rebuild.
+    pub segments_before: usize,
+    /// Segment rows retained after the rebuild.
+    pub segments_after: usize,
+    /// Style rows retained before the rebuild.
+    pub styles_before: usize,
+    /// Style rows retained after the rebuild.
+    pub styles_after: usize,
 }
 
 /// A retained-plan synchronization could not represent scene geometry.
@@ -124,6 +186,9 @@ pub enum SyncError {
     },
     /// A retained table could not preserve its index or allocation contract.
     Table(TableError),
+    /// The retained layout generation could not advance without aliasing an old
+    /// epoch.
+    EpochExhausted,
 }
 
 impl std::fmt::Display for SyncError {
@@ -148,6 +213,9 @@ impl std::fmt::Display for SyncError {
                 "could not reserve {requested} elements for retained plan {resource}"
             ),
             Self::Table(source) => write!(f, "could not build retained plan: {source}"),
+            Self::EpochExhausted => {
+                f.write_str("retained plan epoch exhausted its u64 generation space")
+            }
         }
     }
 }
@@ -157,7 +225,9 @@ impl std::error::Error for SyncError {
         match self {
             Self::InvalidGeometry { source, .. } => Some(source),
             Self::Table(source) => Some(source),
-            Self::LimitExceeded { .. } | Self::AllocationFailed { .. } => None,
+            Self::LimitExceeded { .. } | Self::AllocationFailed { .. } | Self::EpochExhausted => {
+                None
+            }
         }
     }
 }
@@ -236,6 +306,56 @@ fn writable_view_affects_any(buffer: &RecordBuffer, fields: &[&str]) -> bool {
         .any(|field| buffer.writable_view_affects(field))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Reachability {
+    unreachable_segments: u64,
+    unreachable_shapes: u64,
+    unreachable_styles: u64,
+}
+
+impl Reachability {
+    fn exceeds(self, limits: RenderPlanLimits) -> bool {
+        self.unreachable_segments > limits.max_unreachable_segments
+            || self.unreachable_shapes > limits.max_unreachable_shapes
+            || self.unreachable_styles > limits.max_unreachable_styles
+    }
+
+    fn can_relieve(self, error: &SyncError) -> bool {
+        let resource = match error {
+            SyncError::LimitExceeded { resource, .. }
+            | SyncError::AllocationFailed { resource, .. }
+            | SyncError::Table(TableError::IndexCapacityExceeded { resource, .. })
+            | SyncError::Table(TableError::AllocationFailed { resource, .. }) => *resource,
+            SyncError::InvalidGeometry { .. } | SyncError::EpochExhausted => return false,
+        };
+        match resource {
+            "retained segments" | "segment rows" => self.unreachable_segments > 0,
+            "retained shapes" | "shape rows" | "shape index" => self.unreachable_shapes > 0,
+            "retained styles" | "style rows" | "style index" => self.unreachable_styles > 0,
+            _ => false,
+        }
+    }
+}
+
+fn prepare_marks(
+    marks: &mut Vec<bool>,
+    len: usize,
+    resource: &'static str,
+) -> Result<(), SyncError> {
+    if len > marks.len() {
+        let additional = len - marks.len();
+        marks
+            .try_reserve_exact(additional)
+            .map_err(|_| SyncError::AllocationFailed {
+                resource,
+                requested: count_u64(len),
+            })?;
+    }
+    marks.resize(len, false);
+    marks.fill(false);
+    Ok(())
+}
+
 /// What one [`RenderPlan::sync`] did, and — more usefully — did not do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SyncStats {
@@ -253,10 +373,12 @@ pub struct SyncStats {
     pub styles_rebuilt: usize,
     /// Retained entries dropped because their mobject left the draw plan.
     pub dropped: usize,
+    /// The exceptional table-layout transition performed at this safe point.
+    pub compaction: Option<CompactionStats>,
 }
 
 /// One renderable's retained compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Retained {
     shape_dep: Dependency,
     style_dep: Dependency,
@@ -277,7 +399,10 @@ pub struct RenderPlan {
     scratch_instances: Vec<Instance>,
     scratch_retained: HashMap<Mob, Retained>,
     scratch_seen: HashSet<Mob>,
+    scratch_live_shapes: Vec<bool>,
+    scratch_live_styles: Vec<bool>,
     stats: SyncStats,
+    epoch: RenderPlanEpoch,
     geometry_key: GeometryIdentity,
     plan_key: PlanIdentity,
 }
@@ -321,7 +446,10 @@ impl Default for RenderPlan {
             scratch_instances: Vec::new(),
             scratch_retained: HashMap::new(),
             scratch_seen: HashSet::new(),
+            scratch_live_shapes: Vec::new(),
+            scratch_live_styles: Vec::new(),
             stats: SyncStats::default(),
+            epoch: RenderPlanEpoch::default(),
             geometry_key: GeometryIdentity::default(),
             plan_key: PlanIdentity::default(),
         };
@@ -387,6 +515,108 @@ impl RenderPlan {
         RenderPlan::default()
     }
 
+    /// The current retained-table layout generation.
+    #[must_use]
+    pub fn epoch(&self) -> RenderPlanEpoch {
+        self.epoch
+    }
+
+    fn reachability(&mut self) -> Result<Reachability, SyncError> {
+        prepare_marks(
+            &mut self.scratch_live_shapes,
+            self.shapes.shapes().len(),
+            "shape reachability",
+        )?;
+        prepare_marks(
+            &mut self.scratch_live_styles,
+            self.styles.len(),
+            "style reachability",
+        )?;
+
+        for retained in self.retained.values() {
+            if let Some(live) = usize::try_from(retained.shape)
+                .ok()
+                .and_then(|index| self.scratch_live_shapes.get_mut(index))
+            {
+                *live = true;
+            }
+            if let Some(live) = usize::try_from(retained.style)
+                .ok()
+                .and_then(|index| self.scratch_live_styles.get_mut(index))
+            {
+                *live = true;
+            }
+        }
+
+        let live_shapes = self
+            .scratch_live_shapes
+            .iter()
+            .filter(|&&live| live)
+            .count();
+        let live_styles = self
+            .scratch_live_styles
+            .iter()
+            .filter(|&&live| live)
+            .count();
+        let live_segments = self
+            .scratch_live_shapes
+            .iter()
+            .zip(self.shapes.shapes())
+            .filter(|(live, _)| **live)
+            .fold(0u64, |total, (_, shape)| {
+                total.saturating_add(u64::from(shape.segment_count))
+            });
+
+        Ok(Reachability {
+            unreachable_segments: count_u64(self.segments.len()).saturating_sub(live_segments),
+            unreachable_shapes: count_u64(self.shapes.shapes().len())
+                .saturating_sub(count_u64(live_shapes)),
+            unreachable_styles: count_u64(self.styles.len()).saturating_sub(count_u64(live_styles)),
+        })
+    }
+
+    fn rebuild_at_safe_point(
+        &mut self,
+        stage: &Stage,
+        camera: u64,
+        limits: RenderPlanLimits,
+        reason: CompactionReason,
+    ) -> Result<SyncStats, SyncError> {
+        let from_epoch = self.epoch;
+        let to_epoch = RenderPlanEpoch(
+            from_epoch
+                .0
+                .checked_add(1)
+                .ok_or(SyncError::EpochExhausted)?,
+        );
+        let shapes_before = self.shapes.shapes().len();
+        let segments_before = self.segments.len();
+        let styles_before = self.styles.len();
+
+        let mut replacement = RenderPlan::new();
+        replacement.epoch = to_epoch;
+        let mut stats = replacement.sync_append_only(stage, camera, limits)?;
+        stats.dropped = self
+            .retained
+            .keys()
+            .filter(|mob| !replacement.retained.contains_key(mob))
+            .count();
+        stats.compaction = Some(CompactionStats {
+            from_epoch,
+            to_epoch,
+            reason,
+            shapes_before,
+            shapes_after: replacement.shapes.shapes().len(),
+            segments_before,
+            segments_after: replacement.segments.len(),
+            styles_before,
+            styles_after: replacement.styles.len(),
+        });
+        replacement.stats = stats;
+        *self = replacement;
+        Ok(stats)
+    }
+
     /// Synchronize against `stage`, at camera revision `camera`.
     ///
     /// Uses [`RenderPlanLimits::default`]. Call [`RenderPlan::sync_with_limits`]
@@ -402,13 +632,42 @@ impl RenderPlan {
     /// Synchronize with explicit retained-table admission limits.
     ///
     /// Preparation is transactional: changed geometry is compiled and every
-    /// prospective table index is checked in temporary storage. Only after all
-    /// checks and persistent reservations succeed are the append-only tables,
-    /// painter instances, retained entries, statistics, and identities replaced.
+    /// prospective table index is checked in temporary storage. Ordinary syncs
+    /// append rows and preserve indices within the current [`RenderPlanEpoch`].
+    /// When unreachable history exceeds its budget, a fresh compact plan is
+    /// prepared separately and replaces this one only after that full rebuild
+    /// succeeds.
     ///
     /// # Errors
     /// Returns [`SyncError`] without changing any observable plan state.
     pub fn sync_with_limits(
+        &mut self,
+        stage: &Stage,
+        camera: u64,
+        limits: RenderPlanLimits,
+    ) -> Result<SyncStats, SyncError> {
+        let reachability = self.reachability()?;
+        if reachability.exceeds(limits) {
+            return self.rebuild_at_safe_point(
+                stage,
+                camera,
+                limits,
+                CompactionReason::UnreachableBudget,
+            );
+        }
+
+        match self.sync_append_only(stage, camera, limits) {
+            Err(error) if reachability.can_relieve(&error) => self.rebuild_at_safe_point(
+                stage,
+                camera,
+                limits,
+                CompactionReason::AdmissionBoundary,
+            ),
+            result => result,
+        }
+    }
+
+    fn sync_append_only(
         &mut self,
         stage: &Stage,
         camera: u64,
@@ -492,9 +751,9 @@ impl RenderPlan {
 
             let previous = next_retained
                 .get(&mob)
-                .cloned()
-                .or_else(|| self.retained.get(&mob).cloned());
-            if let Some(retained) = previous.clone() {
+                .copied()
+                .or_else(|| self.retained.get(&mob).copied());
+            if let Some(retained) = previous {
                 next_retained.entry(mob).or_insert(retained);
             }
 
@@ -1030,6 +1289,11 @@ fn read_style(stage: &Stage, mob: Mob) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        Binning, FrameConfig, FrameJob, FrameJobError, MonoTable, OutputTransform, ScreenMap,
+        TileCache, TileWork, Tiling, Viewport, frame_digest,
+    };
+    use fmn_core::color::LinearRgba;
     use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
 
     fn vmobject(points: &[[f64; 3]]) -> Mobject {
@@ -1065,6 +1329,40 @@ mod tests {
 
     fn sync_valid(plan: &mut RenderPlan, stage: &Stage, camera: u64) -> SyncStats {
         plan.sync(stage, camera).expect("valid test scene")
+    }
+
+    fn compacting_limits() -> RenderPlanLimits {
+        RenderPlanLimits {
+            max_retained_segments: 64,
+            max_retained_shapes: 32,
+            max_retained_styles: 32,
+            max_unreachable_segments: 0,
+            max_unreachable_shapes: 0,
+            max_unreachable_styles: 0,
+            ..RenderPlanLimits::default()
+        }
+    }
+
+    fn render_fixture() -> (Viewport, ScreenMap, FrameConfig) {
+        let viewport = Viewport {
+            width: 48,
+            height: 32,
+        };
+        let map = ScreenMap {
+            scale: 8.0,
+            origin: [8.0, 8.0],
+        };
+        let config = FrameConfig::new(
+            viewport,
+            map,
+            LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        (viewport, map, config)
     }
 
     #[test]
@@ -1135,6 +1433,7 @@ mod tests {
             max_retained_segments: 2,
             max_retained_shapes: 1,
             max_retained_styles: 1,
+            ..RenderPlanLimits::default()
         };
 
         let stats = plan
@@ -1324,6 +1623,331 @@ mod tests {
         assert_eq!(plan.shapes().instances(), before_instances);
         assert_eq!(plan.stats(), before_stats);
         assert_eq!(plan.identity(), before_identity);
+    }
+
+    #[test]
+    fn unreachable_budgets_plateau_and_wait_frames_keep_indices_and_cache_hits() {
+        let (mut stage, mobs) = staged(1);
+        let mob = mobs[0];
+        let limits = compacting_limits();
+        let mut plan = RenderPlan::new();
+        plan.sync_with_limits(&stage, 0, limits)
+            .expect("initial retained plan");
+
+        // Warm the reachability marks and every transactional sync scratch table.
+        let warm = plan
+            .sync_with_limits(&stage, 0, limits)
+            .expect("warm wait frame");
+        assert!(warm.compaction.is_none());
+        let stable_shape = plan.shapes().instances()[0].shape;
+        let stable_style = plan.shapes().instances()[0].style;
+        let stable_epoch = plan.epoch();
+        let scratch_capacities = (
+            plan.scratch_instances.capacity(),
+            plan.scratch_retained.capacity(),
+            plan.scratch_seen.capacity(),
+            plan.scratch_live_shapes.capacity(),
+            plan.scratch_live_styles.capacity(),
+        );
+        for _ in 0..16 {
+            let stats = plan
+                .sync_with_limits(&stage, 0, limits)
+                .expect("unchanged wait frame");
+            assert!(stats.compaction.is_none());
+            assert_eq!(stats.shapes_reused, 1);
+            assert_eq!(plan.epoch(), stable_epoch);
+            assert_eq!(plan.shapes().instances()[0].shape, stable_shape);
+            assert_eq!(plan.shapes().instances()[0].style, stable_style);
+        }
+        assert_eq!(
+            (
+                plan.scratch_instances.capacity(),
+                plan.scratch_retained.capacity(),
+                plan.scratch_seen.capacity(),
+                plan.scratch_live_shapes.capacity(),
+                plan.scratch_live_styles.capacity(),
+            ),
+            scratch_capacities,
+            "steady wait sync grew a retained scratch allocation"
+        );
+
+        let mut max_shapes = plan.shapes().shapes().len();
+        let mut max_segments = plan.segments().len();
+        let mut max_styles = plan.styles().len();
+        let mut transitions = 0usize;
+        for generation in 1..=64 {
+            let entry = stage.get_mut(mob).expect("live");
+            entry
+                .buffer
+                .write(2, "point", &[2.0 + generation as f32 / 128.0, 0.25, 0.0]);
+            entry.buffer.write(
+                0,
+                "stroke_rgba",
+                &[generation as f32 / 128.0, 0.25, 0.75, 1.0],
+            );
+            let stats = plan
+                .sync_with_limits(&stage, 0, limits)
+                .expect("bounded mutation sync");
+            if let Some(compaction) = stats.compaction {
+                transitions += 1;
+                assert_eq!(compaction.from_epoch.get() + 1, compaction.to_epoch.get());
+                assert_eq!(plan.epoch(), compaction.to_epoch);
+                assert_eq!(compaction.reason, CompactionReason::UnreachableBudget);
+            }
+            max_shapes = max_shapes.max(plan.shapes().shapes().len());
+            max_segments = max_segments.max(plan.segments().len());
+            max_styles = max_styles.max(plan.styles().len());
+        }
+        assert!(transitions > 0, "the adversarial corpus never reclaimed");
+        assert!(
+            max_shapes <= 2,
+            "shape history did not plateau: {max_shapes}"
+        );
+        assert!(
+            max_segments <= 4,
+            "segment history did not plateau: {max_segments}"
+        );
+        assert!(
+            max_styles <= 2,
+            "style history did not plateau: {max_styles}"
+        );
+
+        // A final safe point may collect the last mutation's one-frame history;
+        // the next wait must be wholly stable and cacheable.
+        plan.sync_with_limits(&stage, 0, limits)
+            .expect("settling safe point");
+        plan.sync_with_limits(&stage, 0, limits)
+            .expect("post-compaction wait");
+        let final_shape = plan.shapes().instances()[0].shape;
+        let final_style = plan.shapes().instances()[0].style;
+        let final_epoch = plan.epoch();
+        let (viewport, map, _) = render_fixture();
+        let output = OutputTransform {
+            viewport,
+            map,
+            pixel_format: 0,
+        };
+        let binning =
+            Binning::build(&plan, viewport, Tiling::default(), map).expect("bounded cache fixture");
+        let mut cache = TileCache::new();
+        cache.begin_frame();
+        for tile in 0..binning.tile_count() {
+            if let TileWork::Rasterize(key) = cache
+                .plan_tile(&binning, &plan, tile, 0, output)
+                .expect("in-range tile")
+            {
+                cache.store(tile, key, tile);
+            }
+        }
+        assert!(cache.stats().misses > 0, "fixture populated no cached tile");
+
+        let wait = plan
+            .sync_with_limits(&stage, 0, limits)
+            .expect("cache-hit wait frame");
+        assert!(wait.compaction.is_none());
+        assert_eq!(plan.epoch(), final_epoch);
+        assert_eq!(plan.shapes().instances()[0].shape, final_shape);
+        assert_eq!(plan.shapes().instances()[0].style, final_style);
+        let wait_binning =
+            Binning::build(&plan, viewport, Tiling::default(), map).expect("bounded wait binning");
+        cache.begin_frame();
+        for tile in 0..wait_binning.tile_count() {
+            let _ = cache
+                .plan_tile(&wait_binning, &plan, tile, 0, output)
+                .expect("in-range tile");
+        }
+        assert!(
+            cache.stats().hits > 0,
+            "wait frame produced no tile-cache hit"
+        );
+        assert_eq!(cache.stats().misses, 0);
+        assert_eq!(cache.stats().poisoned, 0);
+    }
+
+    #[test]
+    fn a_hard_boundary_compacts_when_rebuilding_the_live_state_fits() {
+        let (mut stage, mobs) = staged(1);
+        let mut plan = RenderPlan::new();
+        let limits = RenderPlanLimits {
+            max_retained_segments: 4,
+            max_retained_shapes: 2,
+            max_retained_styles: 2,
+            ..RenderPlanLimits::default()
+        };
+        plan.sync_with_limits(&stage, 0, limits)
+            .expect("one live outline fits");
+
+        let entry = stage.get_mut(mobs[0]).expect("live");
+        entry.buffer.write(2, "point", &[2.25, 0.25, 0.0]);
+        entry
+            .buffer
+            .write(0, "stroke_rgba", &[0.25, 0.5, 0.75, 1.0]);
+        let first = plan
+            .sync_with_limits(&stage, 0, limits)
+            .expect("one historical row remains admitted");
+        assert!(first.compaction.is_none());
+        assert_eq!(plan.shapes().shapes().len(), 2);
+        assert_eq!(plan.styles().len(), 2);
+
+        let entry = stage.get_mut(mobs[0]).expect("live");
+        entry.buffer.write(2, "point", &[2.5, 0.5, 0.0]);
+        entry
+            .buffer
+            .write(0, "stroke_rgba", &[0.5, 0.25, 0.75, 1.0]);
+        let stats = plan
+            .sync_with_limits(&stage, 0, limits)
+            .expect("safe-point rebuild fits the same hard boundary");
+        let compaction = stats.compaction.expect("boundary must name its epoch");
+
+        assert_eq!(compaction.reason, CompactionReason::AdmissionBoundary);
+        assert_eq!(compaction.from_epoch, RenderPlanEpoch(0));
+        assert_eq!(compaction.to_epoch, RenderPlanEpoch(1));
+        assert_eq!(plan.epoch(), RenderPlanEpoch(1));
+        assert_eq!(plan.shapes().shapes().len(), 1);
+        assert_eq!(plan.segments().len(), 2);
+        assert_eq!(plan.styles().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_budget_compaction_leaves_every_observable_unchanged() {
+        let (mut stage, mobs) = staged(1);
+        let mob = mobs[0];
+        let limits = compacting_limits();
+        let mut plan = RenderPlan::new();
+        plan.sync_with_limits(&stage, 0, limits)
+            .expect("initial retained plan");
+        stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .write(2, "point", &[2.5, 0.25, 0.0]);
+        plan.sync_with_limits(&stage, 0, limits)
+            .expect("one frame of admitted history");
+        assert_eq!(plan.shapes().shapes().len(), 2);
+
+        let before_segments = plan.segments().to_vec();
+        let before_styles = plan.styles().rows().to_vec();
+        let before_shapes = plan.shapes().shapes().to_vec();
+        let before_instances = plan.shapes().instances().to_vec();
+        let before_stats = plan.stats();
+        let before_geometry = plan.geometry_identity();
+        let before_identity = plan.identity();
+        let before_epoch = plan.epoch();
+        stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .resize(2)
+            .expect("bounded resize");
+
+        assert_eq!(
+            plan.sync_with_limits(&stage, 0, limits)
+                .expect_err("malformed replacement must not install"),
+            SyncError::InvalidGeometry {
+                mob,
+                source: GeomError::EvenPointCount { len: 2 },
+            }
+        );
+        assert_eq!(plan.segments(), before_segments);
+        assert_eq!(plan.styles().rows(), before_styles);
+        assert_eq!(plan.shapes().shapes(), before_shapes);
+        assert_eq!(plan.shapes().instances(), before_instances);
+        assert_eq!(plan.stats(), before_stats);
+        assert_eq!(plan.geometry_identity(), before_geometry);
+        assert_eq!(plan.identity(), before_identity);
+        assert_eq!(plan.epoch(), before_epoch);
+    }
+
+    #[test]
+    fn compaction_refuses_stale_artifacts_and_preserves_frame_bits_at_all_thread_counts() {
+        let (mut stage, mobs) = staged(1);
+        let mob = mobs[0];
+        let append_limits = RenderPlanLimits {
+            max_unreachable_segments: u64::MAX,
+            max_unreachable_shapes: u64::MAX,
+            max_unreachable_styles: u64::MAX,
+            ..RenderPlanLimits::default()
+        };
+        let compact_limits = compacting_limits();
+        let mut append_only = RenderPlan::new();
+        let mut compacting = RenderPlan::new();
+        append_only
+            .sync_with_limits(&stage, 0, append_limits)
+            .expect("append-only seed");
+        compacting
+            .sync_with_limits(&stage, 0, compact_limits)
+            .expect("compacting seed");
+
+        stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .write(2, "point", &[2.25, 0.25, 0.0]);
+        append_only
+            .sync_with_limits(&stage, 0, append_limits)
+            .expect("append-only first mutation");
+        compacting
+            .sync_with_limits(&stage, 0, compact_limits)
+            .expect("compacting first mutation");
+        let (viewport, map, config) = render_fixture();
+        let stale_mono = MonoTable::build(&compacting, map).expect("bounded stale monotone table");
+        let stale_binning = Binning::build(&compacting, viewport, Tiling::default(), map)
+            .expect("bounded stale binning");
+
+        stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .write(2, "point", &[2.5, 0.5, 0.0]);
+        append_only
+            .sync_with_limits(&stage, 0, append_limits)
+            .expect("append-only second mutation");
+        let stats = compacting
+            .sync_with_limits(&stage, 0, compact_limits)
+            .expect("budget-triggered compaction");
+        assert_eq!(
+            stats.compaction.expect("named compaction").reason,
+            CompactionReason::UnreachableBudget
+        );
+
+        let append_mono =
+            MonoTable::build(&append_only, map).expect("bounded append monotone table");
+        let append_binning = Binning::build(&append_only, viewport, Tiling::default(), map)
+            .expect("bounded append binning");
+        let compact_mono =
+            MonoTable::build(&compacting, map).expect("bounded compact monotone table");
+        let compact_binning = Binning::build(&compacting, viewport, Tiling::default(), map)
+            .expect("bounded compact binning");
+
+        assert!(!stale_mono.matches_plan(&compacting));
+        assert!(!stale_binning.matches_plan(&compacting));
+        assert_eq!(
+            FrameJob::new(&compacting, &stale_mono, &compact_binning, config)
+                .expect_err("stale geometry must be refused"),
+            FrameJobError::MonoPlanMismatch
+        );
+        assert_eq!(
+            FrameJob::new(&compacting, &compact_mono, &stale_binning, config)
+                .expect_err("stale command indices must be refused"),
+            FrameJobError::BinningPlanMismatch
+        );
+
+        let append_frame = FrameJob::new(&append_only, &append_mono, &append_binning, config)
+            .expect("coherent append-only job")
+            .render(1)
+            .expect("append-only frame");
+        let expected = frame_digest(&append_frame).expect("canonical append digest");
+        for threads in [1, 4, 16] {
+            let frame = FrameJob::new(&compacting, &compact_mono, &compact_binning, config)
+                .expect("coherent compacted job")
+                .render(threads)
+                .expect("compacted frame");
+            assert_eq!(
+                frame_digest(&frame).expect("canonical compact digest"),
+                expected,
+                "compaction changed frame bits at {threads} threads"
+            );
+        }
     }
 
     #[test]
@@ -1605,12 +2229,11 @@ mod tests {
 
     #[test]
     fn interned_indices_are_stable_across_syncs() {
-        // The property the tile cache's key rests on (`crate::cache`): shape and
-        // style indices come from append-only interning, so a retained plan
-        // keeps them stable and adding an object cannot renumber the ones
-        // already there. A plan rebuilt each frame reshuffles them, and every
-        // tile key in the frame moves for a reason that has nothing to do with
-        // the tile — which is exactly what the cache's first test harness did.
+        // The property the tile cache's key rests on (`crate::cache`): within a
+        // retained-plan epoch, shape and style indices come from append-only
+        // interning, so adding an object cannot renumber existing rows. A named
+        // safe-point compaction may advance the epoch and invalidate derived
+        // artifacts; ordinary syncs never do.
         let (mut stage, mobs) = staged(2);
         let mut plan = RenderPlan::new();
         sync_valid(&mut plan, &stage, 0);

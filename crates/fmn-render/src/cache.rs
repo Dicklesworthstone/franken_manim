@@ -510,10 +510,11 @@ mod tests {
     ///
     /// The plan must be retained and not rebuilt — that is the whole of §10.8 —
     /// and it matters to the *cache* for a reason worth stating: shape and style
-    /// indices come from append-only interning, so a retained plan keeps them
-    /// stable and a rebuilt one reshuffles them on any change. Rebuilding per
-    /// frame (as the first version of this harness did) makes every tile key
-    /// move for a reason that has nothing to do with the tile.
+    /// indices come from append-only interning within one retained-plan epoch.
+    /// Ordinary frames therefore keep them stable. A named safe-point compaction
+    /// may reshuffle them and deliberately misses once; rebuilding every frame
+    /// (as the first version of this harness did) would make every tile key move
+    /// for a reason that has nothing to do with the tile.
     struct Compositor {
         plan: RenderPlan,
         cache: TileCache<u32>,

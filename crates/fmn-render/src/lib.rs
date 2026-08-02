@@ -62,7 +62,10 @@ pub use fill::{
     MonoTableLimits, RationalPiece, RowScratch,
 };
 pub use hint::Hint;
-pub use plan::{RenderPlan, RenderPlanLimits, SyncError, SyncStats};
+pub use plan::{
+    CompactionReason, CompactionStats, RenderPlan, RenderPlanEpoch, RenderPlanLimits, SyncError,
+    SyncStats,
+};
 pub use revision::{Axis, Dependency, Revisions};
 pub use stroke::{JoinWedge, MITER_LIMIT};
 pub use table::{Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError};
