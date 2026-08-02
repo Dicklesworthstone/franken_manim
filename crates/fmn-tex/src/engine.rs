@@ -30,11 +30,41 @@
 //! aborts the batch (the failing string will fail again, precisely, at
 //! construction time).
 
-use crate::error::TexError;
+use crate::error::{PreflightError, TexError};
 use crate::typeset::{Prim, TYPESET_FORMAT_VERSION, Typeset};
 use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
 use fmn_config::{Config, PackRegistry};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+trait ScopedSpawner {
+    fn spawn<'scope, 'env: 'scope, F>(
+        &self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: F,
+    ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+    where
+        F: FnOnce() + Send + 'scope;
+}
+
+struct NativeScopedSpawner;
+
+impl ScopedSpawner for NativeScopedSpawner {
+    fn spawn<'scope, 'env: 'scope, F>(
+        &self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: F,
+    ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+    where
+        F: FnOnce() + Send + 'scope,
+    {
+        std::thread::Builder::new().spawn_scoped(scope, work)
+    }
+}
+
+type PreflightOutcome = Result<(), TexError>;
+type PreflightSlot = Mutex<Option<PreflightOutcome>>;
 
 /// How a string is typeset: mathematics at a style, or the TexText
 /// text-mainland contract.
@@ -259,39 +289,105 @@ impl TexEngine {
     /// Warm the cache for a batch of strings, in parallel, before the
     /// first frame (§11.5). Returns per-string outcomes in input order;
     /// one failing string never aborts the batch.
-    pub fn preflight(&self, items: &[(Mode, &str)]) -> Vec<Result<(), TexError>> {
+    ///
+    /// Worker availability affects only scheduling: every successfully
+    /// started worker remains useful, and a refusal before the first worker
+    /// falls back to the caller thread. No input is silently skipped.
+    ///
+    /// # Errors
+    ///
+    /// [`PreflightError::ResultStorageAllocationFailed`] if the complete
+    /// ordered outcome cannot be reserved before cache-warming work starts.
+    pub fn preflight(
+        &self,
+        items: &[(Mode, &str)],
+    ) -> Result<Vec<Result<(), TexError>>, PreflightError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
         let workers = std::thread::available_parallelism()
             .map(std::num::NonZero::get)
             .unwrap_or(1)
-            .min(items.len().max(1));
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let results: Vec<std::sync::Mutex<Option<Result<(), TexError>>>> = (0..items.len())
-            .map(|_| std::sync::Mutex::new(None))
-            .collect();
+            .min(items.len());
+        self.preflight_with_spawner(items, workers, &NativeScopedSpawner)
+    }
+
+    fn preflight_with_spawner<Spawner>(
+        &self,
+        items: &[(Mode, &str)],
+        workers: usize,
+        spawner: &Spawner,
+    ) -> Result<Vec<Result<(), TexError>>, PreflightError>
+    where
+        Spawner: ScopedSpawner,
+    {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let workers = workers.clamp(1, items.len());
+        let next = AtomicUsize::new(0);
+        let (results, mut outcomes) = preflight_storage(items.len())?;
         std::thread::scope(|scope| {
+            let mut spawned = 0;
             for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some((mode, source)) = items.get(i) else {
-                            break;
-                        };
-                        let outcome = self.typeset(*mode, source).map(|_| ());
-                        if let Ok(mut slot) = results[i].lock() {
-                            *slot = Some(outcome);
-                        }
-                    }
-                });
+                let next = &next;
+                let results = &results;
+                if spawner
+                    .spawn(scope, move || preflight_worker(self, items, next, results))
+                    .is_err()
+                {
+                    break;
+                }
+                spawned += 1;
+            }
+            if spawned == 0 {
+                preflight_worker(self, items, &next, &results);
             }
         });
-        results
-            .into_iter()
-            .map(|slot| {
-                slot.into_inner()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .unwrap_or(Ok(()))
-            })
-            .collect()
+
+        for ((mode, source), slot) in items.iter().copied().zip(results) {
+            let outcome = slot
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(|| self.typeset(mode, source).map(|_| ()));
+            outcomes.push(outcome);
+        }
+        Ok(outcomes)
+    }
+}
+
+fn preflight_storage(
+    items: usize,
+) -> Result<(Vec<PreflightSlot>, Vec<PreflightOutcome>), PreflightError> {
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(items)
+        .map_err(|_| PreflightError::ResultStorageAllocationFailed { items })?;
+    for _ in 0..items {
+        slots.push(Mutex::new(None));
+    }
+
+    let mut outcomes = Vec::new();
+    outcomes
+        .try_reserve_exact(items)
+        .map_err(|_| PreflightError::ResultStorageAllocationFailed { items })?;
+    Ok((slots, outcomes))
+}
+
+fn preflight_worker(
+    engine: &TexEngine,
+    items: &[(Mode, &str)],
+    next: &AtomicUsize,
+    results: &[PreflightSlot],
+) {
+    loop {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        let Some((slot, (mode, source))) = results.get(index).zip(items.get(index)) else {
+            break;
+        };
+        let outcome = engine.typeset(*mode, source).map(|_| ());
+        let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        *slot = Some(outcome);
     }
 }
 
@@ -367,4 +463,129 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
     }
     material.extend_from_slice(&macros.canonical_bytes());
     CacheKey::of_content(&material)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use fmn_cache::{NamespacePolicy, Store, StoreConfig};
+    use fmn_platform::clock::FakeClock;
+    use fmn_platform::fs::VirtualFs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RefusingScopedSpawner {
+        refuse_at: usize,
+        attempts: AtomicUsize,
+    }
+
+    impl RefusingScopedSpawner {
+        const fn new(refuse_at: usize) -> Self {
+            Self {
+                refuse_at,
+                attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ScopedSpawner for RefusingScopedSpawner {
+        fn spawn<'scope, 'env: 'scope, F>(
+            &self,
+            scope: &'scope std::thread::Scope<'scope, 'env>,
+            work: F,
+        ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+        where
+            F: FnOnce() + Send + 'scope,
+        {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            if attempt == self.refuse_at {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            NativeScopedSpawner.spawn(scope, work)
+        }
+    }
+
+    fn store() -> Store {
+        Store::open(
+            Arc::new(VirtualFs::new()),
+            Arc::new(FakeClock::new()),
+            "/cache",
+            StoreConfig::default(),
+        )
+        .expect("virtual cache store")
+    }
+
+    fn assert_refused_worker_still_warms_every_item(refuse_at: usize) {
+        let store = store();
+        let engine = TexEngine::new("fmd-math/pack/default", None)
+            .expect("bundled engine")
+            .with_cache(&store)
+            .expect("cache namespace");
+        let items = [
+            (Mode::Math(Style::Display), "x + 1"),
+            (Mode::Math(Style::Display), r"\frac{1}{2}"),
+            (Mode::Text, r"area $\pi r^2$"),
+            (Mode::Math(Style::Display), r"\sqrt{x + 1}"),
+        ];
+        let spawner = RefusingScopedSpawner::new(refuse_at);
+
+        let outcomes = engine
+            .preflight_with_spawner(&items, items.len(), &spawner)
+            .expect("result storage");
+
+        assert_eq!(spawner.attempts(), refuse_at.saturating_add(1));
+        assert_eq!(outcomes.len(), items.len());
+        assert!(outcomes.iter().all(Result::is_ok));
+        let namespace = store
+            .namespace(
+                "typeset",
+                TYPESET_FORMAT_VERSION,
+                NamespacePolicy::default(),
+            )
+            .expect("typeset namespace");
+        for (mode, source) in items {
+            assert!(
+                namespace
+                    .get(&engine.cache_key(mode, source))
+                    .expect("cache read")
+                    .is_some(),
+                "refused startup left {source:?} cold"
+            );
+        }
+    }
+
+    #[test]
+    fn first_worker_refusal_falls_back_to_caller_and_warms_every_item() {
+        assert_refused_worker_still_warms_every_item(0);
+    }
+
+    #[test]
+    fn intermediate_worker_refusal_keeps_the_started_subset_semantic() {
+        assert_refused_worker_still_warms_every_item(2);
+    }
+
+    #[test]
+    fn empty_preflight_starts_no_workers() {
+        let engine = TexEngine::new("fmd-math/pack/default", None).expect("bundled engine");
+        let spawner = RefusingScopedSpawner::new(0);
+        let outcomes = engine
+            .preflight_with_spawner(&[], 4, &spawner)
+            .expect("empty storage");
+        assert!(outcomes.is_empty());
+        assert_eq!(spawner.attempts(), 0);
+    }
+
+    #[test]
+    fn preflight_result_storage_refuses_capacity_overflow() {
+        assert!(matches!(
+            preflight_storage(usize::MAX),
+            Err(PreflightError::ResultStorageAllocationFailed { items: usize::MAX })
+        ));
+    }
 }

@@ -39,7 +39,7 @@ mod error;
 mod typeset;
 
 pub use engine::{Mode, TexEngine};
-pub use error::TexError;
+pub use error::{PreflightError, TexError};
 pub use typeset::{Prim, Sub, TYPESET_FORMAT_VERSION, Typeset};
 
 // The math surface consumers need alongside the engine: placed-layout

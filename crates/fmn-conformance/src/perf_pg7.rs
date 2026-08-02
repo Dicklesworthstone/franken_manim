@@ -526,7 +526,9 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
     )];
 
     let preflight_start = Instant::now();
-    let mut outcomes = engine.preflight(&[(Mode::Math(Style::Display), FORMULA_SOURCE)]);
+    let mut outcomes = engine
+        .preflight(&[(Mode::Math(Style::Display), FORMULA_SOURCE)])
+        .map_err(|error| Pg7Error::Workload(error.to_string()))?;
     let outcome = outcomes.pop().ok_or_else(|| {
         Pg7Error::CacheState("preflight returned no outcome for one input".to_owned())
     })?;

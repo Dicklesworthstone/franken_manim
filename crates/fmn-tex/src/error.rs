@@ -5,6 +5,33 @@
 
 use core::fmt;
 
+/// A batch-level typesetting-preflight failure.
+///
+/// Per-string parser/layout failures remain [`TexError`] values in the
+/// ordered preflight outcome. This type is reserved for infrastructure that
+/// prevents the batch from owning that outcome at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightError {
+    /// The complete ordered result storage could not be reserved before work.
+    ResultStorageAllocationFailed {
+        /// Number of input strings whose outcomes were requested.
+        items: usize,
+    },
+}
+
+impl fmt::Display for PreflightError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResultStorageAllocationFailed { items } => write!(
+                f,
+                "typesetting preflight could not reserve result storage for {items} items"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PreflightError {}
+
 /// A Tex/TexText failure.
 #[derive(Debug)]
 pub enum TexError {

@@ -271,7 +271,7 @@ fn preflight_warms_the_cache_in_parallel_and_collects_errors() {
             r"\begin{pmatrix} 1 \\ 0 \end{pmatrix}",
         ),
     ];
-    let outcomes = e.preflight(&items);
+    let outcomes = e.preflight(&items).expect("preflight result storage");
     assert_eq!(outcomes.len(), items.len());
     // Per-string outcomes, in order; the tier-2 string fails precisely
     // without aborting the batch.
