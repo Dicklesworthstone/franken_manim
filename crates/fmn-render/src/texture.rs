@@ -14,10 +14,71 @@
 use fmn_codec::png::ColorIntent;
 use fmn_codec::{JpegError, JpegLimits, PngError, PngLimits, decode_jpeg, decode_png};
 use fmn_core::color::LinearRgba;
-use fmn_hash::{Digest, Schema, Writer, sha256};
+use fmn_hash::{Digest, Schema, Sha256, sha256};
 
 /// Texture-source identity document.
 const TEXTURE_SCHEMA: Schema = Schema::new(*b"FMNT", 1, 1, 0);
+
+/// Hash caller-owned RGBA bytes as the canonical `FMNT` document without
+/// materializing a second copy of the pixel payload.
+///
+/// This is byte-for-byte the framing emitted by [`fmn_hash::Writer`]: fixed
+/// header, positional payload, inner document checksum, then the outer content
+/// digest. Streaming matters because `Texture::from_rgba8` admits valid images
+/// larger than the serializer's general-purpose field limit. Falling back to a
+/// raw-pixel hash at that boundary would drop dimensions and transfer encoding
+/// from the texture identity.
+fn rgba_identity<'a>(
+    width: u32,
+    height: u32,
+    encoding: TextureEncoding,
+    rgba_len: u64,
+    chunks: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<Digest, TextureError> {
+    let (encoding_tag, gamma) = match encoding {
+        TextureEncoding::Srgb => (0u32, None),
+        TextureEncoding::Linear => (1, None),
+        TextureEncoding::Gamma(gamma) => (2, Some(gamma)),
+    };
+    let metadata_len = 4u64 + 4 + 4 + u64::from(gamma.is_some()) * 4 + 8;
+    let payload_len = metadata_len
+        .checked_add(rgba_len)
+        .ok_or(TextureError::InvalidDimensions)?;
+
+    let mut document = Sha256::new();
+    document.update(&TEXTURE_SCHEMA.magic);
+    document.update(&TEXTURE_SCHEMA.id.to_le_bytes());
+    document.update(&TEXTURE_SCHEMA.major.to_le_bytes());
+    document.update(&TEXTURE_SCHEMA.minor.to_le_bytes());
+    document.update(&0u16.to_le_bytes()); // flags
+    document.update(&0u16.to_le_bytes()); // reserved
+    document.update(&payload_len.to_le_bytes());
+    document.update(&width.to_le_bytes());
+    document.update(&height.to_le_bytes());
+    document.update(&encoding_tag.to_le_bytes());
+    if let Some(gamma) = gamma {
+        document.update(&gamma.to_le_bytes());
+    }
+    document.update(&rgba_len.to_le_bytes());
+
+    let mut observed = 0u64;
+    for chunk in chunks {
+        observed = observed
+            .checked_add(u64::try_from(chunk.len()).map_err(|_| TextureError::InvalidDimensions)?)
+            .ok_or(TextureError::InvalidDimensions)?;
+        if observed > rgba_len {
+            return Err(TextureError::InvalidDimensions);
+        }
+        document.update(chunk);
+    }
+    if observed != rgba_len {
+        return Err(TextureError::InvalidDimensions);
+    }
+
+    let checksum = document.clone().finalize();
+    document.update(checksum.as_bytes());
+    Ok(document.finalize())
+}
 
 /// Where decoded rows and normalized UV coordinates begin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,25 +302,8 @@ impl Texture {
         rgba: &[u8],
         encoding: TextureEncoding,
     ) -> Result<Self, TextureError> {
-        let mut writer = Writer::new(TEXTURE_SCHEMA);
-        writer.put_u32(width);
-        writer.put_u32(height);
-        match encoding {
-            TextureEncoding::Srgb => {
-                writer.put_u32(0);
-            }
-            TextureEncoding::Linear => {
-                writer.put_u32(1);
-            }
-            TextureEncoding::Gamma(gamma) => {
-                writer.put_u32(2);
-                writer.put_u32(gamma);
-            }
-        }
-        writer.put_bytes(rgba);
-        let digest = writer
-            .finish()
-            .map_or_else(|_| sha256(rgba), |document| sha256(&document));
+        let rgba_len = u64::try_from(rgba.len()).map_err(|_| TextureError::InvalidDimensions)?;
+        let digest = rgba_identity(width, height, encoding, rgba_len, std::iter::once(rgba))?;
         Self::from_parts(
             width,
             height,
@@ -473,6 +517,7 @@ fn unpremultiply(value: [f32; 4]) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_hash::{Limits, Writer};
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() <= 2e-6
@@ -496,6 +541,75 @@ mod tests {
             TextureEncoding::Linear,
         )
         .expect("valid matrix")
+    }
+
+    fn legacy_in_envelope_identity(
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        encoding: TextureEncoding,
+    ) -> Digest {
+        let mut writer = Writer::new(TEXTURE_SCHEMA);
+        writer.put_u32(width);
+        writer.put_u32(height);
+        match encoding {
+            TextureEncoding::Srgb => {
+                writer.put_u32(0);
+            }
+            TextureEncoding::Linear => {
+                writer.put_u32(1);
+            }
+            TextureEncoding::Gamma(gamma) => {
+                writer.put_u32(2);
+                writer.put_u32(gamma);
+            }
+        }
+        writer.put_bytes(rgba);
+        sha256(&writer.finish().expect("small identity document"))
+    }
+
+    #[test]
+    fn streaming_rgba_identity_preserves_in_envelope_document_digests() {
+        let rgba = [0, 1, 2, 3, 4, 5, 6, 7];
+        for encoding in [
+            TextureEncoding::Srgb,
+            TextureEncoding::Linear,
+            TextureEncoding::Gamma(45_455),
+        ] {
+            let texture = Texture::from_rgba8(2, 1, &rgba, encoding).expect("valid texture");
+            assert_eq!(
+                texture.digest(),
+                legacy_in_envelope_identity(2, 1, &rgba, encoding)
+            );
+        }
+    }
+
+    #[test]
+    fn over_envelope_rgba_identity_still_binds_transfer_semantics() {
+        const CHUNK_BYTES: usize = 1 << 20;
+        const CHUNKS: usize = 65;
+        const WIDTH: u32 = 4096;
+        const HEIGHT: u32 = 4160;
+        let block = vec![0xa5; CHUNK_BYTES];
+        let rgba_len = u64::try_from(CHUNK_BYTES * CHUNKS).expect("fixture length fits");
+        assert!(rgba_len > u64::try_from(Limits::DEFAULT.max_field).expect("limit fits"));
+        assert_eq!(rgba_len, u64::from(WIDTH) * u64::from(HEIGHT) * 4);
+
+        let digest = |encoding| {
+            rgba_identity(
+                WIDTH,
+                HEIGHT,
+                encoding,
+                rgba_len,
+                (0..CHUNKS).map(|_| block.as_slice()),
+            )
+            .expect("streamed identity")
+        };
+        assert_ne!(
+            digest(TextureEncoding::Linear),
+            digest(TextureEncoding::Srgb),
+            "the old over-limit raw-pixel fallback erased this distinction"
+        );
     }
 
     #[test]
