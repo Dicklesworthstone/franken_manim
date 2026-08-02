@@ -44,6 +44,90 @@ use fmn_hash::Digest;
 use fmn_mobject::{BoundingBox, JointType, Mob, Placement, Uniforms};
 use std::collections::HashMap;
 
+/// A retained IR table could not preserve its `u32` index contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableError {
+    /// Adding a row would make the table wider than its `u32` indices encode.
+    IndexCapacityExceeded {
+        /// The table or range being indexed.
+        resource: &'static str,
+        /// Rows or the exclusive segment end requested.
+        requested: u64,
+    },
+    /// A preflighted retained table could not reserve its pending rows.
+    AllocationFailed {
+        /// The table being reserved.
+        resource: &'static str,
+        /// Total rows requested after the reservation.
+        requested: u64,
+    },
+}
+
+impl std::fmt::Display for TableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IndexCapacityExceeded {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "retained {resource} needs index capacity {requested}, exceeding u32"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "could not reserve {requested} rows for retained {resource}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TableError {}
+
+fn rows_after_push(resource: &'static str, len: usize) -> Result<(u32, u64), TableError> {
+    let requested = u64::try_from(len)
+        .unwrap_or(u64::MAX)
+        .checked_add(1)
+        .ok_or(TableError::IndexCapacityExceeded {
+            resource,
+            requested: u64::MAX,
+        })?;
+    if requested > u64::from(u32::MAX) {
+        return Err(TableError::IndexCapacityExceeded {
+            resource,
+            requested,
+        });
+    }
+    let index = u32::try_from(len).map_err(|_| TableError::IndexCapacityExceeded {
+        resource,
+        requested,
+    })?;
+    Ok((index, requested))
+}
+
+pub(crate) fn check_row_count(resource: &'static str, count: usize) -> Result<(), TableError> {
+    let requested = u64::try_from(count).unwrap_or(u64::MAX);
+    if requested > u64::from(u32::MAX) {
+        return Err(TableError::IndexCapacityExceeded {
+            resource,
+            requested,
+        });
+    }
+    Ok(())
+}
+
+fn allocation_failed(resource: &'static str, current: usize, additional: usize) -> TableError {
+    TableError::AllocationFailed {
+        resource,
+        requested: current
+            .checked_add(additional)
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(u64::MAX),
+    }
+}
+
 /// One quadratic segment of a compiled path, in **object space**.
 ///
 /// §10.8 says compiled paths retain "screen-independent coefficients", and this
@@ -200,7 +284,7 @@ impl Style {
     /// Bitwise, matching `BatchKey`. The array width is asserted by
     /// construction: adding a field without widening it fails every test here
     /// rather than silently merging two distinct styles.
-    fn bits(&self) -> [u64; 45] {
+    pub(crate) fn bits(&self) -> [u64; 45] {
         let mut b = [0u64; 45];
         let scalars = [
             self.stroke_width,
@@ -283,15 +367,58 @@ pub struct StyleTable {
 
 impl StyleTable {
     /// Intern `style`, returning its row.
-    pub fn intern(&mut self, style: Style) -> u32 {
+    ///
+    /// # Errors
+    /// Returns [`TableError::IndexCapacityExceeded`] before mutation when one
+    /// more row would exceed the table's `u32` index width, or
+    /// [`TableError::AllocationFailed`] when its row or dedup index cannot
+    /// reserve that row.
+    pub fn intern(&mut self, style: Style) -> Result<u32, TableError> {
         let key = style.bits();
         if let Some(&i) = self.index.get(&key) {
-            return i;
+            return Ok(i);
         }
-        let i = self.rows.len() as u32;
+        let (i, _) = rows_after_push("style rows", self.rows.len())?;
+        self.rows
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("style rows", self.rows.len(), 1))?;
+        self.index
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("style index", self.index.len(), 1))?;
         self.rows.push(style);
         self.index.insert(key, i);
-        i
+        Ok(i)
+    }
+
+    pub(crate) fn index_of(&self, style: &Style) -> Option<u32> {
+        self.index.get(&style.bits()).copied()
+    }
+
+    pub(crate) fn reserve_additional(&mut self, additional: usize) -> Result<(), TableError> {
+        let total =
+            self.rows
+                .len()
+                .checked_add(additional)
+                .ok_or(TableError::IndexCapacityExceeded {
+                    resource: "style rows",
+                    requested: u64::MAX,
+                })?;
+        check_row_count("style rows", total)?;
+        self.rows
+            .try_reserve_exact(additional)
+            .map_err(|_| allocation_failed("style rows", self.rows.len(), additional))?;
+        self.index
+            .try_reserve(additional)
+            .map_err(|_| allocation_failed("style index", self.index.len(), additional))?;
+        Ok(())
+    }
+
+    pub(crate) fn insert_prepared(&mut self, index: u32, style: Style) {
+        debug_assert_eq!(usize::try_from(index).ok(), Some(self.rows.len()));
+        let key = style.bits();
+        debug_assert!(!self.index.contains_key(&key));
+        self.rows.push(style);
+        self.index.insert(key, index);
     }
 
     /// The interned rows, in insertion order.
@@ -303,7 +430,7 @@ impl StyleTable {
     /// One row.
     #[must_use]
     pub fn get(&self, index: u32) -> Option<&Style> {
-        self.rows.get(index as usize)
+        self.rows.get(usize::try_from(index).ok()?)
     }
 
     /// How many distinct styles the scene uses.
@@ -430,20 +557,79 @@ impl ShapeTable {
     /// glyph outline means decoding it, splitting it, and measuring its arc
     /// length, and doing that once per occurrence is what §10.8 calls "the bulk
     /// of geometry duplication".
-    pub fn intern_shape(&mut self, digest: Digest, build: impl FnOnce() -> Shape) -> u32 {
+    ///
+    /// # Errors
+    /// Returns [`TableError::IndexCapacityExceeded`] before running `build` or
+    /// mutating the table when one more row would exceed its `u32` index width,
+    /// or [`TableError::AllocationFailed`] when its row or digest index cannot
+    /// reserve that row.
+    pub fn intern_shape(
+        &mut self,
+        digest: Digest,
+        build: impl FnOnce() -> Shape,
+    ) -> Result<u32, TableError> {
         if let Some(&i) = self.by_digest.get(&digest) {
-            return i;
+            return Ok(i);
         }
-        let i = self.shapes.len() as u32;
+        let (i, _) = rows_after_push("shape rows", self.shapes.len())?;
+        self.shapes
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("shape rows", self.shapes.len(), 1))?;
+        self.by_digest
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("shape index", self.by_digest.len(), 1))?;
         self.shapes.push(build());
         self.by_digest.insert(digest, i);
-        i
+        Ok(i)
     }
 
     /// Record an occurrence, returning its index.
-    pub fn push_instance(&mut self, instance: Instance) -> u32 {
+    ///
+    /// # Errors
+    /// Returns [`TableError::IndexCapacityExceeded`] before mutation when one
+    /// more occurrence would exceed the instance table's `u32` index width, or
+    /// [`TableError::AllocationFailed`] when the occurrence cannot be reserved.
+    pub fn push_instance(&mut self, instance: Instance) -> Result<u32, TableError> {
+        let (index, _) = rows_after_push("instance rows", self.instances.len())?;
+        self.instances
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("instance rows", self.instances.len(), 1))?;
         self.instances.push(instance);
-        (self.instances.len() - 1) as u32
+        Ok(index)
+    }
+
+    pub(crate) fn shape_index(&self, digest: Digest) -> Option<u32> {
+        self.by_digest.get(&digest).copied()
+    }
+
+    pub(crate) fn reserve_shapes(&mut self, shapes: usize) -> Result<(), TableError> {
+        let total_shapes =
+            self.shapes
+                .len()
+                .checked_add(shapes)
+                .ok_or(TableError::IndexCapacityExceeded {
+                    resource: "shape rows",
+                    requested: u64::MAX,
+                })?;
+        check_row_count("shape rows", total_shapes)?;
+        self.shapes
+            .try_reserve_exact(shapes)
+            .map_err(|_| allocation_failed("shape rows", self.shapes.len(), shapes))?;
+        self.by_digest
+            .try_reserve(shapes)
+            .map_err(|_| allocation_failed("shape index", self.by_digest.len(), shapes))?;
+        Ok(())
+    }
+
+    pub(crate) fn insert_prepared(&mut self, index: u32, shape: Shape) {
+        debug_assert_eq!(usize::try_from(index).ok(), Some(self.shapes.len()));
+        debug_assert!(!self.by_digest.contains_key(&shape.digest));
+        self.by_digest.insert(shape.digest, index);
+        self.shapes.push(shape);
+    }
+
+    pub(crate) fn swap_instances(&mut self, instances: &mut Vec<Instance>) {
+        std::mem::swap(&mut self.instances, instances);
     }
 
     /// The compiled shapes.
@@ -461,7 +647,7 @@ impl ShapeTable {
     /// One shape.
     #[must_use]
     pub fn shape(&self, index: u32) -> Option<&Shape> {
-        self.shapes.get(index as usize)
+        self.shapes.get(usize::try_from(index).ok()?)
     }
 
     /// How many occurrences share one compiled shape, on average.
@@ -526,13 +712,17 @@ pub fn shape_digest(points: &[Vec3]) -> Digest {
 ///
 /// The compile step §10.8 wants to happen once per *outline* rather than once
 /// per occurrence: segments, hull bounds, the arc-length table, and the hint.
-#[must_use]
+///
+/// # Errors
+/// Returns [`TableError::IndexCapacityExceeded`] when the shape's segment or
+/// subpath rows, or its range in the caller's flat segment table, cannot be
+/// represented by the retained IR's `u32` indices.
 pub fn compile_shape(
     digest: Digest,
     path: &QuadPath,
     hint: Hint,
     first_segment: u32,
-) -> (Shape, Vec<Segment>) {
+) -> Result<(Shape, Vec<Segment>), TableError> {
     let arc_length = ArcLengthTable::for_path(path);
     let lengths = arc_length.curve_lengths();
 
@@ -589,7 +779,14 @@ pub fn compile_shape(
             continue;
         }
         if opens_subpath {
-            subpath_starts.push(segments.len() as u32);
+            let start =
+                u32::try_from(segments.len()).map_err(|_| TableError::IndexCapacityExceeded {
+                    resource: "shape subpath rows",
+                    requested: u64::try_from(segments.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(1),
+                })?;
+            subpath_starts.push(start);
             opens_subpath = false;
         }
         let s0 = if total > 0.0 { acc / total } else { 0.0 };
@@ -618,8 +815,18 @@ pub fn compile_shape(
         }
     };
 
-    let count = segments.len() as u32;
-    (
+    let count = u32::try_from(segments.len()).map_err(|_| TableError::IndexCapacityExceeded {
+        resource: "shape segment rows",
+        requested: u64::try_from(segments.len()).unwrap_or(u64::MAX),
+    })?;
+    let requested = u64::from(first_segment) + u64::from(count);
+    if requested > u64::from(u32::MAX) {
+        return Err(TableError::IndexCapacityExceeded {
+            resource: "segment range",
+            requested,
+        });
+    }
+    Ok((
         Shape {
             digest,
             first_segment,
@@ -630,7 +837,7 @@ pub fn compile_shape(
             subpath_starts,
         },
         segments,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -652,6 +859,36 @@ mod tests {
         p.add_line_to([1.0, 1.0, 0.0], false).unwrap();
         p.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         p
+    }
+
+    #[test]
+    fn table_width_checks_refuse_wrap_without_large_allocations() {
+        let requested = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            rows_after_push(
+                "style rows",
+                usize::try_from(u32::MAX).expect("usize represents u32 on supported targets"),
+            ),
+            Err(TableError::IndexCapacityExceeded {
+                resource: "style rows",
+                requested,
+            })
+        );
+
+        let path = tri();
+        assert_eq!(
+            compile_shape(
+                shape_digest(path.points()),
+                &path,
+                Hint::General,
+                u32::MAX - 2,
+            )
+            .expect_err("the exclusive segment end exceeds u32"),
+            TableError::IndexCapacityExceeded {
+                resource: "segment range",
+                requested,
+            }
+        );
     }
 
     #[test]
@@ -711,8 +948,8 @@ mod tests {
     #[test]
     fn styles_intern_by_bits_and_never_merge_distinct_ones() {
         let mut t = StyleTable::default();
-        let a = t.intern(style_with(2.0));
-        let b = t.intern(style_with(2.0));
+        let a = t.intern(style_with(2.0)).expect("one style row");
+        let b = t.intern(style_with(2.0)).expect("deduplicated style row");
         assert_eq!(a, b);
         assert_eq!(t.len(), 1);
         // One ulp apart is two styles: §8.5 makes batching semantics, so a
@@ -720,7 +957,9 @@ mod tests {
         // takes. `2.0 + f32::EPSILON` would NOT do — EPSILON is the ulp at 1.0,
         // and at 2.0 it rounds straight back, which is how this test first
         // passed against a key that could not tell them apart.
-        let c = t.intern(style_with(f32::from_bits(2.0f32.to_bits() + 1)));
+        let c = t
+            .intern(style_with(f32::from_bits(2.0f32.to_bits() + 1)))
+            .expect("second style row");
         assert_ne!(c, a);
         assert_eq!(t.len(), 2);
     }
@@ -798,10 +1037,10 @@ mod tests {
         ];
 
         let mut t = StyleTable::default();
-        let baseline = t.intern(base);
+        let baseline = t.intern(base).expect("baseline style row");
         for (i, v) in variants.iter().enumerate() {
             assert_ne!(
-                t.intern(*v),
+                t.intern(*v).expect("variant style row"),
                 baseline,
                 "variant {i} interned as the default style — a field is missing from the key"
             );
@@ -866,21 +1105,27 @@ mod tests {
             .enumerate()
         {
             let digest = shape_digest(&pts);
-            let shape = table.intern_shape(digest, || {
-                compiles += 1;
-                let path = QuadPath::from_points(pts.clone()).expect("valid path");
-                compile_shape(digest, &path, Hint::Line, 0).0
-            });
-            table.push_instance(Instance {
-                shape,
-                style: 0,
-                mob,
-                placement: Placement::from_translation([pts[0][0], pts[0][1], pts[0][2]]),
-                order: i as u32,
-                revisions: 0,
-                volatile: false,
-                hint_unsafe: false,
-            });
+            let shape = table
+                .intern_shape(digest, || {
+                    compiles += 1;
+                    let path = QuadPath::from_points(pts.clone()).expect("valid path");
+                    compile_shape(digest, &path, Hint::Line, 0)
+                        .expect("fixture fits retained table widths")
+                        .0
+                })
+                .expect("shape row");
+            table
+                .push_instance(Instance {
+                    shape,
+                    style: 0,
+                    mob,
+                    placement: Placement::from_translation([pts[0][0], pts[0][1], pts[0][2]]),
+                    order: u32::try_from(i).expect("small fixture"),
+                    revisions: 0,
+                    volatile: false,
+                    hint_unsafe: false,
+                })
+                .expect("instance row");
         }
         assert_eq!(compiles, 1, "the outline must compile once");
         assert_eq!(table.shapes().len(), 1);
@@ -929,7 +1174,8 @@ mod tests {
         // fmn-geom itself sees two subpaths; the compiler must agree with it.
         assert_eq!(ring.subpaths().len(), 2, "the fixture is not a ring");
 
-        let (shape, segments) = compile_shape(shape_digest(ring.points()), &ring, Hint::General, 0);
+        let (shape, segments) = compile_shape(shape_digest(ring.points()), &ring, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         assert_eq!(
             shape.subpath_starts.len(),
             2,
@@ -954,9 +1200,13 @@ mod tests {
     fn compiling_a_shape_partitions_arc_length_and_hulls_the_curve() {
         let path = tri();
         let digest = shape_digest(path.points());
-        let (shape, segments) = compile_shape(digest, &path, Hint::Line, 7);
+        let (shape, segments) = compile_shape(digest, &path, Hint::Line, 7)
+            .expect("fixture fits retained table widths");
         assert_eq!(shape.first_segment, 7);
-        assert_eq!(shape.segment_count, segments.len() as u32);
+        assert_eq!(
+            shape.segment_count,
+            u32::try_from(segments.len()).expect("small fixture")
+        );
         assert_eq!(segments.len(), 3);
 
         // The spans partition [0, 1] in order.
@@ -983,7 +1233,8 @@ mod tests {
     fn a_path_with_no_curves_compiles_to_nothing_rather_than_a_degenerate_shape() {
         let mut p = QuadPath::default();
         p.start_new_path([1.0, 1.0, 0.0]);
-        let (shape, segments) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0);
+        let (shape, segments) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         assert!(segments.is_empty());
         assert_eq!(shape.segment_count, 0);
         assert_eq!(shape.bounds, BoundingBox::ZERO);

@@ -4066,6 +4066,7 @@ mod tests {
 
     fn shaped(path: &QuadPath, hint: Hint) -> (crate::table::Shape, Vec<crate::table::Segment>) {
         compile_shape(shape_digest(path.points()), path, hint, 0)
+            .expect("fixture fits retained table widths")
     }
 
     /// Per-pixel coverage from a kernel over a window.

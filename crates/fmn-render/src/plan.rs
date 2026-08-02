@@ -27,12 +27,15 @@
 
 use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
-use crate::table::{Instance, Segment, ShapeTable, Style, StyleTable, compile_shape, shape_digest};
+use crate::table::{
+    Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError, check_row_count,
+    compile_shape, shape_digest,
+};
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, quadpath::QuadPath};
 use fmn_hash::{Digest, Sha256};
 use fmn_mobject::{Mob, Placement, RecordBuffer, Stage};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The axes a compiled outline depends on.
 ///
@@ -59,6 +62,40 @@ const STYLE_VIEW_FIELDS: [&str; 4] = [
     "fill_border_width",
 ];
 
+/// Admission limits for one retained-plan synchronization.
+///
+/// The instance default matches [`crate::bin::BinningLimits`]. The retained
+/// geometry ceiling admits sixteen maximum-size Chisel paths while bounding
+/// append-only outline history to a few hundred MiB rather than letting a
+/// continuously changing object grow until allocator failure. Callers with a
+/// deliberately larger, provisioned scene can pass explicit limits through
+/// [`RenderPlan::sync_with_limits`]; the `u32` table width remains absolute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderPlanLimits {
+    /// Maximum painter-ordered instances produced by one sync.
+    pub max_instances: u64,
+    /// Maximum input curves materialized for geometry rebuilds in one sync.
+    pub max_input_curves: u64,
+    /// Maximum segments retained across every interned outline.
+    pub max_retained_segments: u64,
+    /// Maximum distinct retained outlines.
+    pub max_retained_shapes: u64,
+    /// Maximum distinct retained style rows.
+    pub max_retained_styles: u64,
+}
+
+impl Default for RenderPlanLimits {
+    fn default() -> Self {
+        Self {
+            max_instances: 1 << 20,
+            max_input_curves: 1 << 20,
+            max_retained_segments: 1 << 20,
+            max_retained_shapes: 1 << 20,
+            max_retained_styles: 1 << 20,
+        }
+    }
+}
+
 /// A retained-plan synchronization could not represent scene geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncError {
@@ -69,6 +106,24 @@ pub enum SyncError {
         /// Chisel's precise representation error.
         source: GeomError,
     },
+    /// A declared retained-plan count exceeded its caller-selected ceiling.
+    LimitExceeded {
+        /// The table or work axis being bounded.
+        resource: &'static str,
+        /// Rows or input curves requested.
+        requested: u64,
+        /// Configured maximum.
+        limit: u64,
+    },
+    /// A temporary synchronization table could not reserve its bounded input.
+    AllocationFailed {
+        /// The temporary table being reserved.
+        resource: &'static str,
+        /// Elements requested.
+        requested: u64,
+    },
+    /// A retained table could not preserve its index or allocation contract.
+    Table(TableError),
 }
 
 impl std::fmt::Display for SyncError {
@@ -77,6 +132,22 @@ impl std::fmt::Display for SyncError {
             Self::InvalidGeometry { mob, source } => {
                 write!(f, "cannot compile geometry for {mob:?}: {source}")
             }
+            Self::LimitExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "retained plan {resource} needs {requested}, exceeding the limit {limit}"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "could not reserve {requested} elements for retained plan {resource}"
+            ),
+            Self::Table(source) => write!(f, "could not build retained plan: {source}"),
         }
     }
 }
@@ -85,8 +156,78 @@ impl std::error::Error for SyncError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidGeometry { source, .. } => Some(source),
+            Self::Table(source) => Some(source),
+            Self::LimitExceeded { .. } | Self::AllocationFailed { .. } => None,
         }
     }
+}
+
+impl From<TableError> for SyncError {
+    fn from(source: TableError) -> Self {
+        Self::Table(source)
+    }
+}
+
+fn check_limit(resource: &'static str, requested: u64, limit: u64) -> Result<(), SyncError> {
+    if requested > limit {
+        return Err(SyncError::LimitExceeded {
+            resource,
+            requested,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn count_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn checked_add_count(
+    resource: &'static str,
+    left: usize,
+    right: usize,
+) -> Result<usize, SyncError> {
+    left.checked_add(right).ok_or({
+        SyncError::Table(TableError::IndexCapacityExceeded {
+            resource,
+            requested: u64::MAX,
+        })
+    })
+}
+
+fn prepared_index(
+    resource: &'static str,
+    current: usize,
+    pending: usize,
+) -> Result<u32, SyncError> {
+    let index = checked_add_count(resource, current, pending)?;
+    let rows = index.checked_add(1).ok_or({
+        SyncError::Table(TableError::IndexCapacityExceeded {
+            resource,
+            requested: u64::MAX,
+        })
+    })?;
+    check_row_count(resource, rows)?;
+    u32::try_from(index).map_err(|_| {
+        SyncError::Table(TableError::IndexCapacityExceeded {
+            resource,
+            requested: count_u64(rows),
+        })
+    })
+}
+
+fn try_reserve_exact<T>(
+    values: &mut Vec<T>,
+    resource: &'static str,
+    additional: usize,
+) -> Result<(), SyncError> {
+    values
+        .try_reserve_exact(additional)
+        .map_err(|_| SyncError::AllocationFailed {
+            resource,
+            requested: count_u64(additional),
+        })
 }
 
 fn writable_view_affects_any(buffer: &RecordBuffer, fields: &[&str]) -> bool {
@@ -133,6 +274,9 @@ pub struct RenderPlan {
     styles: StyleTable,
     shapes: ShapeTable,
     retained: HashMap<Mob, Retained>,
+    scratch_instances: Vec<Instance>,
+    scratch_retained: HashMap<Mob, Retained>,
+    scratch_seen: HashSet<Mob>,
     stats: SyncStats,
     geometry_key: GeometryIdentity,
     plan_key: PlanIdentity,
@@ -174,6 +318,9 @@ impl Default for RenderPlan {
             styles: StyleTable::default(),
             shapes: ShapeTable::default(),
             retained: HashMap::new(),
+            scratch_instances: Vec::new(),
+            scratch_retained: HashMap::new(),
+            scratch_seen: HashSet::new(),
             stats: SyncStats::default(),
             geometry_key: GeometryIdentity::default(),
             plan_key: PlanIdentity::default(),
@@ -242,23 +389,55 @@ impl RenderPlan {
 
     /// Synchronize against `stage`, at camera revision `camera`.
     ///
-    /// Walks the scene's draw plan — which is `fmn_mobject`'s pure function of
-    /// scene state, deliberately uncached there so that this cache can be
-    /// checked against it — and for each renderable either reuses its retained
-    /// compilation or rebuilds exactly the part whose axes moved.
+    /// Uses [`RenderPlanLimits::default`]. Call [`RenderPlan::sync_with_limits`]
+    /// for an explicitly provisioned larger or smaller workload.
     ///
     /// # Errors
-    /// Returns [`SyncError`] before mutating the retained plan when a renderable
-    /// has geometry that cannot satisfy the shared-anchor path contract.
+    /// Returns [`SyncError`] before mutating the retained plan when geometry is
+    /// malformed or the synchronization cannot satisfy its resource contract.
     pub fn sync(&mut self, stage: &Stage, camera: u64) -> Result<SyncStats, SyncError> {
-        let mut stats = SyncStats::default();
-        let plan = stage.draw_plan();
+        self.sync_with_limits(stage, camera, RenderPlanLimits::default())
+    }
 
-        // `QuadPath::from_points` currently has one whole-run validation: a
-        // nonempty shared-anchor run must be odd. Check every renderable before
-        // clearing the old instance table so a refusal is atomic. Reading only
-        // schema metadata and record counts preserves the retained plan's
-        // promise not to materialize unchanged point columns.
+    /// Synchronize with explicit retained-table admission limits.
+    ///
+    /// Preparation is transactional: changed geometry is compiled and every
+    /// prospective table index is checked in temporary storage. Only after all
+    /// checks and persistent reservations succeed are the append-only tables,
+    /// painter instances, retained entries, statistics, and identities replaced.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] without changing any observable plan state.
+    pub fn sync_with_limits(
+        &mut self,
+        stage: &Stage,
+        camera: u64,
+        limits: RenderPlanLimits,
+    ) -> Result<SyncStats, SyncError> {
+        let plan = stage.draw_plan();
+        let draw_items = count_u64(plan.items().len());
+        check_limit("instances", draw_items, limits.max_instances)?;
+        check_row_count("instance rows", plan.items().len())?;
+        check_limit(
+            "retained segments",
+            count_u64(self.segments.len()),
+            limits.max_retained_segments,
+        )?;
+        check_limit(
+            "retained shapes",
+            count_u64(self.shapes.shapes().len()),
+            limits.max_retained_shapes,
+        )?;
+        check_limit(
+            "retained styles",
+            count_u64(self.styles.len()),
+            limits.max_retained_styles,
+        )?;
+
+        // Chisel's whole-run invariant is available from record metadata. Check
+        // it before materializing any changed point column so one malformed
+        // renderable cannot make earlier valid outlines pay compilation work
+        // before the atomic refusal.
         for item in plan.items() {
             let mob = item.mob;
             let Some(entry) = stage.get(mob) else {
@@ -276,12 +455,32 @@ impl RenderPlan {
             }
         }
 
-        // Instances are painter order, and painter order is a property of the
-        // frame rather than of any object, so the list is rebuilt every frame.
-        // The *shapes* it indexes are what persist.
-        self.shapes.clear_instances();
+        let mut instances = std::mem::take(&mut self.scratch_instances);
+        instances.clear();
+        try_reserve_exact(&mut instances, "prepared instances", plan.items().len())?;
+        let mut seen = std::mem::take(&mut self.scratch_seen);
+        seen.clear();
+        seen.try_reserve(plan.items().len())
+            .map_err(|_| SyncError::AllocationFailed {
+                resource: "live mobjects",
+                requested: draw_items,
+            })?;
+        let mut next_retained = std::mem::take(&mut self.scratch_retained);
+        next_retained.clear();
+        next_retained
+            .try_reserve(plan.items().len())
+            .map_err(|_| SyncError::AllocationFailed {
+                resource: "retained entries",
+                requested: draw_items,
+            })?;
 
-        let mut seen: Vec<Mob> = Vec::with_capacity(plan.items().len());
+        let mut pending_shapes: Vec<(u32, Shape, Vec<Segment>)> = Vec::new();
+        let mut pending_shape_indices: HashMap<Digest, u32> = HashMap::new();
+        let mut pending_styles: Vec<(u32, Style)> = Vec::new();
+        let mut pending_style_indices: HashMap<[u64; 45], u32> = HashMap::new();
+        let mut pending_segments = 0usize;
+        let mut input_curves = 0u64;
+        let mut stats = SyncStats::default();
 
         for (order, item) in plan.items().iter().enumerate() {
             let mob = item.mob;
@@ -289,110 +488,224 @@ impl RenderPlan {
                 continue;
             };
             stats.visited += 1;
-            seen.push(mob);
+            seen.insert(mob);
 
-            let previous = self.retained.get(&mob).cloned();
+            let previous = next_retained
+                .get(&mob)
+                .cloned()
+                .or_else(|| self.retained.get(&mob).cloned());
+            if let Some(retained) = previous.clone() {
+                next_retained.entry(mob).or_insert(retained);
+            }
+
             let Some(entry_placement) = stage.placement(mob) else {
                 continue;
             };
-            let (hint_unsafe, style_unsafe) = stage.get(mob).map_or((false, false), |entry| {
+            let entry = stage.get(mob);
+            let (hint_unsafe, style_unsafe) = entry.map_or((false, false), |entry| {
                 (
                     writable_view_affects_any(&entry.buffer, &SHAPE_VIEW_FIELDS),
                     writable_view_affects_any(&entry.buffer, &STYLE_VIEW_FIELDS),
                 )
             });
 
-            // --- geometry: the expensive half, and the one that must be skipped.
             let (shape, local_origin) = match &previous {
-                Some(r) if !hint_unsafe && !r.shape_dep.is_stale(&now) => {
+                Some(retained) if !hint_unsafe && !retained.shape_dep.is_stale(&now) => {
                     stats.shapes_reused += 1;
-                    (r.shape, r.local_origin)
+                    (retained.shape, retained.local_origin)
                 }
                 _ => {
+                    let counted_from_schema = entry.and_then(|entry| {
+                        (entry.buffer.schema().field_width("point") == Some(3))
+                            .then_some(entry.buffer.len())
+                    });
+                    if let Some(point_count) = counted_from_schema {
+                        let curves = count_u64(point_count.saturating_sub(1) / 2);
+                        input_curves =
+                            input_curves
+                                .checked_add(curves)
+                                .ok_or(SyncError::LimitExceeded {
+                                    resource: "input curves",
+                                    requested: u64::MAX,
+                                    limit: limits.max_input_curves,
+                                })?;
+                        check_limit("input curves", input_curves, limits.max_input_curves)?;
+                    }
                     let Some(object_points) = stage.get_object_points(mob) else {
                         continue;
                     };
                     if object_points.is_empty() {
                         continue;
                     }
-                    // Shape-local, matching the normalization `shape_digest`
-                    // hashes under: the outline is translated so its first
-                    // anchor sits at the origin, and the instance placement puts
-                    // that origin back in world space. Compiling absolute points
-                    // would still dedup — and would put every later copy of a
-                    // glyph wherever the first one happened to be.
                     let local_origin = object_points[0];
-                    let local: Vec<Vec3> = object_points
-                        .iter()
-                        .map(|p| {
-                            [
-                                p[0] - local_origin[0],
-                                p[1] - local_origin[1],
-                                p[2] - local_origin[2],
-                            ]
-                        })
-                        .collect();
-                    let digest = shape_digest(&object_points);
-                    let before = self.shapes.shapes().len();
-                    let first_segment = self.segments.len() as u32;
-                    let hint = Hint::of(stage, mob).translated([
-                        -local_origin[0],
-                        -local_origin[1],
-                        -local_origin[2],
-                    ]);
+                    let mut local = Vec::new();
+                    try_reserve_exact(&mut local, "shape-local points", object_points.len())?;
+                    local.extend(object_points.iter().map(|point| {
+                        [
+                            point[0] - local_origin[0],
+                            point[1] - local_origin[1],
+                            point[2] - local_origin[2],
+                        ]
+                    }));
                     let path = QuadPath::from_points(local)
                         .map_err(|source| SyncError::InvalidGeometry { mob, source })?;
-                    let segments_out = &mut self.segments;
-                    let index = self.shapes.intern_shape(digest, || {
-                        let (shape, mut segs) = compile_shape(digest, &path, hint, first_segment);
-                        segments_out.append(&mut segs);
-                        shape
-                    });
-                    if self.shapes.shapes().len() > before {
-                        stats.shapes_compiled += 1;
-                    } else {
-                        // Interned onto an outline some other mobject already
-                        // compiled: §10.8's instancing, paying for itself.
-                        stats.shapes_shared += 1;
+                    if counted_from_schema.is_none() {
+                        input_curves = input_curves
+                            .checked_add(count_u64(path.num_curves()))
+                            .ok_or(SyncError::LimitExceeded {
+                                resource: "input curves",
+                                requested: u64::MAX,
+                                limit: limits.max_input_curves,
+                            })?;
+                        check_limit("input curves", input_curves, limits.max_input_curves)?;
                     }
-                    (index, local_origin)
+
+                    let digest = shape_digest(&object_points);
+                    let shape = if let Some(index) = self.shapes.shape_index(digest) {
+                        stats.shapes_shared += 1;
+                        index
+                    } else if let Some(&index) = pending_shape_indices.get(&digest) {
+                        stats.shapes_shared += 1;
+                        index
+                    } else {
+                        let pending_shape_count =
+                            checked_add_count("shape rows", pending_shapes.len(), 1)?;
+                        let retained_shape_count = checked_add_count(
+                            "shape rows",
+                            self.shapes.shapes().len(),
+                            pending_shape_count,
+                        )?;
+                        check_limit(
+                            "retained shapes",
+                            count_u64(retained_shape_count),
+                            limits.max_retained_shapes,
+                        )?;
+                        let index = prepared_index(
+                            "shape rows",
+                            self.shapes.shapes().len(),
+                            pending_shapes.len(),
+                        )?;
+                        let first_segment = checked_add_count(
+                            "segment rows",
+                            self.segments.len(),
+                            pending_segments,
+                        )?;
+                        let first_segment = u32::try_from(first_segment).map_err(|_| {
+                            SyncError::Table(TableError::IndexCapacityExceeded {
+                                resource: "segment rows",
+                                requested: count_u64(first_segment).saturating_add(1),
+                            })
+                        })?;
+                        let hint = Hint::of(stage, mob).translated([
+                            -local_origin[0],
+                            -local_origin[1],
+                            -local_origin[2],
+                        ]);
+                        let (shape, segments) = compile_shape(digest, &path, hint, first_segment)?;
+                        let retained_segment_count = checked_add_count(
+                            "segment rows",
+                            self.segments.len(),
+                            checked_add_count("segment rows", pending_segments, segments.len())?,
+                        )?;
+                        check_limit(
+                            "retained segments",
+                            count_u64(retained_segment_count),
+                            limits.max_retained_segments,
+                        )?;
+                        check_row_count("segment rows", retained_segment_count)?;
+
+                        pending_shapes
+                            .try_reserve(1)
+                            .map_err(|_| SyncError::AllocationFailed {
+                                resource: "pending shapes",
+                                requested: count_u64(pending_shapes.len()).saturating_add(1),
+                            })?;
+                        pending_shape_indices.try_reserve(1).map_err(|_| {
+                            SyncError::AllocationFailed {
+                                resource: "pending shape index",
+                                requested: count_u64(pending_shape_indices.len()).saturating_add(1),
+                            }
+                        })?;
+                        pending_segments = pending_segments.checked_add(segments.len()).ok_or(
+                            SyncError::Table(TableError::IndexCapacityExceeded {
+                                resource: "segment rows",
+                                requested: u64::MAX,
+                            }),
+                        )?;
+                        pending_shape_indices.insert(digest, index);
+                        pending_shapes.push((index, shape, segments));
+                        stats.shapes_compiled += 1;
+                        index
+                    };
+                    (shape, local_origin)
                 }
             };
 
-            // --- style: the cheap half, gated on its own axis so a moved point
-            // does not re-intern a colour.
             let style = match &previous {
-                Some(r) if !style_unsafe && !r.style_dep.is_stale(&now) => r.style,
+                Some(retained) if !style_unsafe && !retained.style_dep.is_stale(&now) => {
+                    retained.style
+                }
                 _ => {
                     stats.styles_rebuilt += 1;
                     let row = read_style(stage, mob);
-                    self.styles.intern(row)
+                    let key = row.bits();
+                    if let Some(index) = self.styles.index_of(&row) {
+                        index
+                    } else if let Some(&index) = pending_style_indices.get(&key) {
+                        index
+                    } else {
+                        let pending_style_count =
+                            checked_add_count("style rows", pending_styles.len(), 1)?;
+                        let retained_style_count = checked_add_count(
+                            "style rows",
+                            self.styles.len(),
+                            pending_style_count,
+                        )?;
+                        check_limit(
+                            "retained styles",
+                            count_u64(retained_style_count),
+                            limits.max_retained_styles,
+                        )?;
+                        let index =
+                            prepared_index("style rows", self.styles.len(), pending_styles.len())?;
+                        pending_styles
+                            .try_reserve(1)
+                            .map_err(|_| SyncError::AllocationFailed {
+                                resource: "pending styles",
+                                requested: count_u64(pending_styles.len()).saturating_add(1),
+                            })?;
+                        pending_style_indices.try_reserve(1).map_err(|_| {
+                            SyncError::AllocationFailed {
+                                resource: "pending style index",
+                                requested: count_u64(pending_style_indices.len()).saturating_add(1),
+                            }
+                        })?;
+                        pending_style_indices.insert(key, index);
+                        pending_styles.push((index, row));
+                        index
+                    }
                 }
             };
 
-            // §8.2's conservative rule, read fresh every sync: a writable live
-            // view can mutate points with no Stage method called and therefore
-            // no revision bumped, so it cannot be folded into `revisions` — it
-            // has to be a separate flag that poisons any cache downstream.
+            let order = u32::try_from(order).map_err(|_| {
+                SyncError::Table(TableError::IndexCapacityExceeded {
+                    resource: "painter order",
+                    requested: draw_items,
+                })
+            })?;
             let volatile = hint_unsafe || style_unsafe;
-            // Compiled points are normalized by subtracting `local_origin`.
-            // Compose that object-space translation *inside* the entry's
-            // object→world map: E(q + origin), not E(q) + origin. The
-            // distinction is observable under rotation, stretch and shear.
             let placement = entry_placement.compose(Placement::from_translation(local_origin));
-
-            self.shapes.push_instance(Instance {
+            instances.push(Instance {
                 shape,
                 style,
                 mob,
                 placement,
-                order: order as u32,
+                order,
                 revisions: now.fold(),
                 volatile,
                 hint_unsafe,
             });
-
-            self.retained.insert(
+            next_retained.insert(
                 mob,
                 Retained {
                     shape_dep: Dependency::new(now, &SHAPE_AXES),
@@ -404,20 +717,43 @@ impl RenderPlan {
             );
         }
 
-        // Drop what left the scene. Compiled outlines are *not* dropped with it:
-        // a mobject removed and re-added within a frame — which `Scene.add` does
-        // on every re-add, since it removes first — must not pay to recompile,
-        // and an interned outline is shared, so it is not this mobject's to free.
-        let live: std::collections::HashSet<Mob> = seen.into_iter().collect();
-        let before = self.retained.len();
-        self.retained.retain(|m, _| live.contains(m));
-        stats.dropped = before - self.retained.len();
+        stats.dropped = self
+            .retained
+            .keys()
+            .filter(|mob| !seen.contains(mob))
+            .count();
 
+        self.segments
+            .try_reserve_exact(pending_segments)
+            .map_err(|_| SyncError::AllocationFailed {
+                resource: "segment rows",
+                requested: count_u64(self.segments.len())
+                    .saturating_add(count_u64(pending_segments)),
+            })?;
+        self.styles.reserve_additional(pending_styles.len())?;
+        self.shapes.reserve_shapes(pending_shapes.len())?;
+
+        for (index, style) in pending_styles {
+            self.styles.insert_prepared(index, style);
+        }
+        for (index, shape, mut segments) in pending_shapes {
+            debug_assert_eq!(
+                usize::try_from(shape.first_segment).ok(),
+                Some(self.segments.len())
+            );
+            self.segments.append(&mut segments);
+            self.shapes.insert_prepared(index, shape);
+        }
+        self.shapes.swap_instances(&mut instances);
+        instances.clear();
+        self.scratch_instances = instances;
+        std::mem::swap(&mut self.retained, &mut next_retained);
+        next_retained.clear();
+        self.scratch_retained = next_retained;
+        seen.clear();
+        self.scratch_seen = seen;
         self.stats = stats;
-        // Shape tables are append-only, so their identity can stay cached when
-        // every outline was reused or interned onto an existing row. The
-        // painter plan is rebuilt every sync and is hashed once alongside that
-        // O(instances) work.
+
         if stats.shapes_compiled > 0 {
             self.geometry_key = self.compute_geometry_identity();
         }
@@ -790,6 +1126,207 @@ mod tests {
     }
 
     #[test]
+    fn retained_limits_count_deduplicated_rows_not_draw_items() {
+        let (stage, _) = staged(8);
+        let mut plan = RenderPlan::new();
+        let limits = RenderPlanLimits {
+            max_instances: 8,
+            max_input_curves: 16,
+            max_retained_segments: 2,
+            max_retained_shapes: 1,
+            max_retained_styles: 1,
+        };
+
+        let stats = plan
+            .sync_with_limits(&stage, 0, limits)
+            .expect("eight copies fit one retained shape and style row");
+
+        assert_eq!(stats.shapes_compiled, 1);
+        assert_eq!(stats.shapes_shared, 7);
+        assert_eq!(plan.segments().len(), 2);
+        assert_eq!(plan.shapes().shapes().len(), 1);
+        assert_eq!(plan.styles().len(), 1);
+        assert_eq!(plan.shapes().instances().len(), 8);
+    }
+
+    #[test]
+    fn retained_limit_refusal_is_named_and_atomic() {
+        let (mut stage, mobs) = staged(1);
+        let mut plan = RenderPlan::new();
+        sync_valid(&mut plan, &stage, 0);
+
+        let before_segments = plan.segments().to_vec();
+        let before_styles = plan.styles().rows().to_vec();
+        let before_shapes = plan.shapes().shapes().to_vec();
+        let before_instances = plan.shapes().instances().to_vec();
+        let before_stats = plan.stats();
+        let before_geometry = plan.geometry_identity();
+        let before_identity = plan.identity();
+        let before_retained = plan.retained.len();
+
+        stage
+            .get_mut(mobs[0])
+            .expect("live")
+            .buffer
+            .write(2, "point", &[500.0, 500.0, 0.0]);
+        let limits = RenderPlanLimits {
+            max_retained_shapes: 1,
+            ..RenderPlanLimits::default()
+        };
+
+        assert_eq!(
+            plan.sync_with_limits(&stage, 0, limits)
+                .expect_err("a second retained shape exceeds the limit"),
+            SyncError::LimitExceeded {
+                resource: "retained shapes",
+                requested: 2,
+                limit: 1,
+            }
+        );
+
+        assert_eq!(plan.segments(), before_segments);
+        assert_eq!(plan.styles().rows(), before_styles);
+        assert_eq!(plan.shapes().shapes(), before_shapes);
+        assert_eq!(plan.shapes().instances(), before_instances);
+        assert_eq!(plan.stats(), before_stats);
+        assert_eq!(plan.geometry_identity(), before_geometry);
+        assert_eq!(plan.identity(), before_identity);
+        assert_eq!(plan.retained.len(), before_retained);
+    }
+
+    #[test]
+    fn each_sync_work_axis_has_a_named_limit() {
+        let (two, _) = staged(2);
+        let mut plan = RenderPlan::new();
+        assert_eq!(
+            plan.sync_with_limits(
+                &two,
+                0,
+                RenderPlanLimits {
+                    max_instances: 1,
+                    ..RenderPlanLimits::default()
+                },
+            )
+            .expect_err("two draw items exceed one instance"),
+            SyncError::LimitExceeded {
+                resource: "instances",
+                requested: 2,
+                limit: 1,
+            }
+        );
+        assert!(plan.shapes().instances().is_empty());
+        assert!(plan.shapes().shapes().is_empty());
+        assert!(plan.segments().is_empty());
+
+        let (one, _) = staged(1);
+        assert_eq!(
+            plan.sync_with_limits(
+                &one,
+                0,
+                RenderPlanLimits {
+                    max_input_curves: 1,
+                    ..RenderPlanLimits::default()
+                },
+            )
+            .expect_err("the two-curve outline exceeds one input curve"),
+            SyncError::LimitExceeded {
+                resource: "input curves",
+                requested: 2,
+                limit: 1,
+            }
+        );
+        assert!(plan.shapes().shapes().is_empty());
+        assert!(plan.segments().is_empty());
+
+        assert_eq!(
+            plan.sync_with_limits(
+                &one,
+                0,
+                RenderPlanLimits {
+                    max_retained_segments: 1,
+                    ..RenderPlanLimits::default()
+                },
+            )
+            .expect_err("the two compiled segments exceed one retained row"),
+            SyncError::LimitExceeded {
+                resource: "retained segments",
+                requested: 2,
+                limit: 1,
+            }
+        );
+        assert!(plan.shapes().shapes().is_empty());
+        assert!(plan.segments().is_empty());
+    }
+
+    #[test]
+    fn retained_style_limit_refusal_preserves_the_old_style_and_identity() {
+        let (mut stage, mobs) = staged(1);
+        let mut plan = RenderPlan::new();
+        sync_valid(&mut plan, &stage, 0);
+        let before_styles = plan.styles().rows().to_vec();
+        let before_instances = plan.shapes().instances().to_vec();
+        let before_stats = plan.stats();
+        let before_identity = plan.identity();
+
+        stage
+            .get_mut(mobs[0])
+            .expect("live")
+            .buffer
+            .write(0, "stroke_rgba", &[1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            plan.sync_with_limits(
+                &stage,
+                0,
+                RenderPlanLimits {
+                    max_retained_styles: 1,
+                    ..RenderPlanLimits::default()
+                },
+            )
+            .expect_err("a second retained style exceeds the limit"),
+            SyncError::LimitExceeded {
+                resource: "retained styles",
+                requested: 2,
+                limit: 1,
+            }
+        );
+
+        assert_eq!(plan.styles().rows(), before_styles);
+        assert_eq!(plan.shapes().instances(), before_instances);
+        assert_eq!(plan.stats(), before_stats);
+        assert_eq!(plan.identity(), before_identity);
+    }
+
+    #[test]
+    fn a_lower_limit_does_not_grandfather_existing_retained_rows() {
+        let (stage, _) = staged(1);
+        let mut plan = RenderPlan::new();
+        sync_valid(&mut plan, &stage, 0);
+        let before_instances = plan.shapes().instances().to_vec();
+        let before_stats = plan.stats();
+        let before_identity = plan.identity();
+
+        assert_eq!(
+            plan.sync_with_limits(
+                &stage,
+                0,
+                RenderPlanLimits {
+                    max_retained_segments: 1,
+                    ..RenderPlanLimits::default()
+                },
+            )
+            .expect_err("the existing two-row segment table exceeds the new limit"),
+            SyncError::LimitExceeded {
+                resource: "retained segments",
+                requested: 2,
+                limit: 1,
+            }
+        );
+        assert_eq!(plan.shapes().instances(), before_instances);
+        assert_eq!(plan.stats(), before_stats);
+        assert_eq!(plan.identity(), before_identity);
+    }
+
+    #[test]
     fn writable_views_refresh_exactly_the_render_fields_they_expose() {
         let (mut stage, mobs) = staged(1);
         let mob = mobs[0];
@@ -1056,7 +1593,7 @@ mod tests {
         let instances = plan.shapes().instances();
         assert_eq!(instances.len(), 3);
         for (i, inst) in instances.iter().enumerate() {
-            assert_eq!(inst.order, i as u32);
+            assert_eq!(inst.order, u32::try_from(i).expect("small fixture"));
             assert_eq!(inst.mob, mobs[i]);
             // The outline is shared, so the placement is what distinguishes the
             // three — which is the whole reason position is excluded from the

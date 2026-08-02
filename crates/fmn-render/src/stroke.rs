@@ -886,7 +886,9 @@ mod tests {
     }
 
     fn segs_of(path: &QuadPath) -> Vec<Segment> {
-        compile_shape(shape_digest(path.points()), path, Hint::General, 0).1
+        compile_shape(shape_digest(path.points()), path, Hint::General, 0)
+            .expect("fixture fits retained table widths")
+            .1
     }
 
     /// Own the prepared-segment backing for a [`PreparedStroke`] view.
@@ -1295,7 +1297,8 @@ mod tests {
         path.start_new_path([-20.0, 40.0, 0.0]);
         path.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         path.add_line_to([20.0, 40.0, 0.0], false).unwrap();
-        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0);
+        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         let style = Style {
             joint_type: JointType::Miter,
             ..flat_stroke_style(2000.0)
@@ -1363,7 +1366,8 @@ mod tests {
             .unwrap();
         path.add_quadratic_bezier_curve_to([24.0, -2.0 + 1e-12, 0.0], [30.0, -2.0, 0.0], false)
             .unwrap();
-        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0);
+        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         let translate = [13.0, -9.0];
 
         for map in [
@@ -1528,7 +1532,8 @@ mod tests {
         p.start_new_path([-20.0, 0.0, 0.0]);
         p.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         p.add_line_to([0.0, 20.0, 0.0], false).unwrap();
-        let (shape, segs) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0);
+        let (shape, segs) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         (segs, shape.subpath_starts)
     }
 
@@ -1726,7 +1731,8 @@ mod tests {
         p.start_new_path([-20.0, 0.0, 0.0]);
         p.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         p.add_line_to([-20.0, 0.0, 0.0], true).unwrap();
-        let (shape, segs) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0);
+        let (shape, segs) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         let map = unit();
         let style = Style {
             joint_type: JointType::Miter,
@@ -1778,7 +1784,8 @@ mod tests {
         p.add_line_to([0.0, 0.0, 0.0], false).unwrap();
         p.add_line_to([20.0 * turn.cos(), 20.0 * turn.sin(), 0.0], false)
             .unwrap();
-        let (shape, segs) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0);
+        let (shape, segs) = compile_shape(shape_digest(p.points()), &p, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         let style = Style {
             joint_type: JointType::Miter,
             ..flat_stroke_style(600.0)
@@ -1800,7 +1807,8 @@ mod tests {
         smooth.start_new_path([0.0, 0.0, 0.0]);
         smooth.add_line_to([10.0, 0.0, 0.0], false).unwrap();
         smooth.add_line_to([20.0, 0.0, 0.0], false).unwrap();
-        let (sh, sg) = compile_shape(shape_digest(smooth.points()), &smooth, Hint::General, 0);
+        let (sh, sg) = compile_shape(shape_digest(smooth.points()), &smooth, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         let style = Style {
             joint_type: JointType::Miter,
             ..flat_stroke_style(400.0)
@@ -1818,7 +1826,8 @@ mod tests {
         tri.add_line_to([20.0, 0.0, 0.0], false).unwrap();
         tri.add_line_to([10.0, 16.0, 0.0], false).unwrap();
         tri.add_line_to([0.0, 0.0, 0.0], false).unwrap();
-        let (sh, sg) = compile_shape(shape_digest(tri.points()), &tri, Hint::General, 0);
+        let (sh, sg) = compile_shape(shape_digest(tri.points()), &tri, Hint::General, 0)
+            .expect("fixture fits retained table widths");
         assert_eq!(sg.len(), 3);
         assert_eq!(
             join_wedges(&sg, &sh.subpath_starts, &style, unit(), [0.0, 0.0]).len(),
