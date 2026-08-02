@@ -593,13 +593,6 @@ impl MonoTable {
         let segments = plan.segments();
         check_shape_count(shapes.len())?;
 
-        let mut layouts = Vec::new();
-        layouts
-            .try_reserve_exact(shapes.len())
-            .map_err(|_| MonoTableError::AllocationFailed {
-                resource: "monotone shape layouts",
-                requested: shapes.len(),
-            })?;
         let mut total_pieces = 0usize;
         let mut max_subpath_segments = 0usize;
         for shape in shapes {
@@ -609,7 +602,6 @@ impl MonoTable {
             let layout = Self::layout_for_segments(own, &shape.subpath_starts, map)?;
             total_pieces = checked_count_add("monotone pieces", total_pieces, layout.pieces)?;
             max_subpath_segments = max_subpath_segments.max(layout.max_subpath_segments);
-            layouts.push(layout);
         }
         check_piece_count(total_pieces, limits)?;
         check_table_bytes(logical_table_bytes(total_pieces, shapes.len())?, limits)?;
@@ -636,7 +628,7 @@ impl MonoTable {
                 requested: max_subpath_segments,
             })?;
 
-        for (shape, layout) in shapes.iter().zip(layouts) {
+        for shape in shapes {
             let first =
                 u32::try_from(pieces.len()).map_err(|_| MonoTableError::IndexCapacityExceeded {
                     resource: "monotone pieces",
@@ -645,6 +637,7 @@ impl MonoTable {
             let lo = (shape.first_segment as usize).min(segments.len());
             let hi = (lo + shape.segment_count as usize).min(segments.len());
             let own = &segments[lo..hi];
+            let layout = Self::layout_for_segments(own, &shape.subpath_starts, map)?;
             // §10.2 fills each *subpath* as if closed, so the pieces are grouped
             // by subpath and each group gets its closing chord. The boundaries
             // come from `Shape::subpath_starts` rather than from anchor
@@ -3602,6 +3595,140 @@ mod tests {
         ));
         assert_eq!(plan.geometry_identity(), plan_geometry);
         assert_eq!(table.pieces(), pieces_before);
+
+        let mut changed_stage = fmn_mobject::Stage::new();
+        let changed_curve = changed_stage.add(fmn_mobject::Mobject::from_points(&[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ]));
+        changed_stage
+            .add_to_scene(changed_curve)
+            .expect("live changed curve");
+        let mut changed_plan = RenderPlan::new();
+        changed_plan
+            .sync(&changed_stage, 0)
+            .expect("valid changed plan");
+        let error = MonoTable::build_with_limits(
+            &changed_plan,
+            unit(),
+            MonoTableLimits {
+                max_pieces: 0,
+                ..exact
+            },
+        )
+        .expect_err("the changed table must refuse before replacing the old artifact");
+        assert!(matches!(
+            error,
+            MonoTableError::LimitExceeded {
+                resource: "monotone pieces",
+                limit: 0,
+                requested: 2,
+            }
+        ));
+        assert!(!table.matches_plan(&changed_plan));
+        assert_eq!(table.pieces(), pieces_before);
+    }
+
+    #[test]
+    fn monotone_table_absolute_width_and_size_overflow_are_typed() {
+        if let Ok(one_over_u32) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(
+                check_piece_count(
+                    one_over_u32,
+                    MonoTableLimits {
+                        max_pieces: usize::MAX,
+                        max_table_bytes: usize::MAX,
+                    },
+                ),
+                Err(MonoTableError::IndexCapacityExceeded {
+                    resource: "monotone pieces",
+                    requested: one_over_u32,
+                })
+            );
+            assert_eq!(
+                check_shape_count(one_over_u32),
+                Err(MonoTableError::IndexCapacityExceeded {
+                    resource: "monotone shape ranges",
+                    requested: one_over_u32,
+                })
+            );
+        }
+
+        let overflowing_pieces = usize::MAX / std::mem::size_of::<MonoPiece>() + 1;
+        assert_eq!(
+            logical_table_bytes(overflowing_pieces, 0),
+            Err(MonoTableError::SizeOverflow {
+                resource: "monotone table bytes",
+            })
+        );
+        assert_eq!(
+            checked_count_add("monotone pieces", usize::MAX, 1),
+            Err(MonoTableError::SizeOverflow {
+                resource: "monotone pieces",
+            })
+        );
+    }
+
+    #[test]
+    fn default_monotone_limits_cover_the_default_retained_plan() {
+        let retained = crate::RenderPlanLimits::default();
+        let monotone = MonoTableLimits::default();
+        let worst_piece_count = retained
+            .max_retained_segments
+            .checked_mul(4)
+            .expect("default segment ceiling has a four-piece bound");
+        assert!(u64::try_from(monotone.max_pieces).expect("usize fits u64") >= worst_piece_count);
+        let piece_bytes =
+            u64::try_from(std::mem::size_of::<MonoPiece>()).expect("row size fits u64");
+        let range_bytes =
+            u64::try_from(std::mem::size_of::<(u32, u32)>()).expect("range size fits u64");
+        let worst_table_bytes = worst_piece_count
+            .checked_mul(piece_bytes)
+            .and_then(|bytes| {
+                retained
+                    .max_retained_shapes
+                    .checked_mul(range_bytes)
+                    .and_then(|ranges| bytes.checked_add(ranges))
+            })
+            .expect("default logical table byte bound");
+        assert!(
+            u64::try_from(monotone.max_table_bytes).expect("usize fits u64") >= worst_table_bytes
+        );
+    }
+
+    #[test]
+    fn frame_local_piece_refusal_precedes_pool_mutation() {
+        let plan = doubly_turning_curve_plan();
+        let table = MonoTable::build(&plan, unit()).expect("bounded seed table");
+        let shape = &plan.shapes().shapes()[0];
+        let mut pieces = crate::arena::Pool::default();
+        pieces.put(table.pieces()[0]);
+        let before = pieces.to_vec();
+        let mut curves = crate::arena::Pool::default();
+
+        let error = MonoTable::pieces_for_segments_into(
+            &mut pieces,
+            &mut curves,
+            plan.segments(),
+            &shape.subpath_starts,
+            unit(),
+            MonoTableLimits {
+                max_pieces: 4,
+                max_table_bytes: usize::MAX,
+            },
+        )
+        .expect_err("one retained row plus four derived rows exceeds the ceiling");
+        assert_eq!(
+            error,
+            MonoTableError::LimitExceeded {
+                resource: "monotone pieces",
+                limit: 4,
+                requested: 5,
+            }
+        );
+        assert_eq!(&*pieces, before);
+        assert!(curves.is_empty());
     }
 
     // ------------------------------------------ perspective / rational pieces
