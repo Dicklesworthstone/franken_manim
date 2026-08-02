@@ -14,7 +14,8 @@
 //! crossfade. `dark_shift` is deliberately absent from [`finalize_color`].
 
 use std::collections::TryReserveError;
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, PoisonError};
 
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_core::types::Vec3;
@@ -1186,6 +1187,7 @@ pub struct ThreeDJob<'a> {
     sample_grid: u32,
     camera_revision: u64,
     preparation_bytes: u64,
+    scratch_pool: TileScratchPool,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -1232,6 +1234,7 @@ impl<'a> ThreeDJob<'a> {
             sample_grid,
             camera_revision: camera.revision(),
             preparation_bytes: budget.working_bytes,
+            scratch_pool: TileScratchPool::new(),
         })
     }
 
@@ -1336,32 +1339,31 @@ impl<'a> ThreeDJob<'a> {
         let band_bytes = stride
             .checked_mul(scratch_height)
             .ok_or(FrameError::TooLarge)?;
+        let workers = threads.max(1);
+        self.scratch_pool.begin_frame();
+        self.scratch_pool
+            .prepare(scratch_pixels, self.sample_grid, workers)?;
         let plane = destination.plane_mut(0);
-        let mut bands: Vec<(usize, &mut [u8])> = plane.chunks_mut(band_bytes).enumerate().collect();
 
-        if threads <= 1 {
-            let mut scratch = TileScratch::new(scratch_pixels, self.sample_grid)?;
-            for (band, bytes) in bands {
+        if workers == 1 {
+            let mut scratch = self.scratch_pool.checkout();
+            for (band, bytes) in plane.chunks_mut(band_bytes).enumerate() {
                 self.render_band(&mut scratch, band, bytes, stride);
             }
             return Ok(());
         }
 
-        let mut scratches = Vec::new();
-        scratches
-            .try_reserve_exact(threads)
-            .map_err(|_| FrameError::TooLarge)?;
-        for _ in 0..threads {
-            scratches.push(TileScratch::new(scratch_pixels, self.sample_grid)?);
-        }
-        bands.reverse();
-        let queue = Mutex::new(bands);
+        // `chunks_mut` proves the queued bands are write-disjoint. The
+        // iterator itself is the queue, so no frame-local vector of borrowed
+        // slices is materialized.
+        let queue = Mutex::new(plane.chunks_mut(band_bytes).enumerate());
         std::thread::scope(|scope| {
             let queue = &queue;
-            for mut scratch in scratches {
+            for _ in 0..workers {
                 scope.spawn(move || {
+                    let mut scratch = self.scratch_pool.checkout();
                     loop {
-                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
+                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
                         let Some((band, bytes)) = next else { break };
                         self.render_band(&mut scratch, band, bytes, stride);
                     }
@@ -3107,6 +3109,145 @@ fn source_over_premul(source: PremulRgba, destination: PremulRgba) -> PremulRgba
     }
 }
 
+struct TileScratchPoolState {
+    idle: Vec<TileScratch>,
+    slots: usize,
+}
+
+struct TileScratchPool {
+    state: Mutex<TileScratchPoolState>,
+    available: Condvar,
+    heap_allocs: AtomicU64,
+}
+
+impl std::fmt::Debug for TileScratchPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TileScratchPool")
+            .field("slots", &self.slots())
+            .field("heap_allocs", &self.heap_allocs())
+            .finish()
+    }
+}
+
+impl TileScratchPool {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(TileScratchPoolState {
+                idle: Vec::new(),
+                slots: 0,
+            }),
+            available: Condvar::new(),
+            heap_allocs: AtomicU64::new(0),
+        }
+    }
+
+    fn begin_frame(&self) {
+        self.heap_allocs.store(0, Ordering::Relaxed);
+    }
+
+    fn heap_allocs(&self) -> u64 {
+        self.heap_allocs.load(Ordering::Relaxed)
+    }
+
+    fn slots(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .slots
+    }
+
+    fn prepare(
+        &self,
+        max_pixels: usize,
+        sample_grid: u32,
+        workers: usize,
+    ) -> Result<(), FrameError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let additional = workers.saturating_sub(state.slots);
+        if additional == 0 {
+            return Ok(());
+        }
+        let required_capacity = state
+            .slots
+            .checked_add(additional)
+            .ok_or(FrameError::TooLarge)?;
+        if state.idle.capacity() < required_capacity {
+            let reserve = required_capacity
+                .checked_sub(state.idle.len())
+                .ok_or(FrameError::TooLarge)?;
+            state
+                .idle
+                .try_reserve_exact(reserve)
+                .map_err(|_| FrameError::TooLarge)?;
+            self.heap_allocs.fetch_add(1, Ordering::Relaxed);
+        }
+        for _ in 0..additional {
+            let scratch = TileScratch::new(max_pixels, sample_grid)?;
+            state.idle.push(scratch);
+            state.slots += 1;
+            self.heap_allocs
+                .fetch_add(TileScratch::HEAP_ALLOCATIONS, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn checkout(&self) -> PooledTileScratch<'_> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(scratch) = state.idle.pop() {
+                return PooledTileScratch {
+                    pool: self,
+                    scratch: Some(scratch),
+                };
+            }
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+struct PooledTileScratch<'a> {
+    pool: &'a TileScratchPool,
+    scratch: Option<TileScratch>,
+}
+
+impl std::ops::Deref for PooledTileScratch<'_> {
+    type Target = TileScratch;
+
+    fn deref(&self) -> &Self::Target {
+        self.scratch
+            .as_ref()
+            .expect("checked-out 3D scratch is populated")
+    }
+}
+
+impl std::ops::DerefMut for PooledTileScratch<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.scratch
+            .as_mut()
+            .expect("checked-out 3D scratch is populated")
+    }
+}
+
+impl Drop for PooledTileScratch<'_> {
+    fn drop(&mut self) {
+        if let Some(scratch) = self.scratch.take() {
+            let mut state = self
+                .pool
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            debug_assert!(state.idle.len() < state.slots);
+            debug_assert!(state.idle.capacity() >= state.slots);
+            state.idle.push(scratch);
+            drop(state);
+            self.pool.available.notify_one();
+        }
+    }
+}
+
 struct TileScratch {
     max_pixels: usize,
     sample_grid: u32,
@@ -3126,6 +3267,8 @@ fn scratch_buffer<T: Clone>(len: usize, value: T) -> Result<Vec<T>, FrameError> 
 }
 
 impl TileScratch {
+    const HEAP_ALLOCATIONS: u64 = 3;
+
     fn new(max_pixels: usize, sample_grid: u32) -> Result<Self, FrameError> {
         let sample_edge = usize::try_from(sample_grid).map_err(|_| FrameError::TooLarge)?;
         let samples_per_pixel = sample_edge
@@ -3865,6 +4008,49 @@ mod tests {
         let vector = compiled_vector(&job);
         assert!(vector.curves.is_empty());
         assert!(vector.fill.is_empty());
+    }
+
+    #[test]
+    fn three_d_worker_scratch_is_warmed_once_and_reused() {
+        let camera = camera();
+        let dot = TrueDotDraw::new([0.0; 3], 0.4, color("#FFFFFF", 1.0));
+        let draws = [ThreeDDraw::TrueDot(dot)];
+        let job = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("prepared dot");
+
+        let mut warm = FrameBuffer::new(job.layout().expect("layout"));
+        job.render_into(4, &mut warm).expect("four-worker warmup");
+        assert!(job.scratch_pool.heap_allocs() > 0);
+        assert_eq!(job.scratch_pool.slots(), 4);
+        let expected = warm.plane(0).to_vec();
+
+        for threads in [4, 1] {
+            let mut frame = FrameBuffer::new(job.layout().expect("layout"));
+            job.render_into(threads, &mut frame).expect("steady render");
+            assert_eq!(job.scratch_pool.heap_allocs(), 0);
+            assert_eq!(job.scratch_pool.slots(), 4);
+            assert_eq!(frame.plane(0), expected);
+        }
+
+        let mut grown = FrameBuffer::new(job.layout().expect("layout"));
+        job.render_into(16, &mut grown).expect("larger-team warmup");
+        assert!(job.scratch_pool.heap_allocs() > 0);
+        assert_eq!(job.scratch_pool.slots(), 16);
+        assert_eq!(grown.plane(0), expected);
+
+        let mut steady = FrameBuffer::new(job.layout().expect("layout"));
+        job.render_into(16, &mut steady)
+            .expect("larger team is now steady");
+        assert_eq!(job.scratch_pool.heap_allocs(), 0);
+        assert_eq!(job.scratch_pool.slots(), 16);
+        assert_eq!(steady.plane(0), expected);
+    }
+
+    #[test]
+    fn three_d_scratch_pool_refuses_an_unrepresentable_team_atomically() {
+        let pool = TileScratchPool::new();
+        assert_eq!(pool.prepare(1, 1, usize::MAX), Err(FrameError::TooLarge));
+        assert_eq!(pool.slots(), 0);
+        assert_eq!(pool.heap_allocs(), 0);
     }
 
     #[test]
