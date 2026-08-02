@@ -89,6 +89,11 @@ impl CompletionGate {
     }
 
     fn complete(&self, sequence: u64, cancellation: &CancellationToken) {
+        // `started` participates in the condition-variable predicate below, so
+        // publish its transition while holding the mutex that `wait` releases.
+        // Otherwise the final starter can notify between another worker's
+        // predicate check and sleep, leaving every worker parked indefinitely.
+        let mut next = self.next.lock().expect("completion gate is not poisoned");
         {
             self.started
                 .lock()
@@ -96,7 +101,6 @@ impl CompletionGate {
                 .insert(sequence);
         }
         self.changed.notify_all();
-        let mut next = self.next.lock().expect("completion gate is not poisoned");
         while !cancellation.is_cancelled()
             && (self
                 .started
