@@ -125,8 +125,8 @@ impl TileKey {
         {
             return None;
         }
-        let draws = binning.tile(tile);
-        let flags = binning.tile_flags(tile);
+        let draws = binning.tile(tile)?;
+        let flags = binning.tile_flags(tile)?;
         let instances = plan.shapes().instances();
 
         let mut commands = Mixer::new();
@@ -299,7 +299,10 @@ impl<T> TileCache<T> {
         if tile >= tile_count {
             return Err(TilePlanError { tile, tile_count });
         }
-        if binning.tile(tile).is_empty() {
+        let Some(draws) = binning.tile(tile) else {
+            return Err(TilePlanError { tile, tile_count });
+        };
+        if draws.is_empty() {
             // An empty tile is not a cache entry: it has no contents to reuse,
             // and keeping one would let a stale payload outlive the commands
             // that produced it.
@@ -468,8 +471,8 @@ mod tests {
             return None;
         }
 
-        let draws = binning.tile(tile);
-        let flags = binning.tile_flags(tile);
+        let draws = binning.tile(tile)?;
+        let flags = binning.tile_flags(tile)?;
         let instances = plan.shapes().instances();
         let command_capacity = draws
             .len()
@@ -910,12 +913,17 @@ mod tests {
             .expect("bounded test binning");
         let tile = (0..binning.tile_count())
             .find(|&candidate| {
-                let flags = binning.tile_flags(candidate);
-                binning.tile(candidate).len() >= 2 && flags.iter().any(|&flag| flag != flags[0])
+                let Some(draws) = binning.tile(candidate) else {
+                    return false;
+                };
+                let Some(flags) = binning.tile_flags(candidate) else {
+                    return false;
+                };
+                draws.len() >= 2 && flags.iter().any(|&flag| flag != flags[0])
             })
             .expect("overlap with distinct command classes");
 
-        let draws = binning.tile(tile);
+        let draws = binning.tile(tile).expect("selected tile is in range");
         let instances = plan.shapes().instances();
         let first = instances[draws[0] as usize];
         let second = instances[draws[1] as usize];

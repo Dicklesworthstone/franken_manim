@@ -1845,8 +1845,12 @@ impl<'a> FrameJob<'a> {
     /// can never downgrade a conservative edge classification to an interior
     /// promise.
     fn initial_tile_class(&self, tile: usize) -> CoverageClass {
-        let draws = self.binning.tile(tile);
-        let flags = self.binning.tile_flags(tile);
+        let Some(draws) = self.binning.tile(tile) else {
+            return CoverageClass::Empty;
+        };
+        let Some(flags) = self.binning.tile_flags(tile) else {
+            return CoverageClass::Empty;
+        };
         let mut visible = false;
         let mut edge = false;
         for (k, &d) in draws.iter().enumerate() {
@@ -1882,8 +1886,12 @@ impl<'a> FrameJob<'a> {
         x_hi: u32,
         classify: bool,
     ) {
-        let draws = self.binning.tile(tile);
-        let flags = self.binning.tile_flags(tile);
+        let Some(draws) = self.binning.tile(tile) else {
+            return;
+        };
+        let Some(flags) = self.binning.tile_flags(tile) else {
+            return;
+        };
         for (k, &d) in draws.iter().enumerate() {
             // `d` is an instance index, and `draws` is indexed by instance
             // index. A `None` is an instance with no pass; an out-of-range index
@@ -2115,8 +2123,8 @@ impl<'a> FrameJob<'a> {
         samples: u32,
     ) -> K::Pixel {
         let samples = samples.max(1);
-        let draws = self.binning.tile(tile);
-        let flags = self.binning.tile_flags(tile);
+        let draws = self.binning.tile(tile).unwrap_or_default();
+        let flags = self.binning.tile_flags(tile).unwrap_or_default();
         let mut sum = PremulRgba::TRANSPARENT;
 
         for sample_y in 0..samples {

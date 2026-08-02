@@ -893,15 +893,19 @@ impl Binning {
     }
 
     /// One tile's command run, in painter order.
+    ///
+    /// Returns `None` when `index` is outside the fine grid.
     #[must_use]
-    pub fn tile(&self, index: usize) -> &[u32] {
-        &self.draws[self.offsets[index] as usize..self.offsets[index + 1] as usize]
+    pub fn tile(&self, index: usize) -> Option<&[u32]> {
+        self.draws.get(self.tile_span(index)?)
     }
 
     /// One tile's class words, parallel to [`Binning::tile`].
+    ///
+    /// Returns `None` when `index` is outside the fine grid.
     #[must_use]
-    pub fn tile_flags(&self, index: usize) -> &[u32] {
-        &self.flags[self.offsets[index] as usize..self.offsets[index + 1] as usize]
+    pub fn tile_flags(&self, index: usize) -> Option<&[u32]> {
+        self.flags.get(self.tile_span(index)?)
     }
 
     /// The fine tile containing an in-viewport pixel.
@@ -922,6 +926,13 @@ impl Binning {
             .checked_add(u64::from(tx))?;
         let index = usize::try_from(index).ok()?;
         (index < self.fine.count()).then_some(index)
+    }
+
+    fn tile_span(&self, index: usize) -> Option<std::ops::Range<usize>> {
+        let next = index.checked_add(1)?;
+        let start = usize::try_from(*self.offsets.get(index)?).ok()?;
+        let end = usize::try_from(*self.offsets.get(next)?).ok()?;
+        (start <= end).then_some(start..end)
     }
 
     /// How many macrotiles held anything, out of how many there are.
@@ -1276,6 +1287,16 @@ mod tests {
             .expect("test coordinate is inside the viewport")
     }
 
+    fn tile_run(binning: &Binning, index: usize) -> &[u32] {
+        binning.tile(index).expect("test tile index is in range")
+    }
+
+    fn tile_class_run(binning: &Binning, index: usize) -> &[u32] {
+        binning
+            .tile_flags(index)
+            .expect("test tile index is in range")
+    }
+
     /// A stroked horizontal line whose hull ends exactly on a tile boundary.
     ///
     /// Purpose-built for the expansion test: the *centreline* stops at the
@@ -1574,6 +1595,32 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_tile_runs_are_checked() {
+        let binning = Binning::build(
+            &RenderPlan::new(),
+            viewport(),
+            Tiling::default(),
+            ScreenMap::default(),
+        )
+        .expect("bounded empty-scene binning");
+        let boundary = binning.tile_count();
+        assert_eq!(binning.tile(boundary), None);
+        assert_eq!(binning.tile_flags(boundary), None);
+        assert_eq!(binning.tile(usize::MAX), None);
+        assert_eq!(binning.tile_flags(usize::MAX), None);
+
+        let empty = Binning::build(
+            &RenderPlan::new(),
+            Viewport::default(),
+            Tiling::default(),
+            ScreenMap::default(),
+        )
+        .expect("zero-area viewport has an empty grid");
+        assert_eq!(empty.tile(0), None);
+        assert_eq!(empty.tile_flags(0), None);
+    }
+
+    #[test]
     fn a_stroke_is_binned_to_the_tiles_its_width_reaches() {
         // §10.3's per-draw width expansion, as a test rather than a sentence.
         // The line's hull is the single row y = 64, which lands on a tile
@@ -1594,7 +1641,7 @@ mod tests {
         let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default())
             .expect("bounded test binning");
 
-        let listed = |x: u32, y: u32| !b.tile(tile_at(&b, x, y)).is_empty();
+        let listed = |x: u32, y: u32| !tile_run(&b, tile_at(&b, x, y)).is_empty();
         assert!(listed(64, 64), "the centreline's own tile row is missing");
         assert!(
             listed(64, 63),
@@ -1620,7 +1667,7 @@ mod tests {
         let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default())
             .expect("bounded test binning");
         assert!(
-            !b.tile(tile_at(&b, 64, 47)).is_empty(),
+            !tile_run(&b, tile_at(&b, 64, 47)).is_empty(),
             "the miter-tip tile is absent"
         );
     }
@@ -1639,9 +1686,9 @@ mod tests {
         let b = Binning::build(&plan, viewport(), tiling, ScreenMap::default())
             .expect("bounded test binning");
         // The rect spans x,y in [48, 80]: tiles 3..=5 on each axis and no more.
-        assert!(!b.tile(tile_at(&b, 48, 48)).is_empty());
+        assert!(!tile_run(&b, tile_at(&b, 48, 48)).is_empty());
         assert!(
-            b.tile(tile_at(&b, 32, 64)).is_empty(),
+            tile_run(&b, tile_at(&b, 32, 64)).is_empty(),
             "a fill was padded into a tile its coverage cannot reach"
         );
     }
@@ -1664,7 +1711,7 @@ mod tests {
             !b.draws().is_empty(),
             "a y-flip binned the whole scene out of existence"
         );
-        assert!(!b.tile(tile_at(&b, 64, 64)).is_empty());
+        assert!(!tile_run(&b, tile_at(&b, 64, 64)).is_empty());
     }
 
     #[test]
@@ -1679,7 +1726,7 @@ mod tests {
             .expect("bounded test binning");
         assert!(!b.draws().is_empty());
         for t in 0..b.tile_count() {
-            let run = b.tile(t);
+            let run = tile_run(&b, t);
             assert!(
                 run.windows(2).all(|w| w[0] < w[1]),
                 "tile {t} out of painter order: {run:?}"
@@ -1749,7 +1796,7 @@ mod tests {
         let px = f64::from(x) + 0.5;
         let py = f64::from(y) + 0.5;
         let instances = plan.shapes().instances();
-        b.tile(tile_at(b, x, y))
+        tile_run(b, tile_at(b, x, y))
             .iter()
             .copied()
             .filter(|&d| {
@@ -1859,10 +1906,12 @@ mod tests {
             .expect("bounded test binning");
         // The centre tile is deep inside; a corner tile is not.
         let centre = tile_at(&b, 128, 128);
-        assert_eq!(b.tile_flags(centre), &[CLASS_INTERIOR]);
+        assert_eq!(tile_class_run(&b, centre), &[CLASS_INTERIOR]);
         let corner = tile_at(&b, 30, 30);
         assert!(
-            b.tile_flags(corner).iter().all(|f| *f == CLASS_PARTIAL),
+            tile_class_run(&b, corner)
+                .iter()
+                .all(|f| *f == CLASS_PARTIAL),
             "the edge tile cannot be interior"
         );
     }
@@ -1897,8 +1946,8 @@ mod tests {
     /// Everything from the last opaque full-tile cover onward.
     fn visible_suffix(b: &Binning, plan: &RenderPlan, x: u32, y: u32) -> Vec<u32> {
         let t = tile_at(b, x, y);
-        let run = b.tile(t);
-        let flags = b.tile_flags(t);
+        let run = tile_run(b, t);
+        let flags = tile_class_run(b, t);
         let instances = plan.shapes().instances();
         let mut start = 0;
         for (k, &d) in run.iter().enumerate() {
@@ -1965,15 +2014,15 @@ mod tests {
 
         // The lone rectangle at (40,40) is instance 0 and nothing covers it.
         let lone = tile_at(&before, 40, 40);
-        assert!(before.tile(lone).contains(&0));
+        assert!(tile_run(&before, lone).contains(&0));
         assert!(
-            after.tile(lone).contains(&0),
+            tile_run(&after, lone).contains(&0),
             "an uncovered draw was dropped"
         );
         // Under the big cover, the small one is gone.
         let covered = tile_at(&before, 200, 200);
-        assert!(before.tile(covered).contains(&1));
-        assert!(!after.tile(covered).contains(&1));
+        assert!(tile_run(&before, covered).contains(&1));
+        assert!(!tile_run(&after, covered).contains(&1));
     }
 
     #[test]
@@ -1987,7 +2036,11 @@ mod tests {
             .expect("bounded test binning");
         b.prune_occluded(&plan).expect("matching plan");
         let centre = tile_at(&b, 128, 128);
-        assert_eq!(b.tile(centre), &[1], "only the cover survives, and it does");
+        assert_eq!(
+            tile_run(&b, centre),
+            &[1],
+            "only the cover survives, and it does"
+        );
     }
 
     #[test]
@@ -2082,9 +2135,9 @@ mod tests {
         let b = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded test binning");
         // Dead centre: inside. On the diagonal near the rim: not.
-        assert_eq!(b.tile_flags(tile_at(&b, 128, 128)), &[CLASS_INTERIOR]);
+        assert_eq!(tile_class_run(&b, tile_at(&b, 128, 128)), &[CLASS_INTERIOR]);
         let rim = tile_at(&b, 128 + 96, 128);
-        assert!(b.tile_flags(rim).iter().all(|f| *f == CLASS_PARTIAL));
+        assert!(tile_class_run(&b, rim).iter().all(|f| *f == CLASS_PARTIAL));
     }
 
     #[test]
@@ -2112,10 +2165,10 @@ mod tests {
             .expect("bounded test binning");
         let near = tile_at(&b, 40, 40);
         let far = tile_at(&b, 200, 200);
-        assert_eq!(b.tile(near), &[0], "instance 0 belongs at (40,40)");
-        assert_eq!(b.tile(far), &[1], "instance 1 belongs at (200,200)");
+        assert_eq!(tile_run(&b, near), &[0], "instance 0 belongs at (40,40)");
+        assert_eq!(tile_run(&b, far), &[1], "instance 1 belongs at (200,200)");
         assert!(
-            !b.tile(near).contains(&1) && !b.tile(far).contains(&0),
+            !tile_run(&b, near).contains(&1) && !tile_run(&b, far).contains(&0),
             "neither may bin at the other's position"
         );
     }

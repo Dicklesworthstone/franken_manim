@@ -595,7 +595,12 @@ impl DebugOverlaySnapshot {
                 let y0 = y
                     .checked_mul(tile)
                     .ok_or(InspectError::OverlayGeometryOverflow)?;
-                let flags = binning.tile_flags(index);
+                let flags = binning
+                    .tile_flags(index)
+                    .ok_or(InspectError::BinningViewportMismatch)?;
+                let draws = binning
+                    .tile(index)
+                    .ok_or(InspectError::BinningViewportMismatch)?;
                 tiles.push(TileOverlay {
                     index,
                     rect: [
@@ -604,7 +609,7 @@ impl DebugOverlaySnapshot {
                         x0.saturating_add(tile).min(viewport.width),
                         y0.saturating_add(tile).min(viewport.height),
                     ],
-                    draws: binning.tile(index).len(),
+                    draws: draws.len(),
                     partial: flags.iter().filter(|flag| **flag == CLASS_PARTIAL).count(),
                     interior: flags.iter().filter(|flag| **flag == CLASS_INTERIOR).count(),
                 });
