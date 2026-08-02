@@ -360,7 +360,7 @@ macro_rules! composite_common {
             if self
                 .animations
                 .iter()
-                .all(|a| a.effect_signature() == AnimationSignature::Pure)
+                .all(|animation| matches!(animation.effect_signature(), AnimationSignature::Pure))
             {
                 AnimationSignature::Pure
             } else {
