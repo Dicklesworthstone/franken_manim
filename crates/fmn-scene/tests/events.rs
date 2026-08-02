@@ -712,6 +712,82 @@ fn top_level_selection_transforms_a_shared_descendant_once() {
 }
 
 #[test]
+fn hierarchy_deselection_preserves_marks_from_the_remaining_parent() {
+    let mut scene = Scene::default();
+    let parent = scene.stage_mut().add(rectangle(
+        [-2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    let child = scene.stage_mut().add(rectangle(
+        [2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    scene.stage_mut().attach(parent, child).unwrap();
+    scene.stage_mut().add_to_scene(parent).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::MousePress {
+            point: [2.0, 0.0, 0.0],
+            button: MouseButton::Left,
+            modifiers: Modifiers::CONTROL,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 3);
+    assert_eq!(interactive.selection(), vec![parent]);
+    assert!(interactive.stage().is_animating(parent));
+    assert!(
+        interactive.stage().is_animating(child),
+        "the selected parent's family must remain marked"
+    );
+}
+
+#[test]
+fn root_deselection_preserves_marks_on_a_shared_descendant() {
+    let mut scene = Scene::default();
+    let left = scene.stage_mut().add(Mobject::new());
+    let right = scene.stage_mut().add(Mobject::new());
+    let shared = scene
+        .stage_mut()
+        .add(rectangle([0.0; 3], Srgb::from_hex("#FFFFFF").unwrap()));
+    scene.stage_mut().attach(left, shared).unwrap();
+    scene.stage_mut().attach(right, shared).unwrap();
+    scene.stage_mut().add_many_to_scene(&[left, right]).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::MousePress {
+            point: [0.0; 3],
+            button: MouseButton::Left,
+            modifiers: Modifiers::CONTROL,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 2);
+    assert_eq!(interactive.selection(), vec![left]);
+    assert!(interactive.stage().is_animating(left));
+    assert!(
+        interactive.stage().is_animating(shared),
+        "the shared member remains covered by the selected root"
+    );
+}
+
+#[test]
 fn clipboard_replacement_and_undo_keep_templates_live_and_bounded() {
     let (mut interactive, selected, _) = scripted_scene();
     let selected_child = interactive.stage_mut().add(Mobject::new());

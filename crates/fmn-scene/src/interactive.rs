@@ -596,6 +596,9 @@ impl InteractionState {
             if let Some(index) = self.selection.iter().position(|selected| *selected == mob) {
                 self.selection.remove(index);
                 stage.set_animating_status(mob, false, true);
+                for &selected in &self.selection {
+                    stage.set_animating_status(selected, true, true);
+                }
             } else {
                 self.add_to_selection(stage, &[mob]);
             }
