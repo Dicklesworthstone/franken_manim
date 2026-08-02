@@ -181,6 +181,7 @@ struct ResizeGesture {
 
 struct UndoState {
     stage: Rc<Snapshot>,
+    selection: Vec<Mob>,
     clipboard: InteractiveClipboard,
 }
 
@@ -389,6 +390,7 @@ impl InteractionState {
     fn save_undo(&mut self, stage: &Stage) {
         self.undo = Some(UndoState {
             stage: Rc::new(stage.snapshot()),
+            selection: self.selection.clone(),
             clipboard: self.clipboard.clone(),
         });
     }
@@ -398,8 +400,10 @@ impl InteractionState {
             return;
         };
         let snapshot = Rc::clone(&undo.stage);
+        let selection = undo.selection.clone();
         let clipboard = undo.clipboard.clone();
         stage.restore(&snapshot);
+        self.selection = selection;
         self.clipboard = clipboard;
         self.prune(stage);
     }

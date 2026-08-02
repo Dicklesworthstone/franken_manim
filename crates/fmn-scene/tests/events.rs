@@ -837,6 +837,53 @@ fn top_level_selection_recolors_a_shared_descendant_once() {
 }
 
 #[test]
+fn undoing_a_group_restores_the_original_selection_and_marks() {
+    let mut scene = Scene::default();
+    let left = scene.stage_mut().add(rectangle(
+        [-2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    let right = scene.stage_mut().add(rectangle(
+        [2.0, 0.0, 0.0],
+        Srgb::from_hex("#FFFFFF").unwrap(),
+    ));
+    scene.stage_mut().add_many_to_scene(&[left, right]).unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('g'),
+            modifiers: Modifiers::CONTROL,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 2);
+    let grouped = interactive.selection();
+    assert_eq!(grouped.len(), 1);
+    let group = grouped[0];
+    assert_ne!(group, left);
+    assert_ne!(group, right);
+
+    interactive
+        .queue_event(EventPayload::KeyPress {
+            key: Key::Character('z'),
+            modifiers: Modifiers::CONTROL,
+        })
+        .unwrap();
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 1);
+
+    assert!(!interactive.stage().contains(group));
+    assert_eq!(interactive.selection(), vec![left, right]);
+    assert!(interactive.stage().is_animating(left));
+    assert!(interactive.stage().is_animating(right));
+}
+
+#[test]
 fn hierarchy_deselection_preserves_marks_from_the_remaining_parent() {
     let mut scene = Scene::default();
     let parent = scene.stage_mut().add(rectangle(
