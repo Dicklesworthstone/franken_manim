@@ -819,6 +819,51 @@ fn shift_sweep_keeps_a_touched_mobject_selected_on_release() {
 }
 
 #[test]
+fn control_resize_can_mirror_selection_through_the_pivot() {
+    let mut scene = Scene::default();
+    let selected = scene
+        .add_mobject(rectangle([0.0; 3], Srgb::from_hex("#FFFFFF").unwrap()))
+        .unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+    for payload in [
+        EventPayload::KeyPress {
+            key: Key::Character('a'),
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::MouseMotion {
+            point: [0.5, 0.0, 0.0],
+            delta: [0.5, 0.0, 0.0],
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseMotion {
+            point: [-0.5, 0.0, 0.0],
+            delta: [-1.0, 0.0, 0.0],
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyRelease {
+            key: Key::Character('t'),
+            modifiers: Modifiers::NONE,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 5);
+    let linear = interactive
+        .stage()
+        .get(selected)
+        .expect("selected mobject remains live")
+        .placement()
+        .linear();
+    assert_eq!(linear[0][0], -1.0);
+    assert_eq!(linear[1][1], 1.0);
+}
+
+#[test]
 fn clipboard_replacement_and_undo_keep_templates_live_and_bounded() {
     let (mut interactive, selected, _) = scripted_scene();
     let selected_child = interactive.stage_mut().add(Mobject::new());

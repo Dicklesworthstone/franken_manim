@@ -471,10 +471,15 @@ impl InteractionState {
                 if reference.abs() <= f64::EPSILON {
                     continue;
                 }
-                let absolute = (component / reference).abs().max(1.0e-6);
-                let incremental = absolute / gesture.last_scale[axis];
+                let ratio = component / reference;
+                let cumulative = if ratio.abs() < 1.0e-6 {
+                    1.0e-6_f64.copysign(ratio)
+                } else {
+                    ratio
+                };
+                let incremental = cumulative / gesture.last_scale[axis];
                 stage.stretch_many_about_point(&self.selection, incremental, axis, gesture.pivot);
-                gesture.last_scale[axis] = absolute;
+                gesture.last_scale[axis] = cumulative;
             }
         } else {
             let reference_norm = norm(gesture.reference);
