@@ -2103,7 +2103,7 @@ pub const GRADIENT_STATIONS: usize = 64;
 /// caller-owned station storage.
 ///
 /// The engine's per-frame path keeps the stations in the frame arena's typed
-/// pools ([`crate::arena`]), so deriving a field allocates nothing once the
+/// pools ([`crate::FrameArena`]), so deriving a field allocates nothing once the
 /// arena is warm (PG-6); tests and the annex backends use plain `Vec`s. The
 /// interpolant is identical either way — only the storage moved.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

@@ -78,7 +78,7 @@
 //! controls took 115.89 µs for translation, 193.51 µs for uniform scale, and
 //! 380.20 µs for a general affine map. Uniform scale was needlessly rerunning
 //! the transcendental-heavy arc-length quadrature even though it cannot change
-//! normalized spans. [`crate::table::retains_normalized_arc_length`] now admits
+//! normalized spans. `retains_normalized_arc_length` now admits
 //! only structurally proven signed-axis similarities; the same uniform-scale
 //! case fell to 140.71–141.89 µs (26.7–27.3% faster), while translation and the
 //! general-affine control stayed effectively unchanged. The governed v3

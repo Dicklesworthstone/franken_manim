@@ -70,7 +70,7 @@
 //!
 //! fm-4wt.3 found that the engine used only the union slab: every pixel inside
 //! that union still ran the cubic nearest-point solve and both arc-length
-//! evaluations for every segment. [`PreparedStroke`] now derives each segment's
+//! evaluations for every segment. `PreparedStroke` now derives each segment's
 //! style/placement-dependent slab and geometry-only total arc length once per
 //! draw. The scalar kernel keeps segment order, rejects only provably
 //! zero-coverage segments, and remains bit-identical to the unculled oracle
