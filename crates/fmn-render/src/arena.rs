@@ -34,6 +34,7 @@ use crate::engine::{Draw, WorkerPool};
 use crate::fill::MonoPiece;
 use crate::stroke::{JoinWedge, PreparedSegment};
 use crate::table::Segment;
+use std::collections::TryReserveError;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -84,11 +85,27 @@ pub(crate) struct PoolRange {
 /// either an allocating vector or a counting bump pool. Two call sites, one
 /// definition: the bit-lock cannot drift between them.
 pub(crate) trait Sink<T> {
+    /// Current number of initialized elements.
+    fn len(&self) -> usize;
+
+    /// Reserve space for an exact preflighted append.
+    fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError>;
+
     /// Append one element.
     fn put(&mut self, value: T);
 }
 
 impl<T> Sink<T> for Vec<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    #[inline]
+    fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        Vec::try_reserve_exact(self, additional)
+    }
+
     #[inline]
     fn put(&mut self, value: T) {
         self.push(value);
@@ -96,6 +113,16 @@ impl<T> Sink<T> for Vec<T> {
 }
 
 impl<T> Sink<T> for Pool<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    #[inline]
+    fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        Pool::try_reserve(self, additional)
+    }
+
     #[inline]
     fn put(&mut self, value: T) {
         Pool::put(self, value);
@@ -141,6 +168,16 @@ impl<T> Deref for Pool<T> {
 }
 
 impl<T> Pool<T> {
+    /// Reserve a preflighted append and account for backing-buffer growth.
+    pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        let capacity = self.buf.capacity();
+        self.buf.try_reserve_exact(additional)?;
+        if self.buf.capacity() != capacity {
+            self.allocs.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Append, counting the growth event if this push forces one.
     pub(crate) fn put(&mut self, value: T) {
         if self.buf.len() == self.buf.capacity() {

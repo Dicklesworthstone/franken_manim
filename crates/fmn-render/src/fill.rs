@@ -310,6 +310,168 @@ pub struct MonoPiece {
 /// dimensionless, so it needs no relation to screen scale.
 const SPLIT_EPS: f64 = 1e-9;
 
+/// Admission limits for one retained or frame-local monotone-piece table.
+///
+/// The default piece ceiling covers the largest default retained segment
+/// table even when every quadratic splits three ways and every segment is its
+/// own open subpath with a closing chord. Callers may provision a larger
+/// table, but the `u32` range representation remains an absolute ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonoTableLimits {
+    /// Maximum total monotone pieces in the destination table.
+    pub max_pieces: usize,
+    /// Maximum logical bytes occupied by pieces and per-shape ranges.
+    pub max_table_bytes: usize,
+}
+
+impl Default for MonoTableLimits {
+    fn default() -> Self {
+        Self {
+            max_pieces: 1 << 22,
+            max_table_bytes: 1 << 28,
+        }
+    }
+}
+
+/// A monotone table could not be represented or admitted without partial
+/// construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonoTableError {
+    /// A declared resource ceiling was exceeded.
+    LimitExceeded {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Configured inclusive ceiling.
+        limit: usize,
+        /// Exact requested amount.
+        requested: usize,
+    },
+    /// A count cannot be represented by the table's `u32` ranges.
+    IndexCapacityExceeded {
+        /// Stable table or range name.
+        resource: &'static str,
+        /// Exact requested row count.
+        requested: usize,
+    },
+    /// Checked size arithmetic overflowed before allocation.
+    SizeOverflow {
+        /// Stable resource name.
+        resource: &'static str,
+    },
+    /// The allocator refused a fully preflighted reservation.
+    AllocationFailed {
+        /// Stable destination name.
+        resource: &'static str,
+        /// Exact number of additional elements requested.
+        requested: usize,
+    },
+}
+
+impl std::fmt::Display for MonoTableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LimitExceeded {
+                resource,
+                limit,
+                requested,
+            } => write!(
+                f,
+                "{resource} requires {requested}, exceeding the configured limit {limit}"
+            ),
+            Self::IndexCapacityExceeded {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "{resource} requires {requested} rows, exceeding the u32 range representation"
+            ),
+            Self::SizeOverflow { resource } => {
+                write!(f, "{resource} size overflows usize")
+            }
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "could not reserve {requested} additional rows for {resource}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MonoTableError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PieceLayout {
+    pieces: usize,
+    max_subpath_segments: usize,
+}
+
+fn checked_count_add(
+    resource: &'static str,
+    left: usize,
+    right: usize,
+) -> Result<usize, MonoTableError> {
+    left.checked_add(right)
+        .ok_or(MonoTableError::SizeOverflow { resource })
+}
+
+fn check_piece_count(count: usize, limits: MonoTableLimits) -> Result<(), MonoTableError> {
+    if count > limits.max_pieces {
+        return Err(MonoTableError::LimitExceeded {
+            resource: "monotone pieces",
+            limit: limits.max_pieces,
+            requested: count,
+        });
+    }
+    if u32::try_from(count).is_err() {
+        return Err(MonoTableError::IndexCapacityExceeded {
+            resource: "monotone pieces",
+            requested: count,
+        });
+    }
+    Ok(())
+}
+
+fn check_shape_count(count: usize) -> Result<(), MonoTableError> {
+    if u32::try_from(count).is_err() {
+        return Err(MonoTableError::IndexCapacityExceeded {
+            resource: "monotone shape ranges",
+            requested: count,
+        });
+    }
+    Ok(())
+}
+
+fn logical_table_bytes(piece_count: usize, range_count: usize) -> Result<usize, MonoTableError> {
+    let pieces = piece_count
+        .checked_mul(std::mem::size_of::<MonoPiece>())
+        .ok_or(MonoTableError::SizeOverflow {
+            resource: "monotone table bytes",
+        })?;
+    let ranges = range_count
+        .checked_mul(std::mem::size_of::<(u32, u32)>())
+        .ok_or(MonoTableError::SizeOverflow {
+            resource: "monotone table bytes",
+        })?;
+    pieces
+        .checked_add(ranges)
+        .ok_or(MonoTableError::SizeOverflow {
+            resource: "monotone table bytes",
+        })
+}
+
+fn check_table_bytes(bytes: usize, limits: MonoTableLimits) -> Result<(), MonoTableError> {
+    if bytes > limits.max_table_bytes {
+        return Err(MonoTableError::LimitExceeded {
+            resource: "monotone table bytes",
+            limit: limits.max_table_bytes,
+            requested: bytes,
+        });
+    }
+    Ok(())
+}
+
 /// The fill's derived geometry: every compiled shape's segments cut into
 /// doubly-monotone pieces, plus the per-shape ranges.
 ///
@@ -332,27 +494,182 @@ pub struct MonoTable {
 }
 
 impl MonoTable {
-    /// Derive doubly-monotone pieces for one already placed segment run.
-    ///
-    /// The shared table calls this with object-space segments. A non-translation
-    /// instance calls it once while preparing its frame-local draw, after
-    /// applying that instance's affine placement.
-    pub(crate) fn pieces_for_segments(
+    fn layout_for_segments(
         segments: &[Segment],
         subpath_starts: &[u32],
         map: ScreenMap,
-    ) -> Vec<MonoPiece> {
-        let mut pieces = Vec::with_capacity(segments.len() * 2);
-        let mut curves = crate::arena::Pool::default();
-        Self::pieces_for_segments_into(&mut pieces, &mut curves, segments, subpath_starts, map);
-        pieces
+    ) -> Result<PieceLayout, MonoTableError> {
+        let screen = |p: fmn_core::types::Vec3| {
+            [
+                map.origin[0] + p[0] * map.scale,
+                map.origin[1] + p[1] * map.scale,
+            ]
+        };
+        let mut pieces = 0usize;
+        let mut max_subpath_segments = 0usize;
+        for (index, &start) in subpath_starts.iter().enumerate() {
+            let end = subpath_starts
+                .get(index + 1)
+                .map_or(segments.len(), |value| *value as usize);
+            let (lo, hi) = ((start as usize).min(segments.len()), end.min(segments.len()));
+            if lo >= hi {
+                continue;
+            }
+            max_subpath_segments = max_subpath_segments.max(hi - lo);
+            for segment in &segments[lo..hi] {
+                pieces = checked_count_add(
+                    "monotone pieces",
+                    pieces,
+                    monotone_piece_count(
+                        screen(segment.p0),
+                        screen(segment.p1),
+                        screen(segment.p2),
+                    ),
+                )?;
+            }
+            if screen(segments[lo].p0) != screen(segments[hi - 1].p2) {
+                pieces = checked_count_add("monotone pieces", pieces, 1)?;
+            }
+        }
+        Ok(PieceLayout {
+            pieces,
+            max_subpath_segments,
+        })
     }
 
-    /// [`MonoTable::pieces_for_segments`] into caller-owned storage — the
-    /// engine's per-frame path, where `out` is the frame arena's piece pool
-    /// and `curves` its per-subpath scratch. Identical derivation; only the
-    /// destinations differ.
+    /// Derive one already placed segment run into caller-owned storage.
+    ///
+    /// The engine's per-frame path uses its monotone-piece pool and per-subpath
+    /// scratch. Exact output counts, table bytes and the absolute `u32` range
+    /// width are checked before either destination is reserved or mutated.
     pub(crate) fn pieces_for_segments_into(
+        out: &mut impl crate::arena::Sink<MonoPiece>,
+        curves: &mut crate::arena::Pool<[[f64; 2]; 3]>,
+        segments: &[Segment],
+        subpath_starts: &[u32],
+        map: ScreenMap,
+        limits: MonoTableLimits,
+    ) -> Result<(), MonoTableError> {
+        let layout = Self::layout_for_segments(segments, subpath_starts, map)?;
+        let final_piece_count = checked_count_add("monotone pieces", out.len(), layout.pieces)?;
+        check_piece_count(final_piece_count, limits)?;
+        check_table_bytes(logical_table_bytes(final_piece_count, 0)?, limits)?;
+        out.try_reserve(layout.pieces)
+            .map_err(|_| MonoTableError::AllocationFailed {
+                resource: "monotone pieces",
+                requested: layout.pieces,
+            })?;
+        curves.try_reserve(layout.max_subpath_segments).map_err(|_| {
+            MonoTableError::AllocationFailed {
+                resource: "monotone subpath scratch",
+                requested: layout.max_subpath_segments,
+            }
+        })?;
+
+        Self::append_segments(out, curves, segments, subpath_starts, map);
+        debug_assert_eq!(out.len(), final_piece_count);
+        Ok(())
+    }
+
+    /// Derive the table from a synchronized plan under the default limits.
+    pub fn build(plan: &RenderPlan, map: ScreenMap) -> Result<MonoTable, MonoTableError> {
+        Self::build_with_limits(plan, map, MonoTableLimits::default())
+    }
+
+    /// Derive the table from a synchronized plan under explicit limits.
+    ///
+    /// Every output count and logical byte is computed before any destination
+    /// allocation. Limit and width refusals therefore leave both the plan and
+    /// all previously built artifacts untouched.
+    pub fn build_with_limits(
+        plan: &RenderPlan,
+        map: ScreenMap,
+        limits: MonoTableLimits,
+    ) -> Result<MonoTable, MonoTableError> {
+        let shapes = plan.shapes().shapes();
+        let segments = plan.segments();
+        check_shape_count(shapes.len())?;
+
+        let mut layouts = Vec::new();
+        layouts
+            .try_reserve_exact(shapes.len())
+            .map_err(|_| MonoTableError::AllocationFailed {
+                resource: "monotone shape layouts",
+                requested: shapes.len(),
+            })?;
+        let mut total_pieces = 0usize;
+        let mut max_subpath_segments = 0usize;
+        for shape in shapes {
+            let lo = (shape.first_segment as usize).min(segments.len());
+            let hi = (lo + shape.segment_count as usize).min(segments.len());
+            let own = &segments[lo..hi];
+            let layout = Self::layout_for_segments(own, &shape.subpath_starts, map)?;
+            total_pieces = checked_count_add("monotone pieces", total_pieces, layout.pieces)?;
+            max_subpath_segments = max_subpath_segments.max(layout.max_subpath_segments);
+            layouts.push(layout);
+        }
+        check_piece_count(total_pieces, limits)?;
+        check_table_bytes(logical_table_bytes(total_pieces, shapes.len())?, limits)?;
+
+        let mut pieces = Vec::new();
+        pieces
+            .try_reserve_exact(total_pieces)
+            .map_err(|_| MonoTableError::AllocationFailed {
+                resource: "monotone pieces",
+                requested: total_pieces,
+            })?;
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(shapes.len())
+            .map_err(|_| MonoTableError::AllocationFailed {
+                resource: "monotone shape ranges",
+                requested: shapes.len(),
+            })?;
+        let mut curves = crate::arena::Pool::default();
+        curves.try_reserve(max_subpath_segments).map_err(|_| {
+            MonoTableError::AllocationFailed {
+                resource: "monotone subpath scratch",
+                requested: max_subpath_segments,
+            }
+        })?;
+
+        for (shape, layout) in shapes.iter().zip(layouts) {
+            let first = u32::try_from(pieces.len()).map_err(|_| {
+                MonoTableError::IndexCapacityExceeded {
+                    resource: "monotone pieces",
+                    requested: pieces.len(),
+                }
+            })?;
+            let lo = (shape.first_segment as usize).min(segments.len());
+            let hi = (lo + shape.segment_count as usize).min(segments.len());
+            let own = &segments[lo..hi];
+            // §10.2 fills each *subpath* as if closed, so the pieces are grouped
+            // by subpath and each group gets its closing chord. The boundaries
+            // come from `Shape::subpath_starts` rather than from anchor
+            // continuity: reconstructing them is almost right and silently wrong
+            // when one subpath happens to begin exactly where the previous one
+            // ended.
+            let start = pieces.len();
+            Self::append_segments(&mut pieces, &mut curves, own, &shape.subpath_starts, map);
+            debug_assert_eq!(pieces.len() - start, layout.pieces);
+            let count = u32::try_from(pieces.len() - start).map_err(|_| {
+                MonoTableError::IndexCapacityExceeded {
+                    resource: "monotone shape range",
+                    requested: pieces.len() - start,
+                }
+            })?;
+            ranges.push((first, count));
+        }
+        debug_assert_eq!(pieces.len(), total_pieces);
+        Ok(MonoTable {
+            pieces,
+            ranges,
+            map,
+            geometry: plan.geometry_identity(),
+        })
+    }
+
+    fn append_segments(
         out: &mut impl crate::arena::Sink<MonoPiece>,
         curves: &mut crate::arena::Pool<[[f64; 2]; 3]>,
         segments: &[Segment],
@@ -368,9 +685,8 @@ impl MonoTable {
         for (index, &start) in subpath_starts.iter().enumerate() {
             let end = subpath_starts
                 .get(index + 1)
-                .copied()
-                .unwrap_or(segments.len() as u32);
-            let (lo, hi) = (start as usize, (end as usize).min(segments.len()));
+                .map_or(segments.len(), |value| *value as usize);
+            let (lo, hi) = ((start as usize).min(segments.len()), end.min(segments.len()));
             if lo >= hi {
                 continue;
             }
@@ -379,35 +695,6 @@ impl MonoTable {
                 curves.put([screen(segment.p0), screen(segment.p1), screen(segment.p2)]);
             }
             append_subpath(curves, out);
-        }
-    }
-
-    /// Derive the table from a synchronized plan under a screen mapping.
-    #[must_use]
-    pub fn build(plan: &RenderPlan, map: ScreenMap) -> MonoTable {
-        let shapes = plan.shapes().shapes();
-        let segments = plan.segments();
-        let mut pieces = Vec::with_capacity(segments.len() * 2);
-        let mut ranges = Vec::with_capacity(shapes.len());
-        for shape in shapes {
-            let first = pieces.len() as u32;
-            let lo = (shape.first_segment as usize).min(segments.len());
-            let hi = (lo + shape.segment_count as usize).min(segments.len());
-            let own = &segments[lo..hi];
-            // §10.2 fills each *subpath* as if closed, so the pieces are grouped
-            // by subpath and each group gets its closing chord. The boundaries
-            // come from `Shape::subpath_starts` rather than from anchor
-            // continuity: reconstructing them is almost right and silently wrong
-            // when one subpath happens to begin exactly where the previous one
-            // ended.
-            pieces.extend(Self::pieces_for_segments(own, &shape.subpath_starts, map));
-            ranges.push((first, pieces.len() as u32 - first));
-        }
-        MonoTable {
-            pieces,
-            ranges,
-            map,
-            geometry: plan.geometry_identity(),
         }
     }
 
@@ -499,6 +786,44 @@ fn extremum(v0: f64, v1: f64, v2: f64) -> Option<f64> {
     }
 }
 
+/// Original-parameter split times that survive the endpoint/duplicate guard.
+///
+/// Counting and materialization share this authority so a successful
+/// preflight reserves exactly the rows the builder will append.
+fn monotone_split_times(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2]) -> ([f64; 2], usize) {
+    let mut candidates = [0.0f64; 2];
+    let mut candidate_count = 0;
+    if let Some(t) = extremum(p0[1], p1[1], p2[1]) {
+        candidates[candidate_count] = t;
+        candidate_count += 1;
+    }
+    if let Some(t) = extremum(p0[0], p1[0], p2[0]) {
+        candidates[candidate_count] = t;
+        candidate_count += 1;
+    }
+    if candidate_count == 2 && candidates[0] > candidates[1] {
+        candidates.swap(0, 1);
+    }
+
+    let mut accepted = [0.0f64; 2];
+    let mut accepted_count = 0;
+    let mut t_base = 0.0;
+    for &t in candidates.iter().take(candidate_count) {
+        let local = (t - t_base) / (1.0 - t_base);
+        if !(local > SPLIT_EPS && local < 1.0 - SPLIT_EPS) {
+            continue;
+        }
+        accepted[accepted_count] = t;
+        accepted_count += 1;
+        t_base = t;
+    }
+    (accepted, accepted_count)
+}
+
+fn monotone_piece_count(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2]) -> usize {
+    monotone_split_times(p0, p1, p2).1 + 1
+}
+
 /// Split one subpath's screen-space curves into monotone pieces, **closing it**.
 ///
 /// §10.2 fills a path, and a path's interior is only defined for closed
@@ -542,19 +867,7 @@ fn split_monotone(
     p2: [f64; 2],
     out: &mut impl crate::arena::Sink<MonoPiece>,
 ) {
-    let mut ts = [0.0f64; 2];
-    let mut n = 0;
-    if let Some(t) = extremum(p0[1], p1[1], p2[1]) {
-        ts[n] = t;
-        n += 1;
-    }
-    if let Some(t) = extremum(p0[0], p1[0], p2[0]) {
-        ts[n] = t;
-        n += 1;
-    }
-    if n == 2 && ts[0] > ts[1] {
-        ts.swap(0, 1);
-    }
+    let (ts, n) = monotone_split_times(p0, p1, p2);
 
     // Successive de Casteljau splits, each reparameterized into the remaining
     // right-hand piece.
@@ -562,9 +875,7 @@ fn split_monotone(
     let mut t_base = 0.0;
     for &t in ts.iter().take(n) {
         let local = (t - t_base) / (1.0 - t_base);
-        if !(local > SPLIT_EPS && local < 1.0 - SPLIT_EPS) {
-            continue;
-        }
+        debug_assert!(local > SPLIT_EPS && local < 1.0 - SPLIT_EPS);
         let (left, right) = split_at(cur, local);
         out.put(MonoPiece {
             p0: left[0],
@@ -2662,6 +2973,21 @@ mod tests {
         }
     }
 
+    fn doubly_turning_curve_plan() -> RenderPlan {
+        // The x and y extrema are distinct, so the quadratic becomes three
+        // monotone pieces. The open subpath contributes one closing chord.
+        let mut stage = fmn_mobject::Stage::new();
+        let curve = stage.add(fmn_mobject::Mobject::from_points(&[
+            [0.0, 0.0, 0.0],
+            [2.0, 3.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ]));
+        stage.add_to_scene(curve).expect("live curve");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).expect("valid one-curve plan");
+        plan
+    }
+
     fn circle_path(cx: f64, cy: f64, r: f64, n: usize) -> QuadPath {
         let pts = bezier::quadratic_points_for_arc(std::f64::consts::TAU, n).expect("valid arc");
         let placed: Vec<Vec3> = pts
@@ -3198,7 +3524,7 @@ mod tests {
         plan.sync(&stage, 0).expect("valid fill fixture");
         assert_eq!(plan.shapes().shapes().len(), 1, "one interned outline");
 
-        let table = MonoTable::build(&plan, unit());
+        let table = MonoTable::build(&plan, unit()).expect("bounded monotone table");
         assert_eq!(table.len(), 1);
         assert!(!table.pieces_of(0).is_empty());
         assert!(
@@ -3214,6 +3540,64 @@ mod tests {
         let t1 = instance_translation(&insts[1], unit());
         assert!((t1[0] - t0[0] - 4.0).abs() < 1e-12);
         assert!((t1[1] - t0[1]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn monotone_table_piece_and_byte_limits_are_exact_and_atomic() {
+        let plan = doubly_turning_curve_plan();
+        let table_bytes = 4 * std::mem::size_of::<MonoPiece>()
+            + std::mem::size_of::<(u32, u32)>();
+        let exact = MonoTableLimits {
+            max_pieces: 4,
+            max_table_bytes: table_bytes,
+        };
+        let table = MonoTable::build_with_limits(&plan, unit(), exact)
+            .expect("four pieces fit the exact table budget");
+        assert_eq!(table.pieces().len(), 4);
+        assert!(table.matches_plan(&plan));
+
+        let plan_geometry = plan.geometry_identity();
+        let pieces_before = table.pieces().to_vec();
+        let error = MonoTable::build_with_limits(
+            &plan,
+            unit(),
+            MonoTableLimits {
+                max_pieces: 3,
+                ..exact
+            },
+        )
+        .expect_err("one piece below the exact boundary must refuse");
+        assert!(matches!(
+            error,
+            MonoTableError::LimitExceeded {
+                resource: "monotone pieces",
+                limit: 3,
+                requested: 4,
+            }
+        ));
+        assert_eq!(plan.geometry_identity(), plan_geometry);
+        assert_eq!(table.pieces(), pieces_before);
+        assert!(table.matches_plan(&plan));
+
+        let error = MonoTable::build_with_limits(
+            &plan,
+            unit(),
+            MonoTableLimits {
+                max_table_bytes: table_bytes - 1,
+                ..exact
+            },
+        )
+        .expect_err("one byte below the exact boundary must refuse");
+        assert!(matches!(
+            error,
+            MonoTableError::LimitExceeded {
+                resource: "monotone table bytes",
+                limit,
+                requested,
+            } if limit + 1 == requested && requested == table_bytes
+        ));
+        assert_eq!(plan.geometry_identity(), plan_geometry);
+        assert_eq!(table.pieces(), pieces_before);
     }
 
     // ------------------------------------------ perspective / rational pieces

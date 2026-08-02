@@ -962,6 +962,9 @@ pub enum FrameJobError {
     MonoMapMismatch,
     /// The monotone table's shape-indexed geometry is stale.
     MonoPlanMismatch,
+    /// Frame-local affine geometry exceeded a monotone-table resource or
+    /// representation boundary.
+    MonoTable(fill::MonoTableError),
     /// The tile command lists were scattered under another screen mapping.
     BinningMapMismatch,
     /// The tile command lists cover a different exact viewport.
@@ -1000,6 +1003,7 @@ impl std::fmt::Display for FrameJobError {
             Self::MonoPlanMismatch => {
                 f.write_str("monotone table geometry does not match the render plan")
             }
+            Self::MonoTable(error) => write!(f, "could not derive frame-local monotone pieces: {error}"),
             Self::BinningMapMismatch => f.write_str("binning screen map does not match the frame"),
             Self::BinningViewportMismatch => {
                 f.write_str("binning viewport does not match the frame")
@@ -1013,7 +1017,14 @@ impl std::fmt::Display for FrameJobError {
     }
 }
 
-impl std::error::Error for FrameJobError {}
+impl std::error::Error for FrameJobError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MonoTable(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// A frame, compiled and ready to rasterize.
 ///
@@ -1369,7 +1380,7 @@ impl<'a> FrameJob<'a> {
             } else {
                 fill::instance_translation(inst, map)
             };
-            let transformed_pieces = transformed_segments.map(|_| {
+            let transformed_pieces = if transformed_segments.is_some() {
                 let start = arena.pieces.len();
                 fill::MonoTable::pieces_for_segments_into(
                     &mut arena.pieces,
@@ -1377,9 +1388,13 @@ impl<'a> FrameJob<'a> {
                     effective_segments,
                     &shape.subpath_starts,
                     map,
-                );
-                arena.pieces.range_from(start)
-            });
+                    fill::MonoTableLimits::default(),
+                )
+                .map_err(FrameJobError::MonoTable)?;
+                Some(arena.pieces.range_from(start))
+            } else {
+                None
+            };
 
             let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
             let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
@@ -2972,7 +2987,7 @@ mod tests {
     fn derive(stage: &Stage, cfg: FrameConfig, tiling: Tiling) -> (RenderPlan, MonoTable, Binning) {
         let mut plan = RenderPlan::new();
         plan.sync(stage, 0).expect("valid engine fixture");
-        let mono = MonoTable::build(&plan, cfg.map);
+        let mono = MonoTable::build(&plan, cfg.map).expect("bounded test monotone table");
         let binning =
             Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded test binning");
         (plan, mono, binning)
@@ -3870,7 +3885,7 @@ mod tests {
         );
 
         let render = |plan: &RenderPlan| {
-            let mono = MonoTable::build(plan, cfg.map);
+            let mono = MonoTable::build(plan, cfg.map).expect("bounded test monotone table");
             let binning = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map)
                 .expect("bounded test binning");
             FrameJob::new(plan, &mono, &binning, cfg)
@@ -4227,7 +4242,8 @@ mod tests {
             origin: [cfg.map.origin[0] + 1.0, cfg.map.origin[1]],
             ..cfg.map
         };
-        let moved_mono = MonoTable::build(&plan, moved_map);
+        let moved_mono =
+            MonoTable::build(&plan, moved_map).expect("bounded moved monotone table");
         assert!(matches!(
             FrameJob::new(&plan, &moved_mono, &binning, cfg),
             Err(FrameJobError::MonoMapMismatch)
