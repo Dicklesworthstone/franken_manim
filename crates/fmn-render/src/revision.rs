@@ -307,6 +307,47 @@ impl Dependency {
     }
 }
 
+const MIX_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const MIX_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Incremental form of [`mix`].
+///
+/// Tile command runs can contain millions of entries. Feeding their words as
+/// they are visited keeps the key's working storage constant without changing
+/// the byte stream, and therefore without changing a single key bit.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Mixer {
+    state: u64,
+}
+
+impl Mixer {
+    /// Begin the same FNV-1a stream used by [`mix`].
+    #[must_use]
+    pub(crate) const fn new() -> Self {
+        Self { state: MIX_OFFSET }
+    }
+
+    /// Append one little-endian `u64` to the stream.
+    pub(crate) fn write_u64(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.state ^= u64::from(byte);
+            self.state = self.state.wrapping_mul(MIX_PRIME);
+        }
+    }
+
+    /// Finish the stream.
+    #[must_use]
+    pub(crate) const fn finish(self) -> u64 {
+        self.state
+    }
+}
+
+impl Default for Mixer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Fold a list of counters into one, order-sensitively.
 ///
 /// Shared with the tile cache (`crate::cache`), which folds the same way for the
@@ -320,16 +361,11 @@ impl Dependency {
 /// the right tool for content addressing (§6.7) and the wrong one for a
 /// per-resource per-frame comparison.
 pub(crate) fn mix(values: &[u64]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = OFFSET;
-    for v in values {
-        for b in v.to_le_bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(PRIME);
-        }
+    let mut mixer = Mixer::new();
+    for &value in values {
+        mixer.write_u64(value);
     }
-    h
+    mixer.finish()
 }
 
 /// The uniforms' contribution to the style axis.
@@ -384,6 +420,38 @@ mod tests {
 
     fn read(stage: &Stage, mob: Mob) -> Revisions {
         Revisions::read(stage, mob).expect("live handle")
+    }
+
+    fn legacy_mix(values: &[u64]) -> u64 {
+        let mut state = 0xcbf2_9ce4_8422_2325_u64;
+        for &value in values {
+            for byte in value.to_le_bytes() {
+                state ^= u64::from(byte);
+                state = state.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn incremental_mixing_preserves_the_existing_key_bits() {
+        let cases: &[&[u64]] = &[
+            &[],
+            &[0],
+            &[u64::MAX],
+            &[1, 2, 3, 4],
+            &[0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 0],
+        ];
+
+        for &values in cases {
+            let expected = legacy_mix(values);
+            let mut incremental = Mixer::new();
+            for &value in values {
+                incremental.write_u64(value);
+            }
+            assert_eq!(incremental.finish(), expected, "values={values:?}");
+            assert_eq!(mix(values), expected, "slice adapter drifted");
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@
 
 use crate::bin::{Binning, ScreenMap, Viewport};
 use crate::plan::RenderPlan;
-use crate::revision::mix;
+use crate::revision::{Mixer, mix};
 use std::collections::HashMap;
 
 /// Everything about the output that can change a tile's bytes without changing
@@ -118,7 +118,8 @@ impl TileKey {
         camera: u64,
         output: OutputTransform,
     ) -> Option<TileKey> {
-        if !binning.matches_plan(plan)
+        if tile >= binning.tile_count()
+            || !binning.matches_plan(plan)
             || binning.viewport() != output.viewport
             || binning.map() != output.map
         {
@@ -128,8 +129,8 @@ impl TileKey {
         let flags = binning.tile_flags(tile);
         let instances = plan.shapes().instances();
 
-        let mut commands: Vec<u64> = Vec::with_capacity(draws.len() * 15);
-        let mut revisions: Vec<u64> = Vec::with_capacity(draws.len());
+        let mut commands = Mixer::new();
+        let mut revisions = Mixer::new();
         for (k, &d) in draws.iter().enumerate() {
             let inst = instances.get(d as usize)?;
             if inst.volatile {
@@ -139,16 +140,18 @@ impl TileKey {
             // an object inserted earlier in the scene shifts every later index
             // without changing what this tile draws, and a key that moved for
             // that would defeat reuse on every insertion.
-            commands.push(u64::from(inst.shape));
-            commands.push(u64::from(inst.style));
-            commands.push(u64::from(flags[k]));
-            commands.extend(inst.placement.coefficients().into_iter().map(f64::to_bits));
-            revisions.push(inst.revisions);
+            commands.write_u64(u64::from(inst.shape));
+            commands.write_u64(u64::from(inst.style));
+            commands.write_u64(u64::from(*flags.get(k)?));
+            for coefficient in inst.placement.coefficients() {
+                commands.write_u64(coefficient.to_bits());
+            }
+            revisions.write_u64(inst.revisions);
         }
 
         Some(TileKey {
-            commands: mix(&commands),
-            revisions: mix(&revisions),
+            commands: commands.finish(),
+            revisions: revisions.finish(),
             camera,
             output: output.fold(),
         })
@@ -410,6 +413,56 @@ mod tests {
             mobs.push(mob);
         }
         (stage, mobs)
+    }
+
+    fn legacy_tile_key(
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+    ) -> Option<TileKey> {
+        if tile >= binning.tile_count()
+            || !binning.matches_plan(plan)
+            || binning.viewport() != output.viewport
+            || binning.map() != output.map
+        {
+            return None;
+        }
+
+        let draws = binning.tile(tile);
+        let flags = binning.tile_flags(tile);
+        let instances = plan.shapes().instances();
+        let command_capacity = draws
+            .len()
+            .checked_mul(15)
+            .expect("small legacy-oracle fixture");
+        let mut commands = Vec::with_capacity(command_capacity);
+        let mut revisions = Vec::with_capacity(draws.len());
+        for (index, &draw) in draws.iter().enumerate() {
+            let instance = instances.get(draw as usize)?;
+            if instance.volatile {
+                return None;
+            }
+            commands.push(u64::from(instance.shape));
+            commands.push(u64::from(instance.style));
+            commands.push(u64::from(*flags.get(index)?));
+            commands.extend(
+                instance
+                    .placement
+                    .coefficients()
+                    .into_iter()
+                    .map(f64::to_bits),
+            );
+            revisions.push(instance.revisions);
+        }
+
+        Some(TileKey {
+            commands: mix(&commands),
+            revisions: mix(&revisions),
+            camera,
+            output: output.fold(),
+        })
     }
 
     /// The frame loop, retained: one plan and one cache across frames.
@@ -799,6 +852,45 @@ mod tests {
     }
 
     #[test]
+    fn streaming_a_tile_key_matches_the_legacy_vector_assembly() {
+        let mut stage = Stage::new();
+        for (index, size) in [120.0, 40.0].into_iter().enumerate() {
+            let mob = stage.add(rect_mobject(64.0, 64.0, size, size));
+            if index != 0 {
+                stage.shift(mob, [2.0, -1.0, 0.0]);
+                stage.set_z_index(mob, index as i32, false);
+            }
+            stage.add_to_scene(mob).expect("live");
+        }
+
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 17);
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+        let tile = (0..binning.tile_count())
+            .find(|&candidate| {
+                let flags = binning.tile_flags(candidate);
+                binning.tile(candidate).len() >= 2 && flags.iter().any(|&flag| flag != flags[0])
+            })
+            .expect("overlap with distinct command classes");
+
+        let draws = binning.tile(tile);
+        let instances = plan.shapes().instances();
+        let first = instances[draws[0] as usize];
+        let second = instances[draws[1] as usize];
+        assert_ne!(
+            first.placement.coefficients(),
+            second.placement.coefficients()
+        );
+        assert_ne!(first.revisions, second.revisions);
+
+        assert_eq!(
+            TileKey::build(&binning, &plan, tile, 17, output()),
+            legacy_tile_key(&binning, &plan, tile, 17, output()),
+        );
+    }
+
+    #[test]
     fn stale_binning_is_never_admitted_to_the_tile_cache() {
         let (mut stage, mobs) = scene();
         let mut plan = RenderPlan::new();
@@ -828,6 +920,21 @@ mod tests {
         assert!(
             TileKey::build(&binning, &plan, tile, 0, output()).is_none(),
             "stale command indices must never become reusable cache keys"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_tile_is_not_cacheable() {
+        let (stage, _) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0);
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+
+        assert_eq!(
+            TileKey::build(&binning, &plan, binning.tile_count(), 0, output()),
+            None,
+            "the fallible key builder must reject a tile outside the grid",
         );
     }
 
