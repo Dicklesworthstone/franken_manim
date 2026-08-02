@@ -788,6 +788,37 @@ fn root_deselection_preserves_marks_on_a_shared_descendant() {
 }
 
 #[test]
+fn shift_sweep_keeps_a_touched_mobject_selected_on_release() {
+    let (mut interactive, selected, _) = scripted_scene();
+    for payload in [
+        EventPayload::MouseMotion {
+            point: [-2.0, 0.0, 0.0],
+            delta: [-2.0, 0.0, 0.0],
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('s'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseMotion {
+            point: [-2.0, 0.0, 0.0],
+            delta: [0.0; 3],
+            modifiers: Modifiers::SHIFT,
+        },
+        EventPayload::KeyRelease {
+            key: Key::Character('s'),
+            modifiers: Modifiers::SHIFT,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 4);
+    assert_eq!(interactive.selection(), vec![selected]);
+    assert!(interactive.stage().is_animating(selected));
+}
+
+#[test]
 fn clipboard_replacement_and_undo_keep_templates_live_and_bounded() {
     let (mut interactive, selected, _) = scripted_scene();
     let selected_child = interactive.stage_mut().add(Mobject::new());

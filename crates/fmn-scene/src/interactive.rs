@@ -190,6 +190,7 @@ struct InteractionState {
     select_top_level: bool,
     selection_start: Option<Vec3>,
     selection_current: Vec3,
+    selection_sweeping: bool,
     grab: Option<GrabGesture>,
     resize: Option<ResizeGesture>,
     color_picking: bool,
@@ -207,6 +208,7 @@ impl Default for InteractionState {
             select_top_level: true,
             selection_start: None,
             selection_current: [0.0; 3],
+            selection_sweeping: false,
             grab: None,
             resize: None,
             color_picking: false,
@@ -303,6 +305,7 @@ impl InteractionState {
             Key::Character('s') if modifiers.is_empty() => {
                 self.selection_start = Some(dispatch.mouse_point());
                 self.selection_current = dispatch.mouse_point();
+                self.selection_sweeping = false;
                 self.cursor_visible = true;
             }
             Key::Character('u') => self.clear_selection(stage),
@@ -375,9 +378,11 @@ impl InteractionState {
         } else if self.selection_start.is_some()
             && modifiers.contains(Modifiers::SHIFT)
             && dispatch.is_key_pressed(Key::Character('s'))
-            && let Some(mob) = self.topmost_at(stage, point)
         {
-            self.add_to_selection(stage, &[mob]);
+            self.selection_sweeping = true;
+            if let Some(mob) = self.topmost_at(stage, point) {
+                self.add_to_selection(stage, &[mob]);
+            }
         }
     }
 
@@ -494,9 +499,13 @@ impl InteractionState {
     }
 
     fn gather_new_selection(&mut self, stage: &mut Stage) {
+        let swept = std::mem::take(&mut self.selection_sweeping);
         let Some(start) = self.selection_start.take() else {
             return;
         };
+        if swept {
+            return;
+        }
         let bounds = rectangle_bounds(start, self.selection_current);
         let tiny = bounds.width() + bounds.height() < CLICK_SIZE;
         let mut additions = Vec::new();
