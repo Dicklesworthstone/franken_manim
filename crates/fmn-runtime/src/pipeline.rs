@@ -21,6 +21,31 @@ use std::sync::mpsc::{
 };
 use std::time::Duration;
 
+trait ScopedSpawner {
+    fn spawn<'scope, 'env: 'scope, F>(
+        &self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: F,
+    ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+    where
+        F: FnOnce() + Send + 'scope;
+}
+
+struct NativeScopedSpawner;
+
+impl ScopedSpawner for NativeScopedSpawner {
+    fn spawn<'scope, 'env: 'scope, F>(
+        &self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: F,
+    ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+    where
+        F: FnOnce() + Send + 'scope,
+    {
+        std::thread::Builder::new().spawn_scoped(scope, work)
+    }
+}
+
 /// One source item: a frozen frame or an effect-model barrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineEvent<F, B> {
@@ -251,6 +276,15 @@ pub enum PipelineError<E> {
         /// Callback location.
         stage: PipelineStage,
     },
+    /// The host refused a worker before the complete pipeline topology existed.
+    WorkerSpawnFailed {
+        /// Worker stage whose start was refused.
+        stage: PipelineStage,
+        /// Total workers required by the plan.
+        requested: usize,
+        /// Workers started before the refusal.
+        spawned: usize,
+    },
     /// A stage queue disappeared before accepting its work.
     StageDisconnected {
         /// Frame sequence, when one was in hand.
@@ -291,6 +325,14 @@ impl<E: fmt::Display> fmt::Display for PipelineError<E> {
                     write!(f, "{stage} callback panicked")
                 }
             }
+            Self::WorkerSpawnFailed {
+                stage,
+                requested,
+                spawned,
+            } => write!(
+                f,
+                "{stage} worker startup failed after {spawned} of {requested} pipeline workers started"
+            ),
             Self::StageDisconnected { sequence, stage } => {
                 if let Some(sequence) = sequence {
                     write!(f, "{stage} stage disconnected for frame {sequence}")
@@ -457,13 +499,29 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
     pub fn run<I, B, Emit, Barrier>(
         &self,
         events: I,
-        mut emit: Emit,
-        mut barrier: Barrier,
+        emit: Emit,
+        barrier: Barrier,
     ) -> Result<PipelineStats, PipelineFailure<S::Error>>
     where
         I: IntoIterator<Item = PipelineEvent<S::Frame, B>>,
         Emit: FnMut(u64, S::Output) -> Result<(), S::Error>,
         Barrier: FnMut(B, BarrierContext) -> Result<(), S::Error>,
+    {
+        self.run_with_spawner(events, emit, barrier, &NativeScopedSpawner)
+    }
+
+    fn run_with_spawner<I, B, Emit, Barrier, Spawner>(
+        &self,
+        events: I,
+        mut emit: Emit,
+        mut barrier: Barrier,
+        spawner: &Spawner,
+    ) -> Result<PipelineStats, PipelineFailure<S::Error>>
+    where
+        I: IntoIterator<Item = PipelineEvent<S::Frame, B>>,
+        Emit: FnMut(u64, S::Output) -> Result<(), S::Error>,
+        Barrier: FnMut(B, BarrierContext) -> Result<(), S::Error>,
+        Spawner: ScopedSpawner,
     {
         let clock = Arc::clone(&self.clock);
         let start = clock.monotonic();
@@ -476,6 +534,9 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
         let cancellation = self.cancellation.clone();
 
         let mut coordinator = std::thread::scope(|scope| {
+            let requested = self.plan.render_teams.len().saturating_add(2);
+            let mut spawned = 0;
+            let mut state = Coordinator::new();
             let (completion_tx, completion_rx) = channel();
             let (raster_tx, raster_rx) = sync_channel(self.plan.frames_in_flight.max(1));
 
@@ -484,17 +545,31 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
             let output_cancel = cancellation.clone();
             let output_clock = Arc::clone(&clock);
             let output_team = &self.plan.output_team;
-            scope.spawn(move || {
-                output_worker(
-                    self.stages,
-                    output_team,
-                    raster_rx,
-                    output_completion,
-                    output_counters,
-                    output_cancel,
-                    output_clock,
+            if spawner
+                .spawn(scope, move || {
+                    output_worker(
+                        self.stages,
+                        output_team,
+                        raster_rx,
+                        output_completion,
+                        output_counters,
+                        output_cancel,
+                        output_clock,
+                    );
+                })
+                .is_err()
+            {
+                state.fail(
+                    PipelineError::WorkerSpawnFailed {
+                        stage: PipelineStage::Convert,
+                        requested,
+                        spawned,
+                    },
+                    &cancellation,
                 );
-            });
+                return state;
+            }
+            spawned += 1;
 
             let mut render_senders = Vec::with_capacity(self.plan.render_teams.len());
             for (team_index, team) in self.plan.render_teams.iter().enumerate() {
@@ -505,19 +580,33 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
                 let team_counters = Arc::clone(&counters);
                 let team_cancel = cancellation.clone();
                 let team_clock = Arc::clone(&clock);
-                scope.spawn(move || {
-                    render_worker(
-                        self.stages,
-                        team,
-                        team_index,
-                        receiver,
-                        team_raster,
-                        team_completion,
-                        team_counters,
-                        team_cancel,
-                        team_clock,
+                if spawner
+                    .spawn(scope, move || {
+                        render_worker(
+                            self.stages,
+                            team,
+                            team_index,
+                            receiver,
+                            team_raster,
+                            team_completion,
+                            team_counters,
+                            team_cancel,
+                            team_clock,
+                        );
+                    })
+                    .is_err()
+                {
+                    state.fail(
+                        PipelineError::WorkerSpawnFailed {
+                            stage: PipelineStage::Raster,
+                            requested,
+                            spawned,
+                        },
+                        &cancellation,
                     );
-                });
+                    return state;
+                }
+                spawned += 1;
             }
             drop(raster_tx);
 
@@ -527,21 +616,33 @@ impl<'a, S: PipelineStages> FramePipeline<'a, S> {
             let prepare_cancel = cancellation.clone();
             let prepare_clock = Arc::clone(&clock);
             let scene_team = &self.plan.scene_team;
-            scope.spawn(move || {
-                prepare_worker(
-                    self.stages,
-                    scene_team,
-                    prepare_rx,
-                    render_senders,
-                    prepare_completion,
-                    prepare_counters,
-                    prepare_cancel,
-                    prepare_clock,
+            if spawner
+                .spawn(scope, move || {
+                    prepare_worker(
+                        self.stages,
+                        scene_team,
+                        prepare_rx,
+                        render_senders,
+                        prepare_completion,
+                        prepare_counters,
+                        prepare_cancel,
+                        prepare_clock,
+                    );
+                })
+                .is_err()
+            {
+                state.fail(
+                    PipelineError::WorkerSpawnFailed {
+                        stage: PipelineStage::Prepare,
+                        requested,
+                        spawned,
+                    },
+                    &cancellation,
                 );
-            });
+                return state;
+            }
             drop(completion_tx);
 
-            let mut state = Coordinator::new();
             let mut events = match catch_unwind(AssertUnwindSafe(|| events.into_iter())) {
                 Ok(events) => events,
                 Err(_) => {
@@ -1648,6 +1749,155 @@ mod tests {
         output.push(1);
         output.reverse();
         output
+    }
+
+    #[derive(Default)]
+    struct StartupObservedStages {
+        calls: AtomicUsize,
+    }
+
+    impl PipelineStages for StartupObservedStages {
+        type Frame = u64;
+        type Prepared = u64;
+        type Rasterized = u64;
+        type Output = u64;
+        type Error = &'static str;
+
+        fn prepare(&self, frame: u64, _team: &TeamPlan) -> Result<u64, Self::Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(frame)
+        }
+
+        fn rasterize(&self, frame: u64, _team: &TeamPlan) -> Result<u64, Self::Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(frame)
+        }
+
+        fn convert(&self, frame: u64, _team: &TeamPlan) -> Result<u64, Self::Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(frame)
+        }
+    }
+
+    struct RefusingScopedSpawner {
+        refuse_at: usize,
+        attempts: AtomicUsize,
+    }
+
+    impl RefusingScopedSpawner {
+        const fn new(refuse_at: usize) -> Self {
+            Self {
+                refuse_at,
+                attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ScopedSpawner for RefusingScopedSpawner {
+        fn spawn<'scope, 'env: 'scope, F>(
+            &self,
+            scope: &'scope std::thread::Scope<'scope, 'env>,
+            work: F,
+        ) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+        where
+            F: FnOnce() + Send + 'scope,
+        {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            if attempt == self.refuse_at {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            NativeScopedSpawner.spawn(scope, work)
+        }
+    }
+
+    fn assert_startup_refusal(
+        refuse_at: usize,
+        expected_stage: PipelineStage,
+        expected_spawned: usize,
+    ) {
+        let plan = plan(3, RenderIntent::Offline);
+        assert!(plan.render_teams.len() >= 2);
+        let requested = plan.render_teams.len().saturating_add(2);
+        let stages = StartupObservedStages::default();
+        let pipeline = FramePipeline::new(&plan, &stages);
+        let source_calls = AtomicUsize::new(0);
+        let emit_calls = AtomicUsize::new(0);
+        let barrier_calls = AtomicUsize::new(0);
+        let events = std::iter::from_fn(|| {
+            source_calls.fetch_add(1, Ordering::Relaxed);
+            None::<PipelineEvent<u64, ()>>
+        });
+        let spawner = RefusingScopedSpawner::new(refuse_at);
+
+        let failure = pipeline
+            .run_with_spawner(
+                events,
+                |_, _| {
+                    emit_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+                |(), _| {
+                    barrier_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+                &spawner,
+            )
+            .expect_err("worker startup must fail");
+
+        assert_eq!(spawner.attempts(), expected_spawned.saturating_add(1));
+        assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(emit_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(barrier_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(stages.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(failure.stats.submitted, 0);
+        assert_eq!(failure.stats.prepared, 0);
+        assert_eq!(failure.stats.rasterized, 0);
+        assert_eq!(failure.stats.converted, 0);
+        assert_eq!(failure.stats.emitted, 0);
+        assert_eq!(failure.stats.barriers, 0);
+        assert_eq!(failure.stats.outstanding_slots, 0);
+        assert_eq!(
+            failure.to_string(),
+            format!(
+                "{expected_stage} worker startup failed after {expected_spawned} of {requested} pipeline workers started"
+            )
+        );
+        assert!(matches!(
+            failure.error,
+            PipelineError::WorkerSpawnFailed {
+                stage,
+                requested: actual_requested,
+                spawned,
+            } if stage == expected_stage
+                && actual_requested == requested
+                && spawned == expected_spawned
+        ));
+        assert!(pipeline.cancellation_token().is_cancelled());
+    }
+
+    #[test]
+    fn output_worker_start_refusal_is_typed_and_atomic() {
+        assert_startup_refusal(0, PipelineStage::Convert, 0);
+    }
+
+    #[test]
+    fn intermediate_raster_worker_start_refusal_is_typed_and_atomic() {
+        assert_startup_refusal(2, PipelineStage::Raster, 2);
+    }
+
+    #[test]
+    fn final_prepare_worker_start_refusal_is_typed_and_atomic() {
+        let plan = plan(3, RenderIntent::Offline);
+        let requested = plan.render_teams.len().saturating_add(2);
+        assert_startup_refusal(
+            requested.saturating_sub(1),
+            PipelineStage::Prepare,
+            requested.saturating_sub(1),
+        );
     }
 
     #[test]
