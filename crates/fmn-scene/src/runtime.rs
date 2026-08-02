@@ -42,6 +42,7 @@ use crate::events::{EventDispatcher, EventError, EventInbox, EventPayload, Input
 
 const DEFAULT_FPS: u32 = 30;
 const DEFAULT_WAIT_TIME: f64 = 1.0;
+const DEFAULT_MAX_PENDING_EVENTS: usize = 4096;
 const THREE_D_THETA_DEGREES: f64 = -30.0;
 const THREE_D_PHI_DEGREES: f64 = 70.0;
 
@@ -62,6 +63,11 @@ pub struct RuntimeConfig {
     pub preview_while_skipping: bool,
     /// Presenter waits are driven by the installed [`HoldController`].
     pub presenter_mode: bool,
+    /// Maximum host payloads awaiting one serial Scene boundary.
+    ///
+    /// The limit is shared by every clone of [`EventInbox`]. Zero explicitly
+    /// disables host event ingress without affecting queued replay events.
+    pub max_pending_events: usize,
     /// `wait(None)` duration.
     pub default_wait_time: f64,
 }
@@ -76,6 +82,7 @@ impl Default for RuntimeConfig {
             end_at_play: None,
             preview_while_skipping: true,
             presenter_mode: false,
+            max_pending_events: DEFAULT_MAX_PENDING_EVENTS,
             default_wait_time: DEFAULT_WAIT_TIME,
         }
     }
@@ -630,6 +637,7 @@ impl Scene {
         let scene_rng = rng_root.substream("scene").sequential();
         let original_skipping = config.skip_animations;
         let skipping = original_skipping || config.start_at_play.is_some();
+        let event_inbox = EventInbox::new(config.max_pending_events)?;
         Ok(Self {
             config,
             stage: Stage::new(),
@@ -645,7 +653,7 @@ impl Scene {
             unbound_updaters: None,
             sound_requests: Vec::new(),
             event_dispatcher: EventDispatcher::new(),
-            event_inbox: EventInbox::new(),
+            event_inbox,
             queued_events: VecDeque::new(),
             recorded_events: Vec::new(),
             next_event_sequence: Some(0),
@@ -1555,9 +1563,16 @@ fn drain_event_queue(
     let mut candidate_sequence = *next_sequence;
     let sequence_capacity =
         candidate_sequence.map_or(0, |sequence| u128::from(u64::MAX - sequence) + 1);
-    let Some(payloads) = inbox.drain_if_at_most(sequence_capacity) else {
-        *event_error = Some(EventError::SequenceExhausted);
-        return 0;
+    let payloads = match inbox.drain_if_at_most(sequence_capacity) {
+        Ok(Some(payloads)) => payloads,
+        Ok(None) => {
+            *event_error = Some(EventError::SequenceExhausted);
+            return 0;
+        }
+        Err(error) => {
+            *event_error = Some(error);
+            return 0;
+        }
     };
     let mut host_events = Vec::new();
     for payload in payloads {

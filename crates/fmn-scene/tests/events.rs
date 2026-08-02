@@ -1352,6 +1352,152 @@ fn cloneable_host_inbox_enters_the_same_serial_boundary() {
 }
 
 #[test]
+fn host_event_inbox_enforces_configured_capacity_across_clones() {
+    assert!(matches!(
+        Scene::new(
+            RuntimeConfig {
+                max_pending_events: usize::MAX,
+                ..RuntimeConfig::default()
+            },
+            6,
+        ),
+        Err(SceneError::Event(EventError::InboxStorageUnavailable {
+            capacity: usize::MAX
+        }))
+    ));
+
+    let disabled = Scene::new(
+        RuntimeConfig {
+            max_pending_events: 0,
+            ..RuntimeConfig::default()
+        },
+        6,
+    )
+    .expect("zero capacity explicitly disables host ingress");
+    assert_eq!(
+        disabled.event_inbox().submit(EventPayload::KeyPress {
+            key: Key::Character('z'),
+            modifiers: Modifiers::NONE,
+        }),
+        Err(EventError::InboxFull { capacity: 0 })
+    );
+
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            max_pending_events: 2,
+            ..RuntimeConfig::default()
+        },
+        7,
+    )
+    .expect("scene");
+    let inbox = scene.event_inbox();
+    assert_eq!(inbox.capacity(), 2);
+
+    assert_eq!(
+        inbox.submit(EventPayload::MouseMotion {
+            point: [f64::NAN, 0.0, 0.0],
+            delta: [0.0; 3],
+            modifiers: Modifiers::NONE,
+        }),
+        Err(EventError::NonFiniteCoordinate)
+    );
+    assert!(inbox.is_empty(), "invalid payloads consume no capacity");
+
+    for key in ['a', 'b'] {
+        inbox
+            .submit(EventPayload::KeyPress {
+                key: Key::Character(key),
+                modifiers: Modifiers::NONE,
+            })
+            .expect("the exact configured capacity is admitted");
+    }
+    assert_eq!(
+        inbox.submit(EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::NONE,
+        }),
+        Err(EventError::InboxFull { capacity: 2 })
+    );
+    assert_eq!(inbox.len(), 2);
+
+    assert_eq!(scene.dispatch_pending_events().expect("first drain"), 2);
+    assert!(inbox.is_empty());
+    assert_eq!(
+        scene
+            .recorded_events()
+            .iter()
+            .map(|event| (event.sequence, event.timestamp, event.payload.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                RationalTime::zero(30),
+                EventPayload::KeyPress {
+                    key: Key::Character('a'),
+                    modifiers: Modifiers::NONE,
+                },
+            ),
+            (
+                1,
+                RationalTime::zero(30),
+                EventPayload::KeyPress {
+                    key: Key::Character('b'),
+                    modifiers: Modifiers::NONE,
+                },
+            ),
+        ]
+    );
+
+    inbox
+        .submit(EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::NONE,
+        })
+        .expect("draining restores the configured capacity");
+    assert_eq!(scene.dispatch_pending_events().expect("second drain"), 1);
+    assert_eq!(scene.recorded_events()[2].sequence, 2);
+
+    let concurrent_scene = Scene::new(
+        RuntimeConfig {
+            max_pending_events: 2,
+            ..RuntimeConfig::default()
+        },
+        8,
+    )
+    .expect("concurrent scene");
+    let concurrent_inbox = concurrent_scene.event_inbox();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+    let handles = ['d', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+        .into_iter()
+        .map(|key| {
+            let inbox = concurrent_inbox.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                inbox.submit(EventPayload::KeyPress {
+                    key: Key::Character(key),
+                    modifiers: Modifiers::NONE,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+
+    let mut accepted = 0;
+    let mut full = 0;
+    for handle in handles {
+        match handle.join().expect("producer thread") {
+            Ok(()) => accepted += 1,
+            Err(EventError::InboxFull { capacity: 2 }) => full += 1,
+            other => std::panic::panic_any(format!("unexpected inbox result: {other:?}")),
+        }
+    }
+    assert_eq!(accepted, 2);
+    assert_eq!(full, 6);
+    assert_eq!(concurrent_inbox.len(), 2);
+}
+
+#[test]
 fn post_play_dispatch_failure_still_advances_the_completed_play_count() {
     let mut scene = Scene::new(
         RuntimeConfig {

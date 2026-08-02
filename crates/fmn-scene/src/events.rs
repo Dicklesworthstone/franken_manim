@@ -473,34 +473,58 @@ impl InputEvent {
 /// is driving a segment. The serial front end drains arrival order at each
 /// pre-capture boundary, assigns exact timestamps and sequence ids there, and
 /// journals the result. No callback or Stage reference crosses this queue.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EventInbox {
     queue: Arc<Mutex<VecDeque<EventPayload>>>,
+    capacity: usize,
 }
 
 impl fmt::Debug for EventInbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EventInbox")
             .field("pending", &self.len())
+            .field("capacity", &self.capacity)
             .finish()
     }
 }
 
 impl EventInbox {
-    /// Empty inbox.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    /// Empty inbox with an exact pending-payload ceiling.
+    ///
+    /// Zero capacity explicitly disables host ingress. Storage for every
+    /// admissible payload is reserved before the handle is published, so a
+    /// successful [`Self::submit`] never grows the queue.
+    pub fn new(capacity: usize) -> Result<Self, EventError> {
+        let mut queue = VecDeque::new();
+        queue
+            .try_reserve_exact(capacity)
+            .map_err(|_| EventError::InboxStorageUnavailable { capacity })?;
+        Ok(Self {
+            queue: Arc::new(Mutex::new(queue)),
+            capacity,
+        })
     }
 
     /// Validate, canonicalize, and append one host payload.
     pub fn submit(&self, payload: EventPayload) -> Result<(), EventError> {
         let canonical = InputEvent::new(0, RationalTime::zero(1), payload)?.payload;
-        self.queue
+        let mut queue = self
+            .queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(canonical);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if queue.len() >= self.capacity {
+            return Err(EventError::InboxFull {
+                capacity: self.capacity,
+            });
+        }
+        queue.push_back(canonical);
         Ok(())
+    }
+
+    /// Maximum pending payloads admitted across every clone.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Number of payloads waiting for a serial boundary.
@@ -518,16 +542,29 @@ impl EventInbox {
         self.len() == 0
     }
 
-    pub(crate) fn drain_if_at_most(&self, capacity: u128) -> Option<Vec<EventPayload>> {
+    pub(crate) fn drain_if_at_most(
+        &self,
+        capacity: u128,
+    ) -> Result<Option<Vec<EventPayload>>, EventError> {
         let mut queue = self
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let pending = u128::try_from(queue.len()).ok()?;
+        let pending =
+            u128::try_from(queue.len()).map_err(|_| EventError::InboxStorageUnavailable {
+                capacity: queue.len(),
+            })?;
         if pending > capacity {
-            return None;
+            return Ok(None);
         }
-        Some(queue.drain(..).collect())
+        let mut payloads = Vec::new();
+        payloads.try_reserve_exact(queue.len()).map_err(|_| {
+            EventError::InboxStorageUnavailable {
+                capacity: queue.len(),
+            }
+        })?;
+        payloads.extend(queue.drain(..));
+        Ok(Some(payloads))
     }
 
     pub(crate) fn clear(&self) {
@@ -558,6 +595,16 @@ pub enum EventError {
     ReplayOutOfOrder,
     /// The session event sequence cannot be incremented without reuse.
     SequenceExhausted,
+    /// The configured host-input queue has no free slot.
+    InboxFull {
+        /// Complete queue capacity shared by every handle clone.
+        capacity: usize,
+    },
+    /// Storage for the configured inbox or one atomic drain was unavailable.
+    InboxStorageUnavailable {
+        /// Number of payload slots requested.
+        capacity: usize,
+    },
     /// Listener tokens cannot be incremented without reuse.
     ListenerIdExhausted,
     /// A durable enum, scalar, or bit set was invalid.
@@ -580,6 +627,13 @@ impl fmt::Display for EventError {
                 "replay timestamps must not move backward and sequence ids must increase",
             ),
             Self::SequenceExhausted => f.write_str("event sequence space is exhausted"),
+            Self::InboxFull { capacity } => {
+                write!(f, "event inbox is full at its {capacity}-payload capacity")
+            }
+            Self::InboxStorageUnavailable { capacity } => write!(
+                f,
+                "event inbox could not reserve storage for {capacity} payloads"
+            ),
             Self::ListenerIdExhausted => f.write_str("event listener id space is exhausted"),
             Self::Malformed(what) => write!(f, "malformed event {what}"),
         }
