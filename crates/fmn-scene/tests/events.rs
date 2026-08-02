@@ -837,6 +837,56 @@ fn top_level_selection_recolors_a_shared_descendant_once() {
 }
 
 #[test]
+fn color_picker_samples_the_group_member_under_the_pointer() {
+    let mut scene = Scene::default();
+    let selected = scene.stage_mut().add(rectangle(
+        [-4.0, 0.0, 0.0],
+        Srgb::from_hex("#00FF00").unwrap(),
+    ));
+    let group = scene.stage_mut().add(Mobject::new());
+    let red = scene
+        .stage_mut()
+        .add(rectangle([0.0; 3], Srgb::from_hex("#FF0000").unwrap()));
+    let blue = scene.stage_mut().add(rectangle(
+        [3.0, 0.0, 0.0],
+        Srgb::from_hex("#0000FF").unwrap(),
+    ));
+    scene.stage_mut().attach(group, red).unwrap();
+    scene.stage_mut().attach(group, blue).unwrap();
+    scene
+        .stage_mut()
+        .add_many_to_scene(&[selected, group])
+        .unwrap();
+    let mut interactive = InteractiveScene::new(scene).unwrap();
+
+    for payload in [
+        EventPayload::MousePress {
+            point: [-4.0, 0.0, 0.0],
+            button: MouseButton::Left,
+            modifiers: Modifiers::CONTROL,
+        },
+        EventPayload::KeyPress {
+            key: Key::Character('c'),
+            modifiers: Modifiers::NONE,
+        },
+        EventPayload::MouseRelease {
+            point: [3.0, 0.0, 0.0],
+            button: MouseButton::Left,
+            modifiers: Modifiers::NONE,
+        },
+    ] {
+        interactive.queue_event(payload).unwrap();
+    }
+    assert_eq!(interactive.dispatch_pending_events().unwrap(), 3);
+
+    assert_eq!(interactive.selection(), vec![selected]);
+    assert_eq!(
+        fill_color(interactive.stage(), selected),
+        fill_color(interactive.stage(), blue)
+    );
+}
+
+#[test]
 fn undoing_a_group_restores_the_original_selection_and_marks() {
     let mut scene = Scene::default();
     let left = scene.stage_mut().add(rectangle(

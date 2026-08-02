@@ -536,6 +536,27 @@ impl InteractionState {
             .find(|mob| point_in_box(point, stage.get_bounding_box(*mob), SELECTION_BUFFER))
     }
 
+    fn topmost_color_source(&self, stage: &Stage, point: Vec3) -> Option<Mob> {
+        let mut members = Vec::new();
+        for &root in stage.roots() {
+            for member in stage.family(root) {
+                if self.unselectables.contains(&member)
+                    || stage
+                        .get(member)
+                        .is_none_or(|entry| entry.buffer.is_empty())
+                    || members.contains(&member)
+                {
+                    continue;
+                }
+                members.push(member);
+            }
+        }
+        members
+            .into_iter()
+            .rev()
+            .find(|mob| point_in_box(point, stage.get_bounding_box(*mob), SELECTION_BUFFER))
+    }
+
     fn selection_search_set(&self, stage: &Stage) -> Vec<Mob> {
         let roots: Vec<_> = stage
             .roots()
@@ -719,7 +740,7 @@ impl InteractionState {
     }
 
     fn choose_color(&self, stage: &mut Stage, point: Vec3) {
-        let Some(source) = self.topmost_at(stage, point) else {
+        let Some(source) = self.topmost_color_source(stage, point) else {
             return;
         };
         let Some(color) = read_color(stage, source) else {
