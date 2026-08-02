@@ -32,9 +32,11 @@ fn rgba_identity<'a>(
     width: u32,
     height: u32,
     encoding: TextureEncoding,
-    rgba_len: u64,
+    rgba_len: usize,
     chunks: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<Digest, TextureError> {
+    checked_rgba_layout(width, height, rgba_len)?;
+    let rgba_len_u64 = u64::try_from(rgba_len).map_err(|_| TextureError::InvalidDimensions)?;
     let (encoding_tag, gamma) = match encoding {
         TextureEncoding::Srgb => (0u32, None),
         TextureEncoding::Linear => (1, None),
@@ -42,7 +44,7 @@ fn rgba_identity<'a>(
     };
     let metadata_len = 4u64 + 4 + 4 + u64::from(gamma.is_some()) * 4 + 8;
     let payload_len = metadata_len
-        .checked_add(rgba_len)
+        .checked_add(rgba_len_u64)
         .ok_or(TextureError::InvalidDimensions)?;
 
     let mut document = Sha256::new();
@@ -59,12 +61,12 @@ fn rgba_identity<'a>(
     if let Some(gamma) = gamma {
         document.update(&gamma.to_le_bytes());
     }
-    document.update(&rgba_len.to_le_bytes());
+    document.update(&rgba_len_u64.to_le_bytes());
 
-    let mut observed = 0u64;
+    let mut observed = 0usize;
     for chunk in chunks {
         observed = observed
-            .checked_add(u64::try_from(chunk.len()).map_err(|_| TextureError::InvalidDimensions)?)
+            .checked_add(chunk.len())
             .ok_or(TextureError::InvalidDimensions)?;
         if observed > rgba_len {
             return Err(TextureError::InvalidDimensions);
@@ -185,6 +187,11 @@ pub enum TextureError {
     },
     /// Dimensions are empty or overflow addressable storage.
     InvalidDimensions,
+    /// Decoded texel storage could not be reserved.
+    AllocationFailed {
+        /// Linear-premultiplied texels requested.
+        pixels: u64,
+    },
     /// The format is outside the native PNG/JPEG set.
     RequiresFfmpeg {
         /// Lowercase extension or `unknown`.
@@ -205,6 +212,9 @@ impl std::fmt::Display for TextureError {
             }
             Self::InvalidDimensions => {
                 f.write_str("texture dimensions must be nonzero and addressable")
+            }
+            Self::AllocationFailed { pixels } => {
+                write!(f, "could not reserve {pixels} decoded texture texels")
             }
             Self::RequiresFfmpeg { format } => write!(
                 f,
@@ -227,6 +237,36 @@ impl From<JpegError> for TextureError {
     fn from(error: JpegError) -> Self {
         Self::Jpeg(error)
     }
+}
+
+fn checked_rgba_layout(width: u32, height: u32, rgba_len: usize) -> Result<usize, TextureError> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or(TextureError::InvalidDimensions)?;
+    if pixels == 0 {
+        return Err(TextureError::InvalidDimensions);
+    }
+    let expected_u64 = pixels
+        .checked_mul(4)
+        .ok_or(TextureError::InvalidDimensions)?;
+    let expected = usize::try_from(expected_u64).map_err(|_| TextureError::InvalidDimensions)?;
+    if rgba_len != expected {
+        return Err(TextureError::RgbaLength {
+            expected,
+            got: rgba_len,
+        });
+    }
+    usize::try_from(pixels).map_err(|_| TextureError::InvalidDimensions)
+}
+
+fn allocate_texels(pixels: usize) -> Result<Vec<[f32; 4]>, TextureError> {
+    let mut texels = Vec::new();
+    texels
+        .try_reserve_exact(pixels)
+        .map_err(|_| TextureError::AllocationFailed {
+            pixels: u64::try_from(pixels).unwrap_or(u64::MAX),
+        })?;
+    Ok(texels)
 }
 
 /// Immutable, output-oriented, premultiplied-linear texture.
@@ -302,8 +342,7 @@ impl Texture {
         rgba: &[u8],
         encoding: TextureEncoding,
     ) -> Result<Self, TextureError> {
-        let rgba_len = u64::try_from(rgba.len()).map_err(|_| TextureError::InvalidDimensions)?;
-        let digest = rgba_identity(width, height, encoding, rgba_len, std::iter::once(rgba))?;
+        let digest = rgba_identity(width, height, encoding, rgba.len(), std::iter::once(rgba))?;
         Self::from_parts(
             width,
             height,
@@ -322,24 +361,8 @@ impl Texture {
         source: TextureSource,
         digest: Digest,
     ) -> Result<Self, TextureError> {
-        let pixels = u64::from(width)
-            .checked_mul(u64::from(height))
-            .ok_or(TextureError::InvalidDimensions)?;
-        if pixels == 0 {
-            return Err(TextureError::InvalidDimensions);
-        }
-        let expected_u64 = pixels
-            .checked_mul(4)
-            .ok_or(TextureError::InvalidDimensions)?;
-        let expected =
-            usize::try_from(expected_u64).map_err(|_| TextureError::InvalidDimensions)?;
-        if rgba.len() != expected {
-            return Err(TextureError::RgbaLength {
-                expected,
-                got: rgba.len(),
-            });
-        }
-        let mut texels = Vec::with_capacity(expected / 4);
+        let pixels = checked_rgba_layout(width, height, rgba.len())?;
+        let mut texels = allocate_texels(pixels)?;
         for pixel in rgba.as_chunks::<4>().0 {
             let alpha = f64::from(pixel[3]) / 255.0;
             let decode = |byte: u8| decode_channel(f64::from(byte) / 255.0, encoding);
@@ -591,9 +614,12 @@ mod tests {
         const WIDTH: u32 = 4096;
         const HEIGHT: u32 = 4160;
         let block = vec![0xa5; CHUNK_BYTES];
-        let rgba_len = u64::try_from(CHUNK_BYTES * CHUNKS).expect("fixture length fits");
-        assert!(rgba_len > u64::try_from(Limits::DEFAULT.max_field).expect("limit fits"));
-        assert_eq!(rgba_len, u64::from(WIDTH) * u64::from(HEIGHT) * 4);
+        let rgba_len = CHUNK_BYTES * CHUNKS;
+        assert!(rgba_len > Limits::DEFAULT.max_field);
+        assert_eq!(
+            u64::try_from(rgba_len).expect("fixture length fits"),
+            u64::from(WIDTH) * u64::from(HEIGHT) * 4
+        );
 
         let digest = |encoding| {
             rgba_identity(
@@ -609,6 +635,32 @@ mod tests {
             digest(TextureEncoding::Linear),
             digest(TextureEncoding::Srgb),
             "the old over-limit raw-pixel fallback erased this distinction"
+        );
+    }
+
+    #[test]
+    fn invalid_rgba_layout_is_refused_before_identity_consumes_chunks() {
+        let consumed = std::cell::Cell::new(0usize);
+        let chunks = std::iter::once_with(|| {
+            consumed.set(consumed.get() + 1);
+            &[][..]
+        });
+        assert_eq!(
+            rgba_identity(2, 2, TextureEncoding::Srgb, 4, chunks),
+            Err(TextureError::RgbaLength {
+                expected: 16,
+                got: 4,
+            })
+        );
+        assert_eq!(consumed.get(), 0);
+    }
+
+    #[test]
+    fn texel_capacity_overflow_is_a_typed_allocation_refusal() {
+        let pixels = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+        assert_eq!(
+            allocate_texels(usize::MAX),
+            Err(TextureError::AllocationFailed { pixels })
         );
     }
 
