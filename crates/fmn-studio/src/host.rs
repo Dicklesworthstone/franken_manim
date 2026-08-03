@@ -507,12 +507,17 @@ impl fmt::Debug for StudioWorkerSession {
 
 impl StudioWorkerSession {
     /// Bind a started supervisor to one scene and its asset verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for an empty or over-budget scene name,
+    /// or a source-preserving protocol storage error when owning the admitted
+    /// name is refused.
     pub fn new(
-        scene: impl Into<String>,
+        scene: &str,
         supervisor: Supervisor,
         asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync>,
     ) -> Result<Self, HostError> {
-        let scene = scene.into();
         if scene.is_empty() {
             return Err(HostError::Configuration("empty Studio scene name"));
         }
@@ -522,6 +527,7 @@ impl StudioWorkerSession {
                 "Studio scene name exceeds protocol field budget",
             ));
         }
+        let scene = studio_scene_with_capacity(scene, scene.len())?;
         Ok(Self {
             scene,
             protocol_limits,
@@ -536,6 +542,10 @@ impl StudioWorkerSession {
         &self.scene
     }
 
+    fn try_owned_scene(&self) -> Result<String, HostError> {
+        studio_scene_with_capacity(&self.scene, self.scene.len())
+    }
+
     fn request(&self, request: SupervisorRequest) -> Result<WorkerResponse, HostError> {
         let reply = lock(&self.supervisor).request(request, &*self.asset_ok)?;
         match reply {
@@ -545,6 +555,26 @@ impl StudioWorkerSession {
             }
         }
     }
+}
+
+fn studio_scene_with_capacity(scene: &str, capacity: usize) -> Result<String, HostError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(capacity)
+        .map_err(|source| ProtocolError::StorageUnavailable {
+            field: "Studio scene name bytes",
+            additional: capacity,
+            source,
+        })?;
+    owned
+        .try_reserve_exact(scene.len())
+        .map_err(|source| ProtocolError::StorageUnavailable {
+            field: "Studio scene name bytes",
+            additional: scene.len(),
+            source,
+        })?;
+    owned.push_str(scene);
+    Ok(owned)
 }
 
 #[derive(Debug)]
@@ -934,16 +964,11 @@ impl HostHandler {
             Some("true") => true,
             Some(_) => return Err(HostError::BadRequest("invalid commit flag")),
         };
+        let scene = self.session.try_owned_scene()?;
         let request = if commit {
-            SupervisorRequest::Seek {
-                scene: self.session.scene().to_owned(),
-                frame,
-            }
+            SupervisorRequest::Seek { scene, frame }
         } else {
-            SupervisorRequest::Scrub {
-                scene: self.session.scene().to_owned(),
-                frame,
-            }
+            SupervisorRequest::Scrub { scene, frame }
         };
         self.write_worker_response(stream, self.session.request(request)?, None)
     }
@@ -953,7 +978,7 @@ impl HostHandler {
         let form = parse_form(&request.body)?;
         let event = event_from_form(&form)?;
         let response = self.session.request(SupervisorRequest::Event {
-            scene: self.session.scene().to_owned(),
+            scene: self.session.try_owned_scene()?,
             event,
         })?;
         self.write_worker_response(stream, response, None)
@@ -961,7 +986,7 @@ impl HostHandler {
 
     fn inspect(&self, stream: &mut TcpStream) -> Result<(), HostError> {
         let response = self.session.request(SupervisorRequest::Inspect {
-            scene: self.session.scene().to_owned(),
+            scene: self.session.try_owned_scene()?,
         })?;
         self.write_worker_response(stream, response, Some(StudioDataKind::Inspection))
     }
@@ -975,7 +1000,7 @@ impl HostHandler {
             None => DebugLayerSet::ALL,
         };
         let response = self.session.request(SupervisorRequest::Overlay {
-            scene: self.session.scene().to_owned(),
+            scene: self.session.try_owned_scene()?,
             layers,
         })?;
         self.write_worker_response(stream, response, Some(StudioDataKind::Overlay))
@@ -3181,6 +3206,27 @@ mod tests {
                 "Studio scene name exceeds protocol field budget"
             ))
         ));
+    }
+
+    #[test]
+    fn worker_scene_ownership_is_fallible_and_exact() {
+        let error = studio_scene_with_capacity("Demo", usize::MAX)
+            .expect_err("impossible Studio scene capacity must refuse");
+        assert!(matches!(
+            &error,
+            HostError::Protocol(ProtocolError::StorageUnavailable {
+                field: "Studio scene name bytes",
+                additional: usize::MAX,
+                ..
+            })
+        ));
+        let protocol =
+            std::error::Error::source(&error).expect("host error preserves protocol source");
+        assert!(std::error::Error::source(protocol).is_some());
+        assert_eq!(
+            studio_scene_with_capacity("Demo", "Demo".len()).unwrap(),
+            "Demo"
+        );
     }
 
     #[test]
