@@ -23,6 +23,8 @@ pub struct InspectorLimits {
     pub max_nodes: usize,
     /// Maximum traversal depth.
     pub max_depth: usize,
+    /// Maximum child edges examined while finding visible mobjects.
+    pub max_traversal_edges: usize,
     /// Maximum visible parent/child links copied for one mobject.
     pub max_links_per_node: usize,
     /// Maximum visible parent/child links copied across one inspection.
@@ -52,6 +54,7 @@ impl Default for InspectorLimits {
         Self {
             max_nodes: 50_000,
             max_depth: 512,
+            max_traversal_edges: 250_000,
             max_links_per_node: 4096,
             max_total_links: 250_000,
             max_fields_per_node: 128,
@@ -71,6 +74,7 @@ impl InspectorLimits {
     fn validate(self) -> Result<Self, InspectError> {
         if self.max_nodes == 0
             || self.max_depth == 0
+            || self.max_traversal_edges == 0
             || self.max_links_per_node == 0
             || self.max_total_links == 0
             || self.max_fields_per_node == 0
@@ -769,6 +773,7 @@ fn visible_handles(
     let mut handles = Vec::new();
     let mut ids = HashMap::new();
     let mut stack: Vec<(Mob, usize, usize)> = Vec::new();
+    let mut traversal_edges = 0usize;
     let mut truncated = false;
     for root in stage.roots().iter().copied() {
         if ids.contains_key(&root) || stage.get(root).is_none() {
@@ -794,11 +799,18 @@ fn visible_handles(
                 stack.pop();
                 continue;
             }
-            let Some(child) = entry.submobjects().get(*next_child).copied() else {
+            if *next_child >= entry.submobjects().len() {
                 stack.pop();
                 continue;
-            };
+            }
+            if traversal_edges >= limits.max_traversal_edges {
+                truncated = true;
+                stack.clear();
+                break;
+            }
+            let child = entry.submobjects()[*next_child];
             *next_child += 1;
+            traversal_edges += 1;
             if ids.contains_key(&child) || stage.get(child).is_none() {
                 continue;
             }

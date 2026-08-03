@@ -260,6 +260,46 @@ fn inspector_and_debug_overlays_follow_visible_family_order() {
 }
 
 #[test]
+fn inspector_bounds_traversal_work_across_seen_shared_edges() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let left = stage.add(Mobject::new());
+    let right = stage.add(Mobject::new());
+    let shared = stage.add(Mobject::new());
+    stage.attach(root, left).unwrap();
+    stage.attach(left, shared).unwrap();
+    stage.attach(root, right).unwrap();
+    stage.attach(right, shared).unwrap();
+    stage.add_to_scene(root).unwrap();
+
+    let exact_limits = InspectorLimits {
+        max_traversal_edges: 4,
+        ..InspectorLimits::default()
+    };
+    let exact = InspectorSnapshot::capture(&stage, &SpanRegistry::new(), exact_limits).unwrap();
+    assert_eq!(exact.nodes.len(), 4);
+    assert!(!exact.truncated);
+    let exact_overlay =
+        DebugOverlaySnapshot::capture(&stage, None, DebugLayerSet::CONTROL_POINTS, exact_limits)
+            .unwrap();
+    assert_eq!(exact_overlay.nodes.len(), 4);
+    assert!(!exact_overlay.truncated);
+
+    let bounded_limits = InspectorLimits {
+        max_traversal_edges: 3,
+        ..exact_limits
+    };
+    let bounded = InspectorSnapshot::capture(&stage, &SpanRegistry::new(), bounded_limits).unwrap();
+    assert_eq!(bounded.nodes.len(), 4);
+    assert!(bounded.truncated);
+    let bounded_overlay =
+        DebugOverlaySnapshot::capture(&stage, None, DebugLayerSet::CONTROL_POINTS, bounded_limits)
+            .unwrap();
+    assert_eq!(bounded_overlay.nodes.len(), 4);
+    assert!(bounded_overlay.truncated);
+}
+
+#[test]
 fn inspector_bounds_source_excerpts_across_the_snapshot() {
     let first = Mobject::from_points(&[[0.0, 0.0, 0.0]]);
     let second = Mobject::from_points(&[[1.0, 0.0, 0.0]]);
