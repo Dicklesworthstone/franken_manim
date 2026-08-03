@@ -16,8 +16,8 @@ use fmn_hash::{Digest, sha256};
 use fmn_platform::clock::{Clock, FakeClock};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_scene::{
-    AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventPayload, InputEvent, Journal,
-    Key, Modifiers, Scene,
+    AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventError, EventPayload,
+    InputEvent, Journal, JournalError, Key, Modifiers, Scene,
 };
 use fmn_studio::{
     BuildError, ChannelError, ChannelFailureKind, Checkpoint, CheckpointSource, CrashReport,
@@ -1218,7 +1218,11 @@ fn journal_segment_rejects_out_of_order_events_without_replacing_the_session() {
     let error = supervisor
         .request(SupervisorRequest::EnumerateScenes, &|_| true)
         .expect_err("an out-of-order segment event must be refused");
-    assert!(matches!(error, SupervisorError::InvalidJournal(_)));
+    assert!(matches!(
+        &error,
+        SupervisorError::InvalidJournal(JournalError::Event(EventError::ReplayOutOfOrder))
+    ));
+    assert!(std::error::Error::source(&error).is_some());
     assert_eq!(supervisor.journal_cache_digest(), prior_digest);
 
     let report = supervisor

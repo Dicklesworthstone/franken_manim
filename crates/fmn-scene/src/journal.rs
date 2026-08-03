@@ -136,6 +136,48 @@ impl From<EventError> for JournalError {
     }
 }
 
+fn try_vec_with_capacity<T>(
+    additional: usize,
+    collection: &'static str,
+) -> Result<Vec<T>, JournalError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(additional)
+        .map_err(|source| JournalError::StorageUnavailable {
+            collection,
+            additional,
+            source,
+        })?;
+    Ok(values)
+}
+
+fn try_string_with_capacity(
+    additional: usize,
+    collection: &'static str,
+) -> Result<String, JournalError> {
+    let mut value = String::new();
+    value
+        .try_reserve_exact(additional)
+        .map_err(|source| JournalError::StorageUnavailable {
+            collection,
+            additional,
+            source,
+        })?;
+    Ok(value)
+}
+
+fn try_clone_string(value: &str, collection: &'static str) -> Result<String, JournalError> {
+    let mut cloned = try_string_with_capacity(value.len(), collection)?;
+    cloned.push_str(value);
+    Ok(cloned)
+}
+
+fn try_clone_bytes(value: &[u8], collection: &'static str) -> Result<Vec<u8>, JournalError> {
+    let mut cloned = try_vec_with_capacity(value.len(), collection)?;
+    cloned.extend_from_slice(value);
+    Ok(cloned)
+}
+
 /// Serializable mirror of the classifier's impurity vocabulary
 /// ([`ImpureEffect`]) — the journal's on-disk form of R20 evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +387,64 @@ impl Entry {
     pub fn is_replay_barrier(&self) -> bool {
         self.effect.is_replay_barrier() || !self.subprocesses.is_empty()
     }
+
+    /// Fallibly copy every owned part of this entry.
+    ///
+    /// # Errors
+    /// [`JournalError::StorageUnavailable`] names the exact field whose
+    /// storage could not be reserved. The source entry is never mutated.
+    pub fn try_clone(&self) -> Result<Self, JournalError> {
+        let command = CommandRecord {
+            kind: self.command.kind,
+            identity: self.command.identity,
+            label: try_clone_string(&self.command.label, "entry command label bytes")?,
+        };
+        let effect = match &self.effect {
+            EffectClass::Pure => EffectClass::Pure,
+            EffectClass::Stateful(source) => {
+                let mut tags = try_vec_with_capacity(source.len(), "entry stateful effect tags")?;
+                tags.extend_from_slice(source);
+                EffectClass::Stateful(tags)
+            }
+            EffectClass::PixelObserving => EffectClass::PixelObserving,
+            EffectClass::Opaque => EffectClass::Opaque,
+        };
+        let mut reads = try_vec_with_capacity(self.reads.len(), "entry asset reads")?;
+        for read in &self.reads {
+            reads.push(AssetRead {
+                path: try_clone_string(&read.path, "entry asset path bytes")?,
+                digest: read.digest,
+            });
+        }
+        let mut subprocesses =
+            try_vec_with_capacity(self.subprocesses.len(), "entry subprocess records")?;
+        for subprocess in &self.subprocesses {
+            subprocesses.push(SubprocessRecord {
+                tool_sha256_hex: try_clone_string(
+                    &subprocess.tool_sha256_hex,
+                    "entry subprocess tool identity bytes",
+                )?,
+                argv_digest: subprocess.argv_digest,
+                destination: try_clone_string(
+                    &subprocess.destination,
+                    "entry subprocess destination bytes",
+                )?,
+            });
+        }
+        let checkpoint = self
+            .checkpoint
+            .as_deref()
+            .map(|bytes| try_clone_bytes(bytes, "entry checkpoint bytes"))
+            .transpose()?;
+        Ok(Self {
+            command,
+            effect,
+            reads,
+            subprocesses,
+            checkpoint,
+            state_hash: self.state_hash,
+        })
+    }
 }
 
 /// The append-only journal.
@@ -403,15 +503,7 @@ impl Journal {
     }
 
     fn event_batch_scratch(additional: usize) -> Result<Vec<InputEvent>, JournalError> {
-        let mut canonical = Vec::new();
-        canonical.try_reserve_exact(additional).map_err(|source| {
-            JournalError::StorageUnavailable {
-                collection: "event batch scratch",
-                additional,
-                source,
-            }
-        })?;
-        Ok(canonical)
+        try_vec_with_capacity(additional, "event batch scratch")
     }
 
     /// The recorded entries, in order.
@@ -1073,8 +1165,9 @@ mod tests {
     use fmn_hash::sha256::sha256;
 
     use super::{
-        CommandKind, CommandRecord, EffectClass, Entry, EventError, EventPayload, InputEvent,
-        Journal, JournalError, Key, Modifiers, RationalTime, SerialError, wire_count,
+        AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventError, EventPayload,
+        ImpureEffectTag, InputEvent, Journal, JournalError, Key, Modifiers, RationalTime,
+        SerialError, SubprocessRecord, try_string_with_capacity, try_vec_with_capacity, wire_count,
     };
 
     fn key_event(sequence: u64, frame: i64) -> InputEvent {
@@ -1197,6 +1290,79 @@ mod tests {
         ));
         assert!(scratch_error.source().is_some());
         assert!(journal.events().is_empty());
+
+        let string_error = try_string_with_capacity(usize::MAX, "entry command label bytes")
+            .expect_err("impossible entry string capacity must refuse");
+        assert!(matches!(
+            &string_error,
+            JournalError::StorageUnavailable {
+                collection: "entry command label bytes",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(string_error.source().is_some());
+
+        let row_error = try_vec_with_capacity::<AssetRead>(usize::MAX, "entry asset reads")
+            .expect_err("impossible entry row capacity must refuse");
+        assert!(matches!(
+            &row_error,
+            JournalError::StorageUnavailable {
+                collection: "entry asset reads",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(row_error.source().is_some());
+    }
+
+    #[test]
+    fn fallible_entry_clone_is_exact_independent_and_keeps_record_coercion() {
+        let original = Entry {
+            command: CommandRecord {
+                kind: CommandKind::Custom,
+                identity: sha256(b"copy command"),
+                label: "custom callback".to_owned(),
+            },
+            effect: EffectClass::Stateful(vec![ImpureEffectTag::SceneUpdater]),
+            reads: vec![AssetRead {
+                path: "assets/input.svg".to_owned(),
+                digest: sha256(b"asset"),
+            }],
+            subprocesses: vec![SubprocessRecord {
+                tool_sha256_hex: "ffmpeg-digest".to_owned(),
+                argv_digest: sha256(b"argv"),
+                destination: "output.mp4".to_owned(),
+            }],
+            checkpoint: Some(b"checkpoint".to_vec()),
+            state_hash: sha256(b"state"),
+        };
+        let mut cloned = original.try_clone().expect("entry fields reserve");
+
+        assert_eq!(cloned.command, original.command);
+        assert_eq!(cloned.effect, original.effect);
+        assert_eq!(cloned.reads, original.reads);
+        assert_eq!(cloned.subprocesses, original.subprocesses);
+        assert_eq!(cloned.checkpoint, original.checkpoint);
+        assert_eq!(cloned.state_hash, original.state_hash);
+
+        cloned.command.label.push_str(" changed");
+        cloned.reads[0].path.push_str(".changed");
+        cloned
+            .checkpoint
+            .as_mut()
+            .expect("cloned checkpoint")
+            .push(0);
+        assert_eq!(original.command.label, "custom callback");
+        assert_eq!(original.reads[0].path, "assets/input.svg");
+        assert_eq!(
+            original.checkpoint.as_deref(),
+            Some(b"checkpoint".as_slice())
+        );
+
+        let mut journal = Journal::new();
+        journal.record(cloned).expect("entry collection reserves");
+        assert_eq!(journal.entries()[0].effect, EffectClass::Opaque);
     }
 
     #[test]

@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 use fmn_cache::Namespace;
 use fmn_hash::{Digest, SerialError, sha256};
 use fmn_platform::clock::Clock;
-use fmn_scene::{AssetRead, CommandRecord, Journal, ReplayAudit, ReplayPlan, plan_replay};
+use fmn_scene::{
+    AssetRead, CommandRecord, Journal, JournalError, ReplayAudit, ReplayPlan, plan_replay,
+};
 
 use crate::protocol::{
     CURRENT_VERSION, Checkpoint, CrashReport, FramingError, JournalReplay, ProtocolError,
@@ -723,8 +725,8 @@ pub enum SupervisorError {
     UnexpectedResponse(&'static str),
     /// Session/checkpoint invariants failed.
     InvalidSession(&'static str),
-    /// A worker journal segment was not a valid canonical journal.
-    InvalidJournal(String),
+    /// A worker journal segment could not be decoded or reconstructed.
+    InvalidJournal(JournalError),
 }
 
 impl fmt::Display for SupervisorError {
@@ -752,8 +754,8 @@ impl fmt::Display for SupervisorError {
                 write!(f, "unexpected worker response: {message}")
             }
             Self::InvalidSession(message) => write!(f, "invalid Studio session: {message}"),
-            Self::InvalidJournal(message) => {
-                write!(f, "invalid worker journal segment: {message}")
+            Self::InvalidJournal(error) => {
+                write!(f, "invalid worker journal segment: {error}")
             }
         }
     }
@@ -767,6 +769,7 @@ impl std::error::Error for SupervisorError {
             Self::Channel(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Serial(error) => Some(error),
+            Self::InvalidJournal(error) => Some(error),
             Self::NoWorker
             | Self::NoSession
             | Self::RequestIdExhausted
@@ -774,8 +777,7 @@ impl std::error::Error for SupervisorError {
             | Self::BuildIdentityMismatch { .. }
             | Self::WorkerRefusal { .. }
             | Self::UnexpectedResponse(_)
-            | Self::InvalidSession(_)
-            | Self::InvalidJournal(_) => None,
+            | Self::InvalidSession(_) => None,
         }
     }
 }
@@ -807,6 +809,12 @@ impl From<ProtocolError> for SupervisorError {
 impl From<SerialError> for SupervisorError {
     fn from(error: SerialError) -> Self {
         Self::Serial(error)
+    }
+}
+
+impl From<JournalError> for SupervisorError {
+    fn from(error: JournalError) -> Self {
+        Self::InvalidJournal(error)
     }
 }
 
@@ -1396,25 +1404,16 @@ impl Supervisor {
                 "journal segment begins beyond the current journal",
             ));
         }
-        let segment = Journal::from_bytes(bytes)
-            .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
+        let segment = Journal::from_bytes(bytes)?;
         let mut merged = Journal::new();
         for entry in &self.journal.entries()[..start] {
-            merged
-                .record(entry.clone())
-                .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
+            merged.record(entry.try_clone()?)?;
         }
         for entry in segment.entries() {
-            merged
-                .record(entry.clone())
-                .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
+            merged.record(entry.try_clone()?)?;
         }
-        merged
-            .record_events(self.journal.events())
-            .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
-        merged
-            .record_events(segment.events())
-            .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
+        merged.record_events(self.journal.events())?;
+        merged.record_events(segment.events())?;
         self.install_session(scene.to_owned(), merged)
     }
 
