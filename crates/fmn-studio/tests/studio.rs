@@ -215,6 +215,50 @@ fn inspector_storage_refusal_is_typed_and_source_preserving() {
 }
 
 #[test]
+fn studio_json_refuses_before_growing_past_the_first_atom() {
+    let tiny = InspectorLimits {
+        max_json_bytes: 1,
+        ..InspectorLimits::default()
+    };
+    let inspection = InspectorSnapshot {
+        version: 1,
+        scene_time: 0.0,
+        nodes: Vec::new(),
+        truncated: false,
+    };
+    let overlays = DebugOverlaySnapshot {
+        version: 1,
+        layers: DebugLayerSet::NONE,
+        tiles: Vec::new(),
+        nodes: Vec::new(),
+        truncated: false,
+    };
+
+    for error in [
+        inspection.to_json(tiny).unwrap_err(),
+        overlays.to_json(tiny).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            InspectError::JsonLimit {
+                limit: 1,
+                needed: 11
+            }
+        ));
+    }
+
+    let limits = InspectorLimits::default();
+    assert_eq!(
+        inspection.to_json(limits).unwrap(),
+        br#"{"version":1,"scene_time":0,"truncated":false,"nodes":[]}"#
+    );
+    assert_eq!(
+        overlays.to_json(limits).unwrap(),
+        br#"{"version":1,"layers":0,"truncated":false,"tiles":[],"nodes":[]}"#
+    );
+}
+
+#[test]
 fn inspector_and_debug_overlays_follow_visible_family_order() {
     let first = Mobject::from_points(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
     let second = Mobject::from_points(&[[2.0, 2.0, 1.0]]);

@@ -501,27 +501,21 @@ impl InspectorSnapshot {
     /// Encode stable line-free JSON under the configured byte ceiling.
     pub fn to_json(&self, limits: InspectorLimits) -> Result<Vec<u8>, InspectError> {
         let limits = limits.validate()?;
-        let mut out = String::new();
-        out.push_str("{\"version\":");
-        push_usize(&mut out, usize::from(self.version));
-        out.push_str(",\"scene_time\":");
-        push_f64(&mut out, self.scene_time);
-        out.push_str(",\"truncated\":");
-        push_bool(&mut out, self.truncated);
-        out.push_str(",\"nodes\":[");
+        let mut out = JsonBuffer::new(limits.max_json_bytes)?;
+        out.push_str("{\"version\":")?;
+        push_usize(&mut out, usize::from(self.version))?;
+        out.push_str(",\"scene_time\":")?;
+        push_f64(&mut out, self.scene_time)?;
+        out.push_str(",\"truncated\":")?;
+        push_bool(&mut out, self.truncated)?;
+        out.push_str(",\"nodes\":[")?;
         for (index, node) in self.nodes.iter().enumerate() {
             if index != 0 {
-                out.push(',');
+                out.push(',')?;
             }
-            push_inspector_node(&mut out, node, limits.max_json_bytes)?;
+            push_inspector_node(&mut out, node)?;
         }
-        out.push_str("]}");
-        if out.len() > limits.max_json_bytes {
-            return Err(InspectError::JsonLimit {
-                limit: limits.max_json_bytes,
-                needed: out.len(),
-            });
-        }
+        out.push_str("]}")?;
         Ok(out.into_bytes())
     }
 }
@@ -750,50 +744,38 @@ impl DebugOverlaySnapshot {
     /// Encode stable JSON under the configured byte ceiling.
     pub fn to_json(&self, limits: InspectorLimits) -> Result<Vec<u8>, InspectError> {
         let limits = limits.validate()?;
-        let mut out = String::new();
-        out.push_str("{\"version\":");
-        push_usize(&mut out, usize::from(self.version));
-        out.push_str(",\"layers\":");
-        push_usize(&mut out, usize::from(self.layers.bits()));
-        out.push_str(",\"truncated\":");
-        push_bool(&mut out, self.truncated);
-        out.push_str(",\"tiles\":[");
+        let mut out = JsonBuffer::new(limits.max_json_bytes)?;
+        out.push_str("{\"version\":")?;
+        push_usize(&mut out, usize::from(self.version))?;
+        out.push_str(",\"layers\":")?;
+        push_usize(&mut out, usize::from(self.layers.bits()))?;
+        out.push_str(",\"truncated\":")?;
+        push_bool(&mut out, self.truncated)?;
+        out.push_str(",\"tiles\":[")?;
         for (index, tile) in self.tiles.iter().enumerate() {
             if index != 0 {
-                out.push(',');
+                out.push(',')?;
             }
-            out.push_str("{\"id\":");
-            push_usize(&mut out, tile.index);
-            out.push_str(",\"rect\":");
-            push_u32_array(&mut out, &tile.rect);
-            out.push_str(",\"draws\":");
-            push_usize(&mut out, tile.draws);
-            out.push_str(",\"partial\":");
-            push_usize(&mut out, tile.partial);
-            out.push_str(",\"interior\":");
-            push_usize(&mut out, tile.interior);
-            out.push('}');
-            if out.len() > limits.max_json_bytes {
-                return Err(InspectError::JsonLimit {
-                    limit: limits.max_json_bytes,
-                    needed: out.len(),
-                });
-            }
+            out.push_str("{\"id\":")?;
+            push_usize(&mut out, tile.index)?;
+            out.push_str(",\"rect\":")?;
+            push_u32_array(&mut out, &tile.rect)?;
+            out.push_str(",\"draws\":")?;
+            push_usize(&mut out, tile.draws)?;
+            out.push_str(",\"partial\":")?;
+            push_usize(&mut out, tile.partial)?;
+            out.push_str(",\"interior\":")?;
+            push_usize(&mut out, tile.interior)?;
+            out.push('}')?;
         }
-        out.push_str("],\"nodes\":[");
+        out.push_str("],\"nodes\":[")?;
         for (index, node) in self.nodes.iter().enumerate() {
             if index != 0 {
-                out.push(',');
+                out.push(',')?;
             }
-            push_overlay_node(&mut out, node, limits.max_json_bytes)?;
+            push_overlay_node(&mut out, node)?;
         }
-        out.push_str("]}");
-        if out.len() > limits.max_json_bytes {
-            return Err(InspectError::JsonLimit {
-                limit: limits.max_json_bytes,
-                needed: out.len(),
-            });
-        }
+        out.push_str("]}")?;
         Ok(out.into_bytes())
     }
 }
@@ -844,6 +826,112 @@ fn try_clone_string(source: &str, field: &'static str) -> Result<String, Inspect
     let mut value = try_string_with_capacity(source.len(), field)?;
     value.push_str(source);
     Ok(value)
+}
+
+const JSON_INITIAL_CAPACITY: usize = 1024;
+
+#[derive(Debug)]
+struct JsonBuffer {
+    bytes: String,
+    max_bytes: usize,
+}
+
+impl JsonBuffer {
+    fn new(max_bytes: usize) -> Result<Self, InspectError> {
+        Self::with_initial_capacity(max_bytes, max_bytes.min(JSON_INITIAL_CAPACITY))
+    }
+
+    fn with_initial_capacity(
+        max_bytes: usize,
+        initial_capacity: usize,
+    ) -> Result<Self, InspectError> {
+        Ok(Self {
+            bytes: try_string_with_capacity(initial_capacity.min(max_bytes), "JSON bytes")?,
+            max_bytes,
+        })
+    }
+
+    fn push_str(&mut self, value: &str) -> Result<(), InspectError> {
+        let Some(needed) = self.bytes.len().checked_add(value.len()) else {
+            return Err(InspectError::JsonLimit {
+                limit: self.max_bytes,
+                needed: usize::MAX,
+            });
+        };
+        if needed > self.max_bytes {
+            return Err(InspectError::JsonLimit {
+                limit: self.max_bytes,
+                needed,
+            });
+        }
+        self.reserve_for(value.len())?;
+        self.bytes.push_str(value);
+        Ok(())
+    }
+
+    fn reserve_for(&mut self, additional: usize) -> Result<(), InspectError> {
+        if self.bytes.capacity().saturating_sub(self.bytes.len()) >= additional {
+            return Ok(());
+        }
+        let needed = self
+            .bytes
+            .len()
+            .checked_add(additional)
+            .ok_or(InspectError::JsonLimit {
+                limit: self.max_bytes,
+                needed: usize::MAX,
+            })?;
+        let grown = self
+            .bytes
+            .capacity()
+            .saturating_mul(2)
+            .max(JSON_INITIAL_CAPACITY);
+        let target_capacity = needed.max(grown).min(self.max_bytes);
+        let reserve_additional = target_capacity - self.bytes.len();
+        self.bytes
+            .try_reserve_exact(reserve_additional)
+            .map_err(|source| storage_unavailable("JSON bytes", reserve_additional, source))
+    }
+
+    fn push(&mut self, value: char) -> Result<(), InspectError> {
+        let mut encoded = [0_u8; 4];
+        self.push_str(value.encode_utf8(&mut encoded))
+    }
+
+    fn push_fmt(&mut self, arguments: fmt::Arguments<'_>) -> Result<(), InspectError> {
+        let mut sink = JsonFormatSink {
+            output: self,
+            error: None,
+        };
+        if fmt::write(&mut sink, arguments).is_err() {
+            return Err(sink.error.unwrap_or(InspectError::JsonFormatting));
+        }
+        Ok(())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes.into_bytes()
+    }
+}
+
+struct JsonFormatSink<'a> {
+    output: &'a mut JsonBuffer,
+    error: Option<InspectError>,
+}
+
+impl fmt::Write for JsonFormatSink<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.error.is_some() {
+            return Err(fmt::Error);
+        }
+        match self.output.push_str(value) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.error = Some(error);
+                Err(fmt::Error)
+            }
+        }
+    }
 }
 
 fn try_reserve_hash_map<K, V>(
@@ -1012,274 +1100,254 @@ fn winding(points: &[[f64; 3]]) -> WindingDirection {
     }
 }
 
-fn push_inspector_node(
-    out: &mut String,
-    node: &InspectorNode,
-    max_bytes: usize,
-) -> Result<(), InspectError> {
-    out.push_str("{\"id\":");
-    push_usize(out, node.id);
-    out.push_str(",\"root\":");
-    push_bool(out, node.root);
-    out.push_str(",\"parents\":");
-    push_usize_array(out, &node.parents, max_bytes)?;
-    out.push_str(",\"children\":");
-    push_usize_array(out, &node.children, max_bytes)?;
-    out.push_str(",\"pins\":");
-    push_usize(out, node.pins);
-    out.push_str(",\"z_index\":");
-    out.push_str(&node.z_index.to_string());
-    out.push_str(",\"animating\":");
-    push_bool(out, node.animating);
-    out.push_str(",\"changing\":");
-    push_bool(out, node.changing);
-    out.push_str(",\"records\":{\"count\":");
-    push_usize(out, node.record_count);
-    out.push_str(",\"revision\":");
-    out.push_str(&node.record_revision.to_string());
-    out.push_str(",\"fields\":[");
+fn push_inspector_node(out: &mut JsonBuffer, node: &InspectorNode) -> Result<(), InspectError> {
+    out.push_str("{\"id\":")?;
+    push_usize(out, node.id)?;
+    out.push_str(",\"root\":")?;
+    push_bool(out, node.root)?;
+    out.push_str(",\"parents\":")?;
+    push_usize_array(out, &node.parents)?;
+    out.push_str(",\"children\":")?;
+    push_usize_array(out, &node.children)?;
+    out.push_str(",\"pins\":")?;
+    push_usize(out, node.pins)?;
+    out.push_str(",\"z_index\":")?;
+    push_display(out, node.z_index)?;
+    out.push_str(",\"animating\":")?;
+    push_bool(out, node.animating)?;
+    out.push_str(",\"changing\":")?;
+    push_bool(out, node.changing)?;
+    out.push_str(",\"records\":{\"count\":")?;
+    push_usize(out, node.record_count)?;
+    out.push_str(",\"revision\":")?;
+    push_display(out, node.record_revision)?;
+    out.push_str(",\"fields\":[")?;
     for (index, field) in node.fields.iter().enumerate() {
         if index != 0 {
-            out.push(',');
+            out.push(',')?;
         }
-        out.push_str("{\"name\":\"");
-        push_json_escaped(out, &field.name, max_bytes)?;
-        out.push_str("\",\"width\":");
-        push_usize(out, field.width);
-        out.push_str(",\"revision\":");
-        out.push_str(&field.revision.to_string());
-        out.push_str(",\"total_values\":");
-        push_usize(out, field.total_values);
-        out.push_str(",\"values\":[");
+        out.push_str("{\"name\":\"")?;
+        push_json_escaped(out, &field.name)?;
+        out.push_str("\",\"width\":")?;
+        push_usize(out, field.width)?;
+        out.push_str(",\"revision\":")?;
+        push_display(out, field.revision)?;
+        out.push_str(",\"total_values\":")?;
+        push_usize(out, field.total_values)?;
+        out.push_str(",\"values\":[")?;
         for (value_index, value) in field.values.iter().copied().enumerate() {
             if value_index != 0 {
-                out.push(',');
+                out.push(',')?;
             }
-            push_f32(out, value);
-            require_json_budget(out, max_bytes)?;
+            push_f32(out, value)?;
         }
-        out.push_str("]}");
-        require_json_budget(out, max_bytes)?;
+        out.push_str("]}")?;
     }
-    out.push_str("]},\"uniforms\":");
-    push_uniforms(out, node.uniforms);
-    out.push_str(",\"placement\":{\"linear\":");
-    push_matrix3(out, &node.placement_linear);
-    out.push_str(",\"translation\":");
-    push_vec3(out, &node.placement_translation);
-    out.push_str("},\"bounds\":");
-    push_matrix3(out, &node.bounds);
-    out.push_str(",\"source_span\":");
-    match &node.source_span {
-        Some(span) => {
-            out.push_str("{\"kind\":\"");
-            out.push_str(span.kind.name());
-            out.push_str("\",\"start\":");
-            push_usize(out, span.start);
-            out.push_str(",\"end\":");
-            push_usize(out, span.end);
-            out.push_str(",\"source_bytes\":");
-            push_usize(out, span.source_bytes);
-            out.push_str(",\"excerpt\":\"");
-            push_json_escaped(out, &span.excerpt, max_bytes)?;
-            out.push_str("\",\"excerpt_truncated\":");
-            push_bool(out, span.excerpt_truncated);
-            out.push('}');
-        }
-        None => out.push_str("null"),
+    out.push_str("]},\"uniforms\":")?;
+    push_uniforms(out, node.uniforms)?;
+    out.push_str(",\"placement\":{\"linear\":")?;
+    push_matrix3(out, &node.placement_linear)?;
+    out.push_str(",\"translation\":")?;
+    push_vec3(out, &node.placement_translation)?;
+    out.push_str("},\"bounds\":")?;
+    push_matrix3(out, &node.bounds)?;
+    out.push_str(",\"source_span\":")?;
+    if let Some(span) = &node.source_span {
+        out.push_str("{\"kind\":\"")?;
+        out.push_str(span.kind.name())?;
+        out.push_str("\",\"start\":")?;
+        push_usize(out, span.start)?;
+        out.push_str(",\"end\":")?;
+        push_usize(out, span.end)?;
+        out.push_str(",\"source_bytes\":")?;
+        push_usize(out, span.source_bytes)?;
+        out.push_str(",\"excerpt\":\"")?;
+        push_json_escaped(out, &span.excerpt)?;
+        out.push_str("\",\"excerpt_truncated\":")?;
+        push_bool(out, span.excerpt_truncated)?;
+        out.push('}')?;
+    } else {
+        out.push_str("null")?;
     }
-    out.push('}');
-    require_json_budget(out, max_bytes)
+    out.push('}')
 }
 
-fn push_overlay_node(
-    out: &mut String,
-    node: &NodeOverlay,
-    max_bytes: usize,
-) -> Result<(), InspectError> {
-    out.push_str("{\"id\":");
-    push_usize(out, node.id);
-    out.push_str(",\"total_points\":");
-    push_usize(out, node.total_points);
-    out.push_str(",\"control_points\":[");
+fn push_overlay_node(out: &mut JsonBuffer, node: &NodeOverlay) -> Result<(), InspectError> {
+    out.push_str("{\"id\":")?;
+    push_usize(out, node.id)?;
+    out.push_str(",\"total_points\":")?;
+    push_usize(out, node.total_points)?;
+    out.push_str(",\"control_points\":[")?;
     for (index, point) in node.control_points.iter().enumerate() {
         if index != 0 {
-            out.push(',');
+            out.push(',')?;
         }
-        push_vec3(out, point);
-        require_json_budget(out, max_bytes)?;
+        push_vec3(out, point)?;
     }
-    out.push_str("],\"bounds\":");
-    match &node.bounds {
-        Some(bounds) => push_matrix3(out, bounds),
-        None => out.push_str("null"),
+    out.push_str("],\"bounds\":")?;
+    if let Some(bounds) = &node.bounds {
+        push_matrix3(out, bounds)?;
+    } else {
+        out.push_str("null")?;
     }
-    out.push_str(",\"winding\":");
-    match node.winding {
-        Some(winding) => {
-            out.push('"');
-            out.push_str(winding.name());
-            out.push('"');
-        }
-        None => out.push_str("null"),
+    out.push_str(",\"winding\":")?;
+    if let Some(winding) = node.winding {
+        out.push('"')?;
+        out.push_str(winding.name())?;
+        out.push('"')?;
+    } else {
+        out.push_str("null")?;
     }
-    out.push_str(",\"center_z\":");
-    push_optional_f64(out, node.center_z);
-    out.push_str(",\"z_index\":");
-    match node.z_index {
-        Some(value) => out.push_str(&value.to_string()),
-        None => out.push_str("null"),
+    out.push_str(",\"center_z\":")?;
+    push_optional_f64(out, node.center_z)?;
+    out.push_str(",\"z_index\":")?;
+    if let Some(value) = node.z_index {
+        push_display(out, value)?;
+    } else {
+        out.push_str("null")?;
     }
-    out.push_str(",\"depth_test\":");
-    match node.depth_test {
-        Some(value) => push_bool(out, value),
-        None => out.push_str("null"),
+    out.push_str(",\"depth_test\":")?;
+    if let Some(value) = node.depth_test {
+        push_bool(out, value)?;
+    } else {
+        out.push_str("null")?;
     }
-    out.push('}');
-    require_json_budget(out, max_bytes)
+    out.push('}')
 }
 
-fn push_uniforms(out: &mut String, uniforms: UniformSnapshot) {
-    out.push_str("{\"is_fixed_in_frame\":");
-    push_f64(out, uniforms.is_fixed_in_frame);
-    out.push_str(",\"shading\":");
-    push_vec3(out, &uniforms.shading);
-    out.push_str(",\"clip_planes\":[");
+fn push_uniforms(out: &mut JsonBuffer, uniforms: UniformSnapshot) -> Result<(), InspectError> {
+    out.push_str("{\"is_fixed_in_frame\":")?;
+    push_f64(out, uniforms.is_fixed_in_frame)?;
+    out.push_str(",\"shading\":")?;
+    push_vec3(out, &uniforms.shading)?;
+    out.push_str(",\"clip_planes\":[")?;
     for (index, plane) in uniforms.clip_planes.iter().enumerate() {
         if index != 0 {
-            out.push(',');
+            out.push(',')?;
         }
-        push_f64_array(out, plane);
+        push_f64_array(out, plane)?;
     }
-    out.push_str("],\"anti_alias_width\":");
-    push_f64(out, uniforms.anti_alias_width);
-    out.push_str(",\"joint_type\":");
-    push_f64(out, uniforms.joint_type);
-    out.push_str(",\"flat_stroke\":");
-    push_bool(out, uniforms.flat_stroke);
-    out.push_str(",\"scale_stroke_with_zoom\":");
-    push_bool(out, uniforms.scale_stroke_with_zoom);
-    out.push_str(",\"stroke_behind\":");
-    push_bool(out, uniforms.stroke_behind);
-    out.push_str(",\"depth_test\":");
-    push_bool(out, uniforms.depth_test);
-    out.push_str(",\"use_winding_fill\":");
-    push_bool(out, uniforms.use_winding_fill);
-    out.push('}');
+    out.push_str("],\"anti_alias_width\":")?;
+    push_f64(out, uniforms.anti_alias_width)?;
+    out.push_str(",\"joint_type\":")?;
+    push_f64(out, uniforms.joint_type)?;
+    out.push_str(",\"flat_stroke\":")?;
+    push_bool(out, uniforms.flat_stroke)?;
+    out.push_str(",\"scale_stroke_with_zoom\":")?;
+    push_bool(out, uniforms.scale_stroke_with_zoom)?;
+    out.push_str(",\"stroke_behind\":")?;
+    push_bool(out, uniforms.stroke_behind)?;
+    out.push_str(",\"depth_test\":")?;
+    push_bool(out, uniforms.depth_test)?;
+    out.push_str(",\"use_winding_fill\":")?;
+    push_bool(out, uniforms.use_winding_fill)?;
+    out.push('}')
 }
 
-fn push_matrix3(out: &mut String, matrix: &[[f64; 3]; 3]) {
-    out.push('[');
+fn push_matrix3(out: &mut JsonBuffer, matrix: &[[f64; 3]; 3]) -> Result<(), InspectError> {
+    out.push('[')?;
     for (index, row) in matrix.iter().enumerate() {
         if index != 0 {
-            out.push(',');
+            out.push(',')?;
         }
-        push_vec3(out, row);
+        push_vec3(out, row)?;
     }
-    out.push(']');
+    out.push(']')
 }
 
-fn push_vec3(out: &mut String, vector: &[f64; 3]) {
-    push_f64_array(out, vector);
+fn push_vec3(out: &mut JsonBuffer, vector: &[f64; 3]) -> Result<(), InspectError> {
+    push_f64_array(out, vector)
 }
 
-fn push_f64_array<const N: usize>(out: &mut String, values: &[f64; N]) {
-    out.push('[');
+fn push_f64_array<const N: usize>(
+    out: &mut JsonBuffer,
+    values: &[f64; N],
+) -> Result<(), InspectError> {
+    out.push('[')?;
     for (index, value) in values.iter().copied().enumerate() {
         if index != 0 {
-            out.push(',');
+            out.push(',')?;
         }
-        push_f64(out, value);
+        push_f64(out, value)?;
     }
-    out.push(']');
+    out.push(']')
 }
 
-fn push_u32_array<const N: usize>(out: &mut String, values: &[u32; N]) {
-    out.push('[');
-    for (index, value) in values.iter().enumerate() {
-        if index != 0 {
-            out.push(',');
-        }
-        out.push_str(&value.to_string());
-    }
-    out.push(']');
-}
-
-fn push_usize_array(
-    out: &mut String,
-    values: &[usize],
-    max_bytes: usize,
+fn push_u32_array<const N: usize>(
+    out: &mut JsonBuffer,
+    values: &[u32; N],
 ) -> Result<(), InspectError> {
-    out.push('[');
+    out.push('[')?;
     for (index, value) in values.iter().enumerate() {
         if index != 0 {
-            out.push(',');
+            out.push(',')?;
         }
-        push_usize(out, *value);
-        require_json_budget(out, max_bytes)?;
+        push_display(out, value)?;
     }
-    out.push(']');
-    require_json_budget(out, max_bytes)
+    out.push(']')
 }
 
-fn push_optional_f64(out: &mut String, value: Option<f64>) {
+fn push_usize_array(out: &mut JsonBuffer, values: &[usize]) -> Result<(), InspectError> {
+    out.push('[')?;
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            out.push(',')?;
+        }
+        push_usize(out, *value)?;
+    }
+    out.push(']')
+}
+
+fn push_optional_f64(out: &mut JsonBuffer, value: Option<f64>) -> Result<(), InspectError> {
     match value {
         Some(value) => push_f64(out, value),
         None => out.push_str("null"),
     }
 }
 
-fn push_f64(out: &mut String, value: f64) {
+fn push_f64(out: &mut JsonBuffer, value: f64) -> Result<(), InspectError> {
     if value.is_finite() {
-        out.push_str(&value.to_string());
+        push_display(out, value)
     } else if value.is_nan() {
-        out.push_str("\"NaN\"");
+        out.push_str("\"NaN\"")
     } else if value.is_sign_positive() {
-        out.push_str("\"Infinity\"");
+        out.push_str("\"Infinity\"")
     } else {
-        out.push_str("\"-Infinity\"");
+        out.push_str("\"-Infinity\"")
     }
 }
 
-fn push_f32(out: &mut String, value: f32) {
-    push_f64(out, f64::from(value));
+fn push_f32(out: &mut JsonBuffer, value: f32) -> Result<(), InspectError> {
+    push_f64(out, f64::from(value))
 }
 
-fn push_usize(out: &mut String, value: usize) {
-    out.push_str(&value.to_string());
+fn push_usize(out: &mut JsonBuffer, value: usize) -> Result<(), InspectError> {
+    push_display(out, value)
 }
 
-fn push_bool(out: &mut String, value: bool) {
-    out.push_str(if value { "true" } else { "false" });
+fn push_display(out: &mut JsonBuffer, value: impl fmt::Display) -> Result<(), InspectError> {
+    out.push_fmt(format_args!("{value}"))
 }
 
-fn push_json_escaped(out: &mut String, raw: &str, max_bytes: usize) -> Result<(), InspectError> {
+fn push_bool(out: &mut JsonBuffer, value: bool) -> Result<(), InspectError> {
+    out.push_str(if value { "true" } else { "false" })
+}
+
+fn push_json_escaped(out: &mut JsonBuffer, raw: &str) -> Result<(), InspectError> {
     for character in raw.chars() {
         match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
+            '"' => out.push_str("\\\"")?,
+            '\\' => out.push_str("\\\\")?,
+            '\n' => out.push_str("\\n")?,
+            '\r' => out.push_str("\\r")?,
+            '\t' => out.push_str("\\t")?,
             character if character.is_control() => {
-                out.push_str(&format!("\\u{:04x}", character as u32));
+                out.push_fmt(format_args!("\\u{:04x}", character as u32))?;
             }
-            character => out.push(character),
+            character => out.push(character)?,
         }
-        require_json_budget(out, max_bytes)?;
     }
     Ok(())
-}
-
-fn require_json_budget(out: &str, max_bytes: usize) -> Result<(), InspectError> {
-    if out.len() > max_bytes {
-        Err(InspectError::JsonLimit {
-            limit: max_bytes,
-            needed: out.len(),
-        })
-    } else {
-        Ok(())
-    }
 }
 
 /// Inspector/overlay refusal.
@@ -1308,6 +1376,8 @@ pub enum InspectError {
         /// Allocation refusal.
         source: TryReserveError,
     },
+    /// A primitive JSON value rejected standard-library formatting.
+    JsonFormatting,
     /// JSON would exceed the worker response budget.
     JsonLimit {
         /// Ceiling.
@@ -1337,8 +1407,9 @@ impl fmt::Display for InspectError {
                 source,
             } => write!(
                 f,
-                "Studio inspector {field} storage could not reserve {additional} additional elements or bytes: {source}"
+                "Studio {field} storage could not reserve {additional} additional elements or bytes: {source}"
             ),
+            Self::JsonFormatting => f.write_str("Studio JSON primitive formatting failed"),
             Self::JsonLimit { limit, needed } => {
                 write!(
                     f,
@@ -1363,8 +1434,8 @@ mod storage_tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        InspectError, try_reserve_hash_map, try_reserve_hash_set, try_string_with_capacity,
-        try_vec_with_capacity,
+        InspectError, JsonBuffer, try_reserve_hash_map, try_reserve_hash_set,
+        try_string_with_capacity, try_vec_with_capacity,
     };
 
     fn assert_storage_refusal(error: &InspectError, field: &'static str, additional: usize) {
@@ -1398,5 +1469,9 @@ mod storage_tests {
         let set = try_reserve_hash_set(&mut set, usize::MAX, "inspector root set")
             .expect_err("impossible set capacity must refuse");
         assert_storage_refusal(&set, "inspector root set", usize::MAX);
+
+        let json = JsonBuffer::with_initial_capacity(usize::MAX, usize::MAX)
+            .expect_err("impossible JSON capacity must refuse");
+        assert_storage_refusal(&json, "JSON bytes", usize::MAX);
     }
 }
