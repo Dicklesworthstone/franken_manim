@@ -6,7 +6,7 @@
 //! has an explicit ceiling, so a hostile or simply enormous scene cannot turn
 //! Studio inspection into an unbounded allocation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, TryReserveError};
 use std::fmt;
 use std::sync::Arc;
 
@@ -350,24 +350,37 @@ impl InspectorSnapshot {
         limits: InspectorLimits,
     ) -> Result<Self, InspectError> {
         let limits = limits.validate()?;
-        let (handles, ids, traversal_truncated) = visible_handles(stage, limits);
+        let VisibleHandles {
+            handles,
+            ids,
+            truncated: traversal_truncated,
+        } = visible_handles(stage, limits)?;
         let roots = stage.roots();
-        let root_set: HashSet<Mob> = roots
-            .iter()
-            .copied()
-            .filter(|mob| ids.contains_key(mob))
-            .collect();
+        let mut root_set = HashSet::new();
+        try_reserve_hash_set(
+            &mut root_set,
+            roots.len().min(ids.len()),
+            "inspector root set",
+        )?;
+        for root in roots.iter().copied().filter(|mob| ids.contains_key(mob)) {
+            root_set.insert(root);
+        }
         let mut total_links = 0usize;
         let mut total_values = 0usize;
         let mut total_source_excerpt_bytes = 0usize;
         let mut truncated = traversal_truncated;
-        let mut nodes = Vec::with_capacity(handles.len());
+        let mut nodes = try_vec_with_capacity(handles.len(), "inspector nodes")?;
         for (id, mob) in handles.iter().copied().enumerate() {
             let Some(entry) = stage.get(mob) else {
                 continue;
             };
             let mut node_links = 0usize;
-            let mut parents = Vec::new();
+            let parent_capacity = entry
+                .parents()
+                .len()
+                .min(limits.max_links_per_node)
+                .min(limits.max_total_links.saturating_sub(total_links));
+            let mut parents = try_vec_with_capacity(parent_capacity, "inspector parent links")?;
             for parent in entry.parents() {
                 let Some(parent) = ids.get(parent).copied() else {
                     continue;
@@ -381,7 +394,12 @@ impl InspectorSnapshot {
                 node_links += 1;
                 total_links += 1;
             }
-            let mut children = Vec::new();
+            let child_capacity = entry
+                .submobjects()
+                .len()
+                .min(limits.max_links_per_node.saturating_sub(node_links))
+                .min(limits.max_total_links.saturating_sub(total_links));
+            let mut children = try_vec_with_capacity(child_capacity, "inspector child links")?;
             for child in entry.submobjects() {
                 let Some(child) = ids.get(child).copied() else {
                     continue;
@@ -395,7 +413,15 @@ impl InspectorSnapshot {
                 node_links += 1;
                 total_links += 1;
             }
-            let mut fields = Vec::new();
+            let mut fields = try_vec_with_capacity(
+                entry
+                    .buffer
+                    .schema()
+                    .fields()
+                    .len()
+                    .min(limits.max_fields_per_node),
+                "inspector record fields",
+            )?;
             for field in entry
                 .buffer
                 .schema()
@@ -409,7 +435,7 @@ impl InspectorSnapshot {
                 if keep < total {
                     truncated = true;
                 }
-                let mut values = Vec::with_capacity(keep);
+                let mut values = try_vec_with_capacity(keep, "inspector record values")?;
                 for record in 0..entry.buffer.len() {
                     if values.len() >= keep {
                         break;
@@ -422,7 +448,7 @@ impl InspectorSnapshot {
                 }
                 total_values += keep;
                 fields.push(RecordFieldSnapshot {
-                    name: field.name.clone(),
+                    name: try_clone_string(&field.name, "inspector field name bytes")?,
                     width: field.width,
                     revision: entry.buffer.field_revision(&field.name).unwrap_or(0),
                     total_values: total,
@@ -438,7 +464,7 @@ impl InspectorSnapshot {
                 .max_total_source_excerpt_bytes
                 .saturating_sub(total_source_excerpt_bytes)
                 .min(limits.max_source_excerpt_bytes);
-            let source_span = span_snapshot(spans.spans.get(&mob), source_excerpt_bytes);
+            let source_span = span_snapshot(spans.spans.get(&mob), source_excerpt_bytes)?;
             if let Some(source_span) = &source_span {
                 total_source_excerpt_bytes += source_span.excerpt.len();
                 if source_span.excerpt_truncated {
@@ -603,7 +629,7 @@ impl DebugOverlaySnapshot {
             }
             let keep = expected.min(limits.max_tiles);
             tiles_truncated = keep < expected;
-            tiles.reserve(keep);
+            try_reserve_vec(&mut tiles, keep, "debug overlay tiles")?;
             for index in 0..keep {
                 let x = u32::try_from(index % cols as usize)
                     .map_err(|_| InspectError::OverlayGeometryOverflow)?;
@@ -636,10 +662,14 @@ impl DebugOverlaySnapshot {
             }
         }
 
-        let (handles, _, traversal_truncated) = visible_handles(stage, limits);
+        let VisibleHandles {
+            handles,
+            truncated: traversal_truncated,
+            ..
+        } = visible_handles(stage, limits)?;
         let mut total_points = 0usize;
         let mut truncated = traversal_truncated || tiles_truncated;
-        let mut nodes = Vec::with_capacity(handles.len());
+        let mut nodes = try_vec_with_capacity(handles.len(), "debug overlay nodes")?;
         for (id, mob) in handles.iter().copied().enumerate() {
             let Some(entry) = stage.get(mob) else {
                 continue;
@@ -655,11 +685,13 @@ impl DebugOverlaySnapshot {
             if keep < total {
                 truncated = true;
             }
-            let mut control_points = Vec::new();
-            if layers.contains(DebugLayerSet::CONTROL_POINTS)
-                || layers.contains(DebugLayerSet::WINDING)
-            {
-                control_points.reserve(keep);
+            let capture_points = layers.contains(DebugLayerSet::CONTROL_POINTS)
+                || layers.contains(DebugLayerSet::WINDING);
+            let mut control_points = try_vec_with_capacity(
+                if capture_points { keep } else { 0 },
+                "debug overlay control points",
+            )?;
+            if capture_points {
                 for record in 0..keep {
                     if let Some(point) = entry.buffer.read(record, "point") {
                         control_points.push(placement.apply_point([
@@ -766,10 +798,104 @@ impl DebugOverlaySnapshot {
     }
 }
 
-fn visible_handles(
-    stage: &Stage,
-    limits: InspectorLimits,
-) -> (Vec<Mob>, HashMap<Mob, usize>, bool) {
+fn storage_unavailable(
+    field: &'static str,
+    additional: usize,
+    source: TryReserveError,
+) -> InspectError {
+    InspectError::StorageUnavailable {
+        field,
+        additional,
+        source,
+    }
+}
+
+fn try_reserve_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    field: &'static str,
+) -> Result<(), InspectError> {
+    values
+        .try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(field, additional, source))
+}
+
+fn try_vec_with_capacity<T>(
+    additional: usize,
+    field: &'static str,
+) -> Result<Vec<T>, InspectError> {
+    let mut values = Vec::new();
+    try_reserve_vec(&mut values, additional, field)?;
+    Ok(values)
+}
+
+fn try_string_with_capacity(
+    additional: usize,
+    field: &'static str,
+) -> Result<String, InspectError> {
+    let mut value = String::new();
+    value
+        .try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(field, additional, source))?;
+    Ok(value)
+}
+
+fn try_clone_string(source: &str, field: &'static str) -> Result<String, InspectError> {
+    let mut value = try_string_with_capacity(source.len(), field)?;
+    value.push_str(source);
+    Ok(value)
+}
+
+fn try_reserve_hash_map<K, V>(
+    values: &mut HashMap<K, V>,
+    additional: usize,
+    field: &'static str,
+) -> Result<(), InspectError>
+where
+    K: Eq + std::hash::Hash,
+{
+    values
+        .try_reserve(additional)
+        .map_err(|source| storage_unavailable(field, additional, source))
+}
+
+fn try_reserve_hash_set<T>(
+    values: &mut HashSet<T>,
+    additional: usize,
+    field: &'static str,
+) -> Result<(), InspectError>
+where
+    T: Eq + std::hash::Hash,
+{
+    values
+        .try_reserve(additional)
+        .map_err(|source| storage_unavailable(field, additional, source))
+}
+
+fn try_push_visible_handle(
+    handles: &mut Vec<Mob>,
+    ids: &mut HashMap<Mob, usize>,
+    stack: &mut Vec<(Mob, usize, usize)>,
+    mob: Mob,
+    depth: usize,
+) -> Result<(), InspectError> {
+    try_reserve_vec(handles, 1, "visible handles")?;
+    try_reserve_hash_map(ids, 1, "visible handle ids")?;
+    try_reserve_vec(stack, 1, "visible traversal stack")?;
+    let id = handles.len();
+    handles.push(mob);
+    ids.insert(mob, id);
+    stack.push((mob, depth, 0));
+    Ok(())
+}
+
+struct VisibleHandles {
+    handles: Vec<Mob>,
+    ids: HashMap<Mob, usize>,
+    truncated: bool,
+}
+
+fn visible_handles(stage: &Stage, limits: InspectorLimits) -> Result<VisibleHandles, InspectError> {
     let mut handles = Vec::new();
     let mut ids = HashMap::new();
     let mut stack: Vec<(Mob, usize, usize)> = Vec::new();
@@ -783,10 +909,7 @@ fn visible_handles(
             truncated = true;
             break;
         }
-        let id = handles.len();
-        handles.push(root);
-        ids.insert(root, id);
-        stack.push((root, 0, 0));
+        try_push_visible_handle(&mut handles, &mut ids, &mut stack, root, 0)?;
         while let Some((mob, depth, next_child)) = stack.last_mut() {
             let Some(entry) = stage.get(*mob) else {
                 stack.pop();
@@ -819,34 +942,41 @@ fn visible_handles(
                 stack.clear();
                 break;
             }
-            let child_id = handles.len();
             let child_depth = *depth + 1;
-            handles.push(child);
-            ids.insert(child, child_id);
-            stack.push((child, child_depth, 0));
+            try_push_visible_handle(&mut handles, &mut ids, &mut stack, child, child_depth)?;
         }
     }
-    (handles, ids, truncated)
+    Ok(VisibleHandles {
+        handles,
+        ids,
+        truncated,
+    })
 }
 
 fn span_snapshot(
     span: Option<&RegisteredSpan>,
     max_excerpt_bytes: usize,
-) -> Option<SourceSpanSnapshot> {
-    let span = span?;
+) -> Result<Option<SourceSpanSnapshot>, InspectError> {
+    let Some(span) = span else {
+        return Ok(None);
+    };
     let intended_end = span.start.saturating_add(max_excerpt_bytes).min(span.end);
     let mut excerpt_end = intended_end;
     while excerpt_end > span.start && !span.source.is_char_boundary(excerpt_end) {
         excerpt_end -= 1;
     }
-    Some(SourceSpanSnapshot {
+    let excerpt = span
+        .source
+        .get(span.start..excerpt_end)
+        .ok_or(InspectError::InvalidSourceSpan)?;
+    Ok(Some(SourceSpanSnapshot {
         kind: span.kind,
         start: span.start,
         end: span.end,
         source_bytes: span.source.len(),
-        excerpt: span.source[span.start..excerpt_end].to_owned(),
+        excerpt: try_clone_string(excerpt, "inspector source excerpt bytes")?,
         excerpt_truncated: excerpt_end < span.end,
-    })
+    }))
 }
 
 fn validate_span(source: &str, start: usize, end: usize) -> Result<(), InspectError> {
@@ -1169,6 +1299,15 @@ pub enum InspectError {
     BinningViewportMismatch,
     /// Tile-grid arithmetic overflowed.
     OverlayGeometryOverflow,
+    /// Storage for an admitted capture field or collection could not be reserved.
+    StorageUnavailable {
+        /// Which capture field or collection needed ownership.
+        field: &'static str,
+        /// Additional elements or bytes requested from the allocator.
+        additional: usize,
+        /// Allocation refusal.
+        source: TryReserveError,
+    },
     /// JSON would exceed the worker response budget.
     JsonLimit {
         /// Ceiling.
@@ -1192,6 +1331,14 @@ impl fmt::Display for InspectError {
                 f.write_str("supplied Viewport does not describe the Binning grid")
             }
             Self::OverlayGeometryOverflow => f.write_str("debug-overlay grid size overflow"),
+            Self::StorageUnavailable {
+                field,
+                additional,
+                source,
+            } => write!(
+                f,
+                "Studio inspector {field} storage could not reserve {additional} additional elements or bytes: {source}"
+            ),
             Self::JsonLimit { limit, needed } => {
                 write!(
                     f,
@@ -1202,4 +1349,54 @@ impl fmt::Display for InspectError {
     }
 }
 
-impl std::error::Error for InspectError {}
+impl std::error::Error for InspectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StorageUnavailable { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::{
+        InspectError, try_reserve_hash_map, try_reserve_hash_set, try_string_with_capacity,
+        try_vec_with_capacity,
+    };
+
+    fn assert_storage_refusal(error: &InspectError, field: &'static str, additional: usize) {
+        assert!(matches!(
+            error,
+            InspectError::StorageUnavailable {
+                field: found,
+                additional: found_additional,
+                ..
+            } if *found == field && *found_additional == additional
+        ));
+        assert!(std::error::Error::source(error).is_some());
+    }
+
+    #[test]
+    fn capture_storage_helpers_preserve_typed_refusals() {
+        let vector = try_vec_with_capacity::<u8>(usize::MAX, "inspector nodes")
+            .expect_err("impossible vector capacity must refuse");
+        assert_storage_refusal(&vector, "inspector nodes", usize::MAX);
+
+        let string = try_string_with_capacity(usize::MAX, "inspector source excerpt bytes")
+            .expect_err("impossible string capacity must refuse");
+        assert_storage_refusal(&string, "inspector source excerpt bytes", usize::MAX);
+
+        let mut map = HashMap::<u8, usize>::new();
+        let map = try_reserve_hash_map(&mut map, usize::MAX, "visible handle ids")
+            .expect_err("impossible map capacity must refuse");
+        assert_storage_refusal(&map, "visible handle ids", usize::MAX);
+
+        let mut set = HashSet::<u8>::new();
+        let set = try_reserve_hash_set(&mut set, usize::MAX, "inspector root set")
+            .expect_err("impossible set capacity must refuse");
+        assert_storage_refusal(&set, "inspector root set", usize::MAX);
+    }
+}

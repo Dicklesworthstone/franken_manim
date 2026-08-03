@@ -192,6 +192,29 @@ fn frame_hub_binds_png_decode_pixels_to_session_frame_budget() {
 }
 
 #[test]
+fn inspector_storage_refusal_is_typed_and_source_preserving() {
+    let mut impossible = Vec::<u8>::new();
+    let source = impossible
+        .try_reserve(usize::MAX)
+        .expect_err("impossible capacity must refuse");
+    let error = InspectError::StorageUnavailable {
+        field: "inspector nodes",
+        additional: usize::MAX,
+        source,
+    };
+    assert!(matches!(
+        &error,
+        InspectError::StorageUnavailable {
+            field: "inspector nodes",
+            additional,
+            ..
+        } if *additional == usize::MAX
+    ));
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(error.to_string().contains("inspector nodes"));
+}
+
+#[test]
 fn inspector_and_debug_overlays_follow_visible_family_order() {
     let first = Mobject::from_points(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
     let second = Mobject::from_points(&[[2.0, 2.0, 1.0]]);
