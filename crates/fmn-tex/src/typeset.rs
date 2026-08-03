@@ -316,40 +316,57 @@ impl Typeset {
     // ── The cache payload codec ─────────────────────────────────────────
 
     /// Serialize for the cache: versioned, little-endian, bit-exact floats.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut w = Wr(Vec::with_capacity(256 + self.source.len()));
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TypesetError`] without emitting a partial document when
+    /// public data is non-canonical, a fixed-width field or aggregate size
+    /// overflows, the document exceeds [`TYPESET_DOCUMENT_LIMIT_BYTES`], or
+    /// its exact storage reservation is refused.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, TypesetError> {
+        self.validate_for_codec()?;
+        let encoded_len = self.encoded_len()?;
+        if encoded_len > TYPESET_DOCUMENT_LIMIT_BYTES {
+            return Err(TypesetError::DocumentTooLarge {
+                bytes: encoded_len,
+                limit: TYPESET_DOCUMENT_LIMIT_BYTES,
+            });
+        }
+
+        let mut bytes = Vec::new();
+        reserve_exact(&mut bytes, encoded_len, "encoded document bytes")?;
+        let mut w = Wr(bytes);
         w.0.extend_from_slice(MAGIC);
-        w.bytes(self.source.as_bytes());
+        w.bytes(self.source.as_bytes(), "source length")?;
         w.f64(self.layout.width);
         w.f64(self.layout.height);
         w.f64(self.layout.depth);
-        w.u32(self.layout.glyphs.len());
+        w.count(self.layout.glyphs.len(), "glyph count")?;
         for g in &self.layout.glyphs {
-            w.u32(g.face.0);
-            w.u32(usize::from(g.gid));
-            w.u32(g.ch as usize);
+            w.raw_u32(g.face.0);
+            w.raw_u32(u32::from(g.gid));
+            w.raw_u32(u32::from(g.ch));
             w.f64(g.x);
             w.f64(g.y);
             w.f64(g.size);
-            w.span(g.span);
+            w.span(g.span, "glyph span start", "glyph span end")?;
         }
-        w.u32(self.layout.rules.len());
+        w.count(self.layout.rules.len(), "rule count")?;
         for r in &self.layout.rules {
             w.f64(r.x);
             w.f64(r.y);
             w.f64(r.width);
             w.f64(r.height);
-            w.span(r.span);
+            w.span(r.span, "rule span start", "rule span end")?;
         }
-        w.u32(self.layout.paths.len());
+        w.count(self.layout.paths.len(), "path count")?;
         for p in &self.layout.paths {
-            w.span(p.span);
-            w.u32(p.contours.len());
+            w.span(p.span, "path span start", "path span end")?;
+            w.count(p.contours.len(), "path contour count")?;
             for c in &p.contours {
                 w.f64(c.start.0);
                 w.f64(c.start.1);
-                w.u32(c.segments.len());
+                w.count(c.segments.len(), "path segment count")?;
                 for s in &c.segments {
                     match s {
                         PathSeg::Line { to } => {
@@ -370,19 +387,36 @@ impl Typeset {
         }
         // The submobject table is derivable from the layout; store only a
         // count for a structural cross-check on decode.
-        w.u32(self.subs.len());
-        w.0
+        w.count(self.subs.len(), "submobject count")?;
+        if w.0.len() != encoded_len {
+            return Err(TypesetError::NonCanonical {
+                field: "encoded document",
+                reason: "preflighted size disagrees with emitted size",
+            });
+        }
+        Ok(w.0)
     }
 
-    /// Decode a cache payload. `None` on any structural fault — the caller
-    /// treats it as a miss and re-typesets (never trusted, never fatal).
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// Decode one cache payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TypesetError`] on every format, canonicality,
+    /// resource-limit, or allocation fault. Cache callers treat all errors as
+    /// misses and re-typeset.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, TypesetError> {
+        if bytes.len() > TYPESET_DOCUMENT_LIMIT_BYTES {
+            return Err(TypesetError::DocumentTooLarge {
+                bytes: bytes.len(),
+                limit: TYPESET_DOCUMENT_LIMIT_BYTES,
+            });
+        }
         let mut r = Rd { b: bytes, at: 0 };
         if r.take(MAGIC.len())? != MAGIC.as_slice() {
-            return None;
+            return Err(TypesetError::InvalidMagic);
         }
-        let source = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+        let source = std::str::from_utf8(r.bytes()?)
+            .map_err(|error| TypesetError::InvalidUtf8 { error })?;
         let width = r.f64()?;
         let height = r.f64()?;
         let depth = r.f64()?;
@@ -392,18 +426,30 @@ impl Typeset {
             depth,
             ..Layout::default()
         };
-        for _ in 0..r.u32()? {
+        let glyph_count = r.count()?;
+        r.ensure_count("glyphs", glyph_count, GLYPH_BYTES)?;
+        reserve_exact(&mut layout.glyphs, glyph_count, "decoded glyph table")?;
+        for _ in 0..glyph_count {
             layout.glyphs.push(PlacedGlyph {
-                face: fmd_math::FaceId(r.u32()?),
-                gid: u16::try_from(r.u32()?).ok()?,
-                ch: char::from_u32(u32::try_from(r.u32()?).ok()?)?,
+                face: fmd_math::FaceId(r.raw_u32()?),
+                gid: u16::try_from(r.raw_u32()?).map_err(|_| TypesetError::NonCanonical {
+                    field: "glyph id",
+                    reason: "value does not fit u16",
+                })?,
+                ch: char::from_u32(r.raw_u32()?).ok_or(TypesetError::NonCanonical {
+                    field: "glyph character",
+                    reason: "value is not a Unicode scalar",
+                })?,
                 x: r.f64()?,
                 y: r.f64()?,
                 size: r.f64()?,
                 span: r.span()?,
             });
         }
-        for _ in 0..r.u32()? {
+        let rule_count = r.count()?;
+        r.ensure_count("rules", rule_count, RULE_BYTES)?;
+        reserve_exact(&mut layout.rules, rule_count, "decoded rule table")?;
+        for _ in 0..rule_count {
             layout.rules.push(PlacedRule {
                 x: r.f64()?,
                 y: r.f64()?,
@@ -412,14 +458,23 @@ impl Typeset {
                 span: r.span()?,
             });
         }
-        for _ in 0..r.u32()? {
+        let path_count = r.count()?;
+        r.ensure_count("paths", path_count, PATH_MIN_BYTES)?;
+        reserve_exact(&mut layout.paths, path_count, "decoded path table")?;
+        for _ in 0..path_count {
             let span = r.span()?;
             let mut contours = Vec::new();
-            for _ in 0..r.u32()? {
+            let contour_count = r.count()?;
+            r.ensure_count("path contours", contour_count, CONTOUR_MIN_BYTES)?;
+            reserve_exact(&mut contours, contour_count, "decoded path contours")?;
+            for _ in 0..contour_count {
                 let start = (r.f64()?, r.f64()?);
                 let mut segments = Vec::new();
-                for _ in 0..r.u32()? {
-                    let tag = *r.take(1)?.first()?;
+                let segment_count = r.count()?;
+                r.ensure_count("path segments", segment_count, LINE_SEGMENT_BYTES)?;
+                reserve_exact(&mut segments, segment_count, "decoded path segments")?;
+                for _ in 0..segment_count {
+                    let tag = r.take(1)?[0];
                     segments.push(match tag {
                         1 => PathSeg::Line {
                             to: (r.f64()?, r.f64()?),
@@ -428,22 +483,129 @@ impl Typeset {
                             ctrl: (r.f64()?, r.f64()?),
                             to: (r.f64()?, r.f64()?),
                         },
-                        _ => return None,
+                        _ => return Err(TypesetError::InvalidSegmentTag { tag }),
                     });
                 }
                 contours.push(PathContour { start, segments });
             }
             layout.paths.push(PlacedPath { contours, span });
         }
-        let expected_subs = r.u32()?;
-        if r.at != bytes.len() {
-            return None; // trailing garbage
+        let encoded_subs = r.count()?;
+        if r.remaining() != 0 {
+            return Err(TypesetError::TrailingBytes {
+                bytes: r.remaining(),
+            });
         }
-        let typeset = Self::new(source, layout);
-        if typeset.subs.len() != expected_subs {
-            return None;
+        let expected_subs = primitive_count(&layout)?;
+        if encoded_subs != expected_subs {
+            return Err(TypesetError::CountMismatch {
+                field: "submobject table",
+                expected: expected_subs,
+                actual: encoded_subs,
+            });
         }
-        Some(typeset)
+        validate_layout(source, &layout)?;
+        Self::from_borrowed(source, layout)
+    }
+
+    fn validate_for_codec(&self) -> Result<(), TypesetError> {
+        validate_layout(&self.source, &self.layout)?;
+        checked_u32("source length", self.source.len())?;
+        checked_u32("glyph count", self.layout.glyphs.len())?;
+        checked_u32("rule count", self.layout.rules.len())?;
+        checked_u32("path count", self.layout.paths.len())?;
+        checked_u32("submobject count", self.subs.len())?;
+
+        let expected_subs = primitive_count(&self.layout)?;
+        if self.subs.len() != expected_subs {
+            return Err(TypesetError::CountMismatch {
+                field: "submobject table",
+                expected: expected_subs,
+                actual: self.subs.len(),
+            });
+        }
+
+        let mut ord = 0;
+        for (index, glyph) in self.layout.glyphs.iter().enumerate() {
+            let expected = Sub {
+                prim: Prim::Glyph(index),
+                span: glyph.span,
+            };
+            if self.subs[ord] != expected {
+                return Err(TypesetError::NonCanonical {
+                    field: "submobject table",
+                    reason: "glyph entry differs from the derivable canonical table",
+                });
+            }
+            ord += 1;
+        }
+        for (index, rule) in self.layout.rules.iter().enumerate() {
+            let expected = Sub {
+                prim: Prim::Rule(index),
+                span: rule.span,
+            };
+            if self.subs[ord] != expected {
+                return Err(TypesetError::NonCanonical {
+                    field: "submobject table",
+                    reason: "rule entry differs from the derivable canonical table",
+                });
+            }
+            ord += 1;
+        }
+        for (index, path) in self.layout.paths.iter().enumerate() {
+            let expected = Sub {
+                prim: Prim::Path(index),
+                span: path.span,
+            };
+            if self.subs[ord] != expected {
+                return Err(TypesetError::NonCanonical {
+                    field: "submobject table",
+                    reason: "path entry differs from the derivable canonical table",
+                });
+            }
+            ord += 1;
+        }
+        Ok(())
+    }
+
+    fn encoded_len(&self) -> Result<usize, TypesetError> {
+        let mut bytes = MAGIC.len();
+        add_size(&mut bytes, U32_BYTES, "encoded document")?;
+        add_size(&mut bytes, self.source.len(), "encoded document")?;
+        add_size(
+            &mut bytes,
+            3 * F64_BYTES + U32_BYTES,
+            "encoded document",
+        )?;
+        add_product(
+            &mut bytes,
+            self.layout.glyphs.len(),
+            GLYPH_BYTES,
+            "glyph table",
+        )?;
+        add_size(&mut bytes, U32_BYTES, "encoded document")?;
+        add_product(
+            &mut bytes,
+            self.layout.rules.len(),
+            RULE_BYTES,
+            "rule table",
+        )?;
+        add_size(&mut bytes, U32_BYTES, "encoded document")?;
+        for path in &self.layout.paths {
+            add_size(&mut bytes, PATH_MIN_BYTES, "path table")?;
+            for contour in &path.contours {
+                add_size(&mut bytes, CONTOUR_MIN_BYTES, "path contour table")?;
+                for segment in &contour.segments {
+                    let segment_bytes = match segment {
+                        PathSeg::Line { .. } => LINE_SEGMENT_BYTES,
+                        PathSeg::Quad { .. } => QUAD_SEGMENT_BYTES,
+                    };
+                    add_size(&mut bytes, segment_bytes, "path segment table")?;
+                }
+            }
+        }
+        add_size(&mut bytes, U32_BYTES, "encoded document")?;
+        Ok(bytes)
     }
 }
 
@@ -451,22 +613,34 @@ impl Typeset {
 struct Wr(Vec<u8>);
 
 impl Wr {
-    fn u32(&mut self, v: usize) {
-        // Counts in a typeset layout are far below u32::MAX; saturate
-        // defensively rather than truncate.
-        let v = u32::try_from(v).unwrap_or(u32::MAX);
+    fn raw_u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
+
+    fn count(&mut self, v: usize, field: &'static str) -> Result<(), TypesetError> {
+        self.raw_u32(checked_u32(field, v)?);
+        Ok(())
+    }
+
     fn f64(&mut self, v: f64) {
         self.0.extend_from_slice(&v.to_bits().to_le_bytes());
     }
-    fn span(&mut self, s: Span) {
-        self.u32(s.start);
-        self.u32(s.end);
+
+    fn span(
+        &mut self,
+        s: Span,
+        start_field: &'static str,
+        end_field: &'static str,
+    ) -> Result<(), TypesetError> {
+        self.count(s.start, start_field)?;
+        self.count(s.end, end_field)?;
+        Ok(())
     }
-    fn bytes(&mut self, b: &[u8]) {
-        self.u32(b.len());
+
+    fn bytes(&mut self, b: &[u8], field: &'static str) -> Result<(), TypesetError> {
+        self.count(b.len(), field)?;
         self.0.extend_from_slice(b);
+        Ok(())
     }
 }
 
@@ -477,32 +651,263 @@ struct Rd<'a> {
 }
 
 impl<'a> Rd<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let end = self.at.checked_add(n)?;
-        if end > self.b.len() {
-            return None;
+    fn remaining(&self) -> usize {
+        self.b.len() - self.at
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], TypesetError> {
+        let remaining = self.remaining();
+        if n > remaining {
+            return Err(TypesetError::UnexpectedEnd {
+                requested: n,
+                remaining,
+            });
         }
+        let end = self.at + n;
         let s = &self.b[self.at..end];
         self.at = end;
-        Some(s)
+        Ok(s)
     }
-    fn u32(&mut self) -> Option<usize> {
+
+    fn raw_u32(&mut self) -> Result<u32, TypesetError> {
         let s = self.take(4)?;
-        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize)
+        Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
-    fn f64(&mut self) -> Option<f64> {
+
+    fn count(&mut self) -> Result<usize, TypesetError> {
+        usize::try_from(self.raw_u32()?).map_err(|_| TypesetError::SizeOverflow {
+            context: "decoded u32 count",
+        })
+    }
+
+    fn f64(&mut self) -> Result<f64, TypesetError> {
         let s = self.take(8)?;
-        Some(f64::from_bits(u64::from_le_bytes([
+        Ok(f64::from_bits(u64::from_le_bytes([
             s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
         ])))
     }
-    fn span(&mut self) -> Option<Span> {
-        let start = self.u32()?;
-        let end = self.u32()?;
-        Some(Span::new(start, end))
+
+    fn span(&mut self) -> Result<Span, TypesetError> {
+        let start = self.count()?;
+        let end = self.count()?;
+        Ok(Span::new(start, end))
     }
-    fn bytes(&mut self) -> Option<&'a [u8]> {
-        let n = self.u32()?;
+
+    fn bytes(&mut self) -> Result<&'a [u8], TypesetError> {
+        let n = self.count()?;
         self.take(n)
+    }
+
+    fn ensure_count(
+        &self,
+        field: &'static str,
+        count: usize,
+        minimum_item_bytes: usize,
+    ) -> Result<(), TypesetError> {
+        let Some(minimum_bytes) = count.checked_mul(minimum_item_bytes) else {
+            return Err(TypesetError::SizeOverflow { context: field });
+        };
+        let remaining_bytes = self.remaining();
+        if minimum_bytes > remaining_bytes {
+            return Err(TypesetError::ImpossibleCount {
+                field,
+                count,
+                minimum_item_bytes,
+                remaining_bytes,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn primitive_count(layout: &Layout) -> Result<usize, TypesetError> {
+    layout
+        .glyphs
+        .len()
+        .checked_add(layout.rules.len())
+        .and_then(|count| count.checked_add(layout.paths.len()))
+        .ok_or(TypesetError::SizeOverflow {
+            context: "submobject table",
+        })
+}
+
+fn reserve_exact<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    context: &'static str,
+) -> Result<(), TypesetError> {
+    values
+        .try_reserve_exact(additional)
+        .map_err(|error| TypesetError::AllocationFailed {
+            context,
+            requested: additional,
+            error,
+        })
+}
+
+fn checked_u32(field: &'static str, value: usize) -> Result<u32, TypesetError> {
+    u32::try_from(value).map_err(|_| TypesetError::IntegerOutOfRange { field, value })
+}
+
+fn add_size(
+    total: &mut usize,
+    additional: usize,
+    context: &'static str,
+) -> Result<(), TypesetError> {
+    *total = total
+        .checked_add(additional)
+        .ok_or(TypesetError::SizeOverflow { context })?;
+    Ok(())
+}
+
+fn add_product(
+    total: &mut usize,
+    count: usize,
+    item_bytes: usize,
+    context: &'static str,
+) -> Result<(), TypesetError> {
+    let additional = count
+        .checked_mul(item_bytes)
+        .ok_or(TypesetError::SizeOverflow { context })?;
+    add_size(total, additional, context)
+}
+
+fn validate_layout(source: &str, layout: &Layout) -> Result<(), TypesetError> {
+    validate_f64("layout width", layout.width)?;
+    validate_f64("layout height", layout.height)?;
+    validate_f64("layout depth", layout.depth)?;
+    checked_u32("glyph count", layout.glyphs.len())?;
+    checked_u32("rule count", layout.rules.len())?;
+    checked_u32("path count", layout.paths.len())?;
+
+    for glyph in &layout.glyphs {
+        validate_f64("glyph x", glyph.x)?;
+        validate_f64("glyph y", glyph.y)?;
+        validate_f64("glyph size", glyph.size)?;
+        validate_span(
+            source,
+            glyph.span,
+            "glyph span",
+            "glyph span start",
+            "glyph span end",
+        )?;
+    }
+    for rule in &layout.rules {
+        validate_f64("rule x", rule.x)?;
+        validate_f64("rule y", rule.y)?;
+        validate_f64("rule width", rule.width)?;
+        validate_f64("rule height", rule.height)?;
+        validate_span(
+            source,
+            rule.span,
+            "rule span",
+            "rule span start",
+            "rule span end",
+        )?;
+    }
+    for path in &layout.paths {
+        checked_u32("path contour count", path.contours.len())?;
+        validate_span(
+            source,
+            path.span,
+            "path span",
+            "path span start",
+            "path span end",
+        )?;
+        for contour in &path.contours {
+            checked_u32("path segment count", contour.segments.len())?;
+            validate_f64("path contour start x", contour.start.0)?;
+            validate_f64("path contour start y", contour.start.1)?;
+            for segment in &contour.segments {
+                match segment {
+                    PathSeg::Line { to } => {
+                        validate_f64("path line end x", to.0)?;
+                        validate_f64("path line end y", to.1)?;
+                    }
+                    PathSeg::Quad { ctrl, to } => {
+                        validate_f64("path quadratic control x", ctrl.0)?;
+                        validate_f64("path quadratic control y", ctrl.1)?;
+                        validate_f64("path quadratic end x", to.0)?;
+                        validate_f64("path quadratic end y", to.1)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_f64(field: &'static str, value: f64) -> Result<(), TypesetError> {
+    if !value.is_finite() {
+        return Err(TypesetError::NonCanonical {
+            field,
+            reason: "value is not finite",
+        });
+    }
+    if value == 0.0 && value.is_sign_negative() {
+        return Err(TypesetError::NonCanonical {
+            field,
+            reason: "negative zero has no canonical encoding",
+        });
+    }
+    Ok(())
+}
+
+fn validate_span(
+    source: &str,
+    span: Span,
+    field: &'static str,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<(), TypesetError> {
+    checked_u32(start_field, span.start)?;
+    checked_u32(end_field, span.end)?;
+    if span.start > span.end {
+        return Err(TypesetError::NonCanonical {
+            field,
+            reason: "start is after end",
+        });
+    }
+    if span.end > source.len() {
+        return Err(TypesetError::NonCanonical {
+            field,
+            reason: "span lies outside the source",
+        });
+    }
+    if !source.is_char_boundary(span.start) || !source.is_char_boundary(span.end) {
+        return Err(TypesetError::NonCanonical {
+            field,
+            reason: "span splits a UTF-8 scalar",
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_counts_are_rejected_instead_of_saturated() {
+        assert!(matches!(
+            checked_u32("test count", usize::MAX),
+            Err(TypesetError::IntegerOutOfRange {
+                field: "test count",
+                value: usize::MAX,
+            })
+        ));
+    }
+
+    #[test]
+    fn reservation_refusal_is_typed() {
+        let mut bytes = Vec::<u8>::new();
+        assert!(matches!(
+            reserve_exact(&mut bytes, usize::MAX, "test bytes"),
+            Err(TypesetError::AllocationFailed {
+                context: "test bytes",
+                requested: usize::MAX,
+                ..
+            })
+        ));
     }
 }

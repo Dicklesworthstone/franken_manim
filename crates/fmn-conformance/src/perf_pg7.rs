@@ -458,7 +458,7 @@ fn measure_formula_cold(definition: &Pg7Definition) -> Result<Measured, Pg7Error
 
     let golden_start = Instant::now();
     let prime = typeset_formula(&engine, FORMULA_SOURCE)?;
-    let prime_digest = typeset_digest(&prime);
+    let prime_digest = typeset_digest(&prime)?;
     require_self_golden(definition, prime_digest)?;
     phases.push(PhaseTiming::new(
         "prime-self-golden-check",
@@ -485,7 +485,7 @@ fn measure_formula_cold(definition: &Pg7Definition) -> Result<Measured, Pg7Error
         elapsed_ns.push(elapsed);
         final_output = output;
     }
-    let result_digest = typeset_digest(&final_output);
+    let result_digest = typeset_digest(&final_output)?;
     require_unchanged(definition, prime_digest, result_digest)?;
     Ok(Measured {
         phases,
@@ -547,10 +547,12 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
                 "preflight returned success but the exact key is absent".to_owned(),
             )
         })?;
-    let decoded = Typeset::from_bytes(&payload).ok_or_else(|| {
-        Pg7Error::CacheState("preflight stored an undecodable typeset payload".to_owned())
+    let decoded = Typeset::from_bytes(&payload).map_err(|error| {
+        Pg7Error::CacheState(format!(
+            "preflight stored an undecodable typeset payload: {error}"
+        ))
     })?;
-    let prime_digest = typeset_digest(&decoded);
+    let prime_digest = typeset_digest(&decoded)?;
     require_self_golden(definition, prime_digest)?;
     let payload_digest = sha256(&payload);
     let _cache_pin = namespace.pin(&key);
@@ -592,7 +594,7 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
             "exact-key payload changed during cached measurement".to_owned(),
         ));
     }
-    let result_digest = typeset_digest(&final_output);
+    let result_digest = typeset_digest(&final_output)?;
     require_unchanged(definition, prime_digest, result_digest)?;
     phases.push(PhaseTiming::new(
         "post-measurement-cache-hit-proof",
@@ -732,8 +734,11 @@ fn require_unchanged(
     require_self_golden(definition, final_result)
 }
 
-fn typeset_digest(typeset: &Typeset) -> Digest {
-    sha256(&typeset.to_bytes())
+fn typeset_digest(typeset: &Typeset) -> Result<Digest, Pg7Error> {
+    let bytes = typeset
+        .to_bytes()
+        .map_err(|error| Pg7Error::Workload(error.to_string()))?;
+    Ok(sha256(&bytes))
 }
 
 fn text_layout_digest(layout: &TextLayout) -> Result<Digest, Pg7Error> {
@@ -1068,7 +1073,7 @@ mod tests {
         let layout =
             layout_text(&book, &TextRequest::plain(&source)).expect("canonical text layout");
         require_text_shape(&layout).expect("canonical text shape");
-        let formula_digest = typeset_digest(&formula);
+        let formula_digest = typeset_digest(&formula).expect("formula digest");
         let text_digest = text_layout_digest(&layout).expect("text digest");
         assert_eq!(
             formula_digest, FORMULA_EXPECTED_RESULT_DIGEST,

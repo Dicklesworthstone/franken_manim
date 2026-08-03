@@ -3,6 +3,7 @@
 //! tier T2, tracked at … `` at construction time — never a blank render),
 //! and everything else is equally named.
 
+use crate::typeset::TypesetError;
 use core::fmt;
 
 /// A batch-level typesetting-preflight failure.
@@ -67,6 +68,9 @@ pub enum TexError {
         /// The underlying failure.
         what: String,
     },
+    /// Owning the source string or canonical submobject table failed while
+    /// constructing the in-memory result.
+    Typeset(TypesetError),
 }
 
 impl fmt::Display for TexError {
@@ -81,6 +85,7 @@ impl fmt::Display for TexError {
             ),
             Self::Faces { what } => write!(f, "bundled faces failed to load: {what}"),
             Self::Cache { what } => write!(f, "typeset cache unavailable: {what}"),
+            Self::Typeset(error) => error.fmt(f),
         }
     }
 }
@@ -90,6 +95,7 @@ impl std::error::Error for TexError {
         match self {
             Self::Math(e) => Some(e),
             Self::Pack(e) => Some(e),
+            Self::Typeset(error) => Some(error),
             _ => None,
         }
     }
@@ -98,5 +104,11 @@ impl std::error::Error for TexError {
 impl From<fmd_math::MathError> for TexError {
     fn from(e: fmd_math::MathError) -> Self {
         Self::Math(e)
+    }
+}
+
+impl From<TypesetError> for TexError {
+    fn from(error: TypesetError) -> Self {
+        Self::Typeset(error)
     }
 }

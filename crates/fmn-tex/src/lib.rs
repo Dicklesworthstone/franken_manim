@@ -40,7 +40,9 @@ mod typeset;
 
 pub use engine::{Mode, TexEngine};
 pub use error::{PreflightError, TexError};
-pub use typeset::{Prim, Sub, TYPESET_FORMAT_VERSION, Typeset};
+pub use typeset::{
+    Prim, Sub, TYPESET_DOCUMENT_LIMIT_BYTES, TYPESET_FORMAT_VERSION, Typeset, TypesetError,
+};
 
 // The math surface consumers need alongside the engine: placed-layout
 // types for the library tier's per-`Sub` resolution (fm-p5d), plus the

@@ -9,8 +9,10 @@
 use fmn_cache::{NamespacePolicy, Store, StoreConfig};
 use fmn_platform::clock::FakeClock;
 use fmn_platform::fs::VirtualFs;
-use fmn_tex::{MacroSet, Mode, Style, TexEngine, Typeset};
+use fmn_tex::{MacroSet, Mode, Style, TexEngine, Typeset, TypesetError};
 use std::sync::Arc;
+
+const MAGIC_V1: &[u8; 8] = b"FMNTEX\x00\x01";
 
 fn engine() -> TexEngine {
     TexEngine::new("fmd-math/pack/default", None).expect("engine")
@@ -146,9 +148,20 @@ fn the_codec_round_trips_exactly() {
         r"\widehat{abc}",
     ] {
         let t = e.typeset(Mode::Math(Style::Display), src).unwrap();
-        let back = Typeset::from_bytes(&t.to_bytes()).expect(src);
+        let back = Typeset::from_bytes(&t.to_bytes().unwrap()).expect(src);
         assert_eq!(t, back, "codec drift for {src:?}");
     }
+}
+
+#[test]
+fn the_codec_preserves_the_v1_bytes_for_valid_values() {
+    let t = Typeset::new("x".to_owned(), fmn_tex::Layout::default()).unwrap();
+    let mut expected = MAGIC_V1.to_vec();
+    expected.extend_from_slice(&1_u32.to_le_bytes());
+    expected.push(b'x');
+    expected.resize(53, 0);
+
+    assert_eq!(t.to_bytes().unwrap(), expected);
 }
 
 #[test]
@@ -160,10 +173,13 @@ fn the_codec_refuses_a_noncanonical_public_submobject_table() {
     assert!(!t.subs.is_empty());
     t.subs[0].prim = fmn_tex::Prim::Glyph(usize::MAX);
 
-    assert!(
-        Typeset::from_bytes(&t.to_bytes()).is_none(),
-        "serialization must not silently discard a public submobject mutation"
-    );
+    assert!(matches!(
+        t.to_bytes(),
+        Err(TypesetError::NonCanonical {
+            field: "submobject table",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -176,10 +192,13 @@ fn the_codec_refuses_spans_that_do_not_fit_its_wire_width() {
     t.layout.glyphs[0].span = wide;
     t.subs[0].span = wide;
 
-    assert!(
-        Typeset::from_bytes(&t.to_bytes()).is_none(),
-        "serialization must not saturate a wide span into a different value"
-    );
+    assert!(matches!(
+        t.to_bytes(),
+        Err(TypesetError::IntegerOutOfRange {
+            field: "glyph span start",
+            value: usize::MAX,
+        })
+    ));
 }
 
 #[test]
@@ -188,17 +207,37 @@ fn corrupt_cache_payloads_decode_to_none_never_panic() {
     let t = e
         .typeset(Mode::Math(Style::Display), r"\frac{a}{b}")
         .unwrap();
-    let good = t.to_bytes();
+    let good = t.to_bytes().unwrap();
     // Truncations at every prefix; a flipped tag byte; garbage.
     for cut in 0..good.len().min(200) {
         let _ = Typeset::from_bytes(&good[..cut]); // must not panic
     }
-    assert!(Typeset::from_bytes(b"not a typeset").is_none());
+    assert!(Typeset::from_bytes(b"not a typeset").is_err());
     let mut bad = good.clone();
     if let Some(b) = bad.last_mut() {
         *b ^= 0xff;
     }
     let _ = Typeset::from_bytes(&bad); // may decode or not; must not panic
+}
+
+#[test]
+fn impossible_declared_counts_fail_before_collection_reservation() {
+    let mut bytes = MAGIC_V1.to_vec();
+    bytes.extend_from_slice(&0_u32.to_le_bytes()); // empty source
+    bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+    assert!(matches!(
+        Typeset::from_bytes(&bytes),
+        Err(TypesetError::ImpossibleCount {
+            field: "glyphs",
+            count,
+            minimum_item_bytes: 44,
+            remaining_bytes: 0,
+        }) if count == usize::try_from(u32::MAX).unwrap()
+    ));
 }
 
 #[test]

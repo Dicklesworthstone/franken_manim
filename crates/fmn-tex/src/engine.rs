@@ -214,12 +214,14 @@ impl TexEngine {
         if let Some(ns) = &self.cache {
             let key = self.cache_key(mode, source);
             if let Ok(Some(bytes)) = ns.get(&key)
-                && let Some(hit) = Typeset::from_bytes(&bytes)
+                && let Ok(hit) = Typeset::from_bytes(&bytes)
             {
                 return Ok(hit);
             }
             let fresh = self.layout(mode, source)?;
-            let _ = ns.put(&key, &fresh.to_bytes());
+            if let Ok(bytes) = fresh.to_bytes() {
+                let _ = ns.put(&key, &bytes);
+            }
             return Ok(fresh);
         }
         self.layout(mode, source)
@@ -236,7 +238,7 @@ impl TexEngine {
                 .typeset_text_with_macros(source, &self.macros)
                 .map_err(TexError::Math)?,
         };
-        Ok(Typeset::new(source.to_owned(), layout))
+        Typeset::from_borrowed(source, layout).map_err(TexError::from)
     }
 
     /// Resolve one submobject primitive into its closed quadratic
