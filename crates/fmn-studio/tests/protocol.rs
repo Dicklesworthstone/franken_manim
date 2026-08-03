@@ -4,7 +4,7 @@
 //! before allocating.
 
 use std::error::Error as _;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 use fmn_hash::{Schema, Writer, sha256};
 use fmn_scene::{
@@ -522,6 +522,112 @@ fn admitted_frame_storage_refusal_is_typed_before_payload_read() {
         read_request(&mut Cursor::new(prefix), limits),
         Err(FramingError::FrameStorageAllocationFailed { bytes, .. }) if bytes == needed
     ));
+}
+
+struct OverreportingReader {
+    inner: Cursor<Vec<u8>>,
+    overreport_on_call: usize,
+    returned: usize,
+    calls: usize,
+}
+
+impl Read for OverreportingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.calls += 1;
+        if self.calls == self.overreport_on_call {
+            return Ok(self.returned);
+        }
+        self.inner.read(buffer)
+    }
+}
+
+struct FragmentingReader {
+    inner: Cursor<Vec<u8>>,
+    interrupt_next: bool,
+}
+
+impl Read for FragmentingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.interrupt_next {
+            self.interrupt_next = false;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        self.interrupt_next = true;
+        let take = buffer.len().min(1);
+        self.inner.read(&mut buffer[..take])
+    }
+}
+
+#[test]
+fn invalid_read_counts_are_contained_at_every_frame_stage() {
+    let limits = ProtocolLimits::default();
+    let request = request(1, SupervisorRequest::EnumerateScenes);
+    let mut frame = Vec::new();
+    write_request(&mut frame, &request, limits).unwrap();
+    let payload_len = frame.len() - 8;
+
+    for (overreport_on_call, requested, returned) in [
+        (1, 1, 2),
+        (2, 7, 8),
+        (3, payload_len, payload_len.saturating_add(1)),
+    ] {
+        let mut reader = OverreportingReader {
+            inner: Cursor::new(frame.clone()),
+            overreport_on_call,
+            returned,
+            calls: 0,
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            read_request(&mut reader, limits)
+        }));
+        let error = result
+            .expect("an invalid Read count must not panic")
+            .expect_err("an invalid Read count must be refused");
+        assert!(matches!(
+            error,
+            FramingError::InvalidReadCount {
+                requested: actual_requested,
+                returned: actual_returned,
+            } if actual_requested == requested && actual_returned == returned
+        ));
+        assert_eq!(reader.calls, overreport_on_call);
+    }
+
+    let error = FramingError::InvalidReadCount {
+        requested: 7,
+        returned: 8,
+    };
+    assert_eq!(
+        error.to_string(),
+        "IPC reader violated Read by returning 8 bytes for a 7-byte buffer"
+    );
+    assert!(error.source().is_none());
+}
+
+#[test]
+fn checked_frame_reads_preserve_partial_interrupt_and_eof_semantics() {
+    let limits = ProtocolLimits::default();
+    let request = request(1, SupervisorRequest::EnumerateScenes);
+    let mut frame = Vec::new();
+    write_request(&mut frame, &request, limits).unwrap();
+    let mut fragmented = FragmentingReader {
+        inner: Cursor::new(frame),
+        interrupt_next: true,
+    };
+    assert_eq!(read_request(&mut fragmented, limits).unwrap(), request);
+
+    assert!(matches!(
+        read_request(&mut Cursor::new(Vec::<u8>::new()), limits),
+        Err(FramingError::Closed)
+    ));
+
+    for truncated in [vec![1], 1u64.to_le_bytes().to_vec()] {
+        assert!(matches!(
+            read_request(&mut Cursor::new(truncated), limits),
+            Err(FramingError::Io(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
 }
 
 #[test]

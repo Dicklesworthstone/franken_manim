@@ -257,6 +257,13 @@ pub enum FramingError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// A `Read` implementation returned more bytes than its supplied buffer.
+    InvalidReadCount {
+        /// Bytes available in the supplied buffer.
+        requested: usize,
+        /// Byte count reported by the reader.
+        returned: usize,
+    },
     /// The canonical payload was invalid.
     Protocol(ProtocolError),
 }
@@ -274,6 +281,13 @@ impl fmt::Display for FramingError {
                 f,
                 "worker IPC frame could not reserve {bytes} bytes of storage: {error}"
             ),
+            Self::InvalidReadCount {
+                requested,
+                returned,
+            } => write!(
+                f,
+                "IPC reader violated Read by returning {returned} bytes for a {requested}-byte buffer"
+            ),
             Self::Protocol(error) => error.fmt(f),
         }
     }
@@ -285,7 +299,7 @@ impl std::error::Error for FramingError {
             Self::Io(error) => Some(error),
             Self::FrameStorageAllocationFailed { error, .. } => Some(error),
             Self::Protocol(error) => Some(error),
-            Self::Closed | Self::FrameTooLarge { .. } => None,
+            Self::Closed | Self::FrameTooLarge { .. } | Self::InvalidReadCount { .. } => None,
         }
     }
 }
@@ -1032,20 +1046,14 @@ pub(crate) fn write_document(
 fn read_document(reader: &mut impl Read, limits: ProtocolLimits) -> Result<Vec<u8>, FramingError> {
     let mut prefix = [0u8; 8];
     loop {
-        match reader.read(&mut prefix[..1]) {
+        match read_checked(reader, &mut prefix[..1]) {
             Ok(0) => return Err(FramingError::Closed),
-            Ok(1) => break,
-            Ok(count) => {
-                return Err(std::io::Error::other(format!(
-                    "IPC reader violated Read by returning {count} for a one-byte buffer"
-                ))
-                .into());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error.into()),
+            Ok(_) => break,
+            Err(FramingError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
     }
-    reader.read_exact(&mut prefix[1..])?;
+    read_exact_checked(reader, &mut prefix[1..])?;
     let declared = u64::from_le_bytes(prefix);
     let message_limit = u64::try_from(limits.max_message_bytes).unwrap_or(u64::MAX);
     if declared > message_limit {
@@ -1063,8 +1071,34 @@ fn read_document(reader: &mut impl Read, limits: ProtocolLimits) -> Result<Vec<u
         .try_reserve_exact(len)
         .map_err(|error| FramingError::FrameStorageAllocationFailed { bytes: len, error })?;
     bytes.resize(len, 0);
-    reader.read_exact(&mut bytes)?;
+    read_exact_checked(reader, &mut bytes)?;
     Ok(bytes)
+}
+
+fn read_checked(reader: &mut impl Read, buffer: &mut [u8]) -> Result<usize, FramingError> {
+    let requested = buffer.len();
+    let returned = reader.read(buffer)?;
+    if returned > requested {
+        return Err(FramingError::InvalidReadCount {
+            requested,
+            returned,
+        });
+    }
+    Ok(returned)
+}
+
+fn read_exact_checked(reader: &mut impl Read, mut buffer: &mut [u8]) -> Result<(), FramingError> {
+    while !buffer.is_empty() {
+        match read_checked(reader, buffer) {
+            Ok(0) => {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            Ok(count) => buffer = &mut buffer[count..],
+            Err(FramingError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn put_request(writer: &mut Writer, request: &SupervisorRequest) {

@@ -1929,9 +1929,9 @@ impl TcpChannel {
     fn map(error: FramingError) -> ChannelError {
         let kind = match &error {
             FramingError::Closed => ChannelFailureKind::Closed,
-            FramingError::Io(_) | FramingError::FrameStorageAllocationFailed { .. } => {
-                ChannelFailureKind::Io
-            }
+            FramingError::Io(_)
+            | FramingError::FrameStorageAllocationFailed { .. }
+            | FramingError::InvalidReadCount { .. } => ChannelFailureKind::Io,
             FramingError::FrameTooLarge { .. } | FramingError::Protocol(_) => {
                 ChannelFailureKind::Protocol
             }
