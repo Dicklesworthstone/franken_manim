@@ -36,6 +36,7 @@ use fmn_anim::RationalTime;
 use fmn_anim::purity::{ImpureEffect, Purity};
 use fmn_hash::serial::{Error as SerialError, Limits, Reader, Schema, UnknownPolicy, Writer};
 use fmn_hash::sha256::{Digest, sha256};
+use std::collections::TryReserveError;
 
 use crate::events::{EventError, EventPayload, EventType, InputEvent, Key, Modifiers, MouseButton};
 
@@ -63,6 +64,15 @@ pub enum JournalError {
     Event(EventError),
     /// The payload decoded but violates a journal invariant.
     Malformed(&'static str),
+    /// Journal-owned collection storage could not be reserved.
+    StorageUnavailable {
+        /// Collection whose capacity growth was refused.
+        collection: &'static str,
+        /// Additional elements requested by the append operation.
+        additional: usize,
+        /// Allocator or capacity-overflow refusal.
+        source: TryReserveError,
+    },
     /// A declared collection cannot fit in the bytes that remain.
     CollectionPayloadTooShort {
         /// Collection field.
@@ -82,6 +92,14 @@ impl std::fmt::Display for JournalError {
             Self::Serial(e) => write!(f, "journal container: {e}"),
             Self::Event(e) => write!(f, "journal event: {e}"),
             Self::Malformed(what) => write!(f, "malformed journal: {what}"),
+            Self::StorageUnavailable {
+                collection,
+                additional,
+                source,
+            } => write!(
+                f,
+                "journal could not reserve {additional} additional {collection}: {source}"
+            ),
             Self::CollectionPayloadTooShort {
                 field,
                 count,
@@ -95,7 +113,16 @@ impl std::fmt::Display for JournalError {
     }
 }
 
-impl std::error::Error for JournalError {}
+impl std::error::Error for JournalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serial(source) => Some(source),
+            Self::Event(source) => Some(source),
+            Self::StorageUnavailable { source, .. } => Some(source),
+            Self::Malformed(_) | Self::CollectionPayloadTooShort { .. } => None,
+        }
+    }
+}
 
 impl From<SerialError> for JournalError {
     fn from(e: SerialError) -> Self {
@@ -339,8 +366,13 @@ impl Journal {
     /// [`EffectClass::Opaque`] regardless of what the recorder claimed
     /// (R16 — unrecognized operations do not get to describe
     /// themselves as replayable).
-    pub fn record(&mut self, entry: Entry) {
+    ///
+    /// # Errors
+    /// [`JournalError::StorageUnavailable`] if entry storage cannot grow.
+    pub fn record(&mut self, entry: Entry) -> Result<(), JournalError> {
+        self.reserve_entries(1)?;
         self.entries.push(Self::canonical_entry(entry));
+        Ok(())
     }
 
     fn canonical_entry(mut entry: Entry) -> Entry {
@@ -350,16 +382,36 @@ impl Journal {
         entry
     }
 
-    /// Fallibly append an entry while preserving [`Self::record`]'s
-    /// conservative effect coercion.
-    ///
-    /// # Errors
-    /// Returns the allocator's [`std::collections::TryReserveError`] without
-    /// mutating the journal when storage for another entry cannot be reserved.
-    pub fn try_record(&mut self, entry: Entry) -> Result<(), std::collections::TryReserveError> {
-        self.entries.try_reserve(1)?;
-        self.entries.push(Self::canonical_entry(entry));
-        Ok(())
+    fn reserve_entries(&mut self, additional: usize) -> Result<(), JournalError> {
+        self.entries
+            .try_reserve(additional)
+            .map_err(|source| JournalError::StorageUnavailable {
+                collection: "entries",
+                additional,
+                source,
+            })
+    }
+
+    fn reserve_events(&mut self, additional: usize) -> Result<(), JournalError> {
+        self.events
+            .try_reserve(additional)
+            .map_err(|source| JournalError::StorageUnavailable {
+                collection: "events",
+                additional,
+                source,
+            })
+    }
+
+    fn event_batch_scratch(additional: usize) -> Result<Vec<InputEvent>, JournalError> {
+        let mut canonical = Vec::new();
+        canonical.try_reserve_exact(additional).map_err(|source| {
+            JournalError::StorageUnavailable {
+                collection: "event batch scratch",
+                additional,
+                source,
+            }
+        })?;
+        Ok(canonical)
     }
 
     /// The recorded entries, in order.
@@ -379,13 +431,14 @@ impl Journal {
         }) {
             return Err(EventError::ReplayOutOfOrder.into());
         }
+        self.reserve_events(1)?;
         self.events.push(event);
         Ok(())
     }
 
     /// Append a dispatched event stream without partial mutation on refusal.
     pub fn record_events(&mut self, events: &[InputEvent]) -> Result<(), JournalError> {
-        let mut canonical = Vec::with_capacity(events.len());
+        let mut canonical = Self::event_batch_scratch(events.len())?;
         let mut previous = self
             .events
             .last()
@@ -400,6 +453,7 @@ impl Journal {
             previous = Some((event.timestamp, event.sequence));
             canonical.push(event);
         }
+        self.reserve_events(canonical.len())?;
         self.events.extend(canonical);
         Ok(())
     }
@@ -1019,9 +1073,21 @@ mod tests {
     use fmn_hash::sha256::sha256;
 
     use super::{
-        CommandKind, CommandRecord, EffectClass, Entry, Journal, JournalError, SerialError,
-        wire_count,
+        CommandKind, CommandRecord, EffectClass, Entry, EventError, EventPayload, InputEvent,
+        Journal, JournalError, Key, Modifiers, RationalTime, SerialError, wire_count,
     };
+
+    fn key_event(sequence: u64, frame: i64) -> InputEvent {
+        InputEvent::new(
+            sequence,
+            RationalTime::zero(30) + frame,
+            EventPayload::KeyPress {
+                key: Key::Character('A'),
+                modifiers: Modifiers::NONE,
+            },
+        )
+        .expect("valid journal event fixture")
+    }
 
     #[test]
     fn wire_count_accepts_u32_max_and_refuses_one_over() {
@@ -1066,7 +1132,7 @@ mod tests {
     fn fallible_record_preserves_custom_effect_coercion() {
         let mut journal = Journal::new();
         journal
-            .try_record(Entry {
+            .record(Entry {
                 command: CommandRecord {
                     kind: CommandKind::Custom,
                     identity: sha256(b"fallible custom"),
@@ -1083,6 +1149,88 @@ mod tests {
         assert!(matches!(
             journal.entries().first().map(|entry| &entry.effect),
             Some(EffectClass::Opaque)
+        ));
+    }
+
+    #[test]
+    fn append_storage_refusals_are_typed_and_leave_contents_unchanged() {
+        use std::error::Error as _;
+
+        let mut journal = Journal::new();
+        let entry_error = journal
+            .reserve_entries(usize::MAX)
+            .expect_err("impossible entry capacity must refuse");
+        assert!(matches!(
+            &entry_error,
+            JournalError::StorageUnavailable {
+                collection: "entries",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(entry_error.source().is_some());
+        assert!(journal.entries().is_empty());
+
+        let event_error = journal
+            .reserve_events(usize::MAX)
+            .expect_err("impossible event capacity must refuse");
+        assert!(matches!(
+            &event_error,
+            JournalError::StorageUnavailable {
+                collection: "events",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(event_error.source().is_some());
+        assert!(journal.events().is_empty());
+
+        let scratch_error = Journal::event_batch_scratch(usize::MAX)
+            .expect_err("impossible batch scratch capacity must refuse");
+        assert!(matches!(
+            &scratch_error,
+            JournalError::StorageUnavailable {
+                collection: "event batch scratch",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(scratch_error.source().is_some());
+        assert!(journal.events().is_empty());
+    }
+
+    #[test]
+    fn event_batch_refusal_is_atomic_and_success_remains_canonical() {
+        let mut journal = Journal::new();
+        journal
+            .record_event(key_event(1, 0))
+            .expect("initial event records");
+        let before = journal.events().to_vec();
+        let invalid = [key_event(2, 1), key_event(2, 2)];
+
+        assert!(matches!(
+            journal.record_events(&invalid),
+            Err(JournalError::Event(EventError::ReplayOutOfOrder))
+        ));
+        assert_eq!(journal.events(), before);
+
+        let canonicalized = InputEvent {
+            sequence: 2,
+            timestamp: RationalTime::zero(30) + 1,
+            payload: EventPayload::KeyPress {
+                key: Key::Character('A'),
+                modifiers: Modifiers::NONE,
+            },
+        };
+        journal
+            .record_events(&[canonicalized])
+            .expect("valid batch records");
+        assert!(matches!(
+            journal.events()[1].payload,
+            EventPayload::KeyPress {
+                key: Key::Character('a'),
+                ..
+            }
         ));
     }
 }

@@ -55,14 +55,16 @@ fn make_journal(count: usize, checkpoint_index: Option<usize>) -> Journal {
         } else {
             sha256(format!("state {index}").as_bytes())
         };
-        journal.record(Entry {
-            command: command(index),
-            effect: EffectClass::Pure,
-            reads: Vec::new(),
-            subprocesses: Vec::new(),
-            checkpoint: (checkpoint_index == Some(index)).then(|| checkpoint.clone()),
-            state_hash,
-        });
+        journal
+            .record(Entry {
+                command: command(index),
+                effect: EffectClass::Pure,
+                reads: Vec::new(),
+                subprocesses: Vec::new(),
+                checkpoint: (checkpoint_index == Some(index)).then(|| checkpoint.clone()),
+                state_hash,
+            })
+            .expect("journal entry storage reserves");
     }
     journal
 }
@@ -839,14 +841,16 @@ fn invalid_session_install_is_atomic_and_preserves_prior_recovery_state() {
     let old_journal_digest = supervisor.journal_cache_digest();
 
     let mut malformed = Journal::new();
-    malformed.record(Entry {
-        command: command(99),
-        effect: EffectClass::Pure,
-        reads: Vec::new(),
-        subprocesses: Vec::new(),
-        checkpoint: Some(b"malformed checkpoint".to_vec()),
-        state_hash: sha256(b"different bytes"),
-    });
+    malformed
+        .record(Entry {
+            command: command(99),
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: Some(b"malformed checkpoint".to_vec()),
+            state_hash: sha256(b"different bytes"),
+        })
+        .expect("journal entry storage reserves");
     assert!(matches!(
         supervisor.install_session("Broken", malformed),
         Err(fmn_studio::SupervisorError::InvalidSession(
@@ -868,14 +872,16 @@ fn invalid_session_install_is_atomic_and_preserves_prior_recovery_state() {
 fn session_install_refuses_unrecoverable_protocol_payloads_atomically() {
     let oversized_checkpoint = b"12345".to_vec();
     let mut checkpoint_journal = Journal::new();
-    checkpoint_journal.record(Entry {
-        command: command(1),
-        effect: EffectClass::Pure,
-        reads: Vec::new(),
-        subprocesses: Vec::new(),
-        checkpoint: Some(oversized_checkpoint.clone()),
-        state_hash: sha256(&oversized_checkpoint),
-    });
+    checkpoint_journal
+        .record(Entry {
+            command: command(1),
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: Some(oversized_checkpoint.clone()),
+            state_hash: sha256(&oversized_checkpoint),
+        })
+        .expect("journal entry storage reserves");
     let checkpoint_journal_len = checkpoint_journal
         .to_bytes()
         .expect("checkpoint journal encodes")
@@ -920,14 +926,16 @@ fn session_install_refuses_unrecoverable_protocol_payloads_atomically() {
     assert_eq!(supervisor.journal_cache_digest(), prior_journal_digest);
 
     let mut oversized_journal = checkpoint_journal.clone();
-    oversized_journal.record(Entry {
-        command: command(2),
-        effect: EffectClass::Pure,
-        reads: Vec::new(),
-        subprocesses: Vec::new(),
-        checkpoint: None,
-        state_hash: sha256(b"second state"),
-    });
+    oversized_journal
+        .record(Entry {
+            command: command(2),
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: None,
+            state_hash: sha256(b"second state"),
+        })
+        .expect("journal entry storage reserves");
     assert!(
         oversized_journal
             .to_bytes()
@@ -1095,14 +1103,16 @@ fn stdio_worker_deadline_cancels_a_blocked_checkpoint_write() {
 fn journal_segment_replaces_only_its_declared_tail() {
     let replacement_command = command(99);
     let mut replacement = Journal::new();
-    replacement.record(Entry {
-        command: replacement_command.clone(),
-        effect: EffectClass::Pure,
-        reads: Vec::new(),
-        subprocesses: Vec::new(),
-        checkpoint: None,
-        state_hash: sha256(b"replacement tail state"),
-    });
+    replacement
+        .record(Entry {
+            command: replacement_command.clone(),
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: None,
+            state_hash: sha256(b"replacement tail state"),
+        })
+        .expect("journal entry storage reserves");
     let segment_event = InputEvent::new(
         2,
         RationalTime::zero(30) + 1,

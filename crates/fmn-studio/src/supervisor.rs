@@ -1400,10 +1400,14 @@ impl Supervisor {
             .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
         let mut merged = Journal::new();
         for entry in &self.journal.entries()[..start] {
-            merged.record(entry.clone());
+            merged
+                .record(entry.clone())
+                .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
         }
         for entry in segment.entries() {
-            merged.record(entry.clone());
+            merged
+                .record(entry.clone())
+                .map_err(|error| SupervisorError::InvalidJournal(error.to_string()))?;
         }
         merged
             .record_events(self.journal.events())

@@ -71,7 +71,7 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
     let mut e0 = entry_for(CommandKind::Add, "add a, b", &state0);
     e0.checkpoint = Some(state0.clone());
     incoming.push(e0.command.clone());
-    journal.record(e0);
+    journal.record(e0).expect("journal entry storage reserves");
 
     stage.shift(a, [3.0, -1.0, 0.0]);
     let state1 = SceneState::capture(stage, 0, 30, 1, rng)
@@ -80,7 +80,7 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
     let mut e1 = entry_for(CommandKind::Play, "play shift(a)", &state1);
     e1.effect = EffectClass::from_purity(&classify_play(stage, &[]));
     incoming.push(e1.command.clone());
-    journal.record(e1);
+    journal.record(e1).expect("journal entry storage reserves");
 
     stage.shift(b, [0.0, 2.5, 0.0]);
     let state2 = SceneState::capture(stage, 0, 30, 2, rng)
@@ -89,14 +89,14 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
     let mut e2 = entry_for(CommandKind::Play, "play shift(b)", &state2);
     e2.checkpoint = Some(state2.clone());
     incoming.push(e2.command.clone());
-    journal.record(e2);
+    journal.record(e2).expect("journal entry storage reserves");
 
     let state3 = SceneState::capture(stage, 0, 30, 3, rng)
         .to_bytes()
         .unwrap();
     let e3 = entry_for(CommandKind::Wait, "wait 1.0", &state3);
     incoming.push(e3.command.clone());
-    journal.record(e3);
+    journal.record(e3).expect("journal entry storage reserves");
 
     (journal, incoming, state3)
 }
@@ -200,7 +200,7 @@ fn journal_collection_counts_are_preflighted_before_reserve() {
         argv_digest: sha256(b"argv"),
         destination: "output.wav".to_owned(),
     });
-    valid.record(entry);
+    valid.record(entry).expect("journal entry storage reserves");
     let valid_bytes = valid.to_bytes().unwrap();
     assert_eq!(
         Journal::from_bytes(&valid_bytes)
@@ -277,7 +277,9 @@ fn custom_commands_are_opaque_by_decree() {
     let mut entry = entry_for(CommandKind::Custom, "mystery callback", b"s");
     // The recorder claims purity; the journal refuses the claim (R16).
     entry.effect = EffectClass::Pure;
-    journal.record(entry);
+    journal
+        .record(entry)
+        .expect("journal entry storage reserves");
     assert_eq!(journal.entries()[0].effect, EffectClass::Opaque);
     assert!(journal.entries()[0].is_replay_barrier());
 
@@ -305,8 +307,8 @@ fn changed_assets_invalidate_by_name() {
         digest: sha256(b"other bytes"),
     });
     let incoming = vec![e0.command.clone(), e1.command.clone()];
-    journal.record(e0);
-    journal.record(e1);
+    journal.record(e0).expect("journal entry storage reserves");
+    journal.record(e1).expect("journal entry storage reserves");
 
     // Second entry's asset changed on disk.
     let plan = plan_replay(&journal, &incoming, &|read| read.path != "assets/other.png");
@@ -330,7 +332,9 @@ fn subprocess_entries_are_replay_barriers() {
         destination: "/tmp/boom.wav".into(),
     });
     let incoming = vec![entry.command.clone()];
-    journal.record(entry);
+    journal
+        .record(entry)
+        .expect("journal entry storage reserves");
     let plan = plan_replay(&journal, &incoming, &|_| true);
     assert_eq!(plan.reuse, 0);
     assert_eq!(
@@ -404,7 +408,9 @@ fn purity_evidence_round_trips_with_the_classifier() {
     let mut journal = Journal::new();
     let mut entry = entry_for(CommandKind::Wait, "wait_until", b"s");
     entry.effect = classified.clone();
-    journal.record(entry);
+    journal
+        .record(entry)
+        .expect("journal entry storage reserves");
     let decoded = Journal::from_bytes(&journal.to_bytes().unwrap()).unwrap();
     assert_eq!(decoded.entries()[0].effect, classified);
 }

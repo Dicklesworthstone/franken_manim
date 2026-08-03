@@ -1408,7 +1408,7 @@ impl RunCtx {
             });
             return;
         }
-        if self.journal.try_record(entry).is_err() {
+        if self.journal.record(entry).is_err() {
             self.recording_error = Some(RecordingError::JournalStorageAllocationFailed);
             return;
         }

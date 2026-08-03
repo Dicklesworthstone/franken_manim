@@ -28,14 +28,16 @@ fn command(label: &str) -> CommandRecord {
 fn journal() -> Journal {
     let state = b"canonical checkpoint".to_vec();
     let mut journal = Journal::new();
-    journal.record(Entry {
-        command: command("play FadeIn(dot)"),
-        effect: EffectClass::Pure,
-        reads: Vec::new(),
-        subprocesses: Vec::new(),
-        checkpoint: Some(state.clone()),
-        state_hash: sha256(&state),
-    });
+    journal
+        .record(Entry {
+            command: command("play FadeIn(dot)"),
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: Some(state.clone()),
+            state_hash: sha256(&state),
+        })
+        .expect("journal entry storage reserves");
     journal
 }
 

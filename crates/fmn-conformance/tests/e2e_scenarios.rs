@@ -1138,7 +1138,9 @@ fn lifecycle_journal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
             checkpoint: (index == 0).then(|| format!("checkpoint-{index}").into_bytes()),
             state_hash,
         };
-        journal.record(entry.clone());
+        journal
+            .record(entry.clone())
+            .map_err(|error| fail(format!("journal records: {error}")))?;
         // The same entries ride the run's repro bundle (the §18 closure).
         ctx.record_journal(entry);
         records.push(record);
