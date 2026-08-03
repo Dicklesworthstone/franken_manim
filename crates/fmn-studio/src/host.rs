@@ -40,6 +40,8 @@ const TOKEN_HEX_BYTES: usize = TOKEN_BYTES * 2;
 const MAX_REQUEST_LINE_BYTES: usize = 4096;
 const SOCKET_AUTHORITY_MAX_BYTES: usize = 47;
 const LOCALHOST_AUTHORITY_MAX_BYTES: usize = 15;
+const CLIENT_THREAD_NAME: &str = "fmn-studio-client";
+const CLIENT_THREAD_NAME_BYTES: usize = CLIENT_THREAD_NAME.len();
 const HTTP_ORIGIN_PREFIX: &[u8] = b"http://";
 
 /// A 256-bit bearer capability.
@@ -584,7 +586,6 @@ struct AuthState {
     requests: VecDeque<Duration>,
 }
 
-#[derive(Clone)]
 struct HostHandler {
     session: Arc<StudioWorkerSession>,
     frames: FrameHub,
@@ -713,21 +714,32 @@ impl StudioHost {
                         write_connection_limit_response(&mut stream);
                         continue;
                     }
-                    let handler = self.handler.clone();
+                    let (handler, thread_name) =
+                        match self.handler.try_clone().and_then(|handler| {
+                            client_thread_name_with_capacity(CLIENT_THREAD_NAME_BYTES)
+                                .map(|thread_name| (handler, thread_name))
+                        }) {
+                            Ok(dispatch) => dispatch,
+                            Err(error) => {
+                                self.active_clients.fetch_sub(1, Ordering::AcqRel);
+                                break Err(error);
+                            }
+                        };
                     let active = Arc::clone(&self.active_clients);
                     let active_guard = Arc::clone(&active);
-                    let client = match std::thread::Builder::new()
-                        .name("fmn-studio-client".to_owned())
-                        .spawn(move || {
-                            let _guard = ActiveClientGuard(active_guard);
-                            let _ = handler.handle_stream(stream, peer);
-                        }) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            active.fetch_sub(1, Ordering::AcqRel);
-                            break Err(error.into());
-                        }
-                    };
+                    let client =
+                        match std::thread::Builder::new()
+                            .name(thread_name)
+                            .spawn(move || {
+                                let _guard = ActiveClientGuard(active_guard);
+                                let _ = handler.handle_stream(stream, peer);
+                            }) {
+                            Ok(client) => client,
+                            Err(error) => {
+                                active.fetch_sub(1, Ordering::AcqRel);
+                                break Err(error.into());
+                            }
+                        };
                     clients.push(client);
                 }
                 // ubs:ignore - I/O error kinds are public enum values, not secrets.
@@ -756,6 +768,23 @@ fn client_handle_storage(max_clients: usize) -> Result<Vec<JoinHandle<()>>, Host
         }
     })?;
     Ok(clients)
+}
+
+fn client_thread_name_with_capacity(capacity: usize) -> Result<String, HostError> {
+    let mut name = String::new();
+    name.try_reserve_exact(capacity).map_err(|error| {
+        HostError::ClientThreadNameAllocationFailed {
+            bytes: capacity,
+            error,
+        }
+    })?;
+    name.try_reserve_exact(CLIENT_THREAD_NAME_BYTES)
+        .map_err(|error| HostError::ClientThreadNameAllocationFailed {
+            bytes: CLIENT_THREAD_NAME_BYTES,
+            error,
+        })?;
+    name.push_str(CLIENT_THREAD_NAME);
+    Ok(name)
 }
 
 fn request_rate_history_storage(max_requests: usize) -> Result<VecDeque<Duration>, HostError> {
@@ -803,6 +832,34 @@ impl Drop for ActiveClientGuard {
 }
 
 impl HostHandler {
+    fn try_clone(&self) -> Result<Self, HostError> {
+        self.try_clone_with_capacities(self.authority.len(), self.localhost_authority.len())
+    }
+
+    fn try_clone_with_capacities(
+        &self,
+        authority_capacity: usize,
+        localhost_authority_capacity: usize,
+    ) -> Result<Self, HostError> {
+        Ok(Self {
+            session: Arc::clone(&self.session),
+            frames: self.frames.clone(),
+            clock: Arc::clone(&self.clock),
+            config: self.config.clone(),
+            authority: authority_with_capacity::<SOCKET_AUTHORITY_MAX_BYTES>(
+                format_args!("{}", self.authority),
+                authority_capacity,
+                "numeric socket authority",
+            )?,
+            localhost_authority: authority_with_capacity::<LOCALHOST_AUTHORITY_MAX_BYTES>(
+                format_args!("{}", self.localhost_authority),
+                localhost_authority_capacity,
+                "localhost authority",
+            )?,
+            auth: Arc::clone(&self.auth),
+        })
+    }
+
     fn handle_stream(&self, mut stream: TcpStream, peer: SocketAddr) -> Result<(), HostError> {
         if !peer.ip().is_loopback() {
             return Err(HostError::Forbidden("peer is not loopback"));
@@ -2035,6 +2092,13 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Storage for the fixed client-handler thread name could not be reserved.
+    ClientThreadNameAllocationFailed {
+        /// Thread-name bytes requested at the refusal point.
+        bytes: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
     /// Storage for the complete bounded request-rate history could not be reserved.
     RateHistoryStorageAllocationFailed {
         /// Maximum requests retained in one rate window.
@@ -2107,6 +2171,7 @@ impl HostError {
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
             Self::Configuration(_)
             | Self::ClientStorageAllocationFailed { .. }
+            | Self::ClientThreadNameAllocationFailed { .. }
             | Self::RateHistoryStorageAllocationFailed { .. }
             | Self::AuthorityStorageAllocationFailed { .. }
             | Self::RequestStorageAllocationFailed { .. }
@@ -2142,6 +2207,10 @@ impl fmt::Display for HostError {
             Self::ClientStorageAllocationFailed { clients, error } => write!(
                 f,
                 "Studio could not reserve storage for {clients} client handlers: {error}"
+            ),
+            Self::ClientThreadNameAllocationFailed { bytes, error } => write!(
+                f,
+                "Studio could not reserve {bytes} bytes for the client thread name: {error}"
             ),
             Self::RateHistoryStorageAllocationFailed { requests, error } => write!(
                 f,
@@ -2195,6 +2264,7 @@ impl std::error::Error for HostError {
             Self::Supervisor(error) => Some(error),
             Self::FramePng(error) => Some(error),
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
+            Self::ClientThreadNameAllocationFailed { error, .. } => Some(error),
             Self::RateHistoryStorageAllocationFailed { error, .. } => Some(error),
             Self::AuthorityStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
@@ -2357,6 +2427,72 @@ mod tests {
         ));
         assert!(error.to_string().contains(&usize::MAX.to_string()));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn client_dispatch_storage_refusals_are_typed() {
+        let host = bind_test_host(StudioHostConfig::default(), 1, 8).unwrap();
+
+        let numeric = host
+            .handler
+            .try_clone_with_capacities(usize::MAX, LOCALHOST_AUTHORITY_MAX_BYTES)
+            .expect_err("impossible numeric authority capacity must refuse");
+        assert!(matches!(
+            &numeric,
+            HostError::AuthorityStorageAllocationFailed {
+                field: "numeric socket authority",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&numeric).is_some());
+
+        let named = host
+            .handler
+            .try_clone_with_capacities(SOCKET_AUTHORITY_MAX_BYTES, usize::MAX)
+            .expect_err("impossible localhost authority capacity must refuse");
+        assert!(matches!(
+            &named,
+            HostError::AuthorityStorageAllocationFailed {
+                field: "localhost authority",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&named).is_some());
+
+        let name = client_thread_name_with_capacity(usize::MAX)
+            .expect_err("impossible client thread-name capacity must refuse");
+        assert!(matches!(
+            &name,
+            HostError::ClientThreadNameAllocationFailed {
+                bytes: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&name).is_some());
+    }
+
+    #[test]
+    fn client_dispatch_clone_preserves_exact_shared_state_and_name() {
+        let host = bind_test_host(StudioHostConfig::default(), 1, 8).unwrap();
+        let handler = host.handler.try_clone().unwrap();
+        assert_eq!(handler.authority, host.handler.authority);
+        assert_eq!(
+            handler.localhost_authority,
+            host.handler.localhost_authority
+        );
+        assert!(Arc::ptr_eq(&handler.session, &host.handler.session));
+        assert!(Arc::ptr_eq(&handler.clock, &host.handler.clock));
+        assert!(Arc::ptr_eq(&handler.auth, &host.handler.auth));
+        assert!(Arc::ptr_eq(
+            &handler.frames.inner,
+            &host.handler.frames.inner
+        ));
+        assert_eq!(
+            client_thread_name_with_capacity(CLIENT_THREAD_NAME_BYTES).unwrap(),
+            CLIENT_THREAD_NAME
+        );
     }
 
     #[test]
@@ -2663,7 +2799,7 @@ mod tests {
         let mut client = TcpStream::connect(address).unwrap();
         let (server, peer) = host.listener.accept().unwrap();
         server.set_nonblocking(true).unwrap();
-        let handler = host.handler.clone();
+        let handler = host.handler.try_clone().unwrap();
 
         std::thread::scope(|scope| {
             let barrier = Arc::new(std::sync::Barrier::new(2));
