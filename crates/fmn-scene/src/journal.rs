@@ -339,11 +339,27 @@ impl Journal {
     /// [`EffectClass::Opaque`] regardless of what the recorder claimed
     /// (R16 — unrecognized operations do not get to describe
     /// themselves as replayable).
-    pub fn record(&mut self, mut entry: Entry) {
+    pub fn record(&mut self, entry: Entry) {
+        self.entries.push(Self::canonical_entry(entry));
+    }
+
+    fn canonical_entry(mut entry: Entry) -> Entry {
         if entry.command.kind == CommandKind::Custom {
             entry.effect = EffectClass::Opaque;
         }
-        self.entries.push(entry);
+        entry
+    }
+
+    /// Fallibly append an entry while preserving [`Self::record`]'s
+    /// conservative effect coercion.
+    ///
+    /// # Errors
+    /// Returns the allocator's [`std::collections::TryReserveError`] without
+    /// mutating the journal when storage for another entry cannot be reserved.
+    pub fn try_record(&mut self, entry: Entry) -> Result<(), std::collections::TryReserveError> {
+        self.entries.try_reserve(1)?;
+        self.entries.push(Self::canonical_entry(entry));
+        Ok(())
     }
 
     /// The recorded entries, in order.
@@ -1043,6 +1059,30 @@ mod tests {
         assert!(matches!(
             Journal::from_bytes(&forged),
             Err(JournalError::Malformed("custom command effect"))
+        ));
+    }
+
+    #[test]
+    fn fallible_record_preserves_custom_effect_coercion() {
+        let mut journal = Journal::new();
+        journal
+            .try_record(Entry {
+                command: CommandRecord {
+                    kind: CommandKind::Custom,
+                    identity: sha256(b"fallible custom"),
+                    label: "fallible custom".to_string(),
+                },
+                effect: EffectClass::Pure,
+                reads: Vec::new(),
+                subprocesses: Vec::new(),
+                checkpoint: None,
+                state_hash: sha256(b"fallible state"),
+            })
+            .expect("one journal entry reserves");
+
+        assert!(matches!(
+            journal.entries().first().map(|entry| &entry.effect),
+            Some(EffectClass::Opaque)
         ));
     }
 }

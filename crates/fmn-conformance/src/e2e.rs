@@ -117,6 +117,16 @@ const MAX_LOG_NAME_BYTES: usize = 256;
 const MAX_LOG_FIELD_KEY_BYTES: usize = 128;
 const MAX_LOG_STRING_BYTES: usize = 16_384;
 const MAX_LOG_EVENT_FIELDS: usize = 128;
+const MAX_REPRO_JOURNAL_ENTRIES: usize = 4_096;
+const MAX_REPRO_CLOSURE_ASSETS: usize = 4_096;
+const MAX_REPRO_PATH_BYTES: usize = 16_384;
+const MAX_REPRO_STRING_BYTES: usize = 16_384;
+const MAX_REPRO_ENTRY_ITEMS: usize = 4_096;
+const MAX_REPRO_EFFECT_TAGS: usize = 16;
+const MAX_REPRO_JOURNAL_BYTES: usize = SerialLimits::DEFAULT.max_field;
+// FMNA framing (24-byte header + 32-byte checksum), entry count, and the
+// empty input-event count carried by journals produced through RunCtx.
+const EMPTY_REPRO_JOURNAL_BYTES: usize = 56 + 4 + 4;
 
 /// Canonical span (event) names for the e2e log contract.
 ///
@@ -1095,26 +1105,176 @@ impl fmt::Debug for Invocation {
 }
 
 #[derive(Debug)]
-enum LogRecordingError {
-    RecordLimit { limit: usize },
-    InvalidRecord(String),
-    StorageAllocationFailed,
+enum RecordingError {
+    LogRecordLimit { limit: usize },
+    InvalidLogRecord(String),
+    LogStorageAllocationFailed,
+    JournalEntryLimit { limit: usize },
+    JournalByteLimit { limit: usize, needed: usize },
+    InvalidJournalEntry(String),
+    JournalStorageAllocationFailed,
+    ClosureAssetLimit { limit: usize },
+    InvalidClosureAsset(String),
+    ClosureStorageAllocationFailed,
 }
 
-impl fmt::Display for LogRecordingError {
+impl fmt::Display for RecordingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RecordLimit { limit } => {
+            Self::LogRecordLimit { limit } => {
                 write!(f, "run log reached the {limit}-record retention limit")
             }
-            Self::InvalidRecord(detail) => {
+            Self::InvalidLogRecord(detail) => {
                 write!(f, "run log record was invalid before retention: {detail}")
             }
-            Self::StorageAllocationFailed => {
+            Self::LogStorageAllocationFailed => {
                 f.write_str("run log record storage allocation failed")
+            }
+            Self::JournalEntryLimit { limit } => {
+                write!(f, "repro journal reached the {limit}-entry retention limit")
+            }
+            Self::JournalByteLimit { limit, needed } => write!(
+                f,
+                "repro journal needs {needed} canonical bytes, over the {limit}-byte limit"
+            ),
+            Self::InvalidJournalEntry(detail) => {
+                write!(
+                    f,
+                    "repro journal entry was invalid before retention: {detail}"
+                )
+            }
+            Self::JournalStorageAllocationFailed => {
+                f.write_str("repro journal entry storage allocation failed")
+            }
+            Self::ClosureAssetLimit { limit } => write!(
+                f,
+                "repro input closure reached the {limit}-asset retention limit"
+            ),
+            Self::InvalidClosureAsset(detail) => {
+                write!(
+                    f,
+                    "repro input-closure asset was invalid before retention: {detail}"
+                )
+            }
+            Self::ClosureStorageAllocationFailed => {
+                f.write_str("repro input-closure storage allocation failed")
             }
         }
     }
+}
+
+fn add_repro_wire_bytes(
+    total: &mut usize,
+    additional: usize,
+    context: &'static str,
+) -> Result<(), String> {
+    *total = total
+        .checked_add(additional)
+        .ok_or_else(|| format!("{context} canonical byte count overflowed usize"))?;
+    Ok(())
+}
+
+fn check_repro_string(field: &'static str, value: &str, limit: usize) -> Result<(), String> {
+    if value.len() > limit {
+        Err(format!(
+            "{field} is {} bytes, over the {limit}-byte limit",
+            value.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn journal_entry_wire_bytes(entry: &Entry) -> Result<usize, String> {
+    check_repro_string(
+        "command label",
+        &entry.command.label,
+        MAX_REPRO_STRING_BYTES,
+    )?;
+
+    // command kind + identity + label length prefix
+    let mut bytes = 1 + 32 + 8;
+    add_repro_wire_bytes(&mut bytes, entry.command.label.len(), "journal entry")?;
+
+    // Custom commands are canonically coerced to Opaque by Journal admission,
+    // so their claimed effect payload never reaches the wire.
+    add_repro_wire_bytes(&mut bytes, 1, "journal effect")?;
+    if entry.command.kind != CommandKind::Custom
+        && let EffectClass::Stateful(tags) = &entry.effect
+    {
+        if tags.len() > MAX_REPRO_EFFECT_TAGS {
+            return Err(format!(
+                "stateful effect has {} tags, over the {MAX_REPRO_EFFECT_TAGS}-tag limit",
+                tags.len()
+            ));
+        }
+        add_repro_wire_bytes(&mut bytes, 4, "journal effect count")?;
+        add_repro_wire_bytes(&mut bytes, tags.len(), "journal effect tags")?;
+    }
+
+    if entry.reads.len() > MAX_REPRO_ENTRY_ITEMS {
+        return Err(format!(
+            "entry has {} asset reads, over the {MAX_REPRO_ENTRY_ITEMS}-read limit",
+            entry.reads.len()
+        ));
+    }
+    add_repro_wire_bytes(&mut bytes, 4, "journal asset-read count")?;
+    for read in &entry.reads {
+        check_repro_string("asset-read path", &read.path, MAX_REPRO_PATH_BYTES)?;
+        // path length prefix + path + digest
+        add_repro_wire_bytes(&mut bytes, 8, "journal asset-read path length")?;
+        add_repro_wire_bytes(&mut bytes, read.path.len(), "journal asset-read path")?;
+        add_repro_wire_bytes(&mut bytes, 32, "journal asset-read digest")?;
+    }
+
+    if entry.subprocesses.len() > MAX_REPRO_ENTRY_ITEMS {
+        return Err(format!(
+            "entry has {} subprocess records, over the {MAX_REPRO_ENTRY_ITEMS}-record limit",
+            entry.subprocesses.len()
+        ));
+    }
+    add_repro_wire_bytes(&mut bytes, 4, "journal subprocess count")?;
+    for subprocess in &entry.subprocesses {
+        check_repro_string(
+            "subprocess tool digest",
+            &subprocess.tool_sha256_hex,
+            MAX_REPRO_STRING_BYTES,
+        )?;
+        check_repro_string(
+            "subprocess destination",
+            &subprocess.destination,
+            MAX_REPRO_PATH_BYTES,
+        )?;
+        // two string prefixes + strings + argv digest
+        add_repro_wire_bytes(&mut bytes, 8, "subprocess tool digest length")?;
+        add_repro_wire_bytes(
+            &mut bytes,
+            subprocess.tool_sha256_hex.len(),
+            "subprocess tool digest",
+        )?;
+        add_repro_wire_bytes(&mut bytes, 32, "subprocess argv digest")?;
+        add_repro_wire_bytes(&mut bytes, 8, "subprocess destination length")?;
+        add_repro_wire_bytes(
+            &mut bytes,
+            subprocess.destination.len(),
+            "subprocess destination",
+        )?;
+    }
+
+    add_repro_wire_bytes(&mut bytes, 1, "journal checkpoint presence")?;
+    if let Some(checkpoint) = &entry.checkpoint {
+        if checkpoint.len() > SerialLimits::DEFAULT.max_field {
+            return Err(format!(
+                "checkpoint is {} bytes, over the {}-byte field limit",
+                checkpoint.len(),
+                SerialLimits::DEFAULT.max_field
+            ));
+        }
+        add_repro_wire_bytes(&mut bytes, 8, "journal checkpoint length")?;
+        add_repro_wire_bytes(&mut bytes, checkpoint.len(), "journal checkpoint")?;
+    }
+    add_repro_wire_bytes(&mut bytes, 32, "journal state digest")?;
+    Ok(bytes)
 }
 
 /// The per-run context handed to the invocation: the deterministic seed,
@@ -1128,8 +1288,9 @@ pub struct RunCtx {
     pub seed: u64,
     fps: (u32, u32),
     log: Vec<LogRecord>,
-    log_error: Option<LogRecordingError>,
+    recording_error: Option<RecordingError>,
     journal: Journal,
+    journal_bytes: usize,
     closure: Vec<AssetRead>,
 }
 
@@ -1139,8 +1300,9 @@ impl RunCtx {
             seed,
             fps: (60, 1),
             log: Vec::new(),
-            log_error: None,
+            recording_error: None,
             journal: Journal::new(),
+            journal_bytes: EMPTY_REPRO_JOURNAL_BYTES,
             closure: Vec::new(),
         }
     }
@@ -1150,28 +1312,28 @@ impl RunCtx {
     }
 
     fn record(&mut self, record: LogRecord) {
-        if self.log_error.is_some() {
+        if self.recording_error.is_some() {
             return;
         }
-        if self.log.len() == MAX_LOG_RECORDS {
-            self.log_error = Some(LogRecordingError::RecordLimit {
+        if self.log.len() >= MAX_LOG_RECORDS {
+            self.recording_error = Some(RecordingError::LogRecordLimit {
                 limit: MAX_LOG_RECORDS,
             });
             return;
         }
         if let Err(detail) = record.validate_limits() {
-            self.log_error = Some(LogRecordingError::InvalidRecord(detail));
+            self.recording_error = Some(RecordingError::InvalidLogRecord(detail));
             return;
         }
         if self.log.try_reserve(1).is_err() {
-            self.log_error = Some(LogRecordingError::StorageAllocationFailed);
+            self.recording_error = Some(RecordingError::LogStorageAllocationFailed);
             return;
         }
         self.log.push(record);
     }
 
-    fn recording_error(&self) -> Option<&LogRecordingError> {
-        self.log_error.as_ref()
+    fn recording_error(&self) -> Option<&RecordingError> {
+        self.recording_error.as_ref()
     }
 
     /// The rational frame rate the repro bundle records (default 60/1).
@@ -1210,16 +1372,76 @@ impl RunCtx {
         });
     }
 
-    /// Append a journal entry that will ship in the repro bundle.
+    /// Append a journal entry that will ship in the repro bundle. Invalid,
+    /// over-limit, or unreservable entries latch a harness error before
+    /// retention and stop subsequent evidence recording.
     pub fn record_journal(&mut self, entry: Entry) {
-        self.journal.record(entry);
+        if self.recording_error.is_some() {
+            return;
+        }
+        if self.journal.entries().len() >= MAX_REPRO_JOURNAL_ENTRIES {
+            self.recording_error = Some(RecordingError::JournalEntryLimit {
+                limit: MAX_REPRO_JOURNAL_ENTRIES,
+            });
+            return;
+        }
+        let entry_bytes = match journal_entry_wire_bytes(&entry) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                self.recording_error = Some(RecordingError::InvalidJournalEntry(detail));
+                return;
+            }
+        };
+        let needed = match self.journal_bytes.checked_add(entry_bytes) {
+            Some(needed) => needed,
+            None => {
+                self.recording_error = Some(RecordingError::InvalidJournalEntry(
+                    "canonical byte count overflowed usize".to_string(),
+                ));
+                return;
+            }
+        };
+        if needed > MAX_REPRO_JOURNAL_BYTES {
+            self.recording_error = Some(RecordingError::JournalByteLimit {
+                limit: MAX_REPRO_JOURNAL_BYTES,
+                needed,
+            });
+            return;
+        }
+        if self.journal.try_record(entry).is_err() {
+            self.recording_error = Some(RecordingError::JournalStorageAllocationFailed);
+            return;
+        }
+        self.journal_bytes = needed;
     }
 
     /// Record an input-closure read: the path as addressed and the
-    /// content hash of the bytes that were read.
+    /// content hash of the bytes that were read. Invalid, over-limit, or
+    /// unreservable rows latch a harness error before retention and stop
+    /// subsequent evidence recording.
     pub fn record_asset(&mut self, path: &str, bytes: &[u8]) {
+        if self.recording_error.is_some() {
+            return;
+        }
+        if self.closure.len() >= MAX_REPRO_CLOSURE_ASSETS {
+            self.recording_error = Some(RecordingError::ClosureAssetLimit {
+                limit: MAX_REPRO_CLOSURE_ASSETS,
+            });
+            return;
+        }
+        if let Err(detail) = check_repro_string("asset path", path, MAX_REPRO_PATH_BYTES) {
+            self.recording_error = Some(RecordingError::InvalidClosureAsset(detail));
+            return;
+        }
+        let mut owned_path = String::new();
+        if owned_path.try_reserve_exact(path.len()).is_err() || self.closure.try_reserve(1).is_err()
+        {
+            self.recording_error = Some(RecordingError::ClosureStorageAllocationFailed);
+            return;
+        }
+        owned_path.push_str(path);
         self.closure.push(AssetRead {
-            path: path.to_string(),
+            path: owned_path,
             digest: sha256(bytes),
         });
     }
@@ -1830,6 +2052,9 @@ impl Runner {
             checkpoint: None,
             state_hash: sha256(name.as_bytes()),
         });
+        if let Some(status) = self.recording_error_status(&mut ctx, name) {
+            return status;
+        }
         ctx.event(
             LogEvent::new(spans::HARNESS_BEGIN)
                 .field("scenario", name)
@@ -2027,7 +2252,11 @@ impl Runner {
 
     fn recording_error_status(&self, ctx: &mut RunCtx, name: &str) -> Option<Status> {
         let detail = ctx.recording_error()?.to_string();
-        Some(self.harness_error(ctx, name, format!("run log recording failed: {detail}")))
+        Some(self.harness_error(
+            ctx,
+            name,
+            format!("run evidence recording failed: {detail}"),
+        ))
     }
 
     /// Evaluate one assertion. Golden locks resolve against the runner's
@@ -2532,7 +2761,7 @@ mod tests {
         assert!(ctx.records().is_empty());
         assert!(matches!(
             ctx.recording_error(),
-            Some(LogRecordingError::InvalidRecord(detail))
+            Some(RecordingError::InvalidLogRecord(detail))
                 if detail.contains("duplicate event field key")
         ));
     }
@@ -2600,11 +2829,161 @@ mod tests {
         assert_eq!(ctx.records().len(), MAX_LOG_RECORDS);
         assert!(matches!(
             ctx.recording_error(),
-            Some(LogRecordingError::RecordLimit { limit }) if *limit == MAX_LOG_RECORDS
+            Some(RecordingError::LogRecordLimit { limit }) if *limit == MAX_LOG_RECORDS
         ));
 
         ctx.event(LogEvent::new("ignored-after-limit"));
         assert_eq!(ctx.records().len(), MAX_LOG_RECORDS);
+    }
+
+    fn minimal_journal_entry() -> Entry {
+        Entry {
+            command: CommandRecord {
+                kind: CommandKind::Play,
+                identity: sha256(b"bounded journal entry"),
+                label: "bounded journal entry".to_string(),
+            },
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: None,
+            state_hash: sha256(b"bounded journal state"),
+        }
+    }
+
+    #[test]
+    fn run_context_caps_journal_entries_before_retention() {
+        let mut ctx = RunCtx::new(1);
+        for _ in 0..=MAX_REPRO_JOURNAL_ENTRIES {
+            ctx.record_journal(minimal_journal_entry());
+        }
+
+        assert_eq!(ctx.journal().entries().len(), MAX_REPRO_JOURNAL_ENTRIES);
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(RecordingError::JournalEntryLimit { limit })
+                if *limit == MAX_REPRO_JOURNAL_ENTRIES
+        ));
+
+        ctx.record_asset("ignored-after-limit", b"content");
+        assert!(ctx.closure().is_empty());
+    }
+
+    #[test]
+    fn run_context_caps_closure_rows_before_retention() {
+        let mut ctx = RunCtx::new(1);
+        for _ in 0..=MAX_REPRO_CLOSURE_ASSETS {
+            ctx.record_asset("bounded.asset", b"content");
+        }
+
+        assert_eq!(ctx.closure().len(), MAX_REPRO_CLOSURE_ASSETS);
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(RecordingError::ClosureAssetLimit { limit })
+                if *limit == MAX_REPRO_CLOSURE_ASSETS
+        ));
+    }
+
+    #[test]
+    fn run_context_rejects_overlong_closure_path_before_retention() {
+        let mut exact = RunCtx::new(1);
+        let exact_path = "p".repeat(MAX_REPRO_PATH_BYTES);
+        exact.record_asset(&exact_path, b"content");
+        assert_eq!(exact.closure().len(), 1);
+        assert!(exact.recording_error().is_none());
+
+        let mut ctx = RunCtx::new(1);
+        let path = "p".repeat(MAX_REPRO_PATH_BYTES + 1);
+        ctx.record_asset(&path, b"content");
+        assert!(ctx.closure().is_empty());
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(RecordingError::InvalidClosureAsset(detail))
+                if detail.contains("asset path")
+        ));
+    }
+
+    #[test]
+    fn run_context_enforces_exact_journal_byte_boundary() {
+        let entry = minimal_journal_entry();
+        let entry_bytes = journal_entry_wire_bytes(&entry).expect("minimal entry has a wire size");
+        let mut ctx = RunCtx::new(1);
+        ctx.journal_bytes = MAX_REPRO_JOURNAL_BYTES - entry_bytes;
+
+        ctx.record_journal(entry.clone());
+        assert_eq!(ctx.journal_bytes, MAX_REPRO_JOURNAL_BYTES);
+        assert_eq!(ctx.journal().entries().len(), 1);
+        assert!(ctx.recording_error().is_none());
+
+        ctx.record_journal(entry);
+        assert_eq!(ctx.journal().entries().len(), 1);
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(RecordingError::JournalByteLimit { limit, needed })
+                if *limit == MAX_REPRO_JOURNAL_BYTES && *needed > *limit
+        ));
+    }
+
+    #[test]
+    fn run_context_journal_accounting_matches_canonical_bytes() {
+        let mut entry = minimal_journal_entry();
+        entry.effect = EffectClass::Stateful(vec![
+            fmn_scene::journal::ImpureEffectTag::DtUpdater,
+            fmn_scene::journal::ImpureEffectTag::SceneUpdater,
+        ]);
+        entry.reads.push(AssetRead {
+            path: "formula.tex".to_string(),
+            digest: sha256(b"formula"),
+        });
+        entry
+            .subprocesses
+            .push(fmn_scene::journal::SubprocessRecord {
+                tool_sha256_hex: sha256(b"tool").to_hex(),
+                argv_digest: sha256(b"argv"),
+                destination: "render.mp4".to_string(),
+            });
+        entry.checkpoint = Some(b"checkpoint".to_vec());
+
+        let mut ctx = RunCtx::new(1);
+        ctx.record_journal(entry);
+        assert!(ctx.recording_error().is_none());
+        assert_eq!(
+            ctx.journal_bytes,
+            ctx.journal
+                .to_bytes()
+                .expect("admitted journal serializes")
+                .len()
+        );
+
+        let mut custom = minimal_journal_entry();
+        custom.command.kind = CommandKind::Custom;
+        custom.effect = EffectClass::Stateful(vec![
+            fmn_scene::journal::ImpureEffectTag::UnclassifiedAnimation,
+        ]);
+        ctx.record_journal(custom);
+        assert!(ctx.recording_error().is_none());
+        assert_eq!(
+            ctx.journal_bytes,
+            ctx.journal
+                .to_bytes()
+                .expect("coerced journal serializes")
+                .len()
+        );
+    }
+
+    #[test]
+    fn run_context_rejects_overlong_journal_fields_before_retention() {
+        let mut entry = minimal_journal_entry();
+        entry.command.label = "l".repeat(MAX_REPRO_STRING_BYTES + 1);
+        let mut ctx = RunCtx::new(1);
+        ctx.record_journal(entry);
+
+        assert!(ctx.journal().entries().is_empty());
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(RecordingError::InvalidJournalEntry(detail))
+                if detail.contains("command label")
+        ));
     }
 
     #[test]
