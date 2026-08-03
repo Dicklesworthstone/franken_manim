@@ -16,7 +16,7 @@
 use std::collections::{BTreeSet, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
@@ -55,6 +55,33 @@ pub struct WorkerArtifact {
 }
 
 impl WorkerArtifact {
+    fn try_clone(&self) -> Result<Self, SupervisorError> {
+        let executable = try_clone_path(&self.executable, "worker executable path bytes")?;
+        let mut argv = try_vec_with_capacity(self.argv.len(), "worker argument rows")?;
+        for argument in &self.argv {
+            argv.push(try_clone_string(argument, "worker argument bytes")?);
+        }
+        let mut env = try_vec_with_capacity(self.env.len(), "worker environment rows")?;
+        for (key, value) in &self.env {
+            env.push((
+                try_clone_string(key, "worker environment key bytes")?,
+                try_clone_string(value, "worker environment value bytes")?,
+            ));
+        }
+        let cwd = self
+            .cwd
+            .as_deref()
+            .map(|path| try_clone_path(path, "worker working-directory path bytes"))
+            .transpose()?;
+        Ok(Self {
+            executable,
+            argv,
+            env,
+            cwd,
+            build_id: self.build_id,
+        })
+    }
+
     fn validate(&self) -> Result<(), LaunchError> {
         if !self.executable.is_absolute() {
             return Err(LaunchError::InvalidArtifact(
@@ -836,6 +863,93 @@ impl From<JournalError> for SupervisorError {
     }
 }
 
+fn storage_unavailable(
+    collection: &'static str,
+    additional: usize,
+    source: TryReserveError,
+) -> SupervisorError {
+    SupervisorError::StorageUnavailable {
+        collection,
+        additional,
+        source,
+    }
+}
+
+fn try_vec_with_capacity<T>(
+    additional: usize,
+    collection: &'static str,
+) -> Result<Vec<T>, SupervisorError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(collection, additional, source))?;
+    Ok(values)
+}
+
+fn try_string_with_capacity(
+    additional: usize,
+    collection: &'static str,
+) -> Result<String, SupervisorError> {
+    let mut value = String::new();
+    value
+        .try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(collection, additional, source))?;
+    Ok(value)
+}
+
+fn try_clone_string(source: &str, collection: &'static str) -> Result<String, SupervisorError> {
+    let mut value = try_string_with_capacity(source.len(), collection)?;
+    value.push_str(source);
+    Ok(value)
+}
+
+fn try_path_with_capacity(
+    additional: usize,
+    collection: &'static str,
+) -> Result<PathBuf, SupervisorError> {
+    let mut path = PathBuf::new();
+    path.try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(collection, additional, source))?;
+    Ok(path)
+}
+
+fn try_clone_path(source: &Path, collection: &'static str) -> Result<PathBuf, SupervisorError> {
+    let mut path = try_path_with_capacity(source.as_os_str().len(), collection)?;
+    path.push(source);
+    Ok(path)
+}
+
+fn try_clone_bytes(source: &[u8], collection: &'static str) -> Result<Vec<u8>, SupervisorError> {
+    let mut bytes = try_vec_with_capacity(source.len(), collection)?;
+    bytes.extend_from_slice(source);
+    Ok(bytes)
+}
+
+fn try_clone_crash_report(source: &CrashReport) -> Result<CrashReport, SupervisorError> {
+    Ok(CrashReport {
+        scene: source
+            .scene
+            .as_deref()
+            .map(|scene| try_clone_string(scene, "crash scene bytes"))
+            .transpose()?,
+        message: try_clone_string(&source.message, "crash message bytes")?,
+        journal_tail: try_clone_bytes(&source.journal_tail, "crash journal tail bytes")?,
+        state_hash: source.state_hash,
+    })
+}
+
+fn try_clone_command_records(journal: &Journal) -> Result<Vec<CommandRecord>, SupervisorError> {
+    let mut commands = try_vec_with_capacity(journal.entries().len(), "recovery command rows")?;
+    for entry in journal.entries() {
+        commands.push(CommandRecord {
+            kind: entry.command.kind,
+            identity: entry.command.identity,
+            label: try_clone_string(&entry.command.label, "recovery command label bytes")?,
+        });
+    }
+    Ok(commands)
+}
+
 #[derive(Clone, Debug)]
 struct StoredCheckpoint {
     state_hash: Digest,
@@ -850,14 +964,7 @@ struct CheckpointTable {
 
 impl CheckpointTable {
     fn try_with_capacity(additional: usize) -> Result<Self, SupervisorError> {
-        let mut rows = Vec::new();
-        rows.try_reserve_exact(additional).map_err(|source| {
-            SupervisorError::StorageUnavailable {
-                collection: "checkpoint rows",
-                additional,
-                source,
-            }
-        })?;
+        let rows = try_vec_with_capacity(additional, "checkpoint rows")?;
         Ok(Self { rows })
     }
 
@@ -893,11 +1000,7 @@ impl CheckpointTable {
             Err(position) => {
                 self.rows
                     .try_reserve(1)
-                    .map_err(|source| SupervisorError::StorageUnavailable {
-                        collection: "checkpoint rows",
-                        additional: 1,
-                        source,
-                    })?;
+                    .map_err(|source| storage_unavailable("checkpoint rows", 1, source))?;
                 // ubs:ignore - binary_search insertion positions are always at most len.
                 self.rows.insert(position, (index, make()));
             }
@@ -916,28 +1019,11 @@ impl CheckpointTable {
     }
 }
 
-fn checkpoint_bytes_scratch(
-    additional: usize,
-    collection: &'static str,
-) -> Result<Vec<u8>, SupervisorError> {
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(additional)
-        .map_err(|source| SupervisorError::StorageUnavailable {
-            collection,
-            additional,
-            source,
-        })?;
-    Ok(bytes)
-}
-
 fn try_clone_checkpoint_bytes(
     source: &[u8],
     collection: &'static str,
 ) -> Result<Vec<u8>, SupervisorError> {
-    let mut bytes = checkpoint_bytes_scratch(source.len(), collection)?;
-    bytes.extend_from_slice(source);
-    Ok(bytes)
+    try_clone_bytes(source, collection)
 }
 
 /// Stable Studio supervisor.
@@ -1019,15 +1105,29 @@ impl Supervisor {
         &self.crashes
     }
 
-    fn retain_crash(&mut self, report: CrashReport) {
+    fn retain_crash(&mut self, report: CrashReport) -> Result<(), SupervisorError> {
         let limit = self.config.max_crash_reports;
         if limit == 0 {
-            return;
+            return Ok(());
+        }
+        if self.crashes.len() < limit {
+            self.crashes
+                .try_reserve(1)
+                .map_err(|source| storage_unavailable("retained crash reports", 1, source))?;
         }
         while self.crashes.len() >= limit {
             self.crashes.remove(0);
         }
         self.crashes.push(report);
+        Ok(())
+    }
+
+    fn retain_crash_copy(&mut self, report: &CrashReport) -> Result<(), SupervisorError> {
+        if self.config.max_crash_reports == 0 {
+            return Ok(());
+        }
+        let report = try_clone_crash_report(report)?;
+        self.retain_crash(report)
     }
 
     /// Negotiated frame transports.
@@ -1192,14 +1292,13 @@ impl Supervisor {
         asset_ok: &dyn Fn(&AssetRead) -> bool,
     ) -> Result<SupervisorReply, SupervisorError> {
         let started = self.clock.monotonic();
-        self.retain_crash(report.clone());
-        let artifact = self.artifact.clone().ok_or(SupervisorError::NoWorker)?;
-        let incoming: Vec<CommandRecord> = self
-            .journal
-            .entries()
-            .iter()
-            .map(|entry| entry.command.clone())
-            .collect();
+        self.retain_crash_copy(&report)?;
+        let artifact = self
+            .artifact
+            .as_ref()
+            .ok_or(SupervisorError::NoWorker)?
+            .try_clone()?;
+        let incoming = try_clone_command_records(&self.journal)?;
         self.launch_and_handshake(artifact)?;
         let recovery = self.recover(&incoming, asset_ok, started)?;
         Ok(SupervisorReply::Recovered {
@@ -1302,7 +1401,10 @@ impl Supervisor {
         asset_ok: &dyn Fn(&AssetRead) -> bool,
         started: Duration,
     ) -> Result<RecoveryReport, SupervisorError> {
-        let scene = self.scene.clone().ok_or(SupervisorError::NoSession)?;
+        let scene = try_clone_string(
+            self.scene.as_deref().ok_or(SupervisorError::NoSession)?,
+            "recovery scene bytes",
+        )?;
         let plan = plan_replay(&self.journal, incoming, asset_ok);
         let journal_bytes = self.journal.to_bytes()?;
         let mut restored_checkpoint = None;
@@ -1320,7 +1422,7 @@ impl Supervisor {
                         "checkpoint journal length exceeds u64",
                     ))?;
             let response = self.exchange(SupervisorRequest::RestoreCheckpoint(Checkpoint {
-                scene: scene.clone(),
+                scene: try_clone_string(&scene, "checkpoint restore scene bytes")?,
                 after_entry,
                 state_hash,
                 state,
@@ -1334,7 +1436,7 @@ impl Supervisor {
                     return Err(SupervisorError::WorkerRefusal { code, message });
                 }
                 WorkerResponse::Crash(report) => {
-                    self.retain_crash(report);
+                    self.retain_crash(report)?;
                     return Err(SupervisorError::UnexpectedResponse(
                         "worker crashed while restoring a checkpoint",
                     ));
@@ -1370,7 +1472,11 @@ impl Supervisor {
             cold_fallback = true;
             restored_checkpoint = None;
             checkpoint_source = None;
-            let artifact = self.artifact.clone().ok_or(SupervisorError::NoWorker)?;
+            let artifact = self
+                .artifact
+                .as_ref()
+                .ok_or(SupervisorError::NoWorker)?
+                .try_clone()?;
             self.launch_and_handshake(artifact)?;
             let hashes = self.replay_range(&scene, &journal_bytes, 0, plan.reuse)?;
             if hashes.len() != plan.reuse {
@@ -1407,10 +1513,10 @@ impl Supervisor {
         let through_entry = u64::try_from(through)
             .map_err(|_| SupervisorError::InvalidSession("replay end exceeds u64"))?;
         let response = self.exchange(SupervisorRequest::ReplayJournal(JournalReplay {
-            scene: scene.to_owned(),
+            scene: try_clone_string(scene, "replay scene bytes")?,
             from_entry,
             through_entry,
-            journal: journal.to_vec(),
+            journal: try_clone_bytes(journal, "replay journal bytes")?,
         }))?;
         match response {
             WorkerResponse::ReplayComplete {
@@ -1423,7 +1529,7 @@ impl Supervisor {
                 Err(SupervisorError::WorkerRefusal { code, message })
             }
             WorkerResponse::Crash(report) => {
-                self.retain_crash(report);
+                self.retain_crash(report)?;
                 Err(SupervisorError::UnexpectedResponse(
                     "worker crashed during journal replay",
                 ))
@@ -1541,7 +1647,10 @@ impl Supervisor {
         }
         merged.record_events(self.journal.events())?;
         merged.record_events(segment.events())?;
-        self.install_session(scene.to_owned(), merged)
+        self.install_session(
+            try_clone_string(scene, "merged session scene bytes")?,
+            merged,
+        )
     }
 
     fn store_checkpoint(
@@ -1740,10 +1849,11 @@ impl Drop for Supervisor {
 }
 
 #[cfg(test)]
-mod checkpoint_storage_tests {
+mod supervisor_storage_tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+    use fmn_scene::{CommandKind, EffectClass, Entry};
 
     fn stored(label: &[u8]) -> StoredCheckpoint {
         StoredCheckpoint {
@@ -1784,31 +1894,95 @@ mod checkpoint_storage_tests {
     }
 
     #[test]
-    fn checkpoint_storage_refusals_are_typed() {
+    fn structured_recovery_inputs_copy_exactly() {
+        let artifact = WorkerArtifact {
+            executable: PathBuf::from("/worker/fmn"),
+            argv: vec!["--studio-worker".to_owned(), "Demo".to_owned()],
+            env: vec![("FMN_MODE".to_owned(), "test".to_owned())],
+            cwd: Some(PathBuf::from("/workspace")),
+            build_id: sha256(b"worker"),
+        };
+        assert_eq!(
+            artifact.try_clone().expect("artifact fields reserve"),
+            artifact
+        );
+
+        let report = CrashReport {
+            scene: Some("Demo".to_owned()),
+            message: "scene panic".to_owned(),
+            journal_tail: b"journal suffix".to_vec(),
+            state_hash: Some(sha256(b"state")),
+        };
+        assert_eq!(
+            try_clone_crash_report(&report).expect("crash fields reserve"),
+            report
+        );
+
+        let mut journal = Journal::new();
+        journal
+            .record(Entry {
+                command: CommandRecord {
+                    kind: CommandKind::Play,
+                    identity: sha256(b"command"),
+                    label: "play FadeIn(circle)".to_owned(),
+                },
+                effect: EffectClass::Pure,
+                reads: Vec::new(),
+                subprocesses: Vec::new(),
+                checkpoint: None,
+                state_hash: sha256(b"state"),
+            })
+            .expect("journal row reserves");
+        let commands = try_clone_command_records(&journal).expect("command fields reserve");
+        let command = commands.first().expect("one copied command");
+        let source_command = &journal
+            .entries()
+            .first()
+            .expect("one source command")
+            .command;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(command, source_command);
+        assert_ne!(command.label.as_ptr(), source_command.label.as_ptr());
+    }
+
+    fn assert_storage_refusal(
+        error: &SupervisorError,
+        collection: &'static str,
+        additional: usize,
+    ) {
+        assert!(matches!(
+            error,
+            SupervisorError::StorageUnavailable {
+                collection: found,
+                additional: found_additional,
+                ..
+            } if *found == collection && *found_additional == additional
+        ));
+        assert!(std::error::Error::source(error).is_some());
+    }
+
+    #[test]
+    fn supervisor_storage_refusals_are_typed() {
         let row_error = CheckpointTable::try_with_capacity(usize::MAX)
             .expect_err("impossible checkpoint row capacity must refuse");
-        assert!(matches!(
-            &row_error,
-            SupervisorError::StorageUnavailable {
-                collection: "checkpoint rows",
-                additional: usize::MAX,
-                ..
-            }
-        ));
-        assert!(std::error::Error::source(&row_error).is_some());
+        assert_storage_refusal(&row_error, "checkpoint rows", usize::MAX);
 
         let byte_error =
-            checkpoint_bytes_scratch(usize::MAX, "installed checkpoint fallback bytes")
+            try_vec_with_capacity::<u8>(usize::MAX, "installed checkpoint fallback bytes")
                 .expect_err("impossible checkpoint byte capacity must refuse");
-        assert!(matches!(
+        assert_storage_refusal(
             &byte_error,
-            SupervisorError::StorageUnavailable {
-                collection: "installed checkpoint fallback bytes",
-                additional: usize::MAX,
-                ..
-            }
-        ));
-        assert!(std::error::Error::source(&byte_error).is_some());
+            "installed checkpoint fallback bytes",
+            usize::MAX,
+        );
+
+        let string_error = try_string_with_capacity(usize::MAX, "recovery scene bytes")
+            .expect_err("impossible recovery scene capacity must refuse");
+        assert_storage_refusal(&string_error, "recovery scene bytes", usize::MAX);
+
+        let path_error = try_path_with_capacity(usize::MAX, "worker executable path bytes")
+            .expect_err("impossible worker path capacity must refuse");
+        assert_storage_refusal(&path_error, "worker executable path bytes", usize::MAX);
     }
 }
 
