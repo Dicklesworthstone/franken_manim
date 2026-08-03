@@ -587,6 +587,7 @@ impl StudioHost {
                 "frame hub exceeds Studio host resource budgets",
             ));
         }
+        let requests = request_rate_history_storage(config.max_requests_per_window)?;
         let listener = TcpListener::bind(config.bind_addr)?;
         let local_addr = listener.local_addr()?;
         if !local_addr.ip().is_loopback() {
@@ -609,7 +610,7 @@ impl StudioHost {
                 auth: Arc::new(Mutex::new(AuthState {
                     token,
                     started,
-                    requests: VecDeque::new(),
+                    requests,
                 })),
             },
             active_clients: Arc::new(AtomicUsize::new(0)),
@@ -706,6 +707,17 @@ fn client_handle_storage(max_clients: usize) -> Result<Vec<JoinHandle<()>>, Host
         }
     })?;
     Ok(clients)
+}
+
+fn request_rate_history_storage(max_requests: usize) -> Result<VecDeque<Duration>, HostError> {
+    let mut requests = VecDeque::new();
+    requests.try_reserve_exact(max_requests).map_err(|error| {
+        HostError::RateHistoryStorageAllocationFailed {
+            requests: max_requests,
+            error,
+        }
+    })?;
+    Ok(requests)
 }
 
 fn reap_finished_clients(clients: &mut Vec<JoinHandle<()>>) -> Result<(), HostError> {
@@ -1870,6 +1882,13 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Storage for the complete bounded request-rate history could not be reserved.
+    RateHistoryStorageAllocationFailed {
+        /// Maximum requests retained in one rate window.
+        requests: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
     /// Storage for one bounded HTTP request could not be reserved.
     RequestStorageAllocationFailed {
         /// Total request-buffer bytes requested at the refusal point.
@@ -1926,6 +1945,7 @@ impl HostError {
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
             Self::Configuration(_)
             | Self::ClientStorageAllocationFailed { .. }
+            | Self::RateHistoryStorageAllocationFailed { .. }
             | Self::RequestStorageAllocationFailed { .. }
             | Self::RequestMetadataAllocationFailed { .. }
             | Self::ResponseStorageAllocationFailed { .. }
@@ -1959,6 +1979,10 @@ impl fmt::Display for HostError {
             Self::ClientStorageAllocationFailed { clients, error } => write!(
                 f,
                 "Studio could not reserve storage for {clients} client handlers: {error}"
+            ),
+            Self::RateHistoryStorageAllocationFailed { requests, error } => write!(
+                f,
+                "Studio could not reserve storage for {requests} request-rate samples: {error}"
             ),
             Self::RequestStorageAllocationFailed { bytes, error } => write!(
                 f,
@@ -2000,6 +2024,7 @@ impl std::error::Error for HostError {
             Self::Supervisor(error) => Some(error),
             Self::FramePng(error) => Some(error),
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
+            Self::RateHistoryStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestMetadataAllocationFailed { error, .. } => Some(error),
             Self::ResponseStorageAllocationFailed { error, .. } => Some(error),
@@ -2160,6 +2185,44 @@ mod tests {
         ));
         assert!(error.to_string().contains(&usize::MAX.to_string()));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn request_rate_history_reserves_the_complete_bound() {
+        let requests = request_rate_history_storage(120).unwrap();
+        assert!(requests.is_empty());
+        assert!(requests.capacity() >= 120);
+    }
+
+    #[test]
+    fn request_rate_history_refuses_capacity_overflow() {
+        let result = request_rate_history_storage(usize::MAX);
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(matches!(
+            &error,
+            HostError::RateHistoryStorageAllocationFailed {
+                requests: usize::MAX,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains(&usize::MAX.to_string()));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn host_bind_refuses_impossible_request_rate_history() {
+        let config = StudioHostConfig {
+            max_requests_per_window: usize::MAX,
+            ..StudioHostConfig::default()
+        };
+        assert!(matches!(
+            bind_test_host(config, 1, 8),
+            Err(HostError::RateHistoryStorageAllocationFailed {
+                requests: usize::MAX,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2715,10 +2778,12 @@ mod tests {
         ));
 
         let token = CapabilityToken::new([0x33; 32]).unwrap();
+        let requests = request_rate_history_storage(config.max_requests_per_window).unwrap();
+        let request_capacity = requests.capacity();
         let auth = Mutex::new(AuthState {
             token: token.clone(),
             started: Duration::ZERO,
-            requests: VecDeque::new(),
+            requests,
         });
         let request = authorized_event(&token);
         authorize_request(
@@ -2730,6 +2795,7 @@ mod tests {
             &auth,
         )
         .unwrap();
+        assert_eq!(lock(&auth).requests.capacity(), request_capacity);
         assert!(matches!(
             authorize_request(
                 &request,
