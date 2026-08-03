@@ -148,6 +148,15 @@ pub enum ProtocolError {
         /// Bytes actually left after the count.
         remaining_bytes: usize,
     },
+    /// Storage for an admitted decoded field or collection could not be reserved.
+    StorageUnavailable {
+        /// Which decoded field or collection needed ownership.
+        field: &'static str,
+        /// Additional elements or bytes requested from the allocator.
+        additional: usize,
+        /// Allocation refusal.
+        source: TryReserveError,
+    },
     /// A decoded payload violated a semantic invariant.
     Malformed(&'static str),
     /// A journal field was not a valid canonical replay journal.
@@ -188,6 +197,14 @@ impl fmt::Display for ProtocolError {
                 f,
                 "IPC {field} count {count} requires at least {minimum_bytes} encoded bytes, but only {remaining_bytes} remain"
             ),
+            Self::StorageUnavailable {
+                field,
+                additional,
+                source,
+            } => write!(
+                f,
+                "IPC {field} storage could not reserve {additional} additional elements or bytes: {source}"
+            ),
             Self::Malformed(message) => write!(f, "malformed IPC payload: {message}"),
             Self::InvalidJournal(message) => write!(f, "invalid replay journal: {message}"),
         }
@@ -198,6 +215,7 @@ impl std::error::Error for ProtocolError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serial(error) => Some(error),
+            Self::StorageUnavailable { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -1112,15 +1130,15 @@ fn get_request(
         }),
         1 => Ok(SupervisorRequest::EnumerateScenes),
         2 => Ok(SupervisorRequest::Play {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             command: get_command(reader)?,
         }),
         3 => Ok(SupervisorRequest::Seek {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             frame: reader.get_i64()?,
         }),
         4 => Ok(SupervisorRequest::Scrub {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             frame: reader.get_i64()?,
         }),
         5 => Ok(SupervisorRequest::RestoreCheckpoint(get_checkpoint(
@@ -1131,14 +1149,14 @@ fn get_request(
         )?)),
         7 => Ok(SupervisorRequest::Shutdown),
         8 => Ok(SupervisorRequest::Event {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             event: get_event(reader)?,
         }),
         9 => Ok(SupervisorRequest::Inspect {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
         }),
         10 => Ok(SupervisorRequest::Overlay {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             layers: DebugLayerSet::from_bits(reader.get_u8()?)?,
         }),
         _ => Err(ProtocolError::Malformed("supervisor request tag")),
@@ -1242,9 +1260,9 @@ fn get_response(
         1 => {
             let count = count(reader.get_u32()?, "scene", limits.max_scenes)?;
             require_collection_payload(reader, "scene", count, 8)?;
-            let mut scenes = Vec::with_capacity(count);
+            let mut scenes = vec_with_capacity(count, "scene")?;
             for _ in 0..count {
-                scenes.push(reader.get_str()?.to_owned());
+                scenes.push(owned_string(reader.get_str()?, "scene")?);
             }
             Ok(WorkerResponse::Scenes(scenes))
         }
@@ -1255,7 +1273,7 @@ fn get_response(
         3 => Ok(WorkerResponse::Frame(get_frame(reader, limits)?)),
         4 => Ok(WorkerResponse::Checkpoint(get_checkpoint(reader, limits)?)),
         5 => Ok(WorkerResponse::JournalSegment {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             start_entry: reader.get_u64()?,
             journal: bounded_bytes(reader, "journal", limits.max_journal_bytes)?,
         }),
@@ -1267,7 +1285,7 @@ fn get_response(
                 limits.max_replay_hashes,
             )?;
             require_collection_payload(reader, "replay state hash", count, 32)?;
-            let mut state_hashes = Vec::with_capacity(count);
+            let mut state_hashes = vec_with_capacity(count, "replay state hash")?;
             for _ in 0..count {
                 state_hashes.push(reader.get_digest()?);
             }
@@ -1283,7 +1301,7 @@ fn get_response(
         }),
         9 => Ok(WorkerResponse::Bye),
         10 => Ok(WorkerResponse::StudioData {
-            scene: reader.get_str()?.to_owned(),
+            scene: owned_string(reader.get_str()?, "scene")?,
             kind: StudioDataKind::from_code(reader.get_u8()?)?,
             digest: reader.get_digest()?,
             bytes: bounded_bytes(reader, "Studio data", limits.max_studio_data_bytes)?,
@@ -1314,7 +1332,7 @@ fn get_command(reader: &mut Reader<'_>) -> Result<CommandRecord, ProtocolError> 
     Ok(CommandRecord {
         kind: command_kind_from_code(reader.get_u8()?)?,
         identity: reader.get_digest()?,
-        label: reader.get_str()?.to_owned(),
+        label: owned_string(reader.get_str()?, "command label")?,
     })
 }
 
@@ -1727,7 +1745,7 @@ fn get_checkpoint(
     limits: ProtocolLimits,
 ) -> Result<Checkpoint, ProtocolError> {
     Ok(Checkpoint {
-        scene: reader.get_str()?.to_owned(),
+        scene: owned_string(reader.get_str()?, "scene")?,
         after_entry: reader.get_u64()?,
         state_hash: reader.get_digest()?,
         state: bounded_bytes(reader, "checkpoint", limits.max_checkpoint_bytes)?,
@@ -1746,7 +1764,7 @@ fn get_replay(
     limits: ProtocolLimits,
 ) -> Result<JournalReplay, ProtocolError> {
     Ok(JournalReplay {
-        scene: reader.get_str()?.to_owned(),
+        scene: owned_string(reader.get_str()?, "scene")?,
         from_entry: reader.get_u64()?,
         through_entry: reader.get_u64()?,
         journal: bounded_bytes(reader, "journal", limits.max_journal_bytes)?,
@@ -1779,7 +1797,7 @@ fn get_frame(
     reader: &mut Reader<'_>,
     limits: ProtocolLimits,
 ) -> Result<FrameStream, ProtocolError> {
-    let scene = reader.get_str()?.to_owned();
+    let scene = owned_string(reader.get_str()?, "scene")?;
     let frame_index = reader.get_u64()?;
     let width = reader.get_u32()?;
     let height = reader.get_u32()?;
@@ -1829,7 +1847,7 @@ fn get_crash(
     limits: ProtocolLimits,
 ) -> Result<CrashReport, ProtocolError> {
     let scene = if reader.get_bool()? {
-        Some(reader.get_str()?.to_owned())
+        Some(owned_string(reader.get_str()?, "scene")?)
     } else {
         None
     };
@@ -1868,7 +1886,7 @@ fn bounded_bytes(
 ) -> Result<Vec<u8>, ProtocolError> {
     let bytes = reader.get_bytes()?;
     limit_payload(field, bytes.len(), limit)?;
-    Ok(bytes.to_vec())
+    owned_bytes(bytes, field)
 }
 
 fn bounded_string(
@@ -1878,7 +1896,43 @@ fn bounded_string(
 ) -> Result<String, ProtocolError> {
     let value = reader.get_str()?;
     limit_payload(field, value.len(), limit)?;
-    Ok(value.to_owned())
+    owned_string(value, field)
+}
+
+fn vec_with_capacity<T>(additional: usize, field: &'static str) -> Result<Vec<T>, ProtocolError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(additional)
+        .map_err(|source| ProtocolError::StorageUnavailable {
+            field,
+            additional,
+            source,
+        })?;
+    Ok(values)
+}
+
+fn string_with_capacity(additional: usize, field: &'static str) -> Result<String, ProtocolError> {
+    let mut value = String::new();
+    value
+        .try_reserve_exact(additional)
+        .map_err(|source| ProtocolError::StorageUnavailable {
+            field,
+            additional,
+            source,
+        })?;
+    Ok(value)
+}
+
+fn owned_bytes(bytes: &[u8], field: &'static str) -> Result<Vec<u8>, ProtocolError> {
+    let mut owned = vec_with_capacity(bytes.len(), field)?;
+    owned.extend_from_slice(bytes);
+    Ok(owned)
+}
+
+fn owned_string(value: &str, field: &'static str) -> Result<String, ProtocolError> {
+    let mut owned = string_with_capacity(value.len(), field)?;
+    owned.push_str(value);
+    Ok(owned)
 }
 
 fn count(raw: u32, field: &'static str, limit: usize) -> Result<usize, ProtocolError> {
@@ -1953,5 +2007,46 @@ fn require_scene(scene: &str) -> Result<(), ProtocolError> {
         Err(ProtocolError::Malformed("empty scene name"))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod decoded_storage_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::error::Error as _;
+
+    use super::{ProtocolError, string_with_capacity, vec_with_capacity};
+
+    fn assert_storage_unavailable(
+        error: ProtocolError,
+        expected_field: &'static str,
+        expected_additional: usize,
+    ) {
+        assert!(error.source().is_some());
+        let cloned = error.clone();
+        assert_eq!(cloned, error);
+        assert!(matches!(error, ProtocolError::StorageUnavailable { .. }));
+        if let ProtocolError::StorageUnavailable {
+            field, additional, ..
+        } = error
+        {
+            assert_eq!(field, expected_field);
+            assert_eq!(additional, expected_additional);
+        }
+    }
+
+    #[test]
+    fn impossible_decoded_vector_capacity_is_typed() {
+        let error = vec_with_capacity::<u8>(usize::MAX, "decoded byte field")
+            .expect_err("an impossible vector capacity must be refused");
+        assert_storage_unavailable(error, "decoded byte field", usize::MAX);
+    }
+
+    #[test]
+    fn impossible_decoded_string_capacity_is_typed() {
+        let error = string_with_capacity(usize::MAX, "decoded string field")
+            .expect_err("an impossible string capacity must be refused");
+        assert_storage_unavailable(error, "decoded string field", usize::MAX);
     }
 }
