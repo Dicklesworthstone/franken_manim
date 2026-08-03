@@ -507,7 +507,9 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
             NamespacePolicy::default(),
         )
         .map_err(|error| Pg7Error::CacheState(error.to_string()))?;
-    let key = uncached_engine.cache_key(Mode::Math(Style::Display), FORMULA_SOURCE);
+    let key = uncached_engine
+        .cache_key(Mode::Math(Style::Display), FORMULA_SOURCE)
+        .ok_or_else(|| Pg7Error::CacheState("canonical PG-7 source has no cache key".to_owned()))?;
     let before = namespace
         .get(&key)
         .map_err(|error| Pg7Error::CacheState(error.to_string()))?;

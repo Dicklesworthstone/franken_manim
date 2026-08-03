@@ -179,8 +179,13 @@ impl TexEngine {
     }
 
     /// The cache key for one (mode, source) under this engine.
+    ///
+    /// `None` means the canonical key material exceeded its fixed format
+    /// budget, so the value is deliberately uncacheable. No reduced key is
+    /// substituted: dropping mode, source, or fingerprint identity could turn
+    /// a cache optimization into a semantic collision.
     #[must_use]
-    pub fn cache_key(&self, mode: Mode, source: &str) -> CacheKey {
+    pub fn cache_key(&self, mode: Mode, source: &str) -> Option<CacheKey> {
         let (tag, style) = match mode {
             Mode::Math(Style::Display) => ("math", 0_u32),
             Mode::Math(Style::Text) => ("math", 1),
@@ -194,11 +199,7 @@ impl TexEngine {
             .push_str(source)
             .push_digest(self.fingerprint.digest())
             .finish()
-            .unwrap_or_else(|_| {
-                // Unreachable in practice (a source string over the serial
-                // field cap); an uncacheable key that still typesets.
-                CacheKey::of_content(source.as_bytes())
-            })
+            .ok()
     }
 
     /// Typeset through the cache: a verified hit returns paths + span map
@@ -211,8 +212,9 @@ impl TexEngine {
     /// [`TexError::Math`]: the precise, named, tier-tagged construct
     /// errors surface at construction time — never a blank render.
     pub fn typeset(&self, mode: Mode, source: &str) -> Result<Typeset, TexError> {
-        if let Some(ns) = &self.cache {
-            let key = self.cache_key(mode, source);
+        if let Some(ns) = &self.cache
+            && let Some(key) = self.cache_key(mode, source)
+        {
             if let Ok(Some(bytes)) = ns.get(&key)
                 && let Ok(hit) = Typeset::from_bytes(&bytes)
             {
@@ -552,11 +554,11 @@ mod tests {
             )
             .expect("typeset namespace");
         for (mode, source) in items {
+            let key = engine
+                .cache_key(mode, source)
+                .expect("small test source has a canonical cache key");
             assert!(
-                namespace
-                    .get(&engine.cache_key(mode, source))
-                    .expect("cache read")
-                    .is_some(),
+                namespace.get(&key).expect("cache read").is_some(),
                 "refused startup left {source:?} cold"
             );
         }

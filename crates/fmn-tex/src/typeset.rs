@@ -415,8 +415,8 @@ impl Typeset {
         if r.take(MAGIC.len())? != MAGIC.as_slice() {
             return Err(TypesetError::InvalidMagic);
         }
-        let source = std::str::from_utf8(r.bytes()?)
-            .map_err(|error| TypesetError::InvalidUtf8 { error })?;
+        let source =
+            std::str::from_utf8(r.bytes()?).map_err(|error| TypesetError::InvalidUtf8 { error })?;
         let width = r.f64()?;
         let height = r.f64()?;
         let depth = r.f64()?;
@@ -572,11 +572,7 @@ impl Typeset {
         let mut bytes = MAGIC.len();
         add_size(&mut bytes, U32_BYTES, "encoded document")?;
         add_size(&mut bytes, self.source.len(), "encoded document")?;
-        add_size(
-            &mut bytes,
-            3 * F64_BYTES + U32_BYTES,
-            "encoded document",
-        )?;
+        add_size(&mut bytes, 3 * F64_BYTES + U32_BYTES, "encoded document")?;
         add_product(
             &mut bytes,
             self.layout.glyphs.len(),

@@ -124,7 +124,9 @@ fn cache_round_trip_is_bit_identical_and_skips_relayout() {
     assert_eq!(cold, warm);
 
     // The payload really came from the cache: the namespace holds the key.
-    let key = e.cache_key(Mode::Math(Style::Display), src);
+    let key = e
+        .cache_key(Mode::Math(Style::Display), src)
+        .expect("small source has a canonical cache key");
     let ns = store
         .namespace(
             "typeset",
@@ -167,9 +169,7 @@ fn the_codec_preserves_the_v1_bytes_for_valid_values() {
 #[test]
 fn the_codec_refuses_a_noncanonical_public_submobject_table() {
     let e = engine();
-    let mut t = e
-        .typeset(Mode::Math(Style::Display), "x")
-        .unwrap();
+    let mut t = e.typeset(Mode::Math(Style::Display), "x").unwrap();
     assert!(!t.subs.is_empty());
     t.subs[0].prim = fmn_tex::Prim::Glyph(usize::MAX);
 
@@ -185,9 +185,7 @@ fn the_codec_refuses_a_noncanonical_public_submobject_table() {
 #[test]
 fn the_codec_refuses_spans_that_do_not_fit_its_wire_width() {
     let e = engine();
-    let mut t = e
-        .typeset(Mode::Math(Style::Display), "x")
-        .unwrap();
+    let mut t = e.typeset(Mode::Math(Style::Display), "x").unwrap();
     let wide = fmn_tex::Span::new(usize::MAX, usize::MAX);
     t.layout.glyphs[0].span = wide;
     t.subs[0].span = wide;
@@ -244,7 +242,10 @@ fn impossible_declared_counts_fail_before_collection_reservation() {
 fn cache_keys_are_sensitive_to_every_semantic_input() {
     let base = engine();
     let src = r"a \minus b";
-    let k = |e: &TexEngine, mode: Mode| e.cache_key(mode, src);
+    let k = |e: &TexEngine, mode: Mode| {
+        e.cache_key(mode, src)
+            .expect("small source has a canonical cache key")
+    };
 
     // Mode and style separate.
     assert_ne!(
@@ -361,7 +362,10 @@ fn preflight_warms_the_cache_in_parallel_and_collects_errors() {
         )
         .unwrap();
     for (i, (mode, src)) in items.iter().enumerate() {
-        let cached = ns.get(&e.cache_key(*mode, src)).unwrap();
+        let key = e
+            .cache_key(*mode, src)
+            .expect("small source has a canonical cache key");
+        let cached = ns.get(&key).unwrap();
         assert_eq!(
             cached.is_some(),
             outcomes[i].is_ok(),
