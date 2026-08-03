@@ -1469,11 +1469,13 @@ fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
     )
     .expect("command");
 
+    let panic_message = "éééé".to_owned();
+    let panic_message_allocation = panic_message.as_ptr();
     let mut output = Vec::new();
     let mut service = PanicService {
         build_id,
         negotiated_frame_budget: None,
-        panic_message: Some("éééé".to_owned()),
+        panic_message: Some(panic_message),
         active_scene: Some("Demo".to_owned()),
         journal_tail: b"canonical journal tail".to_vec(),
     };
@@ -1489,6 +1491,7 @@ fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
     };
     assert_eq!(report.message, "ééé");
     assert_eq!(report.message.len(), 6);
+    assert_eq!(report.message.as_ptr(), panic_message_allocation);
 
     let mut output = std::io::Cursor::new(output);
     let hello = read_response(&mut output, limits).expect("hello response");

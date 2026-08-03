@@ -369,14 +369,15 @@ pub fn serve_worker(
                     }
                     Err(payload) => {
                         let report = crash_report(service, payload, session_limits);
-                        write_response(
-                            writer,
-                            &ResponseEnvelope {
-                                request_id: envelope.request_id,
-                                response: WorkerResponse::Crash(report.clone()),
-                            },
-                            session_limits,
-                        )?;
+                        let envelope = ResponseEnvelope {
+                            request_id: envelope.request_id,
+                            response: WorkerResponse::Crash(report),
+                        };
+                        write_response(writer, &envelope, session_limits)?;
+                        let report = match envelope.response {
+                            WorkerResponse::Crash(report) => report,
+                            _ => return Err(WorkerServeError::ReservedResponse),
+                        };
                         return Ok(WorkerServeOutcome::Crashed(report));
                     }
                 }
