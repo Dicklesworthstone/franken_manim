@@ -47,6 +47,13 @@ use std::collections::HashMap;
 /// A retained IR table could not preserve its `u32` index contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableError {
+    /// A shape builder returned a row under a different content identity.
+    ShapeIdentityMismatch {
+        /// Identity requested from the deduplication index.
+        requested: Digest,
+        /// Identity carried by the built shape row.
+        built: Digest,
+    },
     /// Adding a row would make the table wider than its `u32` indices encode.
     IndexCapacityExceeded {
         /// The table or range being indexed.
@@ -66,6 +73,10 @@ pub enum TableError {
 impl std::fmt::Display for TableError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ShapeIdentityMismatch { requested, built } => write!(
+                f,
+                "retained shape builder returned identity {built} for requested identity {requested}"
+            ),
             Self::IndexCapacityExceeded {
                 resource,
                 requested,
@@ -561,8 +572,10 @@ impl ShapeTable {
     /// # Errors
     /// Returns [`TableError::IndexCapacityExceeded`] before running `build` or
     /// mutating the table when one more row would exceed its `u32` index width,
-    /// or [`TableError::AllocationFailed`] when its row or digest index cannot
-    /// reserve that row.
+    /// [`TableError::AllocationFailed`] when its row or digest index cannot
+    /// reserve that row, or [`TableError::ShapeIdentityMismatch`] when the
+    /// builder returns a shape carrying a different digest. Every refusal
+    /// leaves the semantic table rows and indices unchanged.
     pub fn intern_shape(
         &mut self,
         digest: Digest,
@@ -578,7 +591,14 @@ impl ShapeTable {
         self.by_digest
             .try_reserve(1)
             .map_err(|_| allocation_failed("shape index", self.by_digest.len(), 1))?;
-        self.shapes.push(build());
+        let shape = build();
+        if shape.digest != digest {
+            return Err(TableError::ShapeIdentityMismatch {
+                requested: digest,
+                built: shape.digest,
+            });
+        }
+        self.shapes.push(shape);
         self.by_digest.insert(digest, i);
         Ok(i)
     }
@@ -972,6 +992,47 @@ mod tests {
                 requested,
             }
         );
+    }
+
+    #[test]
+    fn shape_interning_refuses_mismatched_builder_identity_atomically() {
+        let path = tri();
+        let built_digest = shape_digest(path.points());
+        let requested_digest = sha256(b"a different retained shape");
+        let (shape, _) = compile_shape(built_digest, &path, Hint::General, 0)
+            .expect("fixture fits retained table widths");
+        let mut table = ShapeTable::default();
+
+        assert_eq!(
+            table
+                .intern_shape(requested_digest, || shape.clone())
+                .expect_err("the index identity must match the built shape"),
+            TableError::ShapeIdentityMismatch {
+                requested: requested_digest,
+                built: built_digest,
+            }
+        );
+        assert!(table.shapes().is_empty());
+        assert!(table.instances().is_empty());
+        assert_eq!(table.shape_index(requested_digest), None);
+        assert_eq!(table.shape_index(built_digest), None);
+
+        let index = table
+            .intern_shape(built_digest, || shape.clone())
+            .expect("the corrected identity occupies the first row");
+        assert_eq!(index, 0);
+        let mut rebuilt = false;
+        assert_eq!(
+            table
+                .intern_shape(built_digest, || {
+                    rebuilt = true;
+                    shape
+                })
+                .expect("the corrected identity deduplicates"),
+            index
+        );
+        assert!(!rebuilt);
+        assert_eq!(table.shapes().len(), 1);
     }
 
     #[test]
