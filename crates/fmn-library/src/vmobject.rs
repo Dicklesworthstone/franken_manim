@@ -298,8 +298,8 @@ impl VMobject {
 
     /// Replace the detached children by mapping each one (the detached
     /// hook for the Reference's family operations — `set_color` and
-    /// friends recurse into submobjects; compose with [`map_style`] /
-    /// [`map_points`] to do the same here).
+    /// friends recurse into submobjects; compose with [`VMobject::map_style`] /
+    /// [`VMobject::map_points`] to do the same here).
     #[must_use]
     pub fn map_children(mut self, mut f: impl FnMut(VMobject) -> VMobject) -> Self {
         self.submobjects = self.submobjects.into_iter().map(&mut f).collect();

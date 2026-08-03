@@ -6,10 +6,10 @@
 //! [`wait_segment`] — the same primitives [`Timeline::render`] composes,
 //! never a second engine), and serializes the result as one canonical
 //! FMTL/1 document: the engine identity string, the fps, the nested
-//! FMNA/5 [`TimelinePlan`], and one entry per segment. Pure segments the
-//! exporter can *prove* reconstructible export as kind 0 (begin/end stage
-//! snapshots plus the path/rate catalog tags); everything else exports as
-//! kind 1 (one verbatim snapshot per frame).
+//! FMNA/5 [`fmn_anim::TimelinePlan`], and one entry per segment. Pure segments
+//! the exporter can *prove* reconstructible export as kind 0 (begin/end stage
+//! snapshots plus the path/rate catalog tags); everything else exports as kind
+//! 1 (one verbatim snapshot per frame).
 //!
 //! **The export-time proof is the contract's load-bearing rule.** A pure
 //! play segment is nominated for kind 0 only when its whole normalized-alpha
@@ -510,8 +510,8 @@ fn classify_captured_segment(
 /// is serialized immediately into budgeted canonical snapshot bytes; whole
 /// `FramePacket` tables are never retained. Per segment, in plan order:
 ///
-/// - **Nominated pure segments** (see [`nominate`]) run the export-time
-///   proof ([`prove_pure_segment`]); passing segments export as kind 0
+/// - **Nominated pure segments** (see `nominate`) run the export-time
+///   proof (`prove_pure_segment`); passing segments export as kind 0
 ///   with the begin snapshot the driver recorded and the segment's last
 ///   emitted frame as the end snapshot.
 /// - Everything else — stateful classifications, unrepresentable

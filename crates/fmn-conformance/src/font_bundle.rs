@@ -30,13 +30,13 @@
 //! Noto Sans Math subset ships a stripped, empty name table by
 //! construction, which the manifest documents rather than invents around),
 //! byte length, and the content hash: lowercase hex SHA-256 over the exact
-//! bundled TTF bytes via [`fmn_hash::sha256`].
+//! bundled TTF bytes via [`fmn_hash::sha256()`].
 //!
 //! A face's hash here **is** the digest the input closure records and the
 //! typeset cache's font component keys against: one hash function
 //! (fmn-hash, FIPS 180-4), one byte identity (the `ALL_FACES` slice), one
-//! hex rendering ([`Digest::to_hex`]). A font change without a manifest
-//! regeneration is a CI block by construction.
+//! hex rendering ([`fmn_hash::Digest::to_hex`]). A font change without a
+//! manifest regeneration is a CI block by construction.
 
 use fmn_hash::sha256;
 use std::collections::BTreeMap;

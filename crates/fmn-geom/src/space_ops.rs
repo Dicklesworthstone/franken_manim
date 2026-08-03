@@ -23,7 +23,7 @@
 //!   the batching itself belongs to the caller.
 //!
 //! Numerics: f64 semantic math (§6.1) with every transcendental routed
-//! through [`crate::scalar`] onto fmn-dmath, so certified renders are
+//! through `crate::scalar` onto fmn-dmath, so certified renders are
 //! bit-stable across the platform matrix. `sqrt` is used directly — IEEE
 //! 754 requires correct rounding, so it is already reproducible.
 //!

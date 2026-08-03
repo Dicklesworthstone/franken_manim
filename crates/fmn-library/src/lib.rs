@@ -9,7 +9,7 @@
 //! Landed (fm-oab, §12.1): the vectorized base and its variants
 //! ([`vmobject`]), the style surface ([`style`]), the Arc lineage
 //! ([`arc`]), the Line lineage with the tip-attachment algebra
-//! ([`line`], [`tip`]), and polygons, rectangles, arrow tips, and the
+//! ([`mod@line`], [`tip`]), and polygons, rectangles, arrow tips, and the
 //! frame rectangles ([`poly`]).
 //!
 //! Three properties hold across the whole tier and are tested as such:

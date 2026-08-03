@@ -23,7 +23,7 @@
 //!   its signature.
 //!
 //! Everything here is f64 semantic math (§6.1) and routes its
-//! transcendentals through [`crate::scalar`] onto fmn-dmath, so certified
+//! transcendentals through `crate::scalar` onto fmn-dmath, so certified
 //! renders get bit-stable Euler and axis-angle conversions.
 
 use fmn_core::types::Vec3;
@@ -255,7 +255,7 @@ fn elementary_quat(axis: usize, angle: f64) -> Quat {
 /// 2022), including its branch structure: the second angle comes from a
 /// pair of hypotenuses (so it is never fed to `acos` near a pole), the
 /// first and third from the half-sum and half-difference, and a degeneracy
-/// inside [`GIMBAL_EPS`] collapses onto the first angle. Every returned
+/// inside `GIMBAL_EPS` collapses onto the first angle. Every returned
 /// angle is wrapped into `[-π, π]`.
 ///
 /// Returns `None` only for a zero-norm quaternion.

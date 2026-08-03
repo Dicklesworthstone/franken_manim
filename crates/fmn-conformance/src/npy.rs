@@ -198,7 +198,7 @@ pub enum NpyError {
     HeaderTooLarge {
         /// Declared length.
         len: usize,
-        /// The cap ([`MAX_HEADER_LEN`]).
+        /// The cap (`MAX_HEADER_LEN`).
         max: usize,
     },
     /// The header is not ASCII or its dict does not parse.
@@ -217,7 +217,7 @@ pub enum NpyError {
     TooManyDims {
         /// Declared dimensionality.
         dims: usize,
-        /// The cap ([`MAX_DIMS`]).
+        /// The cap (`MAX_DIMS`).
         max: usize,
     },
     /// Shape-product or size arithmetic overflowed.

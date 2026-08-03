@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The mandatory verification gate (AGENTS.md): fmt, check, clippy -D warnings,
-# test, then the structural crate-DAG check — in order, stopping on first
-# failure. CI wires this script rather than duplicating the commands.
+# rustdoc -D warnings, test, then the structural crate-DAG check — in order,
+# stopping on first failure. CI wires this script rather than duplicating the
+# commands.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,6 +33,9 @@ cargo clippy -p fmn-cli --features batch --all-targets -- -D warnings
 
 echo "==> cargo clippy -p fmn-output --features ffmpeg-test-fixture --all-targets -- -D warnings"
 cargo clippy -p fmn-output --features ffmpeg-test-fixture --all-targets -- -D warnings
+
+echo "==> cargo doc --no-deps --workspace (rustdoc -D warnings)"
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 if [[ "${FMN_SIMD_TIER_GATE:-0}" == "1" ]]; then
     # The weekly x86-64-v4 artifact runs under user-mode emulation. Compile and

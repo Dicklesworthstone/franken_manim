@@ -5,8 +5,8 @@
 //!
 //! - Marionette's [`Stage`] owns family membership, stable z-ordering, and CoW
 //!   snapshots.
-//! - Choreo's [`play_segment`] / [`wait_segment`] own the six-step frame order
-//!   and immutable [`FramePacket`] boundary.
+//! - Choreo's [`fmn_anim::play_segment`] / [`fmn_anim::wait_segment`] own the
+//!   six-step frame order and immutable [`FramePacket`] boundary.
 //! - Scribe plugs into [`Scene::set_preflight_hook`] and sees the complete
 //!   constructed root walk plus the first play's animation closure exactly
 //!   once before the first captured frame.

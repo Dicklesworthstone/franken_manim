@@ -4,7 +4,7 @@
 //! Two owned primitives, shared by everything that must turn *meaning* into
 //! *bytes* deterministically:
 //!
-//! - [`sha256`] / [`Sha256`] / [`Digest`] — an in-house SHA-256 (FIPS 180-4),
+//! - [`sha256()`] / [`Sha256`] / [`Digest`] — an in-house SHA-256 (FIPS 180-4),
 //!   the content-address hash for the cache, arena snapshots, provenance
 //!   manifests, and asset/font digests. Owned rather than pulled from a crate
 //!   because the governed closure (D1) admits no external crypto dependency and

@@ -28,7 +28,7 @@
 //! near zero. Each of those is handled where it arises rather than by widening a
 //! tolerance until the tests pass — §6.1's precision-exception posture.
 //!
-//! Every transcendental routes through [`crate::scalar`] to fmn-dmath (§6.6,
+//! Every transcendental routes through `crate::scalar` to fmn-dmath (§6.6,
 //! D-17), because a stroke's silhouette is part of the certified image and
 //! `f64::cbrt` defers to the platform's libm.
 

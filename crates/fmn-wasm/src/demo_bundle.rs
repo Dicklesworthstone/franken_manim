@@ -1,7 +1,7 @@
 //! The tier-2 demo bundle builder (fm-oee): the player's demo scene,
-//! authored as a declarative [`Timeline`] over the same primitive-corpus
-//! mobjects the tier-1 surface renders, and exported through the
-//! scene-side FMTL/1 writer ([`fmn_scene::export_timeline_bundle`]).
+//! authored as a declarative [`fmn_anim::timeline::Timeline`] over the same
+//! primitive-corpus mobjects the tier-1 surface renders, and exported through
+//! the scene-side FMTL/1 writer ([`fmn_scene::export_timeline_bundle`]).
 //!
 //! This is host-side tooling — bundle export is a scene-side operation,
 //! and the wasm artifact never carries it (`#[cfg(not(target_arch =
@@ -11,10 +11,10 @@
 //!
 //! The scene: the corpus circle and Lissajous wave, one one-second play
 //! (a dyadic shift of the circle and a dyadic scale of the wave — two
-//! [`Transform`]s at the Reference's default `smooth` rate, the shape of
-//! segment the export-time proof passes as pure-reconstructible), then a
-//! half-second hold so the terminal state is scrubbable too. Labels mark
-//! the segment boundaries.
+//! [`fmn_anim::Transform`]s at the Reference's default `smooth` rate, the shape
+//! of segment the export-time proof passes as pure-reconstructible), then a
+//! half-second hold so the terminal state is scrubbable too. Labels mark the
+//! segment boundaries.
 
 use fmn_anim::timeline::Timeline;
 use fmn_anim::{AnimConfig, Transform, prepare_animation};

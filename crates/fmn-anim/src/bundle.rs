@@ -5,7 +5,7 @@
 //! convention anywhere would be drift against the pinned contract, so the
 //! player never interpolates records itself: it calls
 //! [`interpolate_between`], which routes every field through
-//! [`interpolate_fields`](crate::transform::interpolate_fields) exactly as
+//! [`interpolate_fields`] exactly as
 //! the contract's normative law requires — pointlike fields through the
 //! path function, every other field linear, locked fields skipped, f64
 //! math stored at record precision.

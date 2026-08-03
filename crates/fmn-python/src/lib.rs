@@ -8,7 +8,7 @@
 //!
 //! This is the sole authoritative crate allowed to contain unsafe code (D3).
 //! The project-authored unsafe surface is confined to the two mechanical
-//! CPython buffer slots on [`PyRecordView`]; every other operation is safe
+//! CPython buffer slots on `PyRecordView`; every other operation is safe
 //! Rust and no engine borrow crosses a Python callback.
 #![deny(unsafe_op_in_unsafe_fn)]
 

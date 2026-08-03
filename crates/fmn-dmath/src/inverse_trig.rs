@@ -276,7 +276,7 @@ fn r_kernel(z: f64) -> f64 {
 ///
 /// |x| < 0.5 uses `x + x*R(x^2)` directly; 0.5 <= |x| < 1 goes through
 /// `pi/2 - 2*asin(sqrt((1-|x|)/2))` with the low-word-zeroed split of
-/// `sqrt` (via [`zero_lo`]) and its exact correction term; `asin(+-1)`
+/// `sqrt` (via `zero_lo`) and its exact correction term; `asin(+-1)`
 /// returns +-pi/2 exactly; |x| > 1 and NaN return NaN. Design bound:
 /// < 1 ulp.
 #[must_use]
@@ -328,7 +328,7 @@ pub fn asin(x: f64) -> f64 {
 ///
 /// Three ranges: |x| < 0.5 via `pi/2 - (x + x*R(x^2))`; x < -0.5 via
 /// `pi - 2*asin(sqrt((1+x)/2))`; x > 0.5 via `2*asin(sqrt((1-x)/2))`
-/// with the high-word-truncated `df` sqrt split (via [`zero_lo`]).
+/// with the high-word-truncated `df` sqrt split (via `zero_lo`).
 /// `acos(1) = 0` and `acos(-1) = pi` exactly; |x| > 1 and NaN return
 /// NaN. Design bound: < 1 ulp.
 #[must_use]

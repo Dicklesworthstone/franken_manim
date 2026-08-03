@@ -8,7 +8,7 @@
 //! **value** like [`VMobject`]: sampled points plus the Reference's
 //! `d_normal_point` column, per-point rgba, the fixed UV-grid triangle
 //! indices, and the kept `(reflectiveness, gloss, shadow)` shading uniform
-//! (fm-0gy's [`fmn_render`][^render] lighting consumes exactly this data).
+//! (fm-0gy's `fmn-render`[^render] lighting consumes exactly this data).
 //! `Stage::add` moves one into the arena through
 //! [`From<Surface> for Mobject`].
 //!
