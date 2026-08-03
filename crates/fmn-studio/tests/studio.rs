@@ -40,9 +40,15 @@ impl Write for PayloadWitness<'_> {
 #[test]
 fn capability_is_explicit_fixed_width_and_redacted() {
     let token = CapabilityToken::new([0x5a; 32]).unwrap();
-    let hex = token.expose_hex();
+    let hex = token.try_expose_hex().unwrap();
     assert_eq!(hex.len(), 64);
-    assert_eq!(CapabilityToken::from_hex(&hex).unwrap().expose_hex(), hex);
+    assert_eq!(
+        CapabilityToken::from_hex(&hex)
+            .unwrap()
+            .try_expose_hex()
+            .unwrap(),
+        hex
+    );
     assert_eq!(format!("{token:?}"), "CapabilityToken([REDACTED])");
     assert!(CapabilityToken::new([0; 32]).is_err());
 }

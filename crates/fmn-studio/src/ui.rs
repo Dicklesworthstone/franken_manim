@@ -18,6 +18,8 @@
 //! every UI response with that header so a connected browser can detect a
 //! stale page against a restarted Studio.
 
+use std::collections::TryReserveError;
+
 /// The UI asset set's version — exactly the fmn-studio crate version.
 ///
 /// Because the assets are compiled in, this is also the version of every byte
@@ -63,10 +65,10 @@ document.getElementById("seek").addEventListener("click", async () => {
 });
 "#;
 
-/// The index shell template. The capability placeholder is substituted by
-/// [`studio_index_html`]; the UI version meta tag is baked in at compile time
-/// via [`STUDIO_UI_VERSION`].
-const STUDIO_INDEX_HTML: &str = concat!(
+/// The static prefix of the index shell. The capability token and suffix are
+/// appended by [`studio_index_html`]; the UI version meta tag is baked in at
+/// compile time via [`STUDIO_UI_VERSION`].
+const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
     "<!doctype html><meta charset=\"utf-8\">",
     "<meta name=\"referrer\" content=\"no-referrer\">",
     "<meta name=\"fmn-studio-ui-version\" content=\"",
@@ -77,10 +79,12 @@ const STUDIO_INDEX_HTML: &str = concat!(
     "<p><input id=\"frame\" type=\"number\" min=\"0\" value=\"0\">",
     "<button id=\"seek\">Seek</button><button id=\"inspect\">Inspect</button></p>",
     "<pre id=\"result\"></pre>",
-    "<script src=\"/studio.js?cap=__FMN_CAPABILITY__\"></script>"
+    "<script src=\"/studio.js?cap="
 );
 
-const CAPABILITY_PLACEHOLDER: &str = "__FMN_CAPABILITY__";
+const STUDIO_INDEX_HTML_SUFFIX: &str = "\"></script>";
+const STUDIO_INDEX_HTML_STATIC_BYTES: usize =
+    STUDIO_INDEX_HTML_PREFIX.len() + STUDIO_INDEX_HTML_SUFFIX.len();
 
 /// The static embedded UI asset set, in route order.
 ///
@@ -106,11 +110,36 @@ pub fn ui_asset(route: &str) -> Option<&'static UiAsset> {
 /// Render the index shell for one session's capability token (hex form).
 ///
 /// The token appears only inside the script URL's `cap` query, exactly as
-/// [`CapabilityToken::expose_hex`](crate::CapabilityToken::expose_hex)
+/// [`CapabilityToken::try_expose_hex`](crate::CapabilityToken::try_expose_hex)
 /// formats it; the template performs no other substitution.
-#[must_use]
-pub fn studio_index_html(capability_hex: &str) -> String {
-    STUDIO_INDEX_HTML.replace(CAPABILITY_PLACEHOLDER, capability_hex)
+///
+/// # Errors
+///
+/// Returns the allocator's refusal when the complete rendered shell cannot be
+/// reserved.
+pub fn studio_index_html(capability_hex: &str) -> Result<String, TryReserveError> {
+    studio_index_html_with_capacity(
+        capability_hex,
+        studio_index_html_capacity(capability_hex.len()),
+    )
+}
+
+pub(crate) const fn studio_index_html_capacity(capability_bytes: usize) -> usize {
+    STUDIO_INDEX_HTML_STATIC_BYTES.saturating_add(capability_bytes)
+}
+
+pub(crate) fn studio_index_html_with_capacity(
+    capability_hex: &str,
+    capacity: usize,
+) -> Result<String, TryReserveError> {
+    let mut rendered = String::new();
+    rendered.try_reserve_exact(capacity)?;
+    let required = studio_index_html_capacity(capability_hex.len());
+    rendered.try_reserve_exact(required)?;
+    rendered.push_str(STUDIO_INDEX_HTML_PREFIX);
+    rendered.push_str(capability_hex);
+    rendered.push_str(STUDIO_INDEX_HTML_SUFFIX);
+    Ok(rendered)
 }
 
 #[cfg(test)]
@@ -120,13 +149,16 @@ mod tests {
     #[test]
     fn version_is_the_crate_version_and_the_template_is_baked() {
         assert_eq!(STUDIO_UI_VERSION, env!("CARGO_PKG_VERSION"));
-        assert!(STUDIO_INDEX_HTML.contains(&format!(
+        assert!(STUDIO_INDEX_HTML_PREFIX.contains(&format!(
             "name=\"fmn-studio-ui-version\" content=\"{STUDIO_UI_VERSION}\""
         )));
-        assert_eq!(STUDIO_INDEX_HTML.matches(CAPABILITY_PLACEHOLDER).count(), 1);
-        let rendered = studio_index_html("abc123");
-        assert!(!rendered.contains(CAPABILITY_PLACEHOLDER));
+        let rendered = studio_index_html("abc123").unwrap();
         assert!(rendered.contains("/studio.js?cap=abc123"));
+    }
+
+    #[test]
+    fn index_html_refuses_capacity_overflow() {
+        assert!(studio_index_html_with_capacity("abc123", usize::MAX).is_err());
     }
 
     #[test]

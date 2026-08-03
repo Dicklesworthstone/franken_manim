@@ -73,14 +73,15 @@ impl CapabilityToken {
     }
 
     /// Explicitly reveal the launch-URL representation.
-    #[must_use]
-    pub fn expose_hex(&self) -> String {
-        let mut out = String::with_capacity(TOKEN_HEX_BYTES);
-        for byte in self.0 {
-            out.push(hex_digit(byte >> 4));
-            out.push(hex_digit(byte & 0x0f));
-        }
-        out
+    ///
+    /// Allocation refusal is returned before any token bytes are exposed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocator's refusal when the fixed-width output cannot be
+    /// reserved.
+    pub fn try_expose_hex(&self) -> Result<String, TryReserveError> {
+        capability_hex_with_capacity(self, TOKEN_HEX_BYTES)
     }
 
     fn matches_hex(&self, presented: &str) -> bool {
@@ -93,6 +94,20 @@ impl CapabilityToken {
         }
         difference == 0
     }
+}
+
+fn capability_hex_with_capacity(
+    token: &CapabilityToken,
+    capacity: usize,
+) -> Result<String, TryReserveError> {
+    let mut out = String::new();
+    out.try_reserve_exact(capacity)?;
+    out.try_reserve_exact(TOKEN_HEX_BYTES)?;
+    for byte in token.0 {
+        out.push(hex_digit(byte >> 4));
+        out.push(hex_digit(byte & 0x0f));
+    }
+    Ok(out)
 }
 
 impl fmt::Debug for CapabilityToken {
@@ -623,13 +638,14 @@ impl StudioHost {
     }
 
     /// Explicit capability-bearing browser launch URL.
-    pub fn launch_url(&self) -> String {
-        let auth = lock(&self.handler.auth);
-        format!(
-            "http://{}/?cap={}",
-            self.handler.authority,
-            auth.token.expose_hex()
-        )
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ResponseStorageAllocationFailed`] when the URL
+    /// buffer cannot grow.
+    pub fn launch_url(&self) -> Result<String, HostError> {
+        let token = lock(&self.handler.auth).token.clone();
+        launch_url_with_capacity(&self.handler.authority, &token, 128)
     }
 
     /// Rotate the bearer capability without extending the session deadline.
@@ -840,8 +856,9 @@ impl HostHandler {
     ) -> Result<(), HostError> {
         match (request.method, request.path.as_str()) {
             (Method::Get, "/") => {
-                let token = lock(&self.auth).token.expose_hex();
-                write_html_response(stream, ui::studio_index_html(&token).as_bytes())
+                let token = lock(&self.auth).token.clone();
+                let body = studio_index_response_body(&token)?;
+                write_html_response(stream, body.as_bytes())
             }
             (Method::Get, "/studio.js") => {
                 let asset = ui::ui_asset("/studio.js").ok_or(HostError::Configuration(
@@ -1642,6 +1659,51 @@ fn response_text_with_capacity(
         value,
         field,
         allocation_failure: None,
+    })
+}
+
+fn launch_url_with_capacity(
+    authority: &str,
+    token: &CapabilityToken,
+    capacity: usize,
+) -> Result<String, HostError> {
+    let mut url = response_text_with_capacity(capacity, "Studio launch URL")?;
+    url.append("http://")?;
+    url.append(authority)?;
+    url.append("/?cap=")?;
+    for byte in token.0 {
+        url.append_char(hex_digit(byte >> 4))?;
+        url.append_char(hex_digit(byte & 0x0f))?;
+    }
+    Ok(url.into_string())
+}
+
+fn studio_index_response_body(token: &CapabilityToken) -> Result<String, HostError> {
+    studio_index_response_body_with_capacities(
+        token,
+        TOKEN_HEX_BYTES,
+        ui::studio_index_html_capacity(TOKEN_HEX_BYTES),
+    )
+}
+
+fn studio_index_response_body_with_capacities(
+    token: &CapabilityToken,
+    token_capacity: usize,
+    html_capacity: usize,
+) -> Result<String, HostError> {
+    let token_hex = capability_hex_with_capacity(token, token_capacity).map_err(|error| {
+        HostError::ResponseStorageAllocationFailed {
+            field: "Studio capability hex",
+            additional: token_capacity,
+            error,
+        }
+    })?;
+    ui::studio_index_html_with_capacity(&token_hex, html_capacity).map_err(|error| {
+        HostError::ResponseStorageAllocationFailed {
+            field: "Studio index HTML",
+            additional: html_capacity,
+            error,
+        }
     })
 }
 
@@ -2631,6 +2693,74 @@ mod tests {
     }
 
     #[test]
+    fn capability_index_and_launch_builders_refuse_capacity_overflow() {
+        let token = CapabilityToken::new([0x42; TOKEN_BYTES]).unwrap();
+        assert!(capability_hex_with_capacity(&token, usize::MAX).is_err());
+
+        let token_index = studio_index_response_body_with_capacities(
+            &token,
+            usize::MAX,
+            ui::studio_index_html_capacity(TOKEN_HEX_BYTES),
+        )
+        .expect_err("impossible capability hex capacity must refuse");
+        assert!(matches!(
+            &token_index,
+            HostError::ResponseStorageAllocationFailed {
+                field: "Studio capability hex",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&token_index).is_some());
+
+        let launch = launch_url_with_capacity("127.0.0.1:42", &token, usize::MAX)
+            .expect_err("impossible launch URL capacity must refuse");
+        assert!(matches!(
+            &launch,
+            HostError::ResponseStorageAllocationFailed {
+                field: "Studio launch URL",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&launch).is_some());
+
+        let index = studio_index_response_body_with_capacities(&token, TOKEN_HEX_BYTES, usize::MAX)
+            .expect_err("impossible index HTML capacity must refuse");
+        assert!(matches!(
+            &index,
+            HostError::ResponseStorageAllocationFailed {
+                field: "Studio index HTML",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&index).is_some());
+    }
+
+    #[test]
+    fn capability_index_and_launch_builders_preserve_exact_bytes() {
+        let token = CapabilityToken::new([0x42; TOKEN_BYTES]).unwrap();
+        let token_hex = "42".repeat(TOKEN_BYTES);
+        assert_eq!(token.try_expose_hex().unwrap(), token_hex);
+        assert_eq!(
+            launch_url_with_capacity("127.0.0.1:42", &token, 128).unwrap(),
+            format!("http://127.0.0.1:42/?cap={token_hex}")
+        );
+        assert_eq!(
+            studio_index_response_body(&token).unwrap(),
+            ui::studio_index_html(&token_hex).unwrap()
+        );
+
+        let host = bind_test_host(StudioHostConfig::default(), 1, 8).unwrap();
+        let authority = socket_authority(host.local_addr().unwrap());
+        assert_eq!(
+            host.launch_url().unwrap(),
+            format!("http://{authority}/?cap={}", "55".repeat(TOKEN_BYTES))
+        );
+    }
+
+    #[test]
     fn fallible_response_builders_preserve_exact_wire_bytes() {
         assert_eq!(
             error_response_body(&HostError::BadRequest("invalid frame")).unwrap(),
@@ -2933,7 +3063,7 @@ mod tests {
         HttpRequest {
             method: Method::Get,
             path: "/".to_owned(),
-            query: vec![("cap".to_owned(), token.expose_hex())],
+            query: vec![("cap".to_owned(), token.try_expose_hex().unwrap())],
             headers: HashMap::from([("host".to_owned(), "127.0.0.1:42".to_owned())]),
             body: Vec::new(),
         }
@@ -2947,7 +3077,10 @@ mod tests {
             headers: HashMap::from([
                 ("host".to_owned(), "127.0.0.1:42".to_owned()),
                 ("origin".to_owned(), "http://127.0.0.1:42".to_owned()),
-                ("x-fmn-capability".to_owned(), token.expose_hex()),
+                (
+                    "x-fmn-capability".to_owned(),
+                    token.try_expose_hex().unwrap(),
+                ),
             ]),
             body: b"type=key_press&key=a".to_vec(),
         }

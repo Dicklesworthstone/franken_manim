@@ -62,7 +62,7 @@ fn test_host() -> TestHost {
     let session =
         StudioWorkerSession::new("Ui", supervisor, Arc::new(|_| true)).expect("session binds");
     let token = CapabilityToken::new([0x42; 32]).expect("nonzero capability");
-    let capability_hex = token.expose_hex();
+    let capability_hex = token.try_expose_hex().expect("token hex storage");
     let frames = FrameHub::new(2, 1024 * 1024).expect("frame hub");
     let host = StudioHost::bind(
         Arc::new(session),
