@@ -1094,6 +1094,29 @@ impl fmt::Debug for Invocation {
     }
 }
 
+#[derive(Debug)]
+enum LogRecordingError {
+    RecordLimit { limit: usize },
+    InvalidRecord(String),
+    StorageAllocationFailed,
+}
+
+impl fmt::Display for LogRecordingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RecordLimit { limit } => {
+                write!(f, "run log reached the {limit}-record retention limit")
+            }
+            Self::InvalidRecord(detail) => {
+                write!(f, "run log record was invalid before retention: {detail}")
+            }
+            Self::StorageAllocationFailed => {
+                f.write_str("run log record storage allocation failed")
+            }
+        }
+    }
+}
+
 /// The per-run context handed to the invocation: the deterministic seed,
 /// the structured log, the repro journal, and the input closure.
 ///
@@ -1105,6 +1128,7 @@ pub struct RunCtx {
     pub seed: u64,
     fps: (u32, u32),
     log: Vec<LogRecord>,
+    log_error: Option<LogRecordingError>,
     journal: Journal,
     closure: Vec<AssetRead>,
 }
@@ -1115,6 +1139,7 @@ impl RunCtx {
             seed,
             fps: (60, 1),
             log: Vec::new(),
+            log_error: None,
             journal: Journal::new(),
             closure: Vec::new(),
         }
@@ -1122,6 +1147,31 @@ impl RunCtx {
 
     fn next_seq(&self) -> u64 {
         u64::try_from(self.log.len()).unwrap_or(u64::MAX)
+    }
+
+    fn record(&mut self, record: LogRecord) {
+        if self.log_error.is_some() {
+            return;
+        }
+        if self.log.len() == MAX_LOG_RECORDS {
+            self.log_error = Some(LogRecordingError::RecordLimit {
+                limit: MAX_LOG_RECORDS,
+            });
+            return;
+        }
+        if let Err(detail) = record.validate_limits() {
+            self.log_error = Some(LogRecordingError::InvalidRecord(detail));
+            return;
+        }
+        if self.log.try_reserve(1).is_err() {
+            self.log_error = Some(LogRecordingError::StorageAllocationFailed);
+            return;
+        }
+        self.log.push(record);
+    }
+
+    fn recording_error(&self) -> Option<&LogRecordingError> {
+        self.log_error.as_ref()
     }
 
     /// The rational frame rate the repro bundle records (default 60/1).
@@ -1135,10 +1185,12 @@ impl RunCtx {
         self.fps
     }
 
-    /// Append a structured event to the run log.
+    /// Append a structured event to the run log. An invalid event or a
+    /// record beyond the retention ceiling latches a harness error and stops
+    /// subsequent log retention.
     pub fn event(&mut self, event: LogEvent) {
         let seq = self.next_seq();
-        self.log.push(LogRecord::Event {
+        self.record(LogRecord::Event {
             seq,
             name: event.name,
             fields: event.fields,
@@ -1146,10 +1198,12 @@ impl RunCtx {
     }
 
     /// Record a counter sample in the run log (peak semantics for
-    /// [`LogExpect::CounterGe`]: record progressive values freely).
+    /// [`LogExpect::CounterGe`]: record progressive values freely). An
+    /// invalid or over-limit record follows [`Self::event`]'s fail-closed
+    /// behavior.
     pub fn counter(&mut self, name: &str, value: u64) {
         let seq = self.next_seq();
-        self.log.push(LogRecord::Counter {
+        self.record(LogRecord::Counter {
             seq,
             name: name.to_string(),
             value,
@@ -1806,6 +1860,9 @@ impl Runner {
                 RunOutcome::ok()
             }
         };
+        if let Some(status) = self.recording_error_status(&mut ctx, name) {
+            return status;
+        }
 
         if let Some(kind) = spec.regression {
             match kind {
@@ -1847,6 +1904,9 @@ impl Runner {
                     );
                 }
             }
+        }
+        if let Some(status) = self.recording_error_status(&mut ctx, name) {
+            return status;
         }
 
         // A golden-drift drill always evaluates goldens in check mode:
@@ -1902,6 +1962,9 @@ impl Runner {
                 }
             }
         }
+        if let Some(status) = self.recording_error_status(&mut ctx, name) {
+            return status;
+        }
 
         let failed = !reasons.is_empty();
         ctx.event(
@@ -1909,6 +1972,9 @@ impl Runner {
                 .field("status", if failed { "failed" } else { "passed" })
                 .field("reasons", reasons.len()),
         );
+        if let Some(status) = self.recording_error_status(&mut ctx, name) {
+            return status;
+        }
         let log = match self.write_log(&ctx, name) {
             Ok(path) => path,
             Err(detail) => {
@@ -1957,6 +2023,11 @@ impl Runner {
             None => Status::Failed(failure),
             Some(kind) => Self::confirm_drill(kind, spec.class, failure),
         }
+    }
+
+    fn recording_error_status(&self, ctx: &mut RunCtx, name: &str) -> Option<Status> {
+        let detail = ctx.recording_error()?.to_string();
+        Some(self.harness_error(ctx, name, format!("run log recording failed: {detail}")))
     }
 
     /// Evaluate one assertion. Golden locks resolve against the runner's
@@ -2458,7 +2529,12 @@ mod tests {
 
         let mut ctx = RunCtx::new(1);
         ctx.event(LogEvent::new("duplicate").field("x", 1u64).field("x", 2u64));
-        assert!(check_ndjson_roundtrip(records(&ctx)).is_err());
+        assert!(ctx.records().is_empty());
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(LogRecordingError::InvalidRecord(detail))
+                if detail.contains("duplicate event field key")
+        ));
     }
 
     #[test]
@@ -2512,6 +2588,23 @@ mod tests {
             too_many.push('\n');
         }
         assert!(parse_log_artifact_body(path, &too_many).is_err());
+    }
+
+    #[test]
+    fn run_context_caps_records_before_retention() {
+        let mut ctx = RunCtx::new(1);
+        for _ in 0..=MAX_LOG_RECORDS {
+            ctx.counter("bounded", 1);
+        }
+
+        assert_eq!(ctx.records().len(), MAX_LOG_RECORDS);
+        assert!(matches!(
+            ctx.recording_error(),
+            Some(LogRecordingError::RecordLimit { limit }) if *limit == MAX_LOG_RECORDS
+        ));
+
+        ctx.event(LogEvent::new("ignored-after-limit"));
+        assert_eq!(ctx.records().len(), MAX_LOG_RECORDS);
     }
 
     #[test]
