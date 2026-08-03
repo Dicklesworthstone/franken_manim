@@ -1273,7 +1273,7 @@ impl Supervisor {
             Err(SupervisorError::Channel(error))
                 if self.config.auto_restart && error.recoverable() =>
             {
-                let report = self.channel_crash_report(&error);
+                let report = self.channel_crash_report(&error)?;
                 self.recover_from_crash(report, asset_ok)
             }
             Err(error) => Err(error),
@@ -1721,26 +1721,35 @@ impl Supervisor {
         ))
     }
 
-    fn channel_crash_report(&self, error: &ChannelError) -> CrashReport {
-        let journal_bytes = self.journal.to_bytes().unwrap_or_default();
-        let tail_len = journal_bytes
-            .len()
-            .min(self.config.protocol_limits.max_crash_tail_bytes);
-        let mut journal_tail = Vec::with_capacity(tail_len);
-        journal_tail.extend_from_slice(&journal_bytes[journal_bytes.len() - tail_len..]);
+    fn channel_crash_report(&self, error: &ChannelError) -> Result<CrashReport, SupervisorError> {
         let message = bounded_channel_error_message(
             error,
             self.config
                 .protocol_limits
                 .max_crash_message_bytes
                 .min(self.config.protocol_limits.max_field_bytes),
-        );
-        CrashReport {
-            scene: self.scene.clone(),
+        )?;
+        let journal_bytes = self.journal.to_bytes()?;
+        let tail_len = journal_bytes
+            .len()
+            .min(self.config.protocol_limits.max_crash_tail_bytes);
+        let tail_start = journal_bytes.len() - tail_len;
+        let tail = journal_bytes
+            .get(tail_start..)
+            .ok_or(SupervisorError::InvalidSession(
+                "channel crash journal tail range",
+            ))?;
+        let journal_tail = try_clone_bytes(tail, "crash journal tail bytes")?;
+        Ok(CrashReport {
+            scene: self
+                .scene
+                .as_deref()
+                .map(|scene| try_clone_string(scene, "crash scene bytes"))
+                .transpose()?,
             message,
             journal_tail,
             state_hash: self.journal.entries().last().map(|entry| entry.state_hash),
-        }
+        })
     }
 
     fn take_request_id(&mut self) -> Result<u64, SupervisorError> {
@@ -1807,21 +1816,28 @@ fn worker_response_scene(response: &WorkerResponse) -> Option<&str> {
     }
 }
 
-fn bounded_channel_error_message(error: &ChannelError, limit: usize) -> String {
-    let limit = limit.max(1);
-    let mut message = String::with_capacity(limit.min(256));
-    push_str_bounded(&mut message, "worker channel ", limit);
-    push_str_bounded(&mut message, channel_failure_name(error.kind), limit);
-    push_str_bounded(&mut message, ": ", limit);
-    push_str_bounded(&mut message, &error.detail, limit);
-    if !error.stderr_tail.is_empty() {
-        push_str_bounded(&mut message, "; stderr tail: ", limit);
-        let remaining = limit.saturating_sub(message.len());
-        let take = remaining.min(error.stderr_tail.len());
-        let stderr = String::from_utf8_lossy(&error.stderr_tail[..take]);
-        push_str_bounded(&mut message, &stderr, limit);
+fn bounded_channel_error_message(
+    error: &ChannelError,
+    limit: usize,
+) -> Result<String, SupervisorError> {
+    if limit == 0 {
+        return Err(ProtocolError::PayloadLimit {
+            field: "crash message",
+            limit,
+            needed: 1,
+        }
+        .into());
     }
-    message
+    let mut message = String::new();
+    try_push_str_bounded(&mut message, "worker channel ", limit)?;
+    try_push_str_bounded(&mut message, channel_failure_name(error.kind), limit)?;
+    try_push_str_bounded(&mut message, ": ", limit)?;
+    try_push_str_bounded(&mut message, &error.detail, limit)?;
+    if !error.stderr_tail.is_empty() {
+        try_push_str_bounded(&mut message, "; stderr tail: ", limit)?;
+        try_push_lossy_bytes_bounded(&mut message, &error.stderr_tail, limit)?;
+    }
+    Ok(message)
 }
 
 const fn channel_failure_name(kind: ChannelFailureKind) -> &'static str {
@@ -1834,12 +1850,48 @@ const fn channel_failure_name(kind: ChannelFailureKind) -> &'static str {
     }
 }
 
-fn push_str_bounded(output: &mut String, value: &str, limit: usize) {
+fn try_push_str_bounded(
+    output: &mut String,
+    value: &str,
+    limit: usize,
+) -> Result<(), SupervisorError> {
     let mut end = limit.saturating_sub(output.len()).min(value.len());
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    output.push_str(&value[..end]);
+    output
+        .try_reserve_exact(end)
+        .map_err(|source| storage_unavailable("crash message bytes", end, source))?;
+    let bounded = value
+        .get(..end)
+        .ok_or(SupervisorError::Protocol(ProtocolError::Malformed(
+            "invalid crash message UTF-8 boundary",
+        )))?;
+    output.push_str(bounded);
+    Ok(())
+}
+
+fn try_push_lossy_bytes_bounded(
+    output: &mut String,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<(), SupervisorError> {
+    let take = limit.saturating_sub(output.len()).min(bytes.len());
+    let admitted = bytes
+        .get(..take)
+        .ok_or(SupervisorError::Protocol(ProtocolError::Malformed(
+            "invalid stderr diagnostic range",
+        )))?;
+    for chunk in admitted.utf8_chunks() {
+        try_push_str_bounded(output, chunk.valid(), limit)?;
+        if !chunk.invalid().is_empty() {
+            if limit.saturating_sub(output.len()) < '\u{fffd}'.len_utf8() {
+                break;
+            }
+            try_push_str_bounded(output, "\u{fffd}", limit)?;
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Supervisor {
@@ -1943,6 +1995,23 @@ mod supervisor_storage_tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(command, source_command);
         assert_ne!(command.label.as_ptr(), source_command.label.as_ptr());
+    }
+
+    #[test]
+    fn channel_crash_message_streams_lossy_utf8_at_byte_boundaries() {
+        let error = ChannelError {
+            kind: ChannelFailureKind::Io,
+            detail: "é".to_owned(),
+            stderr_tail: b"ok\xffz\xe2\x82".to_vec(),
+        };
+        assert_eq!(
+            bounded_channel_error_message(&error, 45).expect("exact message storage reserves"),
+            "worker channel Io: é; stderr tail: ok\u{fffd}z\u{fffd}"
+        );
+        assert_eq!(
+            bounded_channel_error_message(&error, 44).expect("bounded message storage reserves"),
+            "worker channel Io: é; stderr tail: ok\u{fffd}z"
+        );
     }
 
     fn assert_storage_refusal(
