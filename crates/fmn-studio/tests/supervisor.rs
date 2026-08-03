@@ -1599,6 +1599,54 @@ fn worker_refuses_an_impossible_zero_crash_message_budget_precisely() {
 }
 
 #[test]
+fn worker_refuses_an_impossible_zero_error_message_budget_precisely() {
+    let limits = ProtocolLimits {
+        max_error_message_bytes: 0,
+        ..ProtocolLimits::default()
+    };
+    let mut input = Vec::new();
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::EnumerateScenes,
+        },
+        limits,
+    )
+    .expect("non-Hello request");
+
+    let mut output = Vec::new();
+    let mut service = PanicService {
+        build_id: sha256(b"zero-budget refusal worker"),
+        negotiated_frame_budget: None,
+        panic_message: None,
+        active_scene: None,
+        journal_tail: Vec::new(),
+    };
+    let error = serve_worker(
+        &mut service,
+        &mut std::io::Cursor::new(input),
+        &mut output,
+        limits,
+    )
+    .expect_err("a nonempty worker refusal cannot fit a zero-byte wire budget");
+    assert_eq!(
+        error.to_string(),
+        "IPC worker error payload 1 bytes exceeds the configured limit 0"
+    );
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(matches!(
+        error,
+        WorkerServeError::ErrorResponse(ProtocolError::PayloadLimit {
+            field: "worker error",
+            limit: 0,
+            needed: 1,
+        })
+    ));
+    assert!(output.is_empty(), "no malformed refusal may be emitted");
+}
+
+#[test]
 fn worker_bounds_crash_context_to_the_generic_field_budget() {
     let limits = ProtocolLimits {
         max_field_bytes: 5,

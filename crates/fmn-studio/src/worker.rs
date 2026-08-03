@@ -16,9 +16,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use fmn_hash::Digest;
 
 use crate::protocol::{
-    CURRENT_VERSION, CrashReport, FramingError, ProtocolError, ProtocolLimits, ResponseEnvelope,
-    SupervisorRequest, TransportCapabilities, WorkerErrorCode, WorkerResponse, read_request,
-    write_response,
+    CURRENT_VERSION, CrashReport, FramingError, ProtocolError, ProtocolLimits, ProtocolVersion,
+    ResponseEnvelope, SupervisorRequest, TransportCapabilities, WorkerErrorCode, WorkerResponse,
+    read_request, write_response,
 };
 
 /// A scene operation was refused without crashing the worker.
@@ -122,6 +122,8 @@ pub enum WorkerServeError {
     Framing(FramingError),
     /// A contained panic's report could not be represented or owned.
     CrashReport(ProtocolError),
+    /// An ordinary worker refusal could not be represented or owned.
+    ErrorResponse(ProtocolError),
     /// A service returned a response reserved to the protocol driver.
     ReservedResponse,
 }
@@ -131,6 +133,7 @@ impl fmt::Display for WorkerServeError {
         match self {
             Self::Framing(error) => error.fmt(f),
             Self::CrashReport(error) => error.fmt(f),
+            Self::ErrorResponse(error) => error.fmt(f),
             Self::ReservedResponse => {
                 f.write_str("worker service returned a protocol-driver response")
             }
@@ -143,6 +146,7 @@ impl std::error::Error for WorkerServeError {
         match self {
             Self::Framing(error) => Some(error),
             Self::CrashReport(error) => Some(error),
+            Self::ErrorResponse(error) => Some(error),
             Self::ReservedResponse => None,
         }
     }
@@ -160,13 +164,19 @@ impl From<ProtocolError> for WorkerServeError {
     }
 }
 
+enum WorkerErrorMessage<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+    VersionSkew(ProtocolVersion),
+}
+
 /// Serve one supervisor over a bounded request/response pipe.
 ///
 /// # Errors
 ///
 /// Returns [`WorkerServeError`] when the pipe or canonical protocol fails, a
-/// contained panic report cannot be represented or owned, or a service
-/// attempts to synthesize a handshake/shutdown response.
+/// contained panic report or ordinary refusal cannot be represented or owned,
+/// or a service attempts to synthesize a handshake/shutdown response.
 pub fn serve_worker(
     service: &mut dyn WorkerService,
     reader: &mut impl Read,
@@ -190,10 +200,11 @@ pub fn serve_worker(
                 request_id: hello.request_id,
                 response: worker_error(
                     WorkerErrorCode::InvalidRequest,
-                    "Hello must be the first worker request",
+                    WorkerErrorMessage::Borrowed("Hello must be the first worker request"),
                     "worker protocol error",
                     limits,
-                ),
+                )
+                .map_err(WorkerServeError::ErrorResponse)?,
             },
             limits,
         )?;
@@ -206,10 +217,11 @@ pub fn serve_worker(
                 request_id: hello.request_id,
                 response: worker_error(
                     WorkerErrorCode::InvalidRequest,
-                    "request id zero is reserved",
+                    WorkerErrorMessage::Borrowed("request id zero is reserved"),
                     "worker protocol error",
                     limits,
-                ),
+                )
+                .map_err(WorkerServeError::ErrorResponse)?,
             },
             limits,
         )?;
@@ -222,13 +234,11 @@ pub fn serve_worker(
                 request_id: hello.request_id,
                 response: worker_error(
                     WorkerErrorCode::VersionSkew,
-                    format!(
-                        "worker protocol requires {}.{}, peer sent {}.{}",
-                        CURRENT_VERSION.major, CURRENT_VERSION.minor, version.major, version.minor
-                    ),
+                    WorkerErrorMessage::VersionSkew(version),
                     "worker protocol error",
                     limits,
-                ),
+                )
+                .map_err(WorkerServeError::ErrorResponse)?,
             },
             limits,
         )?;
@@ -243,10 +253,11 @@ pub fn serve_worker(
                     request_id: hello.request_id,
                     response: worker_error(
                         WorkerErrorCode::InvalidRequest,
-                        "peer frame budget exceeds this platform",
+                        WorkerErrorMessage::Borrowed("peer frame budget exceeds this platform"),
                         "worker protocol error",
                         limits,
-                    ),
+                    )
+                    .map_err(WorkerServeError::ErrorResponse)?,
                 },
                 limits,
             )?;
@@ -263,10 +274,11 @@ pub fn serve_worker(
                 request_id: hello.request_id,
                 response: worker_error(
                     code,
-                    message,
+                    WorkerErrorMessage::Owned(message),
                     "worker service rejected the session",
                     limits,
-                ),
+                )
+                .map_err(WorkerServeError::ErrorResponse)?,
             },
             limits,
         )?;
@@ -299,10 +311,11 @@ pub fn serve_worker(
                     request_id: envelope.request_id,
                     response: worker_error(
                         WorkerErrorCode::InvalidRequest,
-                        "request ids must increase strictly",
+                        WorkerErrorMessage::Borrowed("request ids must increase strictly"),
                         "worker protocol error",
                         session_limits,
-                    ),
+                    )
+                    .map_err(WorkerServeError::ErrorResponse)?,
                 },
                 session_limits,
             )?;
@@ -318,10 +331,11 @@ pub fn serve_worker(
                         request_id: envelope.request_id,
                         response: worker_error(
                             WorkerErrorCode::InvalidRequest,
-                            "Hello may appear only once",
+                            WorkerErrorMessage::Borrowed("Hello may appear only once"),
                             "worker protocol error",
                             session_limits,
-                        ),
+                        )
+                        .map_err(WorkerServeError::ErrorResponse)?,
                     },
                     session_limits,
                 )?;
@@ -345,10 +359,11 @@ pub fn serve_worker(
                         let response = match response {
                             WorkerResponse::Error { code, message } => worker_error(
                                 code,
-                                message,
+                                WorkerErrorMessage::Owned(message),
                                 "worker service refused the request",
                                 session_limits,
-                            ),
+                            )
+                            .map_err(WorkerServeError::ErrorResponse)?,
                             response => response,
                         };
                         if matches!(response, WorkerResponse::Hello { .. } | WorkerResponse::Bye) {
@@ -371,10 +386,11 @@ pub fn serve_worker(
                                 request_id: envelope.request_id,
                                 response: worker_error(
                                     code,
-                                    message,
+                                    WorkerErrorMessage::Owned(message),
                                     "worker service refused the request",
                                     session_limits,
-                                ),
+                                )
+                                .map_err(WorkerServeError::ErrorResponse)?,
                             },
                             session_limits,
                         )?;
@@ -435,39 +451,32 @@ fn crash_report(
 }
 
 fn panic_message(payload: Box<dyn Any + Send>, limit: usize) -> Result<String, ProtocolError> {
-    require_crash_message_capacity(limit)?;
+    require_message_capacity("crash message", limit)?;
     if let Some(message) = payload.downcast_ref::<&str>() {
-        return bounded_message(message, limit);
-    }
-    if let Ok(message) = payload.downcast::<String>() {
-        return bounded_owned_crash_message(
-            *message,
+        return try_bounded_message(
+            message,
             "scene worker panicked with an empty message",
+            "crash message bytes",
+            "invalid crash message UTF-8 boundary",
             limit,
         );
     }
-    bounded_message("scene worker panicked with a non-string payload", limit)
-}
-
-fn bounded_owned_crash_message(
-    mut message: String,
-    fallback: &str,
-    limit: usize,
-) -> Result<String, ProtocolError> {
-    if message.is_empty() {
-        return bounded_message(fallback, limit);
+    if let Ok(message) = payload.downcast::<String>() {
+        return try_bounded_owned_message(
+            *message,
+            "scene worker panicked with an empty message",
+            "crash message bytes",
+            "invalid crash message UTF-8 boundary",
+            limit,
+        );
     }
-    let end = utf8_prefix_boundary(&message, limit);
-    if end == 0 && limit > 0 {
-        message.clear();
-        message
-            .try_reserve_exact(1)
-            .map_err(|source| storage_unavailable("crash message bytes", 1, source))?;
-        message.push('?');
-        return Ok(message);
-    }
-    message.truncate(end);
-    Ok(message)
+    try_bounded_message(
+        "scene worker panicked with a non-string payload",
+        "scene worker panicked with an empty message",
+        "crash message bytes",
+        "invalid crash message UTF-8 boundary",
+        limit,
+    )
 }
 
 fn effective_field_limit(specific_limit: usize, limits: ProtocolLimits) -> usize {
@@ -476,63 +485,135 @@ fn effective_field_limit(specific_limit: usize, limits: ProtocolLimits) -> usize
 
 fn worker_error(
     code: WorkerErrorCode,
-    message: impl Into<String>,
+    message: WorkerErrorMessage<'_>,
     fallback: &str,
     limits: ProtocolLimits,
-) -> WorkerResponse {
-    WorkerResponse::Error {
-        code,
-        message: bounded_owned_error_message(
-            message.into(),
+) -> Result<WorkerResponse, ProtocolError> {
+    let limit = effective_field_limit(limits.max_error_message_bytes, limits);
+    require_message_capacity("worker error", limit)?;
+    let message = match message {
+        WorkerErrorMessage::Borrowed(message) => try_bounded_message(
+            message,
             fallback,
-            effective_field_limit(limits.max_error_message_bytes, limits),
-        ),
-    }
+            "worker error message bytes",
+            "invalid worker error message UTF-8 boundary",
+            limit,
+        )?,
+        WorkerErrorMessage::Owned(message) => try_bounded_owned_message(
+            message,
+            fallback,
+            "worker error message bytes",
+            "invalid worker error message UTF-8 boundary",
+            limit,
+        )?,
+        WorkerErrorMessage::VersionSkew(version) => {
+            try_version_skew_message(version, fallback, limit)?
+        }
+    };
+    Ok(WorkerResponse::Error { code, message })
 }
 
-fn bounded_owned_error_message(mut message: String, fallback: &str, limit: usize) -> String {
+fn try_bounded_owned_message(
+    mut message: String,
+    fallback: &str,
+    storage_field: &'static str,
+    invalid_boundary: &'static str,
+    limit: usize,
+) -> Result<String, ProtocolError> {
     if message.is_empty() {
-        return bounded_error_message(fallback, limit);
+        return try_bounded_message(fallback, fallback, storage_field, invalid_boundary, limit);
     }
     let end = utf8_prefix_boundary(&message, limit);
     if end == 0 && limit > 0 {
-        return "?".to_owned();
+        message.clear();
+        message
+            .try_reserve_exact(1)
+            .map_err(|source| storage_unavailable(storage_field, 1, source))?;
+        message.push('?');
+        return Ok(message);
+    }
+    if message.get(..end).is_none() {
+        return Err(ProtocolError::Malformed(invalid_boundary));
     }
     message.truncate(end);
-    message
+    Ok(message)
 }
 
-fn bounded_error_message(message: &str, limit: usize) -> String {
-    let end = utf8_prefix_boundary(message, limit);
-    if end == 0 && limit > 0 {
-        "?".to_owned()
-    } else {
-        message.get(..end).unwrap_or_default().to_owned()
-    }
-}
-
-fn bounded_message(message: &str, limit: usize) -> Result<String, ProtocolError> {
-    require_crash_message_capacity(limit)?;
+fn try_bounded_message(
+    message: &str,
+    fallback: &str,
+    storage_field: &'static str,
+    invalid_boundary: &'static str,
+    limit: usize,
+) -> Result<String, ProtocolError> {
     let message = if message.is_empty() {
-        "scene worker panicked with an empty message"
+        fallback
     } else {
         message
     };
     let end = utf8_prefix_boundary(message, limit);
     if end == 0 && limit > 0 {
-        try_clone_string("?", "crash message bytes")
+        try_clone_string("?", storage_field)
     } else {
-        let bounded = message.get(..end).ok_or(ProtocolError::Malformed(
-            "invalid crash message UTF-8 boundary",
-        ))?;
-        try_clone_string(bounded, "crash message bytes")
+        let bounded = message
+            .get(..end)
+            .ok_or(ProtocolError::Malformed(invalid_boundary))?;
+        try_clone_string(bounded, storage_field)
     }
 }
 
-fn require_crash_message_capacity(limit: usize) -> Result<(), ProtocolError> {
+fn try_version_skew_message(
+    peer: ProtocolVersion,
+    fallback: &str,
+    limit: usize,
+) -> Result<String, ProtocolError> {
+    const PREFIX: &str = "worker protocol requires ";
+    const PEER: &str = ", peer sent ";
+    let needed = PREFIX.len()
+        + decimal_digits(CURRENT_VERSION.major)
+        + 1
+        + decimal_digits(CURRENT_VERSION.minor)
+        + PEER.len()
+        + decimal_digits(peer.major)
+        + 1
+        + decimal_digits(peer.minor);
+    let mut message = try_string_with_capacity(needed, "worker error message bytes")?;
+    fmt::Write::write_fmt(
+        &mut message,
+        format_args!(
+            "worker protocol requires {}.{}, peer sent {}.{}",
+            CURRENT_VERSION.major, CURRENT_VERSION.minor, peer.major, peer.minor
+        ),
+    )
+    .map_err(|_| ProtocolError::Malformed("failed to format worker version-skew message"))?;
+    if message.len() != needed {
+        return Err(ProtocolError::Malformed(
+            "invalid worker version-skew message length",
+        ));
+    }
+    try_bounded_owned_message(
+        message,
+        fallback,
+        "worker error message bytes",
+        "invalid worker error message UTF-8 boundary",
+        limit,
+    )
+}
+
+fn decimal_digits(value: u16) -> usize {
+    match value {
+        0..=9 => 1,
+        10..=99 => 2,
+        100..=999 => 3,
+        1_000..=9_999 => 4,
+        _ => 5,
+    }
+}
+
+fn require_message_capacity(field: &'static str, limit: usize) -> Result<(), ProtocolError> {
     if limit == 0 {
         return Err(ProtocolError::PayloadLimit {
-            field: "crash message",
+            field,
             limit,
             needed: 1,
         });
@@ -596,7 +677,11 @@ fn utf8_prefix_boundary(value: &str, limit: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProtocolError, try_string_with_capacity, try_vec_with_capacity};
+    use super::{
+        CURRENT_VERSION, ProtocolError, ProtocolLimits, ProtocolVersion, WorkerErrorCode,
+        WorkerErrorMessage, WorkerResponse, try_string_with_capacity, try_vec_with_capacity,
+        worker_error,
+    };
 
     fn assert_storage_refusal(error: &ProtocolError, field: &'static str, additional: usize) {
         assert!(matches!(
@@ -619,5 +704,58 @@ mod tests {
         let tail = try_vec_with_capacity::<u8>(usize::MAX, "crash journal tail bytes")
             .expect_err("impossible crash tail capacity must refuse");
         assert_storage_refusal(&tail, "crash journal tail bytes", usize::MAX);
+
+        let worker = try_string_with_capacity(usize::MAX, "worker error message bytes")
+            .expect_err("impossible worker error capacity must refuse");
+        assert_storage_refusal(&worker, "worker error message bytes", usize::MAX);
+    }
+
+    #[test]
+    fn worker_error_reuses_owned_message_storage_when_truncating() {
+        let limits = ProtocolLimits {
+            max_error_message_bytes: 5,
+            ..ProtocolLimits::default()
+        };
+        let message = "ééé".to_owned();
+        let allocation = message.as_ptr();
+        let response = worker_error(
+            WorkerErrorCode::ExecutionFailed,
+            WorkerErrorMessage::Owned(message),
+            "worker service refused the request",
+            limits,
+        )
+        .expect("owned refusal fits after truncation");
+        assert!(matches!(&response, WorkerResponse::Error { .. }));
+        if let WorkerResponse::Error { code, message } = response {
+            assert_eq!(code, WorkerErrorCode::ExecutionFailed);
+            assert_eq!(message, "éé");
+            assert_eq!(message.as_ptr(), allocation);
+        }
+    }
+
+    #[test]
+    fn worker_version_skew_message_preserves_exact_decimal_fields() {
+        let peer = ProtocolVersion {
+            major: u16::MAX,
+            minor: u16::MAX,
+        };
+        let response = worker_error(
+            WorkerErrorCode::VersionSkew,
+            WorkerErrorMessage::VersionSkew(peer),
+            "worker protocol error",
+            ProtocolLimits::default(),
+        )
+        .expect("version-skew refusal fits default limits");
+        assert!(matches!(&response, WorkerResponse::Error { .. }));
+        if let WorkerResponse::Error { code, message } = response {
+            assert_eq!(code, WorkerErrorCode::VersionSkew);
+            assert_eq!(
+                message,
+                format!(
+                    "worker protocol requires {}.{}, peer sent 65535.65535",
+                    CURRENT_VERSION.major, CURRENT_VERSION.minor
+                )
+            );
+        }
     }
 }
