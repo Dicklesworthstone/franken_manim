@@ -451,11 +451,18 @@ fn edge_map(luma: &[f64], width: usize, height: usize) -> Vec<bool> {
 /// Borgefors 3-4 chamfer distance transform: each pixel's distance (in thirds
 /// of a pixel — 3 orthogonal, 4 diagonal) to the nearest `true` cell of
 /// `target`, by one forward and one backward raster pass.
-fn chamfer34(target: &[bool], width: usize, height: usize) -> Vec<u32> {
+const fn chamfer_far(width: u32, height: u32) -> u64 {
+    // The largest inputs sum to less than 2^33, so widening before the
+    // arithmetic covers the complete public dimension domain exactly.
+    3 * (width as u64 + height as u64) + 4
+}
+
+fn chamfer34(target: &[bool], width: u32, height: u32) -> Vec<u64> {
     // Larger than any true 3-4 distance inside the frame.
-    let far = 3 * (width as u32 + height as u32) + 4;
-    let mut dt: Vec<u32> = target.iter().map(|&e| if e { 0 } else { far }).collect();
-    let at = |dt: &[u32], x: usize, y: usize| dt[y * width + x];
+    let far = chamfer_far(width, height);
+    let (width, height) = (width as usize, height as usize);
+    let mut dt: Vec<u64> = target.iter().map(|&e| if e { 0 } else { far }).collect();
+    let at = |dt: &[u64], x: usize, y: usize| dt[y * width + x];
     for y in 0..height {
         for x in 0..width {
             let mut best = at(&dt, x, y);
@@ -497,48 +504,78 @@ fn chamfer34(target: &[bool], width: usize, height: usize) -> Vec<u32> {
 
 /// Mean chamfer distance, in pixels, from the `true` cells of `source` to the
 /// nearest `true` cell of `target`, under the conventions in the module docs.
-fn directed_chamfer(source: &[bool], target: &[bool], width: usize, height: usize) -> (u64, f64) {
+fn directed_chamfer(source: &[bool], target: &[bool], width: u32, height: u32) -> (u64, f64) {
     let source_count = source.iter().filter(|&&e| e).count() as u64;
     let target_count = target.iter().filter(|&&e| e).count() as u64;
     if source_count == 0 {
         return (0, 0.0);
     }
     if target_count == 0 {
-        let diagonal = ((width * width + height * height) as f64).sqrt();
+        let width = f64::from(width);
+        let height = f64::from(height);
+        let diagonal = (width * width + height * height).sqrt();
         return (source_count, diagonal);
     }
     let dt = chamfer34(target, width, height);
-    let total: u64 = source
+    let total: u128 = source
         .iter()
         .zip(&dt)
         .filter(|(e, _)| **e)
-        .map(|(_, &d)| u64::from(d))
+        .map(|(_, &d)| u128::from(d))
         .sum();
     (source_count, total as f64 / 3.0 / source_count as f64)
 }
 
 /// The symmetric chamfer edge distance between two luma planes.
-#[must_use]
+///
+/// # Errors
+/// [`GalleryError::InvalidImage`] if the dimensions are zero, their pixel
+/// count is not addressable on this target, or either luma plane is not
+/// exactly `width * height` samples.
 pub fn edge_distance_luma(
     reference: &[f64],
     candidate: &[f64],
     width: u32,
     height: u32,
-) -> EdgeDistance {
+) -> Result<EdgeDistance, GalleryError> {
+    if width == 0 || height == 0 {
+        return Err(GalleryError::InvalidImage(format!(
+            "zero raw-luma dimension ({width}x{height})"
+        )));
+    }
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| usize::try_from(pixels).ok())
+        .ok_or_else(|| {
+            GalleryError::InvalidImage(format!(
+                "raw-luma dimensions {width}x{height} overflow the addressable sample length"
+            ))
+        })?;
+    for (side, actual) in [
+        ("reference", reference.len()),
+        ("candidate", candidate.len()),
+    ] {
+        if actual != expected {
+            return Err(GalleryError::InvalidImage(format!(
+                "raw-luma {side} has {actual} samples for {width}x{height}, expected {expected}"
+            )));
+        }
+    }
+
     let (w, h) = (width as usize, height as usize);
     let reference_edges = edge_map(reference, w, h);
     let candidate_edges = edge_map(candidate, w, h);
     let (reference_count, reference_to_candidate) =
-        directed_chamfer(&reference_edges, &candidate_edges, w, h);
+        directed_chamfer(&reference_edges, &candidate_edges, width, height);
     let (candidate_count, candidate_to_reference) =
-        directed_chamfer(&candidate_edges, &reference_edges, w, h);
-    EdgeDistance {
+        directed_chamfer(&candidate_edges, &reference_edges, width, height);
+    Ok(EdgeDistance {
         reference_edges: reference_count,
         candidate_edges: candidate_count,
         reference_to_candidate,
         candidate_to_reference,
         symmetric: (reference_to_candidate + candidate_to_reference) / 2.0,
-    }
+    })
 }
 
 /// Nearest-rank percentiles of the per-pixel max RGB channel error.
@@ -602,7 +639,7 @@ pub fn compare_pair(
             &candidate_luma,
             reference.width,
             reference.height,
-        ),
+        )?,
         error: error_percentiles(reference, candidate),
     })
 }
@@ -1050,4 +1087,16 @@ pub fn render_pairs(
     }
     pairs.sort_by(|a, b| a.panel.cmp(&b.panel));
     Ok(pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chamfer_far;
+
+    #[test]
+    fn chamfer_sentinel_covers_the_full_u32_dimension_domain() {
+        let far = chamfer_far(u32::MAX, u32::MAX);
+        assert_eq!(far, 25_769_803_774);
+        assert!(far > u64::from(u32::MAX));
+    }
 }

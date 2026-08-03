@@ -8,7 +8,8 @@
 //! without them simply skips the measurement and says so.
 
 use fmn_conformance::gallery::{
-    GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, compare_pair, render_pairs,
+    GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, compare_pair,
+    edge_distance_luma, render_pairs,
 };
 use std::fs::File;
 use std::io::Read;
@@ -232,6 +233,40 @@ fn mismatched_dimensions_are_a_named_error() {
         err.to_string().contains("dimension mismatch"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn raw_luma_metrics_reject_inconsistent_geometry() {
+    let panic_case = edge_distance_luma(&[0.0], &[0.0], 3, 3)
+        .expect_err("short 3x3 planes must refuse before Sobel indexing");
+    assert!(
+        panic_case.to_string().contains("reference has 1 samples")
+            && panic_case.to_string().contains("expected 9"),
+        "unexpected panic-case refusal: {panic_case}"
+    );
+
+    let silent_case = edge_distance_luma(&[0.0], &[0.0], 2, 2)
+        .expect_err("short sub-kernel planes must not alias a valid zero score");
+    assert!(
+        silent_case.to_string().contains("reference has 1 samples")
+            && silent_case.to_string().contains("expected 4"),
+        "unexpected silent-case refusal: {silent_case}"
+    );
+
+    let candidate_case = edge_distance_luma(&[0.0; 4], &[0.0], 2, 2)
+        .expect_err("candidate geometry is independently bound");
+    assert!(
+        candidate_case
+            .to_string()
+            .contains("candidate has 1 samples"),
+        "unexpected candidate refusal: {candidate_case}"
+    );
+
+    let exact = edge_distance_luma(&[0.0; 4], &[0.0; 4], 2, 2)
+        .expect("exact raw-luma geometry remains measurable");
+    assert_eq!(exact.reference_edges, 0);
+    assert_eq!(exact.candidate_edges, 0);
+    assert_eq!(exact.symmetric, 0.0);
 }
 
 #[test]
