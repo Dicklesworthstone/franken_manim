@@ -443,9 +443,17 @@ impl Target for TexMath {
             Ok(typeset) => {
                 // Where defined, Ok outputs re-encode deterministically:
                 // the typeset codec round-trips bit-for-bit.
-                let bytes = typeset.to_bytes();
-                let deterministic = fmn_tex::Typeset::from_bytes(&bytes)
-                    .is_some_and(|again| again.to_bytes() == bytes);
+                let Ok(bytes) = typeset.to_bytes() else {
+                    return Verdict::Refused {
+                        class: "typeset-codec-resource".to_owned(),
+                        message: "typeset result is not cache-encodable".to_owned(),
+                    };
+                };
+                let deterministic = fmn_tex::Typeset::from_bytes(&bytes).is_ok_and(|again| {
+                    again
+                        .to_bytes()
+                        .is_ok_and(|encoded_again| encoded_again == bytes)
+                });
                 if !deterministic {
                     return Verdict::Fault {
                         message: "typeset re-encode is not deterministic".to_owned(),
