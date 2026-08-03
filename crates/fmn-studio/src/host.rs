@@ -8,7 +8,7 @@
 //! disposable worker.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, TryReserveError, VecDeque};
+use std::collections::{HashMap, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -754,7 +754,10 @@ impl HostHandler {
         stream.set_write_timeout(Some(self.config.request_timeout))?;
         let request = match read_http_request(&mut stream, &self.config) {
             Ok(request) => request,
-            Err(error @ HostError::RequestStorageAllocationFailed { .. }) => return Err(error),
+            Err(
+                error @ (HostError::RequestStorageAllocationFailed { .. }
+                | HostError::RequestMetadataAllocationFailed { .. }),
+            ) => return Err(error),
             Err(error) => {
                 write_http_response(
                     &mut stream,
@@ -784,6 +787,7 @@ impl HostHandler {
         }
         match self.route(&mut stream, request, now) {
             Ok(()) => Ok(()),
+            Err(error @ HostError::RequestMetadataAllocationFailed { .. }) => Err(error),
             Err(error) => {
                 let Some((status, reason)) = error.http_status() else {
                     return Err(error);
@@ -1069,7 +1073,7 @@ struct HttpRequest {
     method: Method,
     path: String,
     query: Vec<(String, String)>,
-    headers: BTreeMap<String, String>,
+    headers: HashMap<String, String>,
     body: Vec<u8>,
 }
 
@@ -1140,7 +1144,7 @@ fn read_http_request(
         ));
     }
     let (path, query) = parse_target(target)?;
-    let mut headers = BTreeMap::new();
+    let mut headers = HashMap::new();
     for line in lines {
         if headers.len() >= config.max_headers {
             return Err(HostError::BadRequest("too many request headers"));
@@ -1154,15 +1158,18 @@ fn read_http_request(
         if name.is_empty() || !name.bytes().all(is_header_name_byte) {
             return Err(HostError::BadRequest("invalid header name"));
         }
-        let name = name.to_ascii_lowercase();
+        let name = lowercase_request_header(name)?;
         let value = value.trim();
         // ubs:ignore - header-byte classification is not a secret comparison.
         if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
             return Err(HostError::BadRequest("invalid header value"));
         }
-        if headers.insert(name, value.to_owned()).is_some() {
+        if headers.contains_key(&name) {
             return Err(HostError::BadRequest("duplicate header field"));
         }
+        let value = clone_request_string(value, "HTTP header value bytes")?;
+        reserve_request_map(&mut headers, 1, "HTTP header fields")?;
+        headers.insert(name, value);
     }
     if headers.contains_key("transfer-encoding") {
         return Err(HostError::BadRequest("Transfer-Encoding is forbidden"));
@@ -1228,12 +1235,16 @@ fn parse_target(target: &str) -> Result<(String, Vec<(String, String)>), HostErr
     {
         return Err(HostError::BadRequest("ambiguous request path"));
     }
-    Ok((path.to_owned(), parse_urlencoded(query.as_bytes())?))
+    Ok((
+        clone_request_string(path, "request path bytes")?,
+        parse_urlencoded(query.as_bytes())?,
+    ))
 }
 
-fn parse_form(body: &[u8]) -> Result<BTreeMap<String, String>, HostError> {
+fn parse_form(body: &[u8]) -> Result<HashMap<String, String>, HostError> {
     let pairs = parse_urlencoded(body)?;
-    let mut form = BTreeMap::new();
+    let mut form = HashMap::new();
+    reserve_request_map(&mut form, pairs.len(), "form fields")?;
     for (key, value) in pairs {
         if form.insert(key, value).is_some() {
             return Err(HostError::BadRequest("duplicate form field"));
@@ -1246,26 +1257,35 @@ fn parse_urlencoded(bytes: &[u8]) -> Result<Vec<(String, String)>, HostError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
+    let pair_count = bytes
+        .split(|byte| *byte == b'&') // ubs:ignore - URL delimiter equality is not secret.
+        .try_fold(0usize, |count, pair| {
+            if pair.is_empty() {
+                return Err(HostError::BadRequest("empty URL-encoded field"));
+            }
+            count
+                .checked_add(1)
+                .ok_or(HostError::BadRequest("URL-encoded field count overflow"))
+        })?;
     let mut pairs = Vec::new();
+    reserve_request_vec(&mut pairs, pair_count, "URL-encoded fields")?;
     // ubs:ignore - URL form delimiter equality is not a secret comparison.
     for pair in bytes.split(|byte| *byte == b'&') {
-        if pair.is_empty() {
-            return Err(HostError::BadRequest("empty URL-encoded field"));
-        }
         // ubs:ignore - URL form delimiter equality is not a secret comparison.
         let (key, value) = match pair.iter().position(|byte| *byte == b'=') {
             Some(index) => (&pair[..index], &pair[index + 1..]),
             None => (pair, &[][..]),
         };
-        let key = decode_form_component(key)?;
-        let value = decode_form_component(value)?;
+        let key = decode_form_component(key, "URL key bytes")?;
+        let value = decode_form_component(value, "URL value bytes")?;
         pairs.push((key, value));
     }
     Ok(pairs)
 }
 
-fn decode_form_component(bytes: &[u8]) -> Result<String, HostError> {
-    let mut out = Vec::with_capacity(bytes.len());
+fn decode_form_component(bytes: &[u8], field: &'static str) -> Result<String, HostError> {
+    let mut out = Vec::new();
+    reserve_request_vec(&mut out, bytes.len(), field)?;
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
@@ -1298,7 +1318,67 @@ fn decode_form_component(bytes: &[u8]) -> Result<String, HostError> {
     String::from_utf8(out).map_err(|_| HostError::BadRequest("URL value is not UTF-8"))
 }
 
-fn event_from_form(form: &BTreeMap<String, String>) -> Result<EventPayload, HostError> {
+fn request_string_with_capacity(
+    additional: usize,
+    field: &'static str,
+) -> Result<String, HostError> {
+    let mut value = String::new();
+    value.try_reserve_exact(additional).map_err(|error| {
+        HostError::RequestMetadataAllocationFailed {
+            field,
+            additional,
+            error,
+        }
+    })?;
+    Ok(value)
+}
+
+fn clone_request_string(value: &str, field: &'static str) -> Result<String, HostError> {
+    let mut owned = request_string_with_capacity(value.len(), field)?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+fn lowercase_request_header(name: &str) -> Result<String, HostError> {
+    let mut lowercase = request_string_with_capacity(name.len(), "HTTP header name bytes")?;
+    for byte in name.bytes() {
+        lowercase.push(char::from(byte.to_ascii_lowercase()));
+    }
+    Ok(lowercase)
+}
+
+fn reserve_request_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    field: &'static str,
+) -> Result<(), HostError> {
+    values.try_reserve_exact(additional).map_err(|error| {
+        HostError::RequestMetadataAllocationFailed {
+            field,
+            additional,
+            error,
+        }
+    })
+}
+
+fn reserve_request_map<K, V>(
+    values: &mut HashMap<K, V>,
+    additional: usize,
+    field: &'static str,
+) -> Result<(), HostError>
+where
+    K: Eq + std::hash::Hash,
+{
+    values
+        .try_reserve(additional)
+        .map_err(|error| HostError::RequestMetadataAllocationFailed {
+            field,
+            additional,
+            error,
+        })
+}
+
+fn event_from_form(form: &HashMap<String, String>) -> Result<EventPayload, HostError> {
     let modifiers = Modifiers::from_bits(parse_optional(form, "modifiers", 0u8)?)
         .map_err(|_| HostError::BadRequest("invalid modifier bits"))?;
     let point = || -> Result<[f64; 3], HostError> {
@@ -1406,7 +1486,7 @@ fn parse_key(raw: &str) -> Result<Key, HostError> {
 }
 
 fn parse_required<T: FromStr>(
-    form: &BTreeMap<String, String>,
+    form: &HashMap<String, String>,
     key: &'static str,
 ) -> Result<T, HostError> {
     required_form(form, key)?
@@ -1415,7 +1495,7 @@ fn parse_required<T: FromStr>(
 }
 
 fn parse_optional<T: FromStr>(
-    form: &BTreeMap<String, String>,
+    form: &HashMap<String, String>,
     key: &'static str,
     default: T,
 ) -> Result<T, HostError> {
@@ -1428,7 +1508,7 @@ fn parse_optional<T: FromStr>(
 }
 
 fn required_form<'a>(
-    form: &'a BTreeMap<String, String>,
+    form: &'a HashMap<String, String>,
     key: &'static str,
 ) -> Result<&'a str, HostError> {
     form.get(key)
@@ -1689,6 +1769,15 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Owned HTTP request metadata could not be reserved.
+    RequestMetadataAllocationFailed {
+        /// Name of the metadata collection or byte string.
+        field: &'static str,
+        /// Additional entries or bytes requested at the refusal point.
+        additional: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
     /// Storage for the bounded preview-frame history could not be reserved.
     FrameHistoryStorageAllocationFailed {
         /// Complete history bound requested by host policy.
@@ -1721,6 +1810,7 @@ impl HostError {
             Self::Configuration(_)
             | Self::ClientStorageAllocationFailed { .. }
             | Self::RequestStorageAllocationFailed { .. }
+            | Self::RequestMetadataAllocationFailed { .. }
             | Self::FrameHistoryStorageAllocationFailed { .. }
             | Self::FrameStorageAllocationFailed { .. } => Some((500, "Internal Server Error")),
             Self::Io(_) => None,
@@ -1756,6 +1846,14 @@ impl fmt::Display for HostError {
                 f,
                 "Studio could not reserve {bytes} bytes for one HTTP request: {error}"
             ),
+            Self::RequestMetadataAllocationFailed {
+                field,
+                additional,
+                error,
+            } => write!(
+                f,
+                "Studio could not reserve {additional} additional {field}: {error}"
+            ),
             Self::FrameHistoryStorageAllocationFailed { frames, error } => write!(
                 f,
                 "Studio could not reserve storage for {frames} preview frames: {error}"
@@ -1777,6 +1875,7 @@ impl std::error::Error for HostError {
             Self::FramePng(error) => Some(error),
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
+            Self::RequestMetadataAllocationFailed { error, .. } => Some(error),
             Self::FrameHistoryStorageAllocationFailed { error, .. } => Some(error),
             Self::FrameStorageAllocationFailed { error, .. } => Some(error),
             _ => None,
@@ -2236,11 +2335,17 @@ mod tests {
     #[test]
     fn strict_parser_accepts_one_bounded_origin_form_request() {
         let config = StudioHostConfig::default();
-        let bytes = b"POST /api/scrub HTTP/1.1\r\nHost: 127.0.0.1:42\r\nOrigin: http://127.0.0.1:42\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 20\r\n\r\nframe=17&commit=true"
+        let bytes = b"POST /api/scrub?cap=a%2Bb&word=hello+world HTTP/1.1\r\nhOsT: 127.0.0.1:42\r\nOrigin: http://127.0.0.1:42\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 20\r\n\r\nframe=17&commit=true"
             .to_vec();
         let request = read_http_request(&mut Cursor::new(bytes), &config).unwrap();
         assert_eq!(request.method, Method::Post);
         assert_eq!(request.path, "/api/scrub");
+        assert_eq!(
+            request.headers.get("host").map(String::as_str),
+            Some("127.0.0.1:42")
+        );
+        assert_eq!(request.query_one("cap").unwrap(), Some("a+b"));
+        assert_eq!(request.query_one("word").unwrap(), Some("hello world"));
         assert_eq!(request.body, b"frame=17&commit=true");
     }
 
@@ -2290,6 +2395,36 @@ mod tests {
     }
 
     #[test]
+    fn request_metadata_storage_refuses_capacity_overflow() {
+        let string = request_string_with_capacity(usize::MAX, "request path bytes")
+            .expect_err("impossible request string capacity must refuse");
+        assert!(matches!(
+            &string,
+            HostError::RequestMetadataAllocationFailed {
+                field: "request path bytes",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&string).is_some());
+
+        let mut fields = std::collections::HashMap::<String, String>::new();
+        let map = reserve_request_map(&mut fields, usize::MAX, "HTTP header fields")
+            .expect_err("impossible request map capacity must refuse");
+        assert!(matches!(
+            &map,
+            HostError::RequestMetadataAllocationFailed {
+                field: "HTTP header fields",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(fields.is_empty());
+        assert_eq!(map.http_status(), Some((500, "Internal Server Error")));
+        assert!(std::error::Error::source(&map).is_some());
+    }
+
+    #[test]
     fn event_form_is_typed_and_finite() {
         let form =
             parse_form(b"type=mouse_drag&x=1&y=2&dx=3&dy=4&button=left&modifiers=3").unwrap();
@@ -2301,6 +2436,10 @@ mod tests {
                 button: MouseButton::Left,
                 modifiers,
             } if modifiers == (Modifiers::SHIFT | Modifiers::CONTROL) // ubs:ignore - ordinary test equality.
+        ));
+        assert!(matches!(
+            parse_form(b"type=key_press&type=key_release"),
+            Err(HostError::BadRequest("duplicate form field"))
         ));
     }
 
@@ -2544,7 +2683,7 @@ mod tests {
             method: Method::Get,
             path: "/".to_owned(),
             query: vec![("cap".to_owned(), token.expose_hex())],
-            headers: BTreeMap::from([("host".to_owned(), "127.0.0.1:42".to_owned())]),
+            headers: HashMap::from([("host".to_owned(), "127.0.0.1:42".to_owned())]),
             body: Vec::new(),
         }
     }
@@ -2554,7 +2693,7 @@ mod tests {
             method: Method::Post,
             path: "/api/event".to_owned(),
             query: Vec::new(),
-            headers: BTreeMap::from([
+            headers: HashMap::from([
                 ("host".to_owned(), "127.0.0.1:42".to_owned()),
                 ("origin".to_owned(), "http://127.0.0.1:42".to_owned()),
                 ("x-fmn-capability".to_owned(), token.expose_hex()),
