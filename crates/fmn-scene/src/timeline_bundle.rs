@@ -871,6 +871,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pure_shared_root_transform_exports_kind_zero() {
+        let mut stage = Stage::new();
+        let shared = stage.add(test_mobject(TRIANGLE));
+        let left = stage.add(Mobject::new());
+        let right = stage.add(Mobject::new());
+        stage.attach(left, shared).expect("left parent");
+        stage.attach(right, shared).expect("right parent");
+        stage
+            .add_many_to_scene(&[left, right])
+            .expect("shared roots");
+
+        let target = stage.copy_family(shared).expect("target copy");
+        stage.shift(target, [2.0, 0.0, 0.0]);
+        let animation =
+            prepare_animation(Transform::new(shared, target), &mut stage).expect("prepares");
+        let mut timeline = Timeline::new(30).expect("fps");
+        timeline.play(vec![animation]).expect("play step");
+
+        let rng = RngRoot::from_seed(0);
+        let bytes = export_timeline_bundle(timeline, &mut stage, &rng).expect("export");
+        let (_, _, _, kinds) = inspect(&bytes);
+        assert_eq!(
+            kinds,
+            vec![0],
+            "shared scene roots must not force a representable transform into frame snapshots"
+        );
+    }
+
+    #[test]
     fn two_exports_of_the_same_run_are_byte_identical() {
         let run = || {
             let (mut stage, mob) = stage_with_mob();

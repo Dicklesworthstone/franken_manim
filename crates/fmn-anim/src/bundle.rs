@@ -108,11 +108,14 @@ fn interpolation_identical(stage: &Stage, end_stage: &Stage, mob: fmn_mobject::M
 ///
 /// Every rooted family member whose interpolatable state differs between
 /// `begin` and `end` is lerped toward a private copy of its `end` state at
-/// `alpha` through [`interpolate_fields`]; members that agree exactly are
-/// left untouched, which is precisely what the engine does to them (a mob
-/// no animation's family row touches keeps its begin values — and an
-/// out-and-back animation whose end state equals its begin state fails
-/// the writer's export-time proof and never reaches this path as kind 0).
+/// `alpha` through [`interpolate_fields`]. A member shared by several scene
+/// roots is visited once, in stable first-seen root/family order; root
+/// multiplicity is a draw-order fact, not repeated state mutation. Members
+/// that agree exactly are left untouched, which is precisely what the engine
+/// does to them (a mob no animation's family row touches keeps its begin
+/// values — and an out-and-back animation whose end state equals its begin
+/// state fails the writer's export-time proof and never reaches this path as
+/// kind 0).
 ///
 /// `begin` and `end` must share one handle domain (snapshots of the same
 /// logical stage, or both decoded against the same binding stage — the
@@ -125,8 +128,13 @@ pub fn interpolate_between(begin: &Snapshot, end: &Snapshot, alpha: f64, path: P
     let end_stage = end.materialize();
     let roots = stage.roots().to_vec();
     let mut mobs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for root in roots {
-        mobs.extend(stage.family(root));
+        for mob in stage.family(root) {
+            if seen.insert(mob) {
+                mobs.push(mob);
+            }
+        }
     }
     for mob in mobs {
         if interpolation_identical(&stage, &end_stage, mob) {
@@ -145,6 +153,7 @@ mod tests {
     use super::*;
     use crate::animation::AnimConfig;
     use fmn_core::rate;
+    use fmn_mobject::Mobject;
 
     #[test]
     fn path_tags_round_trip_the_representable_catalog() {
@@ -199,5 +208,29 @@ mod tests {
         assert_eq!(bundle_sub_alpha(-0.2, &linear), 0.0);
         let config = AnimConfig::default();
         assert_eq!(config.lag_ratio, 0.0, "the default pipeline is lag-free");
+    }
+
+    #[test]
+    fn shared_members_are_interpolated_once_across_scene_roots() {
+        let mut stage = Stage::new();
+        let shared = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+        let left = stage.add(Mobject::new());
+        let right = stage.add(Mobject::new());
+        stage.attach(left, shared).expect("left parent");
+        stage.attach(right, shared).expect("right parent");
+        stage
+            .add_many_to_scene(&[left, right])
+            .expect("shared roots");
+
+        let begin = stage.snapshot();
+        stage.shift(shared, [2.0, 0.0, 0.0]);
+        let end = stage.snapshot();
+
+        let midpoint = interpolate_between(&begin, &end, 0.5, PathFunc::Straight);
+        assert_eq!(
+            midpoint.get_center(shared),
+            [1.0, 0.0, 0.0],
+            "root multiplicity must not compound the shared member interpolation"
+        );
     }
 }
