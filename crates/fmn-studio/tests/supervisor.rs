@@ -21,11 +21,12 @@ use fmn_scene::{
 };
 use fmn_studio::{
     BuildError, ChannelError, ChannelFailureKind, Checkpoint, CheckpointSource, CrashReport,
-    FramingError, JournalReplay, LaunchError, ProtocolLimits, ProtocolVersion, RebuildDriver,
-    RequestEnvelope, ResponseEnvelope, ServiceError, StdWorkerLauncher, StudioDataKind, Supervisor,
-    SupervisorConfig, SupervisorError, SupervisorReply, SupervisorRequest, TransportCapabilities,
-    WorkerArtifact, WorkerChannel, WorkerErrorCode, WorkerLauncher, WorkerResponse,
-    WorkerServeOutcome, WorkerService, read_response, serve_worker, write_request,
+    FramingError, JournalReplay, LaunchError, ProtocolError, ProtocolLimits, ProtocolVersion,
+    RebuildDriver, RequestEnvelope, ResponseEnvelope, ServiceError, StdWorkerLauncher,
+    StudioDataKind, Supervisor, SupervisorConfig, SupervisorError, SupervisorReply,
+    SupervisorRequest, TransportCapabilities, WorkerArtifact, WorkerChannel, WorkerErrorCode,
+    WorkerLauncher, WorkerResponse, WorkerServeError, WorkerServeOutcome, WorkerService,
+    read_response, serve_worker, write_request,
 };
 
 fn lock_poisoned<T>(error: PoisonError<T>) -> T {
@@ -1433,6 +1434,12 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
         active_scene: Some("Demo".to_owned()),
         journal_tail: b"canonical journal tail".to_vec(),
     };
+    let source_scene_allocation = service
+        .active_scene
+        .as_deref()
+        .expect("fixture scene")
+        .as_ptr();
+    let source_tail_allocation = service.journal_tail.as_ptr();
     let outcome = serve_worker(
         &mut service,
         &mut std::io::Cursor::new(input),
@@ -1447,6 +1454,12 @@ fn worker_loop_converts_scene_panic_to_structured_correlated_report() {
     assert_eq!(report.scene.as_deref(), Some("Demo"));
     assert_eq!(report.message, "fixture scene panic");
     assert_eq!(report.journal_tail, b"canonical journal tail");
+    assert_ne!(report.message.as_ptr(), "fixture scene panic".as_ptr());
+    assert_ne!(
+        report.scene.as_deref().expect("reported scene").as_ptr(),
+        source_scene_allocation
+    );
+    assert_ne!(report.journal_tail.as_ptr(), source_tail_allocation);
     assert_eq!(service.negotiated_frame_budget, Some(1024));
 
     let mut output = std::io::Cursor::new(output);
@@ -1522,6 +1535,67 @@ fn worker_bounds_owned_panic_message_before_crash_envelope_validation() {
     let crash = read_response(&mut output, limits).expect("crash response");
     assert_eq!(crash.request_id, 2);
     assert_eq!(crash.response, WorkerResponse::Crash(report));
+}
+
+#[test]
+fn worker_refuses_an_impossible_zero_crash_message_budget_precisely() {
+    let limits = ProtocolLimits {
+        max_crash_message_bytes: 0,
+        ..ProtocolLimits::default()
+    };
+    let build_id = sha256(b"zero-budget panic worker");
+    let mut input = Vec::new();
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 1,
+            request: SupervisorRequest::Hello {
+                version: fmn_studio::CURRENT_VERSION,
+                supervisor_build: sha256(b"supervisor"),
+                max_frame_bytes: 1024,
+            },
+        },
+        limits,
+    )
+    .expect("hello");
+    write_request(
+        &mut input,
+        &RequestEnvelope {
+            request_id: 2,
+            request: SupervisorRequest::EnumerateScenes,
+        },
+        limits,
+    )
+    .expect("command");
+
+    let mut output = Vec::new();
+    let mut service = PanicService {
+        build_id,
+        negotiated_frame_budget: None,
+        panic_message: None,
+        active_scene: Some("Demo".to_owned()),
+        journal_tail: b"canonical journal tail".to_vec(),
+    };
+    let error = serve_worker(
+        &mut service,
+        &mut std::io::Cursor::new(input),
+        &mut output,
+        limits,
+    )
+    .expect_err("a nonempty panic diagnostic cannot fit a zero-byte wire budget");
+    assert_eq!(
+        error.to_string(),
+        "IPC crash message payload 1 bytes exceeds the configured limit 0"
+    );
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(matches!(
+        error,
+        WorkerServeError::CrashReport(ProtocolError::PayloadLimit {
+            field: "crash message",
+            limit: 0,
+            needed: 1,
+        })
+    ));
 }
 
 #[test]

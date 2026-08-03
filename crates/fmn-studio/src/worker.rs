@@ -8,6 +8,7 @@
 //! and no dynamic library is patched in place.
 
 use std::any::Any;
+use std::collections::TryReserveError;
 use std::fmt;
 use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -15,7 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use fmn_hash::Digest;
 
 use crate::protocol::{
-    CURRENT_VERSION, CrashReport, FramingError, ProtocolLimits, ResponseEnvelope,
+    CURRENT_VERSION, CrashReport, FramingError, ProtocolError, ProtocolLimits, ResponseEnvelope,
     SupervisorRequest, TransportCapabilities, WorkerErrorCode, WorkerResponse, read_request,
     write_response,
 };
@@ -114,11 +115,13 @@ pub enum WorkerServeOutcome {
     HandshakeRejected,
 }
 
-/// The worker loop itself could not communicate.
+/// The worker loop could not complete its bounded protocol.
 #[derive(Debug)]
 pub enum WorkerServeError {
     /// Pipe/canonical framing failure.
     Framing(FramingError),
+    /// A contained panic's report could not be represented or owned.
+    CrashReport(ProtocolError),
     /// A service returned a response reserved to the protocol driver.
     ReservedResponse,
 }
@@ -127,6 +130,7 @@ impl fmt::Display for WorkerServeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Framing(error) => error.fmt(f),
+            Self::CrashReport(error) => error.fmt(f),
             Self::ReservedResponse => {
                 f.write_str("worker service returned a protocol-driver response")
             }
@@ -138,6 +142,7 @@ impl std::error::Error for WorkerServeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Framing(error) => Some(error),
+            Self::CrashReport(error) => Some(error),
             Self::ReservedResponse => None,
         }
     }
@@ -149,12 +154,19 @@ impl From<FramingError> for WorkerServeError {
     }
 }
 
+impl From<ProtocolError> for WorkerServeError {
+    fn from(error: ProtocolError) -> Self {
+        Self::CrashReport(error)
+    }
+}
+
 /// Serve one supervisor over a bounded request/response pipe.
 ///
 /// # Errors
 ///
-/// Returns [`WorkerServeError`] when the pipe or canonical protocol fails, or
-/// when a service attempts to synthesize a handshake/shutdown response.
+/// Returns [`WorkerServeError`] when the pipe or canonical protocol fails, a
+/// contained panic report cannot be represented or owned, or a service
+/// attempts to synthesize a handshake/shutdown response.
 pub fn serve_worker(
     service: &mut dyn WorkerService,
     reader: &mut impl Read,
@@ -368,7 +380,7 @@ pub fn serve_worker(
                         )?;
                     }
                     Err(payload) => {
-                        let report = crash_report(service, payload, session_limits);
+                        let report = crash_report(service, payload, session_limits)?;
                         let envelope = ResponseEnvelope {
                             request_id: envelope.request_id,
                             response: WorkerResponse::Crash(report),
@@ -390,40 +402,45 @@ fn crash_report(
     service: &dyn WorkerService,
     payload: Box<dyn Any + Send>,
     limits: ProtocolLimits,
-) -> CrashReport {
+) -> Result<CrashReport, ProtocolError> {
     let message = panic_message(
         payload,
         effective_field_limit(limits.max_crash_message_bytes, limits),
-    );
-    let scene = catch_unwind(AssertUnwindSafe(|| service.active_scene()))
-        .ok()
-        .flatten()
-        .filter(|scene| !scene.is_empty() && scene.len() <= limits.max_field_bytes)
-        .map(str::to_owned);
+    )?;
+    let scene = match catch_unwind(AssertUnwindSafe(|| service.active_scene())) {
+        Ok(Some(scene)) if !scene.is_empty() && scene.len() <= limits.max_field_bytes => {
+            Some(try_clone_string(scene, "crash scene bytes")?)
+        }
+        Ok(_) | Err(_) => None,
+    };
     let tail_limit = effective_field_limit(limits.max_crash_tail_bytes, limits);
-    let journal_tail = catch_unwind(AssertUnwindSafe(|| service.journal_tail())).map_or_else(
-        |_| Vec::new(),
-        |tail| {
+    let journal_tail = match catch_unwind(AssertUnwindSafe(|| service.journal_tail())) {
+        Ok(tail) => {
             let keep_from = tail.len().saturating_sub(tail_limit);
-            tail.get(keep_from..).unwrap_or_default().to_vec()
-        },
-    );
+            let tail = tail
+                .get(keep_from..)
+                .ok_or(ProtocolError::Malformed("invalid crash journal tail range"))?;
+            try_clone_bytes(tail, "crash journal tail bytes")?
+        }
+        Err(_) => Vec::new(),
+    };
     let state_hash =
         catch_unwind(AssertUnwindSafe(|| service.last_state_hash())).unwrap_or_default();
-    CrashReport {
+    Ok(CrashReport {
         scene,
         message,
         journal_tail,
         state_hash,
-    }
+    })
 }
 
-fn panic_message(payload: Box<dyn Any + Send>, limit: usize) -> String {
+fn panic_message(payload: Box<dyn Any + Send>, limit: usize) -> Result<String, ProtocolError> {
+    require_crash_message_capacity(limit)?;
     if let Some(message) = payload.downcast_ref::<&str>() {
         return bounded_message(message, limit);
     }
     if let Ok(message) = payload.downcast::<String>() {
-        return bounded_owned_message(
+        return bounded_owned_crash_message(
             *message,
             "scene worker panicked with an empty message",
             limit,
@@ -432,16 +449,25 @@ fn panic_message(payload: Box<dyn Any + Send>, limit: usize) -> String {
     bounded_message("scene worker panicked with a non-string payload", limit)
 }
 
-fn bounded_owned_message(mut message: String, fallback: &str, limit: usize) -> String {
+fn bounded_owned_crash_message(
+    mut message: String,
+    fallback: &str,
+    limit: usize,
+) -> Result<String, ProtocolError> {
     if message.is_empty() {
         return bounded_message(fallback, limit);
     }
     let end = utf8_prefix_boundary(&message, limit);
     if end == 0 && limit > 0 {
-        return "?".to_owned();
+        message.clear();
+        message
+            .try_reserve_exact(1)
+            .map_err(|source| storage_unavailable("crash message bytes", 1, source))?;
+        message.push('?');
+        return Ok(message);
     }
     message.truncate(end);
-    message
+    Ok(message)
 }
 
 fn effective_field_limit(specific_limit: usize, limits: ProtocolLimits) -> usize {
@@ -456,7 +482,7 @@ fn worker_error(
 ) -> WorkerResponse {
     WorkerResponse::Error {
         code,
-        message: bounded_owned_message(
+        message: bounded_owned_error_message(
             message.into(),
             fallback,
             effective_field_limit(limits.max_error_message_bytes, limits),
@@ -464,7 +490,29 @@ fn worker_error(
     }
 }
 
-fn bounded_message(message: &str, limit: usize) -> String {
+fn bounded_owned_error_message(mut message: String, fallback: &str, limit: usize) -> String {
+    if message.is_empty() {
+        return bounded_error_message(fallback, limit);
+    }
+    let end = utf8_prefix_boundary(&message, limit);
+    if end == 0 && limit > 0 {
+        return "?".to_owned();
+    }
+    message.truncate(end);
+    message
+}
+
+fn bounded_error_message(message: &str, limit: usize) -> String {
+    let end = utf8_prefix_boundary(message, limit);
+    if end == 0 && limit > 0 {
+        "?".to_owned()
+    } else {
+        message.get(..end).unwrap_or_default().to_owned()
+    }
+}
+
+fn bounded_message(message: &str, limit: usize) -> Result<String, ProtocolError> {
+    require_crash_message_capacity(limit)?;
     let message = if message.is_empty() {
         "scene worker panicked with an empty message"
     } else {
@@ -472,10 +520,70 @@ fn bounded_message(message: &str, limit: usize) -> String {
     };
     let end = utf8_prefix_boundary(message, limit);
     if end == 0 && limit > 0 {
-        "?".to_owned()
+        try_clone_string("?", "crash message bytes")
     } else {
-        message[..end].to_owned()
+        let bounded = message.get(..end).ok_or(ProtocolError::Malformed(
+            "invalid crash message UTF-8 boundary",
+        ))?;
+        try_clone_string(bounded, "crash message bytes")
     }
+}
+
+fn require_crash_message_capacity(limit: usize) -> Result<(), ProtocolError> {
+    if limit == 0 {
+        return Err(ProtocolError::PayloadLimit {
+            field: "crash message",
+            limit,
+            needed: 1,
+        });
+    }
+    Ok(())
+}
+
+fn storage_unavailable(
+    field: &'static str,
+    additional: usize,
+    source: TryReserveError,
+) -> ProtocolError {
+    ProtocolError::StorageUnavailable {
+        field,
+        additional,
+        source,
+    }
+}
+
+fn try_string_with_capacity(
+    additional: usize,
+    field: &'static str,
+) -> Result<String, ProtocolError> {
+    let mut value = String::new();
+    value
+        .try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(field, additional, source))?;
+    Ok(value)
+}
+
+fn try_clone_string(source: &str, field: &'static str) -> Result<String, ProtocolError> {
+    let mut value = try_string_with_capacity(source.len(), field)?;
+    value.push_str(source);
+    Ok(value)
+}
+
+fn try_vec_with_capacity<T>(
+    additional: usize,
+    field: &'static str,
+) -> Result<Vec<T>, ProtocolError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(additional)
+        .map_err(|source| storage_unavailable(field, additional, source))?;
+    Ok(values)
+}
+
+fn try_clone_bytes(source: &[u8], field: &'static str) -> Result<Vec<u8>, ProtocolError> {
+    let mut value = try_vec_with_capacity(source.len(), field)?;
+    value.extend_from_slice(source);
+    Ok(value)
 }
 
 fn utf8_prefix_boundary(value: &str, limit: usize) -> usize {
@@ -484,4 +592,32 @@ fn utf8_prefix_boundary(value: &str, limit: usize) -> usize {
         end -= 1;
     }
     end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProtocolError, try_string_with_capacity, try_vec_with_capacity};
+
+    fn assert_storage_refusal(error: &ProtocolError, field: &'static str, additional: usize) {
+        assert!(matches!(
+            error,
+            ProtocolError::StorageUnavailable {
+                field: found,
+                additional: found_additional,
+                ..
+            } if *found == field && *found_additional == additional
+        ));
+        assert!(std::error::Error::source(error).is_some());
+    }
+
+    #[test]
+    fn crash_report_storage_refusals_are_typed() {
+        let message = try_string_with_capacity(usize::MAX, "crash message bytes")
+            .expect_err("impossible crash message capacity must refuse");
+        assert_storage_refusal(&message, "crash message bytes", usize::MAX);
+
+        let tail = try_vec_with_capacity::<u8>(usize::MAX, "crash journal tail bytes")
+            .expect_err("impossible crash tail capacity must refuse");
+        assert_storage_refusal(&tail, "crash journal tail bytes", usize::MAX);
+    }
 }
