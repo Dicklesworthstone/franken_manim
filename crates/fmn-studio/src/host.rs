@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::{
     Arc, Condvar, Mutex,
@@ -38,6 +38,9 @@ pub const MULTIPART_BOUNDARY: &str = "fmn-frame";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_HEX_BYTES: usize = TOKEN_BYTES * 2;
 const MAX_REQUEST_LINE_BYTES: usize = 4096;
+const SOCKET_AUTHORITY_MAX_BYTES: usize = 47;
+const LOCALHOST_AUTHORITY_MAX_BYTES: usize = 15;
+const HTTP_ORIGIN_PREFIX: &[u8] = b"http://";
 
 /// A 256-bit bearer capability.
 #[derive(Clone)]
@@ -610,8 +613,8 @@ impl StudioHost {
                 "bound Studio address is not loopback",
             ));
         }
-        let authority = socket_authority(local_addr);
-        let localhost_authority = format!("localhost:{}", local_addr.port());
+        let authority = socket_authority(local_addr)?;
+        let localhost_authority = localhost_authority(local_addr.port())?;
         let started = clock.monotonic();
         Ok(Self {
             listener,
@@ -1081,9 +1084,20 @@ fn is_allowed_host(host: &str, authority: &str, localhost_authority: &str) -> bo
 }
 
 fn is_allowed_origin(origin: &str, authority: &str, localhost_authority: &str) -> bool {
-    let numeric = format!("http://{authority}");
-    let named = format!("http://{localhost_authority}");
-    origin.eq_ignore_ascii_case(&numeric) || origin.eq_ignore_ascii_case(&named)
+    origin_matches_authority(origin, authority)
+        || origin_matches_authority(origin, localhost_authority)
+}
+
+fn origin_matches_authority(origin: &str, authority: &str) -> bool {
+    let Some(expected_len) = HTTP_ORIGIN_PREFIX.len().checked_add(authority.len()) else {
+        return false;
+    };
+    if origin.len() != expected_len {
+        return false;
+    }
+    let (scheme, presented_authority) = origin.as_bytes().split_at(HTTP_ORIGIN_PREFIX.len());
+    scheme.eq_ignore_ascii_case(HTTP_ORIGIN_PREFIX)
+        && presented_authority.eq_ignore_ascii_case(authority.as_bytes())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1875,11 +1889,63 @@ fn is_header_name_byte(byte: u8) -> bool {
         )
 }
 
-fn socket_authority(addr: SocketAddr) -> String {
-    match addr.ip() {
-        IpAddr::V4(ip) => format!("{ip}:{}", addr.port()),
-        IpAddr::V6(ip) => format!("[{ip}]:{}", addr.port()),
-    }
+fn socket_authority(addr: SocketAddr) -> Result<String, HostError> {
+    socket_authority_with_capacity(addr, SOCKET_AUTHORITY_MAX_BYTES)
+}
+
+fn socket_authority_with_capacity(addr: SocketAddr, capacity: usize) -> Result<String, HostError> {
+    authority_with_capacity::<SOCKET_AUTHORITY_MAX_BYTES>(
+        format_args!("{addr}"),
+        capacity,
+        "numeric socket authority",
+    )
+}
+
+fn localhost_authority(port: u16) -> Result<String, HostError> {
+    localhost_authority_with_capacity(port, LOCALHOST_AUTHORITY_MAX_BYTES)
+}
+
+fn localhost_authority_with_capacity(port: u16, capacity: usize) -> Result<String, HostError> {
+    authority_with_capacity::<LOCALHOST_AUTHORITY_MAX_BYTES>(
+        format_args!("localhost:{port}"),
+        capacity,
+        "localhost authority",
+    )
+}
+
+fn authority_with_capacity<const MAX_BYTES: usize>(
+    arguments: fmt::Arguments<'_>,
+    capacity: usize,
+    field: &'static str,
+) -> Result<String, HostError> {
+    let mut bytes = [0; MAX_BYTES];
+    let length = {
+        let mut cursor = std::io::Cursor::new(bytes.as_mut_slice());
+        cursor
+            .write_fmt(arguments)
+            .map_err(|_| HostError::Configuration("authority formatting exceeded its bound"))?;
+        usize::try_from(cursor.position())
+            .map_err(|_| HostError::Configuration("authority length overflows usize"))?
+    };
+    let text = std::str::from_utf8(&bytes[..length])
+        .map_err(|_| HostError::Configuration("authority formatting produced non-UTF-8 bytes"))?;
+    let mut authority = String::new();
+    authority.try_reserve_exact(capacity).map_err(|error| {
+        HostError::AuthorityStorageAllocationFailed {
+            field,
+            additional: capacity,
+            error,
+        }
+    })?;
+    authority.try_reserve_exact(text.len()).map_err(|error| {
+        HostError::AuthorityStorageAllocationFailed {
+            field,
+            additional: text.len(),
+            error,
+        }
+    })?;
+    authority.push_str(text);
+    Ok(authority)
 }
 
 const fn hex_digit(nibble: u8) -> char {
@@ -1951,6 +2017,15 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Storage for one loopback authority string could not be reserved.
+    AuthorityStorageAllocationFailed {
+        /// Name of the authority representation.
+        field: &'static str,
+        /// Additional bytes requested at the refusal point.
+        additional: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
     /// Storage for one bounded HTTP request could not be reserved.
     RequestStorageAllocationFailed {
         /// Total request-buffer bytes requested at the refusal point.
@@ -2008,6 +2083,7 @@ impl HostError {
             Self::Configuration(_)
             | Self::ClientStorageAllocationFailed { .. }
             | Self::RateHistoryStorageAllocationFailed { .. }
+            | Self::AuthorityStorageAllocationFailed { .. }
             | Self::RequestStorageAllocationFailed { .. }
             | Self::RequestMetadataAllocationFailed { .. }
             | Self::ResponseStorageAllocationFailed { .. }
@@ -2045,6 +2121,14 @@ impl fmt::Display for HostError {
             Self::RateHistoryStorageAllocationFailed { requests, error } => write!(
                 f,
                 "Studio could not reserve storage for {requests} request-rate samples: {error}"
+            ),
+            Self::AuthorityStorageAllocationFailed {
+                field,
+                additional,
+                error,
+            } => write!(
+                f,
+                "Studio could not reserve {additional} additional bytes for {field}: {error}"
             ),
             Self::RequestStorageAllocationFailed { bytes, error } => write!(
                 f,
@@ -2087,6 +2171,7 @@ impl std::error::Error for HostError {
             Self::FramePng(error) => Some(error),
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
             Self::RateHistoryStorageAllocationFailed { error, .. } => Some(error),
+            Self::AuthorityStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestMetadataAllocationFailed { error, .. } => Some(error),
             Self::ResponseStorageAllocationFailed { error, .. } => Some(error),
@@ -2284,6 +2369,92 @@ mod tests {
                 requests: usize::MAX,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn authority_builders_refuse_capacity_overflow() {
+        let numeric =
+            socket_authority_with_capacity(SocketAddr::from(([127, 0, 0, 1], 42)), usize::MAX)
+                .expect_err("impossible numeric authority capacity must refuse");
+        assert!(matches!(
+            &numeric,
+            HostError::AuthorityStorageAllocationFailed {
+                field: "numeric socket authority",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&numeric).is_some());
+
+        let named = localhost_authority_with_capacity(42, usize::MAX)
+            .expect_err("impossible localhost authority capacity must refuse");
+        assert!(matches!(
+            &named,
+            HostError::AuthorityStorageAllocationFailed {
+                field: "localhost authority",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&named).is_some());
+    }
+
+    #[test]
+    fn authority_builders_and_origin_matching_preserve_exact_bytes() {
+        let ipv4 = socket_authority_with_capacity(
+            SocketAddr::from(([127, 0, 0, 1], 42)),
+            SOCKET_AUTHORITY_MAX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(ipv4, "127.0.0.1:42");
+        let ipv6 = socket_authority_with_capacity(
+            "[::1]:65535".parse().unwrap(),
+            SOCKET_AUTHORITY_MAX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(ipv6, "[::1]:65535");
+        let longest_ipv6 = socket_authority_with_capacity(
+            "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+                .parse()
+                .unwrap(),
+            SOCKET_AUTHORITY_MAX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            longest_ipv6,
+            "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+        );
+        assert_eq!(longest_ipv6.len(), SOCKET_AUTHORITY_MAX_BYTES);
+        let named =
+            localhost_authority_with_capacity(65535, LOCALHOST_AUTHORITY_MAX_BYTES).unwrap();
+        assert_eq!(named, "localhost:65535");
+        assert_eq!(named.len(), LOCALHOST_AUTHORITY_MAX_BYTES);
+
+        assert!(is_allowed_origin(
+            "HTTP://127.0.0.1:42",
+            &ipv4,
+            "localhost:42"
+        ));
+        assert!(is_allowed_origin(
+            "http://LOCALHOST:42",
+            &ipv4,
+            "localhost:42"
+        ));
+        assert!(!is_allowed_origin(
+            "https://127.0.0.1:42",
+            &ipv4,
+            "localhost:42"
+        ));
+        assert!(!is_allowed_origin(
+            "http://127.0.0.1:420",
+            &ipv4,
+            "localhost:42"
+        ));
+        assert!(!is_allowed_origin(
+            "http://é.example",
+            &ipv4,
+            "localhost:42"
         ));
     }
 
@@ -2753,7 +2924,7 @@ mod tests {
         );
 
         let host = bind_test_host(StudioHostConfig::default(), 1, 8).unwrap();
-        let authority = socket_authority(host.local_addr().unwrap());
+        let authority = socket_authority(host.local_addr().unwrap()).unwrap();
         assert_eq!(
             host.launch_url().unwrap(),
             format!("http://{authority}/?cap={}", "55".repeat(TOKEN_BYTES))
