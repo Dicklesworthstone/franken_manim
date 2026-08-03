@@ -326,7 +326,9 @@ impl Reachability {
             | SyncError::AllocationFailed { resource, .. }
             | SyncError::Table(TableError::IndexCapacityExceeded { resource, .. })
             | SyncError::Table(TableError::AllocationFailed { resource, .. }) => *resource,
-            SyncError::InvalidGeometry { .. } | SyncError::EpochExhausted => return false,
+            SyncError::Table(TableError::ShapeIdentityMismatch { .. })
+            | SyncError::InvalidGeometry { .. }
+            | SyncError::EpochExhausted => return false,
         };
         match resource {
             "retained segments" | "segment rows" => self.unreachable_segments > 0,
