@@ -157,6 +157,10 @@ impl SpanRegistry {
         Self::default()
     }
 
+    fn try_reserve_bindings(&mut self, additional: usize) -> Result<(), InspectError> {
+        try_reserve_hash_map(&mut self.spans, additional, "source span bindings")
+    }
+
     /// Register one explicit source range.
     pub fn register(
         &mut self,
@@ -167,6 +171,9 @@ impl SpanRegistry {
         kind: SpanKind,
     ) -> Result<(), InspectError> {
         validate_span(&source, start, end)?;
+        if !self.spans.contains_key(&mob) {
+            self.try_reserve_bindings(1)?;
+        }
         self.spans.insert(
             mob,
             RegisteredSpan {
@@ -189,16 +196,21 @@ impl SpanRegistry {
         submobjects: &[Mob],
         bindings: &[NativeSpanBinding],
     ) -> Result<(), InspectError> {
+        let mut additional = 0usize;
         for binding in bindings {
-            submobjects
-                .get(binding.submobject_index)
-                .ok_or(InspectError::SpanMapMismatch(
-                    "native span submobject index is out of range",
-                ))?;
+            let mob = native_span_mob(submobjects, binding)?;
             validate_span(&source, binding.start, binding.end)?;
+            if !self.spans.contains_key(&mob) {
+                additional = additional
+                    .checked_add(1)
+                    .ok_or(InspectError::SpanMapMismatch(
+                        "native span binding count overflow",
+                    ))?;
+            }
         }
+        self.try_reserve_bindings(additional)?;
         for binding in bindings {
-            let mob = submobjects[binding.submobject_index];
+            let mob = native_span_mob(submobjects, binding)?;
             self.spans.insert(
                 mob,
                 RegisteredSpan {
@@ -1067,6 +1079,15 @@ fn span_snapshot(
     }))
 }
 
+fn native_span_mob(submobjects: &[Mob], binding: &NativeSpanBinding) -> Result<Mob, InspectError> {
+    submobjects
+        .get(binding.submobject_index)
+        .copied()
+        .ok_or(InspectError::SpanMapMismatch(
+            "native span submobject index is out of range",
+        ))
+}
+
 fn validate_span(source: &str, start: usize, end: usize) -> Result<(), InspectError> {
     if start > end
         || end > source.len()
@@ -1434,7 +1455,7 @@ mod storage_tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        InspectError, JsonBuffer, try_reserve_hash_map, try_reserve_hash_set,
+        InspectError, JsonBuffer, SpanRegistry, try_reserve_hash_map, try_reserve_hash_set,
         try_string_with_capacity, try_vec_with_capacity,
     };
 
@@ -1473,5 +1494,12 @@ mod storage_tests {
         let json = JsonBuffer::with_initial_capacity(usize::MAX, usize::MAX)
             .expect_err("impossible JSON capacity must refuse");
         assert_storage_refusal(&json, "JSON bytes", usize::MAX);
+
+        let mut spans = SpanRegistry::new();
+        let error = spans
+            .try_reserve_bindings(usize::MAX)
+            .expect_err("impossible span-registry capacity must refuse");
+        assert_storage_refusal(&error, "source span bindings", usize::MAX);
+        assert!(spans.spans.is_empty());
     }
 }

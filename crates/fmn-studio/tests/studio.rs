@@ -259,6 +259,61 @@ fn studio_json_refuses_before_growing_past_the_first_atom() {
 }
 
 #[test]
+fn source_span_registration_is_atomic_across_late_map_errors() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+    stage.add_to_scene(root).unwrap();
+    let mut spans = SpanRegistry::new();
+    spans
+        .register(root, Arc::from("old"), 0, 3, SpanKind::TextGlyph)
+        .unwrap();
+
+    let error = spans
+        .bind_native(
+            Arc::from("new"),
+            &[root],
+            &[
+                NativeSpanBinding {
+                    submobject_index: 0,
+                    start: 0,
+                    end: 3,
+                    kind: SpanKind::MathGlyph,
+                },
+                NativeSpanBinding {
+                    submobject_index: 1,
+                    start: 0,
+                    end: 3,
+                    kind: SpanKind::MathPath,
+                },
+            ],
+        )
+        .unwrap_err();
+    assert!(matches!(error, InspectError::SpanMapMismatch(_)));
+
+    let before = InspectorSnapshot::capture(&stage, &spans, InspectorLimits::default()).unwrap();
+    let prior = before.nodes[0].source_span.as_ref().unwrap();
+    assert_eq!(prior.excerpt, "old");
+    assert_eq!(prior.kind, SpanKind::TextGlyph);
+
+    spans
+        .bind_native(
+            Arc::from("new"),
+            &[root],
+            &[NativeSpanBinding {
+                submobject_index: 0,
+                start: 0,
+                end: 3,
+                kind: SpanKind::MathGlyph,
+            }],
+        )
+        .unwrap();
+    let after = InspectorSnapshot::capture(&stage, &spans, InspectorLimits::default()).unwrap();
+    let replacement = after.nodes[0].source_span.as_ref().unwrap();
+    assert_eq!(replacement.excerpt, "new");
+    assert_eq!(replacement.kind, SpanKind::MathGlyph);
+}
+
+#[test]
 fn inspector_and_debug_overlays_follow_visible_family_order() {
     let first = Mobject::from_points(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
     let second = Mobject::from_points(&[[2.0, 2.0, 1.0]]);
