@@ -343,7 +343,7 @@ impl Typeset {
         w.f64(self.layout.depth);
         w.count(self.layout.glyphs.len(), "glyph count")?;
         for g in &self.layout.glyphs {
-            w.raw_u32(g.face.0);
+            w.count(g.face.0, "glyph face id")?;
             w.raw_u32(u32::from(g.gid));
             w.raw_u32(u32::from(g.ch));
             w.f64(g.x);
@@ -431,7 +431,7 @@ impl Typeset {
         reserve_exact(&mut layout.glyphs, glyph_count, "decoded glyph table")?;
         for _ in 0..glyph_count {
             layout.glyphs.push(PlacedGlyph {
-                face: fmd_math::FaceId(r.raw_u32()?),
+                face: fmd_math::FaceId(r.count()?),
                 gid: u16::try_from(r.raw_u32()?).map_err(|_| TypesetError::NonCanonical {
                     field: "glyph id",
                     reason: "value does not fit u16",
@@ -781,6 +781,7 @@ fn validate_layout(source: &str, layout: &Layout) -> Result<(), TypesetError> {
     checked_u32("path count", layout.paths.len())?;
 
     for glyph in &layout.glyphs {
+        checked_u32("glyph face id", glyph.face.0)?;
         validate_f64("glyph x", glyph.x)?;
         validate_f64("glyph y", glyph.y)?;
         validate_f64("glyph size", glyph.size)?;
