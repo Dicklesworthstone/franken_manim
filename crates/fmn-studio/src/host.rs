@@ -27,7 +27,7 @@ use fmn_scene::{AssetRead, EventPayload, Key, Modifiers, MouseButton};
 
 use crate::protocol::{
     DebugLayerSet, FrameEncoding, FramePayload, FrameStream, ProtocolError, ProtocolLimits,
-    StudioDataKind, SupervisorRequest, WorkerResponse,
+    StudioDataKind, SupervisorRequest, WorkerErrorCode, WorkerResponse,
 };
 use crate::supervisor::{Supervisor, SupervisorError, SupervisorReply};
 use crate::ui;
@@ -759,12 +759,13 @@ impl HostHandler {
                 | HostError::RequestMetadataAllocationFailed { .. }),
             ) => return Err(error),
             Err(error) => {
+                let body = error_response_body(&error)?;
                 write_http_response(
                     &mut stream,
                     400,
                     "Bad Request",
                     "text/plain; charset=utf-8",
-                    format!("{error}\n").as_bytes(),
+                    body.as_bytes(),
                 )?;
                 return Ok(());
             }
@@ -776,28 +777,33 @@ impl HostHandler {
                 HostError::RateLimited => (429, "Too Many Requests"),
                 _ => (403, "Forbidden"),
             };
+            let body = error_response_body(&error)?;
             write_http_response(
                 &mut stream,
                 status,
                 reason,
                 "text/plain; charset=utf-8",
-                format!("{error}\n").as_bytes(),
+                body.as_bytes(),
             )?;
             return Ok(());
         }
         match self.route(&mut stream, request, now) {
             Ok(()) => Ok(()),
-            Err(error @ HostError::RequestMetadataAllocationFailed { .. }) => Err(error),
+            Err(
+                error @ (HostError::RequestMetadataAllocationFailed { .. }
+                | HostError::ResponseStorageAllocationFailed { .. }),
+            ) => Err(error),
             Err(error) => {
                 let Some((status, reason)) = error.http_status() else {
                     return Err(error);
                 };
+                let body = error_response_body(&error)?;
                 write_http_response(
                     &mut stream,
                     status,
                     reason,
                     "text/plain; charset=utf-8",
-                    format!("{error}\n").as_bytes(),
+                    body.as_bytes(),
                 )
             }
         }
@@ -851,10 +857,12 @@ impl HostHandler {
         if now.saturating_sub(started) >= self.config.session_ttl {
             return Err(HostError::Expired);
         }
-        let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary={MULTIPART_BOUNDARY}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
-        );
-        stream.write_all(head.as_bytes())?;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=")?;
+        stream.write_all(MULTIPART_BOUNDARY.as_bytes())?;
+        stream.write_all(
+            b"\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        )?;
         let mut last = None;
         for _ in 0..self.config.max_stream_frames {
             let elapsed = self.clock.monotonic().saturating_sub(started);
@@ -954,31 +962,18 @@ impl HostHandler {
             }
             WorkerResponse::Frame(frame) if expected_data.is_none() => {
                 let published = self.frames.publish(&frame, self.session.protocol_limits)?;
-                let body = format!(
-                    "{{\"status\":\"frame\",\"frame_index\":{},\"sha256\":\"{}\"}}",
-                    published.frame_index,
-                    digest_hex(&published.digest)
-                );
+                let body = frame_response_body(published.frame_index, &published.digest)?;
                 write_json_response(stream, body.as_bytes())
             }
             WorkerResponse::Ack {
                 state_hash,
                 journal_len,
             } if expected_data.is_none() => {
-                let hash = state_hash.as_ref().map_or_else(
-                    || "null".to_owned(),
-                    |digest| format!("\"{}\"", digest_hex(digest)),
-                );
-                let body = format!(
-                    "{{\"status\":\"ok\",\"journal_len\":{journal_len},\"state_hash\":{hash}}}"
-                );
+                let body = ack_response_body(journal_len, state_hash.as_ref())?;
                 write_json_response(stream, body.as_bytes())
             }
             WorkerResponse::Error { code, message } => {
-                let body = format!(
-                    "{{\"status\":\"worker_error\",\"code\":\"{code:?}\",\"message\":\"{}\"}}",
-                    json_escape(&message)
-                );
+                let body = worker_error_response_body(code, &message)?;
                 write_http_response(
                     stream,
                     422,
@@ -1568,6 +1563,144 @@ fn write_json_response(stream: &mut impl Write, body: &[u8]) -> Result<(), HostE
     write_http_response(stream, 200, "OK", "application/json; charset=utf-8", body)
 }
 
+#[derive(Debug)]
+struct ResponseText {
+    value: String,
+    field: &'static str,
+    allocation_failure: Option<(usize, TryReserveError)>,
+}
+
+impl ResponseText {
+    fn append(&mut self, value: &str) -> Result<(), HostError> {
+        self.write_arguments(format_args!("{value}"))
+    }
+
+    fn append_char(&mut self, value: char) -> Result<(), HostError> {
+        self.write_arguments(format_args!("{value}"))
+    }
+
+    fn write_arguments(&mut self, arguments: fmt::Arguments<'_>) -> Result<(), HostError> {
+        if fmt::write(self, arguments).is_ok() {
+            return Ok(());
+        }
+        match self.allocation_failure.take() {
+            Some((additional, error)) => Err(HostError::ResponseStorageAllocationFailed {
+                field: self.field,
+                additional,
+                error,
+            }),
+            None => Err(HostError::Configuration(
+                "HTTP response formatting failed without an allocation refusal",
+            )),
+        }
+    }
+
+    fn into_string(self) -> String {
+        self.value
+    }
+}
+
+impl fmt::Write for ResponseText {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.allocation_failure.is_some() {
+            return Err(fmt::Error);
+        }
+        if let Err(error) = self.value.try_reserve(value.len()) {
+            self.allocation_failure = Some((value.len(), error));
+            return Err(fmt::Error);
+        }
+        self.value.push_str(value);
+        Ok(())
+    }
+}
+
+fn response_text_with_capacity(
+    additional: usize,
+    field: &'static str,
+) -> Result<ResponseText, HostError> {
+    let mut value = String::new();
+    value.try_reserve_exact(additional).map_err(|error| {
+        HostError::ResponseStorageAllocationFailed {
+            field,
+            additional,
+            error,
+        }
+    })?;
+    Ok(ResponseText {
+        value,
+        field,
+        allocation_failure: None,
+    })
+}
+
+fn error_response_body(error: &HostError) -> Result<String, HostError> {
+    let mut body = response_text_with_capacity(64, "HTTP error response body")?;
+    body.write_arguments(format_args!("{error}\n"))?;
+    Ok(body.into_string())
+}
+
+fn frame_response_body(frame_index: u64, digest: &Digest) -> Result<String, HostError> {
+    let mut body = response_text_with_capacity(128, "HTTP frame response body")?;
+    body.append("{\"status\":\"frame\",\"frame_index\":")?;
+    body.write_arguments(format_args!("{frame_index}"))?;
+    body.append(",\"sha256\":\"")?;
+    write_digest_hex(&mut body, digest)?;
+    body.append("\"}")?;
+    Ok(body.into_string())
+}
+
+fn ack_response_body(journal_len: u64, state_hash: Option<&Digest>) -> Result<String, HostError> {
+    let mut body = response_text_with_capacity(128, "HTTP acknowledgment response body")?;
+    body.append("{\"status\":\"ok\",\"journal_len\":")?;
+    body.write_arguments(format_args!("{journal_len}"))?;
+    body.append(",\"state_hash\":")?;
+    match state_hash {
+        Some(digest) => {
+            body.append("\"")?;
+            write_digest_hex(&mut body, digest)?;
+            body.append("\"")?;
+        }
+        None => body.append("null")?,
+    }
+    body.append("}")?;
+    Ok(body.into_string())
+}
+
+fn worker_error_response_body(code: WorkerErrorCode, message: &str) -> Result<String, HostError> {
+    let mut body = response_text_with_capacity(128, "HTTP worker-error response body")?;
+    body.append("{\"status\":\"worker_error\",\"code\":\"")?;
+    body.write_arguments(format_args!("{code:?}"))?;
+    body.append("\",\"message\":\"")?;
+    write_json_escaped(&mut body, message)?;
+    body.append("\"}")?;
+    Ok(body.into_string())
+}
+
+fn write_digest_hex(body: &mut ResponseText, digest: &Digest) -> Result<(), HostError> {
+    for byte in digest.as_bytes() {
+        body.append_char(hex_digit(byte >> 4))?;
+        body.append_char(hex_digit(byte & 0x0f))?;
+    }
+    Ok(())
+}
+
+fn write_json_escaped(body: &mut ResponseText, raw: &str) -> Result<(), HostError> {
+    for character in raw.chars() {
+        match character {
+            '"' => body.append("\\\"")?,
+            '\\' => body.append("\\\\")?,
+            '\n' => body.append("\\n")?,
+            '\r' => body.append("\\r")?,
+            '\t' => body.append("\\t")?,
+            character if character.is_control() => {
+                body.write_arguments(format_args!("\\u{:04x}", character as u32))?;
+            }
+            character => body.append_char(character)?,
+        }
+    }
+    Ok(())
+}
+
 fn write_connection_limit_response(stream: &mut impl Write) {
     // The connection is already rejected and is not owned by a client
     // handler. Delivery is best-effort: a peer that disconnected before the
@@ -1600,17 +1733,19 @@ fn write_response_with_headers(
     body: &[u8],
     extra: &[(&str, &str)],
 ) -> Result<(), HostError> {
-    let mut head = format!(
+    let mut head = response_text_with_capacity(256, "HTTP response head")?;
+    head.write_arguments(format_args!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
         body.len()
-    );
+    ))?;
     for (name, value) in extra {
-        head.push_str(name);
-        head.push_str(": ");
-        head.push_str(value);
-        head.push_str("\r\n");
+        head.append(name)?;
+        head.append(": ")?;
+        head.append(value)?;
+        head.append("\r\n")?;
     }
-    head.push_str("\r\n");
+    head.append("\r\n")?;
+    let head = head.into_string();
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()?;
@@ -1673,15 +1808,6 @@ fn socket_authority(addr: SocketAddr) -> String {
     }
 }
 
-fn digest_hex(digest: &Digest) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        out.push(hex_digit(byte >> 4));
-        out.push(hex_digit(byte & 0x0f));
-    }
-    out
-}
-
 const fn hex_digit(nibble: u8) -> char {
     hex_digit_byte(nibble) as char
 }
@@ -1700,24 +1826,6 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-fn json_escape(raw: &str) -> String {
-    let mut out = String::new();
-    for character in raw.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            character if character.is_control() => {
-                out.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => out.push(character),
-        }
-    }
-    out
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1778,6 +1886,15 @@ pub enum HostError {
         /// Allocation refusal.
         error: TryReserveError,
     },
+    /// Storage for an HTTP response head or dynamic body could not be reserved.
+    ResponseStorageAllocationFailed {
+        /// Name of the response buffer.
+        field: &'static str,
+        /// Additional bytes requested at the refusal point.
+        additional: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
     /// Storage for the bounded preview-frame history could not be reserved.
     FrameHistoryStorageAllocationFailed {
         /// Complete history bound requested by host policy.
@@ -1811,6 +1928,7 @@ impl HostError {
             | Self::ClientStorageAllocationFailed { .. }
             | Self::RequestStorageAllocationFailed { .. }
             | Self::RequestMetadataAllocationFailed { .. }
+            | Self::ResponseStorageAllocationFailed { .. }
             | Self::FrameHistoryStorageAllocationFailed { .. }
             | Self::FrameStorageAllocationFailed { .. } => Some((500, "Internal Server Error")),
             Self::Io(_) => None,
@@ -1854,6 +1972,14 @@ impl fmt::Display for HostError {
                 f,
                 "Studio could not reserve {additional} additional {field}: {error}"
             ),
+            Self::ResponseStorageAllocationFailed {
+                field,
+                additional,
+                error,
+            } => write!(
+                f,
+                "Studio could not reserve {additional} additional bytes for {field}: {error}"
+            ),
             Self::FrameHistoryStorageAllocationFailed { frames, error } => write!(
                 f,
                 "Studio could not reserve storage for {frames} preview frames: {error}"
@@ -1876,6 +2002,7 @@ impl std::error::Error for HostError {
             Self::ClientStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestStorageAllocationFailed { error, .. } => Some(error),
             Self::RequestMetadataAllocationFailed { error, .. } => Some(error),
+            Self::ResponseStorageAllocationFailed { error, .. } => Some(error),
             Self::FrameHistoryStorageAllocationFailed { error, .. } => Some(error),
             Self::FrameStorageAllocationFailed { error, .. } => Some(error),
             _ => None,
@@ -2422,6 +2549,64 @@ mod tests {
         assert!(fields.is_empty());
         assert_eq!(map.http_status(), Some((500, "Internal Server Error")));
         assert!(std::error::Error::source(&map).is_some());
+    }
+
+    #[test]
+    fn response_storage_refuses_capacity_overflow() {
+        let error = response_text_with_capacity(usize::MAX, "HTTP response body")
+            .expect_err("impossible response capacity must refuse");
+        assert!(matches!(
+            &error,
+            HostError::ResponseStorageAllocationFailed {
+                field: "HTTP response body",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert_eq!(error.http_status(), Some((500, "Internal Server Error")));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn fallible_response_builders_preserve_exact_wire_bytes() {
+        assert_eq!(
+            error_response_body(&HostError::BadRequest("invalid frame")).unwrap(),
+            "bad Studio request: invalid frame\n"
+        );
+
+        let digest = sha256(b"frame");
+        assert_eq!(
+            frame_response_body(17, &digest).unwrap(),
+            "{\"status\":\"frame\",\"frame_index\":17,\"sha256\":\"9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e\"}"
+        );
+        assert_eq!(
+            ack_response_body(3, None).unwrap(),
+            "{\"status\":\"ok\",\"journal_len\":3,\"state_hash\":null}"
+        );
+        assert_eq!(
+            ack_response_body(3, Some(&digest)).unwrap(),
+            "{\"status\":\"ok\",\"journal_len\":3,\"state_hash\":\"9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e\"}"
+        );
+        assert_eq!(
+            worker_error_response_body(WorkerErrorCode::InvalidRequest, "a\"\\\n\u{0007}é",)
+                .unwrap(),
+            r#"{"status":"worker_error","code":"InvalidRequest","message":"a\"\\\n\u0007é"}"#
+        );
+
+        let mut wire = Vec::new();
+        write_response_with_headers(
+            &mut wire,
+            422,
+            "Unprocessable Content",
+            "application/json; charset=utf-8",
+            b"{}\n",
+            &[("X-Test", "value")],
+        )
+        .unwrap();
+        assert_eq!(
+            wire,
+            b"HTTP/1.1 422 Unprocessable Content\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 3\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Test: value\r\n\r\n{}\n"
+        );
     }
 
     #[test]
