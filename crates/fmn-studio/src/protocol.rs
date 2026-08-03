@@ -12,7 +12,9 @@ use std::fmt;
 use std::io::{Read, Write};
 
 use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer, sha256};
-use fmn_scene::{CommandKind, CommandRecord, EventPayload, Journal, Key, Modifiers, MouseButton};
+use fmn_scene::{
+    CommandKind, CommandRecord, EventPayload, Journal, JournalError, Key, Modifiers, MouseButton,
+};
 
 /// Canonical request envelope schema.
 pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 0);
@@ -160,7 +162,7 @@ pub enum ProtocolError {
     /// A decoded payload violated a semantic invariant.
     Malformed(&'static str),
     /// A journal field was not a valid canonical replay journal.
-    InvalidJournal(String),
+    InvalidJournal(JournalError),
 }
 
 impl fmt::Display for ProtocolError {
@@ -216,6 +218,7 @@ impl std::error::Error for ProtocolError {
         match self {
             Self::Serial(error) => Some(error),
             Self::StorageUnavailable { source, .. } => Some(source),
+            Self::InvalidJournal(error) => Some(error),
             _ => None,
         }
     }
@@ -224,6 +227,12 @@ impl std::error::Error for ProtocolError {
 impl From<SerialError> for ProtocolError {
     fn from(error: SerialError) -> Self {
         Self::Serial(error)
+    }
+}
+
+impl From<JournalError> for ProtocolError {
+    fn from(error: JournalError) -> Self {
+        Self::InvalidJournal(error)
     }
 }
 
@@ -492,8 +501,7 @@ impl JournalReplay {
             return Err(ProtocolError::Malformed("replay range is reversed"));
         }
         limit_payload("journal", self.journal.len(), limits.max_journal_bytes)?;
-        let journal = Journal::from_bytes(&self.journal)
-            .map_err(|error| ProtocolError::InvalidJournal(error.to_string()))?;
+        let journal = Journal::from_bytes(&self.journal)?;
         let end = usize::try_from(self.through_entry)
             .map_err(|_| ProtocolError::Malformed("replay range overflows usize"))?;
         if end > journal.entries().len() {
@@ -844,8 +852,7 @@ impl WorkerResponse {
             Self::JournalSegment { scene, journal, .. } => {
                 require_scene(scene)?;
                 limit_payload("journal", journal.len(), limits.max_journal_bytes)?;
-                Journal::from_bytes(journal)
-                    .map_err(|error| ProtocolError::InvalidJournal(error.to_string()))?;
+                Journal::from_bytes(journal)?;
             }
             Self::ReplayComplete { state_hashes, .. } => {
                 limit_count(

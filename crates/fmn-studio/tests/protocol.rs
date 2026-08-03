@@ -3,11 +3,13 @@
 //! malformed ranges fail closed, and the outer pipe rejects oversized lengths
 //! before allocating.
 
+use std::error::Error as _;
 use std::io::Cursor;
 
 use fmn_hash::{Schema, Writer, sha256};
 use fmn_scene::{
-    CommandKind, CommandRecord, EffectClass, Entry, EventPayload, Journal, Key, Modifiers,
+    CommandKind, CommandRecord, EffectClass, Entry, EventPayload, Journal, JournalError, Key,
+    Modifiers,
 };
 use fmn_studio::{
     CURRENT_VERSION, Checkpoint, CrashReport, DebugLayerSet, FrameEncoding, FramePayload,
@@ -349,6 +351,52 @@ fn malformed_semantics_fail_before_crossing_the_pipe() {
         RequestEnvelope::from_bytes(&writer.finish().unwrap(), limits),
         Err(ProtocolError::Malformed("supervisor request tag"))
     ));
+}
+
+#[test]
+fn invalid_journals_preserve_the_typed_source_across_protocol_validation() {
+    let limits = ProtocolLimits::default();
+    let invalid_journal = vec![0];
+    let request_error = request(
+        7,
+        SupervisorRequest::ReplayJournal(JournalReplay {
+            scene: "Demo".to_owned(),
+            from_entry: 0,
+            through_entry: 0,
+            journal: invalid_journal.clone(),
+        }),
+    )
+    .to_bytes(limits)
+    .expect_err("a truncated replay journal must be refused");
+    let response_error = response(
+        8,
+        WorkerResponse::JournalSegment {
+            scene: "Demo".to_owned(),
+            start_entry: 0,
+            journal: invalid_journal,
+        },
+    )
+    .to_bytes(limits)
+    .expect_err("a truncated journal segment must be refused");
+
+    for error in [request_error, response_error] {
+        assert!(matches!(
+            &error,
+            ProtocolError::InvalidJournal(JournalError::Serial(fmn_hash::SerialError::Truncated {
+                need: 56,
+                got: 1
+            }))
+        ));
+        assert_eq!(error.clone(), error);
+        assert_eq!(
+            error.to_string(),
+            "invalid replay journal: journal container: document truncated: need at least 56 bytes, got 1"
+        );
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some("journal container: document truncated: need at least 56 bytes, got 1".to_owned())
+        );
+    }
 }
 
 #[test]

@@ -56,7 +56,7 @@ const MIN_SUBPROCESS_BYTES: u64 = LENGTH_PREFIX_BYTES + DIGEST_BYTES + LENGTH_PR
 const MIN_INPUT_EVENT_BYTES: u64 = 8 + 8 + 4 + 1 + 1 + 4 + 1;
 
 /// A journal failure.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JournalError {
     /// The canonical container refused the bytes.
     Serial(SerialError),
