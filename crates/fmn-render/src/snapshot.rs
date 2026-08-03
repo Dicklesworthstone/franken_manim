@@ -10,9 +10,10 @@
 //! ## What is in the snapshot, and what is deliberately not
 //!
 //! **In:** everything that decides pixels — segment control points and their
-//! arc-length spans, hull bounds, the primitive hint, every interned style
-//! field, and the painter-ordered instance list with its shape, style, affine
-//! placement and order.
+//! arc-length spans, hull bounds, the full primitive hint, retained per-curve
+//! lengths and subpath boundaries, every interned style field, and the
+//! painter-ordered instance list with its shape, style, affine placement,
+//! order, and hint-safety route.
 //!
 //! **Out: handles.** A `Mob` is `(index, generation)` into a slot arena, so it
 //! encodes *allocation history* rather than content — insert an unrelated
@@ -44,7 +45,85 @@ use fmn_hash::{Digest, Schema, Writer};
 /// Bumping the minor version is how a *compatible* IR extension announces
 /// itself; the major version is for a reshape. Either way the digest moves, and
 /// the golden it moves is adjudicated rather than re-blessed.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 2);
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 3);
+
+/// Append one primitive hint with every payload field its kernel consumes.
+///
+/// The diagnostic name alone is not an identity: two circle hints may name
+/// different centres or radii, and the specialized fill kernel reads those
+/// values directly. Keeping this match exhaustive makes a future hint variant
+/// fail compilation until its durable snapshot representation is decided.
+fn put_hint(w: &mut Writer, hint: Hint) {
+    w.put_str(hint.name());
+    let put_center = |w: &mut Writer, center: [f64; 3]| {
+        for component in center {
+            w.put_f64(component);
+        }
+    };
+    match hint {
+        Hint::General | Hint::Line => {}
+        Hint::Polyline { closed } => {
+            w.put_bool(closed);
+        }
+        Hint::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        } => {
+            put_center(w, center);
+            w.put_f64(radius);
+            w.put_f64(start_angle);
+            w.put_f64(angle);
+        }
+        Hint::Circle { center, radius } | Hint::Dot { center, radius } => {
+            put_center(w, center);
+            w.put_f64(radius);
+        }
+        Hint::Rect {
+            center,
+            width,
+            height,
+        } => {
+            put_center(w, center);
+            w.put_f64(width);
+            w.put_f64(height);
+        }
+        Hint::RoundedRect {
+            center,
+            width,
+            height,
+            corner_radius,
+        } => {
+            put_center(w, center);
+            w.put_f64(width);
+            w.put_f64(height);
+            w.put_f64(corner_radius);
+        }
+    }
+}
+
+/// Append one compiled shape row in canonical field order.
+fn put_shape(w: &mut Writer, shape: &crate::table::Shape) {
+    w.put_u32(shape.first_segment);
+    w.put_u32(shape.segment_count);
+    put_hint(w, shape.hint);
+    for v in [shape.bounds.min, shape.bounds.mid, shape.bounds.max] {
+        for c in v {
+            w.put_f64(c);
+        }
+    }
+    w.put_f64(shape.arc_length.total());
+    let curve_lengths = shape.arc_length.curve_lengths();
+    w.put_u64(curve_lengths.len() as u64);
+    for &length in curve_lengths {
+        w.put_f64(length);
+    }
+    w.put_u64(shape.subpath_starts.len() as u64);
+    for &start in &shape.subpath_starts {
+        w.put_u32(start);
+    }
+}
 
 /// Serialize a plan canonically.
 ///
@@ -70,15 +149,7 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
     let shapes = plan.shapes().shapes();
     w.put_u64(shapes.len() as u64);
     for shape in shapes {
-        w.put_u32(shape.first_segment);
-        w.put_u32(shape.segment_count);
-        w.put_str(shape.hint.name());
-        for v in [shape.bounds.min, shape.bounds.mid, shape.bounds.max] {
-            for c in v {
-                w.put_f64(c);
-            }
-        }
-        w.put_f64(shape.arc_length.total());
+        put_shape(&mut w, shape);
     }
 
     let styles = plan.styles().rows();
@@ -124,6 +195,7 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
         for c in i.placement.coefficients() {
             w.put_f64(c);
         }
+        w.put_bool(i.hint_unsafe);
     }
 
     w.finish()
@@ -158,11 +230,14 @@ pub fn describe(plan: &RenderPlan) -> String {
     for (i, shape) in plan.shapes().shapes().iter().enumerate() {
         let _ = writeln!(
             out,
-            "  shape {i}: hint={} segments {}..{} len {:.6} bounds [{:.4},{:.4}]..[{:.4},{:.4}]",
-            shape.hint.name(),
+            "  shape {i}: hint={:?} segments {}..{} len {:.6} curves {:?} subpaths {:?} bounds \
+             [{:.4},{:.4}]..[{:.4},{:.4}]",
+            shape.hint,
             shape.first_segment,
             shape.first_segment + shape.segment_count,
             shape.arc_length.total(),
+            shape.arc_length.curve_lengths(),
+            shape.subpath_starts,
             shape.bounds.min[0],
             shape.bounds.min[1],
             shape.bounds.max[0],
@@ -196,8 +271,8 @@ pub fn describe(plan: &RenderPlan) -> String {
         let placement = inst.placement.coefficients();
         let _ = writeln!(
             out,
-            "  draw {}: shape {} style {} placement {:?}",
-            inst.order, inst.shape, inst.style, placement,
+            "  draw {}: shape {} style {} placement {:?} hint_unsafe {}",
+            inst.order, inst.shape, inst.style, placement, inst.hint_unsafe,
         );
     }
     out
@@ -301,6 +376,13 @@ mod tests {
         plan
     }
 
+    fn encoded_shape(shape: &crate::table::Shape) -> Digest {
+        let mut writer = Writer::new(SNAPSHOT_SCHEMA);
+        put_shape(&mut writer, shape);
+        let bytes = writer.finish().expect("one shape fits the envelope");
+        fmn_hash::sha256(&bytes)
+    }
+
     /// **The IR golden.**
     ///
     /// Bit-locked, per §16.5. If this moves, something in the compiled IR
@@ -330,7 +412,14 @@ mod tests {
     /// placement. The adjudication dump retains the same shapes, styles and
     /// translations; the additional identity coefficients establish the
     /// independent transform-revision channel used by Marionette and Lumen.
-    const FIXTURE_DIGEST: &str = "ec451e59522c46040a2b69d01725eb663991f91c7390935a949756f3c17c3335";
+    ///
+    /// **Moved again, 2026-08-03 (fm-sq8.2).** Snapshot schema 1.3 carries
+    /// every primitive-hint parameter used by a specialized kernel, the full
+    /// retained per-curve arc-length rows, explicit subpath boundaries, and
+    /// each instance's hint-safety route. The adjudication dump now exposes
+    /// those same fields: the fixture has two straight lengths, sixteen circle
+    /// lengths, one subpath per shape, and no unsafe instance.
+    const FIXTURE_DIGEST: &str = "89666aa7aec6518b11099e78f71366175214395a94e791f0a3bac15600b9b14d";
 
     #[test]
     fn the_fixture_ir_is_bit_locked() {
@@ -421,6 +510,119 @@ mod tests {
         let mut plan2 = RenderPlan::new();
         sync_valid(&mut plan2, &stage2, 0);
         assert_ne!(digest(&plan2).expect("encodes"), before);
+    }
+
+    #[test]
+    fn the_snapshot_moves_when_only_a_hint_payload_moves() {
+        let compile = |radius| {
+            let mut stage = fixture();
+            let circle = stage.draw_plan().items().last().expect("circle").mob;
+            stage.set_shape(
+                circle,
+                ShapeTag::Circle {
+                    center: [30.0, 0.0, 0.0],
+                    radius,
+                },
+            );
+            let mut plan = RenderPlan::new();
+            sync_valid(&mut plan, &stage, 0);
+            plan
+        };
+
+        let exact = compile(1.0);
+        let changed = compile(1.005);
+        assert_ne!(
+            exact.shapes().shapes()[1].hint,
+            changed.shapes().shapes()[1].hint,
+            "the fixture must differ only in the live hint payload"
+        );
+        assert_ne!(
+            digest(&exact).expect("exact hint encodes"),
+            digest(&changed).expect("changed hint encodes"),
+            "pixel-deciding hint parameters must participate in the IR golden"
+        );
+        assert_ne!(
+            describe(&exact),
+            describe(&changed),
+            "the adjudication dump must expose the payload that moved the digest"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_moves_when_only_subpath_boundaries_move() {
+        let plan = synced();
+        let exact = &plan.shapes().shapes()[1];
+        let mut changed = exact.clone();
+        changed.subpath_starts.push(exact.segment_count / 2);
+        assert_ne!(
+            exact.subpath_starts, changed.subpath_starts,
+            "the fixture must differ only in explicit winding boundaries"
+        );
+        assert_ne!(
+            encoded_shape(exact),
+            encoded_shape(&changed),
+            "subpath boundaries must participate in the IR golden"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_moves_when_only_per_curve_arc_lengths_move() {
+        let path = |split| {
+            let mut path = fmn_geom::quadpath::QuadPath::new();
+            path.start_new_path([0.0, 0.0, 0.0]);
+            if split {
+                path.add_line_to([1.0, 0.0, 0.0], false)
+                    .expect("first line");
+            }
+            path.add_line_to([2.0, 0.0, 0.0], false).expect("last line");
+            fmn_geom::arclength::ArcLengthTable::for_path(&path)
+        };
+        let one_curve = path(false);
+        let two_curves = path(true);
+        assert_eq!(one_curve.total(), two_curves.total());
+        assert_ne!(one_curve.curve_lengths(), two_curves.curve_lengths());
+
+        let plan = synced();
+        let mut one = plan.shapes().shapes()[1].clone();
+        let mut two = one.clone();
+        one.arc_length = one_curve;
+        two.arc_length = two_curves;
+        assert_ne!(
+            encoded_shape(&one),
+            encoded_shape(&two),
+            "the full retained arc-length table must participate in the IR golden"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_moves_when_a_live_point_view_disables_hints() {
+        let mut stage = fixture();
+        let circle = stage.draw_plan().items().last().expect("circle").mob;
+        let mut plan = RenderPlan::new();
+        sync_valid(&mut plan, &stage, 0);
+        let before = digest(&plan).expect("clean plan encodes");
+        let retained_hint = plan.shapes().shapes()[1].hint;
+
+        let point_view = stage
+            .get_mut(circle)
+            .expect("live circle")
+            .buffer
+            .export_field_view("point", true)
+            .expect("point field");
+        sync_valid(&mut plan, &stage, 0);
+        let instance = plan.shapes().instances().last().expect("circle instance");
+        assert!(instance.hint_unsafe);
+        assert_eq!(
+            plan.shapes().shapes()[1].hint,
+            retained_hint,
+            "interning must retain the compiled shape so only the instance safety bit moves"
+        );
+        assert_ne!(
+            digest(&plan).expect("live-view plan encodes"),
+            before,
+            "the flag selecting the general pixel path must participate in the IR golden"
+        );
+        drop(point_view);
     }
 
     #[test]
@@ -582,6 +784,94 @@ mod tests {
                 corner_radius: 0.1
             },
         ]));
+    }
+
+    #[test]
+    fn every_hint_payload_field_moves_the_snapshot_encoding() {
+        let encoded = |hint| {
+            let mut writer = Writer::new(SNAPSHOT_SCHEMA);
+            put_hint(&mut writer, hint);
+            writer.finish().expect("one hint fits the envelope")
+        };
+        let arc = |center, radius, start_angle, angle| Hint::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        };
+        let circle = |center, radius| Hint::Circle { center, radius };
+        let dot = |center, radius| Hint::Dot { center, radius };
+        let rect = |center, width, height| Hint::Rect {
+            center,
+            width,
+            height,
+        };
+        let rounded = |center, width, height, corner_radius| Hint::RoundedRect {
+            center,
+            width,
+            height,
+            corner_radius,
+        };
+        let arc_base = arc([0.0; 3], 1.0, 0.0, 1.0);
+        let circle_base = circle([0.0; 3], 1.0);
+        let dot_base = dot([0.0; 3], 1.0);
+        let rect_base = rect([0.0; 3], 1.0, 2.0);
+        let rounded_base = rounded([0.0; 3], 1.0, 2.0, 0.25);
+        let cases = [
+            (
+                "polyline.closed",
+                Hint::Polyline { closed: false },
+                Hint::Polyline { closed: true },
+            ),
+            (
+                "arc.center.x",
+                arc_base,
+                arc([1.0, 0.0, 0.0], 1.0, 0.0, 1.0),
+            ),
+            (
+                "arc.center.y",
+                arc_base,
+                arc([0.0, 1.0, 0.0], 1.0, 0.0, 1.0),
+            ),
+            (
+                "arc.center.z",
+                arc_base,
+                arc([0.0, 0.0, 1.0], 1.0, 0.0, 1.0),
+            ),
+            ("arc.radius", arc_base, arc([0.0; 3], 2.0, 0.0, 1.0)),
+            ("arc.start_angle", arc_base, arc([0.0; 3], 1.0, 0.5, 1.0)),
+            ("arc.angle", arc_base, arc([0.0; 3], 1.0, 0.0, 2.0)),
+            ("circle.center", circle_base, circle([1.0, 0.0, 0.0], 1.0)),
+            ("circle.radius", circle_base, circle([0.0; 3], 2.0)),
+            ("dot.center", dot_base, dot([1.0, 0.0, 0.0], 1.0)),
+            ("dot.radius", dot_base, dot([0.0; 3], 2.0)),
+            ("rect.center", rect_base, rect([1.0, 0.0, 0.0], 1.0, 2.0)),
+            ("rect.width", rect_base, rect([0.0; 3], 3.0, 2.0)),
+            ("rect.height", rect_base, rect([0.0; 3], 1.0, 3.0)),
+            (
+                "rounded_rect.center",
+                rounded_base,
+                rounded([1.0, 0.0, 0.0], 1.0, 2.0, 0.25),
+            ),
+            (
+                "rounded_rect.width",
+                rounded_base,
+                rounded([0.0; 3], 3.0, 2.0, 0.25),
+            ),
+            (
+                "rounded_rect.height",
+                rounded_base,
+                rounded([0.0; 3], 1.0, 3.0, 0.25),
+            ),
+            (
+                "rounded_rect.corner_radius",
+                rounded_base,
+                rounded([0.0; 3], 1.0, 2.0, 0.5),
+            ),
+        ];
+        for (field, before, after) in cases {
+            assert_ne!(encoded(before), encoded(after), "missing {field}");
+        }
     }
 
     #[test]
