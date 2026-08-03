@@ -457,7 +457,9 @@ impl ChildPipeChannel {
     fn terminal_framing_error(&mut self, error: FramingError) -> ChannelError {
         let kind = match &error {
             FramingError::Closed => ChannelFailureKind::Closed,
-            FramingError::Io(_) => ChannelFailureKind::Io,
+            FramingError::Io(_) | FramingError::FrameStorageAllocationFailed { .. } => {
+                ChannelFailureKind::Io
+            }
             FramingError::FrameTooLarge { .. } | FramingError::Protocol(_) => {
                 ChannelFailureKind::Protocol
             }

@@ -7,6 +7,7 @@
 //! inline through the same pipe or out-of-band through an opaque shared-memory
 //! token.  No filesystem path crosses this boundary.
 
+use std::collections::TryReserveError;
 use std::fmt;
 use std::io::{Read, Write};
 
@@ -222,6 +223,13 @@ pub enum FramingError {
         /// Declared frame length.
         needed: u64,
     },
+    /// Storage for an admitted frame could not be reserved.
+    FrameStorageAllocationFailed {
+        /// Declared frame bytes requested from the allocator.
+        bytes: usize,
+        /// Allocation refusal.
+        error: TryReserveError,
+    },
     /// The canonical payload was invalid.
     Protocol(ProtocolError),
 }
@@ -235,6 +243,10 @@ impl fmt::Display for FramingError {
                 f,
                 "worker IPC frame declares {needed} bytes, over the {limit}-byte limit"
             ),
+            Self::FrameStorageAllocationFailed { bytes, error } => write!(
+                f,
+                "worker IPC frame could not reserve {bytes} bytes of storage: {error}"
+            ),
             Self::Protocol(error) => error.fmt(f),
         }
     }
@@ -244,6 +256,7 @@ impl std::error::Error for FramingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::FrameStorageAllocationFailed { error, .. } => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Closed | Self::FrameTooLarge { .. } => None,
         }
@@ -1020,7 +1033,11 @@ fn read_document(reader: &mut impl Read, limits: ProtocolLimits) -> Result<Vec<u
         limit: limits.max_message_bytes,
         needed: declared,
     })?;
-    let mut bytes = vec![0u8; len];
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|error| FramingError::FrameStorageAllocationFailed { bytes: len, error })?;
+    bytes.resize(len, 0);
     reader.read_exact(&mut bytes)?;
     Ok(bytes)
 }

@@ -458,6 +458,23 @@ fn length_framing_round_trips_and_rejects_oversize_before_allocation() {
 }
 
 #[test]
+fn admitted_frame_storage_refusal_is_typed_before_payload_read() {
+    let needed = usize::MAX;
+    let limits = ProtocolLimits {
+        max_message_bytes: needed,
+        ..ProtocolLimits::default()
+    };
+    let prefix = u64::try_from(needed)
+        .expect("supported targets represent usize in the wire width")
+        .to_le_bytes();
+
+    assert!(matches!(
+        read_request(&mut Cursor::new(prefix), limits),
+        Err(FramingError::FrameStorageAllocationFailed { bytes, .. }) if bytes == needed
+    ));
+}
+
+#[test]
 fn response_collection_counts_are_preflighted_before_reserve() {
     let limits = ProtocolLimits::default();
 
