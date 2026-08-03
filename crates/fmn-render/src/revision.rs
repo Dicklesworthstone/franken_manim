@@ -387,20 +387,24 @@ pub(crate) fn mix(values: &[u64]) -> u64 {
 /// `0.1 + 0.2` with `0.3` would silently change how many draw calls a scene
 /// takes — a difference the Parity Ledger would have to explain.
 fn uniform_key(u: &Uniforms) -> u64 {
-    let mut parts: Vec<u64> = Vec::with_capacity(24);
-    parts.push(u.is_fixed_in_frame.to_bits());
-    parts.extend(u.shading.iter().map(|v| v.to_bits()));
-    for plane in &u.clip_planes {
-        parts.extend(plane.iter().map(|v| v.to_bits()));
+    let mut mixer = Mixer::new();
+    mixer.write_u64(u.is_fixed_in_frame.to_bits());
+    for value in u.shading {
+        mixer.write_u64(value.to_bits());
     }
-    parts.push(u.anti_alias_width.to_bits());
-    parts.push(u.joint_type.to_code() as u64);
-    parts.push(u.flat_stroke as u64);
-    parts.push(u.scale_stroke_with_zoom as u64);
-    parts.push(u.stroke_behind as u64);
-    parts.push(u.depth_test as u64);
-    parts.push(u.use_winding_fill as u64);
-    mix(&parts)
+    for plane in &u.clip_planes {
+        for value in plane {
+            mixer.write_u64(value.to_bits());
+        }
+    }
+    mixer.write_u64(u.anti_alias_width.to_bits());
+    mixer.write_u64(u.joint_type.to_code() as u64);
+    mixer.write_u64(u.flat_stroke as u64);
+    mixer.write_u64(u.scale_stroke_with_zoom as u64);
+    mixer.write_u64(u.stroke_behind as u64);
+    mixer.write_u64(u.depth_test as u64);
+    mixer.write_u64(u.use_winding_fill as u64);
+    mixer.finish()
 }
 
 #[cfg(test)]
@@ -445,6 +449,24 @@ mod tests {
         state
     }
 
+    fn legacy_uniform_key(u: &Uniforms) -> u64 {
+        let mut parts = Vec::with_capacity(27);
+        parts.push(u.is_fixed_in_frame.to_bits());
+        parts.extend(u.shading.iter().map(|value| value.to_bits()));
+        for plane in &u.clip_planes {
+            parts.extend(plane.iter().map(|value| value.to_bits()));
+        }
+        parts.push(u.anti_alias_width.to_bits());
+        parts.push(u.joint_type.to_code() as u64);
+        parts.push(u.flat_stroke as u64);
+        parts.push(u.scale_stroke_with_zoom as u64);
+        parts.push(u.stroke_behind as u64);
+        parts.push(u.depth_test as u64);
+        parts.push(u.use_winding_fill as u64);
+        assert_eq!(parts.len(), 27, "the locked uniform stream changed width");
+        legacy_mix(&parts)
+    }
+
     #[test]
     fn incremental_mixing_preserves_the_existing_key_bits() {
         let cases: &[&[u64]] = &[
@@ -464,6 +486,33 @@ mod tests {
             assert_eq!(incremental.finish(), expected, "values={values:?}");
             assert_eq!(mix(values), expected, "slice adapter drifted");
         }
+    }
+
+    #[test]
+    fn uniform_key_streams_every_field_in_the_legacy_order() {
+        let uniforms = Uniforms {
+            is_fixed_in_frame: 0.125,
+            shading: [0.25, 0.375, 0.5],
+            clip_planes: [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+                [9.0, 10.0, 11.0, 12.0],
+                [13.0, 14.0, 15.0, 16.0],
+            ],
+            anti_alias_width: 1.75,
+            joint_type: fmn_mobject::JointType::Miter,
+            flat_stroke: true,
+            scale_stroke_with_zoom: false,
+            stroke_behind: true,
+            depth_test: false,
+            use_winding_fill: true,
+        };
+
+        assert_eq!(
+            uniform_key(&Uniforms::default()),
+            legacy_uniform_key(&Uniforms::default())
+        );
+        assert_eq!(uniform_key(&uniforms), legacy_uniform_key(&uniforms));
     }
 
     #[test]
