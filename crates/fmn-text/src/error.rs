@@ -21,6 +21,13 @@ pub enum TextError {
         /// The families the book can serve.
         available: Vec<String>,
     },
+    /// A user family name would resolve to an already registered family.
+    FontFamilyConflict {
+        /// The family name the caller tried to register.
+        requested: String,
+        /// The existing canonical family that wins lookup for that name.
+        existing: String,
+    },
     /// A user font file failed to parse.
     FontParse {
         /// The path as given.
@@ -56,6 +63,14 @@ impl core::fmt::Display for TextError {
                 "font family '{family}' is not available; bundled families: {} \
                  (load a TTF by path to add one — nothing is ever silently substituted)",
                 available.join(", ")
+            ),
+            Self::FontFamilyConflict {
+                requested,
+                existing,
+            } => write!(
+                f,
+                "font family '{requested}' conflicts with already registered family \
+                 '{existing}' after canonical name and alias normalization"
             ),
             Self::FontParse { path, what } => {
                 write!(f, "font file '{path}' failed to parse: {what}")

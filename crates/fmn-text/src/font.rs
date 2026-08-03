@@ -139,8 +139,21 @@ impl FontBook {
     ///
     /// # Errors
     ///
+    /// [`TextError::FontFamilyConflict`] when lookup would resolve the name to
+    /// an existing canonical family or alias.
     /// [`TextError::FontParse`] when the bytes are not a usable font.
     pub fn add_family(&mut self, name: &str, bytes: Vec<u8>) -> Result<(), TextError> {
+        let want = normalize(name);
+        if let Some(existing) = self
+            .families
+            .iter()
+            .find(|family| matches_normalized_name(family, &want))
+        {
+            return Err(TextError::FontFamilyConflict {
+                requested: name.to_owned(),
+                existing: existing.name.clone(),
+            });
+        }
         let font = fmd_font::Font::parse(bytes).map_err(|e| TextError::FontParse {
             path: name.to_owned(),
             what: e.to_string(),
@@ -176,10 +189,10 @@ impl FontBook {
     /// [`TextError::FontUnavailable`] naming the request and the roster.
     pub fn family(&self, name: &str) -> Result<&Family, TextError> {
         let want = normalize(name);
-        let hit = self.families.iter().find(|f| {
-            let have = normalize(&f.name);
-            have == want || aliases(&f.name).iter().any(|a| normalize(a) == want)
-        });
+        let hit = self
+            .families
+            .iter()
+            .find(|family| matches_normalized_name(family, &want));
         hit.ok_or_else(|| TextError::FontUnavailable {
             family: name.to_owned(),
             available: self.families.iter().map(|f| f.name.clone()).collect(),
@@ -198,6 +211,13 @@ fn normalize(name: &str) -> String {
         .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn matches_normalized_name(family: &Family, want: &str) -> bool {
+    normalize(&family.name) == want
+        || aliases(&family.name)
+            .iter()
+            .any(|alias| normalize(alias) == want)
 }
 
 fn aliases(canonical: &str) -> &'static [&'static str] {

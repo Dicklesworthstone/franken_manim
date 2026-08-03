@@ -110,6 +110,52 @@ fn bundled_family_aliases_resolve() {
     assert!(book.family("Papyrus").is_err());
 }
 
+#[test]
+fn user_family_registration_refuses_unselectable_names() {
+    let bytes = fmd_font::bundled::CM_TYPEWRITER.to_vec();
+    let mut book = book();
+    let initial_families = book.available();
+
+    for (name, font_bytes) in [
+        ("computer-modern", Vec::new()),
+        ("CMU Serif", bytes.clone()),
+    ] {
+        let error = book.add_family(name, font_bytes).unwrap_err();
+        match error {
+            TextError::FontFamilyConflict {
+                requested,
+                existing,
+            } => {
+                assert_eq!(requested, name);
+                assert_eq!(existing, "Computer Modern");
+            }
+            other => std::panic::panic_any(format!("expected FontFamilyConflict, got {other}")),
+        }
+        assert_eq!(book.available(), initial_families);
+    }
+
+    book.add_family("My Face", bytes.clone())
+        .expect("a distinct family is admitted");
+    assert_eq!(book.family("my_face").unwrap().name, "My Face");
+    let duplicate = book.add_family("my face", Vec::new()).unwrap_err();
+    assert!(matches!(
+        duplicate,
+        TextError::FontFamilyConflict {
+            ref requested,
+            ref existing,
+        } if requested == "my face" && existing == "My Face"
+    ));
+    assert_eq!(book.available().len(), initial_families.len() + 1);
+
+    let malformed = book
+        .add_family("Broken Face", bytes[..32].to_vec())
+        .unwrap_err();
+    assert!(matches!(
+        malformed,
+        TextError::FontParse { ref path, .. } if path == "Broken Face"
+    ));
+}
+
 // ── Line breaking (manim width semantics) ───────────────────────────────
 
 #[test]
