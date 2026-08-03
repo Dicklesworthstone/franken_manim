@@ -22,16 +22,190 @@
 //! IEEE-754 bits — a cache hit reproduces the layout **bit-for-bit**
 //! (tested), which is what lets the cache key participate in the certified
 //! input closure: a hit is definitionally equivalent to a recompute.
-//! Decoding is total: corrupt bytes return `None` (the cache treats that
-//! as a miss), never a panic.
+//! Encoding and decoding are total and allocation-fallible: corrupt,
+//! non-canonical, over-limit, or temporarily unallocatable documents return
+//! a typed [`TypesetError`] (the cache treats every one as a miss), never a
+//! partial payload or a panic.
 
 use fmd_math::{Layout, PathContour, PathSeg, PlacedGlyph, PlacedPath, PlacedRule, Span};
+use std::collections::TryReserveError;
+use std::fmt;
+use std::str::Utf8Error;
 
 /// The serialization format tag; bump on any layout change to the byte
 /// format (the cache namespace version rides this).
 pub const TYPESET_FORMAT_VERSION: u32 = 1;
 
+/// Maximum encoded FMNTEX document size.
+///
+/// This matches fmn-hash's canonical field ceiling. A larger in-memory
+/// layout remains usable, but deliberately goes uncached.
+pub const TYPESET_DOCUMENT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 const MAGIC: &[u8; 8] = b"FMNTEX\x00\x01";
+const U32_BYTES: usize = 4;
+const F64_BYTES: usize = 8;
+const GLYPH_BYTES: usize = 44;
+const RULE_BYTES: usize = 40;
+const PATH_MIN_BYTES: usize = 12;
+const CONTOUR_MIN_BYTES: usize = 20;
+const LINE_SEGMENT_BYTES: usize = 17;
+const QUAD_SEGMENT_BYTES: usize = 33;
+
+/// Failure to construct, encode, or decode a [`Typeset`] document.
+#[derive(Debug)]
+pub enum TypesetError {
+    /// The encoded document exceeds the format's fixed resource ceiling.
+    DocumentTooLarge {
+        /// Required or supplied document bytes.
+        bytes: usize,
+        /// Maximum admitted document bytes.
+        limit: usize,
+    },
+    /// A public count or source offset cannot be represented by the wire's
+    /// fixed-width `u32` field.
+    IntegerOutOfRange {
+        /// Field that cannot be represented.
+        field: &'static str,
+        /// In-memory value that was refused.
+        value: usize,
+    },
+    /// Aggregate encoded or in-memory size arithmetic overflowed.
+    SizeOverflow {
+        /// Aggregate whose size could not be represented.
+        context: &'static str,
+    },
+    /// Required owned storage could not be reserved.
+    AllocationFailed {
+        /// Storage being reserved.
+        context: &'static str,
+        /// Elements or bytes requested, as named by `context`.
+        requested: usize,
+        /// Allocator refusal.
+        error: TryReserveError,
+    },
+    /// The format magic/version tag is not FMNTEX v1.
+    InvalidMagic,
+    /// A fixed or declared field ran past the supplied document.
+    UnexpectedEnd {
+        /// Bytes requested by the field.
+        requested: usize,
+        /// Bytes still available.
+        remaining: usize,
+    },
+    /// The source field is not UTF-8.
+    InvalidUtf8 {
+        /// UTF-8 validation failure.
+        error: Utf8Error,
+    },
+    /// A collection count cannot fit in the bytes still present even at its
+    /// smallest legal item encoding.
+    ImpossibleCount {
+        /// Collection carrying the count.
+        field: &'static str,
+        /// Declared item count.
+        count: usize,
+        /// Smallest bytes per item.
+        minimum_item_bytes: usize,
+        /// Bytes remaining after the count.
+        remaining_bytes: usize,
+    },
+    /// A path segment carries no defined FMNTEX tag.
+    InvalidSegmentTag {
+        /// Refused tag byte.
+        tag: u8,
+    },
+    /// Bytes remain after the single canonical document.
+    TrailingBytes {
+        /// Unconsumed byte count.
+        bytes: usize,
+    },
+    /// Public or decoded data has no canonical FMNTEX representation.
+    NonCanonical {
+        /// Field or table that failed validation.
+        field: &'static str,
+        /// Stable refusal reason.
+        reason: &'static str,
+    },
+    /// A redundant structural count disagrees with the canonical layout.
+    CountMismatch {
+        /// Count being checked.
+        field: &'static str,
+        /// Count implied by the layout.
+        expected: usize,
+        /// Count carried by the document or public table.
+        actual: usize,
+    },
+}
+
+impl fmt::Display for TypesetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DocumentTooLarge { bytes, limit } => {
+                write!(f, "FMNTEX document has {bytes} bytes; limit is {limit}")
+            }
+            Self::IntegerOutOfRange { field, value } => {
+                write!(f, "FMNTEX {field} value {value} does not fit u32")
+            }
+            Self::SizeOverflow { context } => {
+                write!(f, "FMNTEX {context} size overflowed usize")
+            }
+            Self::AllocationFailed {
+                context,
+                requested,
+                error,
+            } => write!(
+                f,
+                "FMNTEX could not reserve {requested} units for {context}: {error}"
+            ),
+            Self::InvalidMagic => f.write_str("not an FMNTEX v1 document"),
+            Self::UnexpectedEnd {
+                requested,
+                remaining,
+            } => write!(
+                f,
+                "FMNTEX field needs {requested} bytes but only {remaining} remain"
+            ),
+            Self::InvalidUtf8 { error } => write!(f, "FMNTEX source is not UTF-8: {error}"),
+            Self::ImpossibleCount {
+                field,
+                count,
+                minimum_item_bytes,
+                remaining_bytes,
+            } => write!(
+                f,
+                "FMNTEX {field} count {count} needs at least {minimum_item_bytes} bytes per item, but only {remaining_bytes} bytes remain"
+            ),
+            Self::InvalidSegmentTag { tag } => {
+                write!(f, "FMNTEX path segment tag {tag} is undefined")
+            }
+            Self::TrailingBytes { bytes } => {
+                write!(f, "FMNTEX document has {bytes} trailing bytes")
+            }
+            Self::NonCanonical { field, reason } => {
+                write!(f, "FMNTEX {field} is non-canonical: {reason}")
+            }
+            Self::CountMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "FMNTEX {field} count is {actual}; canonical layout requires {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TypesetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AllocationFailed { error, .. } => Some(error),
+            Self::InvalidUtf8 { error } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Which primitive a submobject is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,10 +240,16 @@ pub struct Typeset {
 
 impl Typeset {
     /// Build the submobject table over a layout.
-    #[must_use]
-    pub fn new(source: String, layout: Layout) -> Self {
-        let mut subs =
-            Vec::with_capacity(layout.glyphs.len() + layout.rules.len() + layout.paths.len());
+    ///
+    /// # Errors
+    ///
+    /// [`TypesetError::SizeOverflow`] if the primitive counts cannot be
+    /// aggregated, or [`TypesetError::AllocationFailed`] if the canonical
+    /// submobject table cannot be reserved.
+    pub fn new(source: String, layout: Layout) -> Result<Self, TypesetError> {
+        let sub_count = primitive_count(&layout)?;
+        let mut subs = Vec::new();
+        reserve_exact(&mut subs, sub_count, "submobject table")?;
         for (i, g) in layout.glyphs.iter().enumerate() {
             subs.push(Sub {
                 prim: Prim::Glyph(i),
@@ -88,11 +268,24 @@ impl Typeset {
                 span: p.span,
             });
         }
-        Self {
+        Ok(Self {
             source,
             layout,
             subs,
-        }
+        })
+    }
+
+    pub(crate) fn from_borrowed(source: &str, layout: Layout) -> Result<Self, TypesetError> {
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(source.len())
+            .map_err(|error| TypesetError::AllocationFailed {
+                context: "source string",
+                requested: source.len(),
+                error,
+            })?;
+        owned.push_str(source);
+        Self::new(owned, layout)
     }
 
     /// The submobject ordinals selected by each occurrence of `needle` in

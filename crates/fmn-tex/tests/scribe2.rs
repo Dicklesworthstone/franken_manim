@@ -152,6 +152,37 @@ fn the_codec_round_trips_exactly() {
 }
 
 #[test]
+fn the_codec_refuses_a_noncanonical_public_submobject_table() {
+    let e = engine();
+    let mut t = e
+        .typeset(Mode::Math(Style::Display), "x")
+        .unwrap();
+    assert!(!t.subs.is_empty());
+    t.subs[0].prim = fmn_tex::Prim::Glyph(usize::MAX);
+
+    assert!(
+        Typeset::from_bytes(&t.to_bytes()).is_none(),
+        "serialization must not silently discard a public submobject mutation"
+    );
+}
+
+#[test]
+fn the_codec_refuses_spans_that_do_not_fit_its_wire_width() {
+    let e = engine();
+    let mut t = e
+        .typeset(Mode::Math(Style::Display), "x")
+        .unwrap();
+    let wide = fmn_tex::Span::new(usize::MAX, usize::MAX);
+    t.layout.glyphs[0].span = wide;
+    t.subs[0].span = wide;
+
+    assert!(
+        Typeset::from_bytes(&t.to_bytes()).is_none(),
+        "serialization must not saturate a wide span into a different value"
+    );
+}
+
+#[test]
 fn corrupt_cache_payloads_decode_to_none_never_panic() {
     let e = engine();
     let t = e
