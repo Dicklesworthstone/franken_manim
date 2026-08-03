@@ -13,7 +13,7 @@
 //! It is not exposed to scene code and cannot be used as an external-tool
 //! escape hatch.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -727,6 +727,15 @@ pub enum SupervisorError {
     InvalidSession(&'static str),
     /// A worker journal segment could not be decoded or reconstructed.
     InvalidJournal(JournalError),
+    /// Supervisor-owned recovery storage could not grow.
+    StorageUnavailable {
+        /// Stable name of the refused collection or byte field.
+        collection: &'static str,
+        /// Additional elements or bytes requested.
+        additional: usize,
+        /// Allocator refusal.
+        source: TryReserveError,
+    },
 }
 
 impl fmt::Display for SupervisorError {
@@ -757,6 +766,14 @@ impl fmt::Display for SupervisorError {
             Self::InvalidJournal(error) => {
                 write!(f, "invalid worker journal segment: {error}")
             }
+            Self::StorageUnavailable {
+                collection,
+                additional,
+                source,
+            } => write!(
+                f,
+                "Studio could not reserve {additional} additional {collection}: {source}"
+            ),
         }
     }
 }
@@ -770,6 +787,7 @@ impl std::error::Error for SupervisorError {
             Self::Protocol(error) => Some(error),
             Self::Serial(error) => Some(error),
             Self::InvalidJournal(error) => Some(error),
+            Self::StorageUnavailable { source, .. } => Some(source),
             Self::NoWorker
             | Self::NoSession
             | Self::RequestIdExhausted
@@ -825,6 +843,103 @@ struct StoredCheckpoint {
     fallback: Vec<u8>,
 }
 
+#[derive(Debug, Default)]
+struct CheckpointTable {
+    rows: Vec<(usize, StoredCheckpoint)>,
+}
+
+impl CheckpointTable {
+    fn try_with_capacity(additional: usize) -> Result<Self, SupervisorError> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(additional).map_err(|source| {
+            SupervisorError::StorageUnavailable {
+                collection: "checkpoint rows",
+                additional,
+                source,
+            }
+        })?;
+        Ok(Self { rows })
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&StoredCheckpoint> {
+        self.rows
+            .binary_search_by_key(&index, |(row_index, _)| *row_index)
+            .ok()
+            .and_then(|position| self.rows.get(position))
+            .map(|(_, stored)| stored)
+    }
+
+    fn try_insert_with(
+        &mut self,
+        index: usize,
+        make: impl FnOnce() -> StoredCheckpoint,
+    ) -> Result<(), SupervisorError> {
+        match self
+            .rows
+            .binary_search_by_key(&index, |(row_index, _)| *row_index)
+        {
+            Ok(position) => {
+                let Some((_, stored)) = self.rows.get_mut(position) else {
+                    return Err(SupervisorError::InvalidSession(
+                        "checkpoint table search returned an invalid position",
+                    ));
+                };
+                *stored = make();
+            }
+            Err(position) => {
+                self.rows
+                    .try_reserve(1)
+                    .map_err(|source| SupervisorError::StorageUnavailable {
+                        collection: "checkpoint rows",
+                        additional: 1,
+                        source,
+                    })?;
+                // ubs:ignore - binary_search insertion positions are always at most len.
+                self.rows.insert(position, (index, make()));
+            }
+        }
+        Ok(())
+    }
+
+    fn warm(&mut self, cache: &Namespace) {
+        for (_, stored) in &mut self.rows {
+            stored.blob_digest = cache
+                .put_blob(&stored.fallback)
+                .ok()
+                // ubs:ignore - this digest is a public state integrity identifier.
+                .filter(|digest| *digest == stored.state_hash);
+        }
+    }
+}
+
+fn checkpoint_bytes_scratch(
+    additional: usize,
+    collection: &'static str,
+) -> Result<Vec<u8>, SupervisorError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(additional)
+        .map_err(|source| SupervisorError::StorageUnavailable {
+            collection,
+            additional,
+            source,
+        })?;
+    Ok(bytes)
+}
+
+fn try_clone_checkpoint_bytes(
+    source: &[u8],
+    collection: &'static str,
+) -> Result<Vec<u8>, SupervisorError> {
+    let mut bytes = checkpoint_bytes_scratch(source.len(), collection)?;
+    bytes.extend_from_slice(source);
+    Ok(bytes)
+}
+
 /// Stable Studio supervisor.
 pub struct Supervisor {
     launcher: Box<dyn WorkerLauncher>,
@@ -837,7 +952,7 @@ pub struct Supervisor {
     next_request_id: u64,
     scene: Option<String>,
     journal: Journal,
-    checkpoints: BTreeMap<usize, StoredCheckpoint>,
+    checkpoints: CheckpointTable,
     journal_cache_digest: Option<Digest>,
     crashes: Vec<CrashReport>,
     transports: Option<TransportCapabilities>,
@@ -879,7 +994,7 @@ impl Supervisor {
             next_request_id: 1,
             scene: None,
             journal: Journal::new(),
-            checkpoints: BTreeMap::new(),
+            checkpoints: CheckpointTable::default(),
             journal_cache_digest: None,
             crashes: Vec::new(),
             transports: None,
@@ -961,8 +1076,8 @@ impl Supervisor {
             .protocol_limits
             .max_checkpoint_bytes
             .min(self.config.protocol_limits.max_field_bytes);
-        let mut validated = Vec::new();
-        for (index, entry) in journal.entries().iter().enumerate() {
+        let mut checkpoint_count = 0usize;
+        for entry in journal.entries() {
             if let Some(state) = &entry.checkpoint {
                 if state.len() > checkpoint_limit {
                     return Err(SupervisorError::InvalidSession(
@@ -974,13 +1089,23 @@ impl Supervisor {
                         "checkpoint bytes do not match their state hash",
                     ));
                 }
-                validated.push((index, entry.state_hash, state.clone()));
+                checkpoint_count += 1;
             }
         }
-        let mut checkpoints = BTreeMap::new();
-        for (index, state_hash, state) in validated {
-            checkpoints.insert(index, self.stored_checkpoint(state_hash, state));
+        let mut checkpoints = CheckpointTable::try_with_capacity(checkpoint_count)?;
+        for (index, entry) in journal.entries().iter().enumerate() {
+            let Some(state) = &entry.checkpoint else {
+                continue;
+            };
+            let fallback =
+                try_clone_checkpoint_bytes(state, "installed checkpoint fallback bytes")?;
+            checkpoints.try_insert_with(index, || StoredCheckpoint {
+                state_hash: entry.state_hash,
+                blob_digest: None,
+                fallback,
+            })?;
         }
+        checkpoints.warm(&self.checkpoint_cache);
         let journal_cache_digest = self.checkpoint_cache.put_blob(&journal_bytes).ok();
 
         // Commit only after the complete incoming session has validated, so a
@@ -1380,7 +1505,9 @@ impl Supervisor {
                 "worker checkpoint does not match the journal entry state hash",
             ));
         }
-        self.store_checkpoint(index, checkpoint.state_hash, checkpoint.state.clone());
+        let state =
+            try_clone_checkpoint_bytes(&checkpoint.state, "worker checkpoint fallback bytes")?;
+        self.store_checkpoint(index, checkpoint.state_hash, state)?;
         Ok(())
     }
 
@@ -1417,30 +1544,32 @@ impl Supervisor {
         self.install_session(scene.to_owned(), merged)
     }
 
-    fn store_checkpoint(&mut self, index: usize, state_hash: Digest, state: Vec<u8>) {
-        let stored = self.stored_checkpoint(state_hash, state);
-        self.checkpoints.insert(index, stored);
-    }
-
-    fn stored_checkpoint(&self, state_hash: Digest, state: Vec<u8>) -> StoredCheckpoint {
-        let blob_digest = self
-            .checkpoint_cache
-            .put_blob(&state)
-            .ok()
-            // ubs:ignore - this digest is a public state integrity identifier.
-            .filter(|digest| *digest == state_hash);
-        StoredCheckpoint {
-            state_hash,
-            blob_digest,
-            fallback: state,
-        }
+    fn store_checkpoint(
+        &mut self,
+        index: usize,
+        state_hash: Digest,
+        state: Vec<u8>,
+    ) -> Result<(), SupervisorError> {
+        let checkpoint_cache = &self.checkpoint_cache;
+        self.checkpoints.try_insert_with(index, || {
+            let blob_digest = checkpoint_cache
+                .put_blob(&state)
+                .ok()
+                // ubs:ignore - this digest is a public state integrity identifier.
+                .filter(|digest| *digest == state_hash);
+            StoredCheckpoint {
+                state_hash,
+                blob_digest,
+                fallback: state,
+            }
+        })
     }
 
     fn load_checkpoint(
         &self,
         index: usize,
     ) -> Result<(Vec<u8>, CheckpointSource, Digest), SupervisorError> {
-        if let Some(stored) = self.checkpoints.get(&index) {
+        if let Some(stored) = self.checkpoints.get(index) {
             if let Some(digest) = stored.blob_digest
                 && let Ok(Some(bytes)) = self.checkpoint_cache.get_blob(&digest)
                 && sha256(&bytes) == stored.state_hash
@@ -1449,7 +1578,10 @@ impl Supervisor {
             }
             if sha256(&stored.fallback) == stored.state_hash {
                 return Ok((
-                    stored.fallback.clone(),
+                    try_clone_checkpoint_bytes(
+                        &stored.fallback,
+                        "supervisor checkpoint recovery bytes",
+                    )?,
                     CheckpointSource::SupervisorMemory,
                     stored.state_hash,
                 ));
@@ -1473,7 +1605,11 @@ impl Supervisor {
                 "journal checkpoint failed integrity verification",
             ));
         }
-        Ok((bytes.clone(), CheckpointSource::Journal, entry.state_hash))
+        Ok((
+            try_clone_checkpoint_bytes(bytes, "journal checkpoint recovery bytes")?,
+            CheckpointSource::Journal,
+            entry.state_hash,
+        ))
     }
 
     fn channel_crash_report(&self, error: &ChannelError) -> CrashReport {
@@ -1600,6 +1736,79 @@ fn push_str_bounded(output: &mut String, value: &str, limit: usize) {
 impl Drop for Supervisor {
     fn drop(&mut self) {
         self.stop_worker(false);
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_storage_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    fn stored(label: &[u8]) -> StoredCheckpoint {
+        StoredCheckpoint {
+            state_hash: sha256(label),
+            blob_digest: None,
+            fallback: label.to_vec(),
+        }
+    }
+
+    #[test]
+    fn checkpoint_table_is_sorted_and_updates_without_growth() {
+        let mut table = CheckpointTable::try_with_capacity(2).expect("table reserves");
+        table
+            .try_insert_with(7, || stored(b"seven"))
+            .expect("first row fits");
+        table
+            .try_insert_with(2, || stored(b"two"))
+            .expect("second row fits");
+        let capacity = table.rows.capacity();
+
+        assert_eq!(
+            table.get(2).expect("lower sorted row").fallback.as_slice(),
+            b"two"
+        );
+        assert_eq!(
+            table.get(7).expect("higher sorted row").fallback.as_slice(),
+            b"seven"
+        );
+        table
+            .try_insert_with(7, || stored(b"updated"))
+            .expect("replacement needs no growth");
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.rows.capacity(), capacity);
+        assert_eq!(
+            table.get(7).expect("updated row").fallback.as_slice(),
+            b"updated"
+        );
+    }
+
+    #[test]
+    fn checkpoint_storage_refusals_are_typed() {
+        let row_error = CheckpointTable::try_with_capacity(usize::MAX)
+            .expect_err("impossible checkpoint row capacity must refuse");
+        assert!(matches!(
+            &row_error,
+            SupervisorError::StorageUnavailable {
+                collection: "checkpoint rows",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&row_error).is_some());
+
+        let byte_error =
+            checkpoint_bytes_scratch(usize::MAX, "installed checkpoint fallback bytes")
+                .expect_err("impossible checkpoint byte capacity must refuse");
+        assert!(matches!(
+            &byte_error,
+            SupervisorError::StorageUnavailable {
+                collection: "installed checkpoint fallback bytes",
+                additional: usize::MAX,
+                ..
+            }
+        ));
+        assert!(std::error::Error::source(&byte_error).is_some());
     }
 }
 

@@ -419,6 +419,68 @@ fn worker_crash_auto_restarts_restores_warm_checkpoint_and_parent_survives() {
     );
 }
 
+#[test]
+fn multiple_installed_checkpoints_and_worker_refresh_recover_from_latest_row() {
+    let checkpoint = scene_state_bytes();
+    let checkpoint_hash = sha256(&checkpoint);
+    let mut journal = Journal::new();
+    for index in 0..3 {
+        journal
+            .record(Entry {
+                command: command(index),
+                effect: EffectClass::Pure,
+                reads: Vec::new(),
+                subprocesses: Vec::new(),
+                checkpoint: (index < 2).then(|| checkpoint.clone()),
+                state_hash: if index < 2 {
+                    checkpoint_hash
+                } else {
+                    sha256(b"terminal state")
+                },
+            })
+            .expect("journal entry storage reserves");
+    }
+    let incoming = commands(&journal);
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
+    supervisor
+        .install_session("Demo", journal)
+        .expect("multiple checkpoints install");
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+
+    state
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .checkpoint_response = Some(Checkpoint {
+        scene: "Demo".to_owned(),
+        after_entry: 1,
+        state_hash: checkpoint_hash,
+        state: checkpoint.clone(),
+    });
+    let reply = supervisor
+        .request(SupervisorRequest::EnumerateScenes, &|_| true)
+        .expect("matching worker checkpoint is retained");
+    assert!(matches!(
+        reply,
+        SupervisorReply::Worker(WorkerResponse::Checkpoint(Checkpoint {
+            after_entry: 1,
+            ..
+        }))
+    ));
+
+    let report = supervisor
+        .rebuild_and_restart(&mut builder, &incoming, &|_| true)
+        .expect("latest retained checkpoint recovers");
+    assert_eq!(report.restored_checkpoint, Some(1));
+    assert_eq!(report.checkpoint_source, Some(CheckpointSource::Cache));
+    assert_eq!(
+        state.lock().unwrap_or_else(lock_poisoned).restored.last(),
+        Some(&checkpoint)
+    );
+}
+
 fn repeating_crash_supervisor(max_crash_reports: usize) -> Supervisor {
     let state = Arc::new(Mutex::new(FakeState {
         crash_every_play: true,
