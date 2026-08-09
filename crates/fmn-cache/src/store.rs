@@ -1182,7 +1182,7 @@ impl CacheClearAuthorization {
             ));
         }
         let quarantined_namespaces = quarantine.join("ns");
-        match fs::rename(&namespaces, &quarantined_namespaces) {
+        match with_transient_windows_retry(|| fs::rename(&namespaces, &quarantined_namespaces)) {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 fs::remove_dir(&quarantine).map_err(|cleanup_err| {
@@ -1206,9 +1206,40 @@ impl CacheClearAuthorization {
         }
 
         rotate_host_generation_and_format(&canonical_root, owner)?;
-        fs::remove_dir_all(&quarantine).map_err(|err| host_io(&quarantine, err))?;
+        with_transient_windows_retry(|| fs::remove_dir_all(&quarantine))
+            .map_err(|err| host_io(&quarantine, err))?;
         Ok(CacheClearOutcome::Cleared)
     }
+}
+
+/// Run a host directory rename/removal, absorbing Windows' transient
+/// refusals.
+///
+/// Windows reports `ERROR_ACCESS_DENIED` for renaming a directory while any
+/// child file is open, and removal of a tree whose children are
+/// delete-pending can surface as `PermissionDenied` or `DirectoryNotEmpty`.
+/// Concurrent cache readers hold those handles only for the duration of one
+/// bounded read, so the linearized clear retries briefly before surfacing
+/// the refusal as real. On POSIX the first attempt always stands: `rename`
+/// and `unlink` succeed against open descriptors, so the loop body is
+/// unreachable there.
+fn with_transient_windows_retry<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut result = op();
+    if cfg!(windows) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while let Err(err) = &result {
+            let transient = matches!(
+                err.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::DirectoryNotEmpty
+            );
+            if !transient || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            result = op();
+        }
+    }
+    result
 }
 
 fn rotate_host_generation_and_format(
