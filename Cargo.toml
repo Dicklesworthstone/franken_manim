@@ -20,6 +20,7 @@ members = [
     "crates/fmn-studio",
     "crates/fmn-output",
     "crates/fmn-runtime",
+    "crates/fmn",
     "crates/fmn-cli",
     "crates/fmn-conformance",
     "crates/fmn-wasm",
@@ -64,6 +65,7 @@ fmn-scene = { path = "crates/fmn-scene" }
 fmn-studio = { path = "crates/fmn-studio" }
 fmn-output = { path = "crates/fmn-output" }
 fmn-runtime = { path = "crates/fmn-runtime" }
+fmn = { path = "crates/fmn" }
 fmn-cli = { path = "crates/fmn-cli" }
 fmn-conformance = { path = "crates/fmn-conformance" }
 fmn-python = { path = "crates/fmn-python" }
