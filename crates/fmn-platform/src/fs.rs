@@ -793,9 +793,14 @@ fn sync_directory(path: &Path) -> Result<(), FsError> {
 fn sync_directory(path: &Path) -> Result<(), FsError> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
+    // Directory handles need backup semantics to open at all, and
+    // `sync_all` is `FlushFileBuffers`, which refuses a read-only handle
+    // with ERROR_ACCESS_DENIED — the handle must carry GENERIC_WRITE even
+    // though nothing is written through it.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     std::fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .and_then(|directory| directory.sync_all())

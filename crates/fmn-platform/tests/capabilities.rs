@@ -1480,6 +1480,9 @@ mod windows_std_runner {
             "job-parent" => {
                 let marker = std::env::var_os(DESCENDANT_MARKER).expect("descendant marker path");
                 let ready = std::env::var_os(DESCENDANT_READY).expect("descendant ready path");
+                // Deliberately never waited on: the fixture exists to prove
+                // the runner's tree kill reaps this descendant, not us.
+                #[allow(clippy::zombie_processes)]
                 let descendant = std::process::Command::new(
                     std::env::current_exe().expect("native descendant executable"),
                 )
@@ -1639,22 +1642,39 @@ fn relative_program_paths_are_refused_by_contract() {
     }
 }
 
+/// An absolute path for a fixture program the scripted runner will never
+/// touch on disk. Absoluteness is platform-defined: `/fake/ffmpeg` has no
+/// root on Windows, where an absolute path needs a drive prefix, and the
+/// runner's ProgramNotAbsolute refusal fires before any scripting.
+fn fake_ffmpeg() -> &'static str {
+    if cfg!(windows) {
+        r"C:\fake\ffmpeg.exe"
+    } else {
+        "/fake/ffmpeg"
+    }
+}
+
 #[test]
 fn scripted_runner_replays_and_logs() {
     let mut r = ScriptedRunner::new();
     r.script(
-        "/fake/ffmpeg",
+        fake_ffmpeg(),
         ProcessOutcome {
             termination: ProcessTermination::Exited(Some(0)),
             stdout: b"frame=  1".to_vec(),
             stderr: Vec::new(),
         },
     );
-    let s = spec("/fake/ffmpeg", &["-i", "-", "out.mp4"]);
+    let s = spec(fake_ffmpeg(), &["-i", "-", "out.mp4"]);
     let out = r.run(&s).expect("scripted");
     assert!(out.success());
     assert_eq!(out.stdout, b"frame=  1");
-    assert!(r.run(&spec("/fake/other", &[])).is_err());
+    let fake_other = if cfg!(windows) {
+        r"C:\fake\other.exe"
+    } else {
+        "/fake/other"
+    };
+    assert!(r.run(&spec(fake_other, &[])).is_err());
     let runs = r.runs();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].argv, vec!["-i", "-", "out.mp4"]);
@@ -1665,7 +1685,7 @@ fn scripted_runner_replays_and_logs() {
 fn scripted_stream_preserves_chunk_order_and_enforces_both_input_bounds() {
     let mut runner = ScriptedRunner::new();
     runner.script(
-        "/fake/ffmpeg",
+        fake_ffmpeg(),
         ProcessOutcome {
             termination: ProcessTermination::Exited(Some(0)),
             stdout: Vec::new(),
@@ -1673,7 +1693,7 @@ fn scripted_stream_preserves_chunk_order_and_enforces_both_input_bounds() {
         },
     );
     let runner = Arc::new(runner);
-    let stream_spec = spec("/fake/ffmpeg", &["-i", "-", "out.mp4"]);
+    let stream_spec = spec(fake_ffmpeg(), &["-i", "-", "out.mp4"]);
     let mut process = runner
         .start(
             &stream_spec,
