@@ -1094,10 +1094,11 @@ mod tests {
         use fmn_platform::fs::VirtualFs;
         use std::sync::Arc;
 
+        let root = if cfg!(windows) { r"C:\cache" } else { "/cache" };
         let store = Store::open(
             Arc::new(VirtualFs::new()),
             Arc::new(FakeClock::new()),
-            "/cache",
+            root,
             StoreConfig::default(),
         )
         .expect("virtual cache store");

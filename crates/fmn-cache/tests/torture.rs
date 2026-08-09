@@ -183,7 +183,12 @@ fn concurrent_first_openers_leave_one_valid_owned_root() {
             result.is_ok() || matches!(result, Err(CacheError::RootRefused { .. }))
         }));
         let reopened = open(&root);
-        assert_eq!(reopened.root(), root);
+        // Store::open canonicalizes its root; on Windows that carries the
+        // `\\?\` verbatim prefix, so compare canonical to canonical.
+        assert_eq!(
+            reopened.root(),
+            std::fs::canonicalize(&root).expect("canonical scratch root")
+        );
         assert!(root.join("STORE_OWNER").is_file());
         assert!(root.join("STORE_FORMAT").is_file());
     }

@@ -899,7 +899,12 @@ fn failure_cache_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 
     let fs = Arc::new(VirtualFs::new());
     let clock = Arc::new(FakeClock::new());
-    let store = Store::open(fs.clone(), clock, "/e2e-cache", StoreConfig::default())
+    let cache_root = if cfg!(windows) {
+        r"C:\e2e-cache"
+    } else {
+        "/e2e-cache"
+    };
+    let store = Store::open(fs.clone(), clock, cache_root, StoreConfig::default())
         .map_err(|error| fail(format!("store opens: {error}")))?;
     let namespace = store
         .namespace(
@@ -917,11 +922,7 @@ fn failure_cache_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 
     // Find the one object file and flip a byte in the middle.
     let mut objects = Vec::new();
-    collect_virtual_objects(
-        fs.as_ref(),
-        std::path::Path::new("/e2e-cache"),
-        &mut objects,
-    );
+    collect_virtual_objects(fs.as_ref(), std::path::Path::new(cache_root), &mut objects);
     if objects.len() != 1 {
         return Err(fail(format!(
             "expected exactly one cache object, found {}",

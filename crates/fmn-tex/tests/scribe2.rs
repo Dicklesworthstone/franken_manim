@@ -18,11 +18,14 @@ fn engine() -> TexEngine {
     TexEngine::new("fmd-math/pack/default", None).expect("engine")
 }
 
+// Host path semantics validate the root even over a VirtualFs.
+const VIRTUAL_CACHE_ROOT: &str = if cfg!(windows) { r"C:\cache" } else { "/cache" };
+
 fn store() -> Store {
     Store::open(
         Arc::new(VirtualFs::new()),
         Arc::new(FakeClock::new()),
-        "/cache",
+        VIRTUAL_CACHE_ROOT,
         StoreConfig::default(),
     )
     .expect("store")

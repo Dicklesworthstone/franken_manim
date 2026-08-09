@@ -78,10 +78,18 @@ fn commands(journal: &Journal) -> Vec<CommandRecord> {
         .collect()
 }
 
+// Store::open validates absoluteness with host path semantics even over a
+// VirtualFs; `/studio-cache` has no drive prefix on Windows.
+const STUDIO_CACHE_ROOT: &str = if cfg!(windows) {
+    r"C:\studio-cache"
+} else {
+    "/studio-cache"
+};
+
 fn cache(clock: Arc<FakeClock>) -> Namespace {
     let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
     let clock_cap: Arc<dyn Clock> = clock;
-    Store::open(fs, clock_cap, "/studio-cache", StoreConfig::default())
+    Store::open(fs, clock_cap, STUDIO_CACHE_ROOT, StoreConfig::default())
         .expect("store opens")
         .namespace(
             "studio-replay",

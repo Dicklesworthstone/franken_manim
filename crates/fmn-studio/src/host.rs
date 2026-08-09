@@ -2320,7 +2320,11 @@ mod tests {
         let cache = Store::open(
             fs,
             Arc::clone(&clock),
-            "/host-protocol-limit-cache",
+            if cfg!(windows) {
+                r"C:\host-protocol-limit-cache"
+            } else {
+                "/host-protocol-limit-cache"
+            },
             StoreConfig::default(),
         )
         .unwrap()

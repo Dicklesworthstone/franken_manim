@@ -437,7 +437,7 @@ fn flipped_bytes_are_detected_evicted_and_recomputed() {
     // Find the one object file and flip a byte in the middle.
     let objects: Vec<PathBuf> = files_under(&fs, Path::new(ROOT))
         .into_iter()
-        .filter(|p| p.to_string_lossy().contains("/objects/"))
+        .filter(|p| p.components().any(|c| c.as_os_str() == "objects"))
         .collect();
     assert_eq!(objects.len(), 1);
     let victim_path = &objects[0];
@@ -468,7 +468,7 @@ fn truncation_and_garbage_files_are_misses() {
     n.put(&k, b"value").unwrap();
     let objects: Vec<PathBuf> = files_under(&fs, Path::new(ROOT))
         .into_iter()
-        .filter(|p| p.to_string_lossy().contains("/objects/"))
+        .filter(|p| p.components().any(|c| c.as_os_str() == "objects"))
         .collect();
     let victim_path = &objects[0];
 
@@ -497,7 +497,7 @@ fn a_valid_envelope_at_the_wrong_address_is_corrupt() {
     n.put(&b, b"value of b").unwrap();
     let objects: Vec<PathBuf> = files_under(&fs, Path::new(ROOT))
         .into_iter()
-        .filter(|p| p.to_string_lossy().contains("/objects/"))
+        .filter(|p| p.components().any(|c| c.as_os_str() == "objects"))
         .collect();
     assert_eq!(objects.len(), 2);
     // Copy a's bytes over b's file: the envelope is pristine but its recorded

@@ -43,7 +43,8 @@ struct TestHost {
 fn test_host() -> TestHost {
     let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
-    let cache = Store::open(fs, Arc::clone(&clock), "/ui-cache", StoreConfig::default())
+    let root = if cfg!(windows) { r"C:\ui-cache" } else { "/ui-cache" };
+    let cache = Store::open(fs, Arc::clone(&clock), root, StoreConfig::default())
         .expect("store opens")
         .namespace(
             "studio-replay",
