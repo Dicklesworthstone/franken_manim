@@ -1680,6 +1680,11 @@ fn public_facade_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
                 .shift([0.5, 0.25, 0.0])?;
             let square_movement = square
                 .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(0.25),
+                    rate_func: Some(fmn::core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
                 .shift([-0.25, 0.0, 0.0])?
                 .rotate(PI / 4.0)?
                 .set_opacity(0.5)?;

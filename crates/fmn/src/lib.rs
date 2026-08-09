@@ -52,7 +52,7 @@ use fmn_anim::{
 use fmn_config::ConfigError;
 use fmn_geom::GeomError;
 use fmn_library::{TexMobjectError, TextMobjectError};
-use fmn_mobject::{Mob, Mobject, Stage as MobjectStage, StageError};
+use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
 use fmn_platform::fs::FsError;
 use fmn_platform::process::{FfmpegLocatorError, ProcessError};
@@ -230,6 +230,8 @@ impl Error {
                 | SceneError::InvalidLifecycle(_)
                 | SceneError::InvalidState(_)
                 | SceneError::UnboundUpdaters
+                | SceneError::Stage(_)
+                | SceneError::Animation(_)
                 | SceneError::Persist(_)
                 | SceneError::Serialize(_)
                 | SceneError::Event(_)
@@ -308,6 +310,12 @@ error_from!(FfmpegLocatorError, FfmpegLocator);
 error_from!(ProcessError, Process);
 error_from!(TopologyError, Topology);
 
+impl From<AnimateError> for Error {
+    fn from(error: AnimateError) -> Self {
+        Self::Animation(error.into())
+    }
+}
+
 impl From<SceneError> for Error {
     fn from(error: SceneError) -> Self {
         match error {
@@ -339,7 +347,7 @@ impl Stage<'_> {
     /// Prepare and play one animation-like value or a simultaneous pair.
     pub fn play(&mut self, animations: impl IntoAnimations) -> Result<SegmentReport> {
         let animations = prepare_animations(animations, self.scene.stage_mut())?;
-        self.play_prepared(animations)?.ok_or_else(|| {
+        self.play_prepared(animations)?.ok_or({
             Error::Scene(SceneError::InvalidLifecycle(
                 "a typed play input unexpectedly became empty",
             ))
