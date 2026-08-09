@@ -587,18 +587,8 @@ impl Rectangle {
     /// # Errors
     /// A rounded rectangle propagates the typed arc-component refusal.
     pub fn build(self) -> Result<VMobject, GeomError> {
-        // The Reference builds the unit square UR, UL, DL, DR and stretches.
-        let corners = Polygon::new([UR, UL, DL, DR]).style(self.style);
         match self.corner_radius {
-            None => Ok(corners
-                .build()
-                .with_width(self.width, true)
-                .with_height(self.height, true)
-                .with_shape(ShapeTag::Rect {
-                    center: ORIGIN,
-                    width: self.width,
-                    height: self.height,
-                })),
+            None => Ok(self.build_unrounded()),
             Some(radius) => {
                 // round_corners runs on the *stretched* rectangle, exactly
                 // as the Reference's RoundedRectangle does, so the corner
@@ -622,6 +612,20 @@ impl Rectangle {
             }
         }
     }
+
+    fn build_unrounded(self) -> VMobject {
+        // The Reference builds the unit square UR, UL, DL, DR and stretches.
+        Polygon::new([UR, UL, DL, DR])
+            .style(self.style)
+            .build()
+            .with_width(self.width, true)
+            .with_height(self.height, true)
+            .with_shape(ShapeTag::Rect {
+                center: ORIGIN,
+                width: self.width,
+                height: self.height,
+            })
+    }
 }
 
 impl TryFrom<Rectangle> for VMobject {
@@ -637,6 +641,69 @@ impl TryFrom<Rectangle> for Mobject {
 
     fn try_from(rectangle: Rectangle) -> Result<Self, Self::Error> {
         rectangle.build().map(Into::into)
+    }
+}
+
+/// `Square(side_length=2.0)`.
+///
+/// This is a distinct public builder because `Square` is part of the manim
+/// API census. It shares Rectangle's unrounded construction rather than
+/// carrying a second geometry implementation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Square {
+    side_length: f64,
+    style: Style,
+}
+
+impl Default for Square {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Square {
+    /// The Reference's default two-unit square.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            side_length: 2.0,
+            style: Style::default(),
+        }
+    }
+
+    /// Set the side length.
+    #[must_use]
+    pub fn side_length(mut self, side_length: f64) -> Self {
+        self.side_length = side_length;
+        self
+    }
+
+    /// Set stroke and fill colour.
+    #[must_use]
+    pub fn color(mut self, color: Srgb) -> Self {
+        self.style = self.style.color(color);
+        self
+    }
+
+    /// Replace the style.
+    #[must_use]
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// Build the detached mobject.
+    #[must_use]
+    pub fn build(self) -> VMobject {
+        Rectangle::square(self.side_length)
+            .style(self.style)
+            .build_unrounded()
+    }
+}
+
+impl From<Square> for Mobject {
+    fn from(square: Square) -> Self {
+        square.build().into()
     }
 }
 
@@ -795,9 +862,7 @@ mod tests {
         assert!(close(rect.center_point()[0], 0.0));
         assert!(matches!(rect.shape(), ShapeTag::Rect { .. }));
 
-        let square = Rectangle::square(2.0)
-            .build()
-            .expect("an unrounded square is valid");
+        let square = Square::new().side_length(2.0).build();
         assert!(close(square.length_over_dim(0), 2.0));
         assert!(close(square.length_over_dim(1), 2.0));
     }

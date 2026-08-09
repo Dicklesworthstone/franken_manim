@@ -184,11 +184,11 @@ impl Stage {
         Ok(())
     }
 
-    /// Reference `invisible_copy`'s `set_opacity(0)`: zero the alpha lane
-    /// of every `*rgba` field across the whole family. Public because the
-    /// fade mechanism family (fading.py's `set_opacity(0)` ghosts, §9.4)
-    /// shares the exact rule.
-    pub fn set_family_opacity_zero(&mut self, mob: Mob) {
+    /// Reference `set_opacity`: write the alpha lane of every `*rgba` field
+    /// across the whole family.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn set_family_opacity(&mut self, mob: Mob, opacity: f64) {
+        let opacity = opacity as f32;
         for member in self.family(mob) {
             let Some(entry) = self.get_mut(member) else {
                 continue;
@@ -204,12 +204,18 @@ impl Stage {
             for field in fields {
                 if let Some(mut column) = entry.buffer.read_column(&field) {
                     for alpha in column.iter_mut().skip(3).step_by(4) {
-                        *alpha = 0.0;
+                        *alpha = opacity;
                     }
                     entry.buffer.write_range(&field, 0, &column);
                 }
             }
         }
+    }
+
+    /// Reference `invisible_copy`'s `set_opacity(0)`. Public because the
+    /// fade mechanism family uses the exact same record mutation.
+    pub fn set_family_opacity_zero(&mut self, mob: Mob) {
+        self.set_family_opacity(mob, 0.0);
     }
 
     /// Reference `align_data` (mobject.py:1746): zip the two families and

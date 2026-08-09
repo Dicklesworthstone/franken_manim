@@ -21,7 +21,7 @@
 use fmn_core::types::Vec3;
 use fmn_library::arc::{Arc, Circle, Dot, Ellipse};
 use fmn_library::line::{Elbow, Line};
-use fmn_library::poly::{CubicBezier, Polygon, Rectangle, RegularPolygon};
+use fmn_library::poly::{CubicBezier, Polygon, Rectangle, RegularPolygon, Square};
 use fmn_library::vmobject::VMobject;
 use std::collections::HashMap;
 
@@ -183,9 +183,9 @@ fn build(case: &Case) -> VMobject {
             .height(case.scalar("height"))
             .build()
             .expect("the parity rectangle is unrounded"),
-        "square" => Rectangle::square(case.scalar("side_length"))
-            .build()
-            .expect("the parity square is unrounded"),
+        "square" => Square::new()
+            .side_length(case.scalar("side_length"))
+            .build(),
         "line" => Line::new(case.point("start"), case.point("end"))
             .buff(case.scalar("buff"))
             .build()

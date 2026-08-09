@@ -14,7 +14,7 @@ use std::rc::Rc;
 use fmn_anim::{
     AnimConfig, AnimError, AnimState, Animation, AnimationGroup, MaintainPositionRelativeTo,
     MethodAnimation, MoveAlongPath, RateFunc, RationalFrameClock, fade_transform, play_segment,
-    prepare_animation, replacement_transform, sub_alpha, time_spanned_alpha,
+    prepare_animation, prepare_animations, replacement_transform, sub_alpha, time_spanned_alpha,
 };
 use fmn_core::rate;
 use fmn_core::rng::RngRoot;
@@ -658,6 +658,27 @@ fn prepare_animation_accepts_animation_builder_and_built() {
         .and_then(|b| b.build(&mut stage))
         .expect("builds");
     assert!(prepare_animation(built, &mut stage).is_ok());
+}
+
+#[test]
+fn prepare_animations_keeps_tuple_members_in_one_play_list() {
+    let mut stage = Stage::new();
+    let left = square(&mut stage);
+    let right = square(&mut stage);
+    let left_shift = left
+        .animate()
+        .shift([-1.0, 0.0, 0.0])
+        .expect("records left shift");
+    let right_shift = right
+        .animate()
+        .shift([1.0, 0.0, 0.0])
+        .expect("records right shift");
+
+    let animations = prepare_animations((left_shift, right_shift), &mut stage)
+        .expect("both tuple members prepare");
+    assert_eq!(animations.len(), 2);
+    assert_eq!(animations[0].state().mobject(), left);
+    assert_eq!(animations[1].state().mobject(), right);
 }
 
 #[test]

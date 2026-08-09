@@ -145,7 +145,7 @@ pub use pointcloud::{
     DOT_CLOUD_AA_WIDTH, DOT_CLOUD_SHADING, DotCloud, GLOW_DOT_FACTOR, GlowLayer, PMobject,
     glow_dot, glow_dots, glow_falloff, glow_layers, p_group, rim_coverage, true_dot,
 };
-pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, TipStyle};
+pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, Square, TipStyle};
 pub use solids::{
     CUBE_SHADING, Cone, Cube, Cylinder, Disk3D, Dodecahedron, Line3D, MESH_NORMAL_NUDGE,
     MESH_RESOLUTION, MeshError, ParametricSurface, Prism, Prismify, SGroup, SURFACE_COLOR,

@@ -39,6 +39,60 @@ fn recording_applies_to_the_target_copy_not_the_source() {
 }
 
 #[test]
+fn rotate_records_against_the_target_copy() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[
+        [-1.0, -0.5, 0.0],
+        [1.0, -0.5, 0.0],
+        [1.0, 0.5, 0.0],
+        [-1.0, 0.5, 0.0],
+    ]));
+
+    let built = mob
+        .animate()
+        .rotate(std::f64::consts::FRAC_PI_2)
+        .and_then(|builder| builder.build(&mut stage))
+        .expect("rotation builds");
+
+    assert!((stage.get_width(mob) - 2.0).abs() < 1e-9);
+    assert!((stage.get_height(mob) - 1.0).abs() < 1e-9);
+    assert!((stage.get_width(built.target) - 1.0).abs() < 1e-9);
+    assert!((stage.get_height(built.target) - 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn opacity_records_against_every_rgba_field_in_the_target_family() {
+    let mut stage = Stage::new();
+    let parent = square(&mut stage);
+    let child = square(&mut stage);
+    stage
+        .attach(parent, child)
+        .expect("fixture family is acyclic");
+
+    let built = parent
+        .animate()
+        .set_opacity(0.25)
+        .and_then(|builder| builder.build(&mut stage))
+        .expect("opacity builds");
+    let target_family = stage.family(built.target);
+
+    for source in [parent, child] {
+        let rgba = stage
+            .get(source)
+            .and_then(|entry| entry.buffer.read_column("rgba"))
+            .expect("source rgba");
+        assert!(rgba.iter().skip(3).step_by(4).all(|alpha| *alpha == 0.0));
+    }
+    for target in target_family {
+        let rgba = stage
+            .get(target)
+            .and_then(|entry| entry.buffer.read_column("rgba"))
+            .expect("target rgba");
+        assert!(rgba.iter().skip(3).step_by(4).all(|alpha| *alpha == 0.25));
+    }
+}
+
+#[test]
 fn anim_args_are_set_once_per_chain() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);

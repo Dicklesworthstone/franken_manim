@@ -1111,6 +1111,62 @@ pub fn prepare_animation(
     input.into_animation(stage)
 }
 
+/// Anything accepted by the high-level `play` surface: one animation-like
+/// value or a pair that should start in the same segment.
+///
+/// The pair implementation prepares both values into the same vector passed
+/// to Choreo's existing segment driver. It is therefore simultaneous play,
+/// not an [`AnimationGroup`](crate::composition::AnimationGroup) wrapper and
+/// not a second scheduling mechanism.
+pub trait IntoAnimations {
+    /// Realize the input into one non-empty play list.
+    ///
+    /// # Errors
+    /// [`AnimError`] from any animation or `.animate` recording.
+    fn into_animations(self, stage: &mut Stage) -> Result<Vec<Box<dyn Animation>>, AnimError>;
+}
+
+impl<A: Animation + 'static> IntoAnimations for A {
+    fn into_animations(self, _stage: &mut Stage) -> Result<Vec<Box<dyn Animation>>, AnimError> {
+        Ok(vec![Box::new(self)])
+    }
+}
+
+impl IntoAnimations for AnimBuilder {
+    fn into_animations(self, stage: &mut Stage) -> Result<Vec<Box<dyn Animation>>, AnimError> {
+        prepare_animation(self, stage).map(|animation| vec![animation])
+    }
+}
+
+impl IntoAnimations for BuiltAnimate {
+    fn into_animations(self, stage: &mut Stage) -> Result<Vec<Box<dyn Animation>>, AnimError> {
+        prepare_animation(self, stage).map(|animation| vec![animation])
+    }
+}
+
+impl<A, B> IntoAnimations for (A, B)
+where
+    A: IntoAnimation,
+    B: IntoAnimation,
+{
+    fn into_animations(self, stage: &mut Stage) -> Result<Vec<Box<dyn Animation>>, AnimError> {
+        let first = prepare_animation(self.0, stage)?;
+        let second = prepare_animation(self.1, stage)?;
+        Ok(vec![first, second])
+    }
+}
+
+/// Prepare one high-level play input without changing segment semantics.
+///
+/// # Errors
+/// [`AnimError`] from any animation or `.animate` recording.
+pub fn prepare_animations(
+    input: impl IntoAnimations,
+    stage: &mut Stage,
+) -> Result<Vec<Box<dyn Animation>>, AnimError> {
+    input.into_animations(stage)
+}
+
 #[cfg(test)]
 mod simd_tests {
     use super::interpolate_linear_column;

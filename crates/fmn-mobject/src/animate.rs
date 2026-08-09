@@ -2,7 +2,7 @@
 //! REAL rules (§8.6, fm-yra; G0-1's ratified fluent-recording shape — one
 //! implementation serving both front doors).
 //!
-//! `mob.animate()` returns a recorder; chained positional calls append
+//! `mob.animate()` returns a recorder; chained mutation calls append
 //! commands; [`AnimBuilder::build`] realizes the recording against a target
 //! copy generated **at build time** — the deferred-command model D-11
 //! ratified (the borrow-checker-clean shape: the recorder owns only a
@@ -33,6 +33,7 @@
 
 use crate::positional::PosTarget;
 use crate::stage::{Mob, Stage};
+use fmn_core::constants::OUT;
 use fmn_core::types::Vec3;
 
 /// Transform-level arguments passed once per chain (the Reference's
@@ -69,14 +70,18 @@ impl PartialEq for AnimateArgs {
     }
 }
 
-/// A recorded positional mutation, applied to the target copy at build.
-/// Every variant maps 1:1 onto the Stage positional surface (§8.4).
+/// A recorded mutation, applied to the target copy at build.
+/// Every variant maps 1:1 onto an existing Stage mutation surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnimateCommand {
     /// `shift(vector)`.
     Shift(Vec3),
     /// `scale(factor)` about the bounding-box center.
     Scale(f64),
+    /// `rotate(angle)` about the bounding-box center in the xy-plane.
+    Rotate(f64),
+    /// `set_opacity(opacity)` across the whole family.
+    SetOpacity(f64),
     /// `stretch(factor, dim)`.
     Stretch(f64, usize),
     /// `center()`.
@@ -239,6 +244,22 @@ impl AnimBuilder {
         self.push(AnimateCommand::Scale(factor))
     }
 
+    /// Record `rotate` about the target's bounding-box center in the xy-plane.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn rotate(self, angle: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Rotate(angle))
+    }
+
+    /// Record `set_opacity` across the target family.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_opacity(self, opacity: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetOpacity(opacity))
+    }
+
     /// Record `stretch`.
     ///
     /// # Errors
@@ -374,6 +395,12 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) {
         }
         AnimateCommand::Scale(f) => {
             stage.scale(target, f);
+        }
+        AnimateCommand::Rotate(angle) => {
+            stage.rotate(target, angle, OUT, None, None);
+        }
+        AnimateCommand::SetOpacity(opacity) => {
+            stage.set_family_opacity(target, opacity);
         }
         AnimateCommand::Stretch(f, dim) => {
             stage.stretch(target, f, dim);

@@ -65,8 +65,8 @@ pub mod update;
 
 pub use animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, DEFAULT_ANIMATION_LAG_RATIO,
-    DEFAULT_ANIMATION_RUN_TIME, IntoAnimation, MethodAnimation, RateFunc, prepare_animation,
-    sub_alpha, time_spanned_alpha,
+    DEFAULT_ANIMATION_RUN_TIME, IntoAnimation, IntoAnimations, MethodAnimation, RateFunc,
+    prepare_animation, prepare_animations, sub_alpha, time_spanned_alpha,
 };
 pub use bundle::{
     PATH_STRAIGHT_TAG, bundle_sub_alpha, interpolate_between, path_from_tag, path_tag,
