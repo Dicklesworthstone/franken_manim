@@ -1652,6 +1652,89 @@ fn logs_engine_identity_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("certified_doc_bytes", doc.len() as u64))
 }
 
+/// §15.1's product-facing proof: compile and execute a primitive scene using
+/// only the `fmn` facade. The facade delegates to the same Scene runtime that
+/// the rest of this catalog exercises; the capture count is the observable
+/// proof that the public entry point crossed the real frame boundary.
+fn public_facade_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+
+    #[derive(Default)]
+    struct FacadeProgram;
+
+    impl SceneConstruct for FacadeProgram {
+        fn name(&self) -> &str {
+            "public_facade_circle_shift"
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.75).color(BLUE_C))?;
+            let square = stage.add(Square::new().side_length(1.25).color(YELLOW))?;
+            let movement = circle
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(0.25),
+                    rate_func: Some(fmn::core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
+                .shift([0.5, 0.25, 0.0])?;
+            let square_movement = square
+                .animate()
+                .shift([-0.25, 0.0, 0.0])?
+                .rotate(PI / 4.0)?
+                .set_opacity(0.5)?;
+            stage.play((movement, square_movement))?;
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FacadeSink {
+        captures: u64,
+    }
+
+    impl SceneSink for FacadeSink {
+        fn capture(
+            &mut self,
+            _reason: CaptureReason,
+            _packet: fmn::animation::FramePacket,
+        ) -> std::result::Result<(), IntegrationError> {
+            self.captures += 1;
+            Ok(())
+        }
+    }
+
+    let mut sink = FacadeSink::default();
+    let completed = run_scene(
+        &mut FacadeProgram,
+        RuntimeConfig {
+            fps: FPS,
+            ..RuntimeConfig::default()
+        },
+        0xFACADE,
+        &mut sink,
+    )
+    .map_err(|error| fail(format!("public facade: {error}")))?;
+    if completed.report().play_count != 2 || sink.captures != 3 {
+        return Err(fail(format!(
+            "public facade produced {} plays and {} captures, expected 2 and 3",
+            completed.report().play_count,
+            sink.captures
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new(e2e::spans::SCENE_CONSTRUCT)
+            .field("scene", "public_facade_circle_shift")
+            .field("captures", sink.captures),
+    );
+    ctx.counter("public_facade_captures", sink.captures);
+    Ok(RunOutcome::ok()
+        .with_counter("public_facade_plays", completed.report().play_count)
+        .with_counter("public_facade_captures", sink.captures))
+}
+
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
@@ -1807,6 +1890,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ),
             LogExpect::event_order(e2e::spans::SCENE_CONSTRUCT, "e2e.lifecycle.transform"),
         ],
+    ));
+    specs.push(spec(
+        "lifecycle.public_fmn_facade_executes.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(public_facade_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("public_facade_plays", 2),
+            counter_eq("public_facade_captures", 3),
+        ],
+        vec![LogExpect::span_present(
+            e2e::spans::SCENE_CONSTRUCT,
+            vec![
+                FieldPred::str_eq("scene", "public_facade_circle_shift"),
+                FieldPred::u64_eq("captures", 3),
+            ],
+        )],
     ));
     specs.push(spec(
         "lifecycle.journal_roundtrip_replay.v1",

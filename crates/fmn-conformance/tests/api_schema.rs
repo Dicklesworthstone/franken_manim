@@ -216,6 +216,30 @@ fn the_schema_parses_and_names_the_pinned_reference() {
 }
 
 #[test]
+fn native_error_categories_match_the_generated_cli_schema() {
+    use fmn::ErrorKind;
+
+    for kind in [
+        ErrorKind::Config,
+        ErrorKind::Capability,
+        ErrorKind::Scene,
+        ErrorKind::Render,
+        ErrorKind::Budget,
+    ] {
+        let generated = fmn_cli::EXIT_CODE_SPECS
+            .iter()
+            .find(|spec| spec.name == kind.name())
+            .expect("every native error category has a generated CLI schema row");
+        assert_eq!(
+            generated.code,
+            kind.code(),
+            "native `{}` category drifted from API_OVERLAY.tsv",
+            kind.name()
+        );
+    }
+}
+
+#[test]
 fn the_class_census_matches_the_plans_verified_count() {
     // Appendix A: "the complete Reference census (257 classes, verified
     // class-by-class against the pin)". The schema is extracted independently

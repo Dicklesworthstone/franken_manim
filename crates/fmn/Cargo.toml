@@ -1,0 +1,22 @@
+[package]
+name = "fmn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The first-class Rust API for FrankenManim"
+
+[dependencies]
+fmn-core.workspace = true
+fmn-config.workspace = true
+fmn-platform.workspace = true
+fmn-geom.workspace = true
+fmn-mobject.workspace = true
+fmn-anim.workspace = true
+fmn-text.workspace = true
+fmn-tex.workspace = true
+fmn-library.workspace = true
+fmn-scene.workspace = true
+
+[lints]
+workspace = true

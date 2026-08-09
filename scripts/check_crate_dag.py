@@ -68,6 +68,20 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-cache",
     },
     "fmn-runtime": {"fmn-core", "fmn-platform"},
+    # The native Rust front door (§15.1): a leaf facade over the real
+    # subsystem APIs, never a second scene loop or animation engine.
+    "fmn": {
+        "fmn-core",
+        "fmn-config",
+        "fmn-platform",
+        "fmn-geom",
+        "fmn-mobject",
+        "fmn-anim",
+        "fmn-text",
+        "fmn-tex",
+        "fmn-library",
+        "fmn-scene",
+    },
     "fmn-cli": {"fmn-core", "fmn-config", "fmn-cache", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
     # dmath: certified scene-corpus callbacks compute pixel-reaching graph
     # geometry through the sovereign transcendental funnel (ADR-0014,
@@ -94,6 +108,7 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-platform",
         "fmn-text",
         "fmn-tex",
+        "fmn",
     },
     "fmn-python": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-anim", "fmn-library", "fmn-scene"},
     # W5 tier-1 wasm surface (fm-l97, §10.7): the browser leaf. dmath is a
@@ -165,7 +180,8 @@ def main() -> int:
         deps = {
             d["name"]
             for d in pkg["dependencies"]
-            if d["name"].startswith("fmn-") and d.get("kind") != "dev"
+            if (d["name"] == "fmn" or d["name"].startswith("fmn-"))
+            and d.get("kind") != "dev"
         }
         # G0 spikes (spikes/, fmn-spike-*) are sanctioned prototype crates
         # outside the §19 map (§20.1). They are exempt from the map itself,

@@ -25,6 +25,9 @@ fmn-cache.workspace = true
 fmn-platform.workspace = true
 fmn-text.workspace = true
 fmn-tex.workspace = true
+# §15.1 public-front-door e2e: the primitive scenario compiles and runs
+# through the shipped facade rather than reconstructing its imports here.
+fmn.workspace = true
 # Certified-path transcendentals route through fmn-dmath (ADR-0010; the
 # edge is ADR-0014's precedent) — the scene corpus's graph closures.
 fmn-dmath.workspace = true
