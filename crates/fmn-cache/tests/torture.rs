@@ -51,6 +51,9 @@ fn key(i: usize) -> CacheKey {
         .expect("key")
 }
 
+// Every caller lives in the unix-cfg permission/corruption suites below, so
+// Windows builds see the helper as dead code without this matching gate.
+#[cfg(unix)]
 fn object_path(
     root: &std::path::Path,
     namespace: &str,

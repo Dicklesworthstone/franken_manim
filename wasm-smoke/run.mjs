@@ -15,10 +15,12 @@
 //     functions in the right slots.
 //
 // Usage: node run.mjs <path-to-fmn_wasm_smoke.wasm>   (bun-as-node works)
+//
+// This file is an ES module (.mjs): `require` does not exist here on real
+// Node (bun's node shim tolerates it, which is how a CommonJS-ism once hid
+// locally while failing every hosted runner).
 
-"use strict";
-
-const fs = require("fs");
+import fs from "node:fs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {

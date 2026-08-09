@@ -4,7 +4,7 @@
 //! alive and automatically restores a replacement worker.
 
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,11 +22,11 @@ use fmn_scene::{
 use fmn_studio::{
     BuildError, ChannelError, ChannelFailureKind, Checkpoint, CheckpointSource, CrashReport,
     FramingError, JournalReplay, LaunchError, ProtocolError, ProtocolLimits, ProtocolVersion,
-    RebuildDriver, RequestEnvelope, ResponseEnvelope, ServiceError, StdWorkerLauncher,
-    StudioDataKind, Supervisor, SupervisorConfig, SupervisorError, SupervisorReply,
-    SupervisorRequest, TransportCapabilities, WorkerArtifact, WorkerChannel, WorkerErrorCode,
-    WorkerLauncher, WorkerResponse, WorkerServeError, WorkerServeOutcome, WorkerService,
-    read_response, serve_worker, write_request,
+    RebuildDriver, RequestEnvelope, ResponseEnvelope, ServiceError, StudioDataKind, Supervisor,
+    SupervisorConfig, SupervisorError, SupervisorReply, SupervisorRequest, TransportCapabilities,
+    WorkerArtifact, WorkerChannel, WorkerErrorCode, WorkerLauncher, WorkerResponse,
+    WorkerServeError, WorkerServeOutcome, WorkerService, read_response, serve_worker,
+    write_request,
 };
 
 fn lock_poisoned<T>(error: PoisonError<T>) -> T {
@@ -1143,6 +1143,10 @@ fn worker_checkpoint_must_match_the_installed_journal_authority() {
 #[cfg(unix)]
 #[test]
 fn stdio_worker_deadline_cancels_a_blocked_checkpoint_write() {
+    use std::path::Path;
+
+    use fmn_studio::StdWorkerLauncher;
+
     let sleep = Path::new("/bin/sleep");
     if !sleep.is_file() {
         return;
