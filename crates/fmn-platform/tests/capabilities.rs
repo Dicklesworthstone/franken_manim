@@ -1164,6 +1164,21 @@ fn spec(program: &str, argv: &[&str]) -> ProcessSpec {
     }
 }
 
+/// Absolute path of a coreutils helper for the spawn tests. Usr-merged Linux
+/// keeps them all in `/usr/bin`; macOS still ships `echo`, `sleep`, and `cat`
+/// in `/bin`. The exact-image runner takes only absolute paths by design, so
+/// resolve the first candidate that exists on this host.
+#[cfg(unix)]
+fn host_bin(name: &str) -> String {
+    let candidates = [format!("/usr/bin/{name}"), format!("/bin/{name}")];
+    for candidate in &candidates {
+        if PathBuf::from(candidate).exists() {
+            return candidate.clone();
+        }
+    }
+    panic!("no {name} in /usr/bin or /bin on this host");
+}
+
 #[cfg(unix)]
 mod std_runner {
     use super::*;
@@ -1188,7 +1203,7 @@ mod std_runner {
     #[test]
     fn argv_only_echo_succeeds() {
         let out = StdProcessRunner
-            .run(&spec("/usr/bin/echo", &["hello", "argv world"]))
+            .run(&spec(&host_bin("echo"), &["hello", "argv world"]))
             .expect("run");
         assert!(out.success());
         // The two argv entries arrive as two arguments — no shell splitting.
@@ -1199,7 +1214,7 @@ mod std_runner {
     #[test]
     fn nonzero_exit_is_an_outcome_not_an_error() {
         let out = StdProcessRunner
-            .run(&spec("/usr/bin/false", &[]))
+            .run(&spec(&host_bin("false"), &[]))
             .expect("run");
         assert_eq!(out.termination, ProcessTermination::Exited(Some(1)));
         assert!(!out.success());
@@ -1207,7 +1222,7 @@ mod std_runner {
 
     #[test]
     fn environment_is_cleared_then_allowlisted() {
-        let mut s = spec("/usr/bin/env", &[]);
+        let mut s = spec(&host_bin("env"), &[]);
         s.env = vec![("FMN_ALLOWED".to_string(), "yes".to_string())];
         let out = StdProcessRunner.run(&s).expect("run");
         let text = String::from_utf8_lossy(&out.stdout);
@@ -1219,7 +1234,7 @@ mod std_runner {
 
     #[test]
     fn stdin_bytes_flow_through() {
-        let mut s = spec("/usr/bin/cat", &[]);
+        let mut s = spec(&host_bin("cat"), &[]);
         s.stdin = Some(b"through the capability".to_vec());
         let out = StdProcessRunner.run(&s).expect("run");
         assert!(out.success());
@@ -1300,7 +1315,7 @@ mod std_runner {
     fn output_cap_kills_and_truncates() {
         // `yes` produces unbounded output; the cap must stop it long before
         // the timeout.
-        let mut s = spec("/usr/bin/yes", &[]);
+        let mut s = spec(&host_bin("yes"), &[]);
         s.timeout = Duration::from_secs(30);
         s.max_output_bytes = 64 * 1024;
         let started = std::time::Instant::now();
@@ -1343,7 +1358,7 @@ mod std_runner {
 
     #[test]
     fn working_directory_requests_are_refused_before_spawn() {
-        let mut s = spec("/usr/bin/true", &[]);
+        let mut s = spec(&host_bin("true"), &[]);
         s.cwd = Some(scratch("exact_image_cwd_refusal"));
         let error = StdProcessRunner.run(&s).expect_err("cwd must be refused");
         assert!(
@@ -1357,7 +1372,7 @@ mod std_runner {
         let cancellation = ProcessCancellation::new();
         let process = StdProcessRunner
             .start(
-                &spec("/usr/bin/sleep", &["30"]),
+                &spec(&host_bin("sleep"), &["30"]),
                 cancellation.clone(),
                 ProcessStdinLimits::new(8 << 20, 8 << 20),
             )
@@ -1396,7 +1411,7 @@ mod std_runner {
         let started = std::time::Instant::now();
         let process = StdProcessRunner
             .start(
-                &spec("/usr/bin/sleep", &["30"]),
+                &spec(&host_bin("sleep"), &["30"]),
                 ProcessCancellation::new(),
                 ProcessStdinLimits::new(1, 1),
             )
