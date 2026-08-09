@@ -281,8 +281,10 @@ jobs:
         run: python -m pip install numpy
 
       - name: test
+        # --no-fail-fast: Windows-only failures surface crate by crate as this
+        # lane comes up; showing them all per run beats one CI round-trip each.
         run: |
-          cargo test
+          cargo test --no-fail-fast
           cargo test -p fmn-cli --features batch --all-targets
           cargo test -p fmn-output --features ffmpeg-test-fixture --all-targets
 

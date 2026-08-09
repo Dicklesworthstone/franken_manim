@@ -19,7 +19,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+// Store::open validates absoluteness with host path semantics even over a
+// VirtualFs, and `/cache` is not absolute on Windows (no drive prefix).
+#[cfg(not(windows))]
 const ROOT: &str = "/cache";
+#[cfg(windows)]
+const ROOT: &str = r"C:\cache";
 
 fn open_store(fs: Arc<dyn FileSystem>, clock: Arc<dyn Clock>) -> Store {
     Store::open(fs, clock, ROOT, StoreConfig::default()).expect("open store")
