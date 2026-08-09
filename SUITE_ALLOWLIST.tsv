@@ -33,6 +33,7 @@ fmn-scene	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Proscenium	
 fmn-studio	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Studio	fm	with-crate
 fmn-output	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Reel	fm	with-crate
 fmn-runtime	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	runtime glue	fm	with-crate
+fmn	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	native Rust front door	fm	with-crate
 fmn-cli	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	fmn CLI	fm	with-crate
 fmn-conformance	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Gauntlet	fm	with-crate
 fmn-wasm	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	W5 tier-1 wasm32 browser surface (fm-l97)	fm	with-crate
