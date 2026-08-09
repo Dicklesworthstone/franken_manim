@@ -18,8 +18,9 @@ use fmn_conformance::perf_pg5::{
     measure_pg5, pg5_identity,
 };
 use fmn_conformance::perf_pg6::{
-    PG6_DEFINITION_SCHEMA, PG6_SAMPLE_COUNT, PG6_SCENARIO, PG6_THREADS,
-    PG6_WARMUP_FRAMES_PER_SCENE, Pg6Definition, measure_pg6, pg6_identity,
+    PG6_DEFINITION_SCHEMA, PG6_SAMPLE_COUNT, PG6_SCENARIO, PG6_SOAK_SCENARIO, PG6_THREADS,
+    PG6_WARMUP_FRAMES_PER_SCENE, Pg6Definition, Pg6SoakDefinition, measure_pg6, measure_pg6_soak,
+    pg6_identity,
 };
 use fmn_conformance::perf_pg7::{
     PG7_DEFINITION_SCHEMA, PG7_SAMPLE_COUNT, PG7_WARMUP_ITERATIONS, Pg7Definition, Pg7Scenario,
@@ -65,7 +66,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(CliError::usage(
             "expected catalog, verify-baseline, pg2-definitions, measure-pg2, \
-             pg5-definitions, measure-pg5, pg6-definitions, measure-pg6, \
+             pg5-definitions, measure-pg5, pg6-definitions, measure-pg6, measure-pg6-soak, \
              pg7-definitions, or measure-pg7",
         ));
     };
@@ -126,6 +127,23 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
                 .get(4)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
         ),
+        "measure-pg6-soak" if arguments.len() == 6 => measure_pg6_soak_command(
+            arguments
+                .get(1)
+                .ok_or_else(|| CliError::usage("missing baseline path"))?,
+            arguments
+                .get(2)
+                .ok_or_else(|| CliError::usage("missing producer commit"))?,
+            arguments
+                .get(3)
+                .ok_or_else(|| CliError::usage("missing trace output path"))?,
+            arguments
+                .get(4)
+                .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            arguments
+                .get(5)
+                .ok_or_else(|| CliError::usage("missing iterations-per-window"))?,
+        ),
         "measure-pg7" if arguments.len() == 6 => measure_pg7_command(
             arguments
                 .get(1)
@@ -158,6 +176,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         )),
         "measure-pg6" => Err(CliError::usage(
             "measure-pg6 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+        )),
+        "measure-pg6-soak" => Err(CliError::usage(
+            "measure-pg6-soak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> <iterations-per-window>",
         )),
         "measure-pg7" => Err(CliError::usage(
             "measure-pg7 requires <baseline.tsv> <producer-commit> \
@@ -708,6 +729,104 @@ fn measure_pg6_command(
         artifacts.batch.key.bare_metal,
         artifacts.batch.key.isolated,
         artifacts.result_digest,
+        escape_json(trace_path_text),
+        trace_digest,
+        escape_json(raw_path_text),
+        raw_digest,
+    ))
+}
+
+fn measure_pg6_soak_command(
+    baseline_path: &OsStr,
+    producer_commit: &OsStr,
+    trace_path: &OsStr,
+    raw_path: &OsStr,
+    iterations_per_window: &OsStr,
+) -> Result<String, CliError> {
+    let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
+    let baseline =
+        Baseline::from_tsv(&baseline_text).map_err(|error| CliError::data(error.to_string()))?;
+    let producer_commit = producer_commit_argument(producer_commit)?;
+    let trace_path_text = utf8_argument(trace_path, "trace output path")?;
+    let raw_path_text = utf8_argument(raw_path, "raw output path")?;
+    if trace_path_text == raw_path_text {
+        return Err(CliError::data(
+            "trace and raw output paths must be distinct",
+        ));
+    }
+    let iterations: u32 = utf8_argument(iterations_per_window, "iterations-per-window")?
+        .parse()
+        .map_err(|_| CliError::data("iterations-per-window must be a positive u32"))?;
+    let definition =
+        Pg6SoakDefinition::new(iterations).map_err(|error| CliError::data(error.to_string()))?;
+    EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    EvidenceRef::from_bytes(EvidenceKind::RawSamples, raw_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    validate_output_parent(trace_path, "trace output")?;
+    validate_output_parent(raw_path, "raw output")?;
+    refuse_existing(trace_path, "trace output")?;
+    refuse_existing(raw_path, "raw output")?;
+
+    // The one production residency capability: fmn-platform over the host
+    // filesystem. Unsupported hosts flow through as retained-invalid samples.
+    let mut probe =
+        || fmn_platform::topology::current_rss_bytes(&StdFs).map_err(|error| error.to_string());
+    let artifacts = measure_pg6_soak(
+        &baseline,
+        producer_commit,
+        trace_path_text,
+        definition,
+        &mut probe,
+    )
+    .map_err(|error| CliError::data(error.to_string()))?;
+    let raw = artifacts
+        .batch
+        .to_tsv()
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw_digest = sha256(raw.as_bytes());
+    let trace_digest = sha256(artifacts.trace_tsv.as_bytes());
+    let invalid_samples = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_some())
+        .count();
+    let leaked_windows = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_none() && sample.value != 0)
+        .count();
+
+    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
+        return Err(CliError::io(format!(
+            "{}; trace output {trace_path_text:?} was already published and was not deleted",
+            error.detail
+        )));
+    }
+
+    Ok(format!(
+        "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-soak-measurement\",\
+         \"gate\":\"pg-6\",\"scenario\":\"{PG6_SOAK_SCENARIO}\",\
+         \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
+         \"producer_commit\":\"{}\",\"iterations_per_window\":{},\
+         \"sample_count\":{},\"invalid_samples\":{},\
+         \"leaked_windows\":{},\"bare_metal\":{},\
+         \"isolation_qualified\":{},\
+         \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"status\":\"measured-not-evaluated\"}}\n",
+        artifacts.batch.key.benchmark_definition,
+        artifacts.batch.key.config_digest,
+        producer_commit,
+        definition.iterations_per_window,
+        artifacts.batch.samples.len(),
+        invalid_samples,
+        leaked_windows,
+        artifacts.batch.key.bare_metal,
+        artifacts.batch.key.isolated,
         escape_json(trace_path_text),
         trace_digest,
         escape_json(raw_path_text),

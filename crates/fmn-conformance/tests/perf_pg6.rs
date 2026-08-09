@@ -3,8 +3,10 @@ use fmn_conformance::perf::{
     MeasurementBatch, MetricUnit, Sample, Verdict,
 };
 use fmn_conformance::perf_pg6::{
-    PG6_MAX_INVALID_SAMPLES, PG6_MIN_VALID_SAMPLES, PG6_SAMPLE_COUNT, PG6_SCENARIO, PG6_THREADS,
-    PG6_TRACE_SCHEMA, Pg6Definition, measure_pg6, pg6_identity,
+    PG6_MAX_INVALID_SAMPLES, PG6_MIN_VALID_SAMPLES, PG6_SAMPLE_COUNT, PG6_SCENARIO,
+    PG6_SOAK_SCENARIO, PG6_SOAK_UNSUPPORTED_REASON, PG6_SOAK_WINDOWS, PG6_THREADS,
+    PG6_TRACE_SCHEMA, Pg6Definition, Pg6SoakDefinition, measure_pg6, measure_pg6_soak,
+    pg6_identity,
 };
 use fmn_hash::sha256;
 
@@ -169,5 +171,226 @@ fn release_perf_producer_emits_every_zero_allocation_scene_and_replayable_trace(
     assert_eq!(
         MeasurementBatch::from_tsv(&raw).expect("raw bundle replay"),
         artifacts.batch
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The leak-soak surface (`one-hour-soak-leak`)
+// ---------------------------------------------------------------------------
+
+fn soak_policy() -> GatePolicy {
+    GatePolicy {
+        gate: GateId::Pg6,
+        scenario: PG6_SOAK_SCENARIO.to_owned(),
+        unit: MetricUnit::LeakedBytes,
+        direction: Direction::Exactly,
+        target: Some(0),
+        min_valid_samples: PG6_SOAK_WINDOWS,
+        max_invalid_samples: 0,
+        max_mad_bps: 0,
+        alert_regression_bps: 0,
+        block_regression_bps: 0,
+        enforcement: Enforcement::Blocking,
+        scope: GateScope::Core,
+        require_regression_profile: true,
+    }
+}
+
+fn soak_definition() -> Pg6SoakDefinition {
+    Pg6SoakDefinition::new(2).expect("nonzero soak window")
+}
+
+fn soak_key() -> BenchmarkKey {
+    let definition = soak_definition();
+    BenchmarkKey {
+        profile_id: "pg6-test-host".to_owned(),
+        build_profile: "release-perf".to_owned(),
+        host_fingerprint: sha256(b"host"),
+        toolchain_fingerprint: sha256(b"toolchain"),
+        suite_lock_digest: sha256(b"suite-lock"),
+        benchmark_definition: definition.digest(),
+        gate: GateId::Pg6,
+        scenario: PG6_SOAK_SCENARIO.to_owned(),
+        unit: MetricUnit::LeakedBytes,
+        engine: pg6_identity().engine.name().to_owned(),
+        tier: pg6_identity().tier.name().to_owned(),
+        thread_profile: "fixed-4".to_owned(),
+        execution_plan_digest: sha256(b"execution-plan"),
+        config_digest: definition.config_digest(),
+        cache_state: "warm-reused-frame-arena-soak".to_owned(),
+        output_mode: "raw-rgba16f".to_owned(),
+        external_tool_fingerprint: None,
+        bare_metal: true,
+        isolated: true,
+    }
+}
+
+fn soak_batch(samples: Vec<Sample>) -> MeasurementBatch {
+    MeasurementBatch {
+        key: soak_key(),
+        producer_commit: COMMIT.to_owned(),
+        samples,
+        evidence: Vec::new(),
+    }
+}
+
+#[test]
+fn soak_definition_accepts_only_its_exact_baseline_identity() {
+    let definition = soak_definition();
+    let baseline =
+        Baseline::targeted(1, soak_policy(), soak_key(), COMMIT).expect("target baseline");
+    definition
+        .validate_baseline(&baseline)
+        .expect("exact compiled identity");
+
+    // A different window length is a different benchmark.
+    let mut wrong_window = baseline.clone();
+    wrong_window.key.benchmark_definition =
+        Pg6SoakDefinition::new(3).expect("other window").digest();
+    let error = definition
+        .validate_baseline(&wrong_window)
+        .expect_err("window-length drift must fail before the workload");
+    assert!(error.to_string().contains("benchmark_definition"));
+
+    // The steady-allocation scenario's identity is never accepted here.
+    let mut wrong_scenario = baseline;
+    wrong_scenario.policy.scenario = PG6_SCENARIO.to_owned();
+    wrong_scenario.key.scenario = PG6_SCENARIO.to_owned();
+    wrong_scenario.policy.unit = MetricUnit::Allocations;
+    wrong_scenario.key.unit = MetricUnit::Allocations;
+    assert!(definition.validate_baseline(&wrong_scenario).is_err());
+}
+
+#[test]
+fn one_injected_leak_blocks_through_the_common_verifier() {
+    let baseline_batch = soak_batch(vec![Sample::valid(0); PG6_SOAK_WINDOWS]);
+    let baseline = Baseline::observed(
+        1,
+        soak_policy(),
+        &baseline_batch,
+        "tests/artifacts/perf/pg6-soak/baseline.tsv",
+    )
+    .expect("observed exact-zero baseline");
+    let mut samples = vec![Sample::valid(0); PG6_SOAK_WINDOWS];
+    samples[PG6_SOAK_WINDOWS - 1] = Sample::valid(4096);
+    let report = baseline.evaluate(Some(&baseline_batch), &soak_batch(samples));
+    assert_eq!(report.verdict, Verdict::Block);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "target-miss")
+    );
+}
+
+#[test]
+fn unsupported_host_samples_are_retained_and_never_pass() {
+    let baseline_batch = soak_batch(vec![Sample::valid(0); PG6_SOAK_WINDOWS]);
+    let baseline = Baseline::observed(
+        1,
+        soak_policy(),
+        &baseline_batch,
+        "tests/artifacts/perf/pg6-soak/baseline.tsv",
+    )
+    .expect("observed exact-zero baseline");
+    let inconclusive = soak_batch(vec![
+        Sample::invalid(0, PG6_SOAK_UNSUPPORTED_REASON);
+        PG6_SOAK_WINDOWS
+    ]);
+    let report = baseline.evaluate(Some(&baseline_batch), &inconclusive);
+    assert_ne!(
+        report.verdict,
+        Verdict::Pass,
+        "a host that cannot attribute residency can never pass the gate"
+    );
+}
+
+#[test]
+fn soak_producer_refuses_bad_identity_before_profile_or_corpus_setup() {
+    let baseline =
+        Baseline::targeted(1, soak_policy(), soak_key(), COMMIT).expect("target baseline");
+    let mut deny_probe =
+        || -> Result<Option<u64>, String> { panic!("probe must not run before identity checks") };
+
+    let error = measure_pg6_soak(
+        &baseline,
+        "not-a-commit",
+        "tests/artifacts/perf/pg6-soak/trace.tsv",
+        soak_definition(),
+        &mut deny_probe,
+    )
+    .expect_err("producer commit must fail before profile or corpus setup");
+    assert!(error.to_string().contains("producer_commit"), "{error}");
+
+    let error = measure_pg6_soak(
+        &baseline,
+        COMMIT,
+        "outside.tsv",
+        soak_definition(),
+        &mut deny_probe,
+    )
+    .expect_err("trace path must fail before profile or corpus setup");
+    assert!(error.to_string().contains("artifact path"), "{error}");
+}
+
+#[test]
+#[ignore = "real corpus soak with the live RSS probe; run explicitly under --profile release-perf"]
+fn release_perf_soak_measures_three_flat_windows_and_a_deliberate_leak_blocks() {
+    use fmn_platform::fs::StdFs;
+    use fmn_platform::topology::current_rss_bytes;
+
+    let definition = soak_definition();
+    let baseline =
+        Baseline::targeted(1, soak_policy(), soak_key(), COMMIT).expect("target baseline");
+
+    let mut real_probe = || current_rss_bytes(&StdFs).map_err(|error| error.to_string());
+    let artifacts = measure_pg6_soak(
+        &baseline,
+        COMMIT,
+        "tests/artifacts/perf/pg6-soak/trace.tsv",
+        definition,
+        &mut real_probe,
+    )
+    .expect("release-perf soak producer");
+    assert_eq!(artifacts.windows.len(), PG6_SOAK_WINDOWS);
+    assert_eq!(artifacts.batch.samples.len(), PG6_SOAK_WINDOWS);
+    assert!(
+        artifacts
+            .batch
+            .samples
+            .iter()
+            .all(|sample| sample.invalid_reason.is_none())
+    );
+
+    // A deliberate ~64 MiB touched leak per probe must be observed. The
+    // optimizer may legally elide an unobserved heap allocation — the first
+    // version of this test proved that under release-perf — so the pointer is
+    // laundered through `black_box` and every page is touched before the
+    // buffer is forgotten.
+    let mut leak_probe = || -> Result<Option<u64>, String> {
+        let mut leak = vec![0u8; 64 << 20];
+        for byte in leak.iter_mut().step_by(4096) {
+            *byte = 1;
+        }
+        std::hint::black_box(leak.as_ptr());
+        std::mem::forget(leak);
+        current_rss_bytes(&StdFs).map_err(|error| error.to_string())
+    };
+    let leaked = measure_pg6_soak(
+        &baseline,
+        COMMIT,
+        "tests/artifacts/perf/pg6-soak/leak-trace.tsv",
+        definition,
+        &mut leak_probe,
+    )
+    .expect("leaking soak still measures");
+    assert!(
+        leaked
+            .batch
+            .samples
+            .iter()
+            .any(|sample| sample.value > 32 << 20),
+        "the injected leak must dominate the window deltas: {:?}",
+        leaked.windows
     );
 }

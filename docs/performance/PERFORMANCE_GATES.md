@@ -61,9 +61,10 @@ Existing repository evidence remains distinct:
   output remains host-unqualified until fm-inr.1; weekly high-core and
   certified-platform receipts are separate evidence, not inferred successes.
 - PG-6's primitive steady-state allocation producer covers the complete
-  committed scene-golden corpus. Peak RSS and the one-hour leak soak still
-  require their own lifecycle-owned producers and remain inconclusive when
-  their evidence is absent.
+  committed scene-golden corpus, and the leak-soak producer covers
+  `one-hour-soak-leak` on residency-capable (Linux) hosts. Peak RSS
+  (`gallery-4k-3d-peak`) still requires the 4K 3D gallery corpus and remains
+  inconclusive while its evidence is absent.
 - the ignored native Metal probes are PG-A measurement producers, not
   committed pinned-profile baselines.
 - Studio's edit-to-frame report remains an input to PG-4, not a whole-gate
@@ -121,6 +122,11 @@ concurrently retargeted by their owner.
   It renders one warm frame and one caller-buffer/arena reuse frame for every
   committed scene, retaining both frame digests and the engine-owned allocation
   ledger for each measured frame.
+- `measure-pg6-soak <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>
+  <iterations-per-window>` applies the same identity and exclusive-publication
+  rules to the leak soak: three windows of full-corpus steady-state rendering,
+  one `leaked-bytes` RSS-delta sample per window through the fmn-platform
+  residency capability, with unsupported hosts retained as invalid samples.
 - `measure-pg7 <baseline.tsv> <producer-commit> <cache-root-or-dash>
   <trace.tsv> <raw.tsv>` applies the same identity and exclusive-publication
   rules to PG-7. `formula-cached` requires a fresh, nonexistent cache root
@@ -233,6 +239,29 @@ and the ordered corpus aggregate must match the compiled self-golden before the
 producer emits evidence. The measured batch still forces host qualification to
 false until fm-inr.1 supplies live attestation; this makes the output useful for
 calibration without inventing a closeable whole-PG-6 verdict.
+
+## Canonical PG-6 leak-soak workload
+
+The `fmn-perf-pg6-soak-definition/1` bytes bind the same 27-scene certified
+corpus, configuration, engine identity, and four-thread schedule as the
+allocation workload, plus the two soak axes: three measurement windows and the
+per-window full-corpus iteration count. The count is a real benchmark-identity
+axis — the weekly lane sizes it so three windows fill roughly an hour on the
+pinned host, and a shorter definition hashes to a different benchmark, so
+abbreviated soaks can never masquerade as the scheduled one.
+
+After one excluded warm frame per scene, each window records resident-set size
+through `fmn-platform`'s `current_rss_bytes` capability (Linux `VmRSS`),
+renders the full corpus for the window's iterations with every frame identity
+re-checked against its warm digest, and retains `rss_end - rss_start` (floored
+at zero) as one valid `leaked-bytes` sample. The exact policy requires every
+window to report zero. Hosts without a residency capability (macOS, Windows,
+wasm) retain all three samples as invalid with reason `rss-unsupported-host`
+and skip the burn: the gate is inconclusive there, never synthesized. The
+`fmn-perf-pg6-soak-trace/1` artifact retains each window's start/end resident
+bytes, leaked bytes, and iteration count. `fmn-perf measure-pg6-soak` is the
+producing front door; `gallery-4k-3d-peak` remains the one PG-6 row without a
+producer, pending the 4K 3D gallery corpus.
 
 ## Canonical PG-7 workloads
 
