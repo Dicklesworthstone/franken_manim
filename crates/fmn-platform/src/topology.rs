@@ -635,6 +635,45 @@ fn group_by_split(ids: &[u32]) -> Vec<ProcessorGroup> {
     groups
 }
 
+/// Bounded ceiling for one `/proc/<pid>/status` read; the real file is ~2 KiB.
+const MAX_PROC_STATUS_BYTES: usize = 64 * 1024;
+
+/// Resident-set size of the calling process, in bytes, through the capability
+/// filesystem.
+///
+/// Linux only by construction: parses the `VmRSS:` row of `/proc/self/status`
+/// (kernel-reported in kB). Hosts without that file — macOS, Windows, wasm —
+/// return `Ok(None)`, and consumers such as PG-6's leak soak retain their
+/// samples as inconclusive rather than inventing a number. A present file with
+/// an unparsable `VmRSS` row is a typed parse error, never a silent `None`.
+///
+/// # Errors
+/// [`TopologyError::Parse`] when the status file exists but its `VmRSS` row is
+/// malformed.
+pub fn current_rss_bytes(fs: &dyn FileSystem) -> Result<Option<u64>, TopologyError> {
+    let path = Path::new("/proc/self/status");
+    let Some(status) = read_optional_string(fs, path, MAX_PROC_STATUS_BYTES) else {
+        return Ok(None);
+    };
+    let Some(row) = status.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
+        // Kernel threads and some restricted mounts omit the row; absence is
+        // an unsupported surface, not corruption.
+        return Ok(None);
+    };
+    let parse = || -> Option<u64> {
+        let mut fields = row.split_whitespace();
+        let value: u64 = fields.next()?.parse().ok()?;
+        match fields.next() {
+            Some("kB") => value.checked_mul(1024),
+            _ => None,
+        }
+    };
+    parse().map(Some).ok_or_else(|| TopologyError::Parse {
+        path: path.to_path_buf(),
+        detail: format!("malformed VmRSS row {row:?}"),
+    })
+}
+
 fn read_string(fs: &dyn FileSystem, path: &Path) -> Result<String, TopologyError> {
     match fs.read_to_string_bounded(path, MAX_CPU_LIST_BYTES) {
         Ok(s) => Ok(s),
@@ -836,5 +875,51 @@ mod tests {
         );
         let topology = HardwareTopology::detect_linux(&overflow).unwrap();
         assert_eq!(topology.total_memory_bytes, None);
+    }
+
+    #[test]
+    fn current_rss_reads_vmrss_and_degrades_precisely() {
+        use crate::fs::VirtualFs;
+        let status = PathBuf::from("/proc/self/status");
+
+        // The documented Linux shape, in bytes.
+        let linux = VirtualFs::new();
+        linux.insert(
+            status.clone(),
+            b"Name:\tfmn\nVmPeak:\t  9000 kB\nVmRSS:\t  4321 kB\nThreads:\t4\n".to_vec(),
+        );
+        assert_eq!(current_rss_bytes(&linux).unwrap(), Some(4321 * 1024));
+
+        // No procfs (macOS/Windows/wasm): an unsupported surface, not an error.
+        assert_eq!(current_rss_bytes(&VirtualFs::new()).unwrap(), None);
+
+        // A status file without the row (kernel threads): also unsupported.
+        let rowless = VirtualFs::new();
+        rowless.insert(status.clone(), b"Name:\tfmn\nThreads:\t4\n".to_vec());
+        assert_eq!(current_rss_bytes(&rowless).unwrap(), None);
+
+        // A present but malformed row is corruption, never a silent None.
+        for bad in ["VmRSS:\tpotato kB\n", "VmRSS:\t12 MB\n", "VmRSS:\t\n"] {
+            let malformed = VirtualFs::new();
+            malformed.insert(status.clone(), format!("Name:\tfmn\n{bad}").into_bytes());
+            assert!(matches!(
+                current_rss_bytes(&malformed),
+                Err(TopologyError::Parse { detail, .. }) if detail.contains("VmRSS")
+            ));
+        }
+
+        // Overflowing kB counts refuse rather than wrap.
+        let huge = VirtualFs::new();
+        huge.insert(status, format!("VmRSS:\t{} kB\n", u64::MAX).into_bytes());
+        assert!(current_rss_bytes(&huge).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn current_rss_reports_the_live_process_on_linux() {
+        let rss = current_rss_bytes(&crate::fs::StdFs)
+            .expect("host status parses")
+            .expect("linux reports VmRSS");
+        assert!(rss > 0, "a running test process is resident");
     }
 }
