@@ -5,7 +5,7 @@
 //! distribution documentation and the code: change either side alone and it
 //! fails.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use fmn_cache::{DEFAULT_CACHE_LEAF, resolve_host_cache_root};
 
@@ -92,6 +92,8 @@ fn documented_config_convention_names_the_real_surfaces() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_host_resolution_follows_the_documented_xdg_convention() {
+    use std::path::PathBuf;
+
     let resolved = resolve_host_cache_root("").expect("the CI host has a cache convention");
     assert!(
         resolved.is_absolute(),
