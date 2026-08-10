@@ -1,8 +1,9 @@
 # FMTL/1 — the tier-2 timeline bundle layout (AUTHORITATIVE CONTRACT, fm-oee)
 
-**Owner decision, 2026-07-30 (GentleBeaver).** The reader (fmn-wasm
-`FmnPlayer`) and the writer (the scene-side exporter) both implement EXACTLY
-this layout. Drift is a bug in whichever side deviates.
+**Owner decision, 2026-07-30 (GentleBeaver).** The shared reader and writer
+(`fmn_scene::TimelineBundle` and the scene-side exporter) both implement
+EXACTLY this layout. `fmn-wasm` and `fmn-cli` consume that reader rather than
+carrying format-specific decoders. Drift is a bug in the shared codec.
 
 **Name history.** The draft magic `FMNT` collides with
 `fmn-render/src/texture.rs`'s texture schema (`Schema::new(*b"FMNT", 1, 1, 0)`) —

@@ -1,6 +1,6 @@
 //! The W5 tier-2 timeline-bundle player (fm-oee, §10.7): [`FmnPlayer`]
 //! consumes an FMTL/1 bundle (`docs/FMNT1_TIMELINE_BUNDLE.md`, the pinned
-//! contract — the writer half lives in `fmn_scene::timeline_bundle`) and
+//! contract — the shared codec lives in `fmn_scene::timeline_bundle`) and
 //! plays it with scrub/seek: decode → reconstruct the frame's stage →
 //! render through the tier-1 Lumen path → canvas RGBA8. There is no scene
 //! code in this process; the bundle is the whole input.
@@ -27,16 +27,17 @@
 //! matching [`crate::FmnScene`]; the nested plan's 1-based global frame is
 //! an internal detail (`locate` maps between them).
 
-use fmn_anim::bundle::{bundle_sub_alpha, interpolate_between, path_from_tag, rate_from_tag};
-use fmn_anim::timeline::TimelinePlan;
-use fmn_anim::{PathFunc, RateFunc};
 use fmn_hash::SerialError;
-use fmn_hash::serial::{Limits, Reader, UnknownPolicy};
+use fmn_mobject::Stage;
 use fmn_mobject::persist::PersistError;
-use fmn_mobject::{Snapshot, Stage};
-use fmn_scene::timeline_bundle::{TIMELINE_BUNDLE_SCHEMA, bundle_engine_version};
+use fmn_scene::{BundleReadError, TimelineBundle};
 use wasm_bindgen::JsError;
 use wasm_bindgen::prelude::wasm_bindgen;
+
+#[cfg(test)]
+use fmn_hash::serial::{Limits, Reader, UnknownPolicy};
+#[cfg(test)]
+use fmn_scene::{TIMELINE_BUNDLE_SCHEMA, bundle_engine_version};
 
 use crate::{render_stage_rgba8, render_stage_rgba8_into, rgba8_output_len};
 
@@ -149,28 +150,33 @@ impl std::error::Error for PlayerError {
     }
 }
 
-/// One decoded segment entry.
-enum SegmentData {
-    /// Kind 0: begin/end snapshots plus the reconstruction identities.
-    /// Boxed: a Snapshot is a whole arena, and the kind-1 arm is a Vec.
-    Pure {
-        begin: Box<Snapshot>,
-        end: Box<Snapshot>,
-        path: PathFunc,
-        rate: RateFunc,
-    },
-    /// Kind 1: every frame's snapshot, decoded.
-    Stateful { frames: Vec<Snapshot> },
+impl From<BundleReadError> for PlayerError {
+    fn from(error: BundleReadError) -> Self {
+        match error {
+            BundleReadError::Malformed(error) => Self::Malformed(error),
+            BundleReadError::EngineMismatch { wanted, found } => {
+                Self::EngineMismatch { wanted, found }
+            }
+            BundleReadError::PlanInconsistent(what) => Self::PlanInconsistent(what),
+            BundleReadError::FrameCountUnrepresentable { frames } => {
+                Self::FrameCountUnrepresentable { frames }
+            }
+            BundleReadError::AllocationFailed { context, requested } => {
+                Self::AllocationFailed { context, requested }
+            }
+            BundleReadError::Snapshot(error) => Self::Snapshot(error),
+            BundleReadError::FrameOutOfRange { index, total } => {
+                Self::FrameOutOfRange { index, total }
+            }
+        }
+    }
 }
 
 /// The host-testable core: everything [`FmnPlayer`] exposes, with no
 /// bindgen types in the way (the same separation [`crate::SceneBuild`]
 /// keeps for tier 1).
 pub(crate) struct PlayerCore {
-    plan: TimelinePlan,
-    segments: Vec<SegmentData>,
-    frame_count: u32,
-    engine_version: String,
+    bundle: TimelineBundle,
     width: u32,
     height: u32,
     cursor: u32,
@@ -182,129 +188,8 @@ impl PlayerCore {
     /// scrub time. The viewport starts unset; [`PlayerCore::set_viewport`]
     /// is the deliberate second step.
     fn load(bytes: &[u8]) -> Result<Self, PlayerError> {
-        let mut reader = Reader::open(
-            bytes,
-            TIMELINE_BUNDLE_SCHEMA,
-            Limits::DEFAULT,
-            UnknownPolicy::Strict,
-        )
-        .map_err(PlayerError::Malformed)?;
-        // The version refusal comes FIRST: nothing else in the document is
-        // interpreted for an engine this build is not.
-        let wanted = reader.get_str().map_err(PlayerError::Malformed)?.to_owned();
-        let found = bundle_engine_version();
-        if wanted != found {
-            return Err(PlayerError::EngineMismatch { wanted, found });
-        }
-        let fps = reader.get_u32().map_err(PlayerError::Malformed)?;
-        let plan = TimelinePlan::from_bytes(reader.get_bytes().map_err(PlayerError::Malformed)?)
-            .map_err(|e| match e {
-                fmn_anim::timeline::TimelineError::Serial(serial) => PlayerError::Malformed(serial),
-                fmn_anim::timeline::TimelineError::Malformed(what) => {
-                    PlayerError::PlanInconsistent(what)
-                }
-            })?;
-        if plan.fps() != fps {
-            return Err(PlayerError::PlanInconsistent("fps"));
-        }
-        let plan_frame_count = plan.total_frames();
-        let frame_count = u32::try_from(plan_frame_count).map_err(|_| {
-            PlayerError::FrameCountUnrepresentable {
-                frames: plan_frame_count,
-            }
-        })?;
-        let segment_count = usize::try_from(reader.get_u32().map_err(PlayerError::Malformed)?)
-            .map_err(|_| PlayerError::PlanInconsistent("segment count exceeds host width"))?;
-        if segment_count != plan.segments().len() {
-            return Err(PlayerError::PlanInconsistent("segment count"));
-        }
-        // Every segment entry starts with at least its one-byte kind tag.
-        // Prove that the payload can carry the table before asking the
-        // allocator for storage proportional to its declared count.
-        if segment_count > reader.remaining() {
-            return Err(PlayerError::PlanInconsistent(
-                "segment table exceeds payload",
-            ));
-        }
-        let binding = Stage::new();
-        let mut segments = Vec::new();
-        segments
-            .try_reserve_exact(segment_count)
-            .map_err(|_| PlayerError::AllocationFailed {
-                context: "segment table",
-                requested: segment_count,
-            })?;
-        for planned in plan.segments() {
-            let kind = reader.get_u8().map_err(PlayerError::Malformed)?;
-            let segment = match kind {
-                0 => {
-                    let begin = reader.get_bytes().map_err(PlayerError::Malformed)?;
-                    let end = reader.get_bytes().map_err(PlayerError::Malformed)?;
-                    let path_tag = reader.get_u8().map_err(PlayerError::Malformed)?;
-                    let rate_tag = reader.get_u8().map_err(PlayerError::Malformed)?;
-                    let path =
-                        path_from_tag(path_tag).ok_or(PlayerError::PlanInconsistent("path tag"))?;
-                    let rate =
-                        rate_from_tag(rate_tag).ok_or(PlayerError::PlanInconsistent("rate tag"))?;
-                    let decode_snapshot = |bytes: &[u8]| -> Result<Box<Snapshot>, PlayerError> {
-                        Ok(Box::new(
-                            Snapshot::from_bytes(bytes, &binding)
-                                .map_err(PlayerError::Snapshot)?
-                                .snapshot,
-                        ))
-                    };
-                    SegmentData::Pure {
-                        begin: decode_snapshot(begin)?,
-                        end: decode_snapshot(end)?,
-                        path,
-                        rate,
-                    }
-                }
-                1 => {
-                    let frame_count = reader.get_u32().map_err(PlayerError::Malformed)?;
-                    if i64::from(frame_count) != planned.n_frames {
-                        return Err(PlayerError::PlanInconsistent(
-                            "stateful segment frame count",
-                        ));
-                    }
-                    // Each snapshot is a length-prefixed bytes field, so
-                    // eight bytes per frame is a strict encoded minimum.
-                    // Check it before converting or reserving the table.
-                    let frame_count = usize::try_from(frame_count).map_err(|_| {
-                        PlayerError::PlanInconsistent("stateful frame count exceeds host width")
-                    })?;
-                    if frame_count > reader.remaining() / std::mem::size_of::<u64>() {
-                        return Err(PlayerError::PlanInconsistent(
-                            "stateful frame table exceeds payload",
-                        ));
-                    }
-                    let mut frames = Vec::new();
-                    frames.try_reserve_exact(frame_count).map_err(|_| {
-                        PlayerError::AllocationFailed {
-                            context: "stateful frame table",
-                            requested: frame_count,
-                        }
-                    })?;
-                    for _ in 0..frame_count {
-                        let bytes = reader.get_bytes().map_err(PlayerError::Malformed)?;
-                        frames.push(
-                            Snapshot::from_bytes(bytes, &binding)
-                                .map_err(PlayerError::Snapshot)?
-                                .snapshot,
-                        );
-                    }
-                    SegmentData::Stateful { frames }
-                }
-                _ => return Err(PlayerError::PlanInconsistent("segment kind tag")),
-            };
-            segments.push(segment);
-        }
-        reader.finish().map_err(PlayerError::Malformed)?;
         Ok(Self {
-            plan,
-            segments,
-            frame_count,
-            engine_version: found,
+            bundle: TimelineBundle::from_bytes(bytes)?,
             width: 0,
             height: 0,
             cursor: 0,
@@ -325,45 +210,13 @@ impl PlayerCore {
     }
 
     fn frame_count(&self) -> u32 {
-        self.frame_count
+        self.bundle.frame_count()
     }
 
     /// Reconstruct the stage at 0-based frame `index` — the contract's
     /// reconstruction law, via the plan's `locate`.
     fn stage_at(&self, index: u32) -> Result<Stage, PlayerError> {
-        let total = self.frame_count();
-        let global = i64::from(index) + 1;
-        let (segment_index, offset) = self
-            .plan
-            .locate(global)
-            .ok_or(PlayerError::FrameOutOfRange { index, total })?;
-        let planned = &self.plan.segments()[segment_index];
-        let fps = self.plan.fps();
-        let mut stage = match &self.segments[segment_index] {
-            SegmentData::Pure {
-                begin,
-                end,
-                path,
-                rate,
-            } => {
-                // The engine's divisor chain, exactly: segment-local
-                // rational time converted once, divided by the run time.
-                let alpha = (offset as f64 / f64::from(fps)) / planned.run_time;
-                interpolate_between(begin, end, bundle_sub_alpha(alpha, rate), *path)
-            }
-            SegmentData::Stateful { frames } => {
-                let snapshot = frames
-                    .get(usize::try_from(offset - 1).unwrap_or(usize::MAX))
-                    .ok_or(PlayerError::PlanInconsistent(
-                        "stateful segment shorter than the plan",
-                    ))?;
-                snapshot.materialize()
-            }
-        };
-        // The clock mirror the engine's own packets carry at capture:
-        // global frame time, one exact-to-f64 conversion.
-        stage.set_time_from_clock(global as f64 / f64::from(fps));
-        Ok(stage)
+        self.bundle.stage_at(index).map_err(PlayerError::from)
     }
 
     /// Seek: validate and position the cursor. Reconstruction is O(frame)
@@ -475,20 +328,20 @@ impl FmnPlayer {
     /// The schedule's frame rate.
     #[wasm_bindgen(getter)]
     pub fn fps(&self) -> u32 {
-        self.core.plan.fps()
+        self.core.bundle.fps()
     }
 
     /// The timeline's exact duration on the frame grid, in seconds.
     #[wasm_bindgen(getter)]
     pub fn duration_seconds(&self) -> f64 {
-        self.core.plan.duration()
+        self.core.bundle.duration_seconds()
     }
 
     /// The engine identity this bundle was written for (and this build
     /// verified itself against at load).
     #[wasm_bindgen(getter)]
     pub fn engine_version(&self) -> String {
-        self.core.engine_version.clone()
+        self.core.bundle.engine_version().to_owned()
     }
 
     /// The current scrub position (set by [`FmnPlayer::seek_frame`]).
@@ -500,7 +353,7 @@ impl FmnPlayer {
     /// The authored label names, in authored order.
     pub fn labels(&self) -> Vec<String> {
         self.core
-            .plan
+            .bundle
             .labels()
             .iter()
             .map(|label| label.name.clone())
@@ -509,8 +362,7 @@ impl FmnPlayer {
 
     /// The 0-based frame a label resolves to, if the name is authored.
     pub fn frame_of_label(&self, name: &str) -> Option<u32> {
-        let frame = self.core.plan.frame_of_label(name)?;
-        u32::try_from(frame - 1).ok()
+        self.core.bundle.frame_of_label(name)
     }
 
     /// The segment kind at `index` (0 = pure-reconstructible, 1 =
@@ -521,13 +373,10 @@ impl FmnPlayer {
     pub fn segment_kind(&self, index: u32) -> Result<u32, JsError> {
         let segment = self
             .core
-            .segments
-            .get(index as usize)
+            .bundle
+            .segment_kind(index as usize)
             .ok_or_else(|| JsError::new("segment index out of range"))?;
-        Ok(match segment {
-            SegmentData::Pure { .. } => 0,
-            SegmentData::Stateful { .. } => 1,
-        })
+        Ok(segment.wire_tag())
     }
 
     /// Seek the scrub cursor to 0-based frame `index`. Cheap in every
@@ -612,7 +461,7 @@ mod tests {
         // actually reach the pixels.
         let mut core = loaded();
         assert!(core.frame_count() > 0);
-        assert_eq!(core.plan.fps(), 30);
+        assert_eq!(core.bundle.fps(), 30);
         core.set_viewport(96, 54).expect("viewport");
         let first = core.render_index(0).expect("first frame");
         assert_eq!(first.len(), 96 * 54 * 4);
@@ -822,13 +671,19 @@ mod tests {
         // shared catalog rate) proves kind 0; the pure wait follows.
         let bytes = demo_bundle().expect("export");
         let core = PlayerCore::load(&bytes).expect("load");
-        assert_eq!(core.segments.len(), 2);
+        assert_eq!(core.bundle.segment_count(), 2);
         assert!(
-            matches!(core.segments[0], SegmentData::Pure { .. }),
+            matches!(
+                core.bundle.segment_kind(0),
+                Some(fmn_scene::BundleSegmentKind::Pure)
+            ),
             "the play segment proved reconstructible"
         );
         assert!(
-            matches!(core.segments[1], SegmentData::Pure { .. }),
+            matches!(
+                core.bundle.segment_kind(1),
+                Some(fmn_scene::BundleSegmentKind::Pure)
+            ),
             "the wait segment proved reconstructible"
         );
     }
@@ -850,7 +705,10 @@ mod tests {
         core.set_viewport(96, 54).expect("viewport");
         let total = core.frame_count();
         assert_eq!(packets.len() as u32, total, "frame counts agree");
-        assert!(matches!(core.segments[0], SegmentData::Pure { .. }));
+        assert!(matches!(
+            core.bundle.segment_kind(0),
+            Some(fmn_scene::BundleSegmentKind::Pure)
+        ));
 
         // Sample densely on the pure play (every third frame covers many
         // mid-segment scrubs), both segment boundaries, the label frames,
@@ -880,18 +738,18 @@ mod tests {
     fn seek_labels_and_accessors_track_the_plan() {
         let mut core = loaded();
         assert_eq!(core.frame_count(), 45);
-        assert!((core.plan.duration() - 1.5).abs() < 1e-12);
-        assert_eq!(core.engine_version, bundle_engine_version());
+        assert!((core.bundle.duration_seconds() - 1.5).abs() < 1e-12);
+        assert_eq!(core.bundle.engine_version(), bundle_engine_version());
         assert_eq!(
-            core.plan
+            core.bundle
                 .labels()
                 .iter()
                 .map(|l| l.name.as_str())
                 .collect::<Vec<_>>(),
             ["shift", "settle"]
         );
-        assert_eq!(core.plan.frame_of_label("shift"), Some(1));
-        assert_eq!(core.plan.frame_of_label("settle"), Some(31));
+        assert_eq!(core.bundle.frame_of_label("shift"), Some(0));
+        assert_eq!(core.bundle.frame_of_label("settle"), Some(30));
         assert!(core.seek_frame(44).is_ok());
         assert_eq!(core.cursor, 44);
         assert!(matches!(

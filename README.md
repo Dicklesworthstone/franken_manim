@@ -231,8 +231,8 @@ fmn --format video --transparent --resolution 640x360 @builtin circle_shift.v1
 # Certified artifacts stop before ffmpeg: canonical frames are the promised bits
 fmn --reproducible --format png_sequence @builtin circle_shift.v1
 
-# User native registrations/compiled artifacts use the same standalone front door
-fmn <native-scene-artifact> SquareToCircle -o
+# Compiled FMTL/1 scenes use the same Lumen/Reel render path and fixed artifact fps
+fmn --format png_sequence demo/wasm/bundle.fmtl DemoTimeline
 
 # Python sources use the separately installed portal
 fmn-python scene.py SquareToCircle -o                 # write and open

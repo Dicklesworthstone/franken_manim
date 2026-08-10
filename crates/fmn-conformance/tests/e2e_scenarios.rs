@@ -53,7 +53,7 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
-use fmn_anim::FramePacket;
+use fmn_anim::{FramePacket, Timeline};
 use fmn_conformance::e2e::{
     self, Assertion, FieldPred, Invocation, LogEvent, LogExpect, RegressionKind, RunCtx,
     RunOutcome, Runner, ScenarioClass, ScenarioError, ScenarioSpec, Status, Surface, Tier,
@@ -64,6 +64,7 @@ use fmn_conformance::perf_pg6::{PG6_THREADS, Pg6Definition, pg6_identity};
 use fmn_conformance::scene_goldens::{self, TILING};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, WHITE};
+use fmn_core::rng::RngRoot;
 use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_hash::sha256;
@@ -1089,6 +1090,85 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_png_signature", 1))
 }
 
+/// A compiled FMTL/1 artifact crosses the stock CLI boundary, reconstructs
+/// through fmn-scene's shared reader, renders through Lumen, and publishes
+/// through Reel. This is the source-unedited native-artifact path rather than
+/// another built-in registration.
+fn cli_compiled_bundle_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_compiled_bundle_render")?;
+    let source = dir.join("compiled_wait.fmtl");
+    let output_dir = dir.join("output");
+    std::fs::create_dir(&output_dir)
+        .map_err(|error| fail(format!("create compiled output directory: {error}")))?;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create compiled timeline: {error}")))?;
+    timeline
+        .wait(0.25)
+        .map_err(|error| fail(format!("author compiled wait: {error}")))?;
+    let bytes =
+        fmn_scene::export_timeline_bundle(timeline, &mut Stage::new(), &RngRoot::from_seed(0))
+            .map_err(|error| fail(format!("export compiled timeline: {error}")))?;
+    std::fs::write(&source, bytes)
+        .map_err(|error| fail(format!("write compiled artifact: {error}")))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--threads",
+        "1",
+        "--video_dir",
+        output_dir
+            .to_str()
+            .ok_or_else(|| fail("compiled output path is not UTF-8"))?,
+        source
+            .to_str()
+            .ok_or_else(|| fail("compiled source path is not UTF-8"))?,
+        "CompiledWait",
+    ]);
+    let sequence = output_dir.join("CompiledWait");
+    let complete = sequence.join("FMN_COMPLETE").is_file();
+    let pngs = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list compiled CLI PNG sequence: {error}")))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+        .count();
+    let signature = std::fs::read(sequence.join("frame_000000.png"))
+        .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .unwrap_or(false);
+    let robot_record = output.stdout.lines().count() == 1
+        && output.stdout.contains("\"kind\":\"render\"")
+        && output.stdout.contains("\"source\":\"compiled\"")
+        && output.stdout.contains("\"source_artifact\":")
+        && output.stdout.contains("\"frames\":2");
+    ctx.event(
+        LogEvent::new("e2e.cli.render")
+            .field("source", "compiled")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("robot_record", truth(robot_record)),
+    );
+    ctx.counter("cli_compiled_render_frames", pngs as u64);
+    ctx.counter("cli_compiled_png_signature", u64::from(signature));
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !complete
+        || pngs != 2
+        || !signature
+        || !robot_record
+    {
+        return Err(fail(format!(
+            "compiled CLI render failed: code={} pngs={pngs} complete={complete} signature={signature} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_compiled_render_frames", 2)
+        .with_counter("cli_compiled_png_signature", 1))
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle drill
 // ---------------------------------------------------------------------------
@@ -1856,6 +1936,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             "e2e.cli.render",
             vec![
                 FieldPred::str_eq("source", "builtin"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_compiled_fmtl_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_compiled_bundle_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_compiled_render_frames", 2),
+            counter_eq("cli_compiled_png_signature", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.render",
+            vec![
+                FieldPred::str_eq("source", "compiled"),
                 FieldPred::str_eq("format", "png_sequence"),
                 FieldPred::str_eq("complete", "true"),
                 FieldPred::str_eq("png_signature", "true"),

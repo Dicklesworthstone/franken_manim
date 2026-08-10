@@ -34,7 +34,10 @@ use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
-use fmn_scene::{CaptureReason, IntegrationError, OutputNaming, SceneSink};
+use fmn_scene::{
+    BundleReadError, CaptureReason, DEFAULT_MAX_BUNDLE_BYTES, IntegrationError, OutputNaming,
+    SceneSink, TimelineBundle,
+};
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
 pub const ROBOT_SCHEMA_VERSION: u32 = 1;
@@ -2226,6 +2229,46 @@ enum RenderArtifactReport {
     Video(VideoArtifactReport),
 }
 
+enum RenderSourceReport {
+    Builtin,
+    Compiled(PathBuf),
+}
+
+impl RenderSourceReport {
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Compiled(_) => "compiled",
+        }
+    }
+
+    fn artifact(&self) -> Option<&Path> {
+        match self {
+            Self::Builtin => None,
+            Self::Compiled(path) => Some(path),
+        }
+    }
+}
+
+struct CompletedRender {
+    source: RenderSourceReport,
+    scene: String,
+    artifact: RenderArtifactReport,
+    engine: String,
+    render_threads: usize,
+}
+
+enum NativeRenderInput {
+    Builtin {
+        names: Vec<String>,
+    },
+    Compiled {
+        source: PathBuf,
+        name: String,
+        bundle: TimelineBundle,
+    },
+}
+
 struct RenderSink {
     frame_config: FrameConfig,
     tiling: Tiling,
@@ -2377,58 +2420,14 @@ impl RenderSink {
         })
     }
 
-    fn finish(mut self) -> Result<RenderArtifactReport, CliError> {
-        let emitter = self
-            .emitter
-            .take()
-            .ok_or_else(|| CliError::new("internal", "render emitter was already finalized"))?;
-        emitter
-            .finish()
-            .map_err(|error| CliError::new("render", error.to_string()))?;
-        match self.receipt {
-            RenderReceipt::Native(receipt) => receipt
-                .take()
-                .map(RenderArtifactReport::Native)
-                .map_err(|error| CliError::new("render", error.to_string())),
-            RenderReceipt::Video(receipt) => {
-                let report = receipt
-                    .take()
-                    .map_err(|error| CliError::new("render", error.to_string()))?;
-                let invocation = report.boundary.invocations.first().ok_or_else(|| {
-                    CliError::new(
-                        "internal",
-                        "ffmpeg publication omitted invocation provenance",
-                    )
-                })?;
-                Ok(RenderArtifactReport::Video(VideoArtifactReport {
-                    path: report.boundary.destination.clone(),
-                    frame_count: report.frame_count,
-                    input_bytes: report.input_bytes,
-                    tool_path: invocation.provenance.tool_path.clone(),
-                    tool_sha256: invocation.provenance.tool_sha256_hex.clone(),
-                    tool_version: invocation.provenance.tool_version.clone(),
-                    encoder: invocation.provenance.encoder.clone(),
-                    process_mechanism: invocation.provenance.process_mechanism.clone(),
-                    process_policy_version: invocation.provenance.process_policy_version,
-                    argv: invocation.provenance.argv.clone(),
-                }))
-            }
-        }
-    }
-}
-
-impl SceneSink for RenderSink {
-    fn capture(
+    fn render_stage(
         &mut self,
-        _reason: CaptureReason,
-        packet: fmn::animation::FramePacket,
+        stage: &fmn_scene::studio_bridge::Stage,
+        revision: u64,
     ) -> Result<(), IntegrationError> {
-        let stage = packet.materialize_stage();
         let mut render_plan = RenderPlan::new();
-        let revision = u64::try_from(packet.frame_index())
-            .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
         render_plan
-            .sync(&stage, revision)
+            .sync(stage, revision)
             .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
         let mono = MonoTable::build(&render_plan, self.frame_config.map)
             .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
@@ -2517,6 +2516,58 @@ impl SceneSink for RenderSink {
             .checked_add(1)
             .ok_or_else(|| IntegrationError::new("reel", "frame sequence exhausted"))?;
         Ok(())
+    }
+
+    fn finish(mut self) -> Result<RenderArtifactReport, CliError> {
+        let emitter = self
+            .emitter
+            .take()
+            .ok_or_else(|| CliError::new("internal", "render emitter was already finalized"))?;
+        emitter
+            .finish()
+            .map_err(|error| CliError::new("render", error.to_string()))?;
+        match self.receipt {
+            RenderReceipt::Native(receipt) => receipt
+                .take()
+                .map(RenderArtifactReport::Native)
+                .map_err(|error| CliError::new("render", error.to_string())),
+            RenderReceipt::Video(receipt) => {
+                let report = receipt
+                    .take()
+                    .map_err(|error| CliError::new("render", error.to_string()))?;
+                let invocation = report.boundary.invocations.first().ok_or_else(|| {
+                    CliError::new(
+                        "internal",
+                        "ffmpeg publication omitted invocation provenance",
+                    )
+                })?;
+                Ok(RenderArtifactReport::Video(VideoArtifactReport {
+                    path: report.boundary.destination.clone(),
+                    frame_count: report.frame_count,
+                    input_bytes: report.input_bytes,
+                    tool_path: invocation.provenance.tool_path.clone(),
+                    tool_sha256: invocation.provenance.tool_sha256_hex.clone(),
+                    tool_version: invocation.provenance.tool_version.clone(),
+                    encoder: invocation.provenance.encoder.clone(),
+                    process_mechanism: invocation.provenance.process_mechanism.clone(),
+                    process_policy_version: invocation.provenance.process_policy_version,
+                    argv: invocation.provenance.argv.clone(),
+                }))
+            }
+        }
+    }
+}
+
+impl SceneSink for RenderSink {
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        packet: fmn::animation::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        let stage = packet.materialize_stage();
+        let revision = u64::try_from(packet.frame_index())
+            .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
+        self.render_stage(&stage, revision)
     }
 }
 
@@ -2731,20 +2782,153 @@ fn prepare_ffmpeg_context(
     })
 }
 
-fn execute_builtin_render(
+fn bundle_read_error(error: BundleReadError) -> CliError {
+    let exit_name = match error {
+        BundleReadError::FrameCountUnrepresentable { .. }
+        | BundleReadError::AllocationFailed { .. } => "budget",
+        _ => "scene",
+    };
+    CliError::new(exit_name, error.to_string())
+}
+
+fn compiled_scene_name(command: &RenderCommand, source: &Path) -> Result<String, CliError> {
+    if command.scene_names.len() > 1 {
+        return Err(CliError::new(
+            "usage",
+            "an FMTL artifact contains exactly one compiled scene; select at most one output name",
+        ));
+    }
+    let name = command.scene_names.first().cloned().unwrap_or_else(|| {
+        source
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or("scene")
+            .to_owned()
+    });
+    let path = Path::new(&name);
+    if name.is_empty() || name == "." || name == ".." || path.file_name() != Some(OsStr::new(&name))
+    {
+        return Err(CliError::new(
+            "usage",
+            "the compiled scene output name must be one non-empty path component",
+        ));
+    }
+    Ok(name)
+}
+
+fn resolve_native_render_input(
+    fs: &dyn FileSystem,
+    command: &RenderCommand,
+) -> Result<NativeRenderInput, CliError> {
+    let source = command.file.as_deref().ok_or_else(|| {
+        CliError::new(
+            "scene",
+            format!("select {BUILTIN_SCENE_SOURCE} or provide one compiled .fmtl artifact"),
+        )
+    })?;
+    if source == Path::new(BUILTIN_SCENE_SOURCE) {
+        let names = if command.write_all {
+            fmn::builtins::PRIMITIVE_SCENE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect()
+        } else if command.scene_names.is_empty() {
+            return Err(CliError::new(
+                "scene",
+                format!(
+                    "select a built-in scene or pass --write_all; available scenes: {}",
+                    fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+                ),
+            ));
+        } else {
+            command.scene_names.clone()
+        };
+        if names.len() > 1 && command.file_name.is_some() {
+            return Err(CliError::new(
+                "config",
+                "--file_name cannot name multiple --write_all artifacts",
+            ));
+        }
+        for name in &names {
+            if fmn::builtins::primitive_scene(name).is_none() {
+                return Err(CliError::new(
+                    "scene",
+                    format!(
+                        "unknown built-in scene {name:?}; available scenes: {}",
+                        fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+                    ),
+                ));
+            }
+        }
+        return Ok(NativeRenderInput::Builtin { names });
+    }
+
+    if source
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_none_or(|extension| !extension.eq_ignore_ascii_case("fmtl"))
+    {
+        return Err(CliError::new(
+            "capability",
+            "the standalone native artifact reader currently accepts the authoritative FMTL/1 .fmtl format",
+        ));
+    }
+    if command.write_all {
+        return Err(CliError::new(
+            "usage",
+            "--write_all applies to multi-registration sources; an FMTL artifact contains one compiled scene",
+        ));
+    }
+    if command.skip_animations
+        || command.animation_range.is_some()
+        || command.presenter_mode
+        || command.full_screen
+        || command.autoreload
+        || command.embed_line.is_some()
+    {
+        return Err(CliError::new(
+            "capability",
+            "an FMTL artifact has a fixed compiled schedule; skip, range, presenter, fullscreen, reload, and embed controls require an authored scene source",
+        ));
+    }
+    let name = compiled_scene_name(command, source)?;
+    let bytes = fs
+        .read_bounded(source, DEFAULT_MAX_BUNDLE_BYTES)
+        .map_err(|error| {
+            let exit_name = if matches!(error, FsError::TooLarge { .. }) {
+                "budget"
+            } else {
+                "scene"
+            };
+            CliError::new(
+                exit_name,
+                format!("could not read {}: {error}", source.display()),
+            )
+        })?;
+    let bundle = TimelineBundle::from_bytes(&bytes).map_err(bundle_read_error)?;
+    if u64::from(bundle.frame_count()) > fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES {
+        return Err(CliError::new(
+            "budget",
+            format!(
+                "compiled artifact schedules {} frames, exceeding the {}-frame CLI output budget",
+                bundle.frame_count(),
+                fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES
+            ),
+        ));
+    }
+    Ok(NativeRenderInput::Compiled {
+        source: source.to_owned(),
+        name,
+        bundle,
+    })
+}
+
+fn execute_native_render(
     fs: Arc<dyn FileSystem>,
     runner: Arc<dyn fmn_platform::process::ProcessRunner>,
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &RenderCommand,
-) -> Result<Vec<(String, RenderArtifactReport, String, usize)>, CliError> {
-    if command.file.as_deref() != Some(Path::new(BUILTIN_SCENE_SOURCE)) {
-        return Err(CliError::new(
-            "capability",
-            format!(
-                "compiled native scene artifacts are not registered yet; use {BUILTIN_SCENE_SOURCE} for the built-in native corpus"
-            ),
-        ));
-    }
+) -> Result<Vec<CompletedRender>, CliError> {
     if command.open || command.finder {
         return Err(CliError::new(
             "capability",
@@ -2754,42 +2938,26 @@ fn execute_builtin_render(
     if command.subdivide || command.prerun {
         return Err(CliError::new(
             "capability",
-            "the built-in native composition path does not yet support `--subdivide` or `--prerun`",
+            "the native render path does not yet support `--subdivide` or `--prerun`",
         ));
     }
+    let input = resolve_native_render_input(fs.as_ref(), command)?;
     let requested_format = requested_render_format(command)?;
-    let selected: Vec<&str> = if command.write_all {
-        fmn::builtins::PRIMITIVE_SCENE_NAMES.to_vec()
-    } else if command.scene_names.is_empty() {
-        return Err(CliError::new(
-            "scene",
-            format!(
-                "select a built-in scene or pass --write_all; available scenes: {}",
-                fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
-            ),
-        ));
-    } else {
-        command.scene_names.iter().map(String::as_str).collect()
-    };
-    if selected.len() > 1 && command.file_name.is_some() {
-        return Err(CliError::new(
-            "config",
-            "--file_name cannot name multiple --write_all artifacts",
-        ));
-    }
-    for name in &selected {
-        if fmn::builtins::primitive_scene(name).is_none() {
+    let mut config = resolve_render_config(fs.as_ref(), command)?;
+    if let NativeRenderInput::Compiled { bundle, .. } = &input {
+        if let Some(requested_fps) = command.fps
+            && requested_fps != bundle.fps()
+        {
             return Err(CliError::new(
-                "scene",
+                "config",
                 format!(
-                    "unknown built-in scene {name:?}; available scenes: {}",
-                    fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+                    "--fps {requested_fps} disagrees with the compiled artifact's fixed {} fps schedule",
+                    bundle.fps()
                 ),
             ));
         }
+        config.camera.fps = bundle.fps();
     }
-
-    let config = resolve_render_config(fs.as_ref(), command)?;
     let video_job = match requested_format {
         RequestedRenderFormat::Native(_) => None,
         RequestedRenderFormat::Video => Some(ffmpeg_video_job(command, &config)?),
@@ -2858,32 +3026,56 @@ fn execute_builtin_render(
         .render_teams
         .first()
         .map_or(1, fmn_runtime::TeamPlan::threads);
-    let mut reports = Vec::with_capacity(selected.len());
-    for name in selected {
-        let destination = match &target {
-            RenderTarget::Native(NativeFrameFormat::PngSequence) => naming.root(name),
-            RenderTarget::Native(NativeFrameFormat::Y4m) => naming.artifact(name, "y4m"),
-            RenderTarget::Video(context) => {
-                naming.artifact(name, context.job.container.extension())
+    let destination = |name: &str| match &target {
+        RenderTarget::Native(NativeFrameFormat::PngSequence) => naming.root(name),
+        RenderTarget::Native(NativeFrameFormat::Y4m) => naming.artifact(name, "y4m"),
+        RenderTarget::Video(context) => naming.artifact(name, context.job.container.extension()),
+    };
+    let report = |source, scene, artifact| CompletedRender {
+        source,
+        scene,
+        artifact,
+        engine: engine.closure_string(),
+        render_threads,
+    };
+    let mut reports = Vec::new();
+    match input {
+        NativeRenderInput::Builtin { names } => {
+            reports.reserve(names.len());
+            for name in names {
+                let mut sink =
+                    RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
+                let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
+                    CliError::new("internal", "validated built-in scene disappeared")
+                })?;
+                fmn::run_scene(
+                    &mut scene,
+                    command.runtime_config(&config),
+                    config.determinism.seed,
+                    &mut sink,
+                )
+                .map_err(native_scene_error)?;
+                reports.push(report(RenderSourceReport::Builtin, name, sink.finish()?));
             }
-        };
-        let mut sink = RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination)?;
-        let mut scene = fmn::builtins::primitive_scene(name)
-            .ok_or_else(|| CliError::new("internal", "validated built-in scene disappeared"))?;
-        fmn::run_scene(
-            &mut scene,
-            command.runtime_config(&config),
-            config.determinism.seed,
-            &mut sink,
-        )
-        .map_err(native_scene_error)?;
-        let report = sink.finish()?;
-        reports.push((
-            name.to_owned(),
-            report,
-            engine.closure_string(),
-            render_threads,
-        ));
+        }
+        NativeRenderInput::Compiled {
+            source,
+            name,
+            bundle,
+        } => {
+            let mut sink =
+                RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
+            for index in 0..bundle.frame_count() {
+                let stage = bundle.stage_at(index).map_err(bundle_read_error)?;
+                sink.render_stage(&stage, u64::from(index) + 1)
+                    .map_err(|error| CliError::new("render", error.to_string()))?;
+            }
+            reports.push(report(
+                RenderSourceReport::Compiled(source),
+                name,
+                sink.finish()?,
+            ));
+        }
     }
     Ok(reports)
 }
@@ -2905,19 +3097,34 @@ fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
     }
 }
 
-fn successful_render_output(
-    command: &RenderCommand,
-    reports: Vec<(String, RenderArtifactReport, String, usize)>,
-) -> RunOutput {
+fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRender>) -> RunOutput {
     let mut stdout = String::new();
-    for (scene, report, engine, render_threads) in reports {
-        match report {
+    for CompletedRender {
+        source,
+        scene,
+        artifact,
+        engine,
+        render_threads,
+    } in reports
+    {
+        let source_artifact = source.artifact().map_or_else(String::new, |path| {
+            format!(
+                ",\"source_artifact\":{}",
+                json_string(&path.to_string_lossy())
+            )
+        });
+        let human_source = source
+            .artifact()
+            .map_or_else(String::new, |path| format!(" from {}", path.display()));
+        match artifact {
             RenderArtifactReport::Native(report) => {
                 if command.common.robot {
                     let _ = writeln!(
                         stdout,
-                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":\"builtin\",\"scene\":{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{}}}",
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{}}}",
                         ROBOT_SCHEMA_VERSION,
+                        json_string(source.kind()),
+                        source_artifact,
                         json_string(&scene),
                         json_string(match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "png_sequence",
@@ -2934,7 +3141,7 @@ fn successful_render_output(
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads)",
+                        "rendered {scene}{human_source} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads)",
                         match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -2951,8 +3158,10 @@ fn successful_render_output(
                 if command.common.robot {
                     let _ = writeln!(
                         stdout,
-                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":\"builtin\",\"scene\":{},\"format\":\"video\",\"artifact\":{},\"frames\":{},\"input_bytes\":{},\"engine\":{},\"render_threads\":{},\"ffmpeg\":{{\"path\":{},\"sha256\":{},\"version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{}}}}}",
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":\"video\",\"artifact\":{},\"frames\":{},\"input_bytes\":{},\"engine\":{},\"render_threads\":{},\"ffmpeg\":{{\"path\":{},\"sha256\":{},\"version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{}}}}}",
                         ROBOT_SCHEMA_VERSION,
+                        json_string(source.kind()),
+                        source_artifact,
                         json_string(&scene),
                         json_string(&report.path.to_string_lossy()),
                         report.frame_count,
@@ -2970,7 +3179,7 @@ fn successful_render_output(
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {})",
+                        "rendered {scene}{human_source} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {})",
                         report.path.display(),
                         report.frame_count,
                         report.input_bytes,
@@ -3056,7 +3265,7 @@ where
         },
         Invocation::ClearCache { common } => clear_cache(fs.as_ref(), &common),
         Invocation::Render(command) => python_source_refusal(&command).unwrap_or_else(|| {
-            match execute_builtin_render(Arc::clone(&fs), Arc::clone(&runner), locator, &command) {
+            match execute_native_render(Arc::clone(&fs), Arc::clone(&runner), locator, &command) {
                 Ok(reports) => successful_render_output(&command, reports),
                 Err(error) => error_output(command.common.robot, &error),
             }

@@ -1,5 +1,5 @@
-//! The FMTL/1 timeline-bundle WRITER (fm-oee, §10.7 — the scene-side
-//! exporter half of `docs/FMNT1_TIMELINE_BUNDLE.md`, the pinned contract).
+//! The FMTL/1 timeline-bundle codec (fm-oee, §10.7 —
+//! `docs/FMNT1_TIMELINE_BUNDLE.md`, the pinned contract).
 //!
 //! [`export_timeline_bundle`] consumes an authored [`Timeline`], drives it
 //! through the ordinary segment drivers ([`play_segment`] /
@@ -39,15 +39,15 @@
 //! host paths, no map iteration — two exports of the same scene run
 //! produce identical bytes (locked by test).
 
-use fmn_anim::bundle::{bundle_sub_alpha, interpolate_between};
+use fmn_anim::bundle::{bundle_sub_alpha, interpolate_between, path_from_tag};
 use fmn_anim::frame::{FramePacket, play_segment, wait_segment};
 use fmn_anim::purity::SegmentReport;
-use fmn_anim::timeline::{Step, Timeline};
+use fmn_anim::timeline::{Label, Step, Timeline, TimelinePlan};
 use fmn_anim::{AnimError, PathFunc, RateFunc, RationalFrameClock, rate_from_tag, rate_tag};
 use fmn_core::rng::RngRoot;
 use fmn_core::types::{canonicalize_f32, canonicalize_f64};
 use fmn_hash::SerialError;
-use fmn_hash::serial::{Limits, Schema, Writer};
+use fmn_hash::serial::{Limits, Reader, Schema, UnknownPolicy, Writer};
 use fmn_mobject::persist::PersistError;
 use fmn_mobject::{Snapshot, Stage};
 use fmn_render::engine::EngineIdentity;
@@ -55,6 +55,9 @@ use fmn_render::engine::EngineIdentity;
 /// The canonical container schema for an FMTL/1 timeline bundle — the
 /// §6.7 registration for the timeline-bundle format family, id 1.
 pub const TIMELINE_BUNDLE_SCHEMA: Schema = Schema::new(*b"FMTL", 1, 0, 0);
+
+/// Maximum bytes accepted by the production FMTL/1 reader.
+pub const DEFAULT_MAX_BUNDLE_BYTES: usize = Limits::DEFAULT.max_total;
 
 /// Default whole-export work ceiling. One million frames is more than nine
 /// hours at 30 fps, while remaining a finite bound the exporter can reject
@@ -97,6 +100,372 @@ impl Default for BundleExportLimits {
 #[must_use]
 pub fn bundle_engine_version() -> String {
     EngineIdentity::certified().closure_string()
+}
+
+/// A decoded FMTL segment's storage/reconstruction kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleSegmentKind {
+    /// Begin/end snapshots reconstruct every frame through the proven
+    /// interpolation law.
+    Pure,
+    /// Every frame is stored as a canonical snapshot.
+    Stateful,
+}
+
+impl BundleSegmentKind {
+    /// The FMTL/1 wire tag used by diagnostic front doors.
+    #[must_use]
+    pub const fn wire_tag(self) -> u32 {
+        match self {
+            Self::Pure => 0,
+            Self::Stateful => 1,
+        }
+    }
+}
+
+/// Every refusal the FMTL/1 reader can produce.
+#[derive(Debug)]
+pub enum BundleReadError {
+    /// Container framing, schema, version, checksum, or limit failure.
+    Malformed(SerialError),
+    /// The bundle targets a different certified engine closure.
+    EngineMismatch {
+        /// Identity recorded in the bundle.
+        wanted: String,
+        /// Identity of this build.
+        found: String,
+    },
+    /// Container fields disagree with the nested schedule.
+    PlanInconsistent(&'static str),
+    /// The schedule does not fit the public `u32` frame surface.
+    FrameCountUnrepresentable {
+        /// Frames scheduled by the validated plan.
+        frames: i64,
+    },
+    /// A payload-validated table could not be reserved.
+    AllocationFailed {
+        /// Destination table.
+        context: &'static str,
+        /// Validated entry count.
+        requested: usize,
+    },
+    /// A canonical stage snapshot refused to decode.
+    Snapshot(PersistError),
+    /// A requested 0-based frame is outside the schedule.
+    FrameOutOfRange {
+        /// Requested frame.
+        index: u32,
+        /// Total frames in the bundle.
+        total: u32,
+    },
+}
+
+impl std::fmt::Display for BundleReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed(error) => write!(f, "malformed FMTL/1 container: {error}"),
+            Self::EngineMismatch { wanted, found } => write!(
+                f,
+                "bundle was written for engine {wanted:?}; this reader is {found:?}"
+            ),
+            Self::PlanInconsistent(what) => {
+                write!(f, "bundle disagrees with its nested plan: {what}")
+            }
+            Self::FrameCountUnrepresentable { frames } => write!(
+                f,
+                "timeline has {frames} frames, exceeding the reader API's u32 range"
+            ),
+            Self::AllocationFailed { context, requested } => {
+                write!(
+                    f,
+                    "{context} could not reserve {requested} validated entries"
+                )
+            }
+            Self::Snapshot(error) => write!(f, "segment snapshot refused: {error}"),
+            Self::FrameOutOfRange { index, total } => {
+                write!(f, "frame index {index} out of range 0..{total}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BundleReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Malformed(error) => Some(error),
+            Self::Snapshot(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// One decoded segment entry.
+enum SegmentData {
+    Pure {
+        begin: Box<Snapshot>,
+        end: Box<Snapshot>,
+        path: PathFunc,
+        rate: RateFunc,
+    },
+    Stateful {
+        frames: Vec<Snapshot>,
+    },
+}
+
+/// A validated, eagerly decoded FMTL/1 artifact.
+///
+/// Frame reconstruction is random-access and order-independent: pure
+/// segments apply the exporter's proven interpolation law, while stateful
+/// segments materialize one recorded snapshot.
+pub struct TimelineBundle {
+    plan: TimelinePlan,
+    segments: Vec<SegmentData>,
+    frame_count: u32,
+    engine_version: String,
+}
+
+impl TimelineBundle {
+    /// Decode and validate an FMTL/1 artifact.
+    ///
+    /// The engine identity is checked before any later field is interpreted.
+    /// Every snapshot is decoded eagerly, so malformed input refuses at load
+    /// rather than during rendering or scrubbing.
+    ///
+    /// # Errors
+    /// [`BundleReadError`] for every named FMTL/1 refusal.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BundleReadError> {
+        let mut reader = Reader::open(
+            bytes,
+            TIMELINE_BUNDLE_SCHEMA,
+            Limits::DEFAULT,
+            UnknownPolicy::Strict,
+        )
+        .map_err(BundleReadError::Malformed)?;
+        let wanted = reader
+            .get_str()
+            .map_err(BundleReadError::Malformed)?
+            .to_owned();
+        let found = bundle_engine_version();
+        if wanted != found {
+            return Err(BundleReadError::EngineMismatch { wanted, found });
+        }
+        let fps = reader.get_u32().map_err(BundleReadError::Malformed)?;
+        let plan =
+            TimelinePlan::from_bytes(reader.get_bytes().map_err(BundleReadError::Malformed)?)
+                .map_err(|error| match error {
+                    fmn_anim::timeline::TimelineError::Serial(serial) => {
+                        BundleReadError::Malformed(serial)
+                    }
+                    fmn_anim::timeline::TimelineError::Malformed(what) => {
+                        BundleReadError::PlanInconsistent(what)
+                    }
+                })?;
+        if plan.fps() != fps {
+            return Err(BundleReadError::PlanInconsistent("fps"));
+        }
+        let plan_frame_count = plan.total_frames();
+        let frame_count = u32::try_from(plan_frame_count).map_err(|_| {
+            BundleReadError::FrameCountUnrepresentable {
+                frames: plan_frame_count,
+            }
+        })?;
+        let segment_count = usize::try_from(reader.get_u32().map_err(BundleReadError::Malformed)?)
+            .map_err(|_| BundleReadError::PlanInconsistent("segment count exceeds host width"))?;
+        if segment_count != plan.segments().len() {
+            return Err(BundleReadError::PlanInconsistent("segment count"));
+        }
+        if segment_count > reader.remaining() {
+            return Err(BundleReadError::PlanInconsistent(
+                "segment table exceeds payload",
+            ));
+        }
+
+        let binding = Stage::new();
+        let mut segments = Vec::new();
+        segments.try_reserve_exact(segment_count).map_err(|_| {
+            BundleReadError::AllocationFailed {
+                context: "segment table",
+                requested: segment_count,
+            }
+        })?;
+        for planned in plan.segments() {
+            let kind = reader.get_u8().map_err(BundleReadError::Malformed)?;
+            let segment = match kind {
+                0 => {
+                    let begin = reader.get_bytes().map_err(BundleReadError::Malformed)?;
+                    let end = reader.get_bytes().map_err(BundleReadError::Malformed)?;
+                    let path = path_from_tag(reader.get_u8().map_err(BundleReadError::Malformed)?)
+                        .ok_or(BundleReadError::PlanInconsistent("path tag"))?;
+                    let rate = rate_from_tag(reader.get_u8().map_err(BundleReadError::Malformed)?)
+                        .ok_or(BundleReadError::PlanInconsistent("rate tag"))?;
+                    let decode_snapshot = |bytes: &[u8]| -> Result<Box<Snapshot>, BundleReadError> {
+                        Ok(Box::new(
+                            Snapshot::from_bytes(bytes, &binding)
+                                .map_err(BundleReadError::Snapshot)?
+                                .snapshot,
+                        ))
+                    };
+                    SegmentData::Pure {
+                        begin: decode_snapshot(begin)?,
+                        end: decode_snapshot(end)?,
+                        path,
+                        rate,
+                    }
+                }
+                1 => {
+                    let encoded_frame_count =
+                        reader.get_u32().map_err(BundleReadError::Malformed)?;
+                    if i64::from(encoded_frame_count) != planned.n_frames {
+                        return Err(BundleReadError::PlanInconsistent(
+                            "stateful segment frame count",
+                        ));
+                    }
+                    let decoded_frame_count =
+                        usize::try_from(encoded_frame_count).map_err(|_| {
+                            BundleReadError::PlanInconsistent(
+                                "stateful frame count exceeds host width",
+                            )
+                        })?;
+                    if decoded_frame_count > reader.remaining() / std::mem::size_of::<u64>() {
+                        return Err(BundleReadError::PlanInconsistent(
+                            "stateful frame table exceeds payload",
+                        ));
+                    }
+                    let mut frames = Vec::new();
+                    frames.try_reserve_exact(decoded_frame_count).map_err(|_| {
+                        BundleReadError::AllocationFailed {
+                            context: "stateful frame table",
+                            requested: decoded_frame_count,
+                        }
+                    })?;
+                    for _ in 0..decoded_frame_count {
+                        let bytes = reader.get_bytes().map_err(BundleReadError::Malformed)?;
+                        frames.push(
+                            Snapshot::from_bytes(bytes, &binding)
+                                .map_err(BundleReadError::Snapshot)?
+                                .snapshot,
+                        );
+                    }
+                    SegmentData::Stateful { frames }
+                }
+                _ => {
+                    return Err(BundleReadError::PlanInconsistent("segment kind tag"));
+                }
+            };
+            segments.push(segment);
+        }
+        reader.finish().map_err(BundleReadError::Malformed)?;
+        Ok(Self {
+            plan,
+            segments,
+            frame_count,
+            engine_version: found,
+        })
+    }
+
+    /// Total frames in the bundle.
+    #[must_use]
+    pub const fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    /// The schedule's frame rate.
+    #[must_use]
+    pub fn fps(&self) -> u32 {
+        self.plan.fps()
+    }
+
+    /// Duration on the exact frame grid, in seconds.
+    #[must_use]
+    pub fn duration_seconds(&self) -> f64 {
+        self.plan.duration()
+    }
+
+    /// The certified engine closure this artifact targets.
+    #[must_use]
+    pub fn engine_version(&self) -> &str {
+        &self.engine_version
+    }
+
+    /// Authored labels, in authored order.
+    #[must_use]
+    pub fn labels(&self) -> &[Label] {
+        self.plan.labels()
+    }
+
+    /// Resolve an authored label to its 0-based frame.
+    #[must_use]
+    pub fn frame_of_label(&self, name: &str) -> Option<u32> {
+        self.plan
+            .frame_of_label(name)
+            .and_then(|frame| frame.checked_sub(1))
+            .and_then(|frame| u32::try_from(frame).ok())
+    }
+
+    /// Number of authored segments.
+    #[must_use]
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Storage/reconstruction kind of one segment.
+    #[must_use]
+    pub fn segment_kind(&self, index: usize) -> Option<BundleSegmentKind> {
+        self.segments.get(index).map(|segment| match segment {
+            SegmentData::Pure { .. } => BundleSegmentKind::Pure,
+            SegmentData::Stateful { .. } => BundleSegmentKind::Stateful,
+        })
+    }
+
+    /// Reconstruct a 0-based frame as an independent Stage.
+    ///
+    /// # Errors
+    /// [`BundleReadError::FrameOutOfRange`] for an invalid frame, or
+    /// [`BundleReadError::PlanInconsistent`] if decoded storage no longer
+    /// agrees with the validated plan.
+    pub fn stage_at(&self, index: u32) -> Result<Stage, BundleReadError> {
+        let total = self.frame_count();
+        let global = i64::from(index) + 1;
+        let (segment_index, offset) = self
+            .plan
+            .locate(global)
+            .ok_or(BundleReadError::FrameOutOfRange { index, total })?;
+        let planned =
+            self.plan
+                .segments()
+                .get(segment_index)
+                .ok_or(BundleReadError::PlanInconsistent(
+                    "located segment missing from plan",
+                ))?;
+        let fps = self.plan.fps();
+        let segment = self
+            .segments
+            .get(segment_index)
+            .ok_or(BundleReadError::PlanInconsistent(
+                "located segment missing from bundle",
+            ))?;
+        let mut stage = match segment {
+            SegmentData::Pure {
+                begin,
+                end,
+                path,
+                rate,
+            } => {
+                let alpha = (offset as f64 / f64::from(fps)) / planned.run_time;
+                interpolate_between(begin, end, bundle_sub_alpha(alpha, rate), *path)
+            }
+            SegmentData::Stateful { frames } => {
+                let snapshot = frames
+                    .get(usize::try_from(offset - 1).unwrap_or(usize::MAX))
+                    .ok_or(BundleReadError::PlanInconsistent(
+                        "stateful segment shorter than the plan",
+                    ))?;
+                snapshot.materialize()
+            }
+        };
+        stage.set_time_from_clock(global as f64 / f64::from(fps));
+        Ok(stage)
+    }
 }
 
 /// A bundle export failure.
@@ -987,5 +1356,51 @@ mod tests {
         assert_eq!(plan.frame_of_label("start"), Some(1));
         assert_eq!(plan.frame_of_label("held"), Some(31));
         assert_eq!(plan.total_frames(), 45);
+    }
+
+    #[test]
+    fn shared_reader_reconstructs_an_exported_artifact() {
+        let (mut stage, _mob) = stage_with_mob();
+        let expected = stage.snapshot().to_bytes().expect("snapshot");
+        let mut timeline = Timeline::new(8).expect("fps");
+        timeline.label("held").wait(0.25).expect("wait step");
+        let bytes =
+            export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(0)).expect("export");
+
+        let bundle = TimelineBundle::from_bytes(&bytes).expect("shared reader accepts export");
+        assert_eq!(bundle.fps(), 8);
+        assert_eq!(bundle.frame_count(), 2);
+        assert_eq!(bundle.duration_seconds(), 0.25);
+        assert_eq!(bundle.frame_of_label("held"), Some(0));
+        assert_eq!(bundle.segment_kind(0), Some(BundleSegmentKind::Pure));
+        for index in 0..bundle.frame_count() {
+            let reconstructed = bundle.stage_at(index).expect("frame reconstructs");
+            assert_eq!(
+                reconstructed
+                    .snapshot()
+                    .to_bytes()
+                    .expect("reconstructed snapshot"),
+                expected
+            );
+            assert_eq!(
+                reconstructed.time(),
+                f64::from(index + 1) / f64::from(bundle.fps())
+            );
+        }
+        assert!(matches!(
+            bundle.stage_at(2),
+            Err(BundleReadError::FrameOutOfRange { index: 2, total: 2 })
+        ));
+    }
+
+    #[test]
+    fn shared_reader_checks_engine_identity_before_later_fields() {
+        let mut writer = Writer::new(TIMELINE_BUNDLE_SCHEMA);
+        writer.put_str("certified-cpu:scalar:not-this-build");
+        let bytes = writer.finish().expect("small forged bundle");
+        assert!(matches!(
+            TimelineBundle::from_bytes(&bytes),
+            Err(BundleReadError::EngineMismatch { .. })
+        ));
     }
 }
