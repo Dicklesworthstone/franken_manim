@@ -423,6 +423,103 @@ fn a_killed_writer_leaves_a_consistent_store() {
     assert_eq!(n.get(&key("fresh")).unwrap().as_deref(), Some(&b"v"[..]));
 }
 
+/// A filesystem where stat of a planted staging file answers the way Windows
+/// answers for a delete-pending file: ACCESS_DENIED instead of NotFound.
+struct DeletePendingFs {
+    inner: VirtualFs,
+}
+
+const DELETE_PENDING_MARKER: &str = "pending-probe";
+
+impl FileSystem for DeletePendingFs {
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+        let pending = path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains(DELETE_PENDING_MARKER));
+        if pending {
+            return Err(FsError::Io {
+                path: path.to_path_buf(),
+                err: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            });
+        }
+        self.inner.node_kind_no_follow(path)
+    }
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+        self.inner.create_dir(path)
+    }
+    fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        self.inner.read(path)
+    }
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.inner.read_bounded(path, max_bytes)
+    }
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        self.inner.write_atomic(path, bytes)
+    }
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+        self.inner.create_new(path, bytes)
+    }
+    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        self.inner.remove_file(path)
+    }
+    fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        self.inner.remove_dir_all(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.inner.exists(path)
+    }
+    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+        self.inner.list_dir(path)
+    }
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError> {
+        self.inner.count_dir_entries_bounded(path, max_entries)
+    }
+}
+
+/// Windows reports a concurrent writer's delete-pending `.fmn-new.*` staging
+/// temp as ACCESS_DENIED when the evictor stats it mid-enumeration; every
+/// other platform reports NotFound for the same lifecycle state. The
+/// maintenance pass must treat it as a vanished entry (the writer owns its
+/// temp), not a hard storage error — regression for the torture-suite
+/// maintainer abort on windows-x86-64 (fm-p7gr).
+#[test]
+fn delete_pending_staging_files_do_not_abort_eviction_on_windows() {
+    let fs = Arc::new(DeletePendingFs {
+        inner: VirtualFs::new(),
+    });
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
+    let store = open_store(fs.clone(), clock);
+    let n = ns(&store, Some(1 << 20));
+    n.put(&key("a"), b"payload").unwrap();
+
+    // Plant the mid-publish temp in a live shard directory.
+    let shard_dir = files_under(&fs.inner, Path::new(ROOT))
+        .into_iter()
+        .find(|p| p.components().any(|c| c.as_os_str() == "objects"))
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .expect("one object shard exists");
+    let probe = shard_dir.join(format!(".fmn-new.4396.133.{DELETE_PENDING_MARKER}"));
+    fs.inner.insert(probe.clone(), b"half-written".to_vec());
+
+    let outcome = n.evict_to_ceiling();
+    if cfg!(windows) {
+        // The pass completes and leaves the writer's temp alone — skipped,
+        // not swept, because the writer still owns its lifecycle.
+        let report = match outcome.unwrap() {
+            EvictOutcome::Done(report) => report,
+            other => panic!("expected a pass, got {other:?}"),
+        };
+        assert_eq!(report.swept_unrecognized, 0);
+        assert!(fs.inner.read(&probe).is_ok(), "the temp survives the pass");
+    } else {
+        // Elsewhere a denied stat is a real permission problem and surfaces.
+        assert!(matches!(
+            outcome,
+            Err(CacheError::Storage(FsError::Io { .. }))
+        ));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Corruption injection
 // ---------------------------------------------------------------------------

@@ -623,7 +623,23 @@ fn list_managed_directory(
                 ),
             ));
         }
-        match fs.node_kind_no_follow(&child)? {
+        let kind = match fs.node_kind_no_follow(&child) {
+            Ok(kind) => kind,
+            // Windows reports a delete-pending file as ACCESS_DENIED from
+            // stat where every other platform reports NotFound. Both mean
+            // the same thing here — a cooperating writer or evictor is
+            // removing the child mid-enumeration — so map it to the
+            // vanished-entry skip below instead of a hard storage error.
+            // Other platforms stay strict: a denied stat there is a real
+            // permission problem, not a lifecycle state.
+            Err(FsError::Io { ref err, .. })
+                if cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
+        match kind {
             Some(FsNodeKind::RegularFile) => checked.push(ManagedDirEntry {
                 path: child,
                 is_directory: false,
