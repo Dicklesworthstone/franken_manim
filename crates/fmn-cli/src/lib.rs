@@ -1644,6 +1644,7 @@ pub fn collect_doctor_snapshot(
         .into_iter()
         .map(str::to_owned)
         .collect();
+    let fonts = collect_font_report(config.text.font)?;
 
     Ok(DoctorSnapshot {
         topology_source,
@@ -1654,18 +1655,27 @@ pub fn collect_doctor_snapshot(
         plan,
         ffmpeg,
         cache,
-        fonts: FontReport {
-            selected: config.text.font,
-            bundled: Vec::new(),
-            user: Vec::new(),
-            complete: false,
-            detail: Some(
-                "font-source inventory is not yet exposed through a capability; selected family only"
-                    .to_owned(),
-            ),
-        },
+        fonts,
         math_packs,
         certification: certification_report(),
+    })
+}
+
+fn collect_font_report(selected: String) -> Result<FontReport, CliError> {
+    let bundled = fmn::text::bundled_font_inventory()
+        .map_err(|error| internal(format!("bundled font inventory: {error}")))?;
+    let selected_is_bundled = fmn::text::is_bundled_text_family(&selected);
+    let detail = (!selected_is_bundled).then(|| {
+        format!(
+            "configured family {selected:?} is not bundled and no user-font source is registered"
+        )
+    });
+    Ok(FontReport {
+        selected,
+        bundled,
+        user: Vec::new(),
+        complete: selected_is_bundled,
+        detail,
     })
 }
 
@@ -6979,7 +6989,7 @@ mod tests {
     }
 
     #[test]
-    fn production_doctor_reports_degraded_capabilities_without_guessing() {
+    fn production_doctor_reports_verified_fonts_while_optional_capabilities_degrade() {
         let fs = Arc::new(VirtualFs::new());
         let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
         let output = run_with_capabilities(
@@ -7004,7 +7014,33 @@ mod tests {
                 .contains("\"kind\":\"cache\",\"resolved\":true")
         );
         assert!(output.stdout.contains("\"kind\":\"fonts\""));
-        assert!(output.stdout.contains("\"complete\":false"));
+        assert!(output.stdout.contains(
+            "\"bundled\":[\"Computer Modern\",\"CM Typewriter\",\"IBM Plex Sans\",\"Noto Sans Math\"]"
+        ));
+        assert!(output.stdout.contains("\"user\":[],\"complete\":true"));
+    }
+
+    #[test]
+    fn doctor_names_an_unregistered_configured_font_without_hiding_the_bundle() {
+        let report = collect_font_report("Unregistered Host Face".to_owned())
+            .expect("the compiled bundle is valid");
+        assert_eq!(
+            report.bundled,
+            vec![
+                "Computer Modern",
+                "CM Typewriter",
+                "IBM Plex Sans",
+                "Noto Sans Math",
+            ]
+        );
+        assert!(report.user.is_empty());
+        assert!(!report.complete);
+        assert!(
+            report
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Unregistered Host Face"))
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]

@@ -84,6 +84,55 @@ pub const DEFAULT_FAMILY: &str = "Computer Modern";
 pub const MONO_FAMILY: &str = "CM Typewriter";
 /// The bundled sans family's canonical name.
 pub const SANS_FAMILY: &str = "IBM Plex Sans";
+/// The bundled mathematics symbol-fallback family's canonical name.
+pub const MATH_FAMILY: &str = "Noto Sans Math";
+const SELECTABLE_BUNDLED_TEXT_FAMILIES: [&str; 3] = [DEFAULT_FAMILY, MONO_FAMILY, SANS_FAMILY];
+/// Every font family compiled into the sovereign Scribe bundle.
+///
+/// The first three families are selectable by [`FontBook`]. The fourth is
+/// the curated symbol fallback consumed by the mathematics engine.
+pub const BUNDLED_FONT_FAMILIES: [&str; 4] =
+    [DEFAULT_FAMILY, MONO_FAMILY, SANS_FAMILY, MATH_FAMILY];
+
+/// Verify the compiled font bundle and return its canonical family roster.
+///
+/// This is the runtime source of truth for capability reporting: it parses
+/// all selectable text faces through [`FontBook::bundled`] and separately
+/// verifies the mathematics symbol fallback, which is deliberately not a
+/// general-purpose selectable text family.
+///
+/// # Errors
+///
+/// [`TextError::FontParse`] if any compiled face is corrupt.
+pub fn bundled_font_inventory() -> Result<Vec<String>, TextError> {
+    let _book = FontBook::bundled()?;
+    fmd_font::Font::parse(fmd_font::bundled::NOTO_SANS_MATH_SYMBOLS.to_vec()).map_err(|error| {
+        TextError::FontParse {
+            path: "bundled:noto-sans-math-symbols".to_owned(),
+            what: error.to_string(),
+        }
+    })?;
+    Ok(BUNDLED_FONT_FAMILIES
+        .iter()
+        .map(|family| (*family).to_owned())
+        .collect())
+}
+
+/// Whether a configured text-family name resolves inside the compiled bundle.
+///
+/// Selectable text-family aliases are accepted exactly as [`FontBook::family`]
+/// accepts them. The mathematics fallback is intentionally not selectable as
+/// a general-purpose text family.
+#[must_use]
+pub fn is_bundled_text_family(name: &str) -> bool {
+    let want = normalize(name);
+    SELECTABLE_BUNDLED_TEXT_FAMILIES.iter().any(|canonical| {
+        normalize(canonical) == want
+            || aliases(canonical)
+                .iter()
+                .any(|alias| normalize(alias) == want)
+    })
+}
 
 impl FontBook {
     /// The bundled sovereign book: Computer Modern (four variants), CM
@@ -226,6 +275,27 @@ fn aliases(canonical: &str) -> &'static [&'static str] {
         MONO_FAMILY => &["Computer Modern Typewriter", "CMU Typewriter Text"],
         SANS_FAMILY => &["Plex Sans", "IBM Plex"],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUNDLED_FONT_FAMILIES, bundled_font_inventory, is_bundled_text_family};
+
+    #[test]
+    fn bundled_inventory_verifies_text_and_math_families() -> Result<(), crate::TextError> {
+        let inventory = bundled_font_inventory()?;
+        assert_eq!(
+            inventory,
+            BUNDLED_FONT_FAMILIES
+                .iter()
+                .map(|family| (*family).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert!(is_bundled_text_family("CMU Serif"));
+        assert!(!is_bundled_text_family("noto_sans-math"));
+        assert!(!is_bundled_text_family("Host Font That Is Not Registered"));
+        Ok(())
     }
 }
 
