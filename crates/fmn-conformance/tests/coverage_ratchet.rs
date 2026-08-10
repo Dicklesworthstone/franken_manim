@@ -155,10 +155,29 @@ fn every_non_tier1_construct_fails_with_its_named_tiered_error() -> Result<(), S
             // T1 support is asserted by fmn-tex's tier-table cross-check.
             continue;
         }
-        let probe = probe_source(construct);
-        let math_err = fmd_math::parse(&probe).err();
-        let text_err = fmd_math::parse_text(&probe).err();
-        let hit = [math_err, text_err].into_iter().flatten().find(|e| {
+        let probes = probe_sources(construct);
+        // A construct that parses in some mode on some probe has GRADUATED
+        // from the pending vocabulary (the ratchet's recomputed counts
+        // carry the advance; tier-1 cross-checks own its correctness).
+        // Everything still failing everywhere must fail with the named,
+        // tier-tagged error — never silence, never garbage.
+        let mut errors = Vec::new();
+        let mut graduated = false;
+        for probe in &probes {
+            let math = fmd_math::parse(probe);
+            let text = fmd_math::parse_text(probe);
+            if math.is_ok() || text.is_ok() {
+                graduated = true;
+                break;
+            }
+            errors.extend(math.err());
+            errors.extend(text.err());
+        }
+        if graduated {
+            audited += 1;
+            continue;
+        }
+        let hit = errors.iter().find(|e| {
             e.unsupported_construct() == Some(construct)
                 && e.to_string().contains("tier T2")
                 && e.to_string().contains("fm-j5t")
@@ -166,9 +185,8 @@ fn every_non_tier1_construct_fails_with_its_named_tiered_error() -> Result<(), S
         assert!(
             hit.is_some(),
             "`{construct}` must fail with its named tier-T2 error in some mode \
-             (probe `{probe}`; math: {:?}, text: {:?})",
-            fmd_math::parse(&probe).err().map(|e| e.to_string()),
-            fmd_math::parse_text(&probe).err().map(|e| e.to_string()),
+             (probes {probes:?}; errors: {:?})",
+            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
         );
         audited += 1;
     }
@@ -180,13 +198,20 @@ fn every_non_tier1_construct_fails_with_its_named_tiered_error() -> Result<(), S
 }
 
 /// A minimal source string exercising a construct from the table.
-fn probe_source(construct: &str) -> String {
+fn probe_sources(construct: &str) -> Vec<String> {
     if let Some(env) = construct.strip_prefix("env:") {
-        return format!("\\begin{{{env}}} x \\end{{{env}}}");
+        return vec![format!("\\begin{{{env}}} x \\end{{{env}}}")];
     }
-    // Control words/symbols exercise directly; argument-takers error at
-    // lookup before any argument is read, so the bare command suffices.
-    construct.to_owned()
+    // A still-pending construct errors at lookup before any argument is
+    // read, so the bare command captures its named error. A GRADUATED
+    // construct may demand an argument — a letter for the general takers,
+    // a number for `\\ding`'s pifont slot — so graduation registers as
+    // success on ANY probe rather than a missing-argument refusal.
+    vec![
+        construct.to_owned(),
+        format!("{construct}{{x}}"),
+        format!("{construct}{{51}}"),
+    ]
 }
 
 // ── Corpus-bearing environments: recompute + ratchet + bless ────────────

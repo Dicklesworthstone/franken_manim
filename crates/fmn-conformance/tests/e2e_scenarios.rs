@@ -848,20 +848,21 @@ fn determinism_threads_run(
 // Failure-path drills
 // ---------------------------------------------------------------------------
 
-/// Unsupported TeX construct: `\substack` is a named, tier-tagged refusal
-/// (fmd-math T2) that must surface verbatim through the e2e runner —
-/// never a blank render, never a panic.
+/// Unsupported TeX construct: `\dddot` is a named, tier-tagged refusal
+/// (fmd-math T2; `\substack` was the example until it graduated under
+/// fm-j5t) that must surface verbatim through the e2e runner — never a
+/// blank render, never a panic.
 fn failure_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let engine = &scene_goldens::corpus().tex;
-    let source = r"\substack{a\\b}";
+    let source = r"\dddot x";
     match engine.typeset(fmn_tex::Mode::Math(fmd_math::Style::Text), source) {
         Ok(_) => Err(fail(
-            "unsupported construct \\substack typeset successfully — the named refusal is gone",
+            "unsupported construct \\dddot typeset successfully — the named refusal is gone",
         )),
         Err(error) => {
             let message = error.to_string();
             let is_math = matches!(error, TexError::Math(_));
-            let names_construct = message.contains("substack");
+            let names_construct = message.contains("dddot");
             let named_refusal = message.contains("not yet supported");
             ctx.event(
                 LogEvent::new("e2e.failure")

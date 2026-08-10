@@ -58,10 +58,16 @@ fn the_committed_tier_table_agrees_with_the_crate() {
                         "`{construct}`: character coverage is a layout tier, parse-transparent"
                     );
                 } else {
-                    assert_eq!(
-                        status,
-                        ConstructStatus::UnsupportedT2,
-                        "tier-2 construct `{construct}` must fail as known-T2 vocabulary"
+                    // The tier column records the G0-4 harvest schedule; a
+                    // construct GRADUATES to Supported as fm-j5t lands it.
+                    // It must never fall out of the known vocabulary.
+                    assert!(
+                        matches!(
+                            status,
+                            ConstructStatus::UnsupportedT2 | ConstructStatus::Supported
+                        ),
+                        "tier-2 construct `{construct}` must stay known \
+                         (pending or graduated), got {status:?}"
                     );
                 }
             }
@@ -98,8 +104,9 @@ fn parse_covers_the_flagship_shapes() {
 
 #[test]
 fn the_error_contract_names_constructs_for_the_ratchet() {
-    let err = fmd_math::parse(r"\substack{a \\ b}").unwrap_err();
-    assert_eq!(err.unsupported_construct(), Some(r"\substack"));
+    // `\substack` was the example until it graduated (fm-j5t tier 2).
+    let err = fmd_math::parse(r"\dddot x").unwrap_err();
+    assert_eq!(err.unsupported_construct(), Some(r"\dddot"));
     assert!(err.to_string().contains("tier T2"));
     assert!(matches!(err, MathError::UnsupportedCommand { .. }));
 }
@@ -198,11 +205,16 @@ fn the_kg9_frontier_lays_out_through_the_pin() {
         .unwrap();
     assert!(mac.glyphs.iter().any(|g| g.ch == '−'), "the pack's \\minus");
 
-    // The tier boundary still names itself.
-    let err = engine
+    // The tier-2 frontier moved (fm-j5t): `\substack` lays out through
+    // the pin at forced script size…
+    let stack = engine
         .typeset(r"\substack{a \\ b}", Style::Display)
-        .unwrap_err();
-    assert_eq!(err.unsupported_construct(), Some(r"\substack"));
+        .unwrap();
+    assert_eq!(stack.glyphs.len(), 2);
+    assert!(stack.glyphs.iter().all(|g| (g.size - 0.7).abs() < 1e-9));
+    // …and the boundary still names itself for what remains pending.
+    let err = engine.typeset(r"\dddot x", Style::Display).unwrap_err();
+    assert_eq!(err.unsupported_construct(), Some(r"\dddot"));
     assert!(err.to_string().contains("tier T2"), "{err}");
 }
 

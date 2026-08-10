@@ -5,43 +5,29 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `4e5066c62818`.**
+**Computed against franken_markdown `76fcbd264d67`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
-| **Parse** | 99.577 % | 99.266 % |
-| **Parse + layout** | 99.379 % | 98.921 % |
+| **Parse** | 99.881 % | 99.795 % |
+| **Parse + layout** | 99.684 % | 99.450 % |
 
 ## Pending constructs (parse plane)
 
 | Construct | Occurrences blocked | Tracked at |
 |---|---|---|
-| `\centering` | 13 | franken_manim fm-j5t |
-| `env:flushleft` | 8 | franken_manim fm-kg9 |
-| `\female` | 6 | franken_manim fm-j5t |
-| `\small` | 6 | franken_manim fm-j5t |
-| `\substack` | 5 | franken_manim fm-j5t |
-| `\Large` | 4 | franken_manim fm-j5t |
-| `\male` | 4 | franken_manim fm-j5t |
 | `\i` | 3 | franken_manim fm-j5t |
 | `\'` | 2 | franken_manim fm-j5t |
 | `\circlearrowright` | 2 | franken_manim fm-j5t |
 | `\dddot` | 2 | franken_manim fm-j5t |
-| `\ding` | 2 | franken_manim fm-j5t |
 | `\j` | 2 | franken_manim fm-j5t |
 | `\nmid` | 2 | franken_manim fm-j5t |
 | `\"` | 1 | franken_manim fm-j5t |
 | `\circlearrowleft` | 1 | franken_manim fm-j5t |
-| `\copyright` | 1 | franken_manim fm-j5t |
 | `\ddddot` | 1 | franken_manim fm-j5t |
 | `\doublespacing` | 1 | franken_manim fm-j5t |
 | `\dx` | 1 | franken_manim fm-j5t |
-| `\earth` | 1 | franken_manim fm-j5t |
-| `\footnotesize` | 1 | franken_manim fm-j5t |
-| `\huge` | 1 | franken_manim fm-j5t |
-| `\large` | 1 | franken_manim fm-j5t |
 | `\oiint` | 1 | franken_manim fm-j5t |
-| `\tiny` | 1 | franken_manim fm-j5t |
 | `\xmapsto` | 1 | franken_manim fm-j5t |
 | `\xrightarrow` | 1 | franken_manim fm-j5t |
 
@@ -61,6 +47,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 |---|---|---|---|---|
 | `5310d87a9db3` | 99.577 | 99.266 | 98.916 | 98.188 |
 | `4e5066c62818` | 99.577 | 99.266 | 99.379 | 98.921 |
+| `76fcbd264d67` | 99.881 | 99.795 | 99.684 | 99.450 |
 
 ## How this is enforced
 
