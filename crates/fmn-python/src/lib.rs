@@ -1365,6 +1365,302 @@ impl BridgeMobject {
         .map_err(stage_error)
     }
 
+    // ------------------------------------------------- native builders
+    //
+    // fm-d3gt: the schema-class constructor seam. Each method drives one
+    // fmn-library builder and installs the built family via
+    // `install_native_tree`; the returned nested `(shell, children)` specs
+    // are hung on the Python family lists by the bootstrap.
+
+    /// `Rectangle(width, height)` over the polygon shelf.
+    fn _build_rectangle<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        width: f64,
+        height: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Rectangle::new()
+            .width(width)
+            .height(height)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `NumberLine(x_range, **config)` over the coords shelf.
+    fn _build_number_line<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        config: &Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let line = number_line_from_config(range3(x_range)?, config)?;
+        let built = with_font_book(|book| line.build_numbered(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.into_vmob())
+    }
+
+    /// `Axes(...)` over the coords shelf; children are `[x_axis, y_axis]`.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_axes<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        y_range: &Bound<'py, PyAny>,
+        axis_config: Option<&Bound<'py, PyDict>>,
+        x_axis_config: Option<&Bound<'py, PyDict>>,
+        y_axis_config: Option<&Bound<'py, PyDict>>,
+        height: Option<f64>,
+        width: Option<f64>,
+        unit_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let axes = axes_builder(
+            range3(x_range)?,
+            range3(y_range)?,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            height,
+            width,
+            unit_size,
+        )?;
+        let built = with_font_book(|book| axes.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.into_vmob())
+    }
+
+    /// `ThreeDAxes(...)`; children are `[x_axis, y_axis, z_axis]`.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_three_d_axes<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        y_range: &Bound<'py, PyAny>,
+        z_range: &Bound<'py, PyAny>,
+        axis_config: Option<&Bound<'py, PyDict>>,
+        x_axis_config: Option<&Bound<'py, PyDict>>,
+        y_axis_config: Option<&Bound<'py, PyDict>>,
+        z_axis_config: Option<&Bound<'py, PyDict>>,
+        height: Option<f64>,
+        width: Option<f64>,
+        depth: Option<f64>,
+        unit_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut axes = fmn_library::ThreeDAxes::new()
+            .x_range(range3(x_range)?)
+            .y_range(range3(y_range)?)
+            .z_range(range3(z_range)?)
+            .axis_config(axis_config_from(axis_config)?)
+            .x_axis_config(axis_config_from(x_axis_config)?)
+            .y_axis_config(axis_config_from(y_axis_config)?)
+            .z_axis_config(axis_config_from(z_axis_config)?)
+            .unit_size(unit_size);
+        if let Some(height) = height {
+            axes = axes.height(height);
+        }
+        if let Some(width) = width {
+            axes = axes.width(width);
+        }
+        if let Some(depth) = depth {
+            axes = axes.depth(depth);
+        }
+        let built = with_font_book(|book| axes.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.into_vmob())
+    }
+
+    /// `NumberPlane(...)`; children are
+    /// `[faded_lines, background_lines, x_axis, y_axis]`.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_number_plane<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        y_range: &Bound<'py, PyAny>,
+        axis_config: Option<&Bound<'py, PyDict>>,
+        x_axis_config: Option<&Bound<'py, PyDict>>,
+        y_axis_config: Option<&Bound<'py, PyDict>>,
+        background_line_style: Option<&Bound<'py, PyDict>>,
+        faded_line_style: Option<&Bound<'py, PyDict>>,
+        faded_line_ratio: usize,
+        height: Option<f64>,
+        width: Option<f64>,
+        unit_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut plane = fmn_library::NumberPlane::new()
+            .x_range(range3(x_range)?)
+            .y_range(range3(y_range)?)
+            .axis_config(axis_config_from(axis_config)?)
+            .x_axis_config(axis_config_from(x_axis_config)?)
+            .y_axis_config(axis_config_from(y_axis_config)?)
+            .background_line_style(line_family_style_from(background_line_style)?)
+            .faded_line_style(faded_line_style_from(faded_line_style)?)
+            .faded_line_ratio(faded_line_ratio)
+            .unit_size(unit_size);
+        if let Some(height) = height {
+            plane = plane.height(height);
+        }
+        if let Some(width) = width {
+            plane = plane.width(width);
+        }
+        let built = with_font_book(|book| plane.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.into_vmob())
+    }
+
+    /// `ComplexPlane(...)`; same family shape as `NumberPlane`.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_complex_plane<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        y_range: &Bound<'py, PyAny>,
+        axis_config: Option<&Bound<'py, PyDict>>,
+        x_axis_config: Option<&Bound<'py, PyDict>>,
+        y_axis_config: Option<&Bound<'py, PyDict>>,
+        background_line_style: Option<&Bound<'py, PyDict>>,
+        faded_line_style: Option<&Bound<'py, PyDict>>,
+        faded_line_ratio: usize,
+        height: Option<f64>,
+        width: Option<f64>,
+        unit_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let plane = complex_plane_builder(
+            range3(x_range)?,
+            range3(y_range)?,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            background_line_style,
+            faded_line_style,
+            faded_line_ratio,
+            height,
+            width,
+            unit_size,
+        )?;
+        let built = with_font_book(|book| plane.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.into_vmob())
+    }
+
+    /// `Axes.add_coordinate_labels`: rebuild the native axes at the
+    /// proxy's CURRENT width/height, run the native labeler, and return
+    /// the two trailing label groups (shifted onto the proxy's current
+    /// center) as shell specs for `x_axis`/`y_axis`.
+    ///
+    /// Until live-state cores land (fm-p107 territory), the rebuild
+    /// reproduces uniform rescales and translations exactly; a rotated or
+    /// stretched axes would label at the unrotated positions.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _axes_label_shells<'py>(
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        y_range: &Bound<'py, PyAny>,
+        axis_config: Option<&Bound<'py, PyDict>>,
+        x_axis_config: Option<&Bound<'py, PyDict>>,
+        y_axis_config: Option<&Bound<'py, PyDict>>,
+        unit_size: f64,
+        current_width: f64,
+        current_height: f64,
+        current_center: [f64; 3],
+        x_values: Option<Vec<f64>>,
+        y_values: Option<Vec<f64>>,
+        excluding: Vec<f64>,
+    ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyList>)> {
+        let axes = axes_builder(
+            range3(x_range)?,
+            range3(y_range)?,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            Some(current_height),
+            Some(current_width),
+            unit_size,
+        )?;
+        let mut built = with_font_book(|book| axes.build(book).map_err(native_error))?;
+        let before_x = built.x_axis().vmob().children().len();
+        let before_y = built.y_axis().vmob().children().len();
+        with_font_book(|book| {
+            built
+                .add_coordinate_labels(
+                    book,
+                    x_values.as_deref(),
+                    y_values.as_deref(),
+                    Some(&excluding),
+                )
+                .map_err(native_error)
+        })?;
+        let py = factory.py();
+        let label_specs =
+            |axis: &fmn_library::NumberLine, before: usize| -> PyResult<Bound<'py, PyList>> {
+                let groups: Vec<Mobject> = axis.vmob().children()[before..]
+                    .iter()
+                    .map(|group| Mobject::from(group.clone().shifted(current_center)))
+                    .collect();
+                native_shell_specs(py, factory, groups)
+            };
+        Ok((
+            label_specs(built.x_axis(), before_x)?,
+            label_specs(built.y_axis(), before_y)?,
+        ))
+    }
+
+    /// `ComplexPlane.add_coordinate_labels`: rebuild at the proxy's
+    /// current width/height (with `font_size` routed to the axes'
+    /// `decimal_number_config`), run the native labeler, and return the
+    /// trailing label group (shifted onto the current center) as one
+    /// shell spec. Same rebuild caveat as `_axes_label_shells`.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _complex_plane_label_shells<'py>(
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        y_range: &Bound<'py, PyAny>,
+        axis_config: Option<&Bound<'py, PyDict>>,
+        x_axis_config: Option<&Bound<'py, PyDict>>,
+        y_axis_config: Option<&Bound<'py, PyDict>>,
+        background_line_style: Option<&Bound<'py, PyDict>>,
+        faded_line_style: Option<&Bound<'py, PyDict>>,
+        faded_line_ratio: usize,
+        unit_size: f64,
+        current_width: f64,
+        current_height: f64,
+        current_center: [f64; 3],
+        numbers: Option<Vec<[f64; 2]>>,
+        font_size: Option<f64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut axis_cfg = axis_config_from(axis_config)?;
+        let mut x_cfg = axis_config_from(x_axis_config)?;
+        let mut y_cfg = axis_config_from(y_axis_config)?;
+        if let Some(font_size) = font_size {
+            axis_cfg.number_font_size = Some(font_size);
+            x_cfg.number_font_size = Some(font_size);
+            y_cfg.number_font_size = Some(font_size);
+        }
+        let plane = fmn_library::ComplexPlane::new()
+            .x_range(range3(x_range)?)
+            .y_range(range3(y_range)?)
+            .axis_config(axis_cfg)
+            .x_axis_config(x_cfg)
+            .y_axis_config(y_cfg)
+            .background_line_style(line_family_style_from(background_line_style)?)
+            .faded_line_style(faded_line_style_from(faded_line_style)?)
+            .faded_line_ratio(faded_line_ratio)
+            .unit_size(unit_size)
+            .height(current_height)
+            .width(current_width);
+        let mut built = with_font_book(|book| plane.build(book).map_err(native_error))?;
+        let before = built.vmob().children().len();
+        with_font_book(|book| {
+            match &numbers {
+                Some(values) => built.add_coordinate_labels_for(values, book),
+                None => built.add_coordinate_labels(book),
+            }
+            .map_err(native_error)
+        })?;
+        let groups: Vec<Mobject> = built.vmob().children()[before..]
+            .iter()
+            .map(|group| Mobject::from(group.clone().shifted(current_center)))
+            .collect();
+        native_shell_specs(factory.py(), factory, groups)
+    }
+
     fn _replace_submobjects(
         slf: &Bound<'_, Self>,
         children: Vec<Bound<'_, PyAny>>,
@@ -1907,6 +2203,352 @@ impl PyGilProbe {
             progress.load(Ordering::Acquire)
         })
     }
+}
+
+// --------------------------------------------------------------------------
+// The native-builder seam (fm-d3gt): designated manimlib classes construct
+// by calling an fmn-library builder, whose built `fmn_mobject::Mobject`
+// family is split across proxy nurseries — the root's own records replace
+// the constructing proxy's nursery, and every descendant becomes a fresh
+// factory-made shell hung on the Python family list. Native geometry is the
+// ONE implementation (D4); the bootstrap never re-derives point math.
+
+thread_local! {
+    /// The bundled typesetting handle numbered builders take, parsed once
+    /// per interpreter thread (the worker is single-threaded by design).
+    static FONT_BOOK: std::cell::OnceCell<fmn_library::FontBook> =
+        const { std::cell::OnceCell::new() };
+}
+
+fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<T>) -> PyResult<T> {
+    FONT_BOOK.with(|cell| {
+        if cell.get().is_none() {
+            let book = fmn_library::FontBook::bundled().map_err(|error| {
+                PyRuntimeError::new_err(format!("bundled FontBook unavailable: {error}"))
+            })?;
+            let _ = cell.set(book);
+        }
+        operation(cell.get().expect("set above"))
+    })
+}
+
+fn native_error(error: impl std::fmt::Display) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// `(min, max)` or `(min, max, step)` — the Reference's RangeSpecifier.
+fn range3(value: &Bound<'_, PyAny>) -> PyResult<[f64; 3]> {
+    let items: Vec<f64> = value
+        .extract()
+        .map_err(|_| PyTypeError::new_err("a range specifier must be a sequence of numbers"))?;
+    match items.len() {
+        2 => Ok([items[0], items[1], 1.0]),
+        3 => Ok([items[0], items[1], items[2]]),
+        other => Err(PyValueError::new_err(format!(
+            "a range specifier needs 2 or 3 entries, got {other}"
+        ))),
+    }
+}
+
+fn srgb_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_core::color::Srgb> {
+    if let Ok(text) = value.extract::<String>() {
+        return fmn_core::color::Srgb::from_hex(&text)
+            .map_err(|error| PyValueError::new_err(format!("invalid color {text:?}: {error}")));
+    }
+    let rgb: Vec<f64> = value
+        .extract()
+        .map_err(|_| PyTypeError::new_err("colors must be hex strings or (r, g, b) sequences"))?;
+    if rgb.len() < 3 {
+        return Err(PyValueError::new_err("an rgb color needs three components"));
+    }
+    Ok(fmn_core::color::Srgb {
+        r: rgb[0],
+        g: rgb[1],
+        b: rgb[2],
+    })
+}
+
+/// One axis-config entry onto [`fmn_library::AxisConfig`]. Returns false
+/// for a key this record does not carry (the caller decides whether that
+/// is an error or a class-specific key).
+fn apply_axis_config_key(
+    config: &mut fmn_library::AxisConfig,
+    key: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    match key {
+        "color" => config.color = Some(srgb_from_py(value)?),
+        "stroke_width" => config.stroke_width = Some(value.extract()?),
+        "unit_size" => config.unit_size = Some(value.extract()?),
+        "include_ticks" => config.include_ticks = Some(value.extract()?),
+        "tick_size" => config.tick_size = Some(value.extract()?),
+        "longer_tick_multiple" => config.longer_tick_multiple = Some(value.extract()?),
+        "tick_offset" => config.tick_offset = Some(value.extract()?),
+        "big_tick_spacing" => config.big_tick_spacing = Some(value.extract()?),
+        "include_numbers" => config.include_numbers = Some(value.extract()?),
+        "line_to_number_direction" => {
+            config.line_to_number_direction = Some(value.extract::<[f64; 3]>()?);
+        }
+        "line_to_number_buff" => config.line_to_number_buff = Some(value.extract()?),
+        "include_tip" => config.include_tip = Some(value.extract()?),
+        "numbers_to_exclude" => config.numbers_to_exclude = Some(value.extract()?),
+        "decimal_number_config" => {
+            let entries = value
+                .cast::<PyDict>()
+                .map_err(|_| PyTypeError::new_err("decimal_number_config must be a dict"))?;
+            for (inner_key, inner_value) in entries.iter() {
+                let inner_key: String = inner_key.extract()?;
+                match inner_key.as_str() {
+                    "num_decimal_places" => {
+                        config.num_decimal_places = Some(inner_value.extract()?);
+                    }
+                    "font_size" => config.number_font_size = Some(inner_value.extract()?),
+                    other => {
+                        return Err(PyTypeError::new_err(format!(
+                            "unsupported decimal_number_config key `{other}`"
+                        )));
+                    }
+                }
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn axis_config_from(config: Option<&Bound<'_, PyDict>>) -> PyResult<fmn_library::AxisConfig> {
+    let mut out = fmn_library::AxisConfig::default();
+    if let Some(config) = config {
+        for (key, value) in config.iter() {
+            let key: String = key
+                .extract()
+                .map_err(|_| PyTypeError::new_err("axis config keys must be strings"))?;
+            if !apply_axis_config_key(&mut out, &key, &value)? {
+                return Err(PyTypeError::new_err(format!(
+                    "unsupported axis config key `{key}`"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn line_family_style_from(
+    style: Option<&Bound<'_, PyDict>>,
+) -> PyResult<fmn_library::planes::LineFamilyStyle> {
+    let mut out = fmn_library::planes::LineFamilyStyle::default();
+    if let Some(style) = style {
+        for (key, value) in style.iter() {
+            let key: String = key.extract()?;
+            match key.as_str() {
+                "stroke_color" => out.stroke_color = srgb_from_py(&value)?,
+                "stroke_width" => out.stroke_width = value.extract()?,
+                "stroke_opacity" => out.stroke_opacity = value.extract()?,
+                other => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unsupported background_line_style key `{other}`"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn faded_line_style_from(
+    style: Option<&Bound<'_, PyDict>>,
+) -> PyResult<fmn_library::planes::FadedLineStyle> {
+    let mut out = fmn_library::planes::FadedLineStyle::default();
+    if let Some(style) = style {
+        for (key, value) in style.iter() {
+            let key: String = key.extract()?;
+            match key.as_str() {
+                "stroke_color" => out.stroke_color = Some(srgb_from_py(&value)?),
+                "stroke_width" => out.stroke_width = value.extract()?,
+                "stroke_opacity" => out.stroke_opacity = value.extract()?,
+                other => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unsupported faded_line_style key `{other}`"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The Reference's NumberLine constructor surface onto the native builder:
+/// the AxisConfig subset plus the NumberLine-only keys. Unknown keys
+/// refuse precisely — never silently dropped.
+fn number_line_from_config(
+    x_range: [f64; 3],
+    config: &Bound<'_, PyDict>,
+) -> PyResult<fmn_library::NumberLine> {
+    let mut axis_config = fmn_library::AxisConfig::default();
+    let mut width: Option<f64> = None;
+    let mut big_tick_numbers: Option<Vec<f64>> = None;
+    let mut tip_size: Option<f64> = None;
+    for (key, value) in config.iter() {
+        let key: String = key.extract()?;
+        match key.as_str() {
+            "width" => width = value.extract()?,
+            "big_tick_numbers" => big_tick_numbers = Some(value.extract()?),
+            "tip_config" => {
+                let entries = value
+                    .cast::<PyDict>()
+                    .map_err(|_| PyTypeError::new_err("tip_config must be a dict"))?;
+                let mut tip_width: Option<f64> = None;
+                let mut tip_length: Option<f64> = None;
+                for (inner_key, inner_value) in entries.iter() {
+                    let inner_key: String = inner_key.extract()?;
+                    match inner_key.as_str() {
+                        "width" => tip_width = Some(inner_value.extract()?),
+                        "length" => tip_length = Some(inner_value.extract()?),
+                        other => {
+                            return Err(PyTypeError::new_err(format!(
+                                "unsupported tip_config key `{other}`"
+                            )));
+                        }
+                    }
+                }
+                match (tip_width, tip_length) {
+                    (None, None) => {}
+                    (Some(w), Some(l)) if w == l => tip_size = Some(w),
+                    (Some(w), None) | (None, Some(w)) => tip_size = Some(w),
+                    (Some(_), Some(_)) => {
+                        return Err(PyValueError::new_err(
+                            "the native arrow tip is square; tip_config width and \
+                             length must agree",
+                        ));
+                    }
+                }
+            }
+            other => {
+                if !apply_axis_config_key(&mut axis_config, other, &value)? {
+                    return Err(PyTypeError::new_err(format!(
+                        "NumberLine() got an unexpected keyword argument `{other}`"
+                    )));
+                }
+            }
+        }
+    }
+    let mut line = fmn_library::create_axis(x_range, axis_config, width);
+    if let Some(values) = big_tick_numbers {
+        line = line.big_tick_numbers(values);
+    }
+    if let Some(size) = tip_size {
+        line = line.tip_size(size);
+    }
+    Ok(line)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn axes_builder(
+    x_range: [f64; 3],
+    y_range: [f64; 3],
+    axis_config: Option<&Bound<'_, PyDict>>,
+    x_axis_config: Option<&Bound<'_, PyDict>>,
+    y_axis_config: Option<&Bound<'_, PyDict>>,
+    height: Option<f64>,
+    width: Option<f64>,
+    unit_size: f64,
+) -> PyResult<fmn_library::Axes> {
+    let mut axes = fmn_library::Axes::new()
+        .x_range(x_range)
+        .y_range(y_range)
+        .axis_config(axis_config_from(axis_config)?)
+        .x_axis_config(axis_config_from(x_axis_config)?)
+        .y_axis_config(axis_config_from(y_axis_config)?)
+        .unit_size(unit_size);
+    if let Some(height) = height {
+        axes = axes.height(height);
+    }
+    if let Some(width) = width {
+        axes = axes.width(width);
+    }
+    Ok(axes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complex_plane_builder(
+    x_range: [f64; 3],
+    y_range: [f64; 3],
+    axis_config: Option<&Bound<'_, PyDict>>,
+    x_axis_config: Option<&Bound<'_, PyDict>>,
+    y_axis_config: Option<&Bound<'_, PyDict>>,
+    background_line_style: Option<&Bound<'_, PyDict>>,
+    faded_line_style: Option<&Bound<'_, PyDict>>,
+    faded_line_ratio: usize,
+    height: Option<f64>,
+    width: Option<f64>,
+    unit_size: f64,
+) -> PyResult<fmn_library::ComplexPlane> {
+    let mut plane = fmn_library::ComplexPlane::new()
+        .x_range(x_range)
+        .y_range(y_range)
+        .axis_config(axis_config_from(axis_config)?)
+        .x_axis_config(axis_config_from(x_axis_config)?)
+        .y_axis_config(axis_config_from(y_axis_config)?)
+        .background_line_style(line_family_style_from(background_line_style)?)
+        .faded_line_style(faded_line_style_from(faded_line_style)?)
+        .faded_line_ratio(faded_line_ratio)
+        .unit_size(unit_size);
+    if let Some(height) = height {
+        plane = plane.height(height);
+    }
+    if let Some(width) = width {
+        plane = plane.width(width);
+    }
+    Ok(plane)
+}
+
+/// One factory shell per family node, recursively: the node's own records
+/// become the shell's single-root nursery; descendants are returned as
+/// nested `(shell, children)` specs for the bootstrap to hang on the
+/// Python family lists.
+fn native_shell_specs<'py>(
+    py: Python<'py>,
+    factory: &Bound<'py, PyAny>,
+    nodes: Vec<Mobject>,
+) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for mut node in nodes {
+        let children = std::mem::take(&mut node.submobjects);
+        let shell = factory.call0()?;
+        {
+            let bridge = shell.cast::<BridgeMobject>().map_err(|_| {
+                PyTypeError::new_err("the native shell factory must return a Mobject")
+            })?;
+            let mut cell = bridge.borrow_mut();
+            cell.nursery = Some(Nursery::new(node));
+            cell.initialized = true;
+        }
+        let child_specs = native_shell_specs(py, factory, children)?;
+        out.append((shell, child_specs))?;
+    }
+    Ok(out)
+}
+
+/// Install a built native family on a constructing proxy: the root's own
+/// records replace `slf`'s nursery; descendants become factory shells.
+fn install_native_tree<'py>(
+    slf: &Bound<'py, BridgeMobject>,
+    factory: &Bound<'py, PyAny>,
+    tree: impl Into<Mobject>,
+) -> PyResult<Bound<'py, PyList>> {
+    let mut tree = tree.into();
+    let children = std::mem::take(&mut tree.submobjects);
+    {
+        let mut cell = slf.borrow_mut();
+        if cell.engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a native builder may only construct a detached mobject",
+            ));
+        }
+        cell.nursery = Some(Nursery::new(tree));
+        cell.initialized = true;
+    }
+    native_shell_specs(slf.py(), factory, children)
 }
 
 /// The engine-backed camera-frame state (fm-d3gt): a thin proxy over

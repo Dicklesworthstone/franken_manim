@@ -1245,6 +1245,392 @@ class VMobject(Mobject):
         return bool(any(self._style_data()["fill_rgba"][:, 3]))
 
 
+# ---------------------------------------------------------------------------
+# The native-builder seam (fm-d3gt): the classes below construct by calling
+# an fmn-library builder through the engine, which installs the built family
+# across proxy nurseries — the root's records replace the constructing
+# proxy's nursery and every descendant arrives as a fresh VMobject shell in
+# the nested specs `_hang_native_children` walks. Native geometry is the ONE
+# implementation (D4); no point math is re-derived here.
+
+
+def _native_shell_factory():
+    shell = VMobject.__new__(VMobject)
+    _install_live_state(shell)
+    return shell
+
+
+def _hang_native_children(parent, specs):
+    shells = []
+    for shell, child_specs in specs:
+        _hang_native_children(shell, child_specs)
+        shells.append(shell)
+    if shells:
+        parent.submobjects.extend(shells)
+
+
+def _apply_vmobject_style_kwargs(mob, kwargs):
+    """The Reference's VMobject style constructor keywords, applied after a
+    native build (its init_colors pass). Unknown keywords refuse."""
+    color = kwargs.pop("color", None)
+    opacity = kwargs.pop("opacity", None)
+    fill_color = kwargs.pop("fill_color", None)
+    fill_opacity = kwargs.pop("fill_opacity", None)
+    stroke_color = kwargs.pop("stroke_color", None)
+    stroke_width = kwargs.pop("stroke_width", None)
+    stroke_opacity = kwargs.pop("stroke_opacity", None)
+    stroke_behind = kwargs.pop("stroke_behind", None)
+    flat_stroke = kwargs.pop("flat_stroke", None)
+    fill_border_width = kwargs.pop("fill_border_width", None)
+    shading = kwargs.pop("shading", None)
+    if kwargs:
+        raise TypeError(
+            "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+        )
+    if fill_color is None:
+        fill_color = color
+    if stroke_color is None:
+        stroke_color = color
+    if fill_opacity is None:
+        fill_opacity = opacity
+    if stroke_opacity is None:
+        stroke_opacity = opacity
+    if any(
+        value is not None
+        for value in (stroke_color, stroke_width, stroke_opacity, stroke_behind, flat_stroke)
+    ):
+        mob.set_stroke(
+            color=stroke_color,
+            width=stroke_width,
+            opacity=stroke_opacity,
+            behind=stroke_behind,
+            flat=flat_stroke,
+        )
+    if any(value is not None for value in (fill_color, fill_opacity, fill_border_width)):
+        mob.set_fill(
+            color=fill_color, opacity=fill_opacity, border_width=fill_border_width
+        )
+    if shading is not None:
+        mob.set_shading(*shading)
+    return mob
+
+
+class VGroup(VMobject):
+    """The Reference's VGroup: a VMobject holding children. Defined here
+    (rather than schema-synthesized) so the native coordinate classes can
+    keep the Reference MRO `Axes < VGroup < VMobject`."""
+
+    def __init__(self, *vmobjects, **kwargs):
+        super().__init__(*vmobjects, **kwargs)
+
+
+class Rectangle(VMobject):
+    def __init__(self, width=4.0, height=2.0, **kwargs):
+        _install_live_state(self)
+        specs = self._build_rectangle(
+            _native_shell_factory, float(width), float(height)
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Square(Rectangle):
+    def __init__(self, side_length=2.0, **kwargs):
+        self.side_length = side_length
+        super().__init__(side_length, side_length, **kwargs)
+
+
+class NumberLine(VMobject):
+    def __init__(self, x_range=(-8, 8, 1), **kwargs):
+        _install_live_state(self)
+        self.x_range = tuple(float(v) for v in x_range)
+        specs = self._build_number_line(
+            _native_shell_factory, self.x_range, dict(kwargs)
+        )
+        _hang_native_children(self, specs)
+
+
+class Axes(VGroup):
+    def __init__(
+        self,
+        x_range=(-8.0, 8.0, 1.0),
+        y_range=(-4.0, 4.0, 1.0),
+        axis_config=None,
+        x_axis_config=None,
+        y_axis_config=None,
+        height=None,
+        width=None,
+        unit_size=1.0,
+        **kwargs,
+    ):
+        # The one remaining Reference keyword configures graph sampling
+        # (`get_graph`), not built geometry; it is stored for that binding.
+        self.num_sampled_graph_points_per_tick = kwargs.pop(
+            "num_sampled_graph_points_per_tick", 5
+        )
+        if kwargs:
+            raise TypeError(
+                "Axes() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        _install_live_state(self)
+        self._axes_params = (
+            tuple(float(v) for v in x_range),
+            tuple(float(v) for v in y_range),
+            dict(axis_config or {}),
+            dict(x_axis_config or {}),
+            dict(y_axis_config or {}),
+            None if height is None else float(height),
+            None if width is None else float(width),
+            float(unit_size),
+        )
+        specs = self._build_axes(_native_shell_factory, *self._axes_params)
+        _hang_native_children(self, specs)
+        self.x_axis = self.submobjects[0]
+        self.y_axis = self.submobjects[1]
+        self.axes = VGroup(self.x_axis, self.y_axis)
+
+    def get_axes(self):
+        return self.axes
+
+    def get_x_axis(self):
+        return self.x_axis
+
+    def get_y_axis(self):
+        return self.y_axis
+
+    def add_coordinate_labels(self, x_values=None, y_values=None, excluding=(0,), **kwargs):
+        font_size = kwargs.pop("font_size", None)
+        if kwargs:
+            raise TypeError(
+                "add_coordinate_labels() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        if font_size is not None:
+            raise NotImplementedError(
+                "Axes.add_coordinate_labels(font_size=...) awaits the "
+                "numbers-shelf font-size passthrough; the default size works"
+            )
+        (x_range, y_range, axis_config, x_axis_config, y_axis_config, _h, _w, unit) = (
+            self._axes_params
+        )
+        x_specs, y_specs = _BridgeMobject._axes_label_shells(
+            _native_shell_factory,
+            x_range,
+            y_range,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            unit,
+            float(self.get_width()),
+            float(self.get_height()),
+            _vec3(self.get_center()),
+            None if x_values is None else [float(v) for v in x_values],
+            None if y_values is None else [float(v) for v in y_values],
+            [float(v) for v in excluding],
+        )
+        _hang_native_children(self.x_axis, x_specs)
+        _hang_native_children(self.y_axis, y_specs)
+        return self
+
+
+class ThreeDAxes(Axes):
+    def __init__(
+        self,
+        x_range=(-6.0, 6.0, 1.0),
+        y_range=(-5.0, 5.0, 1.0),
+        z_range=(-4.0, 4.0, 1.0),
+        z_axis_config=None,
+        z_normal=None,
+        depth=None,
+        **kwargs,
+    ):
+        if z_normal is not None:
+            raise NotImplementedError(
+                "ThreeDAxes(z_normal=...) is not yet routed to the native "
+                "builder; the default DOWN normal works"
+            )
+        axis_config = kwargs.pop("axis_config", None)
+        x_axis_config = kwargs.pop("x_axis_config", None)
+        y_axis_config = kwargs.pop("y_axis_config", None)
+        height = kwargs.pop("height", None)
+        width = kwargs.pop("width", None)
+        unit_size = kwargs.pop("unit_size", 1.0)
+        self.num_sampled_graph_points_per_tick = kwargs.pop(
+            "num_sampled_graph_points_per_tick", 5
+        )
+        if kwargs:
+            raise TypeError(
+                "ThreeDAxes() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        _install_live_state(self)
+        self._axes_params = (
+            tuple(float(v) for v in x_range),
+            tuple(float(v) for v in y_range),
+            dict(axis_config or {}),
+            dict(x_axis_config or {}),
+            dict(y_axis_config or {}),
+            None if height is None else float(height),
+            None if width is None else float(width),
+            float(unit_size),
+        )
+        specs = self._build_three_d_axes(
+            _native_shell_factory,
+            self._axes_params[0],
+            self._axes_params[1],
+            tuple(float(v) for v in z_range),
+            self._axes_params[2],
+            self._axes_params[3],
+            self._axes_params[4],
+            dict(z_axis_config or {}),
+            self._axes_params[5],
+            self._axes_params[6],
+            None if depth is None else float(depth),
+            self._axes_params[7],
+        )
+        _hang_native_children(self, specs)
+        self.x_axis, self.y_axis, self.z_axis = self.submobjects[:3]
+        self.axes = VGroup(self.x_axis, self.y_axis, self.z_axis)
+
+    def get_z_axis(self):
+        return self.z_axis
+
+
+class NumberPlane(Axes):
+    def __init__(
+        self,
+        x_range=(-8.0, 8.0, 1.0),
+        y_range=(-4.0, 4.0, 1.0),
+        background_line_style=None,
+        faded_line_style=None,
+        faded_line_ratio=4,
+        make_smooth_after_applying_functions=True,
+        **kwargs,
+    ):
+        axis_config = kwargs.pop("axis_config", None)
+        x_axis_config = kwargs.pop("x_axis_config", None)
+        y_axis_config = kwargs.pop("y_axis_config", None)
+        height = kwargs.pop("height", None)
+        width = kwargs.pop("width", None)
+        unit_size = kwargs.pop("unit_size", 1.0)
+        self.num_sampled_graph_points_per_tick = kwargs.pop(
+            "num_sampled_graph_points_per_tick", 5
+        )
+        if kwargs:
+            raise TypeError(
+                type(self).__name__
+                + "() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        _install_live_state(self)
+        self.make_smooth_after_applying_functions = make_smooth_after_applying_functions
+        self._plane_params = (
+            tuple(float(v) for v in x_range),
+            tuple(float(v) for v in y_range),
+            dict(axis_config or {}),
+            dict(x_axis_config or {}),
+            dict(y_axis_config or {}),
+            None if background_line_style is None else dict(background_line_style),
+            None if faded_line_style is None else dict(faded_line_style),
+            int(faded_line_ratio),
+            None if height is None else float(height),
+            None if width is None else float(width),
+            float(unit_size),
+        )
+        specs = self._native_plane_specs()
+        _hang_native_children(self, specs)
+        self.faded_lines, self.background_lines, self.x_axis, self.y_axis = (
+            self.submobjects[:4]
+        )
+        self.axes = VGroup(self.x_axis, self.y_axis)
+
+    def _native_plane_specs(self):
+        (x_range, y_range, axis_config, x_axis_config, y_axis_config,
+         background, faded, ratio, height, width, unit) = self._plane_params
+        return self._build_number_plane(
+            _native_shell_factory,
+            x_range,
+            y_range,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            background,
+            faded,
+            ratio,
+            height,
+            width,
+            unit,
+        )
+
+    def add_coordinate_labels(self, x_values=None, y_values=None, excluding=(0,), **kwargs):
+        del x_values, y_values, excluding, kwargs
+        raise NotImplementedError(
+            "NumberPlane.add_coordinate_labels awaits the merged "
+            "plane-axis-config rebuild; ComplexPlane's labeler is native"
+        )
+
+
+class ComplexPlane(NumberPlane):
+    def _native_plane_specs(self):
+        (x_range, y_range, axis_config, x_axis_config, y_axis_config,
+         background, faded, ratio, height, width, unit) = self._plane_params
+        return self._build_complex_plane(
+            _native_shell_factory,
+            x_range,
+            y_range,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            background,
+            faded,
+            ratio,
+            height,
+            width,
+            unit,
+        )
+
+    def add_coordinate_labels(self, numbers=None, skip_first=True, font_size=36, **kwargs):
+        del skip_first  # accepted, never used — the Reference's own contract
+        if kwargs:
+            raise TypeError(
+                "add_coordinate_labels() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        values = None
+        if numbers is not None:
+            values = [
+                (float(z.real), float(z.imag))
+                if isinstance(z, complex)
+                else (float(z[0]), float(z[1]))
+                if not isinstance(z, (int, float))
+                else (float(z), 0.0)
+                for z in numbers
+            ]
+        (x_range, y_range, axis_config, x_axis_config, y_axis_config,
+         background, faded, ratio, _height, _width, unit) = self._plane_params
+        specs = _BridgeMobject._complex_plane_label_shells(
+            _native_shell_factory,
+            x_range,
+            y_range,
+            axis_config,
+            x_axis_config,
+            y_axis_config,
+            background,
+            faded,
+            ratio,
+            unit,
+            float(self.get_width()),
+            float(self.get_height()),
+            _vec3(self.get_center()),
+            values,
+            float(font_size),
+        )
+        _hang_native_children(self, specs)
+        self.coordinate_labels = self.submobjects[-1]
+        return self
+
+
 class CameraFrame(Mobject):
     """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
     real Mobject whose authoritative state lives in one engine
@@ -1861,6 +2247,14 @@ def _install_schema_surface():
         ("manimlib.mobject.mobject", "Point"): Point,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
+        ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
+        ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
+        ("manimlib.mobject.geometry", "Square"): Square,
+        ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
+        ("manimlib.mobject.coordinate_systems", "Axes"): Axes,
+        ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,
+        ("manimlib.mobject.coordinate_systems", "NumberPlane"): NumberPlane,
+        ("manimlib.mobject.coordinate_systems", "ComplexPlane"): ComplexPlane,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,

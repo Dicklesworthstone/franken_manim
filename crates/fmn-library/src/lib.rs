@@ -159,3 +159,9 @@ pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
 pub use vmobject::{DashError, MAX_DASHES, VMobject};
+
+// The typesetting handle every numbered builder takes. Re-exported so
+// above-library consumers (the Python portal's native-builder seam) can
+// construct one through their declared fmn-library edge, mirroring
+// fmn-scene's studio_bridge facade pattern (plan §19).
+pub use fmn_text::FontBook;
