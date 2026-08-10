@@ -2579,11 +2579,113 @@ impl PyScene {
         }
     }
 
+    /// Cut T2 (fm-d3gt): drive the engine's six-step play contract
+    /// (`fmn_scene::Scene::play`) for MoveToTarget-shaped animations.
+    /// Both proxies must already be arena-resident in this scene; the
+    /// bootstrap adopts them beforehand. Rendering is a later tranche:
+    /// captures flow through a frame-counting probe sink whose recorded
+    /// alphas are returned (ordered, one per captured frame).
+    #[pyo3(signature = (pairs, run_time, rate_func, lag_ratio))]
+    fn _play_transforms(
+        slf: &Bound<'_, Self>,
+        pairs: Vec<(Bound<'_, BridgeMobject>, Bound<'_, BridgeMobject>)>,
+        run_time: Option<f64>,
+        rate_func: Option<&str>,
+        lag_ratio: Option<f64>,
+    ) -> PyResult<Vec<f64>> {
+        let engine = Rc::clone(&slf.borrow().engine);
+        let mut animations: Vec<Box<dyn fmn_anim::Animation>> = Vec::with_capacity(pairs.len());
+        for (mobject, target) in &pairs {
+            let (mob_engine, mob) = bound_parts(&mobject.borrow())?;
+            let (target_engine, target_mob) = bound_parts(&target.borrow())?;
+            if !same_engine(&engine, &mob_engine) || !same_engine(&engine, &target_engine) {
+                return Err(ForeignStageError::new_err(
+                    "play endpoints must belong to this Scene",
+                ));
+            }
+            animations.push(Box::new(fmn_anim::Transform::new(mob, target_mob)));
+        }
+        let overrides = fmn_scene::PlayOverrides {
+            run_time,
+            rate_func: rate_func.map(named_rate_func).transpose()?,
+            lag_ratio,
+        };
+        let mut sink = AlphaProbeSink::default();
+        engine
+            .borrow_mut()
+            .play(animations, overrides, &mut sink)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok(sink.alphas)
+    }
+
+    /// Adopt a detached mobject graph into this scene's arena WITHOUT
+    /// adding it to the draw list — the `.animate` target seam.
+    fn _adopt(slf: &Bound<'_, Self>, mobject: &Bound<'_, BridgeMobject>) -> PyResult<()> {
+        bind_graph(slf.py(), slf, mobject)?;
+        Ok(())
+    }
+
+    /// `Scene.wait(duration)` over the native wait segment (NullSceneSink;
+    /// rendering is a later tranche).
+    #[pyo3(signature = (duration = None))]
+    fn _wait(slf: &Bound<'_, Self>, duration: Option<f64>) -> PyResult<()> {
+        let engine = Rc::clone(&slf.borrow().engine);
+        engine
+            .borrow_mut()
+            .wait(duration, &mut fmn_scene::NullSceneSink)
+            .map(|_| ())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
     fn _checkpoint_bytes(&self) -> PyResult<Vec<u8>> {
         self.engine
             .borrow_mut()
             .state_bytes()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+}
+
+/// The engine's named rate-function catalog (fmn-core's single-argument
+/// rate functions, the same pointers Choreo composes). Parameterized and
+/// arbitrary Python callables refuse precisely — a per-frame Python
+/// rate_func is a crossing-budget decision for a later rung.
+fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
+    let function: fn(f64) -> f64 = match name {
+        "linear" => fmn_core::rate::linear,
+        "smooth" => fmn_core::rate::smooth,
+        "rush_into" => fmn_core::rate::rush_into,
+        "rush_from" => fmn_core::rate::rush_from,
+        "slow_into" => fmn_core::rate::slow_into,
+        "double_smooth" => fmn_core::rate::double_smooth,
+        "there_and_back" => fmn_core::rate::there_and_back,
+        "lingering" => fmn_core::rate::lingering,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "rate_func `{other}` is not in the engine's named catalog \
+                 (linear, smooth, rush_into, rush_from, slow_into, \
+                 double_smooth, there_and_back, lingering); parameterized \
+                 and custom callables await the crossing-budget rung"
+            )));
+        }
+    };
+    Ok(fmn_anim::RateFunc::Base(function))
+}
+
+/// The portal's play sink: validates the capture boundary contract and
+/// records each captured frame's alpha (rendering is a later tranche).
+#[derive(Default)]
+struct AlphaProbeSink {
+    alphas: Vec<f64>,
+}
+
+impl fmn_scene::SceneSink for AlphaProbeSink {
+    fn capture(
+        &mut self,
+        _reason: fmn_scene::CaptureReason,
+        packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        self.alphas.push(packet.alpha());
+        Ok(())
     }
 }
 

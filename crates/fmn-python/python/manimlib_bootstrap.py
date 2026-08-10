@@ -44,6 +44,10 @@ _ONES = _np.array([1.0, 1.0, 1.0])
 _DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
 _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
 
+# Function object -> catalog name, filled by _install_rate_functions;
+# Scene.play maps rate_func callables into the engine's named catalog.
+_RATE_FUNC_NAMES = {}
+
 
 def _vec3(value):
     """A sequence (list/tuple/numpy array) as the engine's (x, y, z) floats."""
@@ -302,6 +306,58 @@ def _install_live_state(mobject):
     mobject.submobjects = _LiveSubmobjects(mobject)
     mobject.uniforms = _LiveUniforms(mobject)
     mobject.updaters = []
+
+
+class _AnimationBuilder:
+    """Reference mobject.py:2250 verbatim: intercepted methods apply to
+    the mobject's generated target through the ordinary bound surfaces;
+    the product is a MoveToTarget-shaped (mobject, target) spec plus
+    anim_args."""
+
+    def __init__(self, mobject):
+        self.mobject = mobject
+        self.overridden_animation = None
+        self.mobject.generate_target()
+        self.is_chaining = False
+        self.methods = []
+        self.anim_args = {}
+        self.can_pass_args = True
+
+    def __getattr__(self, method_name):
+        method = getattr(self.mobject.target, method_name)
+        self.methods.append(method)
+        has_overridden_animation = hasattr(method, "_override_animate")
+
+        if (self.is_chaining and has_overridden_animation) or self.overridden_animation:
+            raise NotImplementedError(
+                "Method chaining is currently not supported for "
+                "overridden animations"
+            )
+
+        def update_target(*method_args, **method_kwargs):
+            if has_overridden_animation:
+                self.overridden_animation = method._override_animate(
+                    self.mobject, *method_args, **method_kwargs
+                )
+            else:
+                method(*method_args, **method_kwargs)
+            return self
+
+        self.is_chaining = True
+        return update_target
+
+    def __call__(self, **kwargs):
+        return self.set_anim_args(**kwargs)
+
+    def set_anim_args(self, **kwargs):
+        if not self.can_pass_args:
+            raise ValueError(
+                "Animation arguments can only be passed by calling ``animate`` "
+                "or ``set_anim_args`` and can only be passed once",
+            )
+        self.anim_args = kwargs
+        self.can_pass_args = False
+        return self
 
 
 class _UpdaterBuilder:
@@ -1119,6 +1175,16 @@ class Mobject(_BridgeMobject):
         for target in targets:
             target.updaters.clear()
         return self
+
+    def generate_target(self, use_deepcopy=False):
+        self.target = self.copy(deep=use_deepcopy)
+        return self.target
+
+    @property
+    def animate(self):
+        """Methods called with mobject.animate.method(...) build a
+        MoveToTarget-shaped play spec against a generated target."""
+        return _AnimationBuilder(self)
 
     @property
     def always(self):
@@ -2721,6 +2787,16 @@ class CameraFrame(Mobject):
             euler_axes,
         )
 
+    @property
+    def animate(self):
+        # T3 (fm-d3gt): the frame's state lives in the engine camera core,
+        # not in stage records — a record-level Transform would silently
+        # animate nothing. Precise refusal until the camera track lands.
+        raise NotImplementedError(
+            "CameraFrame.animate awaits the camera-track cut (T3); "
+            "reorient/move_to/set_height apply instantly meanwhile"
+        )
+
     # -- the positional primitives, routed to the engine camera state
 
     def _bbox_rows(self):
@@ -2997,6 +3073,82 @@ class Scene(_SceneCore):
         return self._run_lifecycle()
 
     render = run
+
+    def play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        # Cut T2 (fm-d3gt): mobject.animate builders drive the engine's
+        # six-step play contract. Explicit Animation classes and custom
+        # rate callables refuse precisely until their bindings land.
+        if not proto_animations:
+            return
+        # Python updaters cannot tick inside an engine-driven segment yet:
+        # the frame-boundary hook needs a borrow-release window so a
+        # native->Python dispatch never crosses the live Scene borrow
+        # (fm-p107). Refuse rather than silently freezing them.
+        for root in self._engine_roots():
+            for member in _family_preorder(root):
+                if getattr(member, "updaters", None):
+                    raise NotImplementedError(
+                        "Scene.play with live Python updaters awaits the "
+                        "frame-boundary release window (fm-p107); drive "
+                        "frames with Scene.update meanwhile"
+                    )
+        pairs = []
+        anim_args = {}
+        for proto in proto_animations:
+            if not isinstance(proto, _AnimationBuilder):
+                raise NotImplementedError(
+                    "Scene.play drives mobject.animate builders natively this "
+                    "tranche; explicit Animation classes await their bindings"
+                )
+            if proto.overridden_animation is not None:
+                raise NotImplementedError(
+                    "overridden animations are not yet routed to the engine"
+                )
+            for key, value in proto.anim_args.items():
+                if key not in ("run_time", "rate_func", "lag_ratio"):
+                    raise NotImplementedError(
+                        "anim arg `" + key + "` is not yet routed to the engine play"
+                    )
+                if key in anim_args and anim_args[key] != value:
+                    raise NotImplementedError(
+                        "conflicting per-animation args in one play await "
+                        "per-animation configs"
+                    )
+                anim_args[key] = value
+            mobject = proto.mobject
+            if not mobject._is_bound():
+                self.add(mobject)
+            target = mobject.target
+            if not target._is_bound():
+                self._adopt(target)
+            pairs.append((mobject, target))
+        if run_time is None:
+            run_time = anim_args.get("run_time")
+        if rate_func is None:
+            rate_func = anim_args.get("rate_func")
+        if lag_ratio is None:
+            lag_ratio = anim_args.get("lag_ratio")
+        if rate_func is not None and not isinstance(rate_func, str):
+            rate_func = _RATE_FUNC_NAMES.get(rate_func)
+            if rate_func is None:
+                raise NotImplementedError(
+                    "custom rate_func callables await the crossing-budget "
+                    "rung; use a named catalog function"
+                )
+        return self._play_transforms(
+            pairs,
+            None if run_time is None else float(run_time),
+            rate_func,
+            None if lag_ratio is None else float(lag_ratio),
+        )
+
+    def wait(self, duration=None, **kwargs):
+        if kwargs:
+            raise NotImplementedError(
+                "Scene.wait keyword(s) not yet routed: "
+                + ", ".join(sorted(kwargs))
+            )
+        self._wait(None if duration is None else float(duration))
 
     @staticmethod
     def _dispatch_updater_batch(mobjects, dt):
@@ -3620,6 +3772,7 @@ def _install_rate_functions():
     }
     module = _ensure_module("manimlib.utils.rate_functions")
     for name, function in functions.items():
+        _RATE_FUNC_NAMES[function] = name
         setattr(module, name, function)
         if not hasattr(_FMN_MODULE, name):
             setattr(_FMN_MODULE, name, function)
