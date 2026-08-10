@@ -530,15 +530,20 @@ mod tests {
 
     #[test]
     fn an_unsupported_construct_is_the_named_tier_tagged_error() {
-        // `\substack` graduated (fm-j5t tier 2); `\dddot` remains pending.
-        let err = Tex::new(r"\dddot x").build(&engine()).expect_err("fails");
+        // The pending tier-2 example advances as constructs graduate (fm-j5t).
+        let err = Tex::new(r"\xrightarrow{f}")
+            .build(&engine())
+            .expect_err("fails");
         assert!(
             matches!(&err, TexMobjectError::Tex(TexError::Math(_))),
             "expected a math error, got {err:?}"
         );
         // TexMobjectError's Display delegates to the MathError verbatim.
         let what = err.to_string();
-        assert!(what.contains("\\dddot"), "names the construct: {what}");
+        assert!(
+            what.contains("\\xrightarrow"),
+            "names the construct: {what}"
+        );
         assert!(what.contains("tier"), "carries the tier tag: {what}");
     }
 

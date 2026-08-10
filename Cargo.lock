@@ -568,12 +568,12 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "fmd-font"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=5db49f54f0cfea1eb4e4f949849fc74a5c807fc4#5db49f54f0cfea1eb4e4f949849fc74a5c807fc4"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=b30516ea95228a70a657cec72ccc606fd07a347c#b30516ea95228a70a657cec72ccc606fd07a347c"
 
 [[package]]
 name = "fmd-math"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=5db49f54f0cfea1eb4e4f949849fc74a5c807fc4#5db49f54f0cfea1eb4e4f949849fc74a5c807fc4"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=b30516ea95228a70a657cec72ccc606fd07a347c#b30516ea95228a70a657cec72ccc606fd07a347c"
 dependencies = [
  "fmd-font",
 ]
@@ -617,12 +617,16 @@ dependencies = [
 name = "fmn-cli"
 version = "0.1.0"
 dependencies = [
+ "fmn",
  "fmn-cache",
+ "fmn-codec",
  "fmn-config",
  "fmn-core",
+ "fmn-frame",
  "fmn-library",
  "fmn-output",
  "fmn-platform",
+ "fmn-render",
  "fmn-runtime",
  "fmn-scene",
  "fmn-studio",

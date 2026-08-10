@@ -105,8 +105,8 @@ fn parse_covers_the_flagship_shapes() {
 #[test]
 fn the_error_contract_names_constructs_for_the_ratchet() {
     // `\substack` was the example until it graduated (fm-j5t tier 2).
-    let err = fmd_math::parse(r"\dddot x").unwrap_err();
-    assert_eq!(err.unsupported_construct(), Some(r"\dddot"));
+    let err = fmd_math::parse(r"\xrightarrow{f}").unwrap_err();
+    assert_eq!(err.unsupported_construct(), Some(r"\xrightarrow"));
     assert!(err.to_string().contains("tier T2"));
     assert!(matches!(err, MathError::UnsupportedCommand { .. }));
 }
@@ -213,8 +213,10 @@ fn the_kg9_frontier_lays_out_through_the_pin() {
     assert_eq!(stack.glyphs.len(), 2);
     assert!(stack.glyphs.iter().all(|g| (g.size - 0.7).abs() < 1e-9));
     // …and the boundary still names itself for what remains pending.
-    let err = engine.typeset(r"\dddot x", Style::Display).unwrap_err();
-    assert_eq!(err.unsupported_construct(), Some(r"\dddot"));
+    let err = engine
+        .typeset(r"\xrightarrow{f}", Style::Display)
+        .unwrap_err();
+    assert_eq!(err.unsupported_construct(), Some(r"\xrightarrow"));
     assert!(err.to_string().contains("tier T2"), "{err}");
 }
 

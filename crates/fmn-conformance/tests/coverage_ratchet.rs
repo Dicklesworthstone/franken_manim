@@ -211,6 +211,8 @@ fn probe_sources(construct: &str) -> Vec<String> {
         construct.to_owned(),
         format!("{construct}{{x}}"),
         format!("{construct}{{51}}"),
+        // The text accents compose only over accentable bases.
+        format!("{construct}{{e}}"),
     ]
 }
 

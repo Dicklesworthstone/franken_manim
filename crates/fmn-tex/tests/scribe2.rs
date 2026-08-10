@@ -338,7 +338,7 @@ fn preflight_warms_the_cache_in_parallel_and_collects_errors() {
     let items: Vec<(Mode, &str)> = vec![
         (Mode::Math(Style::Display), r"e^{i\pi} + 1 = 0"),
         (Mode::Math(Style::Display), r"\frac{d}{dx} \sin x"),
-        (Mode::Math(Style::Display), r"\dddot x"), // still-pending tier-2: fails
+        (Mode::Math(Style::Display), r"\xrightarrow{f}"), // still-pending tier-2: fails
         (Mode::Text, r"area $\pi r^2$"),
         (
             Mode::Math(Style::Display),
@@ -384,12 +384,15 @@ fn preflight_warms_the_cache_in_parallel_and_collects_errors() {
 #[test]
 fn construct_errors_surface_named_and_tier_tagged() {
     let e = engine();
-    // `\substack` graduated (fm-j5t tier 2); `\dddot` remains pending.
+    // The pending tier-2 example advances as constructs graduate (fm-j5t).
     let err = e
-        .typeset(Mode::Math(Style::Display), r"\dddot x")
+        .typeset(Mode::Math(Style::Display), r"\xrightarrow{f}")
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains(r"`\dddot` is not yet supported"), "{msg}");
+    assert!(
+        msg.contains(r"`\xrightarrow` is not yet supported"),
+        "{msg}"
+    );
     assert!(msg.contains("tier T2"), "{msg}");
     assert!(msg.contains("fm-j5t"), "tracked-at pointer: {msg}");
 
