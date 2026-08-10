@@ -625,7 +625,6 @@ dependencies = [
  "fmn-core",
  "fmn-frame",
  "fmn-library",
- "fmn-mobject",
  "fmn-output",
  "fmn-platform",
  "fmn-render",

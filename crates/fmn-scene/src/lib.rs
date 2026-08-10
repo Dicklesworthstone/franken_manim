@@ -26,7 +26,7 @@ pub mod timeline_bundle;
 /// Choreo.
 pub mod studio_bridge {
     pub use fmn_anim::{AnimError, FramePacket, Timeline};
-    pub use fmn_mobject::{Mob, Stage, Uniforms};
+    pub use fmn_mobject::{Mob, SceneState, Stage, Uniforms};
 }
 
 pub use events::{

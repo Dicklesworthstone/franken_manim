@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fmn_cli::{BUILTIN_SCENE_SOURCE, PYTHON_SOURCE_PORTAL_MESSAGE};
 use fmn_core::rng::RngRoot;
-#[cfg(feature = "batch")]
 use fmn_output::{ManifestMode, ProvenanceManifest};
 use fmn_scene::export_timeline_bundle;
 use fmn_scene::studio_bridge::{Stage, Timeline};
@@ -489,7 +488,22 @@ fn built_in_corpus_renders_through_the_real_png_and_y4m_sinks() {
             .expect("list published corpus root")
             .collect::<Result<Vec<_>, _>>()
             .expect("read published corpus entries");
-        assert_eq!(entries.len(), 25, "{format}");
+        assert_eq!(entries.len(), 50, "{format}");
+        let manifest_generation = if format == "png_sequence" {
+            root.join("circle_shift.v1.manifest")
+        } else {
+            root.join("circle_shift.y4m.manifest")
+        };
+        assert!(manifest_generation.join("FMN_COMPLETE").is_file());
+        let manifest = ProvenanceManifest::from_bytes(
+            &std::fs::read(manifest_generation.join("manifest.fmnp"))
+                .expect("read standard render FMNP"),
+        )
+        .expect("verify standard render FMNP");
+        assert_eq!(manifest.mode, ManifestMode::Standard);
+        assert!((1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id)));
+        assert_eq!(manifest.outputs.len(), 1);
+        assert!(!manifest.outputs[0].certified);
         if format == "png_sequence" {
             let sequence = root.join("circle_shift.v1");
             assert!(sequence.join("FMN_COMPLETE").is_file());
@@ -543,6 +557,11 @@ fn batch_renders_multiple_scenes_and_reports_in_request_order() {
     assert!(lines[2].contains("\"succeeded\":2"));
     assert!(root.join("circle_shift.v1/FMN_COMPLETE").is_file());
     assert!(root.join("rectangle_shift.v1/FMN_COMPLETE").is_file());
+    assert!(root.join("circle_shift.v1.manifest/FMN_COMPLETE").is_file());
+    assert!(
+        root.join("rectangle_shift.v1.manifest/FMN_COMPLETE")
+            .is_file()
+    );
 }
 
 #[cfg(feature = "batch")]
@@ -968,6 +987,8 @@ fn compiled_fmtl_refuses_schedule_changes_and_malformed_input_before_publication
 #[test]
 fn reproducible_cli_render_is_byte_identical_across_fresh_publications() {
     let mut outputs = Vec::new();
+    let mut closures = Vec::new();
+    let mut artifact_digests = Vec::new();
     for label in ["certified-a", "certified-b"] {
         let root = output_root(label);
         let output = run_clean(&[
@@ -990,7 +1011,36 @@ fn reproducible_cli_render_is_byte_identical_across_fresh_publications() {
         assert_eq!(output.status.code(), Some(0), "{stdout}");
         assert!(output.stderr.is_empty());
         assert!(stdout.contains("\"engine\":\"certified-cpu:scalar:"));
+        assert!(stdout.contains("\"manifest\":{"));
         let sequence = root.join("circle_shift.v1");
+        let manifest_generation = root.join("circle_shift.v1.manifest");
+        assert!(manifest_generation.join("FMN_COMPLETE").is_file());
+        let manifest_path = manifest_generation.join("manifest.fmnp");
+        assert_eq!(
+            json_string_field(&stdout, "path"),
+            Some(manifest_path.to_str().expect("manifest path is UTF-8"))
+        );
+        let manifest = ProvenanceManifest::from_bytes(
+            &std::fs::read(&manifest_path).expect("read certified render FMNP"),
+        )
+        .expect("verify certified render FMNP");
+        assert_eq!(manifest.mode, ManifestMode::Certified);
+        assert!((1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id)));
+        assert_eq!(manifest.outputs.len(), 1);
+        assert!(manifest.outputs[0].certified);
+        assert_eq!(
+            manifest.outputs[0].digest.to_hex(),
+            json_string_field(&stdout, "artifact_digest").expect("artifact digest robot field")
+        );
+        assert_eq!(
+            manifest.closure_digest.to_hex(),
+            json_string_field(&stdout, "closure_digest").expect("closure digest robot field")
+        );
+        let text = std::fs::read_to_string(manifest_generation.join("manifest.txt"))
+            .expect("read certified human manifest");
+        assert!(text.contains("mode = \"certified\""));
+        closures.push(manifest.closure_digest);
+        artifact_digests.push(manifest.outputs[0].digest);
         outputs.push(
             (0..3)
                 .map(|frame| {
@@ -1001,6 +1051,32 @@ fn reproducible_cli_render_is_byte_identical_across_fresh_publications() {
         );
     }
     assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(closures[0], closures[1]);
+    assert_eq!(artifact_digests[0], artifact_digests[1]);
+}
+
+#[test]
+fn occupied_sidecar_is_refused_before_render_artifact_publication() {
+    let root = output_root("occupied-sidecar");
+    std::fs::create_dir(root.join("circle_shift.v1.manifest"))
+        .expect("occupy the sidecar destination");
+    let output = run_clean(&[
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(70), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("sidecars are no-clobber generations"));
+    assert!(!root.join("circle_shift.v1").exists());
 }
 
 #[test]

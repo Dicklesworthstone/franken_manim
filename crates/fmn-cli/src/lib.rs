@@ -30,7 +30,6 @@ use fmn_core::color::Srgb;
 use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
-use fmn_mobject::SceneState;
 use fmn_output::{
     ArtifactDigest, ClosureItem, ColorDescription, Container, EmitterConfig, EmitterHandle,
     EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig,
@@ -43,6 +42,7 @@ use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
+use fmn_scene::studio_bridge::SceneState;
 use fmn_scene::{
     AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
     EffectClass, Entry, IntegrationError, Journal, NullSceneSink, OutputNaming, SceneSink,
@@ -2257,6 +2257,26 @@ enum RenderArtifactReport {
     Video(VideoArtifactReport),
 }
 
+impl RenderArtifactReport {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Native(report) => &report.path,
+            Self::Video(report) => &report.path,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestPublication {
+    /// Publish the manifest as an atomic sibling generation beside the
+    /// artifact before reporting the render as complete.
+    Adjacent,
+    /// Return the sealed manifest to an outer composition root that owns a
+    /// caller-selected publication directory (currently `fmn batch`).
+    #[cfg(feature = "batch")]
+    Deferred,
+}
+
 enum RenderSourceReport {
     Builtin,
     Compiled(PathBuf),
@@ -4076,7 +4096,14 @@ fn execute_native_render(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &RenderCommand,
 ) -> Result<Vec<CompletedRender>, CliError> {
-    execute_native_render_with_cancellation(fs, runner, locator, command, None, false)
+    execute_native_render_with_cancellation(
+        fs,
+        runner,
+        locator,
+        command,
+        None,
+        ManifestPublication::Adjacent,
+    )
 }
 
 fn execute_native_render_with_cancellation(
@@ -4085,7 +4112,7 @@ fn execute_native_render_with_cancellation(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &RenderCommand,
     cancellation: Option<&RenderCancellation>,
-    capture_manifest: bool,
+    manifest_publication: ManifestPublication,
 ) -> Result<Vec<CompletedRender>, CliError> {
     if let Some(cancellation) = cancellation {
         cancellation.cli_checkpoint()?;
@@ -4198,31 +4225,32 @@ fn execute_native_render_with_cancellation(
         RenderTarget::Video(context) => naming.artifact(name, context.job.container.extension()),
     };
     let complete = |source, source_item, scene, artifact| -> Result<CompletedRender, CliError> {
-        let manifest = if capture_manifest {
-            Some(render_manifest(
-                ManifestContext {
-                    fs: fs.as_ref(),
-                    process_mechanism,
-                    command,
-                    config: &config,
-                    plan: &plan,
-                    engine,
-                },
-                source_item,
-                &artifact,
-            )?)
-        } else {
-            None
-        };
-        Ok(CompletedRender {
+        let manifest = render_manifest(
+            ManifestContext {
+                fs: fs.as_ref(),
+                process_mechanism,
+                command,
+                config: &config,
+                plan: &plan,
+                engine,
+            },
+            source_item,
+            &artifact,
+        )?;
+        let mut report = CompletedRender {
             source,
             scene,
             artifact,
             engine: engine.closure_string(),
             render_threads,
-            manifest,
+            manifest: Some(manifest),
             manifest_path: None,
-        })
+        };
+        if manifest_publication == ManifestPublication::Adjacent {
+            let destination = adjacent_manifest_destination(report.artifact.path())?;
+            publish_manifest_generation(&fs, &destination, &mut report)?;
+        }
+        Ok(report)
     };
     let mut reports = Vec::new();
     match input {
@@ -4232,8 +4260,20 @@ fn execute_native_render_with_cancellation(
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
-                let mut sink =
-                    RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
+                let artifact_destination = destination(&name);
+                if manifest_publication == ManifestPublication::Adjacent {
+                    preflight_manifest_generation(
+                        fs.as_ref(),
+                        &adjacent_manifest_destination(&artifact_destination)?,
+                    )?;
+                }
+                let mut sink = RenderSink::new(
+                    Arc::clone(&fs),
+                    &config,
+                    &plan,
+                    &target,
+                    artifact_destination,
+                )?;
                 if let Some(cancellation) = cancellation {
                     let emitter = sink.emitter_handle().ok_or_else(|| {
                         CliError::new("internal", "new render sink omitted its emitter")
@@ -4324,8 +4364,20 @@ fn execute_native_render_with_cancellation(
             name,
             bundle,
         } => {
-            let mut sink =
-                RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
+            let artifact_destination = destination(&name);
+            if manifest_publication == ManifestPublication::Adjacent {
+                preflight_manifest_generation(
+                    fs.as_ref(),
+                    &adjacent_manifest_destination(&artifact_destination)?,
+                )?;
+            }
+            let mut sink = RenderSink::new(
+                Arc::clone(&fs),
+                &config,
+                &plan,
+                &target,
+                artifact_destination,
+            )?;
             if let Some(cancellation) = cancellation {
                 let emitter = sink.emitter_handle().ok_or_else(|| {
                     CliError::new("internal", "new render sink omitted its emitter")
@@ -4681,6 +4733,98 @@ fn preflight_batch_manifests(
     Ok(())
 }
 
+fn adjacent_manifest_destination(artifact: &Path) -> Result<PathBuf, CliError> {
+    let leaf = artifact.file_name().ok_or_else(|| {
+        CliError::new(
+            "output",
+            format!(
+                "render artifact {} has no leaf name for its provenance sidecar",
+                artifact.display()
+            ),
+        )
+    })?;
+    let mut sidecar_leaf = leaf.to_os_string();
+    sidecar_leaf.push(".manifest");
+    Ok(artifact.with_file_name(sidecar_leaf))
+}
+
+fn preflight_manifest_generation(fs: &dyn FileSystem, destination: &Path) -> Result<(), CliError> {
+    if fs
+        .node_kind_no_follow(destination)
+        .map_err(|error| {
+            CliError::new(
+                "output",
+                format!(
+                    "could not inspect manifest destination {}: {error}",
+                    destination.display()
+                ),
+            )
+        })?
+        .is_some()
+    {
+        return Err(CliError::new(
+            "output",
+            format!(
+                "manifest destination {} already exists; sidecars are no-clobber generations",
+                destination.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn publish_manifest_generation(
+    fs: &Arc<dyn FileSystem>,
+    destination: &Path,
+    report: &mut CompletedRender,
+) -> Result<(), CliError> {
+    let manifest = report
+        .manifest
+        .as_ref()
+        .ok_or_else(|| internal("manifest publication omitted its sealed FMNP document"))?;
+    let binary = manifest
+        .to_bytes()
+        .map_err(|error| internal(format!("serialize FMNP manifest: {error}")))?;
+    let text = manifest.to_text();
+    let mut writer = Arc::clone(fs)
+        .begin_atomic_directory(destination)
+        .map_err(|error| {
+            CliError::new(
+                "output",
+                format!(
+                    "could not stage manifest generation {}: {error}",
+                    destination.display()
+                ),
+            )
+        })?;
+    writer
+        .write_file(Path::new("manifest.fmnp"), &binary)
+        .and_then(|()| writer.write_file(Path::new("manifest.txt"), text.as_bytes()))
+        .map_err(|error| {
+            CliError::new(
+                "output",
+                format!(
+                    "could not write manifest generation {}: {error}",
+                    destination.display()
+                ),
+            )
+        })?;
+    writer
+        .prepare()
+        .and_then(|prepared| prepared.commit())
+        .map_err(|error| {
+            CliError::new(
+                "output",
+                format!(
+                    "could not publish manifest generation {}: {error}",
+                    destination.display()
+                ),
+            )
+        })?;
+    report.manifest_path = Some(destination.join("manifest.fmnp"));
+    Ok(())
+}
+
 #[cfg(feature = "batch")]
 fn publish_batch_manifests(
     fs: &Arc<dyn FileSystem>,
@@ -4688,51 +4832,7 @@ fn publish_batch_manifests(
     reports: &mut [CompletedRender],
 ) -> Result<(), CliError> {
     for report in reports {
-        let manifest = report
-            .manifest
-            .as_ref()
-            .ok_or_else(|| internal("batch manifest capture completed without an FMNP document"))?;
-        let binary = manifest
-            .to_bytes()
-            .map_err(|error| internal(format!("serialize FMNP manifest: {error}")))?;
-        let text = manifest.to_text();
-        let destination = root.join(&report.scene);
-        let mut writer = Arc::clone(fs)
-            .begin_atomic_directory(&destination)
-            .map_err(|error| {
-                CliError::new(
-                    "output",
-                    format!(
-                        "could not stage manifest generation {}: {error}",
-                        destination.display()
-                    ),
-                )
-            })?;
-        writer
-            .write_file(Path::new("manifest.fmnp"), &binary)
-            .and_then(|()| writer.write_file(Path::new("manifest.txt"), text.as_bytes()))
-            .map_err(|error| {
-                CliError::new(
-                    "output",
-                    format!(
-                        "could not write manifest generation {}: {error}",
-                        destination.display()
-                    ),
-                )
-            })?;
-        writer
-            .prepare()
-            .and_then(|prepared| prepared.commit())
-            .map_err(|error| {
-                CliError::new(
-                    "output",
-                    format!(
-                        "could not publish manifest generation {}: {error}",
-                        destination.display()
-                    ),
-                )
-            })?;
-        report.manifest_path = Some(destination.join("manifest.fmnp"));
+        publish_manifest_generation(fs, &root.join(&report.scene), report)?;
     }
     Ok(())
 }
@@ -4928,7 +5028,11 @@ fn execute_batch(
                         locator.as_ref(),
                         &job.command,
                         Some(task_cancellation.as_ref()),
-                        manifest_dir.is_some(),
+                        if manifest_dir.is_some() {
+                            ManifestPublication::Deferred
+                        } else {
+                            ManifestPublication::Adjacent
+                        },
                     )?;
                     if let Some(root) = manifest_dir.as_deref() {
                         publish_batch_manifests(&fs, root, &mut reports)?;

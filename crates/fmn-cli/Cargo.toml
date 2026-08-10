@@ -25,7 +25,6 @@ fmn-codec.workspace = true
 fmn-platform.workspace = true
 fmn-runtime.workspace = true
 fmn-render.workspace = true
-fmn-mobject.workspace = true
 fmn-scene.workspace = true
 fmn-studio.workspace = true
 fmn-output.workspace = true

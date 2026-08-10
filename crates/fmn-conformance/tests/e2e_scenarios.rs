@@ -78,7 +78,7 @@ use fmn_output::sinks::{
     NativeArtifactKind, NativeArtifactReport, PngSink, PngSinkConfig, PngTarget, SinkLimits,
     Y4mSink, Y4mSinkConfig,
 };
-use fmn_output::{FrameSink, ProvenanceManifest, SinkWrite};
+use fmn_output::{FrameSink, ManifestMode, ProvenanceManifest, SinkWrite};
 use fmn_platform::fs::FileSystem;
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::FrameArena;
@@ -1060,35 +1060,55 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
     let signature = std::fs::read(sequence.join("frame_000000.png"))
         .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
         .unwrap_or(false);
+    let manifest_generation = dir.join("circle_shift.v1.manifest");
+    let manifest = std::fs::read(manifest_generation.join("manifest.fmnp"))
+        .ok()
+        .and_then(|bytes| ProvenanceManifest::from_bytes(&bytes).ok());
+    let manifest_complete = manifest_generation.join("FMN_COMPLETE").is_file();
+    let manifest_valid = manifest.as_ref().is_some_and(|manifest| {
+        manifest.mode == ManifestMode::Standard
+            && manifest.outputs.len() == 1
+            && (1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id))
+    });
     let robot_record = output.stdout.lines().count() == 1
         && output.stdout.contains("\"kind\":\"render\"")
         && output.stdout.contains("\"source\":\"builtin\"")
-        && output.stdout.contains("\"frames\":3");
+        && output.stdout.contains("\"frames\":3")
+        && output.stdout.contains("circle_shift.v1.manifest");
     ctx.event(
         LogEvent::new("e2e.cli.render")
             .field("source", "builtin")
             .field("format", "png_sequence")
             .field("complete", truth(complete))
             .field("png_signature", truth(signature))
+            .field("manifest_complete", truth(manifest_complete))
+            .field("manifest_valid", truth(manifest_valid))
             .field("robot_record", truth(robot_record)),
     );
     ctx.counter("cli_render_frames", pngs as u64);
     ctx.counter("cli_png_signature", u64::from(signature));
+    ctx.counter(
+        "cli_manifest",
+        u64::from(manifest_complete && manifest_valid),
+    );
     if output.code != 0
         || !output.stderr.is_empty()
         || !complete
         || pngs != 3
         || !signature
+        || !manifest_complete
+        || !manifest_valid
         || !robot_record
     {
         return Err(fail(format!(
-            "native CLI render failed: code={} pngs={pngs} complete={complete} signature={signature} stdout={:?} stderr={:?}",
+            "native CLI render failed: code={} pngs={pngs} complete={complete} signature={signature} manifest_complete={manifest_complete} manifest_valid={manifest_valid} stdout={:?} stderr={:?}",
             output.code, output.stdout, output.stderr
         )));
     }
     Ok(RunOutcome::ok()
         .with_counter("cli_render_frames", 3)
-        .with_counter("cli_png_signature", 1))
+        .with_counter("cli_png_signature", 1)
+        .with_counter("cli_manifest", 1))
 }
 
 /// The batch front door over two real native registrations. Asupersync may
@@ -2117,6 +2137,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Assertion::ExitCode(0),
             counter_eq("cli_render_frames", 3),
             counter_eq("cli_png_signature", 1),
+            counter_eq("cli_manifest", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.cli.render",
@@ -2125,6 +2146,8 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("format", "png_sequence"),
                 FieldPred::str_eq("complete", "true"),
                 FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("manifest_complete", "true"),
+                FieldPred::str_eq("manifest_valid", "true"),
                 FieldPred::str_eq("robot_record", "true"),
             ],
         )],
