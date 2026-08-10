@@ -223,6 +223,13 @@ pub enum Error {
     },
     /// A string field was not valid UTF-8.
     InvalidUtf8,
+    /// The writer's payload (or the sealed document) could not reserve
+    /// storage — allocator refusal surfaces as a typed error, never an
+    /// abort.
+    AllocationFailed {
+        /// Bytes the reservation asked for.
+        needed: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -276,6 +283,9 @@ impl fmt::Display for Error {
                 write!(f, "f64 bits 0x{bits:016x} are not canonical")
             }
             Self::InvalidUtf8 => f.write_str("string field is not valid UTF-8"),
+            Self::AllocationFailed { needed } => {
+                write!(f, "cannot reserve {needed} bytes for the document")
+            }
         }
     }
 }
@@ -327,9 +337,38 @@ impl Writer {
         }
     }
 
+    /// Gate one `n`-byte append: the first sticky error short-circuits
+    /// every later write (fm-a4qr), the total budget is enforced BEFORE the
+    /// payload grows (fm-6h6.1), and growth reserves fallibly
+    /// (fm-6h6.2) — an admitted document can never abort the process on
+    /// allocator refusal, and a refused write leaves the payload exactly as
+    /// it was.
+    fn admit(&mut self, n: usize) -> bool {
+        if self.sticky.is_some() {
+            return false;
+        }
+        let projected = FRAME_LEN
+            .saturating_add(self.payload.len())
+            .saturating_add(n);
+        if projected > self.limits.max_total {
+            self.set_sticky(Error::SizeLimit {
+                limit: self.limits.max_total,
+                needed: projected,
+            });
+            return false;
+        }
+        if self.payload.try_reserve(n).is_err() {
+            self.set_sticky(Error::AllocationFailed { needed: n });
+            return false;
+        }
+        true
+    }
+
     /// Append one byte.
     pub fn put_u8(&mut self, v: u8) -> &mut Self {
-        self.payload.push(v);
+        if self.admit(1) {
+            self.payload.push(v);
+        }
         self
     }
 
@@ -340,31 +379,41 @@ impl Writer {
 
     /// Append a little-endian `u16`.
     pub fn put_u16(&mut self, v: u16) -> &mut Self {
-        self.payload.extend_from_slice(&v.to_le_bytes());
+        if self.admit(2) {
+            self.payload.extend_from_slice(&v.to_le_bytes());
+        }
         self
     }
 
     /// Append a little-endian `u32`.
     pub fn put_u32(&mut self, v: u32) -> &mut Self {
-        self.payload.extend_from_slice(&v.to_le_bytes());
+        if self.admit(4) {
+            self.payload.extend_from_slice(&v.to_le_bytes());
+        }
         self
     }
 
     /// Append a little-endian `u64`.
     pub fn put_u64(&mut self, v: u64) -> &mut Self {
-        self.payload.extend_from_slice(&v.to_le_bytes());
+        if self.admit(8) {
+            self.payload.extend_from_slice(&v.to_le_bytes());
+        }
         self
     }
 
     /// Append a little-endian `i32`.
     pub fn put_i32(&mut self, v: i32) -> &mut Self {
-        self.payload.extend_from_slice(&v.to_le_bytes());
+        if self.admit(4) {
+            self.payload.extend_from_slice(&v.to_le_bytes());
+        }
         self
     }
 
     /// Append a little-endian `i64`.
     pub fn put_i64(&mut self, v: i64) -> &mut Self {
-        self.payload.extend_from_slice(&v.to_le_bytes());
+        if self.admit(8) {
+            self.payload.extend_from_slice(&v.to_le_bytes());
+        }
         self
     }
 
@@ -372,14 +421,18 @@ impl Writer {
     /// stored as little-endian IEEE-754 bits.
     pub fn put_f32(&mut self, v: f32) -> &mut Self {
         let bits = canonicalize_f32(v).to_bits();
-        self.payload.extend_from_slice(&bits.to_le_bytes());
+        if self.admit(4) {
+            self.payload.extend_from_slice(&bits.to_le_bytes());
+        }
         self
     }
 
     /// Append an `f64`, canonicalized and stored as little-endian IEEE-754 bits.
     pub fn put_f64(&mut self, v: f64) -> &mut Self {
         let bits = canonicalize_f64(v).to_bits();
-        self.payload.extend_from_slice(&bits.to_le_bytes());
+        if self.admit(8) {
+            self.payload.extend_from_slice(&bits.to_le_bytes());
+        }
         self
     }
 
@@ -388,6 +441,9 @@ impl Writer {
     /// A field over [`Limits::max_field`] records a sticky error that fails
     /// [`finish`](Self::finish); the offending bytes are not appended.
     pub fn put_bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        if self.sticky.is_some() {
+            return self;
+        }
         if bytes.len() > self.limits.max_field {
             self.set_sticky(Error::SizeLimit {
                 limit: self.limits.max_field,
@@ -395,8 +451,13 @@ impl Writer {
             });
             return self;
         }
-        self.put_u64(bytes.len() as u64);
-        self.payload.extend_from_slice(bytes);
+        // Prefix and bytes are one admission: a refused field appends
+        // neither, so the payload never carries a length without its bytes.
+        if self.admit(8 + bytes.len()) {
+            self.payload
+                .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            self.payload.extend_from_slice(bytes);
+        }
         self
     }
 
@@ -408,7 +469,9 @@ impl Writer {
     /// Append a length-prefixed [`Digest`] (fixed 32 bytes, no length prefix —
     /// digests are constant-width content addresses).
     pub fn put_digest(&mut self, d: &Digest) -> &mut Self {
-        self.payload.extend_from_slice(d.as_bytes());
+        if self.admit(CHECKSUM_LEN) {
+            self.payload.extend_from_slice(d.as_bytes());
+        }
         self
     }
 
@@ -437,7 +500,11 @@ impl Writer {
             });
         }
 
-        let mut out = Vec::with_capacity(total);
+        let mut out = Vec::new();
+        out.try_reserve_exact(total.saturating_add(CHECKSUM_LEN))
+            .map_err(|_| Error::AllocationFailed {
+                needed: total.saturating_add(CHECKSUM_LEN),
+            })?;
         out.extend_from_slice(&self.schema.magic);
         out.extend_from_slice(&self.schema.id.to_le_bytes());
         out.extend_from_slice(&self.schema.major.to_le_bytes());
@@ -1064,6 +1131,85 @@ mod tests {
                 *b = (state >> 33) as u8;
             }
             let _ = fuzz_probe(&buf); // must not panic
+        }
+    }
+
+    #[test]
+    fn total_budget_is_enforced_before_growth_and_sticks() {
+        // FRAME_LEN + 8 admits exactly one u64 and nothing more.
+        let limits = Limits {
+            max_total: FRAME_LEN + 8,
+            ..Limits::DEFAULT
+        };
+        let schema = Schema::new(*b"FMNT", 1, 1, 0);
+        let mut w = Writer::with_limits(schema, limits);
+        w.put_u64(7);
+        w.put_u8(1); // over budget: refused BEFORE growth
+        w.put_u64(9); // sticky: still the first error
+        match w.finish() {
+            Err(Error::SizeLimit { limit, needed }) => {
+                assert_eq!(limit, FRAME_LEN + 8);
+                // `needed` is the projection at the refused one-byte put,
+                // not the total of everything attempted afterwards —
+                // proof the budget fired at the offending write and the
+                // sticky error froze there.
+                assert_eq!(needed, FRAME_LEN + 8 + 1);
+            }
+            other => panic!("expected the sticky budget refusal, got {other:?}"),
+        }
+
+        // Within budget, the same writer shape seals fine.
+        let mut ok = Writer::with_limits(schema, limits);
+        ok.put_u64(7);
+        ok.finish().expect("exactly at the budget");
+    }
+
+    #[test]
+    fn refused_field_appends_neither_prefix_nor_bytes() {
+        // Budget admits the 8-byte prefix but not the field bytes: the
+        // whole field must be refused atomically.
+        let limits = Limits {
+            max_total: FRAME_LEN + 10,
+            ..Limits::DEFAULT
+        };
+        let schema = Schema::new(*b"FMNT", 2, 1, 0);
+        let mut w = Writer::with_limits(schema, limits);
+        w.put_u8(0xAA);
+        w.put_bytes(b"way too long for the remaining budget");
+        assert!(matches!(w.finish(), Err(Error::SizeLimit { .. })));
+
+        // A writer that never attempted the field produces a valid
+        // document whose payload is exactly the admitted prefix byte —
+        // nothing partial ever landed.
+        let mut clean = Writer::with_limits(schema, limits);
+        clean.put_u8(0xAA);
+        let bytes = clean.finish().expect("one byte within budget");
+        let mut r = Reader::open(bytes.as_slice(), schema, limits, UnknownPolicy::Strict)
+            .expect("valid document");
+        assert_eq!(r.get_u8().expect("the admitted byte"), 0xAA);
+        r.finish().expect("nothing partial after it");
+    }
+
+    #[test]
+    fn scalar_writes_after_an_oversized_field_do_not_grow_or_mask() {
+        let limits = Limits {
+            max_field: 4,
+            ..Limits::DEFAULT
+        };
+        let schema = Schema::new(*b"FMNT", 3, 1, 0);
+        let mut w = Writer::with_limits(schema, limits);
+        w.put_bytes(b"five!"); // over max_field: sticky
+        w.put_u64(1);
+        w.put_f64(2.0);
+        w.put_digest(&crate::sha256(b"x"));
+        match w.finish() {
+            Err(Error::SizeLimit { limit, needed }) => {
+                // Still the FIELD error — later writes neither grew the
+                // payload nor replaced the first refusal.
+                assert_eq!(limit, 4);
+                assert_eq!(needed, 5);
+            }
+            other => panic!("expected the sticky field refusal, got {other:?}"),
         }
     }
 }
