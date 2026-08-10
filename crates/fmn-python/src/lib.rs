@@ -1216,22 +1216,132 @@ impl BridgeMobject {
         with_uniforms(slf, |uniforms| set_uniform(uniforms, name, value))
     }
 
-    /// Positional binding: manim's `Mobject.set_height` semantics, routed
-    /// to the one Stage implementation (`Stage::set_height` →
-    /// `rescale_to_fit`) in both proxy states. Uniform scale about the
-    /// family bbox center unless `stretch`, which scales the y-axis only.
-    #[pyo3(signature = (height, stretch = false))]
-    fn _set_height(slf: &Bound<'_, Self>, height: f64, stretch: bool) -> PyResult<()> {
-        crossing::record(CrossingClass::FieldWrite);
+    // ------------------------------------------------ positional primitives
+    //
+    // fm-d3gt: the engine seam under the bootstrap's Reference-signature
+    // positional surface. Each primitive routes to the ONE Stage
+    // implementation via `with_stage`; pivots arrive pre-resolved from the
+    // Python layer (which reads them off the same Stage bounding box), so
+    // family distribution in the detached state stays exact.
+
+    /// Whether this proxy is bound to a Scene's stage. When false its Stage
+    /// is the private nursery, whose family is exactly one root — the
+    /// bootstrap then distributes transforms over the Python family list.
+    fn _is_bound(slf: &Bound<'_, Self>) -> bool {
+        let cell = slf.borrow();
+        cell.engine.is_some() && cell.mob.is_some()
+    }
+
+    /// `(min, mid, max)` rows of the Stage-visible family bounding box.
+    fn _get_bbox(slf: &Bound<'_, Self>) -> PyResult<([f64; 3], [f64; 3], [f64; 3])> {
+        crossing::record(CrossingClass::Other);
         with_stage(slf, |stage, mob| {
-            stage.set_height(mob, height, stretch);
+            let bbox = stage.get_bounding_box(mob);
+            (bbox.min, bbox.mid, bbox.max)
         })
     }
 
-    /// Family bounding-box height via `Stage::get_height`, in both states.
-    fn _get_height(slf: &Bound<'_, Self>) -> PyResult<f64> {
+    /// Whether this entry itself has point records (Reference `has_points`,
+    /// not recursing into the family).
+    fn _has_points(slf: &Bound<'_, Self>) -> PyResult<bool> {
         crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| stage.get_height(mob))
+        with_stage(slf, |stage, mob| {
+            stage
+                .get_points(mob)
+                .is_some_and(|points| !points.is_empty())
+        })
+    }
+
+    /// `Stage::shift`: translate the Stage-visible family.
+    fn _shift(slf: &Bound<'_, Self>, vector: [f64; 3]) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.shift(mob, vector);
+        })
+    }
+
+    /// `Stage::scale_about` with an explicit pre-resolved pivot.
+    fn _scale_about(slf: &Bound<'_, Self>, factor: f64, about_point: [f64; 3]) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.scale_about(mob, factor, Some(about_point), None);
+        })
+    }
+
+    /// `Stage::stretch_about` with an explicit pre-resolved pivot.
+    fn _stretch_about(
+        slf: &Bound<'_, Self>,
+        factor: f64,
+        dim: usize,
+        about_point: [f64; 3],
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        if dim > 2 {
+            return Err(PyValueError::new_err("stretch dim must be 0, 1, or 2"));
+        }
+        with_stage(slf, |stage, mob| {
+            stage.stretch_about(mob, factor, dim, Some(about_point), None);
+        })
+    }
+
+    /// `Stage::rotate` with an explicit pre-resolved pivot.
+    fn _rotate_about(
+        slf: &Bound<'_, Self>,
+        angle: f64,
+        axis: [f64; 3],
+        about_point: [f64; 3],
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.rotate(mob, angle, axis, Some(about_point), None);
+        })
+    }
+
+    /// `Stage::to_edge` (`align_on_border`): the single-target engine path
+    /// used when the proxy is bound; the bootstrap's detached branch
+    /// decomposes over the frame radii instead.
+    fn _to_edge(slf: &Bound<'_, Self>, direction: [f64; 3], buff: f64) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.to_edge(mob, direction, buff);
+        })
+    }
+
+    /// The frame half-extents `(FRAME_X_RADIUS, FRAME_Y_RADIUS)` the border
+    /// alignment surface is defined against.
+    #[staticmethod]
+    fn _frame_radii() -> (f64, f64) {
+        (
+            fmn_core::constants::FRAME_X_RADIUS,
+            fmn_core::constants::FRAME_Y_RADIUS,
+        )
+    }
+
+    /// Reference `get_start`: this entry's own first world-space point.
+    fn _get_start(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.get_start(mob))?
+            .ok_or_else(|| PyValueError::new_err("Cannot get points of Mobject with no points"))
+    }
+
+    /// Reference `get_end`: this entry's own last world-space point.
+    fn _get_end(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.get_end(mob))?
+            .ok_or_else(|| PyValueError::new_err("Cannot get points of Mobject with no points"))
+    }
+
+    /// `Stage::put_start_and_end_on` over the Stage-visible family.
+    fn _put_start_and_end_on(
+        slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.put_start_and_end_on(mob, start, end)
+        })?
+        .map_err(stage_error)
     }
 
     fn _replace_submobjects(

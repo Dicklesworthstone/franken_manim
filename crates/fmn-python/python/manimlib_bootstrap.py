@@ -18,6 +18,30 @@ import sys as _sys
 import types as _types
 import weakref as _weakref
 
+import numpy as _np
+
+# Reference default values used by the positional surface's signatures.
+# These are the same objects the schema constant pass later publishes under
+# their public names (RIGHT, ORIGIN, ...); they exist here privately because
+# class-body default expressions evaluate before that pass runs.
+_ORIGIN = _np.array([0.0, 0.0, 0.0])
+_RIGHT = _np.array([1.0, 0.0, 0.0])
+_LEFT = _np.array([-1.0, 0.0, 0.0])
+_UP = _np.array([0.0, 1.0, 0.0])
+_DOWN = _np.array([0.0, -1.0, 0.0])
+_OUT = _np.array([0.0, 0.0, 1.0])
+_IN = _np.array([0.0, 0.0, -1.0])
+_DL = _LEFT + _DOWN
+_ONES = _np.array([1.0, 1.0, 1.0])
+# manimlib/default_config.yml `sizes`: the Reference's default buffers.
+_DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
+_DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
+
+
+def _vec3(value):
+    """A sequence (list/tuple/numpy array) as the engine's (x, y, z) floats."""
+    return (float(value[0]), float(value[1]), float(value[2]))
+
 
 class _LiveSubmobjects(list):
     """A list whose accepted mutations are mirrored into Marionette."""
@@ -296,16 +320,397 @@ class Mobject(_BridgeMobject):
         self.submobjects.extend(mobjects)
         return self
 
-    # Positional surface (fm-d3gt): defined here, before the schema
-    # placeholder pass, so the parity placeholders skip these names. Both
-    # proxy states route through one engine Stage code path (the scene's
+    # ----------------------------------------------------------------------
+    # Positional surface (fm-d3gt): Reference signatures and bodies over the
+    # engine's Stage primitives. Defined here, before the schema placeholder
+    # pass, so the parity placeholders skip these names. Every transform and
+    # bounding-box read routes through the ONE Stage code path (the scene's
     # stage when bound, the proxy's private nursery Stage when detached).
-    def set_height(self, height, stretch=False):
-        self._set_height(float(height), bool(stretch))
+
+    def _each_stage_target(self):
+        # One engine call per Stage: a bound proxy's scene stage recurses
+        # the family natively; a detached proxy's nursery holds exactly one
+        # root, so the transform distributes over the Python family list.
+        if self._is_bound():
+            return [self]
+        return _family_preorder(self)
+
+    def _bbox_rows(self):
+        # The family bounding box as the Reference's [min, mid, max] rows.
+        if self._is_bound():
+            low, mid, high = self._get_bbox()
+            return _np.array([low, mid, high])
+        lows = []
+        highs = []
+        for member in _family_preorder(self):
+            if not member._has_points():
+                continue
+            low, _mid, high = member._get_bbox()
+            lows.append(low)
+            highs.append(high)
+        if not lows:
+            return _np.zeros((3, 3))
+        low = _np.min(_np.array(lows), axis=0)
+        high = _np.max(_np.array(highs), axis=0)
+        return _np.array([low, (low + high) / 2.0, high])
+
+    def _resolve_pivot(self, about_point, about_edge):
+        # The Reference's `apply_points_function` pivot rule. Both None
+        # applies the (linear) map in place, i.e. about the coordinate
+        # origin.
+        if about_point is None and about_edge is not None:
+            about_point = self.get_bounding_box_point(about_edge)
+        if about_point is None:
+            return (0.0, 0.0, 0.0)
+        return _vec3(about_point)
+
+    def shift(self, vector):
+        vector = _vec3(vector)
+        for target in self._each_stage_target():
+            target._shift(vector)
         return self
 
+    def scale(
+        self,
+        scale_factor,
+        min_scale_factor=1e-8,
+        about_point=None,
+        about_edge=_ORIGIN,
+    ):
+        pivot = self._resolve_pivot(about_point, about_edge)
+        factor = _np.array(scale_factor, dtype=float)
+        if factor.ndim == 0:
+            value = max(float(factor), float(min_scale_factor))
+            for target in self._each_stage_target():
+                target._scale_about(value, pivot)
+        else:
+            values = factor.clip(min=float(min_scale_factor))
+            for target in self._each_stage_target():
+                for dim, value in enumerate(values[:3]):
+                    target._stretch_about(float(value), dim, pivot)
+        return self
+
+    def stretch(self, factor, dim, **kwargs):
+        pivot = self._resolve_pivot(
+            kwargs.pop("about_point", None), kwargs.pop("about_edge", _ORIGIN)
+        )
+        if kwargs:
+            raise TypeError(
+                "stretch() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        for target in self._each_stage_target():
+            target._stretch_about(float(factor), int(dim), pivot)
+        return self
+
+    def stretch_about_point(self, factor, dim, point):
+        return self.stretch(factor, dim, about_point=point)
+
+    def stretch_in_place(self, factor, dim):
+        return self.stretch(factor, dim)
+
+    def rotate(self, angle, axis=_OUT, about_point=None, **kwargs):
+        pivot = self._resolve_pivot(about_point, kwargs.pop("about_edge", _ORIGIN))
+        if kwargs:
+            raise TypeError(
+                "rotate() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        axis = _vec3(axis)
+        for target in self._each_stage_target():
+            target._rotate_about(float(angle), axis, pivot)
+        return self
+
+    def rotate_about_origin(self, angle, axis=_OUT):
+        return self.rotate(angle, axis, about_point=_ORIGIN)
+
+    def flip(self, axis=_UP, **kwargs):
+        return self.rotate(_math.tau / 2, axis, **kwargs)
+
+    def center(self):
+        self.shift(-self.get_center())
+        return self
+
+    def align_on_border(self, direction, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
+        if self._is_bound():
+            self._to_edge(_vec3(direction), float(buff))
+            return self
+        direction = _np.array(_vec3(direction))
+        x_radius, y_radius = type(self)._frame_radii()
+        target_point = _np.sign(direction) * _np.array([x_radius, y_radius, 0.0])
+        point_to_align = self.get_bounding_box_point(direction)
+        shift_val = target_point - point_to_align - buff * direction
+        shift_val = shift_val * abs(_np.sign(direction))
+        self.shift(shift_val)
+        return self
+
+    def to_corner(self, corner=_DL, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
+        return self.align_on_border(corner, buff)
+
+    def to_edge(self, edge=_LEFT, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
+        return self.align_on_border(edge, buff)
+
+    def next_to(
+        self,
+        mobject_or_point,
+        direction=_RIGHT,
+        buff=_DEFAULT_MOBJECT_TO_MOBJECT_BUFF,
+        aligned_edge=_ORIGIN,
+        submobject_to_align=None,
+        index_of_submobject_to_align=None,
+        coor_mask=_ONES,
+    ):
+        direction = _np.array(_vec3(direction))
+        aligned_edge = _np.array(_vec3(aligned_edge))
+        if isinstance(mobject_or_point, _BridgeMobject):
+            mob = mobject_or_point
+            if index_of_submobject_to_align is not None:
+                target_aligner = mob[index_of_submobject_to_align]
+            else:
+                target_aligner = mob
+            target_point = target_aligner.get_bounding_box_point(
+                aligned_edge + direction
+            )
+        else:
+            target_point = _np.array(_vec3(mobject_or_point))
+        if submobject_to_align is not None:
+            aligner = submobject_to_align
+        elif index_of_submobject_to_align is not None:
+            aligner = self[index_of_submobject_to_align]
+        else:
+            aligner = self
+        point_to_align = aligner.get_bounding_box_point(aligned_edge - direction)
+        self.shift(
+            (target_point - point_to_align + buff * direction)
+            * _np.array(_vec3(coor_mask))
+        )
+        return self
+
+    def move_to(self, point_or_mobject, aligned_edge=_ORIGIN, coor_mask=_ONES):
+        aligned_edge = _np.array(_vec3(aligned_edge))
+        if isinstance(point_or_mobject, _BridgeMobject):
+            target = point_or_mobject.get_bounding_box_point(aligned_edge)
+        else:
+            target = _np.array(_vec3(point_or_mobject))
+        point_to_align = self.get_bounding_box_point(aligned_edge)
+        self.shift((target - point_to_align) * _np.array(_vec3(coor_mask)))
+        return self
+
+    def align_to(self, mobject_or_point, direction=_ORIGIN):
+        if isinstance(mobject_or_point, _BridgeMobject):
+            point = mobject_or_point.get_bounding_box_point(direction)
+        else:
+            point = _np.array(_vec3(mobject_or_point))
+        direction = _np.array(_vec3(direction))
+        for dim in range(3):
+            if direction[dim] != 0:
+                self.set_coord(point[dim], dim, direction)
+        return self
+
+    def set_coord(self, value, dim, direction=_ORIGIN):
+        curr = self.get_coord(dim, direction)
+        shift_vect = _np.zeros(3)
+        shift_vect[dim] = value - curr
+        self.shift(shift_vect)
+        return self
+
+    def set_x(self, x, direction=_ORIGIN):
+        return self.set_coord(x, 0, direction)
+
+    def set_y(self, y, direction=_ORIGIN):
+        return self.set_coord(y, 1, direction)
+
+    def set_z(self, z, direction=_ORIGIN):
+        return self.set_coord(z, 2, direction)
+
+    def rescale_to_fit(self, length, dim, stretch=False, **kwargs):
+        old_length = self.length_over_dim(dim)
+        if old_length == 0:
+            return self
+        if stretch:
+            self.stretch(length / old_length, dim, **kwargs)
+        else:
+            self.scale(length / old_length, **kwargs)
+        return self
+
+    def stretch_to_fit_width(self, width, **kwargs):
+        return self.rescale_to_fit(width, 0, stretch=True, **kwargs)
+
+    def stretch_to_fit_height(self, height, **kwargs):
+        return self.rescale_to_fit(height, 1, stretch=True, **kwargs)
+
+    def stretch_to_fit_depth(self, depth, **kwargs):
+        return self.rescale_to_fit(depth, 2, stretch=True, **kwargs)
+
+    def set_width(self, width, stretch=False, **kwargs):
+        return self.rescale_to_fit(width, 0, stretch=stretch, **kwargs)
+
+    def set_height(self, height, stretch=False, **kwargs):
+        return self.rescale_to_fit(height, 1, stretch=stretch, **kwargs)
+
+    def set_depth(self, depth, stretch=False, **kwargs):
+        return self.rescale_to_fit(depth, 2, stretch=stretch, **kwargs)
+
+    def match_dim_size(self, mobject, dim, **kwargs):
+        return self.rescale_to_fit(mobject.length_over_dim(dim), dim, **kwargs)
+
+    def match_width(self, mobject, **kwargs):
+        return self.match_dim_size(mobject, 0, **kwargs)
+
+    def match_height(self, mobject, **kwargs):
+        return self.match_dim_size(mobject, 1, **kwargs)
+
+    def match_depth(self, mobject, **kwargs):
+        return self.match_dim_size(mobject, 2, **kwargs)
+
+    def match_coord(self, mobject_or_point, dim, direction=_ORIGIN):
+        if isinstance(mobject_or_point, _BridgeMobject):
+            coord = mobject_or_point.get_coord(dim, direction)
+        else:
+            coord = mobject_or_point[dim]
+        return self.set_coord(coord, dim=dim, direction=direction)
+
+    def match_x(self, mobject_or_point, direction=_ORIGIN):
+        return self.match_coord(mobject_or_point, 0, direction)
+
+    def match_y(self, mobject_or_point, direction=_ORIGIN):
+        return self.match_coord(mobject_or_point, 1, direction)
+
+    def match_z(self, mobject_or_point, direction=_ORIGIN):
+        return self.match_coord(mobject_or_point, 2, direction)
+
+    def put_start_and_end_on(self, start, end):
+        self._put_start_and_end_on(_vec3(start), _vec3(end))
+        return self
+
+    def arrange(self, direction=_RIGHT, center=True, **kwargs):
+        for m1, m2 in zip(self.submobjects, self.submobjects[1:]):
+            m2.next_to(m1, direction, **kwargs)
+        if center:
+            self.center()
+        return self
+
+    def arrange_in_grid(
+        self,
+        n_rows=None,
+        n_cols=None,
+        buff=None,
+        h_buff=None,
+        v_buff=None,
+        buff_ratio=None,
+        h_buff_ratio=0.5,
+        v_buff_ratio=0.5,
+        aligned_edge=_ORIGIN,
+        fill_rows_first=True,
+    ):
+        submobs = self.submobjects
+        n_submobs = len(submobs)
+        if n_rows is None:
+            n_rows = (
+                int(_np.sqrt(n_submobs)) if n_cols is None else n_submobs // n_cols
+            )
+        if n_cols is None:
+            n_cols = n_submobs // n_rows
+
+        if buff is not None:
+            h_buff = buff
+            v_buff = buff
+        else:
+            if buff_ratio is not None:
+                v_buff_ratio = buff_ratio
+                h_buff_ratio = buff_ratio
+            if h_buff is None:
+                h_buff = h_buff_ratio * self[0].get_width()
+            if v_buff is None:
+                v_buff = v_buff_ratio * self[0].get_height()
+
+        x_unit = h_buff + max(sm.get_width() for sm in submobs)
+        y_unit = v_buff + max(sm.get_height() for sm in submobs)
+
+        for index, sm in enumerate(submobs):
+            if fill_rows_first:
+                x, y = index % n_cols, index // n_cols
+            else:
+                x, y = index // n_rows, index % n_rows
+            sm.move_to(_ORIGIN, aligned_edge)
+            sm.shift(x * x_unit * _RIGHT + y * y_unit * _DOWN)
+        self.center()
+        return self
+
+    # Positional getters over the same Stage bounding box.
+
+    def get_bounding_box(self):
+        return self._bbox_rows()
+
+    def get_bounding_box_point(self, direction):
+        bb = self._bbox_rows()
+        direction = _np.array(_vec3(direction))
+        indices = (_np.sign(direction) + 1).astype(int)
+        return _np.array([bb[indices[i]][i] for i in range(3)])
+
+    def get_edge_center(self, direction):
+        return self.get_bounding_box_point(direction)
+
+    def get_corner(self, direction):
+        return self.get_bounding_box_point(direction)
+
+    def get_center(self):
+        return self._bbox_rows()[1]
+
+    def get_top(self):
+        return self.get_edge_center(_UP)
+
+    def get_bottom(self):
+        return self.get_edge_center(_DOWN)
+
+    def get_right(self):
+        return self.get_edge_center(_RIGHT)
+
+    def get_left(self):
+        return self.get_edge_center(_LEFT)
+
+    def get_zenith(self):
+        return self.get_edge_center(_OUT)
+
+    def get_nadir(self):
+        return self.get_edge_center(_IN)
+
+    def length_over_dim(self, dim):
+        bb = self._bbox_rows()
+        return abs((bb[2] - bb[0])[dim])
+
+    def get_width(self):
+        return self.length_over_dim(0)
+
     def get_height(self):
-        return self._get_height()
+        return self.length_over_dim(1)
+
+    def get_depth(self):
+        return self.length_over_dim(2)
+
+    def get_coord(self, dim, direction=_ORIGIN):
+        return float(self.get_bounding_box_point(direction)[dim])
+
+    def get_x(self, direction=_ORIGIN):
+        return self.get_coord(0, direction)
+
+    def get_y(self, direction=_ORIGIN):
+        return self.get_coord(1, direction)
+
+    def get_z(self, direction=_ORIGIN):
+        return self.get_coord(2, direction)
+
+    def get_start(self):
+        return _np.array(self._get_start())
+
+    def get_end(self):
+        return _np.array(self._get_end())
+
+    def get_start_and_end(self):
+        return (self.get_start(), self.get_end())
+
+    def has_points(self):
+        return self._has_points()
 
     # The Reference's container protocol (manimlib/mobject/mobject.py):
     # a mobject iterates, indexes, and measures as its submobject list;
@@ -699,7 +1104,8 @@ def _resolve_symbolic_constants(rows):
     }
     pending = {}
     resolved = {}
-    for module_name, qualified, kind, _arity, detail, *_rest in rows:
+    # Schema rows are (module, name, kind, origin, exported, detail).
+    for module_name, qualified, kind, _origin, _exported, detail in rows:
         if kind != "constant" or "." in qualified:
             continue
         value = _constant(detail)
