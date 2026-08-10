@@ -577,10 +577,17 @@ pub fn play_segment_with_boundary(
     let prologue = play_prologue(stage, clock, animations, skip)?;
     let segment = prologue.segment;
     let report = prologue.report(SegmentKind::Play);
-    if skip {
+    // Once the prologue succeeds, the finish/cleanup phase runs EXACTLY once
+    // in both modes, error or not (fm-tqy4): the segment body's earliest
+    // driver/deferred error is captured — never `?`-propagated past
+    // `finish_animations` — so a failing composition is still unmarked from
+    // animating, removers apply, and the final zero-dt updater pass runs
+    // before the same error surfaces that skip mode reports.
+    let body: Result<(), AnimError> = if skip {
         // State evolution is frame-for-frame identical to playback; only the
         // expensive capture/emission boundary is suppressed.
         let dt = clock.dt().to_f64();
+        let mut outcome = Ok(());
         for sample in segment.samples() {
             let plan = StepPlan {
                 sample,
@@ -588,8 +595,12 @@ pub fn play_segment_with_boundary(
                 advance: 1,
                 capture: false,
             };
-            frame_step(stage, clock, rng, animations, &plan, boundary, emit)?;
+            if let Err(err) = frame_step(stage, clock, rng, animations, &plan, boundary, emit) {
+                outcome = Err(err);
+                break;
+            }
         }
+        outcome
     } else {
         let mut open = OpenSegment {
             report: report.clone(),
@@ -605,9 +616,10 @@ pub fn play_segment_with_boundary(
             segment.n_frames(),
             boundary,
             emit,
-        )?;
-    }
+        )
+    };
     finish_animations(stage, animations);
+    body?;
     // A composition operator that begins members just in time has no error
     // channel inside `interpolate` (§9.4); the segment surfaces what it
     // recorded, by name, rather than leaving a frozen composition unexplained.

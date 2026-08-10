@@ -793,6 +793,56 @@ fn a_just_in_time_begin_failure_surfaces_from_the_segment() {
 }
 
 #[test]
+fn deferred_begin_failure_finishes_the_segment_in_both_modes() {
+    // fm-tqy4: the rendered path used to `?` the deferred error past
+    // finish_animations while skip mode cleaned up first. Both modes must
+    // now report the same error from the same clock position with the
+    // composition fully unmarked from animating.
+    let run = |skip: bool| {
+        let mut stage = Stage::new();
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let a = square(&mut stage);
+        let b = square(&mut stage);
+        let succession = Succession::new(
+            &mut stage,
+            vec![
+                Probe::boxed(a, "a", 1.0, &log),
+                Box::new(FailingProbe {
+                    state: AnimState::new(b, AnimConfig::default()),
+                }),
+            ],
+        )
+        .expect("succession builds");
+        let mut clock = RationalFrameClock::new(30).expect("clock");
+        let rng = RngRoot::from_seed(3);
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+        let err = play_segment(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            skip,
+            &mut |_packet| {},
+        )
+        .expect_err("the second member's begin refuses");
+        (
+            err,
+            clock.now().frames(),
+            stage.is_animating(a),
+            stage.is_animating(b),
+        )
+    };
+    let rendered = run(false);
+    let skipped = run(true);
+    assert_eq!(rendered, skipped, "rendered and skipped lifecycles agree");
+    assert_eq!(rendered.0, AnimError::EmptyMobject);
+    assert!(
+        !rendered.2 && !rendered.3,
+        "finish_animations unmarked the family in the error path"
+    );
+}
+
+#[test]
 fn a_hollow_group_time_span_is_refused_at_begin() {
     let mut stage = Stage::new();
     let log: Log = Rc::new(RefCell::new(Vec::new()));
