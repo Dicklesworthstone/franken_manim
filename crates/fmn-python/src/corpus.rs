@@ -64,6 +64,44 @@ enum Outcome {
     Refused(String),
 }
 
+/// Phase 2: instantiate the locked scene class and drive the manim
+/// lifecycle (`setup -> construct -> tear_down`). The frontier report —
+/// which named symbol each scene first misses — is fm-d3gt's structural
+/// worklist; success means the scene is ready for structural assertions.
+fn run_outcome(py: Python<'_>, module_path: &str, scene: &str) -> Outcome {
+    let module_name = module_path.trim_end_matches(".py").replace('/', ".");
+    let importlib = py.import("importlib").expect("importlib");
+    let module = importlib
+        .call_method1("import_module", (module_name.as_str(),))
+        .expect("phase 2 runs only after a clean import");
+    let class = module.getattr(scene).expect("locked scene class present");
+    let outcome = class
+        .call0()
+        .and_then(|instance| instance.call_method0("run"));
+    match outcome {
+        Ok(_) => Outcome::Imported,
+        Err(error) => Outcome::Refused(render_refusal(py, &error)),
+    }
+}
+
+fn render_refusal(py: Python<'_>, error: &PyErr) -> String {
+    let type_name = error.get_type(py).name().map_or_else(
+        |_| "UnknownExceptionType".to_owned(),
+        |name| name.to_string(),
+    );
+    let deepest = error
+        .traceback(py)
+        .and_then(|tb| tb.format().ok())
+        .and_then(|text| {
+            text.lines()
+                .rev()
+                .find(|line| line.trim_start().starts_with("File "))
+                .map(|line| line.trim().to_owned())
+        })
+        .unwrap_or_default();
+    format!("{type_name}: {} [{deepest}]", error.value(py))
+}
+
 fn import_outcome(py: Python<'_>, module_path: &str, scene: &str) -> Outcome {
     let module_name = module_path.trim_end_matches(".py").replace('/', ".");
     let importlib = py.import("importlib").expect("importlib");
@@ -77,25 +115,7 @@ fn import_outcome(py: Python<'_>, module_path: &str, scene: &str) -> Outcome {
                 ))
             }
         }
-        Err(error) => {
-            let type_name = error.get_type(py).name().map_or_else(
-                |_| "UnknownExceptionType".to_owned(),
-                |name| name.to_string(),
-            );
-            // The deepest in-corpus frame names where the bridge and the
-            // pinned tree disagree — the worklist's actionable half.
-            let deepest = error
-                .traceback(py)
-                .and_then(|tb| tb.format().ok())
-                .and_then(|text| {
-                    text.lines()
-                        .rev()
-                        .find(|line| line.trim_start().starts_with("File "))
-                        .map(|line| line.trim().to_owned())
-                })
-                .unwrap_or_default();
-            Outcome::Refused(format!("{type_name}: {} [{deepest}]", error.value(py)))
-        }
+        Err(error) => Outcome::Refused(render_refusal(py, &error)),
     }
 }
 
@@ -157,6 +177,27 @@ mod tests {
             // stays green: an allowlisted scene that stops importing is
             // a bridge regression, not a worklist entry.
             assert_eq!(refused, 0, "allowlisted seed modules must import");
+
+            // Phase 2, the structural frontier: instantiate each scene
+            // and drive the manim lifecycle. Refusals here are the
+            // parity worklist (reported, precise, unasserted — the
+            // frontier moves as the mobject/animation surface lands);
+            // successes are scenes ready for structural assertions.
+            for (scene, module_path) in locked_seed() {
+                match run_outcome(py, &module_path, &scene) {
+                    Outcome::Imported => {
+                        println!("corpus-run    ok       {scene} ({module_path})");
+                    }
+                    Outcome::Refused(reason) => {
+                        println!("corpus-run    frontier {scene} ({module_path}): {reason}");
+                        assert!(
+                            !reason.trim().is_empty()
+                                && !reason.starts_with("UnknownExceptionType"),
+                            "frontier must be a named error: {reason}"
+                        );
+                    }
+                }
+            }
         });
     }
 
