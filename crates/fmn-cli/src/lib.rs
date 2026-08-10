@@ -2782,7 +2782,10 @@ impl NativeStudioWorker {
         let state_hash = fmn_studio::protocol_digest(&state);
         let checkpoint = self
             .last_checkpoint_frame
-            .is_none_or(|last| last.abs_diff(frame) as u64 >= self.checkpoint_frames)
+            .is_none_or(|last| {
+                u64::try_from(last.abs_diff(frame))
+                    .is_ok_and(|distance| distance >= self.checkpoint_frames)
+            })
             .then_some(state);
         let entry = Entry {
             command,
@@ -2835,11 +2838,8 @@ impl NativeStudioWorker {
             .try_reserve_exact(through.saturating_sub(from))
             .map_err(|error| studio_service_error(error.to_string()))?;
         for (index, entry) in journal.entries()[from..through].iter().enumerate() {
-            if entry
-                .reads
-                .iter()
-                .any(|read| self.source_read.as_ref() != Some(read))
-            {
+            // ubs:ignore - source records are public replay identities, not secrets.
+            if entry.reads.as_slice() != self.source_read.as_slice() {
                 return Err(fmn_studio::ServiceError::new(
                     fmn_studio::WorkerErrorCode::ReplayFailed,
                     "the replay journal references a different compiled source",
@@ -2897,6 +2897,7 @@ impl NativeStudioWorker {
         let play_count = u64::try_from(journal_position)
             .map_err(|_| studio_service_error("checkpoint journal position exceeds u64"))?;
         let expected = fmn_studio::protocol_digest(&self.state_bytes(frame, play_count)?);
+        // ubs:ignore - the state digest is a public replay-integrity identifier.
         if expected != checkpoint.state_hash {
             return Err(fmn_studio::ServiceError::new(
                 fmn_studio::WorkerErrorCode::CheckpointRejected,
