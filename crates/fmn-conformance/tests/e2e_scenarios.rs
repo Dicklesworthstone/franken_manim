@@ -984,7 +984,8 @@ fn collect_virtual_objects(
     if let Ok(children) = fs.list_dir(dir) {
         for child in children {
             if fs.read(&child).is_ok() {
-                if child.to_string_lossy().contains("/objects/") {
+                // Component-wise: Windows paths separate with backslashes.
+                if child.components().any(|c| c.as_os_str() == "objects") {
                     out.push(child);
                 }
             } else {
