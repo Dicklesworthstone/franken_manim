@@ -304,6 +304,43 @@ def _install_live_state(mobject):
     mobject.updaters = []
 
 
+class _UpdaterBuilder:
+    """Reference mobject.py:2339 verbatim: `mob.always.method(*args)`
+    registers a per-frame `mob.method(*args)` updater."""
+
+    def __init__(self, mobject):
+        self.mobject = mobject
+
+    def __getattr__(self, method_name):
+        def add_updater(*method_args, **method_kwargs):
+            self.mobject.add_updater(
+                lambda m: getattr(m, method_name)(*method_args, **method_kwargs)
+            )
+            return self
+
+        return add_updater
+
+
+class _FunctionalUpdaterBuilder:
+    """Reference mobject.py:2352 verbatim: arguments are thunks evaluated
+    on every frame."""
+
+    def __init__(self, mobject):
+        self.mobject = mobject
+
+    def __getattr__(self, method_name):
+        def add_updater(*method_args, **method_kwargs):
+            self.mobject.add_updater(
+                lambda m: getattr(m, method_name)(
+                    *(arg() for arg in method_args),
+                    **{key: value() for key, value in method_kwargs.items()},
+                )
+            )
+            return self
+
+        return add_updater
+
+
 def _family_preorder(root):
     result = []
     seen = set()
@@ -503,11 +540,21 @@ class Mobject(_BridgeMobject):
             value = max(float(factor), float(min_scale_factor))
             for target in self._each_stage_target():
                 target._scale_about(value, pivot)
+            side_effect_factor = value
         else:
             values = factor.clip(min=float(min_scale_factor))
             for target in self._each_stage_target():
                 for dim, value in enumerate(values[:3]):
                     target._stretch_about(float(value), dim, pivot)
+            side_effect_factor = values
+        # The Reference's per-member hook (DecimalNumber tracks font_size
+        # through it, mobject.py:955).
+        for mob in _family_preorder(self):
+            mob._handle_scale_side_effects(side_effect_factor)
+        return self
+
+    def _handle_scale_side_effects(self, scale_factor):
+        del scale_factor
         return self
 
     def stretch(self, factor, dim, **kwargs):
@@ -1072,6 +1119,18 @@ class Mobject(_BridgeMobject):
         for target in targets:
             target.updaters.clear()
         return self
+
+    @property
+    def always(self):
+        """Methods called with mobject.always.method(*args, **kwargs) run
+        mobject.method(*args, **kwargs) on every frame."""
+        return _UpdaterBuilder(self)
+
+    @property
+    def f_always(self):
+        """Like `always`, but the arguments are functions returning the
+        per-frame values."""
+        return _FunctionalUpdaterBuilder(self)
 
     def _dispatch_updater(self, updater, dt):
         try:
@@ -2450,27 +2509,39 @@ class DecimalNumber(VMobject):
 
     def set_value(self, number):
         # Reference set_value (numbers.py:207): style from the first
-        # pointful member, rebuild the glyphs, re-seat the fixed edge.
-        if self._is_bound():
-            raise NotImplementedError(
-                "DecimalNumber.set_value on a scene-bound number awaits the "
-                "live-state glyph-recycling core (fm-p107)"
-            )
+        # pointful member, fresh glyphs, re-seat the fixed edge. Works
+        # LIVE in both proxy states: the fresh glyph shells build in a
+        # scratch nursery and set_submobjects adopts them — the same
+        # adoption-on-attach seam Scene-bound families already use — so a
+        # bound number mutates in place, digit-count changes included.
         number = float(number)
         move_to_point = self.get_edge_center(self.edge_to_fix)
         donor = next(
             (sm for sm in self.submobjects if sm.has_points()), None
         )
         style = donor.get_style() if donor is not None else None
-        self.submobjects.clear()
-        specs = self._build_decimal_number(
-            _native_shell_factory, number, *self._decimal_params
+        params = list(self._decimal_params)
+        params[9] = float(self.font_size)  # scale side effects track here
+        scratch = VMobject.__new__(VMobject)
+        _install_live_state(scratch)
+        specs = scratch._build_decimal_number(
+            _native_shell_factory, number, *params
         )
-        _hang_native_children(self, specs)
+        _hang_native_children(scratch, specs)
+        if scratch.n_records() != 0:
+            raise NotImplementedError(
+                "DecimalNumber.set_value with root-level records (background "
+                "rectangle) awaits the live-state core (fm-p107)"
+            )
+        self.set_submobjects(list(scratch.submobjects))
         self.move_to(move_to_point, self.edge_to_fix)
         if style is not None:
             self.set_style(**style)
         self.number = number
+        return self
+
+    def _handle_scale_side_effects(self, scale_factor):
+        self.font_size *= scale_factor
         return self
 
     def increment_value(self, delta_t=1):
