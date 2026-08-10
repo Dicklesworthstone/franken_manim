@@ -176,7 +176,7 @@ rank	construct	kind	weight	uses	strings	pct	tier	origin
 172	\csc	control-word	1	1	1	0.006	T1	seed
 173	\ddddot	control-word	1	1	1	0.006	T2	rank
 174	\doublespacing	control-word	1	1	1	0.006	T2	rank
-175	\dx	control-word	1	1	1	0.006	T2	rank
+175	\dx	control-word	1	1	1	0.006	T2	rank	RULED 2026-08-10 (fm-j5t): Reference-broken at the pin — no \newcommand{\dx} exists anywhere in 3b1b/videos@e317d6c or 3b1b/manim@6199a00 (the 2017 eoc render predates the pinned template), so the pinned Reference cannot compile the sole occurrence either; the precise named error is the correct terminal behavior and 99.994% is the terminal parse coverage
 176	\earth	control-word	1	1	1	0.006	T2	rank
 177	\emptyset	control-word	1	4	1	0.006	T1	seed
 178	\eta	control-word	1	1	1	0.006	T1	seed
