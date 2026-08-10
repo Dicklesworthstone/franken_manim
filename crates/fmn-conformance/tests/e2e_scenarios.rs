@@ -848,21 +848,21 @@ fn determinism_threads_run(
 // Failure-path drills
 // ---------------------------------------------------------------------------
 
-/// Unsupported TeX construct: `\dddot` is a named, tier-tagged refusal
+/// Unsupported TeX construct: `\xrightarrow` is a named, tier-tagged refusal
 /// (fmd-math T2; `\substack` was the example until it graduated under
 /// fm-j5t) that must surface verbatim through the e2e runner — never a
 /// blank render, never a panic.
 fn failure_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let engine = &scene_goldens::corpus().tex;
-    let source = r"\dddot x";
+    let source = r"\xrightarrow{f}";
     match engine.typeset(fmn_tex::Mode::Math(fmd_math::Style::Text), source) {
         Ok(_) => Err(fail(
-            "unsupported construct \\dddot typeset successfully — the named refusal is gone",
+            "unsupported construct \\xrightarrow typeset successfully — the named refusal is gone",
         )),
         Err(error) => {
             let message = error.to_string();
             let is_math = matches!(error, TexError::Math(_));
-            let names_construct = message.contains("dddot");
+            let names_construct = message.contains("xrightarrow");
             let named_refusal = message.contains("not yet supported");
             ctx.event(
                 LogEvent::new("e2e.failure")
@@ -1023,6 +1023,70 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .exit_code(2)
         .with_counter("cli_rule_named", 1))
+}
+
+/// The shipped CLI's first positive native-registration path: one program
+/// selected from `@builtin`, rendered by Lumen, converted by fmn-frame, and
+/// atomically published by Reel's ordered PNG-sequence sink.
+fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_builtin_render")?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let sequence = dir.join("circle_shift.v1");
+    let complete = sequence.join("FMN_COMPLETE").is_file();
+    let pngs = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list CLI PNG sequence: {error}")))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+        .count();
+    let signature = std::fs::read(sequence.join("frame_000000.png"))
+        .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .unwrap_or(false);
+    let robot_record = output.stdout.lines().count() == 1
+        && output.stdout.contains("\"kind\":\"render\"")
+        && output.stdout.contains("\"source\":\"builtin\"")
+        && output.stdout.contains("\"frames\":3");
+    ctx.event(
+        LogEvent::new("e2e.cli.render")
+            .field("source", "builtin")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("robot_record", truth(robot_record)),
+    );
+    ctx.counter("cli_render_frames", pngs as u64);
+    ctx.counter("cli_png_signature", u64::from(signature));
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !complete
+        || pngs != 3
+        || !signature
+        || !robot_record
+    {
+        return Err(fail(format!(
+            "native CLI render failed: code={} pngs={pngs} complete={complete} signature={signature} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_render_frames", 3)
+        .with_counter("cli_png_signature", 1))
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,6 +1842,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             }
         }
     }
+    specs.push(spec(
+        "render_matrix.cli_builtin_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_builtin_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_render_frames", 3),
+            counter_eq("cli_png_signature", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.render",
+            vec![
+                FieldPred::str_eq("source", "builtin"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
 
     // DETERMINISM DRILLS.
     specs.push(spec(
