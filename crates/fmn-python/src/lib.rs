@@ -1350,6 +1350,14 @@ impl BridgeMobject {
         .to_hex()
     }
 
+    /// `Stage::save_state`: snapshot this entry's family for `Restore`.
+    fn _save_state(slf: &Bound<'_, Self>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.save_state(mob))?
+            .map(|_| ())
+            .map_err(stage_error)
+    }
+
     /// Reference `get_start`: this entry's own first world-space point.
     fn _get_start(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
@@ -2589,26 +2597,189 @@ impl PyScene {
     /// `(live_core, target_core)` pair; with no mobject pairs the segment
     /// is a native wait carrying the camera. State-exact at every capture
     /// boundary and set exactly to the target state at segment end.
-    #[pyo3(signature = (pairs, camera, run_time, rate_func, lag_ratio))]
-    fn _play_transforms(
+    /// Each spec is `(kind, mobject, target, run_time, rate_func,
+    /// lag_ratio, params)` and builds one native fmn-anim animation.
+    #[allow(clippy::type_complexity, clippy::too_many_lines)]
+    #[pyo3(signature = (specs, camera, run_time, rate_func, lag_ratio))]
+    fn _play_animations(
         slf: &Bound<'_, Self>,
-        pairs: Vec<(Bound<'_, BridgeMobject>, Bound<'_, BridgeMobject>)>,
+        specs: Vec<(
+            String,
+            Bound<'_, BridgeMobject>,
+            Option<Bound<'_, BridgeMobject>>,
+            Option<f64>,
+            Option<String>,
+            Option<f64>,
+            Bound<'_, PyDict>,
+        )>,
         camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
         run_time: Option<f64>,
         rate_func: Option<&str>,
         lag_ratio: Option<f64>,
     ) -> PyResult<Vec<f64>> {
+        let anim_error = |error: fmn_anim::AnimError| PyRuntimeError::new_err(error.to_string());
         let engine = Rc::clone(&slf.borrow().engine);
-        let mut animations: Vec<Box<dyn fmn_anim::Animation>> = Vec::with_capacity(pairs.len());
-        for (mobject, target) in &pairs {
+
+        // Resolve every Python-side value before the engine borrow.
+        struct Resolved {
+            kind: String,
+            mob: Mob,
+            target: Option<Mob>,
+            run_time: Option<f64>,
+            rate: Option<String>,
+            lag: Option<f64>,
+            shift: [f64; 3],
+            scale: f64,
+            angle: f64,
+            axis: [f64; 3],
+            about_point: Option<[f64; 3]>,
+            about_edge: [f64; 3],
+            path_arc: f64,
+            path_arc_axis: [f64; 3],
+            stroke_color: Option<[f64; 3]>,
+        }
+        let mut resolved = Vec::with_capacity(specs.len());
+        for (kind, mobject, target, spec_rt, spec_rate, spec_lag, params) in &specs {
             let (mob_engine, mob) = bound_parts(&mobject.borrow())?;
-            let (target_engine, target_mob) = bound_parts(&target.borrow())?;
-            if !same_engine(&engine, &mob_engine) || !same_engine(&engine, &target_engine) {
+            if !same_engine(&engine, &mob_engine) {
                 return Err(ForeignStageError::new_err(
                     "play endpoints must belong to this Scene",
                 ));
             }
-            animations.push(Box::new(fmn_anim::Transform::new(mob, target_mob)));
+            let target = target
+                .as_ref()
+                .map(|proxy| -> PyResult<Mob> {
+                    let (target_engine, target_mob) = bound_parts(&proxy.borrow())?;
+                    if !same_engine(&engine, &target_engine) {
+                        return Err(ForeignStageError::new_err(
+                            "play endpoints must belong to this Scene",
+                        ));
+                    }
+                    Ok(target_mob)
+                })
+                .transpose()?;
+            let get3 = |name: &str, default: [f64; 3]| -> PyResult<[f64; 3]> {
+                match params.get_item(name)? {
+                    Some(value) => Ok(value.extract()?),
+                    None => Ok(default),
+                }
+            };
+            let get1 = |name: &str, default: f64| -> PyResult<f64> {
+                match params.get_item(name)? {
+                    Some(value) => Ok(value.extract()?),
+                    None => Ok(default),
+                }
+            };
+            resolved.push(Resolved {
+                kind: kind.clone(),
+                mob,
+                target,
+                run_time: *spec_rt,
+                rate: spec_rate.clone(),
+                lag: *spec_lag,
+                shift: get3("shift", [0.0; 3])?,
+                scale: get1("scale", 1.0)?,
+                angle: get1("angle", std::f64::consts::PI)?,
+                axis: get3("axis", [0.0, 0.0, 1.0])?,
+                about_point: params
+                    .get_item("about_point")?
+                    .map(|value| value.extract())
+                    .transpose()?,
+                about_edge: get3("about_edge", [0.0; 3])?,
+                path_arc: get1("path_arc", 0.0)?,
+                path_arc_axis: get3("path_arc_axis", [0.0, 0.0, 1.0])?,
+                stroke_color: params
+                    .get_item("stroke_color")?
+                    .map(|value| value.extract())
+                    .transpose()?,
+            });
+        }
+        let need_target = |target: Option<Mob>| {
+            target.ok_or_else(|| PyValueError::new_err("this animation requires a target"))
+        };
+
+        let mut scene = engine.borrow_mut();
+        let start_time = scene.stage().time();
+        let mut animations: Vec<Box<dyn fmn_anim::Animation>> = Vec::with_capacity(resolved.len());
+        for spec in resolved {
+            let stage = scene.stage_mut();
+            let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
+                "transform" => {
+                    let mut transform =
+                        fmn_anim::Transform::new(spec.mob, need_target(spec.target)?);
+                    if spec.path_arc != 0.0 {
+                        transform = transform.with_path_arc(spec.path_arc, spec.path_arc_axis);
+                    }
+                    Box::new(transform)
+                }
+                "replacement_transform" => Box::new(fmn_anim::replacement_transform(
+                    spec.mob,
+                    need_target(spec.target)?,
+                )),
+                "transform_from_copy" => Box::new(
+                    fmn_anim::transform_from_copy(stage, spec.mob, need_target(spec.target)?)
+                        .map_err(anim_error)?,
+                ),
+                "fade_in" => Box::new(
+                    fmn_anim::fade_in(stage, spec.mob, spec.shift, spec.scale)
+                        .map_err(anim_error)?,
+                ),
+                "fade_out" => Box::new(
+                    fmn_anim::fade_out(stage, spec.mob, spec.shift, spec.scale)
+                        .map_err(anim_error)?,
+                ),
+                "v_fade_in" => Box::new(fmn_anim::v_fade_in(spec.mob)),
+                "v_fade_out" => Box::new(fmn_anim::v_fade_out(spec.mob)),
+                "show_creation" => Box::new(fmn_anim::show_creation(spec.mob)),
+                "uncreate" => Box::new(fmn_anim::uncreate(spec.mob)),
+                "write" => {
+                    let mut write = fmn_anim::write(stage, spec.mob);
+                    if let Some(rgb) = spec.stroke_color {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let rgb = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32];
+                        write = write.with_stroke_color(Some(rgb));
+                    }
+                    Box::new(write)
+                }
+                "rotate" => {
+                    let mut rotating = fmn_anim::rotate(spec.mob, spec.angle)
+                        .with_axis(spec.axis)
+                        .with_about_edge(spec.about_edge);
+                    if let Some(point) = spec.about_point {
+                        rotating = rotating.with_about_point(point);
+                    }
+                    Box::new(rotating)
+                }
+                "grow_from_center" => {
+                    Box::new(fmn_anim::grow_from_center(stage, spec.mob, None).map_err(anim_error)?)
+                }
+                "grow_arrow" => {
+                    Box::new(fmn_anim::grow_arrow(stage, spec.mob).map_err(anim_error)?)
+                }
+                "fade_transform" => Box::new(
+                    fmn_anim::fade_transform(stage, spec.mob, need_target(spec.target)?)
+                        .map_err(anim_error)?,
+                ),
+                "restore" => Box::new(fmn_anim::restore(stage, spec.mob).map_err(anim_error)?),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "animation kind `{other}` is not routed to the native shelf"
+                    )));
+                }
+            };
+            {
+                let config = &mut animation.state_mut().config;
+                if let Some(value) = spec.run_time {
+                    config.run_time = value;
+                }
+                if let Some(name) = &spec.rate {
+                    config.rate_func = named_rate_func(name)?;
+                }
+                if let Some(value) = spec.lag {
+                    config.lag_ratio = value;
+                }
+            }
+            animations.push(animation);
         }
         let effective_run_time = run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME);
         let camera_lerp = camera
@@ -2617,7 +2788,7 @@ impl PyScene {
                     start: live.borrow().frame.clone(),
                     end: target.borrow().frame.clone(),
                     core: live.unbind(),
-                    start_time: engine.borrow().stage().time(),
+                    start_time,
                     run_time: effective_run_time,
                     rate: rate_func
                         .map(named_rate_func)
@@ -2639,18 +2810,17 @@ impl PyScene {
             if sink.camera.is_none() {
                 return Ok(Vec::new());
             }
-            engine
-                .borrow_mut()
+            scene
                 .wait(Some(effective_run_time), &mut sink)
                 .map(|_| ())
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         } else {
-            engine
-                .borrow_mut()
+            scene
                 .play(animations, overrides, &mut sink)
                 .map(|_| ())
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         }
+        drop(scene);
         let AlphaProbeSink {
             alphas,
             camera,
@@ -2670,6 +2840,48 @@ impl PyScene {
     fn _adopt(slf: &Bound<'_, Self>, mobject: &Bound<'_, BridgeMobject>) -> PyResult<()> {
         bind_graph(slf.py(), slf, mobject)?;
         Ok(())
+    }
+
+    /// Attach a [`PyFieldProbe`] to a bound mobject: a native updater
+    /// records `field[lane]` of record 0 every frame (diagnostics only).
+    fn _record_field_probe(
+        slf: &Bound<'_, Self>,
+        mobject: &Bound<'_, BridgeMobject>,
+        field: String,
+        lane: usize,
+    ) -> PyResult<PyFieldProbe> {
+        let engine = Rc::clone(&slf.borrow().engine);
+        let (mob_engine, mob) = bound_parts(&mobject.borrow())?;
+        if !same_engine(&engine, &mob_engine) {
+            return Err(ForeignStageError::new_err(
+                "the probe target must belong to this Scene",
+            ));
+        }
+        let values: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&values);
+        engine
+            .borrow_mut()
+            .stage_mut()
+            .add_updater(
+                mob,
+                move |stage: &mut fmn_mobject::Stage, target: Mob| {
+                    // Animation begin-time copies carry updaters; record
+                    // only the original entry, not its starting/target
+                    // copies.
+                    if target != mob {
+                        return;
+                    }
+                    if let Some(entry) = stage.get(target)
+                        && let Some(lanes) = entry.buffer.read(0, &field)
+                        && let Some(value) = lanes.get(lane)
+                    {
+                        sink.borrow_mut().push(f64::from(*value));
+                    }
+                },
+                false,
+            )
+            .map_err(stage_error)?;
+        Ok(PyFieldProbe { values })
     }
 
     /// `Scene.wait(duration)` over the native wait segment (NullSceneSink;
@@ -2812,6 +3024,22 @@ impl fmn_scene::SceneSink for AlphaProbeSink {
             });
         }
         Ok(())
+    }
+}
+
+/// A per-frame record-field recorder (test/diagnostic seam): a NATIVE
+/// stage updater appends one lane of a mobject's first record at every
+/// frame update — inside the six-step update slot, no Python crossing,
+/// so it may observe an engine-driven play segment mid-flight.
+#[pyclass(unsendable, name = "_FieldProbe")]
+struct PyFieldProbe {
+    values: Rc<RefCell<Vec<f64>>>,
+}
+
+#[pymethods]
+impl PyFieldProbe {
+    fn values(&self) -> Vec<f64> {
+        self.values.borrow().clone()
     }
 }
 
@@ -3471,6 +3699,7 @@ fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRecordView>()?;
     module.add_class::<PyGilProbe>()?;
     module.add_class::<PyCameraFrameCore>()?;
+    module.add_class::<PyFieldProbe>()?;
     module.add_class::<ladder::PyBatchedUpdater>()?;
     module.add_class::<ladder::PyArrayUpdater>()?;
     module.add_class::<ladder::PyNativeUpdater>()?;

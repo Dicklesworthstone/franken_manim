@@ -1180,6 +1180,15 @@ class Mobject(_BridgeMobject):
         self.target = self.copy(deep=use_deepcopy)
         return self.target
 
+    def save_state(self, use_deepcopy=False):
+        # The engine snapshot Restore consumes (Stage::save_state). Note:
+        # a save taken while detached does not survive scene adoption
+        # (copy_into starts a fresh entry); Restore then refuses with the
+        # engine's MissingSavedState.
+        del use_deepcopy
+        self._save_state()
+        return self
+
     @property
     def animate(self):
         """Methods called with mobject.animate.method(...) build a
@@ -3091,65 +3100,98 @@ class Scene(_SceneCore):
                         "frame-boundary release window (fm-p107); drive "
                         "frames with Scene.update meanwhile"
                     )
-        pairs = []
+        def rate_name(value, where):
+            if value is None or isinstance(value, str):
+                return value
+            name = _RATE_FUNC_NAMES.get(value)
+            if name is None:
+                raise NotImplementedError(
+                    where + ": custom rate_func callables await the "
+                    "crossing-budget rung; use a named catalog function"
+                )
+            return name
+
+        specs = []
         camera_pair = None
-        anim_args = {}
         for proto in proto_animations:
-            if not isinstance(proto, _AnimationBuilder):
-                raise NotImplementedError(
-                    "Scene.play drives mobject.animate builders natively this "
-                    "tranche; explicit Animation classes await their bindings"
-                )
-            if proto.overridden_animation is not None:
-                raise NotImplementedError(
-                    "overridden animations are not yet routed to the engine"
-                )
-            for key, value in proto.anim_args.items():
-                if key not in ("run_time", "rate_func", "lag_ratio"):
+            if isinstance(proto, _AnimationBuilder):
+                if proto.overridden_animation is not None:
                     raise NotImplementedError(
-                        "anim arg `" + key + "` is not yet routed to the engine play"
+                        "overridden animations are not yet routed to the engine"
                     )
-                if key in anim_args and anim_args[key] != value:
-                    raise NotImplementedError(
-                        "conflicting per-animation args in one play await "
-                        "per-animation configs"
+                spec_args = {}
+                for key, value in proto.anim_args.items():
+                    if key not in ("run_time", "rate_func", "lag_ratio"):
+                        raise NotImplementedError(
+                            "anim arg `" + key + "` is not yet routed to "
+                            "the engine play"
+                        )
+                    spec_args[key] = value
+                mobject = proto.mobject
+                if isinstance(mobject, CameraFrame):
+                    # Cut T3: the camera lerp rides the same segment; its
+                    # state lives in the engine camera core, not records.
+                    if camera_pair is not None:
+                        raise NotImplementedError(
+                            "one camera-frame builder per play; merge the "
+                            "reorient chain into a single .animate"
+                        )
+                    camera_pair = (mobject._core, mobject.target._core)
+                    continue
+                if not mobject._is_bound():
+                    self.add(mobject)
+                target = mobject.target
+                if not target._is_bound():
+                    self._adopt(target)
+                specs.append(
+                    (
+                        "transform",
+                        mobject,
+                        target,
+                        spec_args.get("run_time"),
+                        rate_name(spec_args.get("rate_func"), "animate"),
+                        spec_args.get("lag_ratio"),
+                        {},
                     )
-                anim_args[key] = value
-            mobject = proto.mobject
-            if isinstance(mobject, CameraFrame):
-                # Cut T3: the camera lerp rides the same segment; its state
-                # lives in the engine camera core, never in stage records.
-                if camera_pair is not None:
-                    raise NotImplementedError(
-                        "one camera-frame builder per play; merge the "
-                        "reorient chain into a single .animate"
-                    )
-                camera_pair = (mobject._core, mobject.target._core)
-                continue
-            if not mobject._is_bound():
-                self.add(mobject)
-            target = mobject.target
-            if not target._is_bound():
-                self._adopt(target)
-            pairs.append((mobject, target))
-        if run_time is None:
-            run_time = anim_args.get("run_time")
-        if rate_func is None:
-            rate_func = anim_args.get("rate_func")
-        if lag_ratio is None:
-            lag_ratio = anim_args.get("lag_ratio")
-        if rate_func is not None and not isinstance(rate_func, str):
-            rate_func = _RATE_FUNC_NAMES.get(rate_func)
-            if rate_func is None:
-                raise NotImplementedError(
-                    "custom rate_func callables await the crossing-budget "
-                    "rung; use a named catalog function"
                 )
-        return self._play_transforms(
-            pairs,
+            elif isinstance(proto, Animation) and getattr(proto, "_native_kind", None):
+                mobject = proto.mobject
+                if isinstance(mobject, CameraFrame):
+                    raise NotImplementedError(
+                        "explicit animations of the camera frame await the "
+                        "camera track; use frame.animate"
+                    )
+                if not mobject._is_bound():
+                    self.add(mobject)
+                target = proto._native_target()
+                if target is not None and not target._is_bound():
+                    self._adopt(target)
+                specs.append(
+                    (
+                        proto._native_kind,
+                        mobject,
+                        target,
+                        None if proto.run_time is None else float(proto.run_time),
+                        rate_name(proto.rate_func, type(proto).__name__),
+                        None if proto.lag_ratio is None else float(proto.lag_ratio),
+                        proto._native_params(),
+                    )
+                )
+            elif isinstance(proto, Animation):
+                raise NotImplementedError(
+                    type(proto).__name__
+                    + " is not yet routed to the native animation shelf"
+                )
+            else:
+                raise NotImplementedError(
+                    "Scene.play accepts mobject.animate builders and the "
+                    "bound Animation classes; got " + type(proto).__name__
+                )
+        return self._play_animations(
+            specs,
             camera_pair,
             None if run_time is None else float(run_time),
-            rate_func,
+            rate_name(rate_func, "play"),
             None if lag_ratio is None else float(lag_ratio),
         )
 
@@ -3202,6 +3244,218 @@ class Animation:
 
     def copy(self):
         return _copy.copy(self)
+
+
+# ---------------------------------------------------------------------------
+# Explicit animation classes (fm-d3gt): thin specs over fmn-anim's native
+# five-mechanisms shelf. Scene.play builds one native segment animation per
+# spec; classes without a 1:1 native mechanism refuse precisely at play.
+
+
+class _NativeAnimation(Animation):
+    _native_kind = None
+    _target_attr = None
+
+    def __init__(self, mobject, run_time=None, rate_func=None, lag_ratio=None, **kwargs):
+        _refuse_unrouted(
+            type(self).__name__ + "()", [(name, True) for name in sorted(kwargs)]
+        )
+        self.mobject = mobject
+        self.run_time = run_time
+        self.rate_func = rate_func
+        self.lag_ratio = lag_ratio
+
+    def _native_params(self):
+        return {}
+
+    def _native_target(self):
+        return getattr(self, self._target_attr) if self._target_attr else None
+
+
+class ShowCreation(_NativeAnimation):
+    _native_kind = "show_creation"
+
+    def __init__(self, mobject, lag_ratio=1.0, **kwargs):
+        super().__init__(mobject, lag_ratio=lag_ratio, **kwargs)
+
+
+class Uncreate(_NativeAnimation):
+    _native_kind = "uncreate"
+
+
+class Write(_NativeAnimation):
+    _native_kind = "write"
+
+    def __init__(
+        self,
+        vmobject,
+        run_time=-1,
+        lag_ratio=-1,
+        rate_func=None,
+        stroke_color=None,
+        **kwargs,
+    ):
+        # -1 keeps the native auto values (family-size-derived timing).
+        super().__init__(
+            vmobject,
+            run_time=None if run_time == -1 else run_time,
+            lag_ratio=None if lag_ratio == -1 else lag_ratio,
+            rate_func=rate_func,
+            **kwargs,
+        )
+        self.stroke_color = stroke_color
+
+    def _native_params(self):
+        if self.stroke_color is None:
+            return {}
+        return {"stroke_color": tuple(_color_to_rgb(self.stroke_color))}
+
+
+class FadeIn(_NativeAnimation):
+    _native_kind = "fade_in"
+
+    def __init__(self, mobject, shift=_ORIGIN, scale=1.0, **kwargs):
+        super().__init__(mobject, **kwargs)
+        self.shift_vect = _vec3(shift)
+        self.scale_factor = float(scale)
+
+    def _native_params(self):
+        return {"shift": self.shift_vect, "scale": self.scale_factor}
+
+
+class FadeOut(FadeIn):
+    _native_kind = "fade_out"
+
+    def __init__(self, mobject, shift=_ORIGIN, remover=True, final_alpha_value=0.0, **kwargs):
+        scale = kwargs.pop("scale", 1.0)
+        _refuse_unrouted(
+            "FadeOut()",
+            [
+                ("remover", remover is not True),
+                ("final_alpha_value", final_alpha_value != 0.0),
+            ],
+        )
+        super().__init__(mobject, shift=shift, scale=scale, **kwargs)
+
+
+class VFadeIn(_NativeAnimation):
+    _native_kind = "v_fade_in"
+
+    def __init__(self, vmobject, suspend_mobject_updating=False, **kwargs):
+        _refuse_unrouted(
+            "VFadeIn()",
+            [("suspend_mobject_updating", bool(suspend_mobject_updating))],
+        )
+        super().__init__(vmobject, **kwargs)
+
+
+class VFadeOut(_NativeAnimation):
+    _native_kind = "v_fade_out"
+
+    def __init__(self, vmobject, remover=True, final_alpha_value=0.0, **kwargs):
+        _refuse_unrouted(
+            "VFadeOut()",
+            [
+                ("remover", remover is not True),
+                ("final_alpha_value", final_alpha_value != 0.0),
+            ],
+        )
+        super().__init__(vmobject, **kwargs)
+
+
+class Rotate(_NativeAnimation):
+    _native_kind = "rotate"
+
+    def __init__(
+        self,
+        mobject,
+        angle=_math.pi,
+        axis=_OUT,
+        run_time=1,
+        rate_func=None,
+        about_edge=_ORIGIN,
+        **kwargs,
+    ):
+        about_point = kwargs.pop("about_point", None)
+        super().__init__(mobject, run_time=run_time, rate_func=rate_func, **kwargs)
+        self.angle = float(angle)
+        self.axis = _vec3(axis)
+        self.about_edge = _vec3(about_edge)
+        self.about_point = None if about_point is None else _vec3(about_point)
+
+    def _native_params(self):
+        params = {
+            "angle": self.angle,
+            "axis": self.axis,
+            "about_edge": self.about_edge,
+        }
+        if self.about_point is not None:
+            params["about_point"] = self.about_point
+        return params
+
+
+class GrowFromCenter(_NativeAnimation):
+    _native_kind = "grow_from_center"
+
+
+class GrowArrow(_NativeAnimation):
+    _native_kind = "grow_arrow"
+
+
+class Restore(_NativeAnimation):
+    _native_kind = "restore"
+
+
+class Transform(_NativeAnimation):
+    _native_kind = "transform"
+    _target_attr = "target_mobject"
+
+    def __init__(
+        self,
+        mobject,
+        target_mobject=None,
+        path_arc=0.0,
+        path_arc_axis=_OUT,
+        path_func=None,
+        **kwargs,
+    ):
+        _refuse_unrouted("Transform()", [("path_func", path_func is not None)])
+        super().__init__(mobject, **kwargs)
+        if target_mobject is None:
+            raise NotImplementedError(
+                "Transform without a target (in-place) awaits its binding"
+            )
+        self.target_mobject = target_mobject
+        self.path_arc = float(path_arc)
+        self.path_arc_axis = _vec3(path_arc_axis)
+
+    def _native_params(self):
+        return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
+
+
+class ReplacementTransform(Transform):
+    _native_kind = "replacement_transform"
+
+
+class TransformFromCopy(Transform):
+    _native_kind = "transform_from_copy"
+
+    def __init__(self, mobject, target_mobject, **kwargs):
+        super().__init__(mobject, target_mobject, **kwargs)
+
+
+class FadeTransform(_NativeAnimation):
+    _native_kind = "fade_transform"
+    _target_attr = "target_mobject"
+
+    def __init__(self, mobject, target_mobject, stretch=True, dim_to_match=1, **kwargs):
+        _refuse_unrouted(
+            "FadeTransform()",
+            [("stretch", stretch is not True), ("dim_to_match", dim_to_match != 1)],
+        )
+        super().__init__(mobject, **kwargs)
+        self.target_mobject = target_mobject
+
 
 
 def _portal_embed(scene=None, namespace=None):
@@ -3496,6 +3750,21 @@ def _install_schema_surface():
         ("manimlib.mobject.value_tracker", "ValueTracker"): ValueTracker,
         ("manimlib.mobject.value_tracker", "ExponentialValueTracker"): ExponentialValueTracker,
         ("manimlib.mobject.value_tracker", "ComplexValueTracker"): ComplexValueTracker,
+        ("manimlib.animation.creation", "ShowCreation"): ShowCreation,
+        ("manimlib.animation.creation", "Uncreate"): Uncreate,
+        ("manimlib.animation.creation", "Write"): Write,
+        ("manimlib.animation.fading", "FadeIn"): FadeIn,
+        ("manimlib.animation.fading", "FadeOut"): FadeOut,
+        ("manimlib.animation.fading", "VFadeIn"): VFadeIn,
+        ("manimlib.animation.fading", "VFadeOut"): VFadeOut,
+        ("manimlib.animation.fading", "FadeTransform"): FadeTransform,
+        ("manimlib.animation.rotation", "Rotate"): Rotate,
+        ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
+        ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
+        ("manimlib.animation.transform", "Transform"): Transform,
+        ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
+        ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
+        ("manimlib.animation.transform", "Restore"): Restore,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
