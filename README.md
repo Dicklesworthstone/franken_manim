@@ -219,7 +219,12 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 > The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema.
 
 ```bash
-# Native registrations/artifacts use the standalone CPython-free binary
+# The shipped native G1 corpus renders through the standalone CPython-free binary
+fmn --format png_sequence --resolution 640x360 @builtin circle_shift.v1
+fmn --format y4m --resolution 640x360 @builtin circle_shift.v1
+fmn --write_all --format png_sequence @builtin
+
+# User native registrations/compiled artifacts use the same standalone front door
 fmn <native-scene-artifact> SquareToCircle -o
 
 # Python sources use the separately installed portal
