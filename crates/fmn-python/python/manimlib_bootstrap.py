@@ -2706,6 +2706,181 @@ class GlowDot(GlowDots):
         super().__init__([center], **kwargs)
 
 
+class Surface(Mobject):
+    """The Surface-family MRO anchor (Reference Surface(Mobject), NOT a
+    VMobject — VGroup's only-VMobjects refusal stays correct for it).
+    Concrete construction routes through the solid subclasses; the
+    remaining Surface surface stays precise schema placeholders."""
+
+    def _apply_surface_style(self, color, opacity, shading, depth_test):
+        # Reference Surface defaults land in the native builders; explicit
+        # values reapply through the state-real surfaces.
+        if color is not None or opacity is not None:
+            self.set_color(color, opacity)
+        if shading is not None:
+            self.set_shading(*shading)
+        if depth_test:
+            self.apply_depth_test()
+        return self
+
+
+class SGroup(Surface):
+    # Reference SGroup(*parametric_surfaces): the group init is inherited
+    # (Mobject's ingest rule); only-Surface membership is the schema's
+    # concern once real Surface parents exist.
+    pass
+
+
+def _native_surface_shell_factory():
+    # Surface-family children are NOT VMobjects: their shells must carry
+    # the Mobject-level color surface (rgba records), never stroke/fill.
+    shell = Surface.__new__(Surface)
+    _install_live_state(shell)
+    return shell
+
+
+class ParametricSurface(Surface):
+    def __init__(self, uv_func, u_range=(0, 1), v_range=(0, 1), **kwargs):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        resolution = kwargs.pop("resolution", (101, 101))
+        _refuse_unrouted(
+            "ParametricSurface()", [(name, True) for name in sorted(kwargs)]
+        )
+        _install_live_state(self)
+        specs = self._build_parametric_surface(
+            _native_surface_shell_factory,
+            uv_func,
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            (int(resolution[0]), int(resolution[1])),
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+
+class Sphere(Surface):
+    def __init__(
+        self,
+        u_range=(0, _math.tau),
+        v_range=(0, _math.pi),
+        resolution=(101, 51),
+        radius=1.0,
+        true_normals=True,
+        clockwise=False,
+        **kwargs,
+    ):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        _refuse_unrouted("Sphere()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        self.radius = float(radius)
+        self._solid_params = ("sphere", self.radius)
+        specs = self._build_sphere(
+            _native_surface_shell_factory,
+            self.radius,
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            (int(resolution[0]), int(resolution[1])),
+            bool(true_normals),
+            bool(clockwise),
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+
+class Cube(SGroup):
+    def __init__(
+        self,
+        color=None,
+        opacity=1,
+        shading=(0.1, 0.5, 0.1),
+        square_resolution=(2, 2),
+        side_length=2,
+        **kwargs,
+    ):
+        depth_test = kwargs.pop("depth_test", True)
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [("square_resolution", tuple(square_resolution) != (2, 2))]
+            + [(name, True) for name in sorted(kwargs)],
+        )
+        _install_live_state(self)
+        specs = self._build_cube(_native_surface_shell_factory, float(side_length))
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+
+class Prism(Cube):
+    def __init__(self, width=3.0, height=2.0, depth=1.0, **kwargs):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        _refuse_unrouted("Prism()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        specs = self._build_prism(
+            _native_surface_shell_factory, float(width), float(height), float(depth)
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+
+class SurfaceMesh(VGroup):
+    """The wireframe over a native surface — a VMobject family (Reference
+    MRO SurfaceMesh(VGroup)), built by the native mesher through the
+    rebuild oracle and re-seated onto the source's current geometry."""
+
+    def __init__(
+        self,
+        uv_surface,
+        resolution=(21, 11),
+        stroke_width=1,
+        stroke_color=None,
+        normal_nudge=0.01,
+        depth_test=True,
+        joint_type="no_joint",
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "SurfaceMesh()",
+            [("joint_type", joint_type != "no_joint")]
+            + [(name, True) for name in sorted(kwargs)],
+        )
+        params = getattr(uv_surface, "_solid_params", None)
+        if params is None:
+            raise NotImplementedError(
+                "SurfaceMesh needs a native-rebuildable source surface "
+                "(Sphere is native); "
+                + type(uv_surface).__name__
+                + " does not carry solid params yet"
+            )
+        _install_live_state(self)
+        specs = self._build_surface_mesh(
+            _native_shell_factory,
+            params[0],
+            float(params[1]),
+            (int(resolution[0]), int(resolution[1])),
+            float(normal_nudge),
+            float(stroke_width),
+            stroke_color,
+        )
+        _hang_native_children(self, specs)
+        # Re-seat onto the source's CURRENT geometry (the rebuild is at
+        # native scale/origin) — exact for uniform rescales and moves.
+        native_height = 2.0 * float(params[1])
+        current_height = uv_surface.get_height()
+        if current_height > 0 and abs(current_height - native_height) > 1e-12:
+            self.scale(current_height / native_height)
+        self.move_to(uv_surface.get_center())
+        if depth_test:
+            self.apply_depth_test()
+
+
 class ValueTracker(Mobject):
     """The Reference's ValueTracker over the native tracker entries
     (§8.6, Stage::add_value_tracker): the value is real engine state in
@@ -3870,6 +4045,13 @@ def _install_schema_surface():
         ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
         ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,
         ("manimlib.mobject.types.dot_cloud", "GlowDot"): GlowDot,
+        ("manimlib.mobject.types.surface", "Surface"): Surface,
+        ("manimlib.mobject.types.surface", "SGroup"): SGroup,
+        ("manimlib.mobject.types.surface", "ParametricSurface"): ParametricSurface,
+        ("manimlib.mobject.three_dimensions", "Sphere"): Sphere,
+        ("manimlib.mobject.three_dimensions", "Cube"): Cube,
+        ("manimlib.mobject.three_dimensions", "Prism"): Prism,
+        ("manimlib.mobject.three_dimensions", "SurfaceMesh"): SurfaceMesh,
         ("manimlib.mobject.geometry", "Line"): Line,
         ("manimlib.mobject.geometry", "DashedLine"): DashedLine,
         ("manimlib.mobject.geometry", "Arrow"): Arrow,

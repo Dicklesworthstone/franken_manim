@@ -67,21 +67,108 @@ enum Outcome {
 /// Phase 2: instantiate the locked scene class and drive the manim
 /// lifecycle (`setup -> construct -> tear_down`). The frontier report —
 /// which named symbol each scene first misses — is fm-d3gt's structural
-/// worklist; success means the scene is ready for structural assertions.
-fn run_outcome(py: Python<'_>, module_path: &str, scene: &str) -> Outcome {
+/// worklist; a completed scene returns its instance so the harness can
+/// take the structural facts the baseline table locks.
+fn run_outcome<'py>(
+    py: Python<'py>,
+    module_path: &str,
+    scene: &str,
+) -> (Outcome, Option<Bound<'py, PyAny>>) {
     let module_name = module_path.trim_end_matches(".py").replace('/', ".");
     let importlib = py.import("importlib").expect("importlib");
     let module = importlib
         .call_method1("import_module", (module_name.as_str(),))
         .expect("phase 2 runs only after a clean import");
     let class = module.getattr(scene).expect("locked scene class present");
-    let outcome = class
-        .call0()
-        .and_then(|instance| instance.call_method0("run"));
+    let outcome = class.call0().and_then(|instance| {
+        instance.call_method0("run")?;
+        Ok(instance)
+    });
     match outcome {
-        Ok(_) => Outcome::Imported,
-        Err(error) => Outcome::Refused(render_refusal(py, &error)),
+        Ok(instance) => (Outcome::Imported, Some(instance)),
+        Err(error) => (Outcome::Refused(render_refusal(py, &error)), None),
     }
+}
+
+/// One completed scene's structural facts, formatted at a stable 1e-6
+/// tolerance: root count, family total, scene bbox (zero boxes skipped),
+/// rational-clock duration, and the final camera (height, theta, phi,
+/// center). This line IS the committed baseline row's payload.
+fn scene_facts(py: Python<'_>, instance: &Bound<'_, PyAny>) -> PyResult<String> {
+    let code = std::ffi::CString::new(
+        r#"
+import numpy as _np
+_roots = scene.mobjects
+_family = sum(m.family_size() for m in _roots)
+_boxes = [_np.array(m.get_bounding_box(), dtype=float) for m in _roots]
+_boxes = [b for b in _boxes if _np.any(b != 0)]
+if _boxes:
+    _lo = _np.min([b[0] for b in _boxes], axis=0)
+    _hi = _np.max([b[2] for b in _boxes], axis=0)
+else:
+    _lo = _np.zeros(3)
+    _hi = _np.zeros(3)
+_frame = scene.frame
+_center = _frame.get_center()
+_values = [
+    *_lo, *_hi, scene.time(),
+    _frame.get_height(), _frame.get_theta(), _frame.get_phi(), *_center,
+]
+facts = "\t".join(
+    [str(len(_roots)), str(int(_family))]
+    + ["%.6f" % float(v) for v in _values]
+)
+"#,
+    )
+    .expect("facts snippet contains no NUL");
+    let globals = pyo3::types::PyDict::new(py);
+    globals.set_item("scene", instance)?;
+    py.run(code.as_c_str(), Some(&globals), Some(&globals))?;
+    globals
+        .get_item("facts")?
+        .expect("snippet defines facts")
+        .extract()
+}
+
+/// The committed per-scene baseline table (fm-rqc's acceptance shape):
+/// `scene<TAB>facts...` rows beside the harness, TSV like the corpus
+/// lock itself.
+fn baseline_path() -> PathBuf {
+    repo_root().join("crates/fmn-python/tests/corpus_baselines.tsv")
+}
+
+fn read_baselines() -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(baseline_path()) else {
+        return out;
+    };
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((scene, facts)) = trimmed.split_once('\t') {
+            out.insert(scene.to_owned(), facts.to_owned());
+        }
+    }
+    out
+}
+
+fn write_baselines(rows: &std::collections::BTreeMap<String, String>) {
+    let mut text = String::from(
+        "# Structural baselines for corpus scenes that complete end-to-end\n\
+         # (fm-d3gt / fm-rqc). Columns after the scene name:\n\
+         # roots, family, bbox lo x/y/z, bbox hi x/y/z, duration,\n\
+         # camera height, theta, phi, center x/y/z — all at 1e-6.\n\
+         # Bless ritual: FMN_CORPUS_BLESS=1 cargo test -p fmn-python corpus\n",
+    );
+    for (scene, facts) in rows {
+        text.push_str(scene);
+        text.push('\t');
+        text.push_str(facts);
+        text.push('\n');
+    }
+    std::fs::write(baseline_path(), text).expect("write corpus baselines");
 }
 
 fn render_refusal(py: Python<'_>, error: &PyErr) -> String {
@@ -179,22 +266,96 @@ mod tests {
             assert_eq!(refused, 0, "allowlisted seed modules must import");
 
             // Phase 2, the structural frontier: instantiate each scene
-            // and drive the manim lifecycle. Refusals here are the
-            // parity worklist (reported, precise, unasserted — the
-            // frontier moves as the mobject/animation surface lands);
-            // successes are scenes ready for structural assertions.
+            // and drive the manim lifecycle. Refusals are the parity
+            // worklist (reported, precise, unasserted — the frontier
+            // moves as the mobject/animation surface lands); a COMPLETED
+            // scene must match its committed structural baseline.
+            let baselines = read_baselines();
+            let bless = std::env::var("FMN_CORPUS_BLESS").is_ok_and(|value| value == "1");
+            let mut completed: Vec<(String, String)> = Vec::new();
             for (scene, module_path) in locked_seed() {
                 match run_outcome(py, &module_path, &scene) {
-                    Outcome::Imported => {
+                    (Outcome::Imported, instance) => {
+                        let instance = instance.expect("completed run returns its instance");
+                        let facts = scene_facts(py, &instance)
+                            .expect("structural facts of a completed scene");
                         println!("corpus-run    ok       {scene} ({module_path})");
+                        println!("corpus-facts  {scene}\t{facts}");
+                        completed.push((scene, facts));
                     }
-                    Outcome::Refused(reason) => {
+                    (Outcome::Refused(reason), _) => {
                         println!("corpus-run    frontier {scene} ({module_path}): {reason}");
                         assert!(
                             !reason.trim().is_empty()
                                 && !reason.starts_with("UnknownExceptionType"),
                             "frontier must be a named error: {reason}"
                         );
+                    }
+                }
+            }
+
+            // The baseline lock. A completed scene without a blessed row
+            // fails loudly naming the ritual; a mismatching row is a
+            // structural regression; a blessed scene that stops
+            // completing is a regression too.
+            if bless {
+                let rows: std::collections::BTreeMap<String, String> =
+                    completed.iter().cloned().collect();
+                write_baselines(&rows);
+                println!("corpus-bless   wrote {} baseline row(s)", rows.len());
+            } else {
+                for (scene, facts) in &completed {
+                    match baselines.get(scene) {
+                        Some(expected) if expected == facts => {
+                            println!("corpus-locked  {scene} matches its baseline");
+                        }
+                        Some(expected) => panic!(
+                            "structural baseline mismatch for {scene}\n  \
+                             expected: {expected}\n  measured: {facts}\n\
+                             (re-bless deliberately with FMN_CORPUS_BLESS=1 \
+                             if the change is intended)"
+                        ),
+                        None => panic!(
+                            "{scene} completed but has no committed baseline; \
+                             bless it with: FMN_CORPUS_BLESS=1 cargo test -p \
+                             fmn-python corpus"
+                        ),
+                    }
+                }
+                let completed_names: std::collections::HashSet<&str> =
+                    completed.iter().map(|(scene, _)| scene.as_str()).collect();
+                for scene in baselines.keys() {
+                    assert!(
+                        completed_names.contains(scene.as_str()),
+                        "{scene} has a committed structural baseline but no \
+                         longer completes — a bridge regression, not a \
+                         worklist entry"
+                    );
+                }
+            }
+
+            // Determinism: the first completed scene, run twice
+            // in-process, must reproduce identical structural facts.
+            if let Some((scene, first_facts)) = completed.first() {
+                let module_path = locked_seed()
+                    .into_iter()
+                    .find(|(name, _)| name == scene)
+                    .expect("completed scene is in the seed")
+                    .1;
+                let (outcome, instance) = run_outcome(py, &module_path, scene);
+                match outcome {
+                    Outcome::Imported => {
+                        let instance = instance.expect("completed run returns its instance");
+                        let facts =
+                            scene_facts(py, &instance).expect("structural facts of the rerun");
+                        assert_eq!(
+                            &facts, first_facts,
+                            "{scene} is not deterministic across in-process runs"
+                        );
+                        println!("corpus-determinism {scene} reproduced its facts");
+                    }
+                    Outcome::Refused(reason) => {
+                        panic!("{scene} completed once but refused on rerun: {reason}")
                     }
                 }
             }

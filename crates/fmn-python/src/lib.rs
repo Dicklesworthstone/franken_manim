@@ -1560,6 +1560,132 @@ impl BridgeMobject {
         install_native_tree(slf, factory, cloud)
     }
 
+    /// `Prism(width, height, depth)` over the solids shelf: six sampled
+    /// quads as an SGroup family.
+    fn _build_prism<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        width: f64,
+        height: f64,
+        depth: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        install_native_tree(slf, factory, fmn_library::Prism::new(width, height, depth))
+    }
+
+    /// `Cube(side_length)` over the solids shelf.
+    fn _build_cube<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        side_length: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        install_native_tree(slf, factory, fmn_library::Cube::new(side_length))
+    }
+
+    /// `Sphere(radius, ...)` over the solids shelf: the Reference's UV
+    /// grid with radial true normals.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_sphere<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        radius: f64,
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        true_normals: bool,
+        clockwise: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let sphere = fmn_library::Sphere::new(radius)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .true_normals(true_normals)
+            .clockwise(clockwise);
+        install_native_tree(slf, factory, sphere.build())
+    }
+
+    /// `ParametricSurface(uv_func, ...)`: the native sampler over a
+    /// Python callable. The callable runs during construction only (no
+    /// engine borrow is held); its first error aborts the build.
+    fn _build_parametric_surface<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        uv_func: &Bound<'py, PyAny>,
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+    ) -> PyResult<Bound<'py, PyList>> {
+        let func = uv_func.clone().unbind();
+        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
+        let closure_errors = Rc::clone(&error_cell);
+        let surface = fmn_library::ParametricSurface::new(move |u, v| {
+            Python::attach(|py| {
+                let sample = func
+                    .bind(py)
+                    .call1((u, v))
+                    .and_then(|value| value.extract::<Vec<f64>>());
+                match sample {
+                    Ok(point) if point.len() >= 3 => [point[0], point[1], point[2]],
+                    Ok(_) => {
+                        if closure_errors.borrow().is_none() {
+                            *closure_errors.borrow_mut() = Some(PyValueError::new_err(
+                                "uv_func must return three components",
+                            ));
+                        }
+                        [0.0; 3]
+                    }
+                    Err(error) => {
+                        if closure_errors.borrow().is_none() {
+                            *closure_errors.borrow_mut() = Some(error);
+                        }
+                        [0.0; 3]
+                    }
+                }
+            })
+        })
+        .u_range(u_range.0, u_range.1)
+        .v_range(v_range.0, v_range.1)
+        .resolution(resolution.0, resolution.1)
+        .build();
+        if let Some(error) = error_cell.borrow_mut().take() {
+            return Err(error);
+        }
+        install_native_tree(slf, factory, surface)
+    }
+
+    /// `SurfaceMesh(uv_surface, ...)` — the rebuild oracle: the source
+    /// surface reconstructs from its stored solid params and the native
+    /// wireframe samples it; the bootstrap re-seats the mesh onto the
+    /// source's current center/scale afterwards.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_surface_mesh<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source_kind: &str,
+        source_radius: f64,
+        resolution: (usize, usize),
+        normal_nudge: f64,
+        stroke_width: f64,
+        stroke_color: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let surface = match source_kind {
+            "sphere" => fmn_library::Sphere::new(source_radius).build(),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "SurfaceMesh over `{other}` awaits its native rebuild \
+                     path; spheres are native"
+                )));
+            }
+        };
+        let mut mesh = fmn_library::SurfaceMesh::new(surface)
+            .resolution(resolution.0, resolution.1)
+            .normal_nudge(normal_nudge)
+            .stroke_width(stroke_width);
+        if let Some(color) = stroke_color {
+            mesh = mesh.stroke_color(srgb_from_py(color)?);
+        }
+        install_native_tree(slf, factory, mesh.build())
+    }
+
     /// `DecimalNumber(number, ...)` over the numbers shelf (the de-TeX'd
     /// native builder with glyph-recycling updates).
     #[allow(clippy::too_many_arguments)]
