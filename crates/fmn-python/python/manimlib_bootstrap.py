@@ -657,6 +657,44 @@ class Mobject(_BridgeMobject):
             self.set_height(max_height, **kwargs)
         return self
 
+    def set_submobjects(self, submobject_list):
+        # Reference Mobject.set_submobjects (mobject.py:508) through the
+        # live-list seam.
+        if self.submobjects == submobject_list:
+            return self
+        self.submobjects.clear()
+        if submobject_list:
+            self.submobjects.extend(submobject_list)
+        return self
+
+    def apply_depth_test(self, recurse=True):
+        # State-real: `depth_test` is a typed engine uniform (§8.4).
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["depth_test"] = True
+        return self
+
+    def deactivate_depth_test(self, recurse=True):
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["depth_test"] = False
+        return self
+
+    def get_continuous_bounding_box_point(self, direction):
+        # Reference Mobject.get_continuous_bounding_box_point verbatim.
+        dl, center, ur = self._bbox_rows()
+        del dl
+        corner_vect = ur - center
+        direction = _np.array(_vec3(direction))
+        return center + direction / _np.max(
+            _np.abs(
+                _np.true_divide(
+                    direction,
+                    corner_vect,
+                    out=_np.zeros(len(direction)),
+                    where=(corner_vect != 0),
+                )
+            )
+        )
+
     def replicate(self, n):
         group_class = self.get_group_class()
         return group_class(*(self.copy() for _ in range(n)))
@@ -1390,6 +1428,162 @@ class Square(Rectangle):
     def __init__(self, side_length=2.0, **kwargs):
         self.side_length = side_length
         super().__init__(side_length, side_length, **kwargs)
+
+
+class Line(VMobject):
+    def __init__(self, start=_LEFT, end=_RIGHT, buff=0.0, path_arc=0.0, **kwargs):
+        _install_live_state(self)
+        self.path_arc = float(path_arc)
+        self.buff = float(buff)
+        self.set_start_and_end_attrs(start, end)
+        specs = self._build_line(
+            _native_shell_factory,
+            _vec3(self.start),
+            _vec3(self.end),
+            self.buff,
+            self.path_arc,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    # Reference-verbatim endpoint resolution (geometry.py:718): mobject
+    # endpoints resolve to continuous boundary points along the rough
+    # center-to-center direction.
+    def set_start_and_end_attrs(self, start, end):
+        rough_start = self.pointify(start)
+        rough_end = self.pointify(end)
+        diff = rough_end - rough_start
+        norm = float(_np.sqrt((diff * diff).sum()))
+        vect = diff / norm if norm > 0 else _np.zeros(3)
+        self.start = self.pointify(start, vect)
+        self.end = self.pointify(end, -vect)
+
+    def pointify(self, mob_or_point, direction=None):
+        if isinstance(mob_or_point, _BridgeMobject):
+            mob = mob_or_point
+            if direction is None:
+                return mob.get_center()
+            return mob.get_continuous_bounding_box_point(direction)
+        point = mob_or_point
+        result = _np.zeros(3)
+        arr = _np.array(point, dtype=float).flatten()
+        result[: len(arr)] = arr[:3]
+        return result
+
+
+class DashedLine(Line):
+    def __init__(
+        self,
+        start=_LEFT,
+        end=_RIGHT,
+        dash_length=0.05,
+        positive_space_ratio=0.5,
+        **kwargs,
+    ):
+        buff = kwargs.pop("buff", 0.0)
+        path_arc = kwargs.pop("path_arc", 0.0)
+        _refuse_unrouted("DashedLine()", [("buff", bool(buff))])
+        _install_live_state(self)
+        self.path_arc = float(path_arc)
+        self.buff = 0.0
+        self.set_start_and_end_attrs(start, end)
+        specs = self._build_dashed_line(
+            _native_shell_factory,
+            _vec3(self.start),
+            _vec3(self.end),
+            float(dash_length),
+            float(positive_space_ratio),
+            self.path_arc,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Arrow(Line):
+    def __init__(
+        self,
+        start=_LEFT,
+        end=_LEFT,
+        buff=0.25,
+        path_arc=0.0,
+        fill_color=None,
+        fill_opacity=None,
+        stroke_width=None,
+        thickness=3.0,
+        tip_width_ratio=5,
+        tip_angle=_math.pi / 3,
+        max_tip_length_to_length_ratio=0.5,
+        max_width_to_length_ratio=0.1,
+        **kwargs,
+    ):
+        # The ratio caps are the Reference defaults baked into the native
+        # builder; off-default values refuse precisely.
+        _refuse_unrouted(
+            "Arrow()",
+            [
+                (
+                    "max_tip_length_to_length_ratio",
+                    max_tip_length_to_length_ratio != 0.5,
+                ),
+                ("max_width_to_length_ratio", max_width_to_length_ratio != 0.1),
+            ],
+        )
+        _install_live_state(self)
+        self.path_arc = float(path_arc)
+        self.buff = float(buff)
+        self.set_start_and_end_attrs(start, end)
+        self._arrow_params = (
+            self.buff,
+            self.path_arc,
+            float(thickness),
+            float(tip_width_ratio),
+            float(tip_angle),
+        )
+        specs = self._build_arrow(
+            _native_shell_factory,
+            _vec3(self.start),
+            _vec3(self.end),
+            *self._arrow_params,
+        )
+        _hang_native_children(self, specs)
+        # The explicit style parameters default to the native builder's
+        # (Reference) style; only caller-supplied values reapply.
+        if fill_color is not None:
+            kwargs.setdefault("fill_color", fill_color)
+        if fill_opacity is not None:
+            kwargs.setdefault("fill_opacity", fill_opacity)
+        if stroke_width is not None:
+            kwargs.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def put_start_and_end_on(self, start, end):
+        # An Arrow is ONE filled path whose tip proportions are functions
+        # of its length; the generic family affine would stretch the tip.
+        # Rebuild natively at the new endpoints instead, carrying style.
+        if self._is_bound():
+            raise NotImplementedError(
+                "Arrow.put_start_and_end_on on a scene-bound arrow awaits "
+                "the live-state builder cores (fm-p107)"
+            )
+        style = self.get_style()
+        specs = self._build_arrow(
+            _native_shell_factory,
+            _vec3(start),
+            _vec3(end),
+            *self._arrow_params,
+        )
+        _hang_native_children(self, specs)
+        self.set_style(**style, recurse=False)
+        self.start = _np.array(_vec3(start))
+        self.end = _np.array(_vec3(end))
+        return self
+
+
+class Vector(Arrow):
+    def __init__(self, direction=_RIGHT, buff=0.0, **kwargs):
+        if len(direction) == 2:
+            direction = _np.hstack([_np.array(direction, dtype=float), 0])
+        super().__init__(_ORIGIN, direction, buff=buff, **kwargs)
 
 
 class NumberLine(VMobject):
@@ -2543,6 +2737,10 @@ def _install_schema_surface():
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
+        ("manimlib.mobject.geometry", "Line"): Line,
+        ("manimlib.mobject.geometry", "DashedLine"): DashedLine,
+        ("manimlib.mobject.geometry", "Arrow"): Arrow,
+        ("manimlib.mobject.geometry", "Vector"): Vector,
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
         ("manimlib.mobject.number_line", "UnitInterval"): UnitInterval,
         ("manimlib.mobject.coordinate_systems", "Axes"): Axes,

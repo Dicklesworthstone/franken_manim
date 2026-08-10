@@ -1387,6 +1387,69 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// `Line(start, end, buff, path_arc)` over the line shelf.
+    fn _build_line<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        buff: f64,
+        path_arc: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::line::Line::new(start, end)
+            .buff(buff)
+            .path_arc(path_arc)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `DashedLine(start, end, dash_length, positive_space_ratio)`.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_dashed_line<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        dash_length: f64,
+        positive_space_ratio: f64,
+        path_arc: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::line::DashedLine::new(start, end)
+            .dash_length(dash_length)
+            .positive_space_ratio(positive_space_ratio)
+            .path_arc(path_arc)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `Arrow(start, end, ...)`: one filled path with the native tip
+    /// proportions (thickness, tip ratios, ratio caps at the Reference
+    /// defaults).
+    #[allow(clippy::too_many_arguments)]
+    fn _build_arrow<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        buff: f64,
+        path_arc: f64,
+        thickness: f64,
+        tip_width_ratio: f64,
+        tip_angle: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::line::Arrow::new(start, end)
+            .buff(buff)
+            .path_arc(path_arc)
+            .thickness(thickness)
+            .tip_width_ratio(tip_width_ratio)
+            .tip_angle(tip_angle)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
     /// `NumberLine(x_range, **config)` over the coords shelf.
     fn _build_number_line<'py>(
         slf: &Bound<'py, Self>,
