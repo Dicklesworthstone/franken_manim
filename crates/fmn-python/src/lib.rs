@@ -32,8 +32,8 @@ use std::time::Instant;
 use crossing::CrossingClass;
 
 use fmn_mobject::{
-    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, StageError,
-    Uniforms,
+    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Stage,
+    StageError, Uniforms,
 };
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::create_exception;
@@ -126,11 +126,33 @@ impl EngineState {
     }
 }
 
-/// Subclassable Python proxy over either detached builder state or one
-/// Stage-scoped Marionette handle.
+/// A detached proxy's builder state: a private, proxy-owned Stage (the
+/// "nursery") plus the root handle its mobject was added with.
+///
+/// Arena residency without scene membership is a supported Stage mode, so
+/// positional/geometry operations run through the exact same Stage code
+/// path in both proxy states — the nursery before Scene.add, the scene's
+/// stage after. Each nursery holds exactly one root: detached family
+/// structure stays in the Python `submobjects` list until `Scene.add`
+/// binds the whole graph.
+struct Nursery {
+    stage: Stage,
+    root: Mob,
+}
+
+impl Nursery {
+    fn new(mobject: Mobject) -> Self {
+        let mut stage = Stage::new();
+        let root = stage.add(mobject);
+        Self { stage, root }
+    }
+}
+
+/// Subclassable Python proxy over either detached builder state (a private
+/// nursery Stage) or one Stage-scoped Marionette handle.
 #[pyclass(subclass, weakref, dict, unsendable, name = "_BridgeMobject")]
 struct BridgeMobject {
-    detached: Option<Mobject>,
+    nursery: Option<Nursery>,
     engine: Option<Engine>,
     mob: Option<Mob>,
     initialized: bool,
@@ -207,11 +229,17 @@ fn with_buffer<T>(
         return Ok(operation(&mut entry.buffer));
     }
     let mut cell = proxy.borrow_mut();
-    let detached = cell
-        .detached
+    let nursery = cell
+        .nursery
         .as_mut()
         .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
-    Ok(operation(&mut detached.buffer))
+    let root = nursery.root;
+    nursery.stage.bake_placement(root).map_err(stage_error)?;
+    let entry = nursery
+        .stage
+        .get_mut(root)
+        .ok_or_else(|| StaleHandleError::new_err("nursery root no longer resolves"))?;
+    Ok(operation(&mut entry.buffer))
 }
 
 fn with_buffer_ref<T>(
@@ -238,12 +266,47 @@ fn with_buffer_ref<T>(
             .ok_or_else(|| StaleHandleError::new_err("mobject handle no longer resolves"))?;
         return Ok(operation(&entry.buffer));
     }
-    let cell = proxy.borrow();
-    let detached = cell
-        .detached
-        .as_ref()
+    let mut cell = proxy.borrow_mut();
+    let nursery = cell
+        .nursery
+        .as_mut()
         .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
-    Ok(operation(&detached.buffer))
+    let root = nursery.root;
+    // The nursery is one Stage code path with the bound branch: a pending
+    // placement bakes before Python observes the buffer.
+    nursery.stage.bake_placement(root).map_err(stage_error)?;
+    let entry = nursery
+        .stage
+        .get(root)
+        .ok_or_else(|| StaleHandleError::new_err("nursery root no longer resolves"))?;
+    Ok(operation(&entry.buffer))
+}
+
+/// Route one positional/geometry operation to the proxy's Stage in either
+/// state: the scene's stage when bound, the private nursery when detached.
+/// This is the single seam every positional binding uses.
+fn with_stage<T>(
+    proxy: &Bound<'_, BridgeMobject>,
+    operation: impl FnOnce(&mut Stage, Mob) -> T,
+) -> PyResult<T> {
+    let bound = {
+        let cell = proxy.borrow();
+        cell.engine
+            .as_ref()
+            .zip(cell.mob)
+            .map(|(engine, mob)| (Rc::clone(engine), mob))
+    };
+    if let Some((engine, mob)) = bound {
+        let mut scene = engine.borrow_mut();
+        return Ok(operation(scene.stage_mut(), mob));
+    }
+    let mut cell = proxy.borrow_mut();
+    let nursery = cell
+        .nursery
+        .as_mut()
+        .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
+    let root = nursery.root;
+    Ok(operation(&mut nursery.stage, root))
 }
 
 fn with_uniforms<T>(
@@ -266,11 +329,16 @@ fn with_uniforms<T>(
         return operation(entry.uniforms_mut());
     }
     let mut cell = proxy.borrow_mut();
-    let detached = cell
-        .detached
+    let nursery = cell
+        .nursery
         .as_mut()
         .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
-    operation(&mut detached.uniforms)
+    let root = nursery.root;
+    let entry = nursery
+        .stage
+        .get_mut(root)
+        .ok_or_else(|| StaleHandleError::new_err("nursery root no longer resolves"))?;
+    operation(entry.uniforms_mut())
 }
 
 fn uniforms_snapshot(proxy: &Bound<'_, BridgeMobject>) -> PyResult<Uniforms> {
@@ -290,9 +358,10 @@ fn uniforms_snapshot(proxy: &Bound<'_, BridgeMobject>) -> PyResult<Uniforms> {
             .ok_or_else(|| StaleHandleError::new_err("mobject handle no longer resolves"));
     }
     let cell = proxy.borrow();
-    cell.detached
+    cell.nursery
         .as_ref()
-        .map(|detached| detached.uniforms)
+        .and_then(|nursery| nursery.stage.get(nursery.root))
+        .map(|entry| *entry.uniforms())
         .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))
 }
 
@@ -521,7 +590,7 @@ fn bind_graph<'py>(
                 "a bound mobject belongs to a different Scene",
             ));
         }
-        if cell.engine.is_none() && (!cell.initialized || cell.detached.is_none()) {
+        if cell.engine.is_none() && (!cell.initialized || cell.nursery.is_none()) {
             return Err(StaleHandleError::new_err(
                 "uninitialized _BridgeMobject cannot enter a Scene",
             ));
@@ -533,19 +602,22 @@ fn bind_graph<'py>(
         if proxy.borrow().engine.is_some() {
             continue;
         }
-        let detached = proxy
-            .borrow_mut()
-            .detached
-            .take()
-            .expect("validated detached state");
+        // Adoption: transfer the nursery family into the scene's stage by
+        // content (the two-scene copy policy), then retire the nursery.
         let mob = {
+            let cell = proxy.borrow();
+            let nursery = cell.nursery.as_ref().expect("validated detached state");
             let mut runtime = engine.borrow_mut();
-            let mob = runtime.stage_mut().add(detached);
+            let mob = nursery
+                .stage
+                .copy_into(nursery.root, runtime.stage_mut())
+                .map_err(stage_error)?;
             runtime.stage_mut().pin(mob).map_err(stage_error)?;
             mob
         };
         {
             let mut cell = proxy.borrow_mut();
+            cell.nursery = None;
             cell.engine = Some(Rc::clone(&engine));
             cell.mob = Some(mob);
         }
@@ -798,7 +870,9 @@ fn record_state<'py>(
         if let (Some(engine), Some(mob)) = (&cell.engine, cell.mob) {
             engine.borrow().stage().z_index(mob)
         } else {
-            cell.detached.as_ref().map_or(0, |mobject| mobject.z_index)
+            cell.nursery
+                .as_ref()
+                .map_or(0, |nursery| nursery.stage.z_index(nursery.root))
         }
     };
     state.set_item("z_index", z_index)?;
@@ -905,7 +979,7 @@ fn restore_record_state(
     let mut detached = Mobject::from_buffer(buffer).with_uniforms(uniforms);
     detached.z_index = z_index;
     let mut cell = proxy.borrow_mut();
-    cell.detached = Some(detached);
+    cell.nursery = Some(Nursery::new(detached));
     cell.mob = None;
     cell.engine = None;
     cell.initialized = true;
@@ -991,7 +1065,7 @@ fn new_bound_proxy<'py>(
     {
         let bridge = proxy.cast::<BridgeMobject>()?;
         let mut cell = bridge.borrow_mut();
-        cell.detached = None;
+        cell.nursery = None;
         cell.engine = Some(Rc::clone(engine));
         cell.mob = Some(mob);
         cell.initialized = true;
@@ -1012,7 +1086,7 @@ impl BridgeMobject {
     #[pyo3(signature = (*_args, **_kwargs))]
     fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         Self {
-            detached: Some(Mobject::new()),
+            nursery: Some(Nursery::new(Mobject::new())),
             engine: None,
             mob: None,
             initialized: false,
@@ -1045,9 +1119,9 @@ impl BridgeMobject {
         let schema = parse_schema(slf)?;
         {
             let mut cell = slf.borrow_mut();
-            cell.detached = Some(Mobject::from_buffer(
+            cell.nursery = Some(Nursery::new(Mobject::from_buffer(
                 RecordBuffer::new(schema, 0).map_err(record_error_to_py)?,
-            ));
+            )));
             cell.initialized = true;
         }
         // No engine or proxy borrow is live across these calls. Each hook
@@ -1142,6 +1216,24 @@ impl BridgeMobject {
         with_uniforms(slf, |uniforms| set_uniform(uniforms, name, value))
     }
 
+    /// Positional binding: manim's `Mobject.set_height` semantics, routed
+    /// to the one Stage implementation (`Stage::set_height` →
+    /// `rescale_to_fit`) in both proxy states. Uniform scale about the
+    /// family bbox center unless `stretch`, which scales the y-axis only.
+    #[pyo3(signature = (height, stretch = false))]
+    fn _set_height(slf: &Bound<'_, Self>, height: f64, stretch: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_height(mob, height, stretch);
+        })
+    }
+
+    /// Family bounding-box height via `Stage::get_height`, in both states.
+    fn _get_height(slf: &Bound<'_, Self>) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.get_height(mob))
+    }
+
     fn _replace_submobjects(
         slf: &Bound<'_, Self>,
         children: Vec<Bound<'_, PyAny>>,
@@ -1162,7 +1254,7 @@ impl BridgeMobject {
             child_locations.push((
                 cell.engine.as_ref().map(Rc::clone),
                 cell.mob,
-                cell.initialized && cell.detached.is_some(),
+                cell.initialized && cell.nursery.is_some(),
             ));
         }
 
@@ -1171,7 +1263,7 @@ impl BridgeMobject {
             (
                 cell.engine.as_ref().map(Rc::clone),
                 cell.mob,
-                cell.initialized && cell.detached.is_some(),
+                cell.initialized && cell.nursery.is_some(),
             )
         };
         let (Some(engine), Some(parent), _) = parent_location else {
@@ -1349,7 +1441,7 @@ impl BridgeMobject {
         let cell = slf.borrow();
         match (&cell.engine, cell.mob) {
             (Some(engine), Some(mob)) => engine.borrow().stage().contains(mob),
-            _ => cell.detached.is_some(),
+            _ => cell.nursery.is_some(),
         }
     }
 

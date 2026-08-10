@@ -296,6 +296,17 @@ class Mobject(_BridgeMobject):
         self.submobjects.extend(mobjects)
         return self
 
+    # Positional surface (fm-d3gt): defined here, before the schema
+    # placeholder pass, so the parity placeholders skip these names. Both
+    # proxy states route through one engine Stage code path (the scene's
+    # stage when bound, the proxy's private nursery Stage when detached).
+    def set_height(self, height, stretch=False):
+        self._set_height(float(height), bool(stretch))
+        return self
+
+    def get_height(self):
+        return self._get_height()
+
     # The Reference's container protocol (manimlib/mobject/mobject.py):
     # a mobject iterates, indexes, and measures as its submobject list;
     # slicing regroups through the family's group class.
