@@ -15,7 +15,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::{
     Arc, Condvar, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -27,9 +27,11 @@ use fmn_scene::{AssetRead, EventPayload, Key, Modifiers, MouseButton};
 
 use crate::protocol::{
     DebugLayerSet, FrameEncoding, FramePayload, FrameStream, ProtocolError, ProtocolLimits,
-    StudioDataKind, SupervisorRequest, WorkerErrorCode, WorkerResponse,
+    StudioDataKind, SupervisorRequest, WorkerErrorCode, WorkerResponse, studio_seek_command,
 };
-use crate::supervisor::{Supervisor, SupervisorError, SupervisorReply};
+use crate::supervisor::{
+    RebuildDriver, RecoveryReport, Supervisor, SupervisorError, SupervisorReply,
+};
 use crate::ui;
 
 /// Multipart boundary used by the permanent browser preview floor.
@@ -496,7 +498,9 @@ pub struct StudioWorkerSession {
     scene: String,
     protocol_limits: ProtocolLimits,
     supervisor: Mutex<Supervisor>,
+    builder: Mutex<Box<dyn RebuildDriver + Send>>,
     asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync>,
+    committed_frame: AtomicI64,
 }
 
 impl fmt::Debug for StudioWorkerSession {
@@ -518,6 +522,7 @@ impl StudioWorkerSession {
     pub fn new(
         scene: &str,
         supervisor: Supervisor,
+        builder: Box<dyn RebuildDriver + Send>,
         asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync>,
     ) -> Result<Self, HostError> {
         if scene.is_empty() {
@@ -534,7 +539,9 @@ impl StudioWorkerSession {
             scene,
             protocol_limits,
             supervisor: Mutex::new(supervisor),
+            builder: Mutex::new(builder),
             asset_ok,
+            committed_frame: AtomicI64::new(0),
         })
     }
 
@@ -556,13 +563,84 @@ impl StudioWorkerSession {
 
     fn request(&self, request: SupervisorRequest) -> Result<WorkerResponse, HostError> {
         let reply = lock(&self.supervisor).request(request, &*self.asset_ok)?;
-        match reply {
-            SupervisorReply::Worker(response) => Ok(response),
-            SupervisorReply::Recovered { crash, .. } => {
-                Err(HostError::WorkerRecovered(crash.message))
-            }
-        }
+        worker_response(reply)
     }
+
+    fn commit_seek(&self, frame: i64) -> Result<WorkerResponse, HostError> {
+        let scene = self.try_owned_scene()?;
+        let command = studio_seek_command(&scene, frame)?;
+        let mut supervisor = lock(&self.supervisor);
+        let response = worker_response(supervisor.request(
+            SupervisorRequest::Play {
+                scene: studio_scene_with_capacity(&scene, scene.len())?,
+                command,
+            },
+            &*self.asset_ok,
+        )?)?;
+        if !matches!(response, WorkerResponse::JournalSegment { .. }) {
+            return Err(HostError::UnexpectedWorkerResponse);
+        }
+        self.committed_frame.store(frame, Ordering::Release);
+        worker_response(
+            supervisor.request(SupervisorRequest::Scrub { scene, frame }, &*self.asset_ok)?,
+        )
+    }
+
+    fn restart(&self) -> Result<StudioRestart, HostError> {
+        let incoming = lock(&self.supervisor).current_commands()?;
+        let mut builder = lock(&self.builder);
+        let mut supervisor = lock(&self.supervisor);
+        let recovery =
+            supervisor.rebuild_and_restart(&mut **builder, &incoming, &*self.asset_ok)?;
+        let invalidated_at = recovery.plan.reuse;
+        let mut reexecuted_entries = 0usize;
+        for command in incoming.into_iter().skip(invalidated_at) {
+            let response = worker_response(supervisor.request(
+                SupervisorRequest::Play {
+                    scene: self.try_owned_scene()?,
+                    command,
+                },
+                &*self.asset_ok,
+            )?)?;
+            if !matches!(response, WorkerResponse::JournalSegment { .. }) {
+                return Err(HostError::UnexpectedWorkerResponse);
+            }
+            reexecuted_entries =
+                reexecuted_entries
+                    .checked_add(1)
+                    .ok_or(HostError::Configuration(
+                        "Studio re-executed-entry count overflow",
+                    ))?;
+        }
+        let frame = worker_response(supervisor.request(
+            SupervisorRequest::Scrub {
+                scene: self.try_owned_scene()?,
+                frame: self.committed_frame.load(Ordering::Acquire),
+            },
+            &*self.asset_ok,
+        )?)?;
+        let WorkerResponse::Frame(frame) = frame else {
+            return Err(HostError::UnexpectedWorkerResponse);
+        };
+        Ok(StudioRestart {
+            recovery,
+            reexecuted_entries,
+            frame,
+        })
+    }
+}
+
+fn worker_response(reply: SupervisorReply) -> Result<WorkerResponse, HostError> {
+    match reply {
+        SupervisorReply::Worker(response) => Ok(response),
+        SupervisorReply::Recovered { crash, .. } => Err(HostError::WorkerRecovered(crash.message)),
+    }
+}
+
+struct StudioRestart {
+    recovery: RecoveryReport,
+    reexecuted_entries: usize,
+    frame: FrameStream,
 }
 
 fn studio_scene_with_capacity(scene: &str, capacity: usize) -> Result<String, HostError> {
@@ -964,6 +1042,7 @@ impl HostHandler {
             }
             (Method::Get, "/stream") => self.stream_frames(stream, now),
             (Method::Post, "/api/scrub") => self.scrub(stream, &request),
+            (Method::Post, "/api/restart") => self.restart(stream),
             (Method::Post, "/api/event") => self.event(stream, &request),
             (Method::Get, "/api/inspect") => self.inspect(stream),
             (Method::Get, "/api/overlays") => self.overlays(stream, &request),
@@ -1028,12 +1107,27 @@ impl HostHandler {
             Some(_) => return Err(HostError::BadRequest("invalid commit flag")),
         };
         let scene = self.session.try_owned_scene()?;
-        let request = if commit {
-            SupervisorRequest::Seek { scene, frame }
+        let response = if commit {
+            self.session.commit_seek(frame)?
         } else {
-            SupervisorRequest::Scrub { scene, frame }
+            self.session
+                .request(SupervisorRequest::Scrub { scene, frame })?
         };
-        self.write_worker_response(stream, self.session.request(request)?, None)
+        self.write_worker_response(stream, response, None)
+    }
+
+    fn restart(&self, stream: &mut TcpStream) -> Result<(), HostError> {
+        let restarted = self.session.restart()?;
+        let published = self
+            .frames
+            .publish(&restarted.frame, self.session.protocol_limits)?;
+        let body = restart_response_body(
+            &restarted.recovery,
+            restarted.reexecuted_entries,
+            published.frame_index,
+            &published.digest,
+        )?;
+        write_json_response(stream, body.as_bytes())
     }
 
     fn event(&self, stream: &mut TcpStream, request: &HttpRequest) -> Result<(), HostError> {
@@ -1825,6 +1919,41 @@ fn frame_response_body(frame_index: u64, digest: &Digest) -> Result<String, Host
     Ok(body.into_string())
 }
 
+fn restart_response_body(
+    recovery: &RecoveryReport,
+    reexecuted_entries: usize,
+    frame_index: u64,
+    digest: &Digest,
+) -> Result<String, HostError> {
+    let mut body = response_text_with_capacity(320, "HTTP restart response body")?;
+    body.append("{\"status\":\"restarted\",\"worker_generation\":")?;
+    body.write_arguments(format_args!("{}", recovery.generation))?;
+    body.append(",\"reused_entries\":")?;
+    body.write_arguments(format_args!("{}", recovery.plan.reuse))?;
+    body.append(",\"replayed_entries\":")?;
+    body.write_arguments(format_args!("{}", recovery.replayed_entries))?;
+    body.append(",\"reexecuted_entries\":")?;
+    body.write_arguments(format_args!("{reexecuted_entries}"))?;
+    body.append(",\"cold_fallback\":")?;
+    body.append(if recovery.cold_fallback {
+        "true"
+    } else {
+        "false"
+    })?;
+    body.append(",\"within_edit_to_frame_budget\":")?;
+    body.append(if recovery.within_edit_to_frame_budget {
+        "true"
+    } else {
+        "false"
+    })?;
+    body.append(",\"frame_index\":")?;
+    body.write_arguments(format_args!("{frame_index}"))?;
+    body.append(",\"sha256\":\"")?;
+    write_digest_hex(&mut body, digest)?;
+    body.append("\"}")?;
+    Ok(body.into_string())
+}
+
 fn ack_response_body(journal_len: u64, state_hash: Option<&Digest>) -> Result<String, HostError> {
     let mut body = response_text_with_capacity(128, "HTTP acknowledgment response body")?;
     body.append("{\"status\":\"ok\",\"journal_len\":")?;
@@ -2316,7 +2445,21 @@ mod tests {
     use fmn_platform::clock::FakeClock;
     use fmn_platform::fs::{FileSystem, VirtualFs};
 
-    use crate::supervisor::{StdWorkerLauncher, SupervisorConfig};
+    use crate::supervisor::{
+        BuildError, RebuildDriver, StdWorkerLauncher, SupervisorConfig, WorkerArtifact,
+    };
+
+    struct UnusedBuilder;
+
+    impl RebuildDriver for UnusedBuilder {
+        fn rebuild(&mut self) -> Result<WorkerArtifact, BuildError> {
+            Err(BuildError::new("host unit test did not request a rebuild"))
+        }
+    }
+
+    fn unused_builder() -> Box<dyn RebuildDriver + Send> {
+        Box::new(UnusedBuilder)
+    }
 
     fn test_supervisor_with_protocol_limits(
         limits: ProtocolLimits,
@@ -2358,8 +2501,10 @@ mod tests {
         limits: ProtocolLimits,
     ) -> (Arc<StudioWorkerSession>, Arc<dyn Clock>) {
         let (supervisor, clock) = test_supervisor_with_protocol_limits(limits);
-        let session =
-            Arc::new(StudioWorkerSession::new("Demo", supervisor, Arc::new(|_| true)).unwrap());
+        let session = Arc::new(
+            StudioWorkerSession::new("Demo", supervisor, unused_builder(), Arc::new(|_| true))
+                .unwrap(),
+        );
         (session, clock)
     }
 
@@ -3343,11 +3488,24 @@ mod tests {
             ..ProtocolLimits::default()
         };
         let (exact_supervisor, _) = test_supervisor_with_protocol_limits(limits);
-        assert!(StudioWorkerSession::new("Demo", exact_supervisor, Arc::new(|_| true)).is_ok());
+        assert!(
+            StudioWorkerSession::new(
+                "Demo",
+                exact_supervisor,
+                unused_builder(),
+                Arc::new(|_| true)
+            )
+            .is_ok()
+        );
 
         let (oversized_supervisor, _) = test_supervisor_with_protocol_limits(limits);
         assert!(matches!(
-            StudioWorkerSession::new("Demos", oversized_supervisor, Arc::new(|_| true)),
+            StudioWorkerSession::new(
+                "Demos",
+                oversized_supervisor,
+                unused_builder(),
+                Arc::new(|_| true)
+            ),
             Err(HostError::Configuration(
                 "Studio scene name exceeds protocol field budget"
             ))

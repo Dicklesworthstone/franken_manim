@@ -1143,6 +1143,15 @@ impl Supervisor {
         self.journal_cache_digest
     }
 
+    /// Fallibly own the current command stream for an incremental rebuild.
+    ///
+    /// The caller can pass this directly to [`Self::rebuild_and_restart`].
+    /// Returning an owned stream keeps the supervisor free to replace its
+    /// journal as the restarted worker re-executes an invalidated suffix.
+    pub fn current_commands(&self) -> Result<Vec<CommandRecord>, SupervisorError> {
+        try_clone_command_records(&self.journal)
+    }
+
     /// Install the current scene and replay record.  Every checkpoint is
     /// integrity-checked before it becomes recovery authority and is written
     /// best-effort into the warm cache.

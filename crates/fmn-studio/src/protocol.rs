@@ -20,9 +20,52 @@ use fmn_scene::{
 pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 0);
 /// Canonical response envelope schema.
 pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 0);
+const STUDIO_SEEK_COMMAND_SCHEMA: Schema = Schema::new(*b"FMNI", 3, 1, 0);
 
 /// The live protocol version advertised during the mandatory handshake.
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
+
+const STUDIO_SEEK_LABEL_PREFIX: &str = "studio seek frame ";
+
+/// Build the canonical replay command for one committed Studio seek.
+///
+/// The frame remains human-readable in the label while the command identity
+/// binds both the scene and frame through a domain-separated canonical
+/// document. The worker validates the complete record before executing it, so
+/// a label cannot be edited independently of the identity.
+pub fn studio_seek_command(scene: &str, frame: i64) -> Result<CommandRecord, ProtocolError> {
+    require_scene(scene)?;
+    if frame < 0 {
+        return Err(ProtocolError::Malformed("negative Studio seek frame"));
+    }
+    let mut identity = Writer::new(STUDIO_SEEK_COMMAND_SCHEMA);
+    identity.put_str(scene).put_i64(frame);
+    let identity = sha256(&identity.finish()?);
+    let mut label = string_with_capacity(64, "Studio seek command label")?;
+    label.push_str(STUDIO_SEEK_LABEL_PREFIX);
+    fmt::write(&mut label, format_args!("{frame}"))
+        .map_err(|_| ProtocolError::Malformed("Studio seek command label"))?;
+    Ok(CommandRecord {
+        kind: CommandKind::Wait,
+        identity,
+        label,
+    })
+}
+
+/// Recover and authenticate the frame carried by a Studio seek command.
+pub fn studio_seek_frame(scene: &str, command: &CommandRecord) -> Result<i64, ProtocolError> {
+    let frame = command
+        .label
+        .strip_prefix(STUDIO_SEEK_LABEL_PREFIX)
+        .ok_or(ProtocolError::Malformed("Studio seek command label"))?
+        .parse::<i64>()
+        .map_err(|_| ProtocolError::Malformed("Studio seek command frame"))?;
+    let expected = studio_seek_command(scene, frame)?;
+    if &expected != command {
+        return Err(ProtocolError::Malformed("Studio seek command identity"));
+    }
+    Ok(frame)
+}
 
 /// A live-protocol version.
 ///
@@ -2048,6 +2091,23 @@ fn require_scene(scene: &str) -> Result<(), ProtocolError> {
         Err(ProtocolError::Malformed("empty scene name"))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod studio_command_tests {
+    use super::*;
+
+    #[test]
+    fn committed_seek_command_round_trips_and_binds_scene_frame_and_label() {
+        let command = studio_seek_command("Demo", 17).expect("valid seek command");
+        assert_eq!(studio_seek_frame("Demo", &command), Ok(17));
+
+        let mut wrong_label = command.clone();
+        wrong_label.label = "studio seek frame 18".to_owned();
+        assert!(studio_seek_frame("Demo", &wrong_label).is_err());
+        assert!(studio_seek_frame("Other", &command).is_err());
+        assert!(studio_seek_command("Demo", -1).is_err());
     }
 }
 

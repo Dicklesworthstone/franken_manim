@@ -13,9 +13,10 @@ use fmn_hash::sha256;
 use fmn_platform::clock::{Clock, FakeClock};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_studio::{
-    CapabilityToken, FrameHub, LaunchError, ProtocolLimits, STUDIO_UI_VERSION,
-    STUDIO_UI_VERSION_HEADER, StudioHost, StudioHostConfig, StudioWorkerSession, Supervisor,
-    SupervisorConfig, WorkerArtifact, WorkerChannel, WorkerLauncher, ui_asset, ui_assets,
+    BuildError, CapabilityToken, FrameHub, LaunchError, ProtocolLimits, RebuildDriver,
+    STUDIO_UI_VERSION, STUDIO_UI_VERSION_HEADER, StudioHost, StudioHostConfig, StudioWorkerSession,
+    Supervisor, SupervisorConfig, WorkerArtifact, WorkerChannel, WorkerLauncher, ui_asset,
+    ui_assets,
 };
 
 /// The UI routes never touch the worker; a launcher that refuses by name
@@ -31,6 +32,12 @@ impl WorkerLauncher for NoLauncher {
         Err(LaunchError::InvalidArtifact(
             "the UI asset test never launches a worker",
         ))
+    }
+}
+
+impl RebuildDriver for NoLauncher {
+    fn rebuild(&mut self) -> Result<WorkerArtifact, BuildError> {
+        Err(BuildError::new("the UI asset test never rebuilds a worker"))
     }
 }
 
@@ -65,7 +72,8 @@ fn test_host() -> TestHost {
         SupervisorConfig::default(),
     );
     let session =
-        StudioWorkerSession::new("Ui", supervisor, Arc::new(|_| true)).expect("session binds");
+        StudioWorkerSession::new("Ui", supervisor, Box::new(NoLauncher), Arc::new(|_| true))
+            .expect("session binds");
     let token = CapabilityToken::new([0x42; 32]).expect("nonzero capability");
     let capability_hex = token.try_expose_hex().expect("token hex storage");
     let frames = FrameHub::new(2, 1024 * 1024).expect("frame hub");

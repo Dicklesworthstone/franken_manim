@@ -63,6 +63,10 @@ document.getElementById("seek").addEventListener("click", async () => {
   });
   document.getElementById("result").textContent = await response.text();
 });
+document.getElementById("restart").addEventListener("click", async () => {
+  const response = await fetch("/api/restart", {method: "POST", headers});
+  document.getElementById("result").textContent = await response.text();
+});
 "#;
 
 /// The static prefix of the index shell. The capability token and suffix are
@@ -77,7 +81,8 @@ const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
     "<title>FrankenManim Studio</title><h1>FrankenManim Studio</h1>",
     "<img id=\"preview\" alt=\"Live preview\">",
     "<p><input id=\"frame\" type=\"number\" min=\"0\" value=\"0\">",
-    "<button id=\"seek\">Seek</button><button id=\"inspect\">Inspect</button></p>",
+    "<button id=\"seek\">Seek</button><button id=\"restart\">Reload worker</button>",
+    "<button id=\"inspect\">Inspect</button></p>",
     "<pre id=\"result\"></pre>",
     "<script src=\"/studio.js?cap="
 );
@@ -154,6 +159,8 @@ mod tests {
         )));
         let rendered = studio_index_html("abc123").unwrap();
         assert!(rendered.contains("/studio.js?cap=abc123"));
+        assert!(rendered.contains("id=\"restart\""));
+        assert!(STUDIO_JS.contains("fetch(\"/api/restart\""));
     }
 
     #[test]
