@@ -385,14 +385,9 @@ fn preflight_warms_the_cache_in_parallel_and_collects_errors() {
 fn construct_errors_surface_named_and_tier_tagged() {
     let e = engine();
     // The pending tier-2 example advances as constructs graduate (fm-j5t).
-    let err = e
-        .typeset(Mode::Math(Style::Display), r"\dx")
-        .unwrap_err();
+    let err = e.typeset(Mode::Math(Style::Display), r"\dx").unwrap_err();
     let msg = err.to_string();
-    assert!(
-        msg.contains(r"`\dx` is not yet supported"),
-        "{msg}"
-    );
+    assert!(msg.contains(r"`\dx` is not yet supported"), "{msg}");
     assert!(msg.contains("tier T2"), "{msg}");
     assert!(msg.contains("fm-j5t"), "tracked-at pointer: {msg}");
 

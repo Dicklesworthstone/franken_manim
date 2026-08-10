@@ -213,9 +213,7 @@ fn the_kg9_frontier_lays_out_through_the_pin() {
     assert_eq!(stack.glyphs.len(), 2);
     assert!(stack.glyphs.iter().all(|g| (g.size - 0.7).abs() < 1e-9));
     // …and the boundary still names itself for what remains pending.
-    let err = engine
-        .typeset(r"\dx", Style::Display)
-        .unwrap_err();
+    let err = engine.typeset(r"\dx", Style::Display).unwrap_err();
     assert_eq!(err.unsupported_construct(), Some(r"\dx"));
     assert!(err.to_string().contains("tier T2"), "{err}");
 }
