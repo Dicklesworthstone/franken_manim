@@ -178,3 +178,35 @@ fn unknown_built_in_scene_fails_before_publication() {
         0
     );
 }
+
+#[test]
+fn video_render_names_the_missing_optional_tool_and_native_alternative() {
+    let root = output_root("missing-ffmpeg");
+    let output = run_clean(&[
+        "--robot",
+        "--format",
+        "video",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(4), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("\"exit_name\":\"capability\""));
+    assert!(stdout.contains("ffmpeg is unavailable"));
+    assert!(stdout.contains("native outputs need no ffmpeg"));
+    assert!(stdout.contains("y4m, PNG sequences, and GIF"));
+    assert_eq!(
+        std::fs::read_dir(root)
+            .expect("list untouched output root")
+            .count(),
+        0
+    );
+}
