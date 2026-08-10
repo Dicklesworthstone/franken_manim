@@ -5178,16 +5178,89 @@ fn write_studio_ready(
         .map_err(|error| internal(format!("could not publish Studio launch URL: {error}")))
 }
 
+fn studio_terminal_protocol(
+    term: Option<&OsStr>,
+    term_program: Option<&OsStr>,
+    kitty_window_id: Option<&OsStr>,
+) -> fmn_studio::TerminalProtocol {
+    if term == Some(OsStr::new("xterm-kitty"))
+        || term_program == Some(OsStr::new("kitty"))
+        || kitty_window_id.is_some_and(|value| !value.is_empty())
+    {
+        fmn_studio::TerminalProtocol::Kitty
+    } else {
+        fmn_studio::TerminalProtocol::Sixel
+    }
+}
+
+fn write_studio_terminal_frame(
+    preview: fmn_studio::TerminalPreview,
+    mut writer: &mut dyn std::io::Write,
+    frame: &fmn_studio::PngFrame,
+) -> Result<(), CliError> {
+    let result = match preview.protocol() {
+        fmn_studio::TerminalProtocol::Kitty => preview.write_png(&mut writer, &frame.png),
+        fmn_studio::TerminalProtocol::Sixel => {
+            let decoded = fmn_codec::decode_png(
+                &frame.png,
+                &fmn_codec::PngLimits {
+                    max_pixels: u64::from(frame.width) * u64::from(frame.height),
+                    ..fmn_codec::PngLimits::default()
+                },
+            )
+            .map_err(|error| CliError::new("render", format!("Studio TUI frame: {error}")))?;
+            preview.write_rgba8(&mut writer, decoded.width, decoded.height, &decoded.rgba)
+        }
+    };
+    result.map_err(|error| CliError::new("render", format!("Studio TUI frame: {error}")))
+}
+
+fn serve_studio_tui(
+    host: fmn_studio::StudioHost,
+    frames: &fmn_studio::FrameHub,
+    ready: &mut dyn std::io::Write,
+    shutdown: &AtomicBool,
+) -> Result<(), CliError> {
+    let protocol = studio_terminal_protocol(
+        std::env::var_os("TERM").as_deref(),
+        std::env::var_os("TERM_PROGRAM").as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").as_deref(),
+    );
+    let preview = fmn_studio::TerminalPreview::new(protocol, fmn_studio::TuiLimits::default())
+        .map_err(|error| CliError::new("capability", format!("Studio TUI: {error}")))?;
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| host.serve_until(shutdown));
+        let mut last_publication = None;
+        let mut terminal_result = Ok(());
+        while !shutdown.load(Ordering::Acquire) && !server.is_finished() {
+            let Some(frame) = frames.wait_after(last_publication, Duration::from_millis(50)) else {
+                continue;
+            };
+            last_publication = Some(frame.publication_sequence);
+            if let Err(error) = write_studio_terminal_frame(preview, ready, &frame) {
+                shutdown.store(true, Ordering::Release);
+                terminal_result = Err(error);
+                break;
+            }
+        }
+        let server_result = server
+            .join()
+            .map_err(|_| internal("Studio host thread panicked"))?
+            .map_err(|error| CliError::new("scene", format!("Studio host: {error}")));
+        terminal_result.and(server_result)
+    })
+}
+
 fn execute_studio(
     public_args: Vec<String>,
     command: StudioCommand,
     ready: &mut dyn std::io::Write,
     shutdown: &AtomicBool,
 ) -> Result<(), CliError> {
-    if command.tui {
-        return Err(CliError::new(
-            "capability",
-            "the terminal Studio client is not yet registered; use the embedded loopback web UI",
+    if command.tui && command.render.common.robot {
+        return Err(usage(
+            "--tui writes terminal escape records and cannot be combined with --robot",
         ));
     }
     if command.preview_codec != PreviewCodec::Png {
