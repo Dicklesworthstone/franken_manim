@@ -145,9 +145,10 @@ fn shims_are_documented_and_the_import_shim_is_hash_pinned() {
         [
             "import-virtualization",
             "asset-path-virtualization",
-            "fonts"
+            "fonts",
+            "kwarg-vintage"
         ],
-        "the three documented shim axes of §15.3, in order"
+        "the §15.3 shim axes plus the R13 kwarg-vintage era shim, in order"
     );
     for row in shims {
         let fields: Vec<&str> = row.split('\t').collect();
