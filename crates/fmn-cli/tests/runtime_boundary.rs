@@ -415,7 +415,25 @@ fn batch_publishes_complete_fmnp_manifests_and_preflights_no_clobber() {
     .expect("verify four-thread FMNP");
     assert_eq!(first_closure, Some(four_manifest.closure_digest));
     assert_eq!(first_outputs[0], four_manifest.outputs[0].digest);
-    assert!(four_stdout.contains("\"render_threads\":4"));
+    // The planner honors --threads as a ceiling, not a demand: render
+    // threads come out as min(limit, physical cores), so a 2-core CI
+    // runner legitimately reports 2 here. Assert the ceiling held; the
+    // closure/output digest equalities above are the thread-invariance
+    // proof.
+    let render_threads: usize = four_stdout
+        .split("\"render_threads\":")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
+        .expect("four-thread run reports render_threads");
+    assert!(
+        (1..=4).contains(&render_threads),
+        "--threads 4 ceiling violated: {render_threads}"
+    );
 
     let (_still_artifacts, still_manifests, _still_stdout) =
         render_with_manifests("fmnp-still", "1", "png");
