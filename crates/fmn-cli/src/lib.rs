@@ -5926,7 +5926,11 @@ mod tests {
         use fmn_platform::fs::StdFs;
         use std::sync::Arc;
 
-        let root = std::env::temp_dir().join(format!("fmn-cli-clear-cache-{}", std::process::id()));
+        // Store::open refuses symlinked root components, and macOS's
+        // temp_dir lives under /var -> /private/var; resolve it first.
+        let tmp = std::env::temp_dir();
+        let tmp = tmp.canonicalize().unwrap_or(tmp);
+        let root = tmp.join(format!("fmn-cli-clear-cache-{}", std::process::id()));
         let _ = StdFs.remove_dir_all(&root);
         let store = Store::open(
             Arc::new(StdFs),
