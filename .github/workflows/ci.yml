@@ -103,14 +103,21 @@ jobs:
         run: bash scripts/check.sh
 
   x86-64-v4:
-    name: weekly check (x86-64-v4, qemu)
+    # qemu-user TCG cannot emulate AVX-512 (any qemu version to date), and
+    # ADR-0016's crate-wide tier flags emit AVX-512 unconditionally, so the
+    # v4 test binaries SIGILL under emulation by construction. The lane
+    # therefore runs the full gate natively when the runner's CPU has
+    # AVX-512 (Xeon-backed runners) and downgrades — loudly, never
+    # silently — to a compile+clippy tier check when it does not
+    # (EPYC-backed runners). Execution coverage on a guaranteed-AVX-512
+    # host is fm-inr.1's dedicated-hardware program.
+    name: weekly check (x86-64-v4)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
       CARGO_TARGET_DIR: target/x86-64-v4
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: qemu-x86_64 -cpu max -L /
       FMN_SIMD_TIER_GATE: "1"
       RUSTFLAGS: -C target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl
     steps:
@@ -120,12 +127,6 @@ jobs:
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
-
-      - name: Install and fingerprint x86-64 emulator
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes qemu-user
-          qemu-x86_64 --version
 
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -139,8 +140,16 @@ jobs:
       - name: Install NumPy for the PG-8 bridge
         run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
 
-      - name: Compile the workspace and run the SIMD tier gate
-        run: bash scripts/check.sh
+      - name: Run the SIMD tier gate (native AVX-512 or compile-only)
+        run: |
+          if grep -q avx512f /proc/cpuinfo; then
+            echo "runner CPU has AVX-512; running the full gate natively"
+            bash scripts/check.sh
+          else
+            echo "::warning::runner CPU lacks AVX-512 and qemu TCG cannot emulate it; v4 tier downgraded to compile+clippy only this week"
+            cargo check --all-targets
+            cargo clippy --all-targets -- -D warnings
+          fi
 
   aarch64-neon:
     name: weekly check (aarch64-neon)
@@ -346,6 +355,11 @@ jobs:
             target/certified-${{ matrix.label }}
           key: cargo-${{ runner.os }}-${{ runner.arch }}-certified-${{ matrix.label }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
+      # The PG-8 bridge harness drives the host CPython against real
+      # NumPy; without it the perf_pg8 suite fails with ModuleNotFoundError.
+      - name: Install NumPy for the PG-8 bridge
+        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+
       - name: Run the workspace tests
         run: cargo test
 
@@ -448,8 +462,13 @@ jobs:
 
       # cargo-fuzz is the class=fuzz toolchain (ADR-0003): pinned install,
       # unreachable from any shipped artifact.
+      # Not --locked: cargo-fuzz 0.13.1's committed lockfile pins rustix
+      # 0.36.5, which the pinned nightly refuses to compile (its rustc_attrs
+      # probe no longer fires). The version stays pinned; its dependency
+      # graph resolves against the live index. The tool is unreachable from
+      # any shipped artifact, so D1's closure discipline is not in play.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version 0.13.1
+        run: cargo install cargo-fuzz --version 0.13.1
 
       - name: Run the scheduled fuzz campaign
         run: bash scripts/fuzz_scheduled.sh
