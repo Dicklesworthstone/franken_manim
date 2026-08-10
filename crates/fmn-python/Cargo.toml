@@ -20,6 +20,7 @@ fmn-config.workspace = true
 fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-library.workspace = true
+fmn-render.workspace = true
 fmn-scene.workspace = true
 pyo3.workspace = true
 

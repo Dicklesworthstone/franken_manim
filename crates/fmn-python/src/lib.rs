@@ -1888,6 +1888,177 @@ impl PyGilProbe {
     }
 }
 
+/// The engine-backed camera-frame state (fm-d3gt): a thin proxy over
+/// Lumen's [`fmn_render::CameraFrame`], the ONE implementation of the
+/// Reference's euler/orientation/shape/fov semantics (fm-0gy).
+///
+/// The bootstrap's `CameraFrame(Mobject)` owns one of these as its
+/// authoritative state; every camera method delegates here, so orientation,
+/// center, shape, and field of view round-trip exactly (D5, state-real).
+/// This value is also the future renderer-binding seam: a render tranche
+/// hands the same `fmn_render::CameraFrame` to Lumen's `Camera` unchanged.
+#[pyclass(unsendable, name = "_CameraFrameCore")]
+struct PyCameraFrameCore {
+    frame: fmn_render::CameraFrame,
+}
+
+fn camera_error(error: fmn_render::CameraError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pymethods]
+impl PyCameraFrameCore {
+    #[new]
+    fn py_new(
+        frame_shape: [f64; 2],
+        center_point: [f64; 3],
+        fovy: f64,
+        euler_axes: &str,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            frame: fmn_render::CameraFrame::new(frame_shape, center_point, fovy, euler_axes)
+                .map_err(camera_error)?,
+        })
+    }
+
+    fn __copy__(&self) -> Self {
+        Self {
+            frame: self.frame.clone(),
+        }
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        Self {
+            frame: self.frame.clone(),
+        }
+    }
+
+    fn center(&self) -> [f64; 3] {
+        self.frame.center()
+    }
+
+    fn set_center(&mut self, center: [f64; 3]) -> PyResult<()> {
+        self.frame.set_center(center).map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn shape(&self) -> (f64, f64) {
+        let [width, height] = self.frame.shape();
+        (width, height)
+    }
+
+    fn set_shape(&mut self, shape: [f64; 2]) -> PyResult<()> {
+        self.frame.set_shape(shape).map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn aspect_ratio(&self) -> f64 {
+        self.frame.aspect_ratio()
+    }
+
+    fn scale(&self) -> f64 {
+        self.frame.scale()
+    }
+
+    fn orientation(&self) -> [f64; 4] {
+        self.frame.orientation()
+    }
+
+    fn set_orientation(&mut self, orientation: [f64; 4]) -> PyResult<()> {
+        self.frame
+            .set_orientation(orientation)
+            .map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn make_orientation_default(&mut self) {
+        self.frame.make_orientation_default();
+    }
+
+    // Reference-verbatim pymethod name; the Rust naming lint does not apply.
+    #[allow(clippy::wrong_self_convention)]
+    fn to_default_state(&mut self) {
+        self.frame.to_default_state();
+    }
+
+    fn euler_axes(&self) -> String {
+        self.frame.euler_axes().to_owned()
+    }
+
+    fn set_euler_axes(&mut self, seq: &str) -> PyResult<()> {
+        self.frame.set_euler_axes(seq).map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn euler_angles(&self) -> [f64; 3] {
+        self.frame.euler_angles()
+    }
+
+    fn set_euler_angles(
+        &mut self,
+        theta: Option<f64>,
+        phi: Option<f64>,
+        gamma: Option<f64>,
+    ) -> PyResult<()> {
+        self.frame
+            .set_euler_angles(theta, phi, gamma)
+            .map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn increment_euler_angles(&mut self, dtheta: f64, dphi: f64, dgamma: f64) -> PyResult<()> {
+        self.frame
+            .increment_euler_angles(dtheta, dphi, dgamma)
+            .map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn rotate(&mut self, angle: f64, axis: [f64; 3]) -> PyResult<()> {
+        self.frame.rotate(angle, axis).map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn field_of_view(&self) -> f64 {
+        self.frame.field_of_view()
+    }
+
+    fn set_field_of_view(&mut self, fovy: f64) -> PyResult<()> {
+        self.frame.set_field_of_view(fovy).map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn focal_distance(&self) -> f64 {
+        self.frame.focal_distance()
+    }
+
+    fn set_focal_distance(&mut self, focal_distance: f64) -> PyResult<()> {
+        self.frame
+            .set_focal_distance(focal_distance)
+            .map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn view_matrix(&self) -> [[f64; 4]; 4] {
+        self.frame.view_matrix()
+    }
+
+    // The `to_*`/`from_*` names mirror the Reference's Python API verbatim;
+    // Rust's self-convention lint does not apply to a pymethod surface.
+    #[allow(clippy::wrong_self_convention)]
+    fn to_fixed_frame_point(&self, point: [f64; 3], relative: bool) -> [f64; 3] {
+        self.frame.to_fixed_frame_point(point, relative)
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    fn from_fixed_frame_point(&self, point: [f64; 3], relative: bool) -> [f64; 3] {
+        self.frame.from_fixed_frame_point(point, relative)
+    }
+
+    fn implied_camera_location(&self) -> [f64; 3] {
+        self.frame.implied_camera_location()
+    }
+}
+
 fn execute_bootstrap(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     // Direct ExtensionFileLoader users do not install the module in
     // sys.modules until after create_module returns, but our bootstrap must
@@ -1913,6 +2084,7 @@ fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyScene>()?;
     module.add_class::<PyRecordView>()?;
     module.add_class::<PyGilProbe>()?;
+    module.add_class::<PyCameraFrameCore>()?;
     module.add_class::<ladder::PyBatchedUpdater>()?;
     module.add_class::<ladder::PyArrayUpdater>()?;
     module.add_class::<ladder::PyNativeUpdater>()?;

@@ -769,6 +769,7 @@ dependencies = [
  "fmn-core",
  "fmn-library",
  "fmn-mobject",
+ "fmn-render",
  "fmn-scene",
  "pyo3",
 ]

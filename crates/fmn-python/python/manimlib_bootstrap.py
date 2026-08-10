@@ -20,6 +20,12 @@ import weakref as _weakref
 
 import numpy as _np
 
+# The module seam handle `_FMN_MODULE` is removed from the module dict once
+# the bootstrap finishes (execute_bootstrap's temporary self-reference), so
+# anything that must resolve the root module at RUNTIME — lazy class lookups
+# in methods — goes through this persistent alias instead.
+_FMN_ROOT = _FMN_MODULE
+
 # Reference default values used by the positional surface's signatures.
 # These are the same objects the schema constant pass later publishes under
 # their public names (RIGHT, ORIGIN, ...); they exist here privately because
@@ -41,6 +47,12 @@ _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
 def _vec3(value):
     """A sequence (list/tuple/numpy array) as the engine's (x, y, z) floats."""
     return (float(value[0]), float(value[1]), float(value[2]))
+
+
+_FRAME_X_RADIUS, _FRAME_Y_RADIUS = _BridgeMobject._frame_radii()
+_FRAME_SHAPE = (2.0 * _FRAME_X_RADIUS, 2.0 * _FRAME_Y_RADIUS)
+_DEG = _math.tau / 360.0
+_RADIANS = 1.0
 
 
 class _LiveSubmobjects(list):
@@ -551,6 +563,25 @@ class Mobject(_BridgeMobject):
     def set_depth(self, depth, stretch=False, **kwargs):
         return self.rescale_to_fit(depth, 2, stretch=stretch, **kwargs)
 
+    def set_shape(self, width=None, height=None, depth=None, **kwargs):
+        if width is not None:
+            self.set_width(width, stretch=True, **kwargs)
+        if height is not None:
+            self.set_height(height, stretch=True, **kwargs)
+        if depth is not None:
+            self.set_depth(depth, stretch=True, **kwargs)
+        return self
+
+    def set_max_width(self, max_width, **kwargs):
+        if self.get_width() > max_width:
+            self.set_width(max_width, **kwargs)
+        return self
+
+    def set_max_height(self, max_height, **kwargs):
+        if self.get_height() > max_height:
+            self.set_height(max_height, **kwargs)
+        return self
+
     def match_dim_size(self, mobject, dim, **kwargs):
         return self.rescale_to_fit(mobject.length_over_dim(dim), dim, **kwargs)
 
@@ -719,7 +750,7 @@ class Mobject(_BridgeMobject):
         return self.submobjects
 
     def get_group_class(self):
-        return getattr(_FMN_MODULE, "Group", Mobject)
+        return getattr(_FMN_ROOT, "Group", Mobject)
 
     def __getitem__(self, value):
         if isinstance(value, slice):
@@ -822,13 +853,299 @@ class VMobject(Mobject):
     ]
 
     def get_group_class(self):
-        return getattr(_FMN_MODULE, "VGroup", VMobject)
+        return getattr(_FMN_ROOT, "VGroup", VMobject)
+
+
+class CameraFrame(Mobject):
+    """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
+    real Mobject whose authoritative state lives in one engine
+    `_CameraFrameCore` (Lumen's `fmn_render::CameraFrame`, fm-0gy).
+
+    State-real by construction (D5): orientation, center, shape, and field
+    of view round-trip exactly through the engine value — never an inert
+    stub. The positional primitives (`shift`/`scale`/`stretch`/`_bbox_rows`)
+    are overridden to read and write that same state, so every inherited
+    Mobject method (`move_to`, `set_x`, `set_height`, `center`, ...)
+    operates on the camera frame exactly as the Reference's point-backed
+    implementation does. `self._core` is the renderer-binding seam: a later
+    render tranche hands this same engine value to Lumen's `Camera`.
+
+    Divergence note: without a SciPy dependency, `set_orientation` accepts
+    a scipy-order `(x, y, z, w)` quaternion sequence (or any object with an
+    `as_quat()` method) and `get_orientation` returns that quaternion as a
+    numpy array rather than a `scipy.spatial.transform.Rotation`.
+    """
+
+    def __init__(
+        self,
+        frame_shape=_FRAME_SHAPE,
+        center_point=_ORIGIN,
+        fovy=45 * _DEG,
+        euler_axes="zxz",
+        z_index=-1,
+        **kwargs,
+    ):
+        super().__init__(z_index=z_index, **kwargs)
+        self._core = _CameraFrameCore(
+            (float(frame_shape[0]), float(frame_shape[1])),
+            _vec3(center_point),
+            float(fovy),
+            euler_axes,
+        )
+
+    # -- the positional primitives, routed to the engine camera state
+
+    def _bbox_rows(self):
+        center = _np.array(self._core.center())
+        width, height = self._core.shape()
+        half = _np.array([width / 2.0, height / 2.0, 0.0])
+        return _np.array([center - half, center, center + half])
+
+    def shift(self, vector):
+        vector = _vec3(vector)
+        center = self._core.center()
+        self._core.set_center(
+            (
+                center[0] + vector[0],
+                center[1] + vector[1],
+                center[2] + vector[2],
+            )
+        )
+        return self
+
+    def scale(
+        self,
+        scale_factor,
+        min_scale_factor=1e-8,
+        about_point=None,
+        about_edge=_ORIGIN,
+    ):
+        pivot = _np.array(self._resolve_pivot(about_point, about_edge))
+        factor = max(float(scale_factor), float(min_scale_factor))
+        center = _np.array(self._core.center())
+        width, height = self._core.shape()
+        self._core.set_shape((width * factor, height * factor))
+        self._core.set_center(tuple(pivot + factor * (center - pivot)))
+        return self
+
+    def stretch(self, factor, dim, **kwargs):
+        pivot = _np.array(
+            self._resolve_pivot(
+                kwargs.pop("about_point", None), kwargs.pop("about_edge", _ORIGIN)
+            )
+        )
+        if kwargs:
+            raise TypeError(
+                "stretch() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        factor = float(factor)
+        dim = int(dim)
+        center = _np.array(self._core.center())
+        center[dim] = pivot[dim] + factor * (center[dim] - pivot[dim])
+        if dim in (0, 1):
+            width, height = self._core.shape()
+            if dim == 0:
+                width *= factor
+            else:
+                height *= factor
+            self._core.set_shape((width, height))
+        self._core.set_center(tuple(center))
+        return self
+
+    # -- orientation
+
+    def set_orientation(self, rotation):
+        if hasattr(rotation, "as_quat"):
+            rotation = rotation.as_quat()
+        self._core.set_orientation(
+            (
+                float(rotation[0]),
+                float(rotation[1]),
+                float(rotation[2]),
+                float(rotation[3]),
+            )
+        )
+        return self
+
+    def get_orientation(self):
+        return _np.array(self._core.orientation())
+
+    def make_orientation_default(self):
+        self._core.make_orientation_default()
+        return self
+
+    def to_default_state(self):
+        self._core.to_default_state()
+        return self
+
+    def get_euler_angles(self):
+        return _np.array(self._core.euler_angles())
+
+    def get_theta(self):
+        return self.get_euler_angles()[0]
+
+    def get_phi(self):
+        return self.get_euler_angles()[1]
+
+    def get_gamma(self):
+        return self.get_euler_angles()[2]
+
+    def get_scale(self):
+        return self._core.scale()
+
+    def get_inverse_camera_rotation_matrix(self):
+        return _np.array(self._core.view_matrix())[:3, :3] * self.get_scale()
+
+    def get_view_matrix(self, refresh=False):
+        del refresh  # the engine value is always current
+        return _np.array(self._core.view_matrix())
+
+    def get_inv_view_matrix(self):
+        return _np.linalg.inv(self.get_view_matrix())
+
+    def rotate(self, angle, axis=_OUT, **kwargs):
+        del kwargs  # the Reference ignores point-function kwargs here too
+        self._core.rotate(float(angle), _vec3(axis))
+        return self
+
+    def set_euler_angles(self, theta=None, phi=None, gamma=None, units=_RADIANS):
+        self._core.set_euler_angles(
+            None if theta is None else float(theta) * units,
+            None if phi is None else float(phi) * units,
+            None if gamma is None else float(gamma) * units,
+        )
+        return self
+
+    def increment_euler_angles(self, dtheta=0, dphi=0, dgamma=0, units=_RADIANS):
+        self._core.increment_euler_angles(
+            float(dtheta) * units, float(dphi) * units, float(dgamma) * units
+        )
+        return self
+
+    def set_euler_axes(self, seq):
+        self._core.set_euler_axes(seq)
+
+    def reorient(
+        self,
+        theta_degrees=None,
+        phi_degrees=None,
+        gamma_degrees=None,
+        center=None,
+        height=None,
+    ):
+        self.set_euler_angles(theta_degrees, phi_degrees, gamma_degrees, units=_DEG)
+        if center is not None:
+            self.move_to(_np.array(center))
+        if height is not None:
+            self.set_height(height)
+        return self
+
+    def set_theta(self, theta):
+        return self.set_euler_angles(theta=theta)
+
+    def set_phi(self, phi):
+        return self.set_euler_angles(phi=phi)
+
+    def set_gamma(self, gamma):
+        return self.set_euler_angles(gamma=gamma)
+
+    def increment_theta(self, dtheta, units=_RADIANS):
+        self.increment_euler_angles(dtheta=dtheta, units=units)
+        return self
+
+    def increment_phi(self, dphi, units=_RADIANS):
+        self.increment_euler_angles(dphi=dphi, units=units)
+        return self
+
+    def increment_gamma(self, dgamma, units=_RADIANS):
+        self.increment_euler_angles(dgamma=dgamma, units=units)
+        return self
+
+    def add_ambient_rotation(self, angular_speed=1 * _DEG):
+        self.add_updater(lambda m, dt: m.increment_theta(angular_speed * dt))
+        return self
+
+    def set_focal_distance(self, focal_distance):
+        self._core.set_focal_distance(float(focal_distance))
+        return self
+
+    def set_field_of_view(self, field_of_view):
+        self._core.set_field_of_view(float(field_of_view))
+        return self
+
+    def get_shape(self):
+        return self._core.shape()
+
+    def get_aspect_ratio(self):
+        return self._core.aspect_ratio()
+
+    def get_center(self):
+        return _np.array(self._core.center())
+
+    def get_width(self):
+        return self._core.shape()[0]
+
+    def get_height(self):
+        return self._core.shape()[1]
+
+    def get_focal_distance(self):
+        return self._core.focal_distance()
+
+    def get_field_of_view(self):
+        return self._core.field_of_view()
+
+    def get_implied_camera_location(self):
+        return _np.array(self._core.implied_camera_location())
+
+    def to_fixed_frame_point(self, point, relative=False):
+        return _np.array(self._core.to_fixed_frame_point(_vec3(point), bool(relative)))
+
+    def from_fixed_frame_point(self, point, relative=False):
+        return _np.array(
+            self._core.from_fixed_frame_point(_vec3(point), bool(relative))
+        )
 
 
 class Scene(_SceneCore):
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+
+    @property
+    def frame(self):
+        # Lazily-created per-scene camera frame, the same object scenes
+        # reach through `self.camera.frame` (the Reference wires
+        # `self.frame = self.camera.frame` in Scene.__init__).
+        frame = self.__dict__.get("_camera_frame")
+        if frame is None:
+            frame = CameraFrame()
+            self.__dict__["_camera_frame"] = frame
+        return frame
+
+    @frame.setter
+    def frame(self, value):
+        self.__dict__["_camera_frame"] = value
+        camera = self.__dict__.get("_camera")
+        if camera is not None:
+            camera.frame = value
+
+    @property
+    def camera(self):
+        # The minimal camera surface: the schema's Camera class (whose
+        # unbound methods stay precise placeholders) holding this scene's
+        # frame. State-real for `frame`; nothing else is silently stubbed.
+        camera = self.__dict__.get("_camera")
+        if camera is None:
+            camera_class = getattr(_FMN_ROOT, "Camera", None)
+            if isinstance(camera_class, type):
+                camera = camera_class.__new__(camera_class)
+                camera.args = ()
+            else:
+                camera = _types.SimpleNamespace()
+            camera.frame = self.frame
+            self.__dict__["_camera"] = camera
+        return camera
 
     def setup(self):
         pass
@@ -1148,6 +1465,7 @@ def _install_schema_surface():
     specials = {
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
+        ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
