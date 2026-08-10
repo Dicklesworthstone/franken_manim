@@ -9,6 +9,7 @@ pickle state, and schema-driven module/class construction.
 from __future__ import annotations
 
 import ast as _ast
+import collections.abc as _collections_abc
 import copy as _copy
 import enum as _enum
 import importlib as _importlib
@@ -370,7 +371,19 @@ class Mobject(_BridgeMobject):
             setattr(self, key, value)
         self._engine_init()
         if submobjects:
-            self.submobjects.extend(submobjects)
+            self._ingest_args(*submobjects)
+
+    def _ingest_args(self, *args):
+        # Reference Group._ingest_args (mobject.py:2201) verbatim: a single
+        # list/tuple/generator argument spreads into the member list.
+        if len(args) == 0:
+            return
+        if all(isinstance(mob, _BridgeMobject) for mob in args):
+            self.submobjects.extend(args)
+        elif isinstance(args[0], _collections_abc.Iterable):
+            self.submobjects.extend(args[0])
+        else:
+            raise Exception(f"Invalid argument to Group of type {type(args[0])}")
 
     def init_data(self):
         pass
@@ -1321,7 +1334,13 @@ class VGroup(VMobject):
     keep the Reference MRO `Axes < VGroup < VMobject`."""
 
     def __init__(self, *vmobjects, **kwargs):
-        super().__init__(*vmobjects, **kwargs)
+        super().__init__(**kwargs)
+        if any(
+            isinstance(vmob, _BridgeMobject) and not isinstance(vmob, VMobject)
+            for vmob in vmobjects
+        ):
+            raise Exception("Only VMobjects can be passed into VGroup")
+        self._ingest_args(*vmobjects)
 
 
 class Rectangle(VMobject):
@@ -1629,6 +1648,197 @@ class ComplexPlane(NumberPlane):
         _hang_native_children(self, specs)
         self.coordinate_labels = self.submobjects[-1]
         return self
+
+
+def _refuse_unrouted(class_name, entries):
+    """Precise refusal for ledger keywords whose native routing has not
+    landed: never silently dropped."""
+    unrouted = [name for name, off_default in entries if off_default]
+    if unrouted:
+        raise NotImplementedError(
+            class_name
+            + " keyword(s) not yet routed to the native builder: "
+            + ", ".join(sorted(unrouted))
+        )
+
+
+class MarkupText(VMobject):
+    """The Reference's MarkupText over the Scribe bridge (fmn-library
+    text.rs): one glyph per child, shaped by the bundled FontBook. The
+    styled-run maps (t2c/t2f/...), fonts beyond the bundled faces, and
+    span provenance are later tranches — off-default values refuse
+    precisely."""
+
+    _native_markup = True
+
+    def __init__(
+        self,
+        text,
+        font_size=48,
+        height=None,
+        justify=False,
+        indent=0,
+        alignment="",
+        line_width=None,
+        font="",
+        slant="NORMAL",
+        weight="NORMAL",
+        gradient=None,
+        line_spacing_height=None,
+        text2color=None,
+        text2font=None,
+        text2gradient=None,
+        text2slant=None,
+        text2weight=None,
+        lsh=None,
+        t2c=None,
+        t2f=None,
+        t2g=None,
+        t2s=None,
+        t2w=None,
+        global_config=None,
+        local_configs=None,
+        disable_ligatures=True,
+        isolate=None,
+        use_labelled_svg=True,
+        path_string_config=None,
+        **kwargs,
+    ):
+        del use_labelled_svg, path_string_config  # SVG-pipeline knobs; native
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [
+                ("alignment", alignment != ""),
+                ("font", font != ""),
+                ("slant", slant != "NORMAL"),
+                ("weight", weight != "NORMAL"),
+                ("gradient", gradient is not None),
+                ("line_spacing_height", line_spacing_height is not None),
+                ("lsh", lsh is not None),
+                ("text2color", bool(text2color)),
+                ("text2font", bool(text2font)),
+                ("text2gradient", bool(text2gradient)),
+                ("text2slant", bool(text2slant)),
+                ("text2weight", bool(text2weight)),
+                ("t2c", bool(t2c)),
+                ("t2f", bool(t2f)),
+                ("t2g", bool(t2g)),
+                ("t2s", bool(t2s)),
+                ("t2w", bool(t2w)),
+                ("global_config", bool(global_config)),
+                ("local_configs", bool(local_configs)),
+                ("isolate", isolate is not None),
+            ],
+        )
+        _install_live_state(self)
+        self.text = str(text)
+        self.font_size = float(font_size)
+        specs = self._build_text(
+            _native_shell_factory,
+            self.text,
+            type(self)._native_markup,
+            self.font_size,
+            bool(justify),
+            float(indent),
+            None if line_width is None else float(line_width),
+            bool(disable_ligatures),
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+        if height is not None:
+            self.set_height(height)
+
+
+class Text(MarkupText):
+    _native_markup = False
+
+
+class Tex(VMobject):
+    """The Reference's Tex over fmd-math (fmn-library tex.rs). When a
+    source exceeds fmd-math's current tier, the engine's refusal names
+    the unsupported constructs and is surfaced VERBATIM — the fm-rqc
+    corpus ratchet consumes those names from this exact message."""
+
+    _native_text_mode = False
+
+    def __init__(
+        self,
+        *tex_strings,
+        font_size=48,
+        alignment="\\centering",
+        template="",
+        additional_preamble="",
+        tex_to_color_map=None,
+        t2c=None,
+        isolate=None,
+        use_labelled_svg=True,
+        **kwargs,
+    ):
+        del use_labelled_svg  # SVG-pipeline knob; typesetting is native
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [
+                ("alignment", alignment != "\\centering"),
+                ("template", template != ""),
+                ("additional_preamble", additional_preamble != ""),
+                ("isolate", bool(isolate)),
+            ],
+        )
+        color_map = dict(t2c or {})
+        color_map.update(tex_to_color_map or {})
+        _install_live_state(self)
+        self.tex_strings = [str(part) for part in tex_strings]
+        self.tex_string = " ".join(self.tex_strings)
+        self.font_size = float(font_size)
+        specs = self._build_tex(
+            _native_shell_factory,
+            self.tex_string,
+            bool(self._native_text_mode),
+            self.font_size,
+            color_map or None,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class TexText(Tex):
+    _native_text_mode = True
+
+
+class OldTex(Tex):
+    """The Reference's legacy Tex interface (old_tex_mobject.py at the
+    pin): joins `tex_strings` with `arg_separator` and typesets in math
+    mode over the same fmd-math engine."""
+
+    def __init__(
+        self,
+        *tex_strings,
+        arg_separator="",
+        isolate=None,
+        tex_to_color_map=None,
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [("isolate", bool(isolate))],
+        )
+        parts = [str(part) for part in tex_strings]
+        super().__init__(
+            arg_separator.join(parts),
+            tex_to_color_map=tex_to_color_map,
+            **kwargs,
+        )
+        self.tex_strings = parts
+
+
+class OldTexText(OldTex):
+    _native_text_mode = True
+
+    def __init__(self, *tex_strings, math_mode=False, arg_separator="", **kwargs):
+        # The Reference's math_mode=True flips back to Tex semantics —
+        # per instance, never on the class.
+        self._native_text_mode = not math_mode
+        super().__init__(*tex_strings, arg_separator=arg_separator, **kwargs)
 
 
 class CameraFrame(Mobject):
@@ -2255,6 +2465,12 @@ def _install_schema_surface():
         ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,
         ("manimlib.mobject.coordinate_systems", "NumberPlane"): NumberPlane,
         ("manimlib.mobject.coordinate_systems", "ComplexPlane"): ComplexPlane,
+        ("manimlib.mobject.svg.text_mobject", "MarkupText"): MarkupText,
+        ("manimlib.mobject.svg.text_mobject", "Text"): Text,
+        ("manimlib.mobject.svg.tex_mobject", "Tex"): Tex,
+        ("manimlib.mobject.svg.tex_mobject", "TexText"): TexText,
+        ("manimlib.mobject.svg.old_tex_mobject", "OldTex"): OldTex,
+        ("manimlib.mobject.svg.old_tex_mobject", "OldTexText"): OldTexText,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,

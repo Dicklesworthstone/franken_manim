@@ -1538,6 +1538,72 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built.into_vmob())
     }
 
+    /// `Text(...)` over the Scribe bridge: one glyph per child from the
+    /// bundled FontBook, decorations trailing.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_text<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        text: &str,
+        markup: bool,
+        font_size: f64,
+        justify: bool,
+        indent: f64,
+        line_width: Option<f64>,
+        disable_ligatures: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut builder = if markup {
+            fmn_library::Text::markup(text)
+        } else {
+            fmn_library::Text::new(text)
+        };
+        builder = builder
+            .font_size(font_size)
+            .ligatures(!disable_ligatures)
+            .justify(justify)
+            .indent(indent);
+        if let Some(width) = line_width {
+            builder = builder.width(width);
+        }
+        let built = with_font_book(|book| builder.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
+    /// `Tex(...)` / `TexText(...)` over fmd-math. An unsupported construct
+    /// is fmd-math's typed refusal, surfaced VERBATIM (the fm-rqc ratchet
+    /// consumes the named constructs from this exact message).
+    fn _build_tex<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source: &str,
+        text_mode: bool,
+        font_size: f64,
+        t2c: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let pairs = t2c_pairs(t2c)?;
+        let refs: Vec<(&str, fmn_core::color::Srgb)> = pairs
+            .iter()
+            .map(|(needle, color)| (needle.as_str(), *color))
+            .collect();
+        let built = with_tex_engine(|engine| {
+            if text_mode {
+                fmn_library::TexText::new(source)
+                    .font_size(font_size)
+                    .t2c(&refs)
+                    .build(engine)
+            } else {
+                fmn_library::Tex::new(source)
+                    .font_size(font_size)
+                    .t2c(&refs)
+                    .build(engine)
+            }
+            // VERBATIM: fmd-math's named-construct refusal is the ratchet's
+            // input; never wrap it in a generic message.
+            .map_err(native_error)
+        })?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
     /// `Axes.add_coordinate_labels`: rebuild the native axes at the
     /// proxy's CURRENT width/height, run the native labeler, and return
     /// the two trailing label groups (shifted onto the proxy's current
@@ -2218,6 +2284,42 @@ thread_local! {
     /// per interpreter thread (the worker is single-threaded by design).
     static FONT_BOOK: std::cell::OnceCell<fmn_library::FontBook> =
         const { std::cell::OnceCell::new() };
+}
+
+thread_local! {
+    /// The math-typesetting engine over the default fmd-math pack,
+    /// constructed once per interpreter thread like [`FONT_BOOK`].
+    static TEX_ENGINE: std::cell::OnceCell<fmn_library::TexEngine> =
+        const { std::cell::OnceCell::new() };
+}
+
+fn with_tex_engine<T>(
+    operation: impl FnOnce(&fmn_library::TexEngine) -> PyResult<T>,
+) -> PyResult<T> {
+    TEX_ENGINE.with(|cell| {
+        if cell.get().is_none() {
+            let engine =
+                fmn_library::TexEngine::new("fmd-math/pack/default", None).map_err(|error| {
+                    PyRuntimeError::new_err(format!("fmd-math engine unavailable: {error}"))
+                })?;
+            let _ = cell.set(engine);
+        }
+        operation(cell.get().expect("set above"))
+    })
+}
+
+/// `t2c=` entries as owned pairs the borrowed builder slices point into.
+fn t2c_pairs(t2c: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, fmn_core::color::Srgb)>> {
+    let mut pairs = Vec::new();
+    if let Some(map) = t2c {
+        for (key, value) in map.iter() {
+            let key: String = key
+                .extract()
+                .map_err(|_| PyTypeError::new_err("t2c keys must be strings"))?;
+            pairs.push((key, srgb_from_py(&value)?));
+        }
+    }
+    Ok(pairs)
 }
 
 fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<T>) -> PyResult<T> {
