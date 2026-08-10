@@ -224,6 +224,13 @@ fmn --format png_sequence --resolution 640x360 @builtin circle_shift.v1
 fmn --format y4m --resolution 640x360 @builtin circle_shift.v1
 fmn --write_all --format png_sequence @builtin
 
+# Optional video output traverses the fingerprinted, sandboxed ffmpeg boundary
+fmn --format video --resolution 640x360 @builtin circle_shift.v1
+fmn --format video --transparent --resolution 640x360 @builtin circle_shift.v1
+
+# Certified artifacts stop before ffmpeg: canonical frames are the promised bits
+fmn --reproducible --format png_sequence @builtin circle_shift.v1
+
 # User native registrations/compiled artifacts use the same standalone front door
 fmn <native-scene-artifact> SquareToCircle -o
 
