@@ -1497,6 +1497,86 @@ class Square(Rectangle):
         super().__init__(side_length, side_length, **kwargs)
 
 
+class Arc(VMobject):
+    def __init__(
+        self,
+        start_angle=0,
+        angle=_math.tau / 4,
+        radius=1.0,
+        n_components=None,
+        arc_center=_ORIGIN,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        self.start_angle = float(start_angle)
+        self.angle = float(angle)
+        specs = self._build_arc(
+            _native_shell_factory,
+            self.start_angle,
+            self.angle,
+            float(radius),
+            _vec3(arc_center),
+            None if n_components is None else int(n_components),
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Circle(Arc):
+    def __init__(self, start_angle=0, stroke_color=None, **kwargs):
+        radius = kwargs.pop("radius", 1.0)
+        arc_center = kwargs.pop("arc_center", _ORIGIN)
+        _install_live_state(self)
+        self.start_angle = float(start_angle)
+        self.angle = _math.tau
+        specs = self._build_circle(
+            _native_shell_factory,
+            self.start_angle,
+            float(radius),
+            _vec3(arc_center),
+        )
+        _hang_native_children(self, specs)
+        # The native circle carries the Reference's RED stroke default; an
+        # explicit stroke_color reapplies.
+        if stroke_color is not None:
+            kwargs.setdefault("stroke_color", stroke_color)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Dot(VMobject):
+    def __init__(
+        self,
+        point=_ORIGIN,
+        radius=0.08,
+        stroke_color=None,
+        stroke_width=None,
+        fill_opacity=None,
+        fill_color=None,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        specs = self._build_dot(
+            _native_shell_factory, _vec3(point), float(radius)
+        )
+        _hang_native_children(self, specs)
+        # The native dot carries the Reference defaults (white fill at 1,
+        # black zero-width stroke); explicit values reapply.
+        for name, value in (
+            ("stroke_color", stroke_color),
+            ("stroke_width", stroke_width),
+            ("fill_opacity", fill_opacity),
+            ("fill_color", fill_color),
+        ):
+            if value is not None:
+                kwargs.setdefault(name, value)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class SmallDot(Dot):
+    def __init__(self, point=_ORIGIN, radius=0.04, **kwargs):
+        super().__init__(point, radius, **kwargs)
+
+
 class Line(VMobject):
     def __init__(self, start=_LEFT, end=_RIGHT, buff=0.0, path_arc=0.0, **kwargs):
         _install_live_state(self)
@@ -2302,6 +2382,74 @@ class OldTexText(OldTex):
         super().__init__(*tex_strings, arg_separator=arg_separator, **kwargs)
 
 
+class PMobject(Mobject):
+    """The point-cloud base (Reference MRO anchor). The remaining PMobject
+    surface stays precise schema placeholders."""
+
+
+class DotCloud(PMobject):
+    """The Reference's DotCloud over the pointcloud shelf: the native
+    point/radius/rgba/glow_factor record schema (NOT a VMobject — the
+    VMobject stroke/fill surface does not exist here; Mobject-level
+    set_color/set_opacity write the real rgba records)."""
+
+    def __init__(
+        self,
+        points=None,
+        color=None,
+        opacity=1.0,
+        radius=0.05,
+        glow_factor=0.0,
+        anti_alias_width=2.0,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        for key, val in kwargs.items():
+            setattr(self, key, val)
+        self.radius = float(radius)
+        self.glow_factor = float(glow_factor)
+        specs = self._build_dot_cloud(
+            _native_shell_factory,
+            [] if points is None else [_vec3(p) for p in points],
+            None if color is None else color,
+            float(opacity),
+            float(radius),
+            float(glow_factor),
+            float(anti_alias_width),
+        )
+        _hang_native_children(self, specs)
+
+    def get_radius(self):
+        return self.radius
+
+    def get_glow_factor(self):
+        return self.glow_factor
+
+
+class TrueDot(DotCloud):
+    def __init__(self, center=_ORIGIN, **kwargs):
+        super().__init__([center], **kwargs)
+
+
+class GlowDots(DotCloud):
+    def __init__(
+        self,
+        points=None,
+        color="#FFFF00",
+        radius=0.2,
+        glow_factor=2.0,
+        **kwargs,
+    ):
+        super().__init__(
+            points, color=color, radius=radius, glow_factor=glow_factor, **kwargs
+        )
+
+
+class GlowDot(GlowDots):
+    def __init__(self, center=_ORIGIN, **kwargs):
+        super().__init__([center], **kwargs)
+
+
 class ValueTracker(Mobject):
     """The Reference's ValueTracker over the native tracker entries
     (§8.6, Stage::add_value_tracker): the value is real engine state in
@@ -2974,6 +3122,15 @@ def _install_schema_surface():
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
+        ("manimlib.mobject.geometry", "Arc"): Arc,
+        ("manimlib.mobject.geometry", "Circle"): Circle,
+        ("manimlib.mobject.geometry", "Dot"): Dot,
+        ("manimlib.mobject.geometry", "SmallDot"): SmallDot,
+        ("manimlib.mobject.types.point_cloud_mobject", "PMobject"): PMobject,
+        ("manimlib.mobject.types.dot_cloud", "DotCloud"): DotCloud,
+        ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
+        ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,
+        ("manimlib.mobject.types.dot_cloud", "GlowDot"): GlowDot,
         ("manimlib.mobject.geometry", "Line"): Line,
         ("manimlib.mobject.geometry", "DashedLine"): DashedLine,
         ("manimlib.mobject.geometry", "Arrow"): Arrow,
@@ -3319,6 +3476,18 @@ def _install_space_ops():
     def midpoint(point1, point2):
         return center_of_mass([point1, point2])
 
+    def rotate_vector(vector, angle, axis=_OUT):
+        # The ONE rotation implementation: fmn-geom's scipy-exact
+        # quaternion rotation_matrix, through the engine seam.
+        return _np.array(
+            _BridgeMobject._rotate_vector(_vec3(vector), float(angle), _vec3(axis))
+        )
+
+    def rotate_vector_2d(vector, angle):
+        # Reference-verbatim complex-arithmetic 2D rotation.
+        z = complex(*vector) * _np.exp(complex(0, angle))
+        return _np.array([z.real, z.imag])
+
     functions = {
         "get_norm": get_norm,
         "get_dist": get_dist,
@@ -3326,6 +3495,8 @@ def _install_space_ops():
         "normalize_along_axis": normalize_along_axis,
         "center_of_mass": center_of_mass,
         "midpoint": midpoint,
+        "rotate_vector": rotate_vector,
+        "rotate_vector_2d": rotate_vector_2d,
     }
     module = _ensure_module("manimlib.utils.space_ops")
     for name, function in functions.items():

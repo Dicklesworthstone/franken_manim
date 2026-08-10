@@ -1459,6 +1459,99 @@ impl BridgeMobject {
         })
     }
 
+    /// `space_ops.rotate_vector` over the ONE rotation implementation
+    /// (fmn-geom's scipy-exact quaternion `rotation_matrix`, the same
+    /// kernel `Stage::rotate` composes).
+    #[staticmethod]
+    fn _rotate_vector(vector: [f64; 3], angle: f64, axis: [f64; 3]) -> [f64; 3] {
+        let matrix = fmn_library::rotation_matrix(angle, axis);
+        [
+            matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+            matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+            matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2],
+        ]
+    }
+
+    /// `Arc(start_angle, angle, radius, arc_center)` over the arc shelf.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_arc<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start_angle: f64,
+        angle: f64,
+        radius: f64,
+        arc_center: [f64; 3],
+        n_components: Option<usize>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut arc = fmn_library::Arc::new()
+            .start_angle(start_angle)
+            .angle(angle)
+            .radius(radius)
+            .arc_center(arc_center);
+        if let Some(n) = n_components {
+            arc = arc.n_components(n);
+        }
+        let built = arc.build().map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `Circle(start_angle, radius, arc_center)` — the native circle
+    /// builder, keeping its semantic shape tag.
+    fn _build_circle<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start_angle: f64,
+        radius: f64,
+        arc_center: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Circle::new()
+            .start_angle(start_angle)
+            .radius(radius)
+            .arc_center(arc_center)
+            .build();
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `Dot(point, radius)` — a filled disc with the Reference defaults.
+    fn _build_dot<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        point: [f64; 3],
+        radius: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Dot::new().point(point).radius(radius).build();
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `DotCloud(points, color, opacity, radius, glow_factor,
+    /// anti_alias_width)` over the pointcloud shelf — the DotCloud record
+    /// schema (`point`/`radius`/`rgba`/`glow_factor`), not a VMobject.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_dot_cloud<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        points: Vec<[f64; 3]>,
+        color: Option<&Bound<'py, PyAny>>,
+        opacity: f64,
+        radius: f64,
+        glow_factor: f64,
+        anti_alias_width: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut cloud = fmn_library::DotCloud::new(points)
+            .with_radius(radius)
+            .with_glow_factor(glow_factor)
+            .with_anti_alias_width(anti_alias_width);
+        if let Some(color) = color {
+            cloud = cloud.colored(srgb_from_py(color)?, opacity);
+        } else if opacity != 1.0 {
+            cloud = cloud.colored(
+                fmn_core::color::Srgb::from_hex("#888888").expect("grey"),
+                opacity,
+            );
+        }
+        install_native_tree(slf, factory, cloud)
+    }
+
     /// `Line(start, end, buff, path_arc)` over the line shelf.
     fn _build_line<'py>(
         slf: &Bound<'py, Self>,
@@ -1955,10 +2048,10 @@ impl BridgeMobject {
         children: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut seen = HashSet::new();
-        let mut child_locations = Vec::with_capacity(children.len());
+        let mut proxies = Vec::with_capacity(children.len());
         for child in children {
             let child = child
-                .cast::<BridgeMobject>()
+                .cast_into::<BridgeMobject>()
                 .map_err(|_| PyTypeError::new_err("submobjects must be Mobject instances"))?;
             let marker = child.as_ptr() as usize;
             if !seen.insert(marker) {
@@ -1966,13 +2059,17 @@ impl BridgeMobject {
                     "one submobject cannot appear twice under the same parent",
                 ));
             }
-            let cell = child.borrow();
-            child_locations.push((
+            proxies.push(child);
+        }
+        let location_of = |proxy: &Bound<'_, BridgeMobject>| {
+            let cell = proxy.borrow();
+            (
                 cell.engine.as_ref().map(Rc::clone),
                 cell.mob,
                 cell.initialized && cell.nursery.is_some(),
-            ));
-        }
+            )
+        };
+        let mut child_locations: Vec<_> = proxies.iter().map(&location_of).collect();
 
         let parent_location = {
             let cell = slf.borrow();
@@ -2000,6 +2097,29 @@ impl BridgeMobject {
             // complete graph in one transaction.
             return Ok(());
         };
+
+        // Adoption-on-attach (fm-d3gt): a detached child joining a
+        // scene-bound parent adopts into the parent's scene first, through
+        // the SAME bind_graph path Scene.add uses — nursery copy_into,
+        // pinning, proxy registration, `_scene`, Python identity intact.
+        // Mixed lists work; a child bound to a different scene still
+        // refuses below.
+        if child_locations
+            .iter()
+            .any(|(child_engine, _, detached)| child_engine.is_none() && *detached)
+        {
+            let scene_object = slf.getattr("_scene")?;
+            let scene = scene_object
+                .cast::<PyScene>()
+                .map_err(|_| PyRuntimeError::new_err("bound proxy's `_scene` is not a Scene"))?;
+            for (proxy, location) in proxies.iter().zip(&child_locations) {
+                if location.0.is_none() && location.2 {
+                    // bind_graph registers proxies and sets `_scene` itself.
+                    bind_graph(slf.py(), scene, proxy)?;
+                }
+            }
+            child_locations = proxies.iter().map(&location_of).collect();
+        }
 
         let mut candidate = Vec::with_capacity(child_locations.len());
         for (child_engine, child_mob, _) in child_locations {
