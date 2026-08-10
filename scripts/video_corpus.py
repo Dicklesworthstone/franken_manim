@@ -66,14 +66,22 @@ VIDEOS_REF = REPO / "scripts" / "videos_ref"
 # ---------------------------------------------------------------------------
 SEED_SCENES: tuple[tuple[str, str, str, str], ...] = (
     # (scene class, module path, era, curation note)
-    ("FlowerSymmetries", "_2022/galois/groups.py", "2022", "symmetry actions; no TeX"),
+    ("Cubic", "_2022/quintic/roots_and_coefs.py", "2022", "root/coef planes via RootCoefScene.setup; TeX-bearing module"),
+    ("QuadraticFormula", "_2022/quintic/roots_and_coefs.py", "2022", "root/coef planes, custom plane configs; TeX-bearing module"),
     ("WaveMachineDemo", "_2023/optics_puzzles/wave_machine.py", "2023", "3D wave kinematics; no TeX"),
-    ("PoolTableReflections", "_2023/standup_maths/pool.py", "2023", "reflection geometry; no TeX"),
     ("MaxProcess", "_2024/puzzles/max_rand.py", "2024", "probability process; TeX-bearing (19 call sites in module)"),
     ("GroverPreview", "_2025/colliding_blocks_v2/grover.py", "2025", "state-space preview; light TeX"),
     ("FlattenCone", "_2025/guest_videos/euclid.py", "2025", "surface development; no TeX"),
     ("SquareOnASphere", "_2025/guest_videos/euclid.py", "2025", "spherical geometry; no TeX"),
     ("BeamSplitter", "_2025/grover/polarization.py", "2025", "optics diagram; light TeX"),
+)
+
+# Scenes that were allowlisted in an earlier curation pass and had to be
+# withdrawn: they stay in the lock as excluded scene rows so the reversal
+# is on the record (R13), not silently disappeared.
+SEED_EXCLUDED_SCENES: tuple[tuple[str, str, str, str], ...] = (
+    ("FlowerSymmetries", "_2022/galois/groups.py", "2022", "loads an ImageMobject from an out-of-tree Dropbox path; unobtainable asset — the harness proved it, the extension heuristic had missed it"),
+    ("PoolTableReflections", "_2023/standup_maths/pool.py", "2023", "loads ImageMobject('pool_table'), an extensionless asset-dir reference outside the tree; caught by the harness, now flagged by scan's constructor signal"),
 )
 
 # Modules considered for the seed and deliberately rejected. These are
@@ -171,10 +179,14 @@ def render_lock() -> str:
     w("")
     w("[scenes]")
     w("# scene\tmodule\tmodule-sha256\tera\tstatus\tattribution\tnote")
-    for scene, module, era, note in sorted(SEED_SCENES):
+    statused = [(scene, module, era, "allowlisted", note) for scene, module, era, note in SEED_SCENES] + [
+        (scene, module, era, "excluded", note)
+        for scene, module, era, note in SEED_EXCLUDED_SCENES
+    ]
+    for scene, module, era, status, note in sorted(statused):
         attribution = f"3b1b/videos@{pins['3b1b/videos'][:12]} {module}"
         w(
-            f"{scene}\t{module}\t{blob_sha256(module)}\t{era}\tallowlisted\t{attribution}\t{note}"
+            f"{scene}\t{module}\t{blob_sha256(module)}\t{era}\t{status}\t{attribution}\t{note}"
         )
     w("")
     w("[assets]")
@@ -207,6 +219,9 @@ ASSET_SUFFIXES = (
     ".glb",
 )
 TEX_CONSTRUCTORS = {"Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"}
+# Constructors that resolve extensionless names through asset directories —
+# an asset dependency even when no literal carries a file suffix.
+ASSET_CONSTRUCTORS = {"ImageMobject", "SVGMobject", "Sound"}
 
 STDLIB_OK = {
     "manimlib",
@@ -265,6 +280,8 @@ class ModuleFacts(ast.NodeVisitor):
         )
         if callee in TEX_CONSTRUCTORS:
             self.tex_calls += 1
+        if callee in ASSET_CONSTRUCTORS:
+            self.asset_literals.add(f"call:{callee}")
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:

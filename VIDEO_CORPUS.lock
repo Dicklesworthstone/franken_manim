@@ -31,11 +31,13 @@ fonts	bundled OFL faces substitute for the era's system fonts (documented diverg
 [scenes]
 # scene	module	module-sha256	era	status	attribution	note
 BeamSplitter	_2025/grover/polarization.py	e55ac4a1f3007e09e28e50eb0214bf45b639e41db57cfd45d2533caea76e7855	2025	allowlisted	3b1b/videos@e317d6c5eaa8 _2025/grover/polarization.py	optics diagram; light TeX
+Cubic	_2022/quintic/roots_and_coefs.py	19aabfca9d865ca0339c3b0da4dcb48b62c6054f545a49745e9a1add4d996e95	2022	allowlisted	3b1b/videos@e317d6c5eaa8 _2022/quintic/roots_and_coefs.py	root/coef planes via RootCoefScene.setup; TeX-bearing module
 FlattenCone	_2025/guest_videos/euclid.py	88a7187a2bfd976ebdc15c3bae2c1b7fa1127b9a59f52a7b335063f419eed789	2025	allowlisted	3b1b/videos@e317d6c5eaa8 _2025/guest_videos/euclid.py	surface development; no TeX
-FlowerSymmetries	_2022/galois/groups.py	86457329a4be5f75c4ba83fdf73cc19b15a392b5f154f0042e7e081e621e0f99	2022	allowlisted	3b1b/videos@e317d6c5eaa8 _2022/galois/groups.py	symmetry actions; no TeX
+FlowerSymmetries	_2022/galois/groups.py	86457329a4be5f75c4ba83fdf73cc19b15a392b5f154f0042e7e081e621e0f99	2022	excluded	3b1b/videos@e317d6c5eaa8 _2022/galois/groups.py	loads an ImageMobject from an out-of-tree Dropbox path; unobtainable asset — the harness proved it, the extension heuristic had missed it
 GroverPreview	_2025/colliding_blocks_v2/grover.py	6c71d9c735ffd56735a2a32a1f706be5b54945d81e122ece9abffcd8329bb2fe	2025	allowlisted	3b1b/videos@e317d6c5eaa8 _2025/colliding_blocks_v2/grover.py	state-space preview; light TeX
 MaxProcess	_2024/puzzles/max_rand.py	2525486925eb8a1d8b9acced589a95329ba919fb8f3ef92f2c5b6b0146983f6c	2024	allowlisted	3b1b/videos@e317d6c5eaa8 _2024/puzzles/max_rand.py	probability process; TeX-bearing (19 call sites in module)
-PoolTableReflections	_2023/standup_maths/pool.py	bb2a829ff9a38e238eb3dce149900acafd41dc8ba3ee9cfbf591f9b08fce9f42	2023	allowlisted	3b1b/videos@e317d6c5eaa8 _2023/standup_maths/pool.py	reflection geometry; no TeX
+PoolTableReflections	_2023/standup_maths/pool.py	bb2a829ff9a38e238eb3dce149900acafd41dc8ba3ee9cfbf591f9b08fce9f42	2023	excluded	3b1b/videos@e317d6c5eaa8 _2023/standup_maths/pool.py	loads ImageMobject('pool_table'), an extensionless asset-dir reference outside the tree; caught by the harness, now flagged by scan's constructor signal
+QuadraticFormula	_2022/quintic/roots_and_coefs.py	19aabfca9d865ca0339c3b0da4dcb48b62c6054f545a49745e9a1add4d996e95	2022	allowlisted	3b1b/videos@e317d6c5eaa8 _2022/quintic/roots_and_coefs.py	root/coef planes, custom plane configs; TeX-bearing module
 SquareOnASphere	_2025/guest_videos/euclid.py	88a7187a2bfd976ebdc15c3bae2c1b7fa1127b9a59f52a7b335063f419eed789	2025	allowlisted	3b1b/videos@e317d6c5eaa8 _2025/guest_videos/euclid.py	spherical geometry; no TeX
 WaveMachineDemo	_2023/optics_puzzles/wave_machine.py	e819820fa7020fea04935b6ea8ee58ee793994fd1eaaa7e323459bffc5c2b4d0	2023	allowlisted	3b1b/videos@e317d6c5eaa8 _2023/optics_puzzles/wave_machine.py	3D wave kinematics; no TeX
 
