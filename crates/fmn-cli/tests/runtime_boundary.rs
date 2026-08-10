@@ -128,6 +128,89 @@ fn built_in_corpus_renders_through_the_real_png_and_y4m_sinks() {
 }
 
 #[test]
+fn native_png_publishes_the_final_frame_and_gif_streams_the_schedule() {
+    let root = output_root("native-png-gif");
+    let sequence_root = root.join("sequence");
+    let still_root = root.join("still");
+    let gif_root = root.join("gif");
+    for directory in [&sequence_root, &still_root, &gif_root] {
+        std::fs::create_dir(directory).expect("create native-format output root");
+    }
+
+    let render = |format: &str, output: &std::path::Path| {
+        run_clean(&[
+            "--robot",
+            "--format",
+            format,
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--video_dir",
+            output.to_str().expect("output path is UTF-8"),
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+    };
+
+    let sequence = render("png_sequence", &sequence_root);
+    assert_eq!(sequence.status.code(), Some(0));
+    assert!(sequence.stderr.is_empty());
+
+    let still = render("png", &still_root);
+    let still_stdout = String::from_utf8(still.stdout).expect("robot output is UTF-8");
+    assert_eq!(still.status.code(), Some(0), "{still_stdout}");
+    assert!(still.stderr.is_empty());
+    assert!(still_stdout.contains("\"format\":\"png\""));
+    assert!(still_stdout.contains("\"frames\":1"));
+    let still_bytes =
+        std::fs::read(still_root.join("circle_shift.png")).expect("read final-state PNG");
+    let final_sequence_frame =
+        std::fs::read(sequence_root.join("circle_shift.v1/frame_000002.png"))
+            .expect("read final PNG-sequence frame");
+    assert_eq!(still_bytes, final_sequence_frame);
+
+    let gif = render("gif", &gif_root);
+    let gif_stdout = String::from_utf8(gif.stdout).expect("robot output is UTF-8");
+    assert_eq!(gif.status.code(), Some(0), "{gif_stdout}");
+    assert!(gif.stderr.is_empty());
+    assert!(gif_stdout.contains("\"format\":\"gif\""));
+    assert!(gif_stdout.contains("\"frames\":3"));
+    let gif_bytes = std::fs::read(gif_root.join("circle_shift.gif")).expect("read native GIF");
+    assert!(gif_bytes.starts_with(b"GIF89a"));
+    assert_eq!(gif_bytes.last(), Some(&b';'));
+}
+
+#[test]
+fn certified_gif_is_refused_before_publication() {
+    let root = output_root("certified-gif-refusal");
+    let output = run_clean(&[
+        "--robot",
+        "--reproducible",
+        "--format",
+        "gif",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(4), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("\"exit_name\":\"capability\""));
+    assert!(stdout.contains("GIF is outside the certified artifact set"));
+    assert_eq!(
+        std::fs::read_dir(root)
+            .expect("list untouched output root")
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn compiled_fmtl_renders_through_the_standalone_binary() {
     let root = output_root("compiled-fmtl");
     let source = compiled_wait_bundle(&root);

@@ -25,8 +25,8 @@ use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8}
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_output::{
     ColorDescription, Container, EmitterConfig, EncoderCapabilities, EncoderChoice,
-    FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegTool, JobLimits,
-    NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget, SinkLimits,
+    FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegTool, GifSink, GifSinkConfig,
+    JobLimits, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget, SinkLimits,
     SinkReceipt, VideoJob, WireFormat, Y4mSink, Y4mSinkConfig,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
@@ -35,8 +35,8 @@ use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
 use fmn_scene::{
-    BundleReadError, CaptureReason, DEFAULT_MAX_BUNDLE_BYTES, IntegrationError, OutputNaming,
-    SceneSink, TimelineBundle,
+    BundleReadError, CaptureReason, DEFAULT_MAX_BUNDLE_BYTES, IntegrationError, NullSceneSink,
+    OutputNaming, SceneSink, TimelineBundle,
 };
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
@@ -2164,21 +2164,23 @@ impl RunOutput {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeFrameFormat {
+    Png,
     PngSequence,
+    Gif,
     Y4m,
 }
 
 impl NativeFrameFormat {
     const fn pixel_format(self) -> PixelFormat {
         match self {
-            Self::PngSequence => PixelFormat::Rgba8,
+            Self::Png | Self::PngSequence | Self::Gif => PixelFormat::Rgba8,
             Self::Y4m => PixelFormat::Nv12,
         }
     }
 
     const fn planning_format(self) -> fmn_runtime::OutputPixelFormat {
         match self {
-            Self::PngSequence => fmn_runtime::OutputPixelFormat::Rgba8,
+            Self::Png | Self::PngSequence | Self::Gif => fmn_runtime::OutputPixelFormat::Rgba8,
             Self::Y4m => fmn_runtime::OutputPixelFormat::Nv12,
         }
     }
@@ -2294,18 +2296,22 @@ impl RenderSink {
         let output_layout = FrameLayout::tight(format, width, height)
             .map_err(|error| CliError::new("config", error.to_string()))?;
         let limits = render_sink_limits(&output_layout)?;
-        let (binding, receipt) = match format {
-            PixelFormat::Rgba8
-                if matches!(target, RenderTarget::Native(NativeFrameFormat::PngSequence)) =>
-            {
+        let (binding, receipt) = match target {
+            RenderTarget::Native(NativeFrameFormat::Png | NativeFrameFormat::PngSequence) => {
+                let single = matches!(target, RenderTarget::Native(NativeFrameFormat::Png));
+                let png_target = if single {
+                    PngTarget::Single(destination)
+                } else {
+                    PngTarget::Sequence {
+                        directory: destination,
+                        stem: "frame".to_owned(),
+                        digits: 6,
+                    }
+                };
                 let (binding, receipt) = PngSink::new(
                     fs,
                     PngSinkConfig {
-                        target: PngTarget::Sequence {
-                            directory: destination,
-                            stem: "frame".to_owned(),
-                            digits: 6,
-                        },
+                        target: png_target,
                         width,
                         height,
                         first_sequence: 0,
@@ -2322,10 +2328,28 @@ impl RenderSink {
                     },
                 )
                 .map_err(output_adapter_error)?
-                .into_binding("png-sequence");
+                .into_binding(if single { "png" } else { "png-sequence" });
                 (binding, RenderReceipt::Native(receipt))
             }
-            PixelFormat::Nv12 if matches!(target, RenderTarget::Native(NativeFrameFormat::Y4m)) => {
+            RenderTarget::Native(NativeFrameFormat::Gif) => {
+                let (binding, receipt) = GifSink::new(
+                    fs,
+                    GifSinkConfig {
+                        destination,
+                        width,
+                        height,
+                        fps: (config.camera.fps, 1),
+                        loop_forever: true,
+                        first_sequence: 0,
+                        limits,
+                        profile: None,
+                    },
+                )
+                .map_err(output_adapter_error)?
+                .into_binding("gif");
+                (binding, RenderReceipt::Native(receipt))
+            }
+            RenderTarget::Native(NativeFrameFormat::Y4m) => {
                 let (binding, receipt) = Y4mSink::new(
                     fs,
                     Y4mSinkConfig {
@@ -2343,13 +2367,7 @@ impl RenderSink {
                 .into_binding("y4m");
                 (binding, RenderReceipt::Native(receipt))
             }
-            _ => {
-                let RenderTarget::Video(context) = target else {
-                    return Err(CliError::new(
-                        "internal",
-                        "native output target and frame format disagreed",
-                    ));
-                };
+            RenderTarget::Video(context) => {
                 let (binding, receipt) = FfmpegSink::new(
                     Arc::clone(&context.runner),
                     FfmpegSinkConfig {
@@ -2619,9 +2637,15 @@ enum RequestedRenderFormat {
 
 fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFormat, CliError> {
     match command.format {
+        OutputFormat::Png => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Png)),
         OutputFormat::PngSequence => Ok(RequestedRenderFormat::Native(
             NativeFrameFormat::PngSequence,
         )),
+        OutputFormat::Gif if command.common.reproducible => Err(CliError::new(
+            "capability",
+            "native GIF is outside the certified artifact set; use --format png or --format png_sequence with --reproducible",
+        )),
+        OutputFormat::Gif => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Gif)),
         OutputFormat::Y4m => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Y4m)),
         OutputFormat::Video => Ok(RequestedRenderFormat::Video),
         OutputFormat::Auto if command.vcodec.is_some() || command.pix_fmt.is_some() => {
@@ -2629,11 +2653,11 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
         }
         OutputFormat::Auto => Err(CliError::new(
             "capability",
-            "native registered scenes currently require `--format png_sequence`, `--format y4m`, or `--format video`; no format is substituted silently",
+            "native registered scenes require an explicit `--format`; no format is substituted silently",
         )),
-        OutputFormat::Png | OutputFormat::Gif | OutputFormat::Wav => Err(CliError::new(
+        OutputFormat::Wav => Err(CliError::new(
             "capability",
-            "this native registration path currently supports canonical PNG sequences, y4m, and negotiated ffmpeg video",
+            "WAV publication requires a scene sound-cue composition path, which is not registered yet",
         )),
     }
 }
@@ -3027,7 +3051,9 @@ fn execute_native_render(
         .first()
         .map_or(1, fmn_runtime::TeamPlan::threads);
     let destination = |name: &str| match &target {
+        RenderTarget::Native(NativeFrameFormat::Png) => naming.artifact(name, "png"),
         RenderTarget::Native(NativeFrameFormat::PngSequence) => naming.root(name),
+        RenderTarget::Native(NativeFrameFormat::Gif) => naming.artifact(name, "gif"),
         RenderTarget::Native(NativeFrameFormat::Y4m) => naming.artifact(name, "y4m"),
         RenderTarget::Video(context) => naming.artifact(name, context.job.container.extension()),
     };
@@ -3048,13 +3074,28 @@ fn execute_native_render(
                 let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
                     CliError::new("internal", "validated built-in scene disappeared")
                 })?;
-                fmn::run_scene(
-                    &mut scene,
-                    command.runtime_config(&config),
-                    config.determinism.seed,
-                    &mut sink,
-                )
-                .map_err(native_scene_error)?;
+                if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
+                    let mut discard = NullSceneSink;
+                    let completed = fmn::run_scene(
+                        &mut scene,
+                        command.runtime_config(&config),
+                        config.determinism.seed,
+                        &mut discard,
+                    )
+                    .map_err(native_scene_error)?;
+                    completed
+                        .into_scene()
+                        .show(&mut sink)
+                        .map_err(|error| CliError::new("scene", error.to_string()))?;
+                } else {
+                    fmn::run_scene(
+                        &mut scene,
+                        command.runtime_config(&config),
+                        config.determinism.seed,
+                        &mut sink,
+                    )
+                    .map_err(native_scene_error)?;
+                }
                 reports.push(report(RenderSourceReport::Builtin, name, sink.finish()?));
             }
         }
@@ -3065,7 +3106,18 @@ fn execute_native_render(
         } => {
             let mut sink =
                 RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
-            for index in 0..bundle.frame_count() {
+            let frames = if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
+                let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
+                    CliError::new(
+                        "scene",
+                        "the compiled timeline has no frame to publish as a final-state PNG",
+                    )
+                })?;
+                final_frame..bundle.frame_count()
+            } else {
+                0..bundle.frame_count()
+            };
+            for index in frames {
                 let stage = bundle.stage_at(index).map_err(bundle_read_error)?;
                 sink.render_stage(&stage, u64::from(index) + 1)
                     .map_err(|error| CliError::new("render", error.to_string()))?;

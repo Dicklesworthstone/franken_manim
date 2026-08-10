@@ -1090,6 +1090,89 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_png_signature", 1))
 }
 
+/// Stock-CLI proof for the two native RGBA artifact adapters that share
+/// Lumen's final conversion but have distinct publication semantics: PNG
+/// captures exactly the completed scene state, while GIF streams the full
+/// schedule without crossing the ffmpeg boundary.
+fn cli_native_png_gif_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_native_png_gif")?;
+    let png_dir = dir.join("png");
+    let gif_dir = dir.join("gif");
+    std::fs::create_dir(&png_dir)
+        .map_err(|error| fail(format!("create CLI PNG directory: {error}")))?;
+    std::fs::create_dir(&gif_dir)
+        .map_err(|error| fail(format!("create CLI GIF directory: {error}")))?;
+    let png_dir_text = png_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI PNG output path is not UTF-8"))?;
+    let gif_dir_text = gif_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI GIF output path is not UTF-8"))?;
+
+    let render = |format: &str, output: &str| {
+        fmn_cli::run([
+            "--robot",
+            "--format",
+            format,
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--video_dir",
+            output,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+    };
+    let png = render("png", png_dir_text);
+    let gif = render("gif", gif_dir_text);
+    let png_signature = std::fs::read(png_dir.join("circle_shift.png"))
+        .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .unwrap_or(false);
+    let gif_signature = std::fs::read(gif_dir.join("circle_shift.gif"))
+        .map(|bytes| bytes.starts_with(b"GIF89a") && bytes.last() == Some(&b';'))
+        .unwrap_or(false);
+    let robot_records = png.stdout.lines().count() == 1
+        && png.stdout.contains("\"format\":\"png\"")
+        && png.stdout.contains("\"frames\":1")
+        && gif.stdout.lines().count() == 1
+        && gif.stdout.contains("\"format\":\"gif\"")
+        && gif.stdout.contains("\"frames\":3");
+    ctx.event(
+        LogEvent::new("e2e.cli.native_rgba_artifacts")
+            .field("png_signature", truth(png_signature))
+            .field("gif_signature", truth(gif_signature))
+            .field("robot_records", truth(robot_records)),
+    );
+    ctx.counter("cli_png_still_frames", u64::from(png_signature));
+    ctx.counter(
+        "cli_gif_stream_frames",
+        if gif_signature && gif.stdout.contains("\"frames\":3") {
+            3
+        } else {
+            0
+        },
+    );
+    if png.code != 0
+        || gif.code != 0
+        || !png.stderr.is_empty()
+        || !gif.stderr.is_empty()
+        || !png_signature
+        || !gif_signature
+        || !robot_records
+    {
+        return Err(fail(format!(
+            "native PNG/GIF CLI path failed: png=({},{:?},{:?}) gif=({},{:?},{:?})",
+            png.code, png.stdout, png.stderr, gif.code, gif.stdout, gif.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_png_still_frames", 1)
+        .with_counter("cli_gif_stream_frames", 3))
+}
+
 /// A compiled FMTL/1 artifact crosses the stock CLI boundary, reconstructs
 /// through fmn-scene's shared reader, renders through Lumen, and publishes
 /// through Reel. This is the source-unedited native-artifact path rather than
@@ -1940,6 +2023,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("complete", "true"),
                 FieldPred::str_eq("png_signature", "true"),
                 FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_native_png_gif.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_native_png_gif_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_png_still_frames", 1),
+            counter_eq("cli_gif_stream_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.native_rgba_artifacts",
+            vec![
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("gif_signature", "true"),
+                FieldPred::str_eq("robot_records", "true"),
             ],
         )],
     ));

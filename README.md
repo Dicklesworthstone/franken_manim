@@ -221,6 +221,8 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 ```bash
 # The shipped native G1 corpus renders through the standalone CPython-free binary
 fmn --format png_sequence --resolution 640x360 @builtin circle_shift.v1
+fmn --format png --resolution 640x360 @builtin circle_shift.v1    # final-state still
+fmn --format gif --resolution 640x360 @builtin circle_shift.v1
 fmn --format y4m --resolution 640x360 @builtin circle_shift.v1
 fmn --write_all --format png_sequence @builtin
 
