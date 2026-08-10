@@ -1144,10 +1144,10 @@ mod tests {
     #[test]
     fn unsupported_construct_diagnostic_remains_precise() {
         let engine = build_tex_engine().expect("formula engine");
-        let error = typeset_formula(&engine, r"\xrightarrow{f}")
+        let error = typeset_formula(&engine, r"\dx")
             .expect_err("tier-2 construct must remain a named refusal");
         let detail = error.to_string();
-        assert!(detail.contains("xrightarrow"), "{detail}");
+        assert!(detail.contains("dx"), "{detail}");
         assert!(detail.contains("tier T2"), "{detail}");
     }
 }

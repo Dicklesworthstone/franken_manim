@@ -338,7 +338,7 @@ fn preflight_warms_the_cache_in_parallel_and_collects_errors() {
     let items: Vec<(Mode, &str)> = vec![
         (Mode::Math(Style::Display), r"e^{i\pi} + 1 = 0"),
         (Mode::Math(Style::Display), r"\frac{d}{dx} \sin x"),
-        (Mode::Math(Style::Display), r"\xrightarrow{f}"), // still-pending tier-2: fails
+        (Mode::Math(Style::Display), r"\dx"), // still-pending tier-2: fails
         (Mode::Text, r"area $\pi r^2$"),
         (
             Mode::Math(Style::Display),
@@ -386,11 +386,11 @@ fn construct_errors_surface_named_and_tier_tagged() {
     let e = engine();
     // The pending tier-2 example advances as constructs graduate (fm-j5t).
     let err = e
-        .typeset(Mode::Math(Style::Display), r"\xrightarrow{f}")
+        .typeset(Mode::Math(Style::Display), r"\dx")
         .unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains(r"`\xrightarrow` is not yet supported"),
+        msg.contains(r"`\dx` is not yet supported"),
         "{msg}"
     );
     assert!(msg.contains("tier T2"), "{msg}");

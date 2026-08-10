@@ -42,8 +42,8 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 # else enters.
 [workspace.dependencies]
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c48399f20a9780ef420de64fe504ff922e5afe5e", default-features = false }
-fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "b30516ea95228a70a657cec72ccc606fd07a347c", features = ["bundled-faces"] }
-fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "b30516ea95228a70a657cec72ccc606fd07a347c" }
+fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "0e727c3362818835f2942d9342c5cb2530ae09e3", features = ["bundled-faces"] }
+fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "0e727c3362818835f2942d9342c5cb2530ae09e3" }
 fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
 ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "523aaf827faf538aa541126ee222fcd7af348410" }
 fmn-core = { path = "crates/fmn-core" }
