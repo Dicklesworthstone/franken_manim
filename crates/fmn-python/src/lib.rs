@@ -1317,6 +1317,27 @@ impl BridgeMobject {
         )
     }
 
+    /// fmn-core's one color model (D4): parse `#RRGGBB`/`#RGB` into sRGB
+    /// components in `[0, 1]`. Anything else is a precise refusal — the
+    /// bootstrap never hand-rolls color arithmetic.
+    #[staticmethod]
+    fn _hex_to_rgb(value: &str) -> PyResult<(f64, f64, f64)> {
+        fmn_core::color::Srgb::from_hex(value)
+            .map(|color| (color.r, color.g, color.b))
+            .map_err(|error| PyValueError::new_err(format!("invalid color {value:?}: {error}")))
+    }
+
+    /// Format sRGB components as the Reference's uppercase `#RRGGBB`.
+    #[staticmethod]
+    fn _rgb_to_hex(rgb: (f64, f64, f64)) -> String {
+        fmn_core::color::Srgb {
+            r: rgb.0,
+            g: rgb.1,
+            b: rgb.2,
+        }
+        .to_hex()
+    }
+
     /// Reference `get_start`: this entry's own first world-space point.
     fn _get_start(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);

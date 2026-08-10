@@ -55,6 +55,68 @@ _DEG = _math.tau / 360.0
 _RADIANS = 1.0
 
 
+# Reference iterable plumbing (manimlib/utils/iterables.py), verbatim: the
+# style surface resizes color/width runs with these exact rules.
+def _listify(obj):
+    if isinstance(obj, str):
+        return [obj]
+    try:
+        return list(obj)
+    except TypeError:
+        return [obj]
+
+
+def _array_is_constant(arr):
+    return len(arr) > 0 and (arr == arr[0]).all()
+
+
+def _resize_with_interpolation(nparray, length):
+    if len(nparray) == length:
+        return nparray
+    if len(nparray) == 1 or _array_is_constant(nparray):
+        return nparray[:1].repeat(length, axis=0)
+    if length == 0:
+        return _np.zeros((0, *nparray.shape[1:]))
+    cont_indices = _np.linspace(0, len(nparray) - 1, length)
+    return _np.array(
+        [
+            (1 - a) * nparray[lh] + a * nparray[rh]
+            for ci in cont_indices
+            for lh, rh, a in [(int(ci), int(_np.ceil(ci)), ci % 1)]
+        ]
+    )
+
+
+def _make_even(iterable_1, iterable_2):
+    len1 = len(iterable_1)
+    len2 = len(iterable_2)
+    if len1 == len2:
+        return iterable_1, iterable_2
+    new_len = max(len1, len2)
+    return (
+        [iterable_1[(n * len1) // new_len] for n in range(new_len)],
+        [iterable_2[(n * len2) // new_len] for n in range(new_len)],
+    )
+
+
+def _color_to_rgb(color):
+    # Hex spellings route through fmn-core's one color model (D4); RGB(A)
+    # sequences pass through. Anything else refuses precisely.
+    if isinstance(color, str):
+        return _np.array(_BridgeMobject._hex_to_rgb(color))
+    return _np.array([float(component) for component in color][:3])
+
+
+def _color_to_rgba(color, alpha=1.0):
+    return _np.array([*_color_to_rgb(color), float(alpha)])
+
+
+def _rgb_to_hex(rgb):
+    return _BridgeMobject._rgb_to_hex(
+        (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+    )
+
+
 class _LiveSubmobjects(list):
     """A list whose accepted mutations are mirrored into Marionette."""
 
@@ -743,6 +805,78 @@ class Mobject(_BridgeMobject):
     def has_points(self):
         return self._has_points()
 
+    # Color surface (fm-d3gt): Reference bodies over the live record views.
+    # Style written to a point-free mobject lands in `_data_defaults` (the
+    # Reference's ones-row), so it round-trips through the getters before
+    # any points exist.
+
+    def _style_data(self):
+        if self.n_records() > 0:
+            return self.data
+        defaults = self.__dict__.get("_data_defaults")
+        if defaults is None:
+            defaults = _np.ones(1, dtype=self.data.dtype)
+            self.__dict__["_data_defaults"] = defaults
+        return defaults
+
+    def set_rgba_array(self, rgba_array, name="rgba", recurse=False):
+        rgba_array = _np.asarray(rgba_array, dtype=float)
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob._style_data()[name][:] = rgba_array
+        return self
+
+    def set_rgba_array_by_color(
+        self, color=None, opacity=None, name="rgba", recurse=True
+    ):
+        for mob in _family_preorder(self) if recurse else [self]:
+            data = mob._style_data()
+            if color is not None:
+                rgbs = _np.array([_color_to_rgb(c) for c in _listify(color)])
+                if 1 < len(rgbs):
+                    rgbs = _resize_with_interpolation(rgbs, len(data))
+                data[name][:, :3] = rgbs
+            if opacity is not None:
+                if not isinstance(opacity, (float, int, _np.floating)):
+                    opacity = _resize_with_interpolation(
+                        _np.array(opacity), len(data)
+                    )
+                data[name][:, 3] = opacity
+        return self
+
+    def set_color(self, color, opacity=None, recurse=True):
+        self.set_rgba_array_by_color(color, opacity, recurse=False)
+        # Recurse to submobjects differently from how set_rgba_array_by_color
+        # does, in case they implement set_color differently.
+        if recurse:
+            for submob in self.submobjects:
+                submob.set_color(color, recurse=True)
+        return self
+
+    def set_opacity(self, opacity, recurse=True):
+        self.set_rgba_array_by_color(color=None, opacity=opacity, recurse=False)
+        if recurse:
+            for submob in self.submobjects:
+                submob.set_opacity(opacity, recurse=True)
+        return self
+
+    def get_color(self):
+        return _rgb_to_hex(self._style_data()["rgba"][0, :3])
+
+    def get_opacity(self):
+        return float(self._style_data()["rgba"][0, 3])
+
+    def get_shading(self):
+        return _np.array(self.uniforms["shading"])
+
+    def set_shading(self, reflectiveness=None, gloss=None, shadow=None, recurse=True):
+        for mob in _family_preorder(self) if recurse else [self]:
+            shading = list(mob.uniforms["shading"])
+            for index, value in enumerate([reflectiveness, gloss, shadow]):
+                if value is not None:
+                    shading[index] = float(value)
+            mob.uniforms["shading"] = shading
+        return self
+
     # The Reference's container protocol (manimlib/mobject/mobject.py):
     # a mobject iterates, indexes, and measures as its submobject list;
     # slicing regroups through the family's group class.
@@ -841,6 +975,43 @@ class Mobject(_BridgeMobject):
         )
 
 
+class Point(Mobject):
+    """The Reference's Point (manimlib/mobject/mobject.py at the pin): one
+    location record with artificial box extents. State-real — the location
+    lives in the engine record, so every positional operation and read
+    round-trips through the one Stage code path."""
+
+    def __init__(
+        self,
+        location=_ORIGIN,
+        artificial_width=1e-6,
+        artificial_height=1e-6,
+        **kwargs,
+    ):
+        self.artificial_width = artificial_width
+        self.artificial_height = artificial_height
+        super().__init__(**kwargs)
+        self.set_location(location)
+
+    def get_width(self):
+        return self.artificial_width
+
+    def get_height(self):
+        return self.artificial_height
+
+    def get_location(self):
+        return _np.array(self.get_field("point", 0), dtype=float)
+
+    def get_bounding_box_point(self, *args, **kwargs):
+        del args, kwargs
+        return self.get_location()
+
+    def set_location(self, new_loc):
+        self.resize(1)
+        self.set_field("point", 0, list(_vec3(new_loc)))
+        return self
+
+
 class VMobject(Mobject):
     data_dtype = [
         ("point", 3),
@@ -854,6 +1025,224 @@ class VMobject(Mobject):
 
     def get_group_class(self):
         return getattr(_FMN_ROOT, "VGroup", VMobject)
+
+    # Style surface (fm-d3gt): Reference bodies (vectorized_mobject.py at
+    # the pin) over the live engine record views (`stroke_rgba`,
+    # `stroke_width`, `fill_rgba`, `fill_border_width`) and the typed
+    # engine uniforms (`stroke_behind`, `flat_stroke`, `shading`,
+    # `anti_alias_width`). Family recursion is the Python family list —
+    # identical in both proxy states.
+
+    def set_fill(self, color=None, opacity=None, border_width=None, recurse=True):
+        self.set_rgba_array_by_color(color, opacity, "fill_rgba", recurse)
+        if border_width is not None:
+            self.border_width = border_width
+            for mob in _family_preorder(self) if recurse else [self]:
+                mob._style_data()["fill_border_width"] = border_width
+        return self
+
+    def set_stroke(
+        self,
+        color=None,
+        width=None,
+        opacity=None,
+        behind=None,
+        flat=None,
+        recurse=True,
+    ):
+        self.set_rgba_array_by_color(color, opacity, "stroke_rgba", recurse)
+
+        if width is not None:
+            for mob in _family_preorder(self) if recurse else [self]:
+                data = mob._style_data()
+                if isinstance(width, (float, int, _np.floating)):
+                    data["stroke_width"][:, 0] = width
+                else:
+                    data["stroke_width"][:, 0] = _resize_with_interpolation(
+                        _np.array(width), len(data)
+                    ).flatten()
+
+        if behind is not None:
+            for mob in _family_preorder(self) if recurse else [self]:
+                mob.uniforms["stroke_behind"] = bool(behind)
+
+        if flat is not None:
+            self.set_flat_stroke(flat)
+
+        return self
+
+    def set_backstroke(self, color="#000000", width=3):
+        self.set_stroke(color, width, behind=True)
+        return self
+
+    def set_flat_stroke(self, flat_stroke=True, recurse=True):
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["flat_stroke"] = bool(flat_stroke)
+        return self
+
+    def get_flat_stroke(self):
+        return bool(self.uniforms["flat_stroke"])
+
+    def set_anti_alias_width(self, anti_alias_width, recurse=True):
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["anti_alias_width"] = float(anti_alias_width)
+        return self
+
+    def get_anti_alias_width(self):
+        return float(self.uniforms["anti_alias_width"])
+
+    def set_style(
+        self,
+        fill_color=None,
+        fill_opacity=None,
+        fill_rgba=None,
+        fill_border_width=None,
+        stroke_color=None,
+        stroke_opacity=None,
+        stroke_rgba=None,
+        stroke_width=None,
+        stroke_behind=None,
+        flat_stroke=None,
+        shading=None,
+        recurse=True,
+    ):
+        for mob in _family_preorder(self) if recurse else [self]:
+            if fill_rgba is not None:
+                data = mob._style_data()
+                data["fill_rgba"][:] = _resize_with_interpolation(
+                    _np.asarray(fill_rgba, dtype=float), len(data["fill_rgba"])
+                )
+            else:
+                mob.set_fill(
+                    color=fill_color,
+                    opacity=fill_opacity,
+                    border_width=fill_border_width,
+                    recurse=False,
+                )
+
+            if stroke_rgba is not None:
+                data = mob._style_data()
+                data["stroke_rgba"][:] = _resize_with_interpolation(
+                    _np.asarray(stroke_rgba, dtype=float), len(data["stroke_rgba"])
+                )
+                mob.set_stroke(
+                    width=stroke_width,
+                    behind=stroke_behind,
+                    flat=flat_stroke,
+                    recurse=False,
+                )
+            else:
+                mob.set_stroke(
+                    color=stroke_color,
+                    width=stroke_width,
+                    opacity=stroke_opacity,
+                    flat=flat_stroke,
+                    behind=stroke_behind,
+                    recurse=False,
+                )
+
+            if shading is not None:
+                mob.set_shading(*shading, recurse=False)
+        return self
+
+    def get_style(self):
+        data = self._style_data()
+        return {
+            "fill_rgba": data["fill_rgba"].copy(),
+            "fill_border_width": data["fill_border_width"].copy(),
+            "stroke_rgba": data["stroke_rgba"].copy(),
+            "stroke_width": data["stroke_width"].copy(),
+            "stroke_behind": bool(self.uniforms["stroke_behind"]),
+            "flat_stroke": self.get_flat_stroke(),
+            "shading": tuple(self.get_shading()),
+        }
+
+    def match_style(self, vmobject, recurse=True):
+        self.set_style(**vmobject.get_style(), recurse=False)
+        if recurse:
+            # Does its best to match up submobject lists, and match styles
+            # accordingly.
+            submobs1, submobs2 = self.submobjects, vmobject.submobjects
+            if len(submobs1) == 0:
+                return self
+            elif len(submobs2) == 0:
+                submobs2 = [vmobject]
+            for sm1, sm2 in zip(*_make_even(submobs1, submobs2)):
+                sm1.match_style(sm2)
+        return self
+
+    def set_color(self, color, opacity=None, recurse=True):
+        self.set_fill(color, opacity=opacity, recurse=recurse)
+        self.set_stroke(color, opacity=opacity, recurse=recurse)
+        return self
+
+    def set_opacity(self, opacity, recurse=True):
+        self.set_fill(opacity=opacity, recurse=recurse)
+        self.set_stroke(opacity=opacity, recurse=recurse)
+        return self
+
+    def fade(self, darkness=0.5, recurse=True):
+        mobs = _family_preorder(self) if recurse else [self]
+        for mob in mobs:
+            factor = 1.0 - darkness
+            mob.set_fill(opacity=factor * mob.get_fill_opacity(), recurse=False)
+            mob.set_stroke(
+                opacity=factor * mob.get_stroke_opacity(), recurse=False
+            )
+        return self
+
+    def get_fill_colors(self):
+        return [
+            _rgb_to_hex(rgba[:3]) for rgba in self._style_data()["fill_rgba"]
+        ]
+
+    def get_fill_opacities(self):
+        return self._style_data()["fill_rgba"][:, 3]
+
+    def get_stroke_colors(self):
+        return [
+            _rgb_to_hex(rgba[:3]) for rgba in self._style_data()["stroke_rgba"]
+        ]
+
+    def get_stroke_opacities(self):
+        return self._style_data()["stroke_rgba"][:, 3]
+
+    def get_stroke_widths(self):
+        return self._style_data()["stroke_width"][:, 0]
+
+    def get_fill_color(self):
+        return _rgb_to_hex(self._style_data()["fill_rgba"][0, :3])
+
+    def get_fill_opacity(self):
+        return float(self._style_data()["fill_rgba"][0, 3])
+
+    def get_stroke_color(self):
+        return _rgb_to_hex(self._style_data()["stroke_rgba"][0, :3])
+
+    def get_stroke_width(self):
+        return float(self._style_data()["stroke_width"][0, 0])
+
+    def get_stroke_opacity(self):
+        return float(self._style_data()["stroke_rgba"][0, 3])
+
+    def get_color(self):
+        if self.has_fill():
+            return self.get_fill_color()
+        return self.get_stroke_color()
+
+    def get_opacity(self):
+        if self.has_fill():
+            return self.get_fill_opacity()
+        return self.get_stroke_opacity()
+
+    def has_stroke(self):
+        data = self._style_data()
+        return bool(any(data["stroke_width"].flatten())) and bool(
+            any(data["stroke_rgba"][:, 3])
+        )
+
+    def has_fill(self):
+        return bool(any(self._style_data()["fill_rgba"][:, 3]))
 
 
 class CameraFrame(Mobject):
@@ -1144,6 +1533,11 @@ class Scene(_SceneCore):
             else:
                 camera = _types.SimpleNamespace()
             camera.frame = self.frame
+            # The Reference's Camera.init_light_source: a real Point at the
+            # camera config's light_source_position default (the same
+            # [-10, 10, 10] Lumen's CameraConfig declares). State-real:
+            # scenes move it and read it back through the Stage.
+            camera.light_source = Point((-10.0, 10.0, 10.0))
             self.__dict__["_camera"] = camera
         return camera
 
@@ -1464,6 +1858,7 @@ def _install_schema_surface():
 
     specials = {
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
+        ("manimlib.mobject.mobject", "Point"): Point,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.scene.scene", "Scene"): Scene,
