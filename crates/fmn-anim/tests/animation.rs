@@ -103,6 +103,30 @@ fn rate_func_combinators_match_the_fmn_core_closures() {
 }
 
 #[test]
+fn sampled_rate_func_is_exact_on_its_grid_and_linear_between() {
+    // The portal's pre-sampled Python-callable seam: exact at every grid
+    // point, the linear interpolant between them, clamped outside [0, 1].
+    let samples: std::sync::Arc<[f64]> = (0..=30)
+        .map(|i| rate::smooth(f64::from(i) / 30.0))
+        .collect::<Vec<_>>()
+        .into();
+    let sampled = RateFunc::Sampled(samples.clone());
+    for (i, expected) in samples.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let t = i as f64 / 30.0;
+        assert_eq!(sampled.eval(t), *expected, "grid point t={t}");
+    }
+    let midpoint = sampled.eval(0.5 / 30.0);
+    assert!(
+        (midpoint - 0.5 * (samples[0] + samples[1])).abs() < 1e-15,
+        "between grid points the curve is the linear interpolant"
+    );
+    assert_eq!(sampled.eval(-1.0), samples[0], "clamped below");
+    assert_eq!(sampled.eval(2.0), samples[30], "clamped above");
+    assert_eq!(RateFunc::Sampled(vec![0.25].into()).eval(0.7), 0.25);
+}
+
+#[test]
 fn degenerate_squish_returns_the_window_point() {
     // The Reference's a == b branch returns a itself, not func(a).
     let f = RateFunc::smooth().squish(0.4, 0.4);

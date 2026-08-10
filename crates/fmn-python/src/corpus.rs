@@ -97,17 +97,9 @@ fn run_outcome<'py>(
 fn scene_facts(py: Python<'_>, instance: &Bound<'_, PyAny>) -> PyResult<String> {
     let code = std::ffi::CString::new(
         r#"
-import numpy as _np
-_roots = scene.mobjects
-_family = sum(m.family_size() for m in _roots)
-_boxes = [_np.array(m.get_bounding_box(), dtype=float) for m in _roots]
-_boxes = [b for b in _boxes if _np.any(b != 0)]
-if _boxes:
-    _lo = _np.min([b[0] for b in _boxes], axis=0)
-    _hi = _np.max([b[2] for b in _boxes], axis=0)
-else:
-    _lo = _np.zeros(3)
-    _hi = _np.zeros(3)
+# Engine truth only: the Stage draw list and its family boxes, never the
+# Python proxy view (which depends on GC timing of temporary copies).
+_roots, _family, _lo, _hi = scene._engine_facts()
 _frame = scene.frame
 _center = _frame.get_center()
 _values = [
@@ -115,7 +107,7 @@ _values = [
     _frame.get_height(), _frame.get_theta(), _frame.get_phi(), *_center,
 ]
 facts = "\t".join(
-    [str(len(_roots)), str(int(_family))]
+    [str(int(_roots)), str(int(_family))]
     + ["%.6f" % float(v) for v in _values]
 )
 "#,

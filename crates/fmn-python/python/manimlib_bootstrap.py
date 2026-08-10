@@ -3275,16 +3275,24 @@ class Scene(_SceneCore):
                         "frame-boundary release window (fm-p107); drive "
                         "frames with Scene.update meanwhile"
                     )
-        def rate_name(value, where):
+        def rate_payload(value, where, run_time_hint):
             if value is None or isinstance(value, str):
                 return value
             name = _RATE_FUNC_NAMES.get(value)
-            if name is None:
-                raise NotImplementedError(
-                    where + ": custom rate_func callables await the "
-                    "crossing-budget rung; use a named catalog function"
+            if name is not None:
+                return name
+            if not callable(value):
+                raise TypeError(
+                    where + ": rate_func must be a callable or a catalog name"
                 )
-            return name
+            # A custom callable (pure by the rate-func contract): pre-sample
+            # it on the segment's frame grid BEFORE the segment runs, so it
+            # evaluates natively with zero mid-segment interpreter
+            # crossings — exact at every unlagged capture boundary; lagged
+            # or time-spanned members see the linear interpolant between
+            # grid points.
+            frames = max(2, int(round(float(run_time_hint) * 30.0)))
+            return [float(value(k / frames)) for k in range(frames + 1)]
 
         def build_spec(proto, nested):
             if isinstance(proto, _AnimationBuilder):
@@ -3316,7 +3324,11 @@ class Scene(_SceneCore):
                     mobject,
                     target,
                     spec_args.get("run_time"),
-                    rate_name(spec_args.get("rate_func"), "animate"),
+                    rate_payload(
+                        spec_args.get("rate_func"),
+                        "animate",
+                        spec_args.get("run_time") or run_time or 1.0,
+                    ),
                     spec_args.get("lag_ratio"),
                     {},
                 )
@@ -3338,7 +3350,11 @@ class Scene(_SceneCore):
                         None,
                         None,
                         None if proto.run_time is None else float(proto.run_time),
-                        rate_name(proto.rate_func, type(proto).__name__),
+                        rate_payload(
+                            proto.rate_func,
+                            type(proto).__name__,
+                            proto.run_time or run_time or 1.0,
+                        ),
                         None,
                         params,
                     )
@@ -3358,7 +3374,11 @@ class Scene(_SceneCore):
                     mobject,
                     target,
                     None if proto.run_time is None else float(proto.run_time),
-                    rate_name(proto.rate_func, type(proto).__name__),
+                    rate_payload(
+                        proto.rate_func,
+                        type(proto).__name__,
+                        proto.run_time or run_time or 1.0,
+                    ),
                     None if proto.lag_ratio is None else float(proto.lag_ratio),
                     params,
                 )
@@ -3393,7 +3413,7 @@ class Scene(_SceneCore):
             specs,
             camera_pair,
             None if run_time is None else float(run_time),
-            rate_name(rate_func, "play"),
+            rate_payload(rate_func, "play", run_time or 1.0),
             None if lag_ratio is None else float(lag_ratio),
         )
 

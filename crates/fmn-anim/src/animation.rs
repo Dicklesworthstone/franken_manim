@@ -158,6 +158,17 @@ pub enum RateFunc {
     /// A plain rate function (any `fn(f64) -> f64`, e.g. the fmn-core
     /// catalog).
     Base(fn(f64) -> f64),
+    /// A pre-sampled rate curve on a uniform grid over `[0, 1]`, linearly
+    /// interpolated between samples (at least two).
+    ///
+    /// This is the capturing-closure seam the type docs promise the Python
+    /// front door: the portal evaluates a pure Python rate callable for
+    /// every grid point BEFORE a segment runs, so the segment drivers stay
+    /// free of mid-segment interpreter crossings. Sampled at a segment's
+    /// frame count, the curve is exact at every unlagged capture boundary;
+    /// lagged or time-spanned members evaluate between grid points and see
+    /// the linear interpolant of the pure callable.
+    Sampled(std::sync::Arc<[f64]>),
     /// The Reference's `squish_rate_func(func, a, b)`: run `inner`'s whole
     /// arc inside `[a, b]`, clamping outside; degenerate `a == b` returns
     /// `a` (kept exactly).
@@ -223,6 +234,20 @@ impl RateFunc {
     pub fn eval(&self, t: f64) -> f64 {
         match self {
             Self::Base(f) => f(t),
+            Self::Sampled(samples) => match samples.len() {
+                0 => t,
+                1 => samples[0],
+                len => {
+                    #[allow(clippy::cast_precision_loss)]
+                    let position = t.clamp(0.0, 1.0) * (len - 1) as f64;
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let low = position.floor() as usize;
+                    let high = low.min(len - 2) + 1;
+                    #[allow(clippy::cast_precision_loss)]
+                    let fraction = position - low as f64;
+                    (1.0 - fraction) * samples[low.min(len - 1)] + fraction * samples[high]
+                }
+            },
             Self::Squish { inner, a, b } => {
                 // The Reference's squish_rate_func body, branch for branch.
                 if a == b {

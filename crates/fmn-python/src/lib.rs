@@ -2735,12 +2735,13 @@ impl PyScene {
         specs: Vec<Bound<'_, PyAny>>,
         camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
         run_time: Option<f64>,
-        rate_func: Option<&str>,
+        rate_func: Option<Bound<'_, PyAny>>,
         lag_ratio: Option<f64>,
     ) -> PyResult<Vec<f64>> {
         let engine = Rc::clone(&slf.borrow().engine);
 
         // Resolve every Python-side value before the engine borrow.
+        let play_rate = rate_func.as_ref().map(rate_func_from_py).transpose()?;
         let mut resolved = Vec::with_capacity(specs.len());
         for spec in &specs {
             resolved.push(parse_anim_spec(&engine, spec)?);
@@ -2761,16 +2762,13 @@ impl PyScene {
                     core: live.unbind(),
                     start_time,
                     run_time: effective_run_time,
-                    rate: rate_func
-                        .map(named_rate_func)
-                        .transpose()?
-                        .unwrap_or_default(),
+                    rate: play_rate.clone().unwrap_or_default(),
                 })
             })
             .transpose()?;
         let overrides = fmn_scene::PlayOverrides {
             run_time,
-            rate_func: rate_func.map(named_rate_func).transpose()?,
+            rate_func: play_rate,
             lag_ratio,
         };
         let mut sink = AlphaProbeSink {
@@ -2789,7 +2787,23 @@ impl PyScene {
             scene
                 .play(animations, overrides, &mut sink)
                 .map(|_| ())
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                .map_err(|error| {
+                    let text = error.to_string();
+                    if text.contains("become between records of different schemas") {
+                        // The engine's precise cross-schema refusal, plus the
+                        // design it awaits: revealing a sampled Surface is the
+                        // Reference's Surface.pointwise_become_partial u-slice
+                        // mechanism — an fmn-anim/fmn-mobject tranche, not a
+                        // binding.
+                        PyRuntimeError::new_err(format!(
+                            "{text}; revealing a sampled Surface awaits the \
+                         engine's surface partial-reveal mechanism \
+                         (Surface.pointwise_become_partial)"
+                        ))
+                    } else {
+                        PyRuntimeError::new_err(text)
+                    }
+                })?;
         }
         drop(scene);
         let AlphaProbeSink {
@@ -2804,6 +2818,39 @@ impl PyScene {
             camera.finish_exact(slf.py())?;
         }
         Ok(alphas)
+    }
+
+    /// Engine-truth structural facts (the corpus baselines): draw-list
+    /// root count, total family membership, and the aggregate family bbox
+    /// (zero boxes skipped) — measured on the Stage directly, so the
+    /// numbers never depend on Python proxy liveness or GC timing.
+    #[allow(clippy::type_complexity)]
+    fn _engine_facts(slf: &Bound<'_, Self>) -> PyResult<(usize, usize, [f64; 3], [f64; 3])> {
+        let engine = Rc::clone(&slf.borrow().engine);
+        let scene = engine.borrow();
+        let stage = scene.stage();
+        let roots = stage.roots().to_vec();
+        let mut family_total = 0usize;
+        let mut low = [f64::INFINITY; 3];
+        let mut high = [f64::NEG_INFINITY; 3];
+        let mut any_box = false;
+        for &root in &roots {
+            family_total += stage.family(root).len();
+            let bbox = stage.get_bounding_box(root);
+            if bbox.min == [0.0; 3] && bbox.max == [0.0; 3] {
+                continue;
+            }
+            any_box = true;
+            for axis in 0..3 {
+                low[axis] = low[axis].min(bbox.min[axis]);
+                high[axis] = high[axis].max(bbox.max[axis]);
+            }
+        }
+        if !any_box {
+            low = [0.0; 3];
+            high = [0.0; 3];
+        }
+        Ok((roots.len(), family_total, low, high))
     }
 
     /// Adopt a detached mobject graph into this scene's arena WITHOUT
@@ -2890,7 +2937,7 @@ struct AnimSpec {
     mob: Option<Mob>,
     target: Option<Mob>,
     run_time: Option<f64>,
-    rate: Option<String>,
+    rate: Option<fmn_anim::RateFunc>,
     lag: Option<f64>,
     shift: [f64; 3],
     scale: f64,
@@ -2915,10 +2962,11 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
         Option<Bound<'_, BridgeMobject>>,
         Option<Bound<'_, BridgeMobject>>,
         Option<f64>,
-        Option<String>,
+        Option<Bound<'_, PyAny>>,
         Option<f64>,
         Bound<'_, PyDict>,
     ) = spec.extract()?;
+    let rate = rate.as_ref().map(rate_func_from_py).transpose()?;
     let resolve = |proxy: &Bound<'_, BridgeMobject>| -> PyResult<Mob> {
         let (mob_engine, mob) = bound_parts(&proxy.borrow())?;
         if same_engine(engine, &mob_engine) {
@@ -3116,8 +3164,8 @@ fn build_native_animation(
         if let Some(value) = spec.run_time {
             config.run_time = value;
         }
-        if let Some(name) = &spec.rate {
-            config.rate_func = named_rate_func(name)?;
+        if let Some(rate) = spec.rate {
+            config.rate_func = rate;
         }
         if let Some(value) = spec.lag
             && !is_composition
@@ -3129,6 +3177,30 @@ fn build_native_animation(
         }
     }
     Ok(animation)
+}
+
+/// A play-surface rate value: a catalog NAME, or a pre-sampled curve (a
+/// sequence of at least two floats on the uniform `[0, 1]` grid) — the
+/// bootstrap samples pure Python callables into the latter before the
+/// segment runs, so no interpreter crossing ever happens mid-segment.
+fn rate_func_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_anim::RateFunc> {
+    if let Ok(name) = value.extract::<String>() {
+        return named_rate_func(&name);
+    }
+    let samples: Vec<f64> = value.extract().map_err(|_| {
+        PyTypeError::new_err("rate_func must be a catalog name or a pre-sampled sequence of floats")
+    })?;
+    if samples.len() < 2 {
+        return Err(PyValueError::new_err(
+            "a sampled rate curve needs at least two samples",
+        ));
+    }
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err(PyValueError::new_err(
+            "a sampled rate curve must be finite everywhere",
+        ));
+    }
+    Ok(fmn_anim::RateFunc::Sampled(samples.into()))
 }
 
 fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
