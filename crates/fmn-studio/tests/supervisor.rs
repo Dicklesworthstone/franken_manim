@@ -329,7 +329,14 @@ impl ScriptedBuilder {
             clock,
             build_cost,
             build: 0,
-            executable: PathBuf::from("/worker/fmn"),
+            // The launcher is scripted, so the path is never opened — but the
+            // supervisor validates absoluteness with host path semantics, and
+            // `/worker/fmn` has no drive prefix on Windows.
+            executable: PathBuf::from(if cfg!(windows) {
+                r"C:\worker\fmn.exe"
+            } else {
+                "/worker/fmn"
+            }),
         }
     }
 }
@@ -342,7 +349,11 @@ impl RebuildDriver for ScriptedBuilder {
             executable: self.executable.clone(),
             argv: vec!["--studio-worker".to_owned()],
             env: Vec::new(),
-            cwd: Some(PathBuf::from("/workspace")),
+            cwd: Some(PathBuf::from(if cfg!(windows) {
+                r"C:\workspace"
+            } else {
+                "/workspace"
+            })),
             build_id: sha256(format!("worker build {}", self.build).as_bytes()),
         })
     }
