@@ -5,18 +5,17 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `0e727c336281`.**
+**Computed against franken_markdown `82588865c453`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
-| **Parse** | 99.989 % | 99.978 % |
-| **Parse + layout** | 99.791 % | 99.633 % |
+| **Parse** | 99.994 % | 99.989 % |
+| **Parse + layout** | 99.797 % | 99.644 % |
 
 ## Pending constructs (parse plane)
 
 | Construct | Occurrences blocked | Tracked at |
 |---|---|---|
-| `\doublespacing` | 1 | franken_manim fm-j5t |
 | `\dx` | 1 | franken_manim fm-j5t |
 
 ## Pending at layout (parse succeeds)
@@ -40,6 +39,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | `4743f78d3e57` | 99.960 | 99.924 | 99.763 | 99.579 |
 | `b30516ea9522` | 99.977 | 99.957 | 99.780 | 99.612 |
 | `0e727c336281` | 99.989 | 99.978 | 99.791 | 99.633 |
+| `82588865c453` | 99.994 | 99.989 | 99.797 | 99.644 |
 
 ## How this is enforced
 
