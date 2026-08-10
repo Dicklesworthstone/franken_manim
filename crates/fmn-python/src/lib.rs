@@ -146,6 +146,18 @@ impl Nursery {
         let root = stage.add(mobject);
         Self { stage, root }
     }
+
+    /// A nursery whose root is a native value tracker (§8.6): `kind` is
+    /// 0 = Plain, 1 = Exponential, 2 = Complex (re/im in `value`/`im`).
+    fn value_tracker(kind: u8, value: f64, im: f64) -> Self {
+        let mut stage = Stage::new();
+        let root = match kind {
+            1 => stage.add_exponential_value_tracker(value),
+            2 => stage.add_complex_value_tracker(value, im),
+            _ => stage.add_value_tracker(value),
+        };
+        Self { stage, root }
+    }
 }
 
 /// Subclassable Python proxy over either detached builder state (a private
@@ -1385,6 +1397,66 @@ impl BridgeMobject {
             .build()
             .map_err(native_error)?;
         install_native_tree(slf, factory, built)
+    }
+
+    /// `ValueTracker` initialization: replace the detached nursery with a
+    /// native tracker entry (`Stage::add_value_tracker` and kin) —
+    /// state-real in both proxy states, and `copy_into` carries the
+    /// tracker through scene adoption.
+    fn _init_value_tracker(slf: &Bound<'_, Self>, kind: u8, value: f64, im: f64) -> PyResult<()> {
+        let mut cell = slf.borrow_mut();
+        if cell.engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a value tracker initializes before scene entry",
+            ));
+        }
+        cell.nursery = Some(Nursery::value_tracker(kind, value, im));
+        cell.initialized = true;
+        Ok(())
+    }
+
+    /// The decoded scalar tracker value (Plain or Exponential).
+    fn _tracker_value(slf: &Bound<'_, Self>) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.tracker_value(mob))?
+            .ok_or_else(|| StaleHandleError::new_err("no scalar value tracker behind this proxy"))
+    }
+
+    /// The complex tracker value as `(re, im)`.
+    fn _tracker_complex_value(slf: &Bound<'_, Self>) -> PyResult<(f64, f64)> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.tracker_complex_value(mob))?
+            .ok_or_else(|| StaleHandleError::new_err("no complex value tracker behind this proxy"))
+    }
+
+    fn _set_tracker_value(slf: &Bound<'_, Self>, value: f64) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.set_tracker_value(mob, value))?.map_err(stage_error)
+    }
+
+    fn _set_tracker_complex_value(slf: &Bound<'_, Self>, re: f64, im: f64) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_tracker_complex_value(mob, re, im)
+        })?
+        .map_err(stage_error)
+    }
+
+    fn _increment_tracker_value(slf: &Bound<'_, Self>, d_value: f64) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.increment_tracker_value(mob, d_value)
+        })?
+        .map_err(stage_error)
+    }
+
+    /// `Stage::set_z_index` for this entry alone; the bootstrap
+    /// distributes over the family list in both proxy states.
+    fn _set_z_index(slf: &Bound<'_, Self>, z_index: i32) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_z_index(mob, z_index, false);
+        })
     }
 
     /// `Line(start, end, buff, path_arc)` over the line shelf.

@@ -50,6 +50,39 @@ def _vec3(value):
     return (float(value[0]), float(value[1]), float(value[2]))
 
 
+def _interpolate(start, end, alpha):
+    # manimlib/utils/bezier.py interpolate, verbatim.
+    return (1 - alpha) * start + alpha * end
+
+
+def _outer_interpolate(start, end, alpha):
+    # manimlib/utils/bezier.py outer_interpolate, verbatim.
+    result = _np.outer(1 - alpha, start) + _np.outer(alpha, end)
+    return result.reshape((*_np.shape(alpha), *_np.shape(start)))
+
+
+def _axis_number_to_point(axis, x_min, x_max, number):
+    # NumberLine.number_to_point (number_line.py:134) over the axis
+    # proxy's LIVE own points — exact after any rescale/move/stretch.
+    start = _np.array(axis._get_start())
+    end = _np.array(axis._get_end())
+    alpha = (_np.asarray(number, dtype=float) - x_min) / (x_max - x_min)
+    if _np.shape(alpha) == ():
+        return _interpolate(start, end, float(alpha))
+    return _outer_interpolate(start, end, alpha)
+
+
+def _axis_point_to_number(axis, x_min, x_max, point):
+    # NumberLine.point_to_number (number_line.py:140), verbatim.
+    start = _np.array(axis._get_start())
+    end = _np.array(axis._get_end())
+    vect = end - start
+    proportion = _np.dot(_np.asarray(point, dtype=float) - start, vect) / _np.dot(
+        vect, vect
+    )
+    return _interpolate(x_min, x_max, proportion)
+
+
 _FRAME_X_RADIUS, _FRAME_Y_RADIUS = _BridgeMobject._frame_radii()
 _FRAME_SHAPE = (2.0 * _FRAME_X_RADIUS, 2.0 * _FRAME_Y_RADIUS)
 _DEG = _math.tau / 360.0
@@ -666,6 +699,40 @@ class Mobject(_BridgeMobject):
         if submobject_list:
             self.submobjects.extend(submobject_list)
         return self
+
+    def set_z_index(self, z_index, recurse=True):
+        # State-real: the engine's scene-list sort key (§8.5), written per
+        # family member in both proxy states.
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob._set_z_index(int(z_index))
+        return self
+
+    def arrange_to_fit_dim(self, length, dim, about_edge=_ORIGIN):
+        # Reference Mobject.arrange_to_fit_dim (mobject.py:583) verbatim,
+        # including its bare `return` for the trivial-count branch.
+        ref_point = self.get_bounding_box_point(about_edge)
+        n_submobs = len(self.submobjects)
+        if n_submobs <= 1:
+            return
+        total_length = sum(sm.length_over_dim(dim) for sm in self.submobjects)
+        buff = (length - total_length) / (n_submobs - 1)
+        vect = _np.zeros(3)
+        vect[dim] = 1
+        x = 0
+        for submob in self.submobjects:
+            submob.set_coord(x, dim, -vect)
+            x += submob.length_over_dim(dim) + buff
+        self.move_to(ref_point, about_edge)
+        return self
+
+    def arrange_to_fit_width(self, width, about_edge=_ORIGIN):
+        return self.arrange_to_fit_dim(width, 0, about_edge)
+
+    def arrange_to_fit_height(self, height, about_edge=_ORIGIN):
+        return self.arrange_to_fit_dim(height, 1, about_edge)
+
+    def arrange_to_fit_depth(self, depth, about_edge=_ORIGIN):
+        return self.arrange_to_fit_dim(depth, 2, about_edge)
 
     def apply_depth_test(self, recurse=True):
         # State-real: `depth_test` is a typed engine uniform (§8.4).
@@ -1470,6 +1537,27 @@ class Line(VMobject):
         result[: len(arr)] = arr[:3]
         return result
 
+    def get_vector(self):
+        return self.get_end() - self.get_start()
+
+    def get_unit_vector(self):
+        vect = self.get_vector()
+        norm = float(_np.sqrt((vect * vect).sum()))
+        return vect / norm if norm > 0 else _np.zeros(3)
+
+    def get_angle(self):
+        vect = self.get_vector()
+        return _math.atan2(vect[1], vect[0])
+
+    def get_length(self):
+        vect = self.get_vector()
+        return float(_np.sqrt((vect * vect).sum()))
+
+    def get_projection(self, point):
+        unit_vect = self.get_unit_vector()
+        start = self.get_start()
+        return start + _np.dot(_np.asarray(point, dtype=float) - start, unit_vect) * unit_vect
+
 
 class DashedLine(Line):
     def __init__(
@@ -1589,12 +1677,45 @@ class Vector(Arrow):
 class NumberLine(VMobject):
     def __init__(self, x_range=(-8, 8, 1), **kwargs):
         _install_live_state(self)
-        self.x_range = tuple(float(v) for v in x_range)
+        parts = [float(v) for v in x_range]
+        if len(parts) == 2:
+            parts.append(1.0)
+        self.x_range = tuple(parts)
+        self.x_min, self.x_max, self.x_step = parts
         self._number_line_params = (self.x_range, dict(kwargs))
         specs = self._build_number_line(
             _native_shell_factory, self.x_range, dict(kwargs)
         )
         _hang_native_children(self, specs)
+
+    # The coordinate mapping reads the proxy's LIVE line geometry (its own
+    # first/last points), so a rescaled, moved, or even stretched line maps
+    # exactly where its ticks actually sit.
+    def number_to_point(self, number):
+        return _axis_number_to_point(self, self.x_min, self.x_max, number)
+
+    def point_to_number(self, point):
+        return _axis_point_to_number(self, self.x_min, self.x_max, point)
+
+    def n2p(self, number):
+        """Abbreviation for number_to_point"""
+        return self.number_to_point(number)
+
+    def p2n(self, point):
+        """Abbreviation for point_to_number"""
+        return self.point_to_number(point)
+
+    def get_vector(self):
+        return self.get_end() - self.get_start()
+
+    def get_angle(self):
+        vect = self.get_vector()
+        return _math.atan2(vect[1], vect[0])
+
+    def get_unit_vector(self):
+        vect = self.get_vector()
+        norm = float(_np.sqrt((vect * vect).sum()))
+        return vect / norm if norm > 0 else _np.zeros(3)
 
     def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
         # The Reference forwards **kwargs to get_number_mobject; the two
@@ -1682,6 +1803,9 @@ class Axes(VGroup):
         self.x_axis = self.submobjects[0]
         self.y_axis = self.submobjects[1]
         self.axes = VGroup(self.x_axis, self.y_axis)
+        self.x_range = self._axes_params[0]
+        self.y_range = self._axes_params[1]
+        self.dimension = 2
 
     def get_axes(self):
         return self.axes
@@ -1691,6 +1815,41 @@ class Axes(VGroup):
 
     def get_y_axis(self):
         return self.y_axis
+
+    def get_all_ranges(self):
+        return [self.x_range, self.y_range]
+
+    # CoordinateSystem mapping (coordinate_systems.py:501), verbatim over
+    # each axis proxy's LIVE line geometry — exact after rescale/move.
+    def coords_to_point(self, *coords):
+        axes = list(self.axes)
+        ranges = self.get_all_ranges()
+        origin = _axis_number_to_point(axes[0], ranges[0][0], ranges[0][1], 0)
+        result = _np.array(origin, dtype=float)
+        for axis, rng, coord in zip(axes, ranges, coords):
+            result = result + (
+                _axis_number_to_point(axis, rng[0], rng[1], coord) - origin
+            )
+        return result
+
+    def point_to_coords(self, point):
+        axes = list(self.axes)
+        ranges = self.get_all_ranges()
+        return tuple(
+            _axis_point_to_number(axis, rng[0], rng[1], point)
+            for axis, rng in zip(axes, ranges)
+        )
+
+    def c2p(self, *coords):
+        """Abbreviation for coords_to_point"""
+        return self.coords_to_point(*coords)
+
+    def p2c(self, point):
+        """Abbreviation for point_to_coords"""
+        return self.point_to_coords(point)
+
+    def get_origin(self):
+        return self.c2p(*[0] * self.dimension)
 
     def add_coordinate_labels(self, x_values=None, y_values=None, excluding=(0,), **kwargs):
         font_size = kwargs.pop("font_size", None)
@@ -1785,9 +1944,16 @@ class ThreeDAxes(Axes):
         _hang_native_children(self, specs)
         self.x_axis, self.y_axis, self.z_axis = self.submobjects[:3]
         self.axes = VGroup(self.x_axis, self.y_axis, self.z_axis)
+        self.x_range = self._axes_params[0]
+        self.y_range = self._axes_params[1]
+        self.z_range = tuple(float(v) for v in z_range)
+        self.dimension = 3
 
     def get_z_axis(self):
         return self.z_axis
+
+    def get_all_ranges(self):
+        return [self.x_range, self.y_range, self.z_range]
 
 
 class NumberPlane(Axes):
@@ -1837,6 +2003,9 @@ class NumberPlane(Axes):
             self.submobjects[:4]
         )
         self.axes = VGroup(self.x_axis, self.y_axis)
+        self.x_range = self._plane_params[0]
+        self.y_range = self._plane_params[1]
+        self.dimension = 2
 
     def _native_plane_specs(self):
         (x_range, y_range, axis_config, x_axis_config, y_axis_config,
@@ -1865,6 +2034,21 @@ class NumberPlane(Axes):
 
 
 class ComplexPlane(NumberPlane):
+    # Reference ComplexPlane: complex numbers map through the 2D grid.
+    def number_to_point(self, number):
+        number = complex(number)
+        return self.coords_to_point(number.real, number.imag)
+
+    def n2p(self, number):
+        return self.number_to_point(number)
+
+    def point_to_number(self, point):
+        x, y = self.point_to_coords(point)
+        return complex(x, y)
+
+    def p2n(self, point):
+        return self.point_to_number(point)
+
     def _native_plane_specs(self):
         (x_range, y_range, axis_config, x_axis_config, y_axis_config,
          background, faded, ratio, height, width, unit) = self._plane_params
@@ -2116,6 +2300,59 @@ class OldTexText(OldTex):
         # per instance, never on the class.
         self._native_text_mode = not math_mode
         super().__init__(*tex_strings, arg_separator=arg_separator, **kwargs)
+
+
+class ValueTracker(Mobject):
+    """The Reference's ValueTracker over the native tracker entries
+    (§8.6, Stage::add_value_tracker): the value is real engine state in
+    both proxy states and survives scene adoption."""
+
+    _tracker_kind = 0  # Plain
+
+    def __init__(self, value=0, **kwargs):
+        _install_live_state(self)
+        for key, val in kwargs.items():
+            setattr(self, key, val)
+        if isinstance(value, complex):
+            raise TypeError(
+                type(self).__name__
+                + " holds a scalar; use ComplexValueTracker for complex values"
+            )
+        self._init_value_tracker(type(self)._tracker_kind, float(value), 0.0)
+
+    def get_value(self):
+        return self._tracker_value()
+
+    def set_value(self, value):
+        self._set_tracker_value(float(value))
+        return self
+
+    def increment_value(self, d_value):
+        self.set_value(self.get_value() + d_value)
+
+
+class ExponentialValueTracker(ValueTracker):
+    _tracker_kind = 1
+
+
+class ComplexValueTracker(ValueTracker):
+    _tracker_kind = 2
+
+    def __init__(self, value=0, **kwargs):
+        _install_live_state(self)
+        for key, val in kwargs.items():
+            setattr(self, key, val)
+        value = complex(value)
+        self._init_value_tracker(2, value.real, value.imag)
+
+    def get_value(self):
+        re, im = self._tracker_complex_value()
+        return complex(re, im)
+
+    def set_value(self, value):
+        value = complex(value)
+        self._set_tracker_complex_value(value.real, value.imag)
+        return self
 
 
 class CameraFrame(Mobject):
@@ -2753,6 +2990,9 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.tex_mobject", "TexText"): TexText,
         ("manimlib.mobject.svg.old_tex_mobject", "OldTex"): OldTex,
         ("manimlib.mobject.svg.old_tex_mobject", "OldTexText"): OldTexText,
+        ("manimlib.mobject.value_tracker", "ValueTracker"): ValueTracker,
+        ("manimlib.mobject.value_tracker", "ExponentialValueTracker"): ExponentialValueTracker,
+        ("manimlib.mobject.value_tracker", "ComplexValueTracker"): ComplexValueTracker,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
