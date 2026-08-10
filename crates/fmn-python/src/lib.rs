@@ -1350,6 +1350,127 @@ impl BridgeMobject {
         .to_hex()
     }
 
+    /// `Mobject.become` over `Stage::become_mobject`: per-member data,
+    /// uniform, and placement assignment across zipped equal-shape
+    /// families. Schema or family-shape drift is the engine's precise
+    /// refusal (structural `align_family` awaits its binding).
+    #[pyo3(signature = (other, match_updaters = false))]
+    fn _become(
+        slf: &Bound<'_, Self>,
+        other: &Bound<'_, BridgeMobject>,
+        match_updaters: bool,
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        let self_bound = {
+            let cell = slf.borrow();
+            cell.engine.as_ref().map(Rc::clone).zip(cell.mob)
+        };
+        if let Some((engine, mob)) = self_bound {
+            let (other_engine, other_mob) = bound_parts(&other.borrow())?;
+            if !same_engine(&engine, &other_engine) {
+                return Err(ForeignStageError::new_err(
+                    "become endpoints must belong to one Scene",
+                ));
+            }
+            return engine
+                .borrow_mut()
+                .stage_mut()
+                .become_mobject(mob, other_mob, match_updaters)
+                .map_err(stage_error);
+        }
+        // Detached self: bring a copy of the source family into the
+        // nursery, become it, and drop the temp — the Reference's
+        // become-is-a-data-copy semantics without any scene requirement.
+        let other_location = {
+            let cell = other.borrow();
+            (cell.engine.as_ref().map(Rc::clone), cell.mob)
+        };
+        let mut self_cell = slf.borrow_mut();
+        let root = self_cell
+            .nursery
+            .as_ref()
+            .map(|nursery| nursery.root)
+            .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
+        let nursery = self_cell.nursery.as_mut().expect("checked above");
+        let temp = match other_location {
+            (Some(other_engine), Some(other_mob)) => {
+                let scene = other_engine.borrow();
+                scene
+                    .stage()
+                    .copy_into(other_mob, &mut nursery.stage)
+                    .map_err(stage_error)?
+            }
+            _ => {
+                let other_cell = other.borrow();
+                let other_nursery = other_cell.nursery.as_ref().ok_or_else(|| {
+                    StaleHandleError::new_err("become source has no detached or bound state")
+                })?;
+                other_nursery
+                    .stage
+                    .copy_into(other_nursery.root, &mut nursery.stage)
+                    .map_err(stage_error)?
+            }
+        };
+        let outcome = nursery
+            .stage
+            .become_mobject(root, temp, match_updaters)
+            .map_err(stage_error);
+        nursery.stage.delete(temp).map_err(stage_error)?;
+        outcome
+    }
+
+    /// `TracingTail` construction: create the native tracer — a bound
+    /// stage entry whose native dt-updater follows the traced mobject's
+    /// center (fmn-library fields.rs) — and bind THIS proxy to it.
+    #[pyo3(signature = (scene, traced, time_traced, stroke_color, stroke_width_taper, stroke_opacity_taper))]
+    fn _init_native_tracer(
+        slf: &Bound<'_, Self>,
+        scene: &Bound<'_, PyScene>,
+        traced: &Bound<'_, BridgeMobject>,
+        time_traced: f64,
+        stroke_color: Option<&Bound<'_, PyAny>>,
+        stroke_width_taper: Vec<f64>,
+        stroke_opacity_taper: Vec<f64>,
+    ) -> PyResult<()> {
+        if slf.borrow().engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a tracing tail initializes before scene entry",
+            ));
+        }
+        let engine = Rc::clone(&scene.borrow().engine);
+        let (traced_engine, traced_mob) = bound_parts(&traced.borrow())?;
+        if !same_engine(&engine, &traced_engine) {
+            return Err(ForeignStageError::new_err(
+                "the traced mobject belongs to a different Scene",
+            ));
+        }
+        let mut tail = fmn_library::TracingTail::new()
+            .with_time_traced(time_traced)
+            .with_stroke_width_taper(stroke_width_taper)
+            .with_stroke_opacity_taper(stroke_opacity_taper);
+        if let Some(color) = stroke_color {
+            tail = tail.with_stroke_color(srgb_from_py(color)?);
+        }
+        let mob = {
+            let mut runtime = engine.borrow_mut();
+            let mob = tail
+                .add_to_stage(runtime.stage_mut(), traced_mob)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            runtime.stage_mut().pin(mob).map_err(stage_error)?;
+            mob
+        };
+        {
+            let mut cell = slf.borrow_mut();
+            cell.nursery = None;
+            cell.engine = Some(Rc::clone(&engine));
+            cell.mob = Some(mob);
+            cell.initialized = true;
+        }
+        register_proxy(slf.py(), scene, mob, slf.as_any())?;
+        slf.as_any().setattr("_scene", scene)?;
+        Ok(())
+    }
+
     /// `Stage::save_state`: snapshot this entry's family for `Restore`.
     fn _save_state(slf: &Bound<'_, Self>) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
@@ -2250,7 +2371,7 @@ impl BridgeMobject {
         };
         let mut child_locations: Vec<_> = proxies.iter().map(&location_of).collect();
 
-        let parent_location = {
+        let parent_locator = |slf: &Bound<'_, Self>| {
             let cell = slf.borrow();
             (
                 cell.engine.as_ref().map(Rc::clone),
@@ -2258,23 +2379,46 @@ impl BridgeMobject {
                 cell.initialized && cell.nursery.is_some(),
             )
         };
-        let (Some(engine), Some(parent), _) = parent_location else {
+        let mut parent_location = parent_locator(slf);
+        if parent_location.0.is_none() {
             if !parent_location.2 {
                 return Err(StaleHandleError::new_err(
                     "uninitialized mobject cannot own submobjects",
                 ));
             }
-            if child_locations
+            let bound_child = proxies
                 .iter()
-                .any(|(child_engine, _, detached)| child_engine.is_some() || !detached)
-            {
-                return Err(ForeignStageError::new_err(
-                    "a detached parent may contain only detached mobjects",
-                ));
+                .zip(&child_locations)
+                .find_map(|(proxy, location)| location.0.is_some().then_some(proxy));
+            match bound_child {
+                None => {
+                    if child_locations.iter().any(|(_, _, detached)| !detached) {
+                        return Err(ForeignStageError::new_err(
+                            "a detached parent may contain only detached mobjects",
+                        ));
+                    }
+                    // The Python live list is authoritative until Scene.add
+                    // binds the complete graph in one transaction.
+                    return Ok(());
+                }
+                Some(child) => {
+                    // Mirror adoption (fm-p107): a detached parent
+                    // ingesting a bound child adopts INTO the child's
+                    // scene first — the Reference's global-mobject model;
+                    // the parent is typically scene-added right after.
+                    let scene_object = child.getattr("_scene")?;
+                    let scene = scene_object.cast::<PyScene>().map_err(|_| {
+                        PyRuntimeError::new_err("bound proxy's `_scene` is not a Scene")
+                    })?;
+                    bind_graph(slf.py(), scene, slf)?;
+                    parent_location = parent_locator(slf);
+                }
             }
-            // The Python live list is authoritative until Scene.add binds the
-            // complete graph in one transaction.
-            return Ok(());
+        }
+        let (Some(engine), Some(parent), _) = parent_location else {
+            return Err(StaleHandleError::new_err(
+                "parent adoption did not bind the mobject",
+            ));
         };
 
         // Adoption-on-attach (fm-d3gt): a detached child joining a

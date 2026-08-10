@@ -1180,6 +1180,17 @@ class Mobject(_BridgeMobject):
         self.target = self.copy(deep=use_deepcopy)
         return self.target
 
+    def become(self, mobject, match_updaters=False):
+        # Reference mobject.py:721: per-member data/uniform assignment
+        # across zipped families, in both proxy states. The engine's
+        # become handles equal-shape, same-schema families; schema or
+        # shape drift refuses precisely (structural align_family awaits
+        # its binding).
+        if self._is_bound() and not mobject._is_bound():
+            self._scene._adopt(mobject)
+        self._become(mobject, match_updaters)
+        return self
+
     def save_state(self, use_deepcopy=False):
         # The engine snapshot Restore consumes (Stage::save_state). Note:
         # a save taken while detached does not survive scene adoption
@@ -2881,6 +2892,53 @@ class SurfaceMesh(VGroup):
             self.apply_depth_test()
 
 
+class TracingTail(VMobject):
+    """The Reference's TracingTail (changing.py:151) over the native
+    tracer (fmn-library fields.rs): a bound stage entry whose NATIVE
+    dt-updater follows the traced mobject's center with the kept width
+    and opacity tapers — no Python crossing per frame, and no
+    parent-child relation to the traced mobject (it only reads the
+    center, the correct Reference reading)."""
+
+    def __init__(
+        self,
+        mobject_or_func,
+        time_traced=1.0,
+        stroke_color=None,
+        stroke_width=(0, 3),
+        stroke_opacity=(0, 1),
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "TracingTail()", [(name, True) for name in sorted(kwargs)]
+        )
+        if not isinstance(mobject_or_func, _BridgeMobject):
+            raise NotImplementedError(
+                "function-traced tails await the native point-function "
+                "tracer; pass the traced mobject itself"
+            )
+        if not mobject_or_func._is_bound():
+            raise NotImplementedError(
+                "TracingTail traces a scene-bound mobject; add it to the "
+                "Scene before tracing (fm-p107)"
+            )
+
+        def taper(value):
+            if hasattr(value, "__len__"):
+                return [float(v) for v in value]
+            return [float(value), float(value)]
+
+        _install_live_state(self)
+        self._init_native_tracer(
+            mobject_or_func._scene,
+            mobject_or_func,
+            float(time_traced),
+            stroke_color,
+            taper(stroke_width),
+            taper(stroke_opacity),
+        )
+
+
 class ValueTracker(Mobject):
     """The Reference's ValueTracker over the native tracker entries
     (§8.6, Stage::add_value_tracker): the value is real engine state in
@@ -4088,6 +4146,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.tex_mobject", "TexText"): TexText,
         ("manimlib.mobject.svg.old_tex_mobject", "OldTex"): OldTex,
         ("manimlib.mobject.svg.old_tex_mobject", "OldTexText"): OldTexText,
+        ("manimlib.mobject.changing", "TracingTail"): TracingTail,
         ("manimlib.mobject.value_tracker", "ValueTracker"): ValueTracker,
         ("manimlib.mobject.value_tracker", "ExponentialValueTracker"): ExponentialValueTracker,
         ("manimlib.mobject.value_tracker", "ComplexValueTracker"): ComplexValueTracker,
@@ -4470,6 +4529,26 @@ def _install_space_ops():
 
 
 _install_space_ops()
+
+
+def _install_mobject_functions():
+    """Free functions from manimlib/mobject/mobject.py, Reference-verbatim
+    over the bound surfaces."""
+
+    def always_redraw(func, *args, **kwargs):
+        mob = func(*args, **kwargs)
+        mob.add_updater(lambda m: m.become(func(*args, **kwargs)))
+        return mob
+
+    functions = {"always_redraw": always_redraw}
+    module = _ensure_module("manimlib.mobject.mobject_update_utils")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_mobject_functions()
 
 
 _install_schema_surface()
