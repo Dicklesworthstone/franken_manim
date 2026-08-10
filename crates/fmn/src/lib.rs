@@ -50,8 +50,8 @@ use fmn_anim::{
     prepare_animations,
 };
 use fmn_config::ConfigError;
-use fmn_geom::GeomError;
-use fmn_library::{TexMobjectError, TextMobjectError};
+use fmn_geom::{GeomError, SpaceOpsError};
+use fmn_library::{DashError, TexMobjectError, TextMobjectError};
 use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
 use fmn_platform::fs::FsError;
@@ -64,6 +64,198 @@ use fmn_scene::{
 use fmn_tex::TexError;
 
 pub mod prelude;
+
+/// Built-in native scenes shipped with the standalone binary.
+///
+/// The primitive corpus is both a useful installation smoke test and G1's
+/// public, permissively licensed end-to-end corpus. Keeping its scene
+/// definitions here means the CLI and the certified conformance target execute
+/// exactly the same native programs.
+pub mod builtins {
+    use crate::prelude::*;
+
+    /// Stable names in the public G1 primitive corpus.
+    pub const PRIMITIVE_SCENE_NAMES: [&str; 25] = [
+        "circle_shift.v1",
+        "rectangle_shift.v1",
+        "triangle_shift.v1",
+        "pentagon_shift.v1",
+        "arc_shift.v1",
+        "dot_shift.v1",
+        "ellipse_shift.v1",
+        "annulus_shift.v1",
+        "line_shift.v1",
+        "dashed_line_shift.v1",
+        "arrow_shift.v1",
+        "circle_scale.v1",
+        "rectangle_scale.v1",
+        "triangle_scale.v1",
+        "hexagon_scale.v1",
+        "arc_scale.v1",
+        "dot_scale.v1",
+        "ellipse_scale.v1",
+        "annulus_scale.v1",
+        "line_scale.v1",
+        "dashed_line_scale.v1",
+        "arrow_scale.v1",
+        "rounded_rectangle.v1",
+        "arc_between_points.v1",
+        "layered_polygon.v1",
+    ];
+
+    const COLORS: [Srgb; 7] = [BLUE_C, GREEN_B, MAROON_C, RED_C, TEAL_B, YELLOW_C, WHITE];
+
+    /// One native program from [`PRIMITIVE_SCENE_NAMES`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PrimitiveScene {
+        index: usize,
+        name: &'static str,
+    }
+
+    impl SceneConstruct for PrimitiveScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let color = COLORS[self.index % COLORS.len()];
+            let main = stage.add(primitive(self.index, color)?)?;
+            stage.set_fill(
+                main,
+                Some(color),
+                Some(0.28 + 0.08 * (self.index % 6) as f64),
+                Some(0.0),
+                true,
+            );
+            stage.set_stroke(
+                main,
+                Some(WHITE),
+                Some(1.2 + 0.25 * (self.index % 5) as f64),
+                Some(0.95),
+                None,
+                true,
+            );
+
+            // A quiet back layer makes painter ordering and alpha composition
+            // part of every sequence, not only the layered fixture.
+            let back = stage.add(
+                Circle::new()
+                    .radius(0.32 + 0.015 * self.index as f64)
+                    .arc_center([-0.55, 0.28, 0.0]),
+            )?;
+            stage.set_fill(
+                back,
+                Some(COLORS[(self.index + 3) % COLORS.len()]),
+                Some(0.32),
+                Some(0.0),
+                true,
+            );
+            stage.set_stroke(back, None, Some(0.0), Some(0.0), None, true);
+            stage.set_z_index(back, -1, true);
+            stage.arena_mut().add_to_scene(back)?;
+
+            let start_x = -0.72 + 0.06 * (self.index % 5) as f64;
+            let start_y = -0.32 + 0.11 * (self.index % 7) as f64;
+            stage.shift(main, [start_x, start_y, 0.0]);
+
+            let builder = main.animate().set_anim_args(AnimateArgs {
+                run_time: Some(0.25),
+                rate_func: Some(crate::core::rate::linear),
+                ..AnimateArgs::default()
+            })?;
+            let builder = if self.index < 11 {
+                builder.shift([
+                    1.0 + 0.04 * (self.index % 4) as f64,
+                    0.18 - 0.03 * (self.index % 3) as f64,
+                    0.0,
+                ])
+            } else if self.index < 22 {
+                builder.scale(0.82 + 0.035 * (self.index % 6) as f64)
+            } else {
+                builder
+                    .shift([0.76, 0.16, 0.0])
+                    .and_then(|builder| builder.scale(0.9))
+            }?;
+            stage.play(builder)?;
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+
+    /// Resolve one built-in primitive scene by its stable name.
+    #[must_use]
+    pub fn primitive_scene(name: &str) -> Option<PrimitiveScene> {
+        PRIMITIVE_SCENE_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .map(|index| PrimitiveScene {
+                index,
+                name: PRIMITIVE_SCENE_NAMES[index],
+            })
+    }
+
+    fn primitive(index: usize, color: Srgb) -> crate::Result<Mobject> {
+        Ok(match index {
+            0 | 11 => Circle::new()
+                .radius(0.48 + 0.02 * (index % 4) as f64)
+                .color(color)
+                .into(),
+            1 | 12 => Rectangle::new()
+                .width(1.1)
+                .height(0.62 + 0.03 * (index % 3) as f64)
+                .color(color)
+                .build()?
+                .into(),
+            2 | 13 => Mobject::try_from(RegularPolygon::triangle().radius(0.6).color(color))?,
+            3 => Mobject::try_from(RegularPolygon::new(5).radius(0.56).color(color))?,
+            14 => Mobject::try_from(RegularPolygon::new(6).radius(0.56).color(color))?,
+            4 | 15 => Arc::new()
+                .start_angle(-0.4)
+                .angle(4.2)
+                .radius(0.58)
+                .color(color)
+                .build()?
+                .into(),
+            5 | 16 => Dot::new().radius(0.23).color(color).into(),
+            6 | 17 => Ellipse::new().width(1.15).height(0.58).color(color).into(),
+            7 | 18 => Annulus::new()
+                .inner_radius(0.22)
+                .outer_radius(0.52)
+                .color(color)
+                .into(),
+            8 | 19 => Line::new([-0.58, -0.25, 0.0], [0.58, 0.25, 0.0])
+                .path_arc(0.18)
+                .color(color)
+                .build()?
+                .into(),
+            9 | 20 => DashedLine::new([-0.62, 0.0, 0.0], [0.62, 0.0, 0.0])
+                .dash_length(0.16)
+                .positive_space_ratio(0.55)
+                .color(color)
+                .build()?
+                .into(),
+            10 | 21 => Arrow::new([-0.58, 0.0, 0.0], [0.58, 0.0, 0.0])
+                .buff(0.0)
+                .color(color)
+                .build()?
+                .into(),
+            22 => Rectangle::new()
+                .width(1.1)
+                .height(0.66)
+                .corner_radius(0.16)
+                .color(color)
+                .build()?
+                .into(),
+            23 => ArcBetweenPoints::new([-0.58, -0.18, 0.0], [0.58, 0.18, 0.0])
+                .angle(1.2)
+                .color(color)
+                .build()?
+                .into(),
+            // The only remaining corpus index is 24, the layered polygon.
+            _ => Mobject::try_from(RegularPolygon::new(7).radius(0.56).color(color))?,
+        })
+    }
+}
 
 /// Substrate constants, colors, rates, deterministic RNG, and value types.
 pub mod core {
@@ -165,6 +357,10 @@ pub enum Error {
     Config(ConfigError),
     /// A geometry constructor or operation.
     Geometry(GeomError),
+    /// A bounded public space-ops construction.
+    SpaceOps(SpaceOpsError),
+    /// A dashed-path construction.
+    Dash(DashError),
     /// Arena ownership, family, or record semantics.
     Stage(StageError),
     /// Animation preparation or playback.
@@ -203,6 +399,8 @@ impl Error {
                 | GeomError::ArcComponentOverflow { .. }
                 | GeomError::ArcComponentsAboveBudget { .. },
             )
+            | Self::SpaceOps(_)
+            | Self::Dash(DashError::DashCountOverflow | DashError::TooManyDashes { .. })
             | Self::Stage(StageError::SubmobjectBudgetExceeded { .. })
             | Self::Text(
                 TextMobjectError::ResourceLimit { .. }
@@ -223,6 +421,7 @@ impl Error {
             | Self::Process(ProcessError::CapabilityAbsent { .. })
             | Self::Topology(_) => ErrorKind::Capability,
             Self::Geometry(_)
+            | Self::Dash(_)
             | Self::Stage(_)
             | Self::Animation(_)
             | Self::Scene(
@@ -252,6 +451,8 @@ impl fmt::Display for Error {
         match self {
             Self::Config(error) => write!(f, "configuration failed: {error}"),
             Self::Geometry(error) => write!(f, "geometry failed: {error}"),
+            Self::SpaceOps(error) => write!(f, "space operation failed: {error}"),
+            Self::Dash(error) => write!(f, "dash construction failed: {error}"),
             Self::Stage(error) => write!(f, "stage operation failed: {error}"),
             Self::Animation(error) => write!(f, "animation failed: {error}"),
             Self::Scene(error) => write!(f, "{error}"),
@@ -272,6 +473,8 @@ impl std::error::Error for Error {
         Some(match self {
             Self::Config(error) => error,
             Self::Geometry(error) => error,
+            Self::SpaceOps(error) => error,
+            Self::Dash(error) => error,
             Self::Stage(error) => error,
             Self::Animation(error) => error,
             Self::Scene(error) => error,
@@ -299,6 +502,8 @@ macro_rules! error_from {
 
 error_from!(ConfigError, Config);
 error_from!(GeomError, Geometry);
+error_from!(SpaceOpsError, SpaceOps);
+error_from!(DashError, Dash);
 error_from!(StageError, Stage);
 error_from!(AnimError, Animation);
 error_from!(TextMobjectError, Text);
