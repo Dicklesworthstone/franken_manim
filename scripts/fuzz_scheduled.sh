@@ -4,8 +4,11 @@
 # scripts/check.sh does not call it. CI invokes it from the weekly
 # `fuzz-codec` job in .github/workflows/ci.yml (`schedule` events only):
 #
-#     cargo install cargo-fuzz --locked
+#     cargo install cargo-fuzz --version 0.13.1
 #     bash scripts/fuzz_scheduled.sh
+#
+# (Not --locked: cargo-fuzz 0.13.1's committed lockfile pins a rustix
+# the pinned nightly refuses to compile; see the ci.yml install step.)
 #
 # Each target runs time-boxed. A crash (assertion failure = a budget
 # violation, libFuzzer-detected panic, timeout-hang, or rss blow-out)
