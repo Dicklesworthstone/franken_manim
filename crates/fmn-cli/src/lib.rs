@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(feature = "batch")]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -55,6 +55,10 @@ pub const PYTHON_SOURCE_PORTAL_MESSAGE: &str = "Python scene sources require the
 /// Reserved source identifier for the native primitive registrations compiled
 /// into the standalone binary.
 pub const BUILTIN_SCENE_SOURCE: &str = "@builtin";
+
+/// Exact private argv sentinel used only between the Studio supervisor and
+/// the disposable worker instance of the same `fmn` executable.
+pub const INTERNAL_STUDIO_WORKER_ARG: &str = "--fmn-internal-studio-worker-v1";
 
 const SUITE_LOCK_BYTES: &[u8] = include_bytes!("../../../SUITE.lock");
 const SUITE_LOCK_TEXT: &str = include_str!("../../../SUITE.lock");
@@ -2382,6 +2386,412 @@ enum NativeRenderInput {
     },
 }
 
+#[derive(Default)]
+struct StudioPacketCapture {
+    packets: Vec<fmn_scene::studio_bridge::FramePacket>,
+}
+
+impl SceneSink for StudioPacketCapture {
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        self.packets
+            .try_reserve(1)
+            .map_err(|error| IntegrationError::new("studio", error.to_string()))?;
+        self.packets.push(packet);
+        Ok(())
+    }
+}
+
+enum NativeStudioFrames {
+    Captured(Vec<fmn_scene::studio_bridge::FramePacket>),
+    Compiled(Box<TimelineBundle>),
+}
+
+impl NativeStudioFrames {
+    fn len(&self) -> usize {
+        match self {
+            Self::Captured(packets) => packets.len(),
+            Self::Compiled(bundle) => usize::try_from(bundle.frame_count()).unwrap_or(usize::MAX),
+        }
+    }
+
+    fn stage_at(
+        &self,
+        index: usize,
+    ) -> Result<fmn_scene::studio_bridge::Stage, fmn_studio::ServiceError> {
+        match self {
+            Self::Captured(packets) => packets
+                .get(index)
+                .map(fmn_scene::studio_bridge::FramePacket::materialize_stage)
+                .ok_or_else(|| studio_service_error("preview frame is outside the scene")),
+            Self::Compiled(bundle) => {
+                let index = u32::try_from(index)
+                    .map_err(|_| studio_service_error("preview frame index exceeds u32"))?;
+                bundle
+                    .stage_at(index)
+                    .map_err(|error| studio_service_error(error.to_string()))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NativeStudioRenderer {
+    frame_config: FrameConfig,
+    tiling: Tiling,
+    engine: EngineIdentity,
+    render_threads: usize,
+}
+
+impl NativeStudioRenderer {
+    fn render(
+        self,
+        scene: &str,
+        frame_index: usize,
+        stage: &fmn_scene::studio_bridge::Stage,
+    ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
+        let (render_plan, mono, binning) = self.prepare(stage, frame_index)?;
+        let frame = FrameJob::with_identity(
+            &render_plan,
+            &mono,
+            &binning,
+            self.frame_config,
+            self.engine,
+        )
+        .map_err(|error| studio_service_error(error.to_string()))?
+        .render(self.render_threads)
+        .map_err(|error| studio_service_error(error.to_string()))?;
+        let layout = FrameLayout::tight(
+            PixelFormat::Rgba8,
+            self.frame_config.viewport.width,
+            self.frame_config.viewport.height,
+        )
+        .map_err(|error| studio_service_error(error.to_string()))?;
+        let mut rgba = FrameBuffer::new(layout);
+        rgba16f_to_rgba8(&frame, &mut rgba)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let png = fmn_codec::encode_rgba8(
+            self.frame_config.viewport.width,
+            self.frame_config.viewport.height,
+            rgba.as_bytes(),
+            fmn_codec::CompressionLevel::Fast,
+        );
+        let digest = fmn_studio::protocol_digest(&png);
+        Ok(fmn_studio::FrameStream {
+            scene: scene.to_owned(),
+            frame_index: u64::try_from(frame_index)
+                .map_err(|_| studio_service_error("preview frame index exceeds u64"))?,
+            width: self.frame_config.viewport.width,
+            height: self.frame_config.viewport.height,
+            stride: 0,
+            encoding: fmn_studio::FrameEncoding::Png,
+            payload: fmn_studio::FramePayload::Pipe { bytes: png, digest },
+        })
+    }
+
+    fn prepare(
+        self,
+        stage: &fmn_scene::studio_bridge::Stage,
+        revision: usize,
+    ) -> Result<(RenderPlan, MonoTable, Binning), fmn_studio::ServiceError> {
+        let revision = u64::try_from(revision)
+            .map_err(|_| studio_service_error("preview revision exceeds u64"))?;
+        let mut render_plan = RenderPlan::new();
+        render_plan
+            .sync(stage, revision.saturating_add(1))
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let mono = MonoTable::build(&render_plan, self.frame_config.map)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let mut binning = Binning::build(
+            &render_plan,
+            self.frame_config.viewport,
+            self.tiling,
+            self.frame_config.map,
+        )
+        .map_err(|error| studio_service_error(error.to_string()))?;
+        binning
+            .prune_occluded(&render_plan)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        Ok((render_plan, mono, binning))
+    }
+
+    fn overlay_json(
+        self,
+        stage: &fmn_scene::studio_bridge::Stage,
+        frame_index: usize,
+        layers: fmn_studio::DebugLayerSet,
+    ) -> Result<Vec<u8>, fmn_studio::ServiceError> {
+        let (_, _, binning) = self.prepare(stage, frame_index)?;
+        let limits = fmn_studio::InspectorLimits::default();
+        fmn_studio::DebugOverlaySnapshot::capture(
+            stage,
+            Some((&binning, self.frame_config.viewport)),
+            layers,
+            limits,
+        )
+        .and_then(|snapshot| snapshot.to_json(limits))
+        .map_err(|error| studio_service_error(error.to_string()))
+    }
+}
+
+struct NativeStudioWorker {
+    build_id: fmn_studio::ProtocolDigest,
+    scene: String,
+    frames: NativeStudioFrames,
+    renderer: NativeStudioRenderer,
+    current_frame: usize,
+    max_frame_bytes: usize,
+}
+
+impl NativeStudioWorker {
+    fn from_command(fs: &dyn FileSystem, command: &RenderCommand) -> Result<Self, CliError> {
+        let input = resolve_native_render_input(fs, command)?;
+        let (scene, frames, config) = match input {
+            NativeRenderInput::Builtin { names } => {
+                if names.len() != 1 {
+                    return Err(CliError::new(
+                        "scene",
+                        "Studio requires exactly one scene name",
+                    ));
+                }
+                let scene = names.into_iter().next().ok_or_else(|| {
+                    CliError::new("scene", "Studio requires exactly one scene name")
+                })?;
+                let mut program = fmn::builtins::primitive_scene(&scene).ok_or_else(|| {
+                    CliError::new("scene", "validated built-in scene disappeared")
+                })?;
+                let config = resolve_render_config(fs, command)?;
+                let mut capture = StudioPacketCapture::default();
+                let completed = fmn::run_scene(
+                    &mut program,
+                    command.runtime_config(&config),
+                    config.determinism.seed,
+                    &mut capture,
+                )
+                .map_err(native_scene_error)?;
+                if capture.packets.is_empty() {
+                    completed
+                        .into_scene()
+                        .show(&mut capture)
+                        .map_err(|error| CliError::new("scene", error.to_string()))?;
+                }
+                (scene, NativeStudioFrames::Captured(capture.packets), config)
+            }
+            NativeRenderInput::Compiled { name, bundle, .. } => {
+                let mut compiled_command = command.clone();
+                if let Some(requested_fps) = compiled_command.fps
+                    && requested_fps != bundle.fps()
+                {
+                    return Err(CliError::new(
+                        "config",
+                        format!(
+                            "--fps {requested_fps} disagrees with the compiled artifact's fixed {} fps schedule",
+                            bundle.fps()
+                        ),
+                    ));
+                }
+                compiled_command.fps = Some(bundle.fps());
+                let config = resolve_render_config(fs, &compiled_command)?;
+                (name, NativeStudioFrames::Compiled(bundle), config)
+            }
+        };
+        if frames.len() == 0 {
+            return Err(CliError::new(
+                "scene",
+                "the selected Studio scene has no preview frame",
+            ));
+        }
+        // Studio is an interactive preview front door even when ordinary
+        // render defaults would otherwise select offline semantics.
+        let (plan, _, _) = derive_execution_plan(
+            fs,
+            &config,
+            fmn_runtime::RenderIntent::Preview,
+            fmn_runtime::OutputPixelFormat::Rgba8,
+        )?;
+        let engine = match plan.engine {
+            fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
+            fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
+            fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
+                return Err(CliError::new(
+                    "capability",
+                    "the selected annex engine has no production Studio renderer",
+                ));
+            }
+        };
+        Ok(Self {
+            build_id: fmn_studio::protocol_digest(BUILD_ID.as_bytes()),
+            scene,
+            frames,
+            renderer: NativeStudioRenderer {
+                frame_config: resolved_frame_config(&config)?,
+                tiling: Tiling {
+                    macro_tile: plan.macro_tile,
+                    fine_tile: plan.fine_tile,
+                },
+                engine,
+                render_threads: plan
+                    .render_teams
+                    .first()
+                    .map_or(1, fmn_runtime::TeamPlan::threads),
+            },
+            current_frame: 0,
+            max_frame_bytes: fmn_studio::ProtocolLimits::default().max_frame_bytes,
+        })
+    }
+
+    fn require_scene(&self, scene: &str) -> Result<(), fmn_studio::ServiceError> {
+        if scene == self.scene {
+            Ok(())
+        } else {
+            Err(fmn_studio::ServiceError::new(
+                fmn_studio::WorkerErrorCode::SceneNotFound,
+                format!("scene {scene:?} is not registered in this worker"),
+            ))
+        }
+    }
+
+    fn resolve_frame(&self, frame: i64) -> Result<usize, fmn_studio::ServiceError> {
+        let frame =
+            usize::try_from(frame).map_err(|_| studio_service_error("negative preview frame"))?;
+        if frame >= self.frames.len() {
+            return Err(studio_service_error(format!(
+                "preview frame {frame} is outside 0..{}",
+                self.frames.len()
+            )));
+        }
+        Ok(frame)
+    }
+
+    fn render_frame(
+        &self,
+        frame: usize,
+    ) -> Result<fmn_studio::WorkerResponse, fmn_studio::ServiceError> {
+        let stage = self.frames.stage_at(frame)?;
+        let stream = self.renderer.render(&self.scene, frame, &stage)?;
+        if let fmn_studio::FramePayload::Pipe { bytes, .. } = &stream.payload
+            && bytes.len() > self.max_frame_bytes
+        {
+            return Err(studio_service_error(format!(
+                "preview PNG is {} bytes, over the negotiated {}-byte budget",
+                bytes.len(),
+                self.max_frame_bytes
+            )));
+        }
+        Ok(fmn_studio::WorkerResponse::Frame(stream))
+    }
+
+    fn studio_data(
+        &self,
+        kind: fmn_studio::StudioDataKind,
+        bytes: Vec<u8>,
+    ) -> fmn_studio::WorkerResponse {
+        let digest = fmn_studio::protocol_digest(&bytes);
+        fmn_studio::WorkerResponse::StudioData {
+            scene: self.scene.clone(),
+            kind,
+            bytes,
+            digest,
+        }
+    }
+}
+
+impl fmn_studio::WorkerService for NativeStudioWorker {
+    fn build_id(&self) -> fmn_studio::ProtocolDigest {
+        self.build_id
+    }
+
+    fn begin_session(
+        &mut self,
+        _supervisor_build: fmn_studio::ProtocolDigest,
+        max_frame_bytes: usize,
+    ) -> Result<(), fmn_studio::ServiceError> {
+        self.max_frame_bytes = max_frame_bytes;
+        Ok(())
+    }
+
+    fn handle(
+        &mut self,
+        request: fmn_studio::SupervisorRequest,
+    ) -> Result<fmn_studio::WorkerResponse, fmn_studio::ServiceError> {
+        match request {
+            fmn_studio::SupervisorRequest::EnumerateScenes => {
+                Ok(fmn_studio::WorkerResponse::Scenes(vec![self.scene.clone()]))
+            }
+            fmn_studio::SupervisorRequest::Seek { scene, frame }
+            | fmn_studio::SupervisorRequest::Scrub { scene, frame } => {
+                self.require_scene(&scene)?;
+                let frame = self.resolve_frame(frame)?;
+                self.current_frame = frame;
+                self.render_frame(frame)
+            }
+            fmn_studio::SupervisorRequest::Play { scene, .. }
+            | fmn_studio::SupervisorRequest::Event { scene, .. } => {
+                self.require_scene(&scene)?;
+                Err(fmn_studio::ServiceError::new(
+                    fmn_studio::WorkerErrorCode::InvalidRequest,
+                    "the selected native preview artifact has no live command/event adapter",
+                ))
+            }
+            fmn_studio::SupervisorRequest::Inspect { scene } => {
+                self.require_scene(&scene)?;
+                let stage = self.frames.stage_at(self.current_frame)?;
+                let limits = fmn_studio::InspectorLimits::default();
+                let bytes = fmn_studio::InspectorSnapshot::capture(
+                    &stage,
+                    &fmn_studio::SpanRegistry::new(),
+                    limits,
+                )
+                .and_then(|snapshot| snapshot.to_json(limits))
+                .map_err(|error| studio_service_error(error.to_string()))?;
+                Ok(self.studio_data(fmn_studio::StudioDataKind::Inspection, bytes))
+            }
+            fmn_studio::SupervisorRequest::Overlay { scene, layers } => {
+                self.require_scene(&scene)?;
+                let stage = self.frames.stage_at(self.current_frame)?;
+                let bytes = self
+                    .renderer
+                    .overlay_json(&stage, self.current_frame, layers)?;
+                Ok(self.studio_data(fmn_studio::StudioDataKind::Overlay, bytes))
+            }
+            fmn_studio::SupervisorRequest::ReplayJournal(replay)
+                if replay.scene == self.scene && replay.from_entry == replay.through_entry =>
+            {
+                Ok(fmn_studio::WorkerResponse::ReplayComplete {
+                    from_entry: replay.from_entry,
+                    state_hashes: Vec::new(),
+                })
+            }
+            fmn_studio::SupervisorRequest::ReplayJournal(_) => Err(fmn_studio::ServiceError::new(
+                fmn_studio::WorkerErrorCode::ReplayFailed,
+                "the native preview worker cannot replay a nonempty authored journal yet",
+            )),
+            fmn_studio::SupervisorRequest::RestoreCheckpoint(_) => {
+                Err(fmn_studio::ServiceError::new(
+                    fmn_studio::WorkerErrorCode::CheckpointRejected,
+                    "the native preview worker has no installed checkpoint",
+                ))
+            }
+            fmn_studio::SupervisorRequest::Hello { .. }
+            | fmn_studio::SupervisorRequest::Shutdown => Err(fmn_studio::ServiceError::new(
+                fmn_studio::WorkerErrorCode::InvalidRequest,
+                "the protocol driver owns handshake and shutdown requests",
+            )),
+        }
+    }
+
+    fn active_scene(&self) -> Option<&str> {
+        Some(&self.scene)
+    }
+}
+
+fn studio_service_error(message: impl Into<String>) -> fmn_studio::ServiceError {
+    fmn_studio::ServiceError::new(fmn_studio::WorkerErrorCode::ExecutionFailed, message)
+}
+
 struct RenderSink {
     frame_config: FrameConfig,
     tiling: Tiling,
@@ -4581,6 +4991,359 @@ fn clear_cache(fs: &dyn FileSystem, common: &CommonOptions) -> RunOutput {
                 format!("cache already absent: {root}\n")
             }
         })
+    }
+}
+
+struct SelfWorkerBuilder {
+    executable: PathBuf,
+    argv: Vec<String>,
+    cwd: PathBuf,
+    build_id: fmn_studio::ProtocolDigest,
+}
+
+impl fmn_studio::RebuildDriver for SelfWorkerBuilder {
+    fn rebuild(&mut self) -> Result<fmn_studio::WorkerArtifact, fmn_studio::BuildError> {
+        Ok(fmn_studio::WorkerArtifact {
+            executable: self.executable.clone(),
+            argv: self.argv.clone(),
+            env: Vec::new(),
+            cwd: Some(self.cwd.clone()),
+            build_id: self.build_id,
+        })
+    }
+}
+
+fn os_args_to_utf8(args: &[OsString]) -> Result<Vec<String>, CliError> {
+    let mut utf8 = Vec::new();
+    utf8.try_reserve_exact(args.len())
+        .map_err(|error| internal(format!("command argument storage failed: {error}")))?;
+    for arg in args {
+        utf8.push(
+            arg.clone()
+                .into_string()
+                .map_err(|_| usage("command-line arguments must be valid UTF-8"))?,
+        );
+    }
+    Ok(utf8)
+}
+
+/// Whether these arguments select the public Studio command.
+#[must_use]
+pub fn is_studio_invocation_os(args: &[OsString]) -> bool {
+    os_args_to_utf8(args)
+        .and_then(parse_args)
+        .is_ok_and(|invocation| matches!(invocation, Invocation::Studio(_)))
+}
+
+/// Whether these arguments select the private disposable-worker entry point.
+#[must_use]
+pub fn is_internal_studio_worker_os(args: &[OsString]) -> bool {
+    args.first()
+        .is_some_and(|arg| arg == OsStr::new(INTERNAL_STUDIO_WORKER_ARG))
+}
+
+fn internal_worker_failure(error: impl fmt::Display) -> RunOutput {
+    RunOutput {
+        code: exit_code("internal"),
+        stdout: String::new(),
+        stderr: format!("fmn Studio worker: {error}\n"),
+    }
+}
+
+/// Serve the private Studio protocol over this process's stdin/stdout.
+///
+/// The caller must first check [`is_internal_studio_worker_os`]. Protocol
+/// bytes are written directly to stdout, so returned diagnostics never use
+/// stdout even when the public invocation carried `--robot`.
+#[must_use]
+pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
+    let Some(public_args) = args.get(1..) else {
+        return internal_worker_failure("missing public Studio invocation");
+    };
+    let utf8 = match os_args_to_utf8(public_args) {
+        Ok(args) => args,
+        Err(error) => return internal_worker_failure(error),
+    };
+    let command = match parse_args(utf8) {
+        Ok(Invocation::Studio(command)) => command,
+        Ok(_) => return internal_worker_failure("worker argv is not a Studio invocation"),
+        Err(error) => return internal_worker_failure(error),
+    };
+    if command.render.scene_source_kind() == Some(SceneSourceKind::Python) {
+        return internal_worker_failure(PYTHON_SOURCE_PORTAL_MESSAGE);
+    }
+    let mut service =
+        match NativeStudioWorker::from_command(&fmn_platform::fs::StdFs, &command.render) {
+            Ok(service) => service,
+            Err(error) => return internal_worker_failure(error),
+        };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let outcome = fmn_studio::serve_worker(
+        &mut service,
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        fmn_studio::ProtocolLimits::default(),
+    );
+    match outcome {
+        Ok(fmn_studio::WorkerServeOutcome::Shutdown)
+        | Ok(fmn_studio::WorkerServeOutcome::PeerClosed) => RunOutput::success(String::new()),
+        Ok(fmn_studio::WorkerServeOutcome::HandshakeRejected) => {
+            internal_worker_failure("supervisor handshake was rejected")
+        }
+        Ok(fmn_studio::WorkerServeOutcome::Crashed(report)) => {
+            internal_worker_failure(report.message)
+        }
+        Err(error) => internal_worker_failure(error),
+    }
+}
+
+fn studio_scene_name(fs: &dyn FileSystem, command: &RenderCommand) -> Result<String, CliError> {
+    match resolve_native_render_input(fs, command)? {
+        NativeRenderInput::Builtin { mut names } => {
+            if names.len() != 1 {
+                return Err(CliError::new(
+                    "scene",
+                    "Studio requires exactly one scene name",
+                ));
+            }
+            names
+                .pop()
+                .ok_or_else(|| CliError::new("scene", "Studio requires exactly one scene name"))
+        }
+        NativeRenderInput::Compiled { name, .. } => Ok(name),
+    }
+}
+
+fn studio_cache(
+    clock: Arc<dyn fmn_platform::clock::Clock>,
+) -> Result<fmn_cache::Namespace, CliError> {
+    let root = if cfg!(windows) {
+        PathBuf::from(r"C:\fmn-studio-session-cache")
+    } else {
+        PathBuf::from("/fmn-studio-session-cache")
+    };
+    fmn_cache::Store::open(
+        Arc::new(fmn_platform::fs::VirtualFs::new()),
+        clock,
+        root,
+        fmn_cache::StoreConfig::default(),
+    )
+    .and_then(|store| {
+        store.namespace(
+            "studio-replay",
+            1,
+            fmn_cache::NamespacePolicy {
+                ceiling_bytes: None,
+            },
+        )
+    })
+    .map_err(|error| internal(format!("Studio replay cache: {error}")))
+}
+
+fn write_studio_ready(
+    ready: &mut dyn std::io::Write,
+    command: &StudioCommand,
+    scene: &str,
+    url: &str,
+    generation: u64,
+) -> Result<(), CliError> {
+    let text = if command.render.common.robot {
+        format!(
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"studio_ready\",\
+             \"scene\":{},\"url\":{},\"preview_codec\":\"png\",\
+             \"browser_launch\":{},\"checkpoint_frames\":{},\"worker_generation\":{}}}\n",
+            ROBOT_SCHEMA_VERSION,
+            json_string(scene),
+            json_string(url),
+            json_string(if command.no_browser {
+                "suppressed"
+            } else {
+                "manual"
+            }),
+            command.checkpoint_frames,
+            generation,
+        )
+    } else {
+        let launch = if command.no_browser {
+            "browser launch suppressed"
+        } else {
+            "open manually; the one-external-tool policy forbids spawning a browser"
+        };
+        format!("Studio ready for {scene}: {url} ({launch})\n")
+    };
+    ready
+        .write_all(text.as_bytes())
+        .and_then(|()| ready.flush())
+        .map_err(|error| internal(format!("could not publish Studio launch URL: {error}")))
+}
+
+fn execute_studio(
+    public_args: Vec<String>,
+    command: StudioCommand,
+    ready: &mut dyn std::io::Write,
+    shutdown: &AtomicBool,
+) -> Result<(), CliError> {
+    if command.tui {
+        return Err(CliError::new(
+            "capability",
+            "the terminal Studio client is not yet registered; use the embedded loopback web UI",
+        ));
+    }
+    if command.preview_codec != PreviewCodec::Png {
+        return Err(CliError::new(
+            "capability",
+            "MJPEG Studio preview is not yet wired; use --preview-codec png",
+        ));
+    }
+    let fs: Arc<dyn FileSystem> = Arc::new(fmn_platform::fs::StdFs);
+    let scene = studio_scene_name(fs.as_ref(), &command.render)?;
+    let mut token_bytes = [0_u8; 32];
+    fmn_platform::entropy::HostEntropy::fill(
+        &fmn_platform::entropy::StdHostEntropy,
+        &mut token_bytes,
+    )
+    .map_err(|error| CliError::new("capability", error.to_string()))?;
+    let token = fmn_studio::CapabilityToken::new(token_bytes)
+        .map_err(|error| CliError::new("capability", error.to_string()))?;
+    let executable = std::env::current_exe().map_err(|error| {
+        internal(format!(
+            "cannot resolve the Studio worker executable: {error}"
+        ))
+    })?;
+    let cwd = std::env::current_dir().map_err(|error| {
+        internal(format!(
+            "cannot resolve the Studio working directory: {error}"
+        ))
+    })?;
+    if !executable.is_absolute() || !cwd.is_absolute() {
+        return Err(internal(
+            "the Studio worker executable and working directory must be absolute",
+        ));
+    }
+    let build_id = fmn_studio::protocol_digest(BUILD_ID.as_bytes());
+    let mut worker_argv = Vec::new();
+    worker_argv
+        .try_reserve_exact(public_args.len().saturating_add(1))
+        .map_err(|error| internal(format!("Studio worker argv storage failed: {error}")))?;
+    worker_argv.push(INTERNAL_STUDIO_WORKER_ARG.to_owned());
+    worker_argv.extend(public_args);
+    let mut builder = SelfWorkerBuilder {
+        executable,
+        argv: worker_argv,
+        cwd,
+        build_id,
+    };
+    let clock: Arc<dyn fmn_platform::clock::Clock> = Arc::new(fmn_platform::clock::StdClock::new());
+    let protocol_limits = fmn_studio::ProtocolLimits::default();
+    let mut supervisor = fmn_studio::Supervisor::new(
+        Box::new(fmn_studio::StdWorkerLauncher::default()),
+        Arc::clone(&clock),
+        studio_cache(Arc::clone(&clock))?,
+        fmn_studio::SupervisorConfig {
+            protocol_limits,
+            supervisor_build_id: build_id,
+            ..fmn_studio::SupervisorConfig::default()
+        },
+    );
+    supervisor
+        .install_session(scene.clone(), fmn_scene::Journal::new())
+        .and_then(|()| supervisor.build_and_start(&mut builder))
+        .map_err(|error| CliError::new("scene", format!("Studio worker startup: {error}")))?;
+    let generation = supervisor.generation();
+    let initial = supervisor
+        .request(
+            fmn_studio::SupervisorRequest::Scrub {
+                scene: scene.clone(),
+                frame: 0,
+            },
+            &|_| false,
+        )
+        .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
+    let initial = match initial {
+        fmn_studio::SupervisorReply::Worker(fmn_studio::WorkerResponse::Frame(frame)) => frame,
+        fmn_studio::SupervisorReply::Worker(_) => {
+            return Err(internal("Studio worker omitted the first preview frame"));
+        }
+        fmn_studio::SupervisorReply::Recovered { crash, .. } => {
+            return Err(CliError::new(
+                "scene",
+                format!(
+                    "Studio worker crashed during first frame: {}",
+                    crash.message
+                ),
+            ));
+        }
+    };
+    let frames = fmn_studio::FrameHub::new(4, protocol_limits.max_frame_bytes)
+        .map_err(|error| internal(format!("Studio frame hub: {error}")))?;
+    frames
+        .publish(&initial, protocol_limits)
+        .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
+    let session = Arc::new(
+        fmn_studio::StudioWorkerSession::new(&scene, supervisor, Arc::new(|_| false))
+            .map_err(|error| internal(format!("Studio session: {error}")))?,
+    );
+    let host = match fmn_studio::StudioHost::bind(
+        Arc::clone(&session),
+        frames,
+        token,
+        clock,
+        fmn_studio::StudioHostConfig {
+            bind_addr: std::net::SocketAddr::new(command.bind, command.port),
+            ..fmn_studio::StudioHostConfig::default()
+        },
+    ) {
+        Ok(host) => host,
+        Err(error) => {
+            session.shutdown_worker();
+            return Err(CliError::new("capability", format!("Studio host: {error}")));
+        }
+    };
+    let result = host
+        .launch_url()
+        .map_err(|error| internal(format!("Studio launch URL: {error}")))
+        .and_then(|url| write_studio_ready(ready, &command, &scene, &url, generation))
+        .and_then(|()| {
+            host.serve_until(shutdown)
+                .map_err(|error| CliError::new("scene", format!("Studio host: {error}")))
+        });
+    session.shutdown_worker();
+    result
+}
+
+/// Run the public Studio composition while publishing its capability-bearing
+/// launch URL before entering the server loop.
+#[must_use]
+pub fn run_studio_os(
+    args: &[OsString],
+    ready: &mut dyn std::io::Write,
+    shutdown: &AtomicBool,
+) -> RunOutput {
+    let requested_robot = args
+        .iter()
+        .take_while(|arg| arg.as_os_str() != OsStr::new("--"))
+        .any(|arg| arg == OsStr::new("--robot"));
+    let utf8 = match os_args_to_utf8(args) {
+        Ok(args) => args,
+        Err(error) => return error_output(requested_robot, &error),
+    };
+    let invocation = match parse_args(utf8.clone()) {
+        Ok(invocation) => invocation,
+        Err(error) => return error_output(requested_robot, &error),
+    };
+    let Invocation::Studio(command) = invocation else {
+        return error_output(
+            requested_robot,
+            &internal("run_studio_os received a non-Studio invocation"),
+        );
+    };
+    if let Some(output) = python_source_refusal(&command.render) {
+        return output;
+    }
+    match execute_studio(utf8, command, ready, shutdown) {
+        Ok(()) => RunOutput::success(String::new()),
+        Err(error) => error_output(requested_robot, &error),
     }
 }
 

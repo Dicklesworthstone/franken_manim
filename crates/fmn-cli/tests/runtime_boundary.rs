@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
+use std::io::{BufRead as _, Read as _, Write as _};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fmn_cli::{BUILTIN_SCENE_SOURCE, PYTHON_SOURCE_PORTAL_MESSAGE};
 use fmn_core::rng::RngRoot;
+#[cfg(feature = "batch")]
 use fmn_output::{ManifestMode, ProvenanceManifest};
 use fmn_scene::export_timeline_bundle;
 use fmn_scene::studio_bridge::{Stage, Timeline};
@@ -79,6 +81,120 @@ fn python_source_is_refused_before_file_or_process_access() {
         assert!(stdout.contains(PYTHON_SOURCE_PORTAL_MESSAGE), "{args:?}");
         assert!(!stdout.contains("composition is unavailable"), "{args:?}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn studio_serves_a_real_worker_frame_and_shuts_down_on_stdin_eof() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
+        .args([
+            "studio",
+            "--robot",
+            "--no-browser",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("launch Studio front door");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("Studio stdout"));
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .expect("read Studio readiness record");
+    assert!(ready.contains("\"kind\":\"studio_ready\""), "{ready}");
+    assert!(ready.contains("\"worker_generation\":1"), "{ready}");
+    let url = json_string_field(&ready, "url").expect("readiness URL");
+    let location = url.strip_prefix("http://").expect("loopback HTTP URL");
+    let (authority, target) = location.split_once('/').expect("URL authority and target");
+    let query = target.split_once('?').expect("capability query").1;
+
+    let body = b"frame=1&commit=false";
+    let mut scrub = std::net::TcpStream::connect(authority).expect("connect to Studio scrub API");
+    scrub
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("scrub timeout");
+    write!(
+        scrub,
+        "POST /api/scrub?{query} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .expect("write scrub request");
+    scrub.write_all(body).expect("write scrub body");
+    let mut scrub_response = Vec::new();
+    scrub
+        .read_to_end(&mut scrub_response)
+        .expect("read scrub response");
+    let _ = scrub.shutdown(std::net::Shutdown::Both);
+    let scrub_response = String::from_utf8(scrub_response).expect("scrub response is UTF-8");
+    assert!(
+        scrub_response.starts_with("HTTP/1.1 200 OK"),
+        "{scrub_response}"
+    );
+    assert!(
+        scrub_response.contains("\"frame_index\":1"),
+        "{scrub_response}"
+    );
+
+    let mut stream = std::net::TcpStream::connect(authority).expect("connect to Studio stream");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("stream timeout");
+    write!(
+        stream,
+        "GET /stream?{query} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write stream request");
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let contains_frame_one_png = |bytes: &[u8]| {
+        bytes
+            .windows(20)
+            .position(|window| window == b"X-FMN-Frame-Index: 1")
+            .is_some_and(|header| {
+                bytes[header..]
+                    .windows(8)
+                    .any(|window| window == b"\x89PNG\r\n\x1a\n")
+            })
+    };
+    while !contains_frame_one_png(&response) {
+        let read = stream
+            .read(&mut chunk)
+            .expect("read Studio multipart stream");
+        assert_ne!(read, 0, "Studio stream closed before frame one's PNG");
+        response.extend_from_slice(&chunk[..read]);
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(
+        response
+            .windows(20)
+            .any(|window| window == b"X-FMN-Frame-Index: 1")
+    );
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    drop(stream);
+    drop(stdout);
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait for graceful Studio shutdown");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("Studio stderr")
+        .read_to_string(&mut stderr)
+        .expect("read Studio stderr");
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]

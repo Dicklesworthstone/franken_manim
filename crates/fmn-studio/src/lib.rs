@@ -50,6 +50,11 @@ pub use ui::{
 };
 pub use worker::{ServiceError, WorkerServeError, WorkerServeOutcome, WorkerService, serve_worker};
 
+/// Canonical digest carried by the Studio protocol.
+pub use fmn_hash::Digest as ProtocolDigest;
+/// Hash bytes with the canonical digest used by the Studio protocol.
+pub use fmn_hash::sha256 as protocol_digest;
+
 #[cfg(feature = "metal")]
 pub use fmn_render::metal::{
     NativePreviewError, NativePreviewRenderer, NativePreviewReport, PresentOutcome,

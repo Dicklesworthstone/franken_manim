@@ -1,4 +1,4 @@
-//! Filesystem/process/clock/AssetFetcher capability traits plus
+//! Filesystem/process/clock/entropy/AssetFetcher capability traits plus
 //! HardwareTopology introspection (§6, §17.4, fm-x68).
 //!
 //! # The capability doctrine (read this before adding any I/O to any crate)
@@ -7,8 +7,8 @@
 //! global.** No authoritative fmn crate calls `std::fs`, spawns a process,
 //! reads a clock, or touches the network directly — it accepts the relevant
 //! trait from this crate ([`fs::FileSystem`], [`process::ProcessRunner`],
-//! [`clock::Clock`], [`fetch::AssetFetcher`]) and uses only that. The reasons
-//! are load-bearing, not stylistic:
+//! [`clock::Clock`], [`entropy::HostEntropy`], [`fetch::AssetFetcher`]) and
+//! uses only that. The reasons are load-bearing, not stylistic:
 //!
 //! - **Determinism.** The certified input closure (§16.7, docs/INPUT_CLOSURE.md)
 //!   can only enumerate what the engine read if every read goes through a
@@ -46,6 +46,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod entropy;
 pub mod fetch;
 pub mod fs;
 pub mod process;

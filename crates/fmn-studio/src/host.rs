@@ -544,6 +544,12 @@ impl StudioWorkerSession {
         &self.scene
     }
 
+    /// Ask the disposable worker to terminate through the protocol and reap
+    /// it before the stable host exits.
+    pub fn shutdown_worker(&self) {
+        lock(&self.supervisor).shutdown_worker();
+    }
+
     fn try_owned_scene(&self) -> Result<String, HostError> {
         studio_scene_with_capacity(&self.scene, self.scene.len())
     }
