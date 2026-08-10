@@ -1572,14 +1572,22 @@ impl BridgeMobject {
     /// `Tex(...)` / `TexText(...)` over fmd-math. An unsupported construct
     /// is fmd-math's typed refusal, surfaced VERBATIM (the fm-rqc ratchet
     /// consumes the named constructs from this exact message).
+    ///
+    /// With more than one part, glyph children regroup per part by the
+    /// typeset's native source spans (`typeset.subs[i].span` — §11.4's
+    /// span map, no heuristic splitting), matching the Reference's
+    /// per-`SingleStringTex` submobject structure.
+    #[allow(clippy::too_many_arguments)]
     fn _build_tex<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
-        source: &str,
+        parts: Vec<String>,
+        separator: &str,
         text_mode: bool,
         font_size: f64,
         t2c: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyList>> {
+        let source = parts.join(separator);
         let pairs = t2c_pairs(t2c)?;
         let refs: Vec<(&str, fmn_core::color::Srgb)> = pairs
             .iter()
@@ -1587,12 +1595,12 @@ impl BridgeMobject {
             .collect();
         let built = with_tex_engine(|engine| {
             if text_mode {
-                fmn_library::TexText::new(source)
+                fmn_library::TexText::new(&source)
                     .font_size(font_size)
                     .t2c(&refs)
                     .build(engine)
             } else {
-                fmn_library::Tex::new(source)
+                fmn_library::Tex::new(&source)
                     .font_size(font_size)
                     .t2c(&refs)
                     .build(engine)
@@ -1601,7 +1609,87 @@ impl BridgeMobject {
             // input; never wrap it in a generic message.
             .map_err(native_error)
         })?;
-        install_native_tree(slf, factory, built.vmob)
+        if parts.len() <= 1 {
+            return install_native_tree(slf, factory, built.vmob);
+        }
+        // Half-open byte ranges of each part in the joined source; a part
+        // owns its trailing separator so every source byte has one owner.
+        let mut ranges = Vec::with_capacity(parts.len());
+        let mut cursor = 0usize;
+        for (index, part) in parts.iter().enumerate() {
+            let start = cursor;
+            cursor += part.len();
+            if index + 1 < parts.len() {
+                cursor += separator.len();
+            }
+            ranges.push((start, cursor));
+        }
+        let subs = &built.typeset.subs;
+        let mut tree = Mobject::from(built.vmob.clone());
+        let children = std::mem::take(&mut tree.submobjects);
+        let mut buckets: Vec<Vec<Mobject>> = (0..parts.len()).map(|_| Vec::new()).collect();
+        for (index, child) in children.into_iter().enumerate() {
+            let start = subs.get(index).map_or(0, |sub| sub.span.start);
+            let part = ranges
+                .iter()
+                .position(|&(from, to)| from <= start && start < to)
+                .unwrap_or(parts.len() - 1);
+            buckets[part].push(child);
+        }
+        tree.submobjects = buckets
+            .into_iter()
+            .map(|kids| {
+                // A vmobject-schema group node, so the style surface sees
+                // the stroke/fill fields on the part wrapper too.
+                let mut node = Mobject::from(fmn_library::vmobject::v_group(std::iter::empty::<
+                    fmn_library::VMobject,
+                >()));
+                node.submobjects = kids;
+                node
+            })
+            .collect();
+        install_native_tree(slf, factory, tree)
+    }
+
+    /// `NumberLine.add_numbers`: rebuild the native line at the proxy's
+    /// current width, run the native labeler at `font_size`, and return
+    /// the trailing label group (shifted onto the current center) as one
+    /// shell spec. Same rebuild caveat as `_axes_label_shells`.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _number_line_label_shells<'py>(
+        factory: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        config: &Bound<'py, PyDict>,
+        font_size: f64,
+        current_width: f64,
+        current_center: [f64; 3],
+        x_values: Option<Vec<f64>>,
+        excluding: Option<Vec<f64>>,
+        direction: Option<[f64; 3]>,
+        buff: Option<f64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut line = number_line_from_config(range3(x_range)?, config)?
+            .numbers_font_size(font_size)
+            .width(current_width);
+        if let Some(direction) = direction {
+            line = line.line_to_number_direction(direction);
+        }
+        if let Some(buff) = buff {
+            line = line.line_to_number_buff(buff);
+        }
+        let mut built = line.build().map_err(native_error)?;
+        let before = built.vmob().children().len();
+        with_font_book(|book| {
+            built
+                .add_numbers(book, x_values.as_deref(), excluding.as_deref())
+                .map_err(native_error)
+        })?;
+        let groups: Vec<Mobject> = built.vmob().children()[before..]
+            .iter()
+            .map(|group| Mobject::from(group.clone().shifted(current_center)))
+            .collect();
+        native_shell_specs(factory.py(), factory, groups)
     }
 
     /// `Axes.add_coordinate_labels`: rebuild the native axes at the

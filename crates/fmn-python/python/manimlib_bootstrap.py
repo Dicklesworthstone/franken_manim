@@ -657,6 +657,39 @@ class Mobject(_BridgeMobject):
             self.set_height(max_height, **kwargs)
         return self
 
+    def replicate(self, n):
+        group_class = self.get_group_class()
+        return group_class(*(self.copy() for _ in range(n)))
+
+    def get_grid(
+        self,
+        n_rows,
+        n_cols,
+        height=None,
+        width=None,
+        group_by_rows=False,
+        group_by_cols=False,
+        **kwargs,
+    ):
+        # Reference Mobject.get_grid (mobject.py:786) verbatim — including
+        # its `grid.set_height(width)` in the width branch, an evident
+        # Reference defect kept for parity pending an Appendix-C ruling.
+        total = n_rows * n_cols
+        grid = self.replicate(total)
+        if group_by_cols:
+            kwargs["fill_rows_first"] = False
+        grid.arrange_in_grid(n_rows, n_cols, **kwargs)
+        if height is not None:
+            grid.set_height(height)
+        if width is not None:
+            grid.set_height(width)
+        group_class = self.get_group_class()
+        if group_by_rows:
+            return group_class(*(grid[n : n + n_cols] for n in range(0, total, n_cols)))
+        elif group_by_cols:
+            return group_class(*(grid[n : n + n_rows] for n in range(0, total, n_rows)))
+        return grid
+
     def match_dim_size(self, mobject, dim, **kwargs):
         return self.rescale_to_fit(mobject.length_over_dim(dim), dim, **kwargs)
 
@@ -1363,10 +1396,57 @@ class NumberLine(VMobject):
     def __init__(self, x_range=(-8, 8, 1), **kwargs):
         _install_live_state(self)
         self.x_range = tuple(float(v) for v in x_range)
+        self._number_line_params = (self.x_range, dict(kwargs))
         specs = self._build_number_line(
             _native_shell_factory, self.x_range, dict(kwargs)
         )
         _hang_native_children(self, specs)
+
+    def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
+        # The Reference forwards **kwargs to get_number_mobject; the two
+        # positional overrides the corpus uses route natively.
+        direction = kwargs.pop("direction", None)
+        buff = kwargs.pop("buff", None)
+        _refuse_unrouted(
+            "NumberLine.add_numbers()",
+            [(name, True) for name in sorted(kwargs)],
+        )
+        x_range, config = self._number_line_params
+        specs = _BridgeMobject._number_line_label_shells(
+            _native_shell_factory,
+            x_range,
+            config,
+            float(font_size),
+            float(self.get_width()),
+            _vec3(self.get_center()),
+            None if x_values is None else [float(v) for v in x_values],
+            None if excluding is None else [float(v) for v in excluding],
+            None if direction is None else _vec3(direction),
+            None if buff is None else float(buff),
+        )
+        _hang_native_children(self, specs)
+        self.numbers = self.submobjects[-1]
+        return self.numbers
+
+
+class UnitInterval(NumberLine):
+    def __init__(
+        self,
+        x_range=(0, 1, 0.1),
+        unit_size=10,
+        big_tick_numbers=(0, 1),
+        decimal_number_config=None,
+        **kwargs,
+    ):
+        if decimal_number_config is None:
+            decimal_number_config = dict(num_decimal_places=1)
+        super().__init__(
+            x_range,
+            unit_size=unit_size,
+            big_tick_numbers=list(big_tick_numbers),
+            decimal_number_config=decimal_number_config,
+            **kwargs,
+        )
 
 
 class Axes(VGroup):
@@ -1787,12 +1867,16 @@ class Tex(VMobject):
         color_map = dict(t2c or {})
         color_map.update(tex_to_color_map or {})
         _install_live_state(self)
+        separator = getattr(self, "_tex_arg_separator", " ")
         self.tex_strings = [str(part) for part in tex_strings]
-        self.tex_string = " ".join(self.tex_strings)
+        self.tex_string = separator.join(self.tex_strings)
         self.font_size = float(font_size)
+        # Multiple parts regroup glyph children per part via the typeset's
+        # native source spans — the Reference's SingleStringTex structure.
         specs = self._build_tex(
             _native_shell_factory,
-            self.tex_string,
+            self.tex_strings,
+            separator,
             bool(self._native_text_mode),
             self.font_size,
             color_map or None,
@@ -1822,13 +1906,12 @@ class OldTex(Tex):
             type(self).__name__ + "()",
             [("isolate", bool(isolate))],
         )
-        parts = [str(part) for part in tex_strings]
+        self._tex_arg_separator = str(arg_separator)
         super().__init__(
-            arg_separator.join(parts),
+            *tex_strings,
             tex_to_color_map=tex_to_color_map,
             **kwargs,
         )
-        self.tex_strings = parts
 
 
 class OldTexText(OldTex):
@@ -2461,6 +2544,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
+        ("manimlib.mobject.number_line", "UnitInterval"): UnitInterval,
         ("manimlib.mobject.coordinate_systems", "Axes"): Axes,
         ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,
         ("manimlib.mobject.coordinate_systems", "NumberPlane"): NumberPlane,
@@ -2764,6 +2848,55 @@ def _install_rate_functions():
 
 
 _install_rate_functions()
+
+
+def _install_space_ops():
+    """The pure-arithmetic space_ops (manimlib/utils/space_ops.py at the
+    pin), Reference-verbatim. Rotation/quaternion members stay precise
+    placeholders until they bind to the engine's camera math."""
+
+    def get_norm(vect):
+        return sum(x**2 for x in vect) ** 0.5
+
+    def get_dist(vect1, vect2):
+        return get_norm(_np.array(vect2) - _np.array(vect1))
+
+    def normalize(vect, fall_back=None):
+        norm = get_norm(vect)
+        if norm > 0:
+            return _np.array(vect) / norm
+        elif fall_back is not None:
+            return _np.array(fall_back)
+        else:
+            return _np.zeros(len(vect))
+
+    def normalize_along_axis(array, axis):
+        norms = _np.sqrt((array * array).sum(axis))
+        norms[norms == 0] = 1
+        return array / norms[:, _np.newaxis]
+
+    def center_of_mass(points):
+        return _np.array(points).sum(0) / len(points)
+
+    def midpoint(point1, point2):
+        return center_of_mass([point1, point2])
+
+    functions = {
+        "get_norm": get_norm,
+        "get_dist": get_dist,
+        "normalize": normalize,
+        "normalize_along_axis": normalize_along_axis,
+        "center_of_mass": center_of_mass,
+        "midpoint": midpoint,
+    }
+    module = _ensure_module("manimlib.utils.space_ops")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_space_ops()
 
 
 _install_schema_surface()
