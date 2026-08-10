@@ -211,6 +211,36 @@ fn certified_gif_is_refused_before_publication() {
 }
 
 #[test]
+fn skip_mode_publishes_one_final_frame_to_a_streaming_native_sink() {
+    let root = output_root("skip-final-gif");
+    let output = run_clean(&[
+        "--robot",
+        "--skip_animations",
+        "--format",
+        "gif",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("\"format\":\"gif\""));
+    assert!(stdout.contains("\"frames\":1"));
+    let gif = std::fs::read(root.join("circle_shift.gif")).expect("read final-state GIF");
+    assert!(gif.starts_with(b"GIF89a"));
+    assert_eq!(gif.last(), Some(&b';'));
+}
+
+#[test]
 fn compiled_fmtl_renders_through_the_standalone_binary() {
     let root = output_root("compiled-fmtl");
     let source = compiled_wait_bundle(&root);

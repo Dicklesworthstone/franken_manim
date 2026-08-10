@@ -3074,7 +3074,9 @@ fn execute_native_render(
                 let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
                     CliError::new("internal", "validated built-in scene disappeared")
                 })?;
-                if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
+                if command.skip_animations
+                    || matches!(target, RenderTarget::Native(NativeFrameFormat::Png))
+                {
                     let mut discard = NullSceneSink;
                     let completed = fmn::run_scene(
                         &mut scene,
@@ -3083,6 +3085,10 @@ fn execute_native_render(
                         &mut discard,
                     )
                     .map_err(native_scene_error)?;
+                    // Skip mode advances semantic state without ordinary
+                    // captures. A still has the same composition shape even
+                    // without `--skip_animations`: run to completion, then
+                    // publish the one final-state frame explicitly.
                     completed
                         .into_scene()
                         .show(&mut sink)
