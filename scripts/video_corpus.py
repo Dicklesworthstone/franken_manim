@@ -18,13 +18,13 @@ Subcommands
 -----------
 scan    Advisory census of the pinned videos tree: every Scene subclass,
         scored for self-containedness (imports, asset references, custom
-        GLSL, TeX usage). Guides seed curation; commits nothing.
-verify  Recompute every hash-bearing field of the committed
-        VIDEO_CORPUS.lock against the pinned checkout and byte-compare.
-        Exit 0 clean; exit 1 drift (named per row); exit 2 when the
+        GLSL, TeX usage). Guides curation; commits nothing.
+        `--self-contained` restricts to modules with no signals at all.
+verify  Regenerate the lock in memory from the SEED tables plus the
+        pinned checkout and byte-compare against the committed
+        VIDEO_CORPUS.lock. Exit 0 clean; exit 1 drift; exit 2 when the
         gitignored checkout is absent (with the exact clone commands).
-emit    Regenerate VIDEO_CORPUS.lock from the curated SEED table below
-        plus the pinned checkout. Run under VIDEO_CORPUS_UPDATE=1 only —
+emit    Write VIDEO_CORPUS.lock. Refused unless VIDEO_CORPUS_UPDATE=1 —
         the blessing ritual mirrors the coverage ratchet's.
 
 The pins are read from SUITE.lock `[reference]`; the checkout convention
@@ -46,21 +46,61 @@ VIDEOS_REF = REPO / "scripts" / "videos_ref"
 # ---------------------------------------------------------------------------
 # The curated seed allowlist (fm-rqc tranche 1).
 #
-# Selection rule (mechanical, from `scan`): modern-era modules whose
-# imports resolve entirely inside manimlib (no per-video helper modules,
-# no third-party imports), with no image/SVG/sound asset references and
-# no custom-GLSL signals. Each entry names one Scene subclass the G4a
-# harness will drive source-unedited. Attribution rows satisfy the
-# CC BY-NC-SA fixture policy: the source tree is 3b1b/videos (Grant
-# Sanderson), per-scene provenance recorded here.
+# Selection rule (mechanical, from `scan`): modern-era modules whose only
+# foreign import is the era shim `manim_imports_ext` (itself resolving to
+# manimlib plus the in-tree `custom/` package), with no asset-file string
+# literals and no custom-GLSL signals at module scope. Each entry names
+# one Scene subclass the G4a harness drives source-unedited. TeX-bearing
+# modules are deliberately included: a scene whose TeX outruns the
+# current fmd-math tier is re-marked pending-with-named-constructs by the
+# harness, feeding the W6 ratchet — that machinery needs seed exercise.
 #
 # status vocabulary (the lock's whole vocabulary):
-#   allowlisted                 in the gallery; the harness must run it
-#   pending-with-named-constructs   TeX outruns the current fmd-math tier;
-#                               the named constructs feed the W6 ratchet
-#   excluded                    considered and rejected, reason recorded
+#   allowlisted                    in the gallery; the harness must run it
+#   pending-with-named-constructs  TeX outran the fmd-math tier; the named
+#                                  constructs feed the W6 ratchet
+#   excluded                       considered and rejected, reason recorded
+#
+# Absence from the lock is NO claim — only exclusion rows are deliberate
+# rejections.
 # ---------------------------------------------------------------------------
-SEED: tuple[dict[str, str], ...] = ()  # populated by curation below
+SEED_SCENES: tuple[tuple[str, str, str, str], ...] = (
+    # (scene class, module path, era, curation note)
+    ("FlowerSymmetries", "_2022/galois/groups.py", "2022", "symmetry actions; no TeX"),
+    ("WaveMachineDemo", "_2023/optics_puzzles/wave_machine.py", "2023", "3D wave kinematics; no TeX"),
+    ("PoolTableReflections", "_2023/standup_maths/pool.py", "2023", "reflection geometry; no TeX"),
+    ("MaxProcess", "_2024/puzzles/max_rand.py", "2024", "probability process; TeX-bearing (19 call sites in module)"),
+    ("GroverPreview", "_2025/colliding_blocks_v2/grover.py", "2025", "state-space preview; light TeX"),
+    ("FlattenCone", "_2025/guest_videos/euclid.py", "2025", "surface development; no TeX"),
+    ("SquareOnASphere", "_2025/guest_videos/euclid.py", "2025", "spherical geometry; no TeX"),
+    ("BeamSplitter", "_2025/grover/polarization.py", "2025", "optics diagram; light TeX"),
+)
+
+# Modules considered for the seed and deliberately rejected. These are
+# recorded (R13: reasons on the record), not merely omitted.
+SEED_EXCLUSIONS: tuple[tuple[str, str], ...] = (
+    ("_2022/borwein/main.py", "not seed-tier: 16 scenes, 73 TeX call sites; revisit for the full gallery once the structural harness is proven on the seed"),
+    ("_2022/some2/announcement.py", "meta/announcement content; no mathematical-rendering value for the gallery"),
+    ("_2025/colliding_blocks_v2/supplements.py", "38 supplement scenes of channel meta-content; not gallery material"),
+)
+
+# Era-level exclusions (R13). Pre-2020 trees predate the Reference-era
+# manimlib API; running them source-unedited is not a current claim.
+# Revisit trigger: per-scene era-shim documentation.
+ERA_EXCLUSIONS: tuple[tuple[str, str], ...] = (
+    ("_2015 _2016 _2017 _2018 _2019", "out-of-era: pre-Reference manimlib API surface; revisit per-scene with documented era shims"),
+    ("_2020 _2021", "transition-era API; unreviewed for the seed; revisit per-scene before the full gallery"),
+)
+
+# The documented shims (§15.3): what the harness virtualizes so scene
+# source stays unedited. The import shim's entry blob is hash-pinned;
+# its `custom/**` closure is covered by the tree pin itself.
+SHIMS: tuple[tuple[str, str, str], ...] = (
+    # (name, mechanism, hashed file relative to videos_ref or "-")
+    ("import-virtualization", "manimlib import surface served by fmn-python; the era shim manim_imports_ext plus its in-tree custom/** closure import-resolve inside the pinned tree", "manim_imports_ext.py"),
+    ("asset-path-virtualization", "corpus asset references resolve through the AssetFetcher/cache capability, never the host filesystem; the seed allowlist requires no assets", "-"),
+    ("fonts", "bundled OFL faces substitute for the era's system fonts (documented divergence; Look-Gallery reviewed)", "-"),
+)
 
 
 def read_reference_pins() -> dict[str, str]:
@@ -90,9 +130,69 @@ def require_checkout() -> None:
         raise SystemExit(2)
 
 
-def blob_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def blob_sha256(rel: str) -> str:
+    return hashlib.sha256((VIDEOS_REF / rel).read_bytes()).hexdigest()
 
+
+def render_lock() -> str:
+    """The complete lock, deterministically, from the tables + checkout."""
+    pins = read_reference_pins()
+    out: list[str] = []
+    w = out.append
+    w("# VIDEO_CORPUS.lock — the corpus gate's pinned scene allowlist (fm-rqc, §15.3-15.4)")
+    w("#")
+    w("# The G4a criterion this lock serves: every allowlisted scene runs")
+    w("# SOURCE-UNEDITED through the fmn-python portal under the [shims]")
+    w("# documented below, and passes structural assertions (object counts,")
+    w("# timings, bounding envelopes) plus Look-Gallery review. Pixel diffs")
+    w("# are deleted by design (§4).")
+    w("#")
+    w("# Fixture policy (CC BY-NC-SA): the 3b1b/videos tree is © Grant")
+    w("# Sanderson, CC BY-NC-SA; gallery fixtures derived from it stay")
+    w("# private; the public corpus is the permissive primitive set. Every")
+    w("# scene row carries its in-tree provenance as attribution.")
+    w("#")
+    w("# Absence from this lock is NO claim. Exclusion rows are deliberate,")
+    w("# reasoned rejections (R13). Regenerate only via:")
+    w("#   VIDEO_CORPUS_UPDATE=1 python3 scripts/video_corpus.py emit")
+    w("# Verify against the pinned checkout via:")
+    w("#   python3 scripts/video_corpus.py verify")
+    w("")
+    w("[pins]")
+    w("# Mirrors SUITE.lock [reference]; verify asserts the equality.")
+    for name in ("3b1b/videos", "3b1b/manim"):
+        w(f"{name}\t{pins[name]}")
+    w("")
+    w("[shims]")
+    w("# name\tmechanism\tpinned-entry-blob (sha256 at the tree pin, or -)")
+    for name, mechanism, hashed in SHIMS:
+        digest = blob_sha256(hashed) if hashed != "-" else "-"
+        w(f"{name}\t{mechanism}\t{digest}")
+    w("")
+    w("[scenes]")
+    w("# scene\tmodule\tmodule-sha256\tera\tstatus\tattribution\tnote")
+    for scene, module, era, note in sorted(SEED_SCENES):
+        attribution = f"3b1b/videos@{pins['3b1b/videos'][:12]} {module}"
+        w(
+            f"{scene}\t{module}\t{blob_sha256(module)}\t{era}\tallowlisted\t{attribution}\t{note}"
+        )
+    w("")
+    w("[assets]")
+    w("# path\tsha256\trequired-by — the seed allowlist requires none.")
+    w("")
+    w("[exclusions]")
+    w("# module-or-era-set\treason")
+    for module, reason in sorted(SEED_EXCLUSIONS):
+        w(f"{module}\t{reason}")
+    for eras, reason in ERA_EXCLUSIONS:
+        w(f"{eras}\t{reason}")
+    w("")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# scan — the advisory census
+# ---------------------------------------------------------------------------
 
 ASSET_SUFFIXES = (
     ".png",
@@ -106,8 +206,27 @@ ASSET_SUFFIXES = (
     ".obj",
     ".glb",
 )
-GLSL_MARKERS = ("set_color_by_code", "shader_folder", "glsl", "Shader")
 TEX_CONSTRUCTORS = {"Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"}
+
+STDLIB_OK = {
+    "manimlib",
+    "numpy",
+    "np",
+    "math",
+    "itertools",
+    "functools",
+    "random",
+    "typing",
+    "fractions",
+    "collections",
+    "copy",
+    "operator",
+    "os",
+    "sys",
+    "re",
+    "string",
+    "colorsys",
+}
 
 
 class ModuleFacts(ast.NodeVisitor):
@@ -116,7 +235,6 @@ class ModuleFacts(ast.NodeVisitor):
     def __init__(self) -> None:
         self.scene_classes: list[str] = []
         self.imports: set[str] = set()
-        self.import_star_manimlib = False
         self.asset_literals: set[str] = set()
         self.glsl_signals: set[str] = set()
         self.tex_calls = 0
@@ -140,8 +258,6 @@ class ModuleFacts(ast.NodeVisitor):
         if node.level:
             root = f".{root}" if root else "."
         self.imports.add(root)
-        if root == "manimlib" and any(a.name == "*" for a in node.names):
-            self.import_star_manimlib = True
 
     def visit_Call(self, node: ast.Call) -> None:
         callee = node.func.id if isinstance(node.func, ast.Name) else (
@@ -152,13 +268,8 @@ class ModuleFacts(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
-        if isinstance(node.value, str):
-            lowered = node.value.lower()
-            if lowered.endswith(ASSET_SUFFIXES):
-                self.asset_literals.add(node.value)
-            for marker in GLSL_MARKERS:
-                if marker.lower() in lowered and marker == "glsl":
-                    self.glsl_signals.add(node.value)
+        if isinstance(node.value, str) and node.value.lower().endswith(ASSET_SUFFIXES):
+            self.asset_literals.add(node.value)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr in ("shader_folder", "set_color_by_code"):
@@ -166,33 +277,12 @@ class ModuleFacts(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-STDLIB_OK = {
-    "manimlib",
-    "numpy",
-    "np",
-    "math",
-    "itertools",
-    "functools",
-    "random",
-    "typing",
-    "fractions",
-    "collections",
-    "copy",
-    "operator",
-    "os",
-    "sys",
-    "re",
-    "string",
-    "colorsys",
-}
-
-
 def scan(argv: list[str]) -> int:
     require_checkout()
     rows: list[tuple[str, str, str, str]] = []
     for path in sorted(VIDEOS_REF.rglob("*.py")):
         rel = path.relative_to(VIDEOS_REF).as_posix()
-        if rel.startswith((".", "manim_imports_ext")):
+        if rel.startswith("."):
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
@@ -214,7 +304,8 @@ def scan(argv: list[str]) -> int:
             flags.append("glsl")
         if facts.tex_calls:
             flags.append(f"tex:{facts.tex_calls}")
-        verdict = "self-contained" if not foreign and not facts.asset_literals and not facts.glsl_signals else "entangled"
+        clean = not foreign and not facts.asset_literals and not facts.glsl_signals
+        verdict = "self-contained" if clean else "entangled"
         rows.append((verdict, rel, ";".join(facts.scene_classes), " ".join(flags) or "-"))
     only_clean = "--self-contained" in argv
     for verdict, rel, scenes, flags in rows:
@@ -224,14 +315,67 @@ def scan(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# verify / emit
+# ---------------------------------------------------------------------------
+
+
+def verify() -> int:
+    require_checkout()
+    expected = render_lock()
+    if not LOCK_PATH.exists():
+        sys.stderr.write("VIDEO_CORPUS.lock missing; run the emit ritual\n")
+        return 1
+    actual = LOCK_PATH.read_text(encoding="utf-8")
+    if actual == expected:
+        scene_count = sum(
+            1
+            for line in actual.splitlines()
+            if line and not line.startswith(("#", "["))
+            and "\tallowlisted\t" in line
+        )
+        sys.stdout.write(
+            f"OK: VIDEO_CORPUS.lock reproduces byte-for-byte at the pins "
+            f"({scene_count} allowlisted scenes)\n"
+        )
+        return 0
+    exp_lines = expected.splitlines()
+    act_lines = actual.splitlines()
+    for index, (exp, act) in enumerate(zip(exp_lines, act_lines), start=1):
+        if exp != act:
+            sys.stderr.write(
+                f"drift at line {index}:\n  committed: {act}\n  computed:  {exp}\n"
+            )
+            break
+    else:
+        sys.stderr.write(
+            f"drift: line-count mismatch (committed {len(act_lines)}, "
+            f"computed {len(exp_lines)})\n"
+        )
+    return 1
+
+
+def emit() -> int:
+    if os.environ.get("VIDEO_CORPUS_UPDATE") != "1":
+        sys.stderr.write(
+            "refusing to rewrite VIDEO_CORPUS.lock without VIDEO_CORPUS_UPDATE=1\n"
+        )
+        return 2
+    require_checkout()
+    LOCK_PATH.write_text(render_lock(), encoding="utf-8")
+    sys.stdout.write(f"wrote {LOCK_PATH.relative_to(REPO)}\n")
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] not in ("scan", "verify", "emit"):
         sys.stderr.write(__doc__ or "")
         return 2
     if sys.argv[1] == "scan":
         return scan(sys.argv[2:])
-    sys.stderr.write("verify/emit land with the lock in this tranche\n")
-    return 2
+    if sys.argv[1] == "verify":
+        return verify()
+    return emit()
 
 
 if __name__ == "__main__":
