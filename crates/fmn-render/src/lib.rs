@@ -21,8 +21,9 @@
 //! | [`plan`] | the retained plan: lazy synchronization from Marionette |
 //! | [`snapshot`] | the canonical, bit-lockable form of a compiled plan (§16.5) |
 //!
-//! The retained compositor's pixel half (§10.8) lands with its own bead and
-//! consumes this.
+//! [`PixelTileCache`] and [`FrameJob::render_into_cached`] bind the retained
+//! compositor to real CPU-engine pixels; callers retain the plan, frame arena,
+//! raw frame, and cache across captures.
 #![forbid(unsafe_code)]
 
 mod arena;
@@ -44,7 +45,9 @@ pub mod three_d;
 
 pub use arena::{AllocStats, FrameArena};
 pub use bin::{Binning, BinningError, BinningLimits, ScreenMap, Tiling, Viewport};
-pub use cache::{CacheStats, OutputTransform, TileCache, TileKey, TileWork};
+pub use cache::{
+    CacheStats, OutputTransform, PixelTileCache, PixelTileCacheError, TileCache, TileKey, TileWork,
+};
 pub use camera::{
     CAMERA_FRAME_Z_INDEX, Camera, CameraConfig, CameraError, CameraFrame, ClipPoint,
     ClippedQuadratic, DEFAULT_FOVY, DEFAULT_LIGHT_POSITION, EdgeSampleLimit,
@@ -53,9 +56,10 @@ pub use camera::{
 pub use engine::{
     AA_COMPLEX_2X_CROSSINGS, AA_COMPLEX_4X_CROSSINGS, AA_STROKE_COMPLEX_MIN_WIDTH_BANDS,
     AA_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR, AA_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, AaPolicy,
-    AaStats, CoverageClass, EngineIdentity, EngineKind, FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR,
-    FAST_VISUAL_BUDGET_V1_MIN_SSIM, FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, FrameConfig, FrameJob,
-    FrameJobError, RENDERER_VERSION, Tier, frame_digest,
+    AaStats, CachedRenderError, CachedRenderStats, CoverageClass, EngineIdentity, EngineKind,
+    FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR, FAST_VISUAL_BUDGET_V1_MIN_SSIM,
+    FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR, FrameConfig, FrameJob, FrameJobError,
+    RENDERER_VERSION, Tier, frame_digest,
 };
 pub use fill::{
     FillKernel, FlattenReport, GradientField, MonoPiece, MonoTable, MonoTableError,

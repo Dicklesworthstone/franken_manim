@@ -255,7 +255,8 @@ fmn-python scene.py SquareToCircle --autoreload
 fmn-python studio scene.py                     # browser Studio: scrub, inspect, overlays
 
 # Batch farms under asupersync, with budgets and per-scene manifests
-fmn batch render_all.toml
+fmn batch --format png_sequence --video_dir ./media \
+  @builtin circle_shift.v1 rectangle_shift.v1
 
 # Capabilities: ffmpeg fingerprint + hardware encoders, fonts, cache, ExecutionPlan
 fmn doctor

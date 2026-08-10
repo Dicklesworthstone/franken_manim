@@ -28,13 +28,14 @@
 //! no reason to exist, and — worse — it would make an incomplete key *look*
 //! correct in testing while costing everything it was meant to save.
 //!
-//! ## What is generic, and why
+//! ## Generic key discipline, concrete pixel reuse
 //!
-//! [`TileCache`] is generic over the payload. The engines own pixels (§10.1), and
-//! there is no rasterizer in the tree yet; parameterizing means the cache
-//! mechanism — the part where a mistake is catastrophic — is complete and tested
-//! now, and the payload type arrives with the engine that produces it rather
-//! than being guessed at here.
+//! [`TileCache`] remains generic because key completeness is independent of an
+//! engine's payload representation. [`PixelTileCache`] is the certified/fast CPU
+//! binding: tightly packed `Rgba16F` fine tiles restored directly into a pooled
+//! frame by [`crate::engine::FrameJob::render_into_cached`]. A hit therefore
+//! bypasses coverage, stroke, compositing and writeback rather than recomputing
+//! pixels and comparing them after the fact.
 //!
 //! ## Live views are never traded for reuse
 //!
@@ -48,6 +49,8 @@
 use crate::bin::{Binning, ScreenMap, Viewport};
 use crate::plan::RenderPlan;
 use crate::revision::{Mixer, mix};
+use fmn_frame::{FrameBuffer, PixelFormat};
+use fmn_hash::Digest;
 use std::collections::HashMap;
 
 /// Everything about the output that can change a tile's bytes without changing
@@ -372,6 +375,341 @@ impl<T> TileCache<T> {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Remove one retained payload so a concrete cache can reuse its storage
+    /// under a replacement key.
+    fn take_payload(&mut self, tile: usize) -> Option<T> {
+        self.entries.remove(&tile).map(|(_, payload)| payload)
+    }
+}
+
+/// A failure while planning or retaining real `Rgba16F` tile bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PixelTileCacheError {
+    /// The cache planner was asked for a tile outside the supplied binning.
+    Plan(TilePlanError),
+    /// Frame or tile geometry could not be represented in the host address
+    /// space, or the retained work table could not reserve its bounded size.
+    TooLarge,
+    /// The engine attempted to consume a retained payload with the wrong
+    /// dimensions. This is an internal invariant failure, never a cache miss.
+    PayloadShape {
+        /// Fine-tile index.
+        tile: usize,
+        /// Bytes required by the current tile rectangle.
+        expected: usize,
+        /// Bytes held by the retained payload.
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for PixelTileCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plan(error) => error.fmt(f),
+            Self::TooLarge => f.write_str("pixel tile cache exceeds the host address space"),
+            Self::PayloadShape {
+                tile,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "pixel tile {tile} retains {actual} bytes, expected {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PixelTileCacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Plan(error) => Some(error),
+            Self::TooLarge | Self::PayloadShape { .. } => None,
+        }
+    }
+}
+
+impl From<TilePlanError> for PixelTileCacheError {
+    fn from(error: TilePlanError) -> Self {
+        Self::Plan(error)
+    }
+}
+
+/// Real retained-compositor storage for the CPU engine's raw `Rgba16F` tiles.
+///
+/// The generic [`TileCache`] owns the key discipline; this adapter owns the
+/// missing pixel half: a retained work table and tightly packed tile payloads.
+/// Payload allocations are recycled when a dirty tile is replaced, so after a
+/// stable geometry warm-up the cache itself performs no per-frame allocation.
+#[derive(Debug, Default)]
+pub struct PixelTileCache {
+    tiles: TileCache<Vec<u8>>,
+    work: Vec<TileWork>,
+    render_state: Option<Digest>,
+}
+
+impl PixelTileCache {
+    /// An empty real-pixel cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This frame's key-planning counters.
+    #[must_use]
+    pub fn stats(&self) -> CacheStats {
+        self.tiles.stats()
+    }
+
+    /// Number of retained non-empty tiles.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Whether no tile payload is retained.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Forget all pixels and renderer identity.
+    pub fn clear(&mut self) {
+        self.tiles.clear();
+        self.work.clear();
+        self.render_state = None;
+    }
+
+    pub(crate) fn prepare_frame(
+        &mut self,
+        binning: &Binning,
+        plan: &RenderPlan,
+        camera: u64,
+        render_state: Digest,
+    ) -> Result<(), PixelTileCacheError> {
+        // Background, AA policy, engine/tier, semantic renderer version and
+        // tiling all affect raw bytes but are intentionally not scene
+        // revisions. The engine's journal digest already names that complete
+        // closure; changing any part invalidates every retained payload.
+        if self.render_state != Some(render_state) {
+            self.tiles.clear();
+            self.render_state = Some(render_state);
+        }
+
+        self.tiles.begin_frame();
+        self.work.clear();
+        self.work
+            .try_reserve(binning.tile_count())
+            .map_err(|_| PixelTileCacheError::TooLarge)?;
+        let output = OutputTransform {
+            viewport: binning.viewport(),
+            map: binning.map(),
+            // A tile key lasts only for this process. The discriminant is
+            // therefore the intended representation (see OutputTransform).
+            pixel_format: transient_format_id(PixelFormat::Rgba16F),
+        };
+        for tile in 0..binning.tile_count() {
+            self.work
+                .push(self.tiles.plan_tile(binning, plan, tile, camera, output)?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn work(&self, tile: usize) -> Option<TileWork> {
+        self.work.get(tile).copied()
+    }
+
+    pub(crate) fn restore_reused_tiles(
+        &self,
+        frame: &mut FrameBuffer,
+        binning: &Binning,
+    ) -> Result<(), PixelTileCacheError> {
+        let width = frame.layout().width();
+        let height = frame.layout().height();
+        let tile_edge = binning.tiling().fine_tile.max(1);
+        let cols = width.div_ceil(tile_edge);
+        let stride = frame.layout().stride(0);
+        let plane_len = frame.plane(0).len();
+
+        for tile in 0..self.work.len() {
+            if self.work.get(tile) != Some(&TileWork::Reuse) {
+                continue;
+            }
+            let (x0, y0, tile_width, tile_height) =
+                tile_rect(tile, cols, tile_edge, width, height)?;
+            let row_bytes = rgba16f_row_bytes(tile_width)?;
+            let payload_len = row_bytes
+                .checked_mul(
+                    usize::try_from(tile_height).map_err(|_| PixelTileCacheError::TooLarge)?,
+                )
+                .ok_or(PixelTileCacheError::TooLarge)?;
+            let payload = self
+                .tiles
+                .get(tile)
+                .ok_or(PixelTileCacheError::PayloadShape {
+                    tile,
+                    expected: payload_len,
+                    actual: 0,
+                })?;
+            if payload.len() != payload_len {
+                return Err(PixelTileCacheError::PayloadShape {
+                    tile,
+                    expected: payload_len,
+                    actual: payload.len(),
+                });
+            }
+            for row in 0..usize::try_from(tile_height).map_err(|_| PixelTileCacheError::TooLarge)? {
+                let source_start = row
+                    .checked_mul(row_bytes)
+                    .ok_or(PixelTileCacheError::TooLarge)?;
+                let source_end = source_start
+                    .checked_add(row_bytes)
+                    .ok_or(PixelTileCacheError::TooLarge)?;
+                let destination_start = frame_row_start(y0, row, stride, x0)?;
+                let destination_end = destination_start
+                    .checked_add(row_bytes)
+                    .ok_or(PixelTileCacheError::TooLarge)?;
+                let source = payload.get(source_start..source_end).ok_or(
+                    PixelTileCacheError::PayloadShape {
+                        tile,
+                        expected: source_end,
+                        actual: payload.len(),
+                    },
+                )?;
+                let destination = frame
+                    .plane_mut(0)
+                    .get_mut(destination_start..destination_end)
+                    .ok_or(PixelTileCacheError::PayloadShape {
+                        tile,
+                        expected: destination_end,
+                        actual: plane_len,
+                    })?;
+                destination.copy_from_slice(source);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retain_rasterized_tiles(
+        &mut self,
+        frame: &FrameBuffer,
+        binning: &Binning,
+    ) -> Result<(), PixelTileCacheError> {
+        let width = frame.layout().width();
+        let height = frame.layout().height();
+        let tile_edge = binning.tiling().fine_tile.max(1);
+        let cols = width.div_ceil(tile_edge);
+        let stride = frame.layout().stride(0);
+        let plane = frame.plane(0);
+
+        for tile in 0..self.work.len() {
+            let Some(TileWork::Rasterize(key)) = self.work.get(tile).copied() else {
+                continue;
+            };
+            let (x0, y0, tile_width, tile_height) =
+                tile_rect(tile, cols, tile_edge, width, height)?;
+            let row_bytes = rgba16f_row_bytes(tile_width)?;
+            let payload_len = row_bytes
+                .checked_mul(
+                    usize::try_from(tile_height).map_err(|_| PixelTileCacheError::TooLarge)?,
+                )
+                .ok_or(PixelTileCacheError::TooLarge)?;
+            let mut payload = self.tiles.take_payload(tile).unwrap_or_default();
+            payload
+                .try_reserve(payload_len.saturating_sub(payload.len()))
+                .map_err(|_| PixelTileCacheError::TooLarge)?;
+            payload.resize(payload_len, 0);
+            for row in 0..usize::try_from(tile_height).map_err(|_| PixelTileCacheError::TooLarge)? {
+                let source_start = frame_row_start(y0, row, stride, x0)?;
+                let source_end = source_start
+                    .checked_add(row_bytes)
+                    .ok_or(PixelTileCacheError::TooLarge)?;
+                let destination_start = row
+                    .checked_mul(row_bytes)
+                    .ok_or(PixelTileCacheError::TooLarge)?;
+                let destination_end = destination_start
+                    .checked_add(row_bytes)
+                    .ok_or(PixelTileCacheError::TooLarge)?;
+                let source = plane.get(source_start..source_end).ok_or(
+                    PixelTileCacheError::PayloadShape {
+                        tile,
+                        expected: source_end,
+                        actual: plane.len(),
+                    },
+                )?;
+                let payload_actual = payload.len();
+                let destination = payload.get_mut(destination_start..destination_end).ok_or(
+                    PixelTileCacheError::PayloadShape {
+                        tile,
+                        expected: destination_end,
+                        actual: payload_actual,
+                    },
+                )?;
+                destination.copy_from_slice(source);
+            }
+            self.tiles.store(tile, key, payload);
+        }
+        Ok(())
+    }
+}
+
+const fn transient_format_id(format: PixelFormat) -> u32 {
+    match format {
+        PixelFormat::Rgba8 => 0,
+        PixelFormat::Bgra8 => 1,
+        PixelFormat::Rgba16F => 2,
+        PixelFormat::Nv12 => 3,
+        PixelFormat::P010 => 4,
+    }
+}
+
+fn rgba16f_row_bytes(width: u32) -> Result<usize, PixelTileCacheError> {
+    usize::try_from(width)
+        .map_err(|_| PixelTileCacheError::TooLarge)?
+        .checked_mul(8)
+        .ok_or(PixelTileCacheError::TooLarge)
+}
+
+fn tile_rect(
+    tile: usize,
+    cols: u32,
+    tile_edge: u32,
+    width: u32,
+    height: u32,
+) -> Result<(u32, u32, u32, u32), PixelTileCacheError> {
+    let tile = u32::try_from(tile).map_err(|_| PixelTileCacheError::TooLarge)?;
+    let tx = tile
+        .checked_rem(cols)
+        .ok_or(PixelTileCacheError::TooLarge)?;
+    let ty = tile
+        .checked_div(cols)
+        .ok_or(PixelTileCacheError::TooLarge)?;
+    let x0 = tx
+        .checked_mul(tile_edge)
+        .ok_or(PixelTileCacheError::TooLarge)?;
+    let y0 = ty
+        .checked_mul(tile_edge)
+        .ok_or(PixelTileCacheError::TooLarge)?;
+    Ok((
+        x0,
+        y0,
+        tile_edge.min(width.saturating_sub(x0)),
+        tile_edge.min(height.saturating_sub(y0)),
+    ))
+}
+
+fn frame_row_start(
+    y0: u32,
+    row: usize,
+    stride: usize,
+    x0: u32,
+) -> Result<usize, PixelTileCacheError> {
+    usize::try_from(y0)
+        .map_err(|_| PixelTileCacheError::TooLarge)?
+        .checked_add(row)
+        .and_then(|y| y.checked_mul(stride))
+        .and_then(|offset| offset.checked_add(usize::try_from(x0).ok()?.checked_mul(8)?))
+        .ok_or(PixelTileCacheError::TooLarge)
 }
 
 /// Walk every tile of a frame, returning what each needs.

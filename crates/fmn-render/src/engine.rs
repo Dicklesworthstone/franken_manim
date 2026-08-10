@@ -98,6 +98,7 @@
 
 use crate::arena::{AllocStats, FrameArena, PoolRange, PoolRangeError};
 use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
+use crate::cache::{CacheStats, PixelTileCache, PixelTileCacheError, TileWork};
 use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
 };
@@ -666,6 +667,55 @@ pub struct AaStats {
     pub simple_edge_tiles: u64,
     /// Fine tiles containing at least one escalated cell.
     pub complex_edge_tiles: u64,
+}
+
+/// Work evidence from one retained-compositor render.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CachedRenderStats {
+    /// Fine-tile reuse and invalidation counts.
+    pub cache: CacheStats,
+    /// Coverage and sampling work that actually executed. Reused tiles do not
+    /// contribute to these counters because their rasterizer was bypassed.
+    pub raster: AaStats,
+}
+
+/// A retained-compositor render failed before it could publish a frame.
+#[derive(Debug)]
+pub enum CachedRenderError {
+    /// Destination layout or worker execution failed.
+    Frame(FrameError),
+    /// Tile planning or payload retention failed.
+    Cache(PixelTileCacheError),
+}
+
+impl std::fmt::Display for CachedRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Frame(error) => error.fmt(f),
+            Self::Cache(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CachedRenderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Frame(error) => Some(error),
+            Self::Cache(error) => Some(error),
+        }
+    }
+}
+
+impl From<FrameError> for CachedRenderError {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
+    }
+}
+
+impl From<PixelTileCacheError> for CachedRenderError {
+    fn from(error: PixelTileCacheError) -> Self {
+        Self::Cache(error)
+    }
 }
 
 impl AaStats {
@@ -1793,6 +1843,51 @@ impl<'a> FrameJob<'a> {
         self.render_into_profiled(threads, dst).map(|_| ())
     }
 
+    /// Rasterize only dirty fine tiles and restore cache hits byte-for-byte.
+    ///
+    /// `camera_revision` names camera state independently of the scene's
+    /// object revisions. A fixed 2D camera uses one stable value across frames;
+    /// changing it invalidates every retained tile. The renderer/configuration
+    /// closure is derived internally, so changing background, AA policy,
+    /// engine tier, renderer semantics, or tiling also invalidates all pixels.
+    ///
+    /// # Errors
+    /// See [`FrameJob::render_into`], plus [`PixelTileCacheError`] when retained
+    /// work or payload geometry cannot be represented.
+    pub fn render_into_cached(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+        camera_revision: u64,
+        cache: &mut PixelTileCache,
+    ) -> Result<CachedRenderStats, CachedRenderError> {
+        if dst.layout().format() != PixelFormat::Rgba16F {
+            return Err(FrameError::FormatMismatch {
+                expected: "Rgba16F raw frame",
+                got: dst.layout().format(),
+            }
+            .into());
+        }
+        if dst.layout().width() != self.config.viewport.width
+            || dst.layout().height() != self.config.viewport.height
+        {
+            return Err(FrameError::DimensionMismatch.into());
+        }
+        cache.prepare_frame(
+            self.binning,
+            self.plan,
+            camera_revision,
+            self.journal_digest(),
+        )?;
+        cache.restore_reused_tiles(dst, self.binning)?;
+        let raster = self.render_into_profiled_cached(threads, dst, cache)?;
+        cache.retain_rasterized_tiles(dst, self.binning)?;
+        Ok(CachedRenderStats {
+            cache: cache.stats(),
+            raster,
+        })
+    }
+
     /// Shared render body for ordinary and instrumented entry points.
     fn render_into_profiled(
         &self,
@@ -1823,6 +1918,33 @@ impl<'a> FrameJob<'a> {
         }
     }
 
+    fn render_into_profiled_cached(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+        cache: &PixelTileCache,
+    ) -> Result<AaStats, FrameError> {
+        match self.identity.engine {
+            EngineKind::CertifiedCpu => {
+                if self.identity.tier == Tier::Scalar {
+                    self.render_into_profiled_with_cache::<CertifiedScalar>(threads, dst, cache)
+                } else {
+                    self.render_into_profiled_with_cache::<CertifiedBuildTier>(threads, dst, cache)
+                }
+            }
+            EngineKind::FastCpu => {
+                if self.identity.tier == Tier::Scalar {
+                    self.render_into_profiled_with_cache::<FastScalar>(threads, dst, cache)
+                } else {
+                    self.render_into_profiled_with_cache::<FastBuildTier>(threads, dst, cache)
+                }
+            }
+            EngineKind::Metal | EngineKind::Cuda => {
+                unreachable!("annex jobs must use their backend-specific renderer")
+            }
+        }
+    }
+
     /// Monomorphized render body selected once per frame.
     fn render_into_profiled_with<K: PixelKernel>(
         &self,
@@ -1832,11 +1954,39 @@ impl<'a> FrameJob<'a> {
         self.render_into_profiled_with_spawner::<K, _>(threads, dst, &NativeScopedSpawner)
     }
 
+    fn render_into_profiled_with_cache<K: PixelKernel>(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+        cache: &PixelTileCache,
+    ) -> Result<AaStats, FrameError> {
+        self.render_into_profiled_with_spawner_and_cache::<K, _, true>(
+            threads,
+            dst,
+            &NativeScopedSpawner,
+            Some(cache),
+        )
+    }
+
     fn render_into_profiled_with_spawner<K: PixelKernel, S: ScopedSpawner>(
         &self,
         threads: usize,
         dst: &mut FrameBuffer,
         spawner: &S,
+    ) -> Result<AaStats, FrameError> {
+        self.render_into_profiled_with_spawner_and_cache::<K, S, false>(threads, dst, spawner, None)
+    }
+
+    fn render_into_profiled_with_spawner_and_cache<
+        K: PixelKernel,
+        S: ScopedSpawner,
+        const CACHED: bool,
+    >(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+        spawner: &S,
+        cache: Option<&PixelTileCache>,
     ) -> Result<AaStats, FrameError> {
         // W5 wasm tier 1: collapses to 1 on wasm32 (no spawnable threads);
         // the identity on native. See crate::effective_threads.
@@ -1897,7 +2047,7 @@ impl<'a> FrameJob<'a> {
                 .workers
                 .checkout::<K>(scratch_width, self.cols as usize);
             for (band, bytes) in plane.chunks_mut(band_bytes).enumerate() {
-                self.render_band::<K>(&mut worker, band, bytes, stride);
+                self.render_band::<K, CACHED>(&mut worker, band, bytes, stride, cache);
             }
             return Ok(worker.stats);
         }
@@ -1914,7 +2064,7 @@ impl<'a> FrameJob<'a> {
             loop {
                 let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
                 let Some((band, bytes)) = next else { break };
-                self.render_band::<K>(&mut worker, band, bytes, stride);
+                self.render_band::<K, CACHED>(&mut worker, band, bytes, stride, cache);
             }
             stats
                 .lock()
@@ -1925,12 +2075,13 @@ impl<'a> FrameJob<'a> {
     }
 
     /// Rasterize one band: `tile` pixel rows spanning the full frame width.
-    fn render_band<K: PixelKernel>(
+    fn render_band<K: PixelKernel, const CACHED: bool>(
         &self,
         worker: &mut Worker<K>,
         band: usize,
         bytes: &mut [u8],
         stride: usize,
+        cache: Option<&PixelTileCache>,
     ) {
         let tile = self.binning.tiling().fine_tile.max(1);
         let width = self.config.viewport.width;
@@ -1941,11 +2092,14 @@ impl<'a> FrameJob<'a> {
 
         for tx in 0..self.cols {
             let t = band * self.cols as usize + tx as usize;
-            worker.tile_classes[tx as usize] = if t < self.binning.tile_count() {
-                self.initial_tile_class(t)
-            } else {
-                CoverageClass::Empty
-            };
+            worker.tile_classes[tx as usize] =
+                if CACHED && cache.is_some_and(|cache| cache.work(t) == Some(TileWork::Reuse)) {
+                    CoverageClass::Empty
+                } else if t < self.binning.tile_count() {
+                    self.initial_tile_class(t)
+                } else {
+                    CoverageClass::Empty
+                };
         }
 
         // The background is written first and unconditionally, so a band with no
@@ -1961,11 +2115,16 @@ impl<'a> FrameJob<'a> {
                     continue;
                 }
                 let w = (x_hi - x_lo) as usize;
+                let t = band * self.cols as usize + tx as usize;
+                if CACHED && cache.is_some_and(|cache| cache.work(t) == Some(TileWork::Reuse)) {
+                    // The typed, bounds-checked serial restore ran before
+                    // worker fan-out. A hit's only worker action is to skip.
+                    continue;
+                }
                 worker.acc[..w].fill(bg);
                 worker.edges[..w].fill(0);
                 worker.stats.output_cells = worker.stats.output_cells.saturating_add(w as u64);
 
-                let t = band * self.cols as usize + tx as usize;
                 if t < self.binning.tile_count() {
                     match aa {
                         RenderAa::Forced(samples) => {
@@ -2025,8 +2184,16 @@ impl<'a> FrameJob<'a> {
             }
         }
 
-        for class in worker.tile_classes.iter().take(self.cols as usize) {
-            worker.stats.count_tile(*class);
+        for (tx, class) in worker
+            .tile_classes
+            .iter()
+            .take(self.cols as usize)
+            .enumerate()
+        {
+            let tile = band * self.cols as usize + tx;
+            if !CACHED || cache.is_none_or(|cache| cache.work(tile) != Some(TileWork::Reuse)) {
+                worker.stats.count_tile(*class);
+            }
         }
     }
 
@@ -3346,6 +3513,124 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn retained_pixels_bypass_unchanged_raster_work_and_match_cold_rendering() {
+        let (mut stage, mobs) = corpus();
+        let cfg = FrameConfig {
+            viewport: Viewport {
+                width: 109,
+                height: 107,
+            },
+            ..config()
+        };
+        let tiling = default_tiling();
+        let mut plan = RenderPlan::new();
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::new();
+        let layout = FrameLayout::with_row_alignment(
+            PixelFormat::Rgba16F,
+            cfg.viewport.width,
+            cfg.viewport.height,
+            64,
+        )
+        .expect("padded layout");
+        let mut frame = FrameBuffer::new(layout.clone());
+
+        plan.sync(&stage, 0).expect("valid first frame");
+        let first_mono = MonoTable::build(&plan, cfg.map).expect("bounded first monotone table");
+        let first_binning =
+            Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded first binning");
+        let first = FrameJob::new_in(&mut arena, &plan, &first_mono, &first_binning, cfg)
+            .expect("matching first frame artifacts")
+            .render_into_cached(4, &mut frame, 0, &mut cache)
+            .expect("first cached render");
+        let first_bytes = frame.as_bytes().to_vec();
+        assert_eq!(first.cache.hits, 0, "a cold cache cannot hit");
+        assert!(first.cache.misses > 0, "the corpus populated no tiles");
+
+        plan.sync(&stage, 0).expect("valid wait frame");
+        let wait_mono = MonoTable::build(&plan, cfg.map).expect("bounded wait monotone table");
+        let wait_binning =
+            Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded wait binning");
+        let wait = FrameJob::new_in(&mut arena, &plan, &wait_mono, &wait_binning, cfg)
+            .expect("matching wait frame artifacts")
+            .render_into_cached(4, &mut frame, 0, &mut cache)
+            .expect("wait cached render");
+        assert_eq!(frame.as_bytes(), first_bytes);
+        assert_eq!(wait.cache.misses, 0, "an unchanged tile was rasterized");
+        assert_eq!(wait.cache.hits, first.cache.misses);
+        assert!(
+            wait.raster.sample_evaluations() < first.raster.sample_evaluations(),
+            "a cache hit must bypass coverage work, not re-render and compare"
+        );
+
+        stage.shift(mobs[0], [24.0, 0.0, 0.0]);
+        plan.sync(&stage, 0).expect("valid moved frame");
+        let moved_mono = MonoTable::build(&plan, cfg.map).expect("bounded moved monotone table");
+        let moved_binning =
+            Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded moved binning");
+        let moved = FrameJob::new_in(&mut arena, &plan, &moved_mono, &moved_binning, cfg)
+            .expect("matching moved frame artifacts")
+            .render_into_cached(4, &mut frame, 0, &mut cache)
+            .expect("moved cached render");
+        let mut cold = FrameBuffer::new(layout);
+        FrameJob::new(&plan, &moved_mono, &moved_binning, cfg)
+            .expect("matching cold frame artifacts")
+            .render_into(1, &mut cold)
+            .expect("cold moved render");
+        assert_frames_equal(
+            &frame,
+            &cold,
+            "cached dirty tiles diverged from cold rendering",
+        );
+        assert!(moved.cache.hits > 0, "movement invalidated unrelated tiles");
+        assert!(
+            moved.cache.misses > 0,
+            "movement reused stale affected tiles"
+        );
+    }
+
+    #[test]
+    fn retained_pixels_invalidate_when_renderer_configuration_changes() {
+        let (stage, _) = corpus();
+        let cfg = config();
+        let tiling = default_tiling();
+        let (plan, mono, binning) = derive(&stage, cfg, tiling);
+        let mut cache = PixelTileCache::new();
+        let mut frame = FrameBuffer::new(cfg.layout().expect("layout"));
+        FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("matching first artifacts")
+            .render_into_cached(1, &mut frame, 0, &mut cache)
+            .expect("first cached render");
+
+        let changed = FrameConfig {
+            background: LinearRgba {
+                r: 0.2,
+                g: 0.1,
+                b: 0.05,
+                a: 1.0,
+            },
+            ..cfg
+        };
+        let changed_render = FrameJob::new(&plan, &mono, &binning, changed)
+            .expect("matching changed artifacts")
+            .render_into_cached(1, &mut frame, 0, &mut cache)
+            .expect("changed cached render");
+        let cold = FrameJob::new(&plan, &mono, &binning, changed)
+            .expect("matching cold changed artifacts")
+            .render(1)
+            .expect("cold changed render");
+        assert_eq!(
+            changed_render.cache.hits, 0,
+            "background changes must invalidate every retained pixel"
+        );
+        assert_frames_equal(
+            &frame,
+            &cold,
+            "renderer-state invalidation served stale background pixels",
+        );
     }
 
     /// Even a one-band frame must warm the whole requested team. Without

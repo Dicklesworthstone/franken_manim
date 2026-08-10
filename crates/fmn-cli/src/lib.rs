@@ -42,6 +42,7 @@ use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
+use fmn_render::{FrameArena, PixelTileCache};
 use fmn_scene::studio_bridge::SceneState;
 use fmn_scene::{
     AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
@@ -3068,6 +3069,10 @@ struct RenderSink {
     tiling: Tiling,
     engine: EngineIdentity,
     render_threads: usize,
+    render_plan: RenderPlan,
+    frame_arena: FrameArena,
+    tile_cache: PixelTileCache,
+    render_frame: FrameBuffer,
     format: PixelFormat,
     emitter: Option<OrderedEmitter>,
     receipt: RenderReceipt,
@@ -3220,6 +3225,8 @@ impl RenderSink {
             .transpose()
             .map_err(|error| CliError::new("config", error.to_string()))?
             .map(FrameBuffer::new);
+        let render_layout = FrameLayout::tight(PixelFormat::Rgba16F, width, height)
+            .map_err(|error| CliError::new("config", error.to_string()))?;
         Ok(Self {
             frame_config,
             tiling: Tiling {
@@ -3231,6 +3238,10 @@ impl RenderSink {
                 .render_teams
                 .first()
                 .map_or(1, fmn_runtime::TeamPlan::threads),
+            render_plan: RenderPlan::new(),
+            frame_arena: FrameArena::new(),
+            tile_cache: PixelTileCache::new(),
+            render_frame: FrameBuffer::new(render_layout),
             format,
             emitter: Some(emitter),
             receipt,
@@ -3242,33 +3253,45 @@ impl RenderSink {
     fn render_stage(
         &mut self,
         stage: &fmn_scene::studio_bridge::Stage,
-        revision: u64,
+        _revision: u64,
     ) -> Result<(), IntegrationError> {
-        let mut render_plan = RenderPlan::new();
-        render_plan
-            .sync(stage, revision)
+        self.render_plan
+            // RenderPlan's second input is the camera revision, not the frame
+            // sequence. This CLI camera is fixed for the lifetime of the sink;
+            // feeding frame index here used to invalidate every instance on
+            // every capture and made retained pixels impossible to hit.
+            .sync(stage, 0)
             .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
-        let mono = MonoTable::build(&render_plan, self.frame_config.map)
+        let mono = MonoTable::build(&self.render_plan, self.frame_config.map)
             .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
         let mut binning = Binning::build(
-            &render_plan,
+            &self.render_plan,
             self.frame_config.viewport,
             self.tiling,
             self.frame_config.map,
         )
         .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
         binning
-            .prune_occluded(&render_plan)
+            .prune_occluded(&self.render_plan)
             .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
-        let frame = FrameJob::with_identity(
-            &render_plan,
+        FrameJob::with_identity_in(
+            &mut self.frame_arena,
+            &self.render_plan,
             &mono,
             &binning,
             self.frame_config,
             self.engine,
         )
         .map_err(|error| IntegrationError::new("lumen", error.to_string()))?
-        .render(self.render_threads)
+        // This front door has one fixed 2D camera. Object revisions live in
+        // RenderPlan; camera revision zero therefore remains stable across
+        // frames and lets unchanged tiles hit.
+        .render_into_cached(
+            self.render_threads,
+            &mut self.render_frame,
+            0,
+            &mut self.tile_cache,
+        )
         .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
 
         let emitter = self
@@ -3280,14 +3303,14 @@ impl RenderSink {
             .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
         match self.format {
             PixelFormat::Rgba8 => {
-                rgba16f_to_rgba8(&frame, reservation.frame_mut())
+                rgba16f_to_rgba8(&self.render_frame, reservation.frame_mut())
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
             }
             PixelFormat::Bgra8 => {
                 let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
                     IntegrationError::new("reel", "BGRA conversion scratch is unavailable")
                 })?;
-                rgba16f_to_rgba8(&frame, rgba8)
+                rgba16f_to_rgba8(&self.render_frame, rgba8)
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
                 swap_rb8(rgba8, reservation.frame_mut())
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
@@ -3296,7 +3319,7 @@ impl RenderSink {
                 let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
                     IntegrationError::new("reel", "NV12 conversion scratch is unavailable")
                 })?;
-                rgba16f_to_rgba8(&frame, rgba8)
+                rgba16f_to_rgba8(&self.render_frame, rgba8)
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
                 rgba_to_nv12(
                     rgba8,
@@ -3310,7 +3333,7 @@ impl RenderSink {
                 let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
                     IntegrationError::new("reel", "P010 conversion scratch is unavailable")
                 })?;
-                rgba16f_to_rgba8(&frame, rgba8)
+                rgba16f_to_rgba8(&self.render_frame, rgba8)
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
                 rgba_to_p010(
                     rgba8,
