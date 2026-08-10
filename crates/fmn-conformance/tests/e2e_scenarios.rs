@@ -1111,6 +1111,86 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_manifest", 1))
 }
 
+/// Count the ordinary scene schedule without touching Reel, then drive each
+/// authored segment through its own real native sink.
+fn cli_prerun_subdivide_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_prerun_subdivide")?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--prerun",
+        "--subdivide",
+        "--format",
+        "y4m",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let records = output.stdout.lines().collect::<Vec<_>>();
+    let prerun_record = records.first().is_some_and(|record| {
+        record.contains("\"kind\":\"prerun\"")
+            && record.contains("\"frames\":3")
+            && record.contains("\"segments\":2")
+    });
+    let render_records = records.len() == 3
+        && records.get(1).is_some_and(|record| {
+            record.contains("\"subdivision\":0") && record.contains("\"frames\":2")
+        })
+        && records.get(2).is_some_and(|record| {
+            record.contains("\"subdivision\":1") && record.contains("\"frames\":1")
+        });
+    let root = dir.join("circle_shift.v1");
+    let mut rendered_frames = 0_usize;
+    let mut complete = true;
+    for index in 0..2 {
+        let artifact = root.join(format!("{index:05}.y4m"));
+        let bytes = std::fs::read(&artifact).unwrap_or_default();
+        rendered_frames += bytes
+            .windows(6)
+            .filter(|window| *window == b"FRAME\n")
+            .count();
+        complete &= artifact
+            .with_file_name(format!("{index:05}.y4m.manifest"))
+            .join("FMN_COMPLETE")
+            .is_file();
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.prerun_subdivide")
+            .field("prerun_record", truth(prerun_record))
+            .field("render_records", truth(render_records))
+            .field("complete", truth(complete))
+            .field("rendered_frames", rendered_frames as u64),
+    );
+    ctx.counter("cli_prerun_frames", u64::from(prerun_record) * 3);
+    ctx.counter("cli_subdivision_segments", u64::from(render_records) * 2);
+    ctx.counter("cli_subdivision_frames", rendered_frames as u64);
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !prerun_record
+        || !render_records
+        || !complete
+        || rendered_frames != 3
+    {
+        return Err(fail(format!(
+            "CLI prerun/subdivision failed: code={} rendered_frames={rendered_frames} complete={complete} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_prerun_frames", 3)
+        .with_counter("cli_subdivision_segments", 2)
+        .with_counter("cli_subdivision_frames", 3))
+}
+
 /// The batch front door over two real native registrations. Asupersync may
 /// complete scene jobs in either order; the CLI contract reports them in the
 /// request order and publishes each sequence atomically.
@@ -2149,6 +2229,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("manifest_complete", "true"),
                 FieldPred::str_eq("manifest_valid", "true"),
                 FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_prerun_subdivide_y4m.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_prerun_subdivide_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_prerun_frames", 3),
+            counter_eq("cli_subdivision_segments", 2),
+            counter_eq("cli_subdivision_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.prerun_subdivide",
+            vec![
+                FieldPred::str_eq("prerun_record", "true"),
+                FieldPred::str_eq("render_records", "true"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::u64_eq("rendered_frames", 3),
             ],
         )],
     ));

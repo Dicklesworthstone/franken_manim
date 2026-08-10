@@ -408,6 +408,21 @@ impl TimelineBundle {
         self.segments.len()
     }
 
+    /// The 0-based, half-open global frame range owned by one authored
+    /// segment.
+    ///
+    /// This is the public scheduling seam used by output subdivision. The
+    /// range comes from the validated nested plan rather than being
+    /// reconstructed from durations, so rounding stays identical to ordinary
+    /// bundle playback.
+    #[must_use]
+    pub fn segment_frame_range(&self, index: usize) -> Option<std::ops::Range<u32>> {
+        let segment = self.plan.segments().get(index)?;
+        let start = segment.base_frame;
+        let end = start.checked_add(segment.n_frames)?;
+        Some(u32::try_from(start).ok()?..u32::try_from(end).ok()?)
+    }
+
     /// Storage/reconstruction kind of one segment.
     #[must_use]
     pub fn segment_kind(&self, index: usize) -> Option<BundleSegmentKind> {
@@ -1372,6 +1387,8 @@ mod tests {
         assert_eq!(bundle.frame_count(), 2);
         assert_eq!(bundle.duration_seconds(), 0.25);
         assert_eq!(bundle.frame_of_label("held"), Some(0));
+        assert_eq!(bundle.segment_frame_range(0), Some(0..2));
+        assert_eq!(bundle.segment_frame_range(1), None);
         assert_eq!(bundle.segment_kind(0), Some(BundleSegmentKind::Pure));
         for index in 0..bundle.frame_count() {
             let reconstructed = bundle.stage_at(index).expect("frame reconstructs");

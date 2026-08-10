@@ -519,6 +519,125 @@ fn built_in_corpus_renders_through_the_real_png_and_y4m_sinks() {
     }
 }
 
+#[test]
+fn prerun_and_subdivide_drive_real_per_segment_outputs() {
+    let root = output_root("prerun-subdivide-builtin");
+    let output = run_clean(&[
+        "--robot",
+        "--prerun",
+        "--subdivide",
+        "--format",
+        "y4m",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+    let records = stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(records.len(), 3, "{stdout}");
+    assert!(records[0].contains("\"kind\":\"prerun\""));
+    assert!(records[0].contains("\"frames\":3"));
+    assert!(records[0].contains("\"segments\":2"));
+    for (index, frames) in [2, 1].into_iter().enumerate() {
+        let record = records[index + 1];
+        assert!(record.contains("\"kind\":\"render\""), "{record}");
+        assert!(
+            record.contains(&format!("\"subdivision\":{index}")),
+            "{record}"
+        );
+        assert!(record.contains(&format!("\"frames\":{frames}")), "{record}");
+        let artifact = root.join(format!("circle_shift.v1/{index:05}.y4m"));
+        let bytes = std::fs::read(&artifact).expect("read subdivided y4m artifact");
+        assert!(bytes.starts_with(b"YUV4MPEG2 W96 H54 F8:1"));
+        assert_eq!(
+            bytes
+                .windows(6)
+                .filter(|window| *window == b"FRAME\n")
+                .count(),
+            frames
+        );
+        assert!(
+            artifact
+                .with_file_name(format!("{index:05}.y4m.manifest"))
+                .join("FMN_COMPLETE")
+                .is_file()
+        );
+    }
+
+    let compiled_root = output_root("prerun-subdivide-compiled");
+    let source = compiled_root.join("two_waits.fmtl");
+    let mut timeline = Timeline::new(8).expect("valid bundle fps");
+    timeline.wait(0.25).expect("first wait");
+    timeline.wait(0.125).expect("second wait");
+    let bytes = export_timeline_bundle(timeline, &mut Stage::new(), &RngRoot::from_seed(0))
+        .expect("compile two-segment artifact");
+    std::fs::write(&source, bytes).expect("write compiled artifact");
+    let output = run_clean(&[
+        "--robot",
+        "--prerun",
+        "--subdivide",
+        "--format",
+        "y4m",
+        "--resolution",
+        "96x54",
+        "--threads",
+        "1",
+        "--video_dir",
+        compiled_root.to_str().expect("output path is UTF-8"),
+        source.to_str().expect("source path is UTF-8"),
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+    let records = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(records.len(), 3, "{stdout}");
+    assert!(records[0].contains("\"frames\":3"));
+    assert!(records[0].contains("\"segments\":2"));
+    assert!(records[1].contains("\"frames\":2"));
+    assert!(records[2].contains("\"frames\":1"));
+    assert!(compiled_root.join("two_waits/00000.y4m").is_file());
+    assert!(compiled_root.join("two_waits/00001.y4m").is_file());
+}
+
+#[test]
+fn subdivide_preflights_every_generation_before_rendering() {
+    let root = output_root("subdivide-preflight");
+    std::fs::create_dir_all(root.join("circle_shift.v1/00001.y4m.manifest"))
+        .expect("occupy the second subdivision sidecar");
+    let output = run_clean(&[
+        "--robot",
+        "--subdivide",
+        "--format",
+        "y4m",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(70), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("sidecars are no-clobber generations"));
+    assert!(!root.join("circle_shift.v1/00000.y4m").exists());
+}
+
 #[cfg(feature = "batch")]
 #[test]
 fn batch_renders_multiple_scenes_and_reports_in_request_order() {
@@ -562,6 +681,60 @@ fn batch_renders_multiple_scenes_and_reports_in_request_order() {
         root.join("rectangle_shift.v1.manifest/FMN_COMPLETE")
             .is_file()
     );
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn batch_subdivision_publishes_distinct_manifest_generations() {
+    let root = output_root("batch-subdivide");
+    let artifacts = root.join("artifacts");
+    let manifests = root.join("manifests");
+    std::fs::create_dir(&artifacts).expect("create artifact root");
+    std::fs::create_dir(&manifests).expect("create manifest root");
+    let output = run_clean(&[
+        "batch",
+        "--robot",
+        "--prerun",
+        "--subdivide",
+        "--format",
+        "y4m",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--max-scenes",
+        "1",
+        "--manifest-dir",
+        manifests.to_str().expect("manifest path is UTF-8"),
+        "--video_dir",
+        artifacts.to_str().expect("artifact path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+    let records = stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(records.len(), 4, "{stdout}");
+    assert!(records[0].contains("\"kind\":\"prerun\""));
+    assert!(records[1].contains("\"subdivision\":0"));
+    assert!(records[2].contains("\"subdivision\":1"));
+    assert!(records[3].contains("\"kind\":\"batch\""));
+    for index in 0..2 {
+        assert!(
+            manifests
+                .join(format!("circle_shift.v1/{index:05}/FMN_COMPLETE"))
+                .is_file()
+        );
+        assert!(
+            artifacts
+                .join(format!("circle_shift.v1/{index:05}.y4m"))
+                .is_file()
+        );
+    }
 }
 
 #[cfg(feature = "batch")]

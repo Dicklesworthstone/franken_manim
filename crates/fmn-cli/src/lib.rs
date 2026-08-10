@@ -45,8 +45,8 @@ use fmn_render::plan::RenderPlan;
 use fmn_scene::studio_bridge::SceneState;
 use fmn_scene::{
     AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
-    EffectClass, Entry, IntegrationError, Journal, NullSceneSink, OutputNaming, SceneSink,
-    TimelineBundle,
+    EffectClass, Entry, IntegrationError, Journal, LifecycleEvent, LifecyclePhase, NullSceneSink,
+    OutputNaming, SceneSink, TimelineBundle,
 };
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
@@ -2314,8 +2314,22 @@ struct CompletedRender {
     artifact: RenderArtifactReport,
     engine: String,
     render_threads: usize,
+    subdivision: Option<u64>,
+    prerun: Option<PreRunSummary>,
     manifest: Option<ProvenanceManifest>,
     manifest_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreRunSummary {
+    frames: u64,
+    play_indices: Vec<u64>,
+}
+
+impl PreRunSummary {
+    fn segment_count(&self) -> usize {
+        self.play_indices.len()
+    }
 }
 
 const RENDER_ACTIVE: u8 = 0;
@@ -3386,6 +3400,235 @@ impl SceneSink for RenderSink {
     }
 }
 
+struct PreRunCounter {
+    frames: u64,
+    play_indices: Vec<u64>,
+    segment_active: bool,
+    segments_only: bool,
+}
+
+impl PreRunCounter {
+    fn new(segments_only: bool) -> Self {
+        Self {
+            frames: 0,
+            play_indices: Vec::new(),
+            segment_active: false,
+            segments_only,
+        }
+    }
+
+    fn finish(self) -> PreRunSummary {
+        PreRunSummary {
+            frames: self.frames,
+            play_indices: self.play_indices,
+        }
+    }
+}
+
+impl SceneSink for PreRunCounter {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        if event.phase == LifecyclePhase::DriveSegment && !event.skipping {
+            self.play_indices
+                .try_reserve(1)
+                .map_err(|error| IntegrationError::new("prerun", error.to_string()))?;
+            self.play_indices.push(event.play_index);
+            self.segment_active = true;
+        } else if event.phase == LifecyclePhase::FinishSegment && !event.skipping {
+            self.segment_active = false;
+        }
+        Ok(())
+    }
+
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        _packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        if self.segments_only && !self.segment_active {
+            return Ok(());
+        }
+        self.frames = self
+            .frames
+            .checked_add(1)
+            .ok_or_else(|| IntegrationError::new("prerun", "frame count exhausted"))?;
+        Ok(())
+    }
+}
+
+struct ActiveSubdivision {
+    play_index: u64,
+    sink: RenderSink,
+}
+
+#[derive(Clone, Copy)]
+struct SubdivisionContext<'a> {
+    config: &'a fmn_config::Config,
+    plan: &'a fmn_runtime::ExecutionPlan,
+    target: &'a RenderTarget,
+    naming: &'a OutputNaming,
+    cancellation: Option<&'a RenderCancellation>,
+}
+
+struct SubdividedRenderSink<'a> {
+    fs: Arc<dyn FileSystem>,
+    context: SubdivisionContext<'a>,
+    scene_name: &'a str,
+    single_frame: bool,
+    current: Option<ActiveSubdivision>,
+    final_packet: Option<fmn_scene::studio_bridge::FramePacket>,
+    artifacts: Vec<(u64, RenderArtifactReport)>,
+}
+
+impl<'a> SubdividedRenderSink<'a> {
+    fn new(
+        fs: Arc<dyn FileSystem>,
+        context: SubdivisionContext<'a>,
+        scene_name: &'a str,
+        capacity: usize,
+    ) -> Result<Self, CliError> {
+        let mut artifacts = Vec::new();
+        artifacts
+            .try_reserve_exact(capacity)
+            .map_err(|error| CliError::new("budget", error.to_string()))?;
+        Ok(Self {
+            fs,
+            context,
+            scene_name,
+            single_frame: matches!(context.target, RenderTarget::Native(NativeFrameFormat::Png)),
+            current: None,
+            final_packet: None,
+            artifacts,
+        })
+    }
+
+    fn begin(&mut self, play_index: u64) -> Result<(), IntegrationError> {
+        if self.current.is_some() {
+            return Err(IntegrationError::new(
+                "subdivide",
+                "a new segment began before the preceding output was finalized",
+            ));
+        }
+        let destination = subdivided_destination(
+            self.context.naming,
+            self.scene_name,
+            play_index,
+            self.context.target,
+        );
+        let sink = RenderSink::new(
+            Arc::clone(&self.fs),
+            self.context.config,
+            self.context.plan,
+            self.context.target,
+            destination,
+        )
+        .map_err(subdivision_integration_error)?;
+        if let Some(cancellation) = self.context.cancellation {
+            let emitter = sink.emitter_handle().ok_or_else(|| {
+                IntegrationError::new("subdivide", "new render sink omitted its emitter")
+            })?;
+            cancellation.register_emitter(emitter);
+            cancellation.scene_checkpoint()?;
+        }
+        self.current = Some(ActiveSubdivision { play_index, sink });
+        self.final_packet = None;
+        Ok(())
+    }
+
+    fn finish_current(&mut self, play_index: u64) -> Result<(), IntegrationError> {
+        let mut active = self.current.take().ok_or_else(|| {
+            IntegrationError::new("subdivide", "segment finished without an active output")
+        })?;
+        if active.play_index != play_index {
+            return Err(IntegrationError::new(
+                "subdivide",
+                "segment output index disagreed with the scene lifecycle",
+            ));
+        }
+        if self.single_frame {
+            let packet = self.final_packet.take().ok_or_else(|| {
+                IntegrationError::new(
+                    "subdivide",
+                    "a zero-frame segment cannot produce a final-state PNG",
+                )
+            })?;
+            active.sink.capture(CaptureReason::Segment, packet)?;
+        }
+        let artifact = active
+            .sink
+            .finish()
+            .map_err(subdivision_integration_error)?;
+        self.artifacts.push((play_index, artifact));
+        Ok(())
+    }
+
+    fn into_artifacts(self) -> Result<Vec<(u64, RenderArtifactReport)>, CliError> {
+        if self.current.is_some() {
+            return Err(CliError::new(
+                "internal",
+                "scene completed with an unfinished subdivided output",
+            ));
+        }
+        Ok(self.artifacts)
+    }
+}
+
+impl SceneSink for SubdividedRenderSink<'_> {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        match event.phase {
+            LifecyclePhase::DriveSegment if !event.skipping => self.begin(event.play_index),
+            LifecyclePhase::FinishSegment if !event.skipping => {
+                self.finish_current(event.play_index)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        let Some(active) = self.current.as_mut() else {
+            return Ok(());
+        };
+        if self.single_frame {
+            self.final_packet = Some(packet);
+            Ok(())
+        } else {
+            active.sink.capture(reason, packet)
+        }
+    }
+}
+
+fn subdivision_integration_error(error: CliError) -> IntegrationError {
+    IntegrationError::new("subdivide", format!("{}: {error}", error.exit_name()))
+}
+
+fn subdivided_destination(
+    naming: &OutputNaming,
+    scene_name: &str,
+    play_index: u64,
+    target: &RenderTarget,
+) -> PathBuf {
+    match target {
+        RenderTarget::Native(NativeFrameFormat::Png) => {
+            naming.partial_artifact(scene_name, play_index, "png")
+        }
+        RenderTarget::Native(NativeFrameFormat::PngSequence) => naming
+            .partial_directory(scene_name)
+            .join(format!("{play_index:05}")),
+        RenderTarget::Native(NativeFrameFormat::Gif) => {
+            naming.partial_artifact(scene_name, play_index, "gif")
+        }
+        RenderTarget::Native(NativeFrameFormat::Y4m) => {
+            naming.partial_artifact(scene_name, play_index, "y4m")
+        }
+        RenderTarget::Video(context) => {
+            naming.partial_artifact(scene_name, play_index, context.job.container.extension())
+        }
+    }
+}
+
 fn render_sink_limits(layout: &FrameLayout) -> Result<SinkLimits, CliError> {
     const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024 * 1024;
     const MAX_FRAMES: u64 = 1_000_000;
@@ -4116,6 +4359,38 @@ fn execute_native_render(
     )
 }
 
+fn prerun_builtin_scene(
+    name: &str,
+    command: &RenderCommand,
+    config: &fmn_config::Config,
+    cancellation: Option<&RenderCancellation>,
+) -> Result<PreRunSummary, CliError> {
+    let mut scene = fmn::builtins::primitive_scene(name)
+        .ok_or_else(|| CliError::new("internal", "validated built-in scene disappeared"))?;
+    let mut counter = PreRunCounter::new(command.subdivide);
+    if let Some(cancellation) = cancellation {
+        let mut cancellable = CancellableSceneSink {
+            inner: &mut counter,
+            cancellation,
+        };
+        fmn::run_scene(
+            &mut scene,
+            command.runtime_config(config),
+            config.determinism.seed,
+            &mut cancellable,
+        )
+    } else {
+        fmn::run_scene(
+            &mut scene,
+            command.runtime_config(config),
+            config.determinism.seed,
+            &mut counter,
+        )
+    }
+    .map_err(native_scene_error)?;
+    Ok(counter.finish())
+}
+
 fn execute_native_render_with_cancellation(
     fs: Arc<dyn FileSystem>,
     runner: Arc<dyn fmn_platform::process::ProcessRunner>,
@@ -4131,12 +4406,6 @@ fn execute_native_render_with_cancellation(
         return Err(CliError::new(
             "capability",
             "host open/reveal integration is not registered; the render artifact can still be written without `--open` or `--finder`",
-        ));
-    }
-    if command.subdivide || command.prerun {
-        return Err(CliError::new(
-            "capability",
-            "the native render path does not yet support `--subdivide` or `--prerun`",
         ));
     }
     let input = resolve_native_render_input(fs.as_ref(), command)?;
@@ -4234,7 +4503,13 @@ fn execute_native_render_with_cancellation(
         RenderTarget::Native(NativeFrameFormat::Y4m) => naming.artifact(name, "y4m"),
         RenderTarget::Video(context) => naming.artifact(name, context.job.container.extension()),
     };
-    let complete = |source, source_item, scene, artifact| -> Result<CompletedRender, CliError> {
+    let complete = |source,
+                    source_item,
+                    scene,
+                    artifact,
+                    subdivision,
+                    prerun|
+     -> Result<CompletedRender, CliError> {
         let manifest = render_manifest(
             ManifestContext {
                 fs: fs.as_ref(),
@@ -4253,6 +4528,8 @@ fn execute_native_render_with_cancellation(
             artifact,
             engine: engine.closure_string(),
             render_threads,
+            subdivision,
+            prerun,
             manifest: Some(manifest),
             manifest_path: None,
         };
@@ -4269,6 +4546,85 @@ fn execute_native_render_with_cancellation(
             for name in names {
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
+                }
+                let summary = (command.prerun || command.subdivide)
+                    .then(|| prerun_builtin_scene(&name, command, &config, cancellation))
+                    .transpose()?;
+                if command.subdivide {
+                    let summary = summary.ok_or_else(|| {
+                        CliError::new("internal", "subdivision omitted its counting pass")
+                    })?;
+                    for &play_index in &summary.play_indices {
+                        let artifact_destination =
+                            subdivided_destination(&naming, &name, play_index, &target);
+                        preflight_render_generation(fs.as_ref(), &artifact_destination)?;
+                        if manifest_publication == ManifestPublication::Adjacent {
+                            preflight_manifest_generation(
+                                fs.as_ref(),
+                                &adjacent_manifest_destination(&artifact_destination)?,
+                            )?;
+                        }
+                    }
+                    let mut sink = SubdividedRenderSink::new(
+                        Arc::clone(&fs),
+                        SubdivisionContext {
+                            config: &config,
+                            plan: &plan,
+                            target: &target,
+                            naming: &naming,
+                            cancellation,
+                        },
+                        &name,
+                        summary.segment_count(),
+                    )?;
+                    let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
+                        CliError::new("internal", "validated built-in scene disappeared")
+                    })?;
+                    if let Some(cancellation) = cancellation {
+                        let mut cancellable = CancellableSceneSink {
+                            inner: &mut sink,
+                            cancellation,
+                        };
+                        fmn::run_scene(
+                            &mut scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut cancellable,
+                        )
+                    } else {
+                        fmn::run_scene(
+                            &mut scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut sink,
+                        )
+                    }
+                    .map_err(native_scene_error)?;
+                    if let Some(cancellation) = cancellation {
+                        cancellation.cli_checkpoint()?;
+                    }
+                    let artifacts = sink.into_artifacts()?;
+                    if artifacts.len() != summary.segment_count() {
+                        return Err(CliError::new(
+                            "internal",
+                            "subdivision output count disagreed with the deterministic prerun",
+                        ));
+                    }
+                    let mut prerun = command.prerun.then_some(summary);
+                    reports.try_reserve(artifacts.len()).map_err(|error| {
+                        CliError::new("budget", format!("subdivision report table: {error}"))
+                    })?;
+                    for (play_index, artifact) in artifacts {
+                        reports.push(complete(
+                            RenderSourceReport::Builtin,
+                            builtin_source_item(&name)?,
+                            name.clone(),
+                            artifact,
+                            Some(play_index),
+                            prerun.take(),
+                        )?);
+                    }
+                    continue;
                 }
                 let artifact_destination = destination(&name);
                 if manifest_publication == ManifestPublication::Adjacent {
@@ -4365,6 +4721,8 @@ fn execute_native_render_with_cancellation(
                     source_item,
                     name,
                     artifact,
+                    None,
+                    summary,
                 )?);
             }
         }
@@ -4374,6 +4732,93 @@ fn execute_native_render_with_cancellation(
             name,
             bundle,
         } => {
+            let play_indices = (0..bundle.segment_count())
+                .map(|index| {
+                    u64::try_from(index).map_err(|_| {
+                        CliError::new("budget", "compiled subdivision index exceeds u64")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let summary = PreRunSummary {
+                frames: u64::from(bundle.frame_count()),
+                play_indices,
+            };
+            if command.subdivide {
+                for &play_index in &summary.play_indices {
+                    let artifact_destination =
+                        subdivided_destination(&naming, &name, play_index, &target);
+                    preflight_render_generation(fs.as_ref(), &artifact_destination)?;
+                    if manifest_publication == ManifestPublication::Adjacent {
+                        preflight_manifest_generation(
+                            fs.as_ref(),
+                            &adjacent_manifest_destination(&artifact_destination)?,
+                        )?;
+                    }
+                }
+                let mut prerun = command.prerun.then_some(summary.clone());
+                reports
+                    .try_reserve(summary.segment_count())
+                    .map_err(|error| {
+                        CliError::new("budget", format!("subdivision report table: {error}"))
+                    })?;
+                for (segment_index, &play_index) in summary.play_indices.iter().enumerate() {
+                    if let Some(cancellation) = cancellation {
+                        cancellation.cli_checkpoint()?;
+                    }
+                    let artifact_destination =
+                        subdivided_destination(&naming, &name, play_index, &target);
+                    let mut sink = RenderSink::new(
+                        Arc::clone(&fs),
+                        &config,
+                        &plan,
+                        &target,
+                        artifact_destination,
+                    )?;
+                    if let Some(cancellation) = cancellation {
+                        let emitter = sink.emitter_handle().ok_or_else(|| {
+                            CliError::new("internal", "new render sink omitted its emitter")
+                        })?;
+                        cancellation.register_emitter(emitter);
+                        cancellation.cli_checkpoint()?;
+                    }
+                    let segment_frames =
+                        bundle.segment_frame_range(segment_index).ok_or_else(|| {
+                            CliError::new(
+                                "internal",
+                                "validated bundle omitted a segment frame range",
+                            )
+                        })?;
+                    let frames = if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
+                        let final_frame = segment_frames.end.checked_sub(1).ok_or_else(|| {
+                            CliError::new(
+                                "scene",
+                                "a zero-frame segment cannot produce a final-state PNG",
+                            )
+                        })?;
+                        final_frame..segment_frames.end
+                    } else {
+                        segment_frames
+                    };
+                    for index in frames {
+                        if let Some(cancellation) = cancellation {
+                            cancellation.cli_checkpoint()?;
+                        }
+                        let stage = bundle.stage_at(index).map_err(bundle_read_error)?;
+                        sink.render_stage(&stage, u64::from(index) + 1)
+                            .map_err(|error| CliError::new("render", error.to_string()))?;
+                    }
+                    let artifact = sink.finish()?;
+                    reports.push(complete(
+                        RenderSourceReport::Compiled(source.clone()),
+                        source_item.clone(),
+                        name.clone(),
+                        artifact,
+                        Some(play_index),
+                        prerun.take(),
+                    )?);
+                }
+                return Ok(reports);
+            }
             let artifact_destination = destination(&name);
             if manifest_publication == ManifestPublication::Adjacent {
                 preflight_manifest_generation(
@@ -4422,6 +4867,8 @@ fn execute_native_render_with_cancellation(
                 source_item,
                 name,
                 sink.finish()?,
+                None,
+                command.prerun.then_some(summary),
             )?);
         }
     }
@@ -4453,6 +4900,8 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         artifact,
         engine,
         render_threads,
+        subdivision,
+        prerun,
         manifest,
         manifest_path,
     } in reports
@@ -4466,6 +4915,31 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         let human_source = source
             .artifact()
             .map_or_else(String::new, |path| format!(" from {}", path.display()));
+        if let Some(prerun) = prerun {
+            if command.common.robot {
+                let _ = writeln!(
+                    stdout,
+                    "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"prerun\",\"source\":{}{},\"scene\":{},\"frames\":{},\"segments\":{}}}",
+                    ROBOT_SCHEMA_VERSION,
+                    json_string(source.kind()),
+                    source_artifact,
+                    json_string(&scene),
+                    prerun.frames,
+                    prerun.segment_count(),
+                );
+            } else if !command.common.quiet {
+                let _ = writeln!(
+                    stdout,
+                    "prerun counted {} frames across {} segments for {scene}{human_source}",
+                    prerun.frames,
+                    prerun.segment_count(),
+                );
+            }
+        }
+        let subdivision_json =
+            subdivision.map_or_else(String::new, |index| format!(",\"subdivision\":{index}"));
+        let human_subdivision =
+            subdivision.map_or_else(String::new, |index| format!(" subdivision {index}"));
         let manifest_json = manifest.as_ref().zip(manifest_path.as_ref()).map_or_else(
             String::new,
             |(manifest, path)| {
@@ -4484,11 +4958,12 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 if command.common.robot {
                     let _ = write!(
                         stdout,
-                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{},\"artifact_digest\":{}",
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{}{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{},\"artifact_digest\":{}",
                         ROBOT_SCHEMA_VERSION,
                         json_string(source.kind()),
                         source_artifact,
                         json_string(&scene),
+                        subdivision_json,
                         json_string(match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "png_sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -4507,7 +4982,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_manifest})",
+                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_manifest})",
                         match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -4524,11 +4999,12 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 if command.common.robot {
                     let _ = write!(
                         stdout,
-                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":\"video\",\"artifact\":{},\"frames\":{},\"input_bytes\":{},\"bytes\":{},\"artifact_digest\":{},\"engine\":{},\"render_threads\":{},\"ffmpeg\":{{\"path\":{},\"sha256\":{},\"version\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{}}}",
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{}{},\"format\":\"video\",\"artifact\":{},\"frames\":{},\"input_bytes\":{},\"bytes\":{},\"artifact_digest\":{},\"engine\":{},\"render_threads\":{},\"ffmpeg\":{{\"path\":{},\"sha256\":{},\"version\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{}}}",
                         ROBOT_SCHEMA_VERSION,
                         json_string(source.kind()),
                         source_artifact,
                         json_string(&scene),
+                        subdivision_json,
                         json_string(&report.path.to_string_lossy()),
                         report.frame_count,
                         report.input_bytes,
@@ -4553,7 +5029,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_manifest})",
+                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_manifest})",
                         report.path.display(),
                         report.frame_count,
                         report.input_bytes,
@@ -4758,6 +5234,31 @@ fn adjacent_manifest_destination(artifact: &Path) -> Result<PathBuf, CliError> {
     Ok(artifact.with_file_name(sidecar_leaf))
 }
 
+fn preflight_render_generation(fs: &dyn FileSystem, destination: &Path) -> Result<(), CliError> {
+    if fs
+        .node_kind_no_follow(destination)
+        .map_err(|error| {
+            CliError::new(
+                "output",
+                format!(
+                    "could not inspect render destination {}: {error}",
+                    destination.display()
+                ),
+            )
+        })?
+        .is_some()
+    {
+        return Err(CliError::new(
+            "output",
+            format!(
+                "render destination {} already exists; subdivided artifacts are no-clobber generations",
+                destination.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn preflight_manifest_generation(fs: &dyn FileSystem, destination: &Path) -> Result<(), CliError> {
     if fs
         .node_kind_no_follow(destination)
@@ -4842,7 +5343,11 @@ fn publish_batch_manifests(
     reports: &mut [CompletedRender],
 ) -> Result<(), CliError> {
     for report in reports {
-        publish_manifest_generation(fs, &root.join(&report.scene), report)?;
+        let mut destination = root.join(&report.scene);
+        if let Some(subdivision) = report.subdivision {
+            destination.push(format!("{subdivision:05}"));
+        }
+        publish_manifest_generation(fs, &destination, report)?;
     }
     Ok(())
 }
