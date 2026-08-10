@@ -22,8 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(feature = "batch")]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(feature = "batch")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use fmn_core::color::Srgb;
 use fmn_core::rng::RNG_LAYOUT_VERSION;
@@ -5353,6 +5354,7 @@ fn execute_studio(
     frames
         .publish(&initial, protocol_limits)
         .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
+    let tui_frames = command.tui.then(|| frames.clone());
     let session = Arc::new(
         fmn_studio::StudioWorkerSession::new(&scene, supervisor, Arc::new(|_| false))
             .map_err(|error| internal(format!("Studio session: {error}")))?,
@@ -5377,9 +5379,11 @@ fn execute_studio(
         .launch_url()
         .map_err(|error| internal(format!("Studio launch URL: {error}")))
         .and_then(|url| write_studio_ready(ready, &command, &scene, &url, generation))
-        .and_then(|()| {
-            host.serve_until(shutdown)
-                .map_err(|error| CliError::new("scene", format!("Studio host: {error}")))
+        .and_then(|()| match tui_frames.as_ref() {
+            Some(frames) => serve_studio_tui(host, frames, ready, shutdown),
+            None => host
+                .serve_until(shutdown)
+                .map_err(|error| CliError::new("scene", format!("Studio host: {error}"))),
         });
     session.shutdown_worker();
     result
@@ -5681,6 +5685,57 @@ mod tests {
 
     fn fs_capability(fs: &Arc<VirtualFs>) -> Arc<dyn FileSystem> {
         Arc::clone(fs) as Arc<dyn FileSystem>
+    }
+
+    #[test]
+    fn studio_terminal_protocol_prefers_kitty_and_falls_back_to_sixel() {
+        assert_eq!(
+            studio_terminal_protocol(Some(OsStr::new("xterm-kitty")), None, None),
+            fmn_studio::TerminalProtocol::Kitty
+        );
+        assert_eq!(
+            studio_terminal_protocol(None, Some(OsStr::new("kitty")), None),
+            fmn_studio::TerminalProtocol::Kitty
+        );
+        assert_eq!(
+            studio_terminal_protocol(None, None, Some(OsStr::new("1"))),
+            fmn_studio::TerminalProtocol::Kitty
+        );
+        assert_eq!(
+            studio_terminal_protocol(Some(OsStr::new("xterm-256color")), None, None),
+            fmn_studio::TerminalProtocol::Sixel
+        );
+
+        let png = fmn_codec::encode_rgba8(
+            2,
+            1,
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+            fmn_codec::CompressionLevel::Fast,
+        );
+        let frame = fmn_studio::PngFrame {
+            publication_sequence: 0,
+            scene: "terminal-fixture".to_owned(),
+            frame_index: 0,
+            width: 2,
+            height: 1,
+            digest: fmn_studio::protocol_digest(&png),
+            png,
+        };
+        for (protocol, prefix) in [
+            (fmn_studio::TerminalProtocol::Kitty, b"\x1b_G".as_slice()),
+            (
+                fmn_studio::TerminalProtocol::Sixel,
+                b"\x1bP0;0;0q".as_slice(),
+            ),
+        ] {
+            let preview =
+                fmn_studio::TerminalPreview::new(protocol, fmn_studio::TuiLimits::default())
+                    .expect("valid terminal adapter");
+            let mut output = Vec::new();
+            write_studio_terminal_frame(preview, &mut output, &frame)
+                .expect("validated host PNG reaches the terminal adapter");
+            assert!(output.starts_with(prefix));
+        }
     }
 
     #[cfg(unix)]

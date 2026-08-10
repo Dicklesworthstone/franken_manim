@@ -201,6 +201,137 @@ fn studio_serves_a_real_worker_frame_and_shuts_down_on_stdin_eof() {
 }
 
 #[test]
+fn robot_mode_refuses_terminal_escape_output() {
+    let output = run_clean(&[
+        "studio",
+        "--robot",
+        "--tui",
+        "--no-browser",
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(2), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("\"exit_name\":\"usage\""), "{stdout}");
+    assert!(
+        stdout.contains("cannot be combined with --robot"),
+        "{stdout}"
+    );
+    assert!(!stdout.as_bytes().contains(&0x1b));
+}
+
+#[cfg(unix)]
+#[test]
+fn studio_tui_streams_real_worker_frames_after_scrub() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
+        .args([
+            "studio",
+            "--tui",
+            "--no-browser",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("KITTY_WINDOW_ID")
+        .env("TERM", "xterm-kitty")
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("launch terminal Studio front door");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("Studio stdout"));
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .expect("read human Studio readiness record");
+    assert!(
+        ready.starts_with("Studio ready for circle_shift.v1: http://"),
+        "{ready}"
+    );
+    let location = ready
+        .split_once("http://")
+        .expect("readiness URL scheme")
+        .1
+        .split_once(" (")
+        .expect("readiness URL suffix")
+        .0;
+    let (authority, target) = location.split_once('/').expect("URL authority and target");
+    let query = target.split_once('?').expect("capability query").1;
+
+    let terminal_reader = std::thread::spawn(move || {
+        let mut terminal = Vec::new();
+        stdout
+            .read_to_end(&mut terminal)
+            .expect("read terminal Studio frames");
+        terminal
+    });
+
+    let body = b"frame=1&commit=false";
+    let mut scrub = std::net::TcpStream::connect(authority).expect("connect to Studio scrub API");
+    scrub
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("scrub timeout");
+    write!(
+        scrub,
+        "POST /api/scrub?{query} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .expect("write scrub request");
+    scrub.write_all(body).expect("write scrub body");
+    let mut scrub_response = Vec::new();
+    scrub
+        .read_to_end(&mut scrub_response)
+        .expect("read scrub response");
+    let _ = scrub.shutdown(std::net::Shutdown::Both);
+    assert!(
+        scrub_response.starts_with(b"HTTP/1.1 200 OK"),
+        "{}",
+        String::from_utf8_lossy(&scrub_response)
+    );
+    assert!(
+        scrub_response
+            .windows(b"\"frame_index\":1".len())
+            .any(|window| window == b"\"frame_index\":1")
+    );
+
+    drop(child.stdin.take());
+    let status = child
+        .wait()
+        .expect("wait for graceful terminal Studio shutdown");
+    let terminal = terminal_reader.join().expect("terminal reader thread");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("Studio stderr")
+        .read_to_string(&mut stderr)
+        .expect("read Studio stderr");
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(
+        terminal
+            .windows(b"\x1b_Ga=T,f=100,t=d,q=2,".len())
+            .filter(|window| *window == b"\x1b_Ga=T,f=100,t=d,q=2,")
+            .count()
+            >= 2,
+        "expected the initial and scrubbed worker frames, got {} terminal bytes",
+        terminal.len()
+    );
+}
+
+#[test]
 fn built_in_corpus_renders_through_the_real_png_and_y4m_sinks() {
     for format in ["png_sequence", "y4m"] {
         let root = output_root(format);
