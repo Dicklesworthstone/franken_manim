@@ -296,6 +296,26 @@ class Mobject(_BridgeMobject):
         self.submobjects.extend(mobjects)
         return self
 
+    # The Reference's container protocol (manimlib/mobject/mobject.py):
+    # a mobject iterates, indexes, and measures as its submobject list;
+    # slicing regroups through the family's group class.
+    def split(self):
+        return self.submobjects
+
+    def get_group_class(self):
+        return getattr(_FMN_MODULE, "Group", Mobject)
+
+    def __getitem__(self, value):
+        if isinstance(value, slice):
+            return self.get_group_class()(*self.split()[value])
+        return self.split()[value]
+
+    def __iter__(self):
+        return iter(self.split())
+
+    def __len__(self):
+        return len(self.split())
+
     def remove(self, *mobjects):
         for mobject in mobjects:
             if mobject in self.submobjects:
@@ -384,6 +404,9 @@ class VMobject(Mobject):
         ("base_normal", 3),
         ("fill_border_width", 1),
     ]
+
+    def get_group_class(self):
+        return getattr(_FMN_MODULE, "VGroup", VMobject)
 
 
 class Scene(_SceneCore):
