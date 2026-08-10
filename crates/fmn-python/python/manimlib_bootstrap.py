@@ -2382,6 +2382,110 @@ class OldTexText(OldTex):
         super().__init__(*tex_strings, arg_separator=arg_separator, **kwargs)
 
 
+class DecimalNumber(VMobject):
+    """The Reference's DecimalNumber over the de-TeX'd native numbers
+    shelf. `set_value` uses the rebuild pattern: the split-family proxy
+    representation must re-split its glyph children anyway, which IS a
+    rebuild — the native shelf's live glyph-recycling `set_value` is the
+    upgrade path once live-state cores land (fm-p107)."""
+
+    def __init__(
+        self,
+        number=0,
+        color=None,
+        stroke_width=0,
+        fill_opacity=1.0,
+        fill_border_width=0.5,
+        num_decimal_places=2,
+        min_total_width=0,
+        include_sign=False,
+        group_with_commas=True,
+        digit_buff_per_font_unit=0.001,
+        show_ellipsis=False,
+        unit=None,
+        include_background_rectangle=False,
+        hide_zero_components_on_complex=True,
+        edge_to_fix=_LEFT,
+        font_size=48,
+        text_config=None,
+        **kwargs,
+    ):
+        del hide_zero_components_on_complex  # only observable for complex
+        if isinstance(number, complex):
+            raise NotImplementedError(
+                "DecimalNumber over complex values awaits the native "
+                "complex-formatting path; real values are native"
+            )
+        _refuse_unrouted(
+            "DecimalNumber()", [("text_config", bool(text_config))]
+        )
+        _install_live_state(self)
+        self.number = float(number)
+        self.font_size = float(font_size)
+        self.edge_to_fix = _np.array(_vec3(edge_to_fix))
+        self._decimal_params = (
+            int(num_decimal_places),
+            0 if min_total_width is None else int(min_total_width),
+            bool(include_sign),
+            bool(group_with_commas),
+            float(digit_buff_per_font_unit),
+            bool(show_ellipsis),
+            None if unit is None else str(unit),
+            bool(include_background_rectangle),
+            _vec3(edge_to_fix),
+            float(font_size),
+            color,
+            float(stroke_width),
+            float(fill_opacity),
+            float(fill_border_width),
+        )
+        specs = self._build_decimal_number(
+            _native_shell_factory, self.number, *self._decimal_params
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def get_value(self):
+        return self.number
+
+    def set_value(self, number):
+        # Reference set_value (numbers.py:207): style from the first
+        # pointful member, rebuild the glyphs, re-seat the fixed edge.
+        if self._is_bound():
+            raise NotImplementedError(
+                "DecimalNumber.set_value on a scene-bound number awaits the "
+                "live-state glyph-recycling core (fm-p107)"
+            )
+        number = float(number)
+        move_to_point = self.get_edge_center(self.edge_to_fix)
+        donor = next(
+            (sm for sm in self.submobjects if sm.has_points()), None
+        )
+        style = donor.get_style() if donor is not None else None
+        self.submobjects.clear()
+        specs = self._build_decimal_number(
+            _native_shell_factory, number, *self._decimal_params
+        )
+        _hang_native_children(self, specs)
+        self.move_to(move_to_point, self.edge_to_fix)
+        if style is not None:
+            self.set_style(**style)
+        self.number = number
+        return self
+
+    def increment_value(self, delta_t=1):
+        self.set_value(self.get_value() + delta_t)
+        return self
+
+
+class Integer(DecimalNumber):
+    def __init__(self, number=0, num_decimal_places=0, **kwargs):
+        super().__init__(number, num_decimal_places=num_decimal_places, **kwargs)
+
+    def get_value(self):
+        return int(_np.round(super().get_value()))
+
+
 class PMobject(Mobject):
     """The point-cloud base (Reference MRO anchor). The remaining PMobject
     surface stays precise schema placeholders."""
@@ -2424,6 +2528,12 @@ class DotCloud(PMobject):
 
     def get_glow_factor(self):
         return self.glow_factor
+
+    def make_3d(self, reflectiveness=0.5, gloss=0.1, shadow=0.2):
+        # Reference dot_cloud.py:149 — uniforms-only, both engine-real.
+        self.set_shading(reflectiveness, gloss, shadow)
+        self.apply_depth_test()
+        return self
 
 
 class TrueDot(DotCloud):
@@ -3127,6 +3237,8 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Dot"): Dot,
         ("manimlib.mobject.geometry", "SmallDot"): SmallDot,
         ("manimlib.mobject.types.point_cloud_mobject", "PMobject"): PMobject,
+        ("manimlib.mobject.numbers", "DecimalNumber"): DecimalNumber,
+        ("manimlib.mobject.numbers", "Integer"): Integer,
         ("manimlib.mobject.types.dot_cloud", "DotCloud"): DotCloud,
         ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
         ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,

@@ -1552,6 +1552,51 @@ impl BridgeMobject {
         install_native_tree(slf, factory, cloud)
     }
 
+    /// `DecimalNumber(number, ...)` over the numbers shelf (the de-TeX'd
+    /// native builder with glyph-recycling updates).
+    #[allow(clippy::too_many_arguments)]
+    fn _build_decimal_number<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        number: f64,
+        num_decimal_places: usize,
+        min_total_width: usize,
+        include_sign: bool,
+        group_with_commas: bool,
+        digit_buff_per_font_unit: f64,
+        show_ellipsis: bool,
+        unit: Option<String>,
+        include_background_rectangle: bool,
+        edge_to_fix: [f64; 3],
+        font_size: f64,
+        color: Option<&Bound<'py, PyAny>>,
+        stroke_width: f64,
+        fill_opacity: f64,
+        fill_border_width: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut decimal = fmn_library::DecimalNumber::new(number)
+            .num_decimal_places(num_decimal_places)
+            .min_total_width(min_total_width)
+            .include_sign(include_sign)
+            .group_with_commas(group_with_commas)
+            .digit_buff_per_font_unit(digit_buff_per_font_unit)
+            .show_ellipsis(show_ellipsis)
+            .include_background_rectangle(include_background_rectangle)
+            .edge_to_fix(edge_to_fix)
+            .font_size(font_size)
+            .stroke_width(stroke_width)
+            .fill_opacity(fill_opacity)
+            .fill_border_width(fill_border_width);
+        if let Some(unit) = &unit {
+            decimal = decimal.unit(unit);
+        }
+        if let Some(color) = color {
+            decimal = decimal.color(srgb_from_py(color)?);
+        }
+        let built = with_font_book(|book| decimal.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built.into_vmob())
+    }
+
     /// `Line(start, end, buff, path_arc)` over the line shelf.
     fn _build_line<'py>(
         slf: &Bound<'py, Self>,
