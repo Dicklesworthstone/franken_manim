@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+// The io traits serve only the unix-gated Studio front-door test; an
+// unconditional import is dead (and clippy-fatal) on Windows.
+#[cfg(unix)]
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
