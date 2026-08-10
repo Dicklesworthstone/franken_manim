@@ -46,7 +46,7 @@ fmd-font.workspace = true
 fmn-codec.workspace = true
 # W10 e2e CLI scenarios drive fmn_cli's in-process runner (fm-fjq; dev-only,
 # so the shipped edge set and the crate DAG gate are unaffected).
-fmn-cli.workspace = true
+fmn-cli = { workspace = true, features = ["batch"] }
 # The §16.5 fuzz campaign's targets (tests/fuzz_campaign.rs): the pinned font
 # parser and the config YAML subset. Same posture as above — the campaign is a
 # Gauntlet consumer, not a shipped edge.

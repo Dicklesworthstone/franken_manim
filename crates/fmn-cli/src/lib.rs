@@ -19,6 +19,11 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "batch")]
+use std::sync::mpsc;
+#[cfg(feature = "batch")]
+use std::time::{Duration, Instant};
 
 use fmn_core::color::Srgb;
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
@@ -2260,6 +2265,76 @@ struct CompletedRender {
     render_threads: usize,
 }
 
+const RENDER_ACTIVE: u8 = 0;
+#[cfg(feature = "batch")]
+const RENDER_CANCEL_FAIL_FAST: u8 = 1;
+#[cfg(feature = "batch")]
+const RENDER_CANCEL_BUDGET: u8 = 2;
+
+#[derive(Debug, Default)]
+struct RenderCancellation {
+    reason: AtomicU8,
+}
+
+impl RenderCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.reason.load(Ordering::Acquire) != RENDER_ACTIVE
+    }
+
+    #[cfg(feature = "batch")]
+    fn request(&self, reason: u8) {
+        let _ = self.reason.compare_exchange(
+            RENDER_ACTIVE,
+            reason,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn cli_checkpoint(&self) -> Result<(), CliError> {
+        if self.is_cancelled() {
+            Err(CliError::new("budget", "batch scene job was cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn scene_checkpoint(&self) -> Result<(), IntegrationError> {
+        if self.is_cancelled() {
+            Err(IntegrationError::new(
+                "batch",
+                "scene job cancelled at a semantic boundary",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct CancellableSceneSink<'a, S> {
+    inner: &'a mut S,
+    cancellation: &'a RenderCancellation,
+}
+
+impl<S> SceneSink for CancellableSceneSink<'_, S>
+where
+    S: SceneSink,
+{
+    fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
+        self.cancellation.scene_checkpoint()?;
+        self.inner.event(event)
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        self.cancellation.scene_checkpoint()?;
+        self.inner.capture(reason, packet)
+    }
+}
+
 enum NativeRenderInput {
     Builtin {
         names: Vec<String>,
@@ -2953,6 +3028,19 @@ fn execute_native_render(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &RenderCommand,
 ) -> Result<Vec<CompletedRender>, CliError> {
+    execute_native_render_with_cancellation(fs, runner, locator, command, None)
+}
+
+fn execute_native_render_with_cancellation(
+    fs: Arc<dyn FileSystem>,
+    runner: Arc<dyn fmn_platform::process::ProcessRunner>,
+    locator: &dyn fmn_platform::process::FfmpegLocator,
+    command: &RenderCommand,
+    cancellation: Option<&RenderCancellation>,
+) -> Result<Vec<CompletedRender>, CliError> {
+    if let Some(cancellation) = cancellation {
+        cancellation.cli_checkpoint()?;
+    }
     if command.open || command.finder {
         return Err(CliError::new(
             "capability",
@@ -3069,6 +3157,9 @@ fn execute_native_render(
         NativeRenderInput::Builtin { names } => {
             reports.reserve(names.len());
             for name in names {
+                if let Some(cancellation) = cancellation {
+                    cancellation.cli_checkpoint()?;
+                }
                 let mut sink =
                     RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
                 let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
@@ -3078,29 +3169,65 @@ fn execute_native_render(
                     || matches!(target, RenderTarget::Native(NativeFrameFormat::Png))
                 {
                     let mut discard = NullSceneSink;
-                    let completed = fmn::run_scene(
-                        &mut scene,
-                        command.runtime_config(&config),
-                        config.determinism.seed,
-                        &mut discard,
-                    )
+                    let completed = if let Some(cancellation) = cancellation {
+                        let mut cancellable = CancellableSceneSink {
+                            inner: &mut discard,
+                            cancellation,
+                        };
+                        fmn::run_scene(
+                            &mut scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut cancellable,
+                        )
+                    } else {
+                        fmn::run_scene(
+                            &mut scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut discard,
+                        )
+                    }
                     .map_err(native_scene_error)?;
                     // Skip mode advances semantic state without ordinary
                     // captures. A still has the same composition shape even
                     // without `--skip_animations`: run to completion, then
                     // publish the one final-state frame explicitly.
-                    completed
-                        .into_scene()
-                        .show(&mut sink)
-                        .map_err(|error| CliError::new("scene", error.to_string()))?;
+                    let mut completed = completed.into_scene();
+                    if let Some(cancellation) = cancellation {
+                        let mut cancellable = CancellableSceneSink {
+                            inner: &mut sink,
+                            cancellation,
+                        };
+                        completed.show(&mut cancellable)
+                    } else {
+                        completed.show(&mut sink)
+                    }
+                    .map_err(|error| CliError::new("scene", error.to_string()))?;
                 } else {
-                    fmn::run_scene(
-                        &mut scene,
-                        command.runtime_config(&config),
-                        config.determinism.seed,
-                        &mut sink,
-                    )
+                    if let Some(cancellation) = cancellation {
+                        let mut cancellable = CancellableSceneSink {
+                            inner: &mut sink,
+                            cancellation,
+                        };
+                        fmn::run_scene(
+                            &mut scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut cancellable,
+                        )
+                    } else {
+                        fmn::run_scene(
+                            &mut scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut sink,
+                        )
+                    }
                     .map_err(native_scene_error)?;
+                }
+                if let Some(cancellation) = cancellation {
+                    cancellation.cli_checkpoint()?;
                 }
                 reports.push(report(RenderSourceReport::Builtin, name, sink.finish()?));
             }
@@ -3124,9 +3251,15 @@ fn execute_native_render(
                 0..bundle.frame_count()
             };
             for index in frames {
+                if let Some(cancellation) = cancellation {
+                    cancellation.cli_checkpoint()?;
+                }
                 let stage = bundle.stage_at(index).map_err(bundle_read_error)?;
                 sink.render_stage(&stage, u64::from(index) + 1)
                     .map_err(|error| CliError::new("render", error.to_string()))?;
+            }
+            if let Some(cancellation) = cancellation {
+                cancellation.cli_checkpoint()?;
             }
             reports.push(report(
                 RenderSourceReport::Compiled(source),
@@ -3251,6 +3384,412 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
     RunOutput::success(stdout)
 }
 
+#[cfg(feature = "batch")]
+#[derive(Clone)]
+struct FixedBatchFfmpegLocator {
+    executable: Option<fmn_platform::process::FfmpegExecutable>,
+}
+
+#[cfg(feature = "batch")]
+impl fmn_platform::process::FfmpegLocator for FixedBatchFfmpegLocator {
+    fn locate_ffmpeg(
+        &self,
+        _configured: &Path,
+    ) -> Result<fmn_platform::process::FfmpegExecutable, fmn_platform::process::FfmpegLocatorError>
+    {
+        self.executable
+            .clone()
+            .ok_or(fmn_platform::process::FfmpegLocatorError::NotFound)
+    }
+}
+
+#[cfg(feature = "batch")]
+struct BatchJob {
+    scene: String,
+    command: RenderCommand,
+}
+
+#[cfg(feature = "batch")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BatchCancellationReason {
+    FailFast,
+    Budget,
+}
+
+#[cfg(feature = "batch")]
+impl BatchCancellationReason {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::FailFast => "fail_fast",
+            Self::Budget => "budget",
+        }
+    }
+}
+
+#[cfg(feature = "batch")]
+enum BatchJobStatus {
+    Succeeded(Vec<CompletedRender>),
+    Failed(CliError),
+    Cancelled(BatchCancellationReason),
+}
+
+#[cfg(feature = "batch")]
+fn batch_cancellation_reason(cancellation: &RenderCancellation) -> Option<BatchCancellationReason> {
+    match cancellation.reason.load(Ordering::Acquire) {
+        RENDER_ACTIVE => None,
+        RENDER_CANCEL_FAIL_FAST => Some(BatchCancellationReason::FailFast),
+        RENDER_CANCEL_BUDGET => Some(BatchCancellationReason::Budget),
+        _ => Some(BatchCancellationReason::FailFast),
+    }
+}
+
+#[cfg(feature = "batch")]
+fn prepare_batch_jobs(
+    fs: &dyn FileSystem,
+    command: &RenderCommand,
+) -> Result<Vec<BatchJob>, CliError> {
+    match resolve_native_render_input(fs, command)? {
+        NativeRenderInput::Builtin { names } => Ok(names
+            .into_iter()
+            .map(|scene| {
+                let mut command = command.clone();
+                command.scene_names = vec![scene.clone()];
+                command.write_all = false;
+                BatchJob { scene, command }
+            })
+            .collect()),
+        NativeRenderInput::Compiled { name, .. } => Ok(vec![BatchJob {
+            scene: name,
+            command: command.clone(),
+        }]),
+    }
+}
+
+#[cfg(feature = "batch")]
+fn prepare_batch_locator(
+    fs: &dyn FileSystem,
+    locator: &dyn fmn_platform::process::FfmpegLocator,
+    command: &RenderCommand,
+) -> Result<FixedBatchFfmpegLocator, CliError> {
+    let executable = if requested_render_format(command)? == RequestedRenderFormat::Video {
+        let config = resolve_render_config(fs, command)?;
+        let configured = Path::new(&config.file_writer.ffmpeg_bin);
+        Some(locator.locate_ffmpeg(configured).map_err(|error| {
+            CliError::new(
+                "capability",
+                format!(
+                    "ffmpeg is unavailable at {}: {error}; {}",
+                    configured.display(),
+                    fmn_output::NATIVE_ALTERNATIVE
+                ),
+            )
+        })?)
+    } else {
+        None
+    };
+    Ok(FixedBatchFfmpegLocator { executable })
+}
+
+#[cfg(feature = "batch")]
+fn batch_output(
+    command: &BatchCommand,
+    scene_names: &[String],
+    statuses: Vec<BatchJobStatus>,
+    max_scenes: usize,
+) -> RunOutput {
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut succeeded = 0_usize;
+    let mut failed = 0_usize;
+    let mut cancelled = 0_usize;
+    let mut first_error_code = None;
+
+    for (scene, status) in scene_names.iter().zip(statuses) {
+        match status {
+            BatchJobStatus::Succeeded(reports) => {
+                succeeded = succeeded.saturating_add(1);
+                let output = successful_render_output(&command.render, reports);
+                stdout.push_str(&output.stdout);
+            }
+            BatchJobStatus::Failed(error) => {
+                failed = failed.saturating_add(1);
+                first_error_code.get_or_insert_with(|| error.code());
+                if command.render.common.robot {
+                    let _ = writeln!(
+                        stdout,
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"batch_job\",\"scene\":{},\"status\":\"failed\",\"exit_code\":{},\"exit_name\":{},\"rule\":{},\"message\":{}}}",
+                        ROBOT_SCHEMA_VERSION,
+                        json_string(scene),
+                        error.code(),
+                        json_string(error.exit_name()),
+                        json_option(error.rule()),
+                        json_string(error.message()),
+                    );
+                } else {
+                    let _ = writeln!(stderr, "fmn batch: {scene}: {error}");
+                }
+            }
+            BatchJobStatus::Cancelled(reason) => {
+                cancelled = cancelled.saturating_add(1);
+                if command.render.common.robot {
+                    let _ = writeln!(
+                        stdout,
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"batch_job\",\"scene\":{},\"status\":\"cancelled\",\"reason\":{}}}",
+                        ROBOT_SCHEMA_VERSION,
+                        json_string(scene),
+                        json_string(reason.name()),
+                    );
+                } else {
+                    let _ = writeln!(stderr, "fmn batch: {scene}: cancelled ({})", reason.name());
+                }
+            }
+        }
+    }
+
+    let ok = failed == 0 && cancelled == 0;
+    if command.render.common.robot {
+        let budget_ms = command
+            .budget_ms
+            .map_or_else(|| "null".to_owned(), |value| value.to_string());
+        let _ = writeln!(
+            stdout,
+            "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"batch\",\"status\":{},\"jobs\":{},\"succeeded\":{},\"failed\":{},\"cancelled\":{},\"max_scenes\":{},\"budget_ms\":{}}}",
+            ROBOT_SCHEMA_VERSION,
+            json_string(if ok { "ok" } else { "failed" }),
+            scene_names.len(),
+            succeeded,
+            failed,
+            cancelled,
+            max_scenes,
+            budget_ms,
+        );
+    } else if !command.render.common.quiet {
+        let _ = writeln!(
+            stdout,
+            "batch finished: {succeeded} succeeded, {failed} failed, {cancelled} cancelled (max {max_scenes} concurrent)"
+        );
+    }
+
+    let code = first_error_code.unwrap_or_else(|| {
+        if cancelled == 0 {
+            exit_code("success")
+        } else {
+            exit_code("budget")
+        }
+    });
+    RunOutput {
+        code,
+        stdout,
+        stderr,
+    }
+}
+
+#[cfg(feature = "batch")]
+fn execute_batch(
+    fs: Arc<dyn FileSystem>,
+    runner: Arc<dyn fmn_platform::process::ProcessRunner>,
+    locator: &dyn fmn_platform::process::FfmpegLocator,
+    command: &BatchCommand,
+) -> RunOutput {
+    if command.manifest_dir.is_some() {
+        return error_output(
+            command.render.common.robot,
+            &CliError::new(
+                "capability",
+                "--manifest-dir requires the complete FMNP C1-C10 input-closure producer, which is not registered yet",
+            ),
+        );
+    }
+    if command.max_scenes == Some(0) {
+        return error_output(
+            command.render.common.robot,
+            &CliError::new("config", "--max-scenes must be greater than zero"),
+        );
+    }
+
+    let mut jobs = match prepare_batch_jobs(fs.as_ref(), &command.render) {
+        Ok(jobs) => jobs,
+        Err(error) => return error_output(command.render.common.robot, &error),
+    };
+    let locator = match prepare_batch_locator(fs.as_ref(), locator, &command.render) {
+        Ok(locator) => Arc::new(locator),
+        Err(error) => return error_output(command.render.common.robot, &error),
+    };
+    let (topology, _) = detect_topology(fs.as_ref());
+    let physical_cores = usize::try_from(topology.physical_cores).unwrap_or(usize::MAX);
+    let logical_cores = usize::try_from(topology.logical_cores()).unwrap_or(usize::MAX);
+    let default_scenes = physical_cores.max(1).min(jobs.len());
+    let max_scenes = command
+        .max_scenes
+        .unwrap_or(default_scenes)
+        .min(jobs.len())
+        .max(1);
+    if command.render.common.threads.is_none() {
+        let per_scene_threads = (logical_cores / max_scenes).max(1);
+        for job in &mut jobs {
+            job.command.common.threads = Some(per_scene_threads);
+        }
+    }
+    let deadline = match command.budget_ms {
+        Some(milliseconds) => match Instant::now().checked_add(Duration::from_millis(milliseconds))
+        {
+            Some(deadline) => Some(deadline),
+            None => {
+                return error_output(
+                    command.render.common.robot,
+                    &CliError::new("config", "--budget-ms is too large for the host clock"),
+                );
+            }
+        },
+        None => None,
+    };
+    let runtime = match asupersync::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(max_scenes, max_scenes)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return error_output(
+                command.render.common.robot,
+                &CliError::new(
+                    "internal",
+                    format!("batch runtime initialization failed: {error}"),
+                ),
+            );
+        }
+    };
+
+    let cancellation = Arc::new(RenderCancellation::default());
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        cancellation.request(RENDER_CANCEL_BUDGET);
+    }
+    let (sender, receiver) = mpsc::channel();
+    let scene_names: Vec<String> = jobs.iter().map(|job| job.scene.clone()).collect();
+    let job_count = jobs.len();
+    let mut handles: Vec<asupersync::runtime::blocking_pool::BlockingTaskHandle> =
+        Vec::with_capacity(job_count);
+    for (index, job) in jobs.into_iter().enumerate() {
+        let fs = Arc::clone(&fs);
+        let runner = Arc::clone(&runner);
+        let locator = Arc::clone(&locator);
+        let task_cancellation = Arc::clone(&cancellation);
+        let sender = sender.clone();
+        let fail_fast = command.fail_fast;
+        let Some(handle) = runtime.spawn_blocking(move || {
+            let status = if let Some(reason) = batch_cancellation_reason(&task_cancellation) {
+                BatchJobStatus::Cancelled(reason)
+            } else {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_native_render_with_cancellation(
+                        fs,
+                        runner,
+                        locator.as_ref(),
+                        &job.command,
+                        Some(task_cancellation.as_ref()),
+                    )
+                })) {
+                    Ok(Ok(reports)) => BatchJobStatus::Succeeded(reports),
+                    Ok(Err(error)) => {
+                        if let Some(reason) = batch_cancellation_reason(&task_cancellation) {
+                            BatchJobStatus::Cancelled(reason)
+                        } else {
+                            if fail_fast {
+                                task_cancellation.request(RENDER_CANCEL_FAIL_FAST);
+                            }
+                            BatchJobStatus::Failed(error)
+                        }
+                    }
+                    Err(_) => {
+                        if fail_fast {
+                            task_cancellation.request(RENDER_CANCEL_FAIL_FAST);
+                        }
+                        BatchJobStatus::Failed(CliError::new(
+                            "internal",
+                            "batch scene job panicked",
+                        ))
+                    }
+                }
+            };
+            let _ = sender.send((index, status));
+        }) else {
+            cancellation.request(RENDER_CANCEL_FAIL_FAST);
+            for handle in &handles {
+                handle.cancel();
+                handle.wait();
+            }
+            return error_output(
+                command.render.common.robot,
+                &CliError::new("internal", "Asupersync blocking pool is unavailable"),
+            );
+        };
+        handles.push(handle);
+    }
+    drop(sender);
+
+    let mut statuses: Vec<Option<BatchJobStatus>> =
+        std::iter::repeat_with(|| None).take(job_count).collect();
+    let mut received = 0_usize;
+    while received < job_count {
+        let result = if let Some(deadline) = deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                cancellation.request(RENDER_CANCEL_BUDGET);
+                break;
+            }
+            receiver.recv_timeout(deadline.saturating_duration_since(now))
+        } else {
+            match receiver.recv() {
+                Ok(message) => Ok(message),
+                Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
+            }
+        };
+        match result {
+            Ok((index, status)) if index < job_count && statuses[index].is_none() => {
+                statuses[index] = Some(status);
+                received = received.saturating_add(1);
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                cancellation.request(RENDER_CANCEL_BUDGET);
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    if batch_cancellation_reason(&cancellation) == Some(BatchCancellationReason::Budget) {
+        for handle in &handles {
+            handle.cancel();
+        }
+    }
+    for handle in &handles {
+        handle.wait();
+    }
+    while let Ok((index, status)) = receiver.try_recv() {
+        if index < job_count && statuses[index].is_none() {
+            statuses[index] = Some(status);
+        }
+    }
+    let missing_reason = batch_cancellation_reason(&cancellation);
+    let statuses = statuses
+        .into_iter()
+        .map(|status| {
+            status.unwrap_or_else(|| {
+                missing_reason.map_or_else(
+                    || {
+                        BatchJobStatus::Failed(CliError::new(
+                            "internal",
+                            "batch job ended without a terminal report",
+                        ))
+                    },
+                    BatchJobStatus::Cancelled,
+                )
+            })
+        })
+        .collect();
+    batch_output(command, &scene_names, statuses, max_scenes)
+}
+
 /// Parse and dispatch with explicit host capabilities.
 #[must_use]
 pub fn run_with_capabilities<I, S>(
@@ -3332,15 +3871,20 @@ where
             if let Some(output) = python_source_refusal(&command.render) {
                 return output;
             }
-            let message = if cfg!(feature = "batch") {
-                "batch composition is unavailable: no cancellable production scene service is registered"
-            } else {
-                "batch support is disabled in this binary; rebuild with the `batch` feature"
-            };
-            error_output(
-                command.render.common.robot,
-                &CliError::new("capability", message),
-            )
+            #[cfg(feature = "batch")]
+            {
+                execute_batch(Arc::clone(&fs), Arc::clone(&runner), locator, &command)
+            }
+            #[cfg(not(feature = "batch"))]
+            {
+                error_output(
+                    command.render.common.robot,
+                    &CliError::new(
+                        "capability",
+                        "batch support is disabled in this binary; rebuild with the `batch` feature",
+                    ),
+                )
+            }
         }
         Invocation::Studio(command) => python_source_refusal(&command.render).unwrap_or_else(|| {
             error_output(
@@ -4985,7 +5529,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_dispatch_reports_the_compiled_feature_state() {
+    fn batch_dispatch_reports_feature_state_or_validates_a_real_job() {
         let fs = Arc::new(VirtualFs::new());
         let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
         let output = run_with_capabilities(
@@ -4994,15 +5538,15 @@ mod tests {
             runner,
             &no_ffmpeg_locator(),
         );
-        assert_eq!(output.code, 4);
         assert!(output.stderr.is_empty());
-        if cfg!(feature = "batch") {
-            assert!(
-                output
-                    .stdout
-                    .contains("no cancellable production scene service")
-            );
-        } else {
+        #[cfg(feature = "batch")]
+        {
+            assert_eq!(output.code, 5);
+            assert!(output.stdout.contains("select @builtin"));
+        }
+        #[cfg(not(feature = "batch"))]
+        {
+            assert_eq!(output.code, 4);
             assert!(output.stdout.contains("disabled in this binary"));
         }
     }

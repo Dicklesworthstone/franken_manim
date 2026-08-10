@@ -127,6 +127,145 @@ fn built_in_corpus_renders_through_the_real_png_and_y4m_sinks() {
     }
 }
 
+#[cfg(feature = "batch")]
+#[test]
+fn batch_renders_multiple_scenes_and_reports_in_request_order() {
+    let root = output_root("batch-positive");
+    let output = run_clean(&[
+        "batch",
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--max-scenes",
+        "2",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+        "rectangle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(lines.len(), 3, "{stdout}");
+    assert!(lines[0].contains("\"kind\":\"render\""));
+    assert!(lines[0].contains("\"scene\":\"circle_shift.v1\""));
+    assert!(lines[1].contains("\"kind\":\"render\""));
+    assert!(lines[1].contains("\"scene\":\"rectangle_shift.v1\""));
+    assert!(lines[2].contains("\"kind\":\"batch\""));
+    assert!(lines[2].contains("\"status\":\"ok\""));
+    assert!(lines[2].contains("\"succeeded\":2"));
+    assert!(root.join("circle_shift.v1/FMN_COMPLETE").is_file());
+    assert!(root.join("rectangle_shift.v1/FMN_COMPLETE").is_file());
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn batch_budget_cancels_before_publication_and_manifest_gap_is_explicit() {
+    let budget_root = output_root("batch-budget");
+    let budget = run_clean(&[
+        "batch",
+        "--robot",
+        "--budget-ms",
+        "0",
+        "--max-scenes",
+        "2",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--video_dir",
+        budget_root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+        "rectangle_shift.v1",
+    ]);
+    let budget_stdout = String::from_utf8(budget.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(budget.status.code(), Some(8), "{budget_stdout}");
+    assert!(budget.stderr.is_empty());
+    assert_eq!(budget_stdout.lines().count(), 3, "{budget_stdout}");
+    assert_eq!(budget_stdout.matches("\"status\":\"cancelled\"").count(), 2);
+    assert!(budget_stdout.contains("\"cancelled\":2"));
+    assert_eq!(
+        std::fs::read_dir(&budget_root)
+            .expect("list unpublished budget root")
+            .count(),
+        0
+    );
+
+    let manifest_root = output_root("batch-manifest-refusal");
+    let manifest = run_clean(&[
+        "batch",
+        "--robot",
+        "--manifest-dir",
+        manifest_root.to_str().expect("manifest path is UTF-8"),
+        "--format",
+        "png_sequence",
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let manifest_stdout = String::from_utf8(manifest.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(manifest.status.code(), Some(4), "{manifest_stdout}");
+    assert!(manifest.stderr.is_empty());
+    assert!(manifest_stdout.contains("complete FMNP C1-C10 input-closure producer"));
+    assert_eq!(
+        std::fs::read_dir(manifest_root)
+            .expect("list untouched manifest root")
+            .count(),
+        0
+    );
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn batch_fail_fast_cancels_jobs_after_the_first_publication_failure() {
+    let root = output_root("batch-fail-fast");
+    std::fs::create_dir(root.join("circle_shift.v1"))
+        .expect("reserve the first scene destination to force no-clobber failure");
+    let output = run_clean(&[
+        "batch",
+        "--robot",
+        "--fail-fast",
+        "--max-scenes",
+        "1",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--threads",
+        "1",
+        "--video_dir",
+        root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+        "rectangle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    assert_eq!(output.status.code(), Some(6), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(lines.len(), 3, "{stdout}");
+    assert!(lines[0].contains("\"scene\":\"circle_shift.v1\""));
+    assert!(lines[0].contains("\"status\":\"failed\""));
+    assert!(lines[1].contains("\"scene\":\"rectangle_shift.v1\""));
+    assert!(lines[1].contains("\"status\":\"cancelled\""));
+    assert!(lines[1].contains("\"reason\":\"fail_fast\""));
+    assert!(lines[2].contains("\"failed\":1"));
+    assert!(lines[2].contains("\"cancelled\":1"));
+    assert!(!root.join("rectangle_shift.v1").exists());
+}
+
 #[test]
 fn native_png_publishes_the_final_frame_and_gif_streams_the_schedule() {
     let root = output_root("native-png-gif");

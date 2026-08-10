@@ -617,6 +617,7 @@ dependencies = [
 name = "fmn-cli"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "fmn",
  "fmn-cache",
  "fmn-codec",

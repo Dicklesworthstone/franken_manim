@@ -30,9 +30,10 @@ fmn-studio.workspace = true
 fmn-output.workspace = true
 fmn-library.workspace = true
 fmn.workspace = true
+asupersync = { workspace = true, optional = true }
 
 [features]
-batch = ["cli"]
+batch = ["cli", "dep:asupersync"]
 cli = []
 
 [lints]

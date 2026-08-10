@@ -17,7 +17,8 @@
 //!   {certified, standard} engine identities. Certified rows bit-lock every
 //!   emitted artifact in the `e2e` suite (`Scope::Certified`); standard
 //!   rows assert structure (frame count, geometry, exit code, emitted-file
-//!   inventory).
+//!   inventory). The CLI rows also cover ordered two-scene batch publication
+//!   through the real Asupersync-backed composition root.
 //! - **DETERMINISM DRILLS** — the same render twice in a row is
 //!   byte-identical; the certified terminal frame is byte-identical at
 //!   {1, 4} threads (fast tier) and at 16 threads (full tier) — PG-5's
@@ -1090,6 +1091,85 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_png_signature", 1))
 }
 
+/// The batch front door over two real native registrations. Asupersync may
+/// complete scene jobs in either order; the CLI contract reports them in the
+/// request order and publishes each sequence atomically.
+fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_batch_render")?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI batch output path is not UTF-8"))?;
+    let scenes = ["circle_shift.v1", "rectangle_shift.v1"];
+    let output = fmn_cli::run([
+        "batch",
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--max-scenes",
+        "2",
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        scenes[0],
+        scenes[1],
+    ]);
+    let mut frames = 0_usize;
+    let mut complete = true;
+    let mut signatures = true;
+    for scene in scenes {
+        let sequence = dir.join(scene);
+        complete &= sequence.join("FMN_COMPLETE").is_file();
+        frames = frames.saturating_add(
+            std::fs::read_dir(&sequence)
+                .map_err(|error| fail(format!("list batch sequence {scene}: {error}")))?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+                .count(),
+        );
+        signatures &= std::fs::read(sequence.join("frame_000000.png"))
+            .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+            .unwrap_or(false);
+    }
+    let lines: Vec<&str> = output.stdout.lines().collect();
+    let ordered_records = lines.len() == 3
+        && lines[0].contains("\"scene\":\"circle_shift.v1\"")
+        && lines[1].contains("\"scene\":\"rectangle_shift.v1\"")
+        && lines[2].contains("\"kind\":\"batch\"")
+        && lines[2].contains("\"status\":\"ok\"")
+        && lines[2].contains("\"succeeded\":2");
+    ctx.event(
+        LogEvent::new("e2e.cli.batch")
+            .field("source", "builtin")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signatures", truth(signatures))
+            .field("ordered_records", truth(ordered_records)),
+    );
+    ctx.counter("cli_batch_scenes", 2);
+    ctx.counter("cli_batch_frames", frames as u64);
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !complete
+        || frames != 6
+        || !signatures
+        || !ordered_records
+    {
+        return Err(fail(format!(
+            "native CLI batch failed: code={} frames={frames} complete={complete} signatures={signatures} ordered={ordered_records} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_batch_scenes", 2)
+        .with_counter("cli_batch_frames", 6))
+}
+
 /// Stock-CLI proof for the two native RGBA artifact adapters that share
 /// Lumen's final conversion but have distinct publication semantics: PNG
 /// captures exactly the completed scene state, while GIF streams the full
@@ -2023,6 +2103,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("complete", "true"),
                 FieldPred::str_eq("png_signature", "true"),
                 FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_batch_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_batch_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_batch_scenes", 2),
+            counter_eq("cli_batch_frames", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.batch",
+            vec![
+                FieldPred::str_eq("source", "builtin"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signatures", "true"),
+                FieldPred::str_eq("ordered_records", "true"),
             ],
         )],
     ));
