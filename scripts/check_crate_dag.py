@@ -82,7 +82,24 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-library",
         "fmn-scene",
     },
-    "fmn-cli": {"fmn-core", "fmn-config", "fmn-cache", "fmn-platform", "fmn-runtime", "fmn-scene", "fmn-studio", "fmn-output", "fmn-library"},
+    # The standalone composition root consumes the native facade, Lumen,
+    # frame conversion, codecs, and Reel directly; it does not duplicate any
+    # subsystem implementation (fm-ffj.67, plan sections 13.6 and 15.1).
+    "fmn-cli": {
+        "fmn-core",
+        "fmn-config",
+        "fmn-cache",
+        "fmn-frame",
+        "fmn-codec",
+        "fmn-platform",
+        "fmn-runtime",
+        "fmn-render",
+        "fmn-scene",
+        "fmn-studio",
+        "fmn-output",
+        "fmn-library",
+        "fmn",
+    },
     # dmath: certified scene-corpus callbacks compute pixel-reaching graph
     # geometry through the sovereign transcendental funnel (ADR-0014,
     # fm-t1v.1). frame/runtime: the PG-5 producer consumes the real certified

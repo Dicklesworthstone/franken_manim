@@ -20,12 +20,16 @@ required-features = ["cli"]
 fmn-core.workspace = true
 fmn-config.workspace = true
 fmn-cache.workspace = true
+fmn-frame.workspace = true
+fmn-codec.workspace = true
 fmn-platform.workspace = true
 fmn-runtime.workspace = true
+fmn-render.workspace = true
 fmn-scene.workspace = true
 fmn-studio.workspace = true
 fmn-output.workspace = true
 fmn-library.workspace = true
+fmn.workspace = true
 
 [features]
 batch = ["cli"]

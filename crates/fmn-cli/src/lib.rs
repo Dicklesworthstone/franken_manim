@@ -18,14 +18,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use fmn_core::color::Srgb;
+use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
+use fmn_output::{
+    EmitterConfig, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
+    SinkLimits, SinkReceipt, Y4mSink, Y4mSinkConfig,
+};
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
+use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
+use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
+use fmn_render::fill::MonoTable;
+use fmn_render::plan::RenderPlan;
+use fmn_scene::{CaptureReason, IntegrationError, OutputNaming, SceneSink};
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
 pub const ROBOT_SCHEMA_VERSION: u32 = 1;
 
 /// Stable refusal for Python source files presented to the standalone binary.
 pub const PYTHON_SOURCE_PORTAL_MESSAGE: &str = "Python scene sources require the CPython-dependent fmn-python entry point; the standalone fmn binary never embeds, locates, or spawns CPython";
+
+/// Reserved source identifier for the native primitive registrations compiled
+/// into the standalone binary.
+pub const BUILTIN_SCENE_SOURCE: &str = "@builtin";
 
 /// A stable CLI failure carrying its schema-owned process status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1440,30 +1457,14 @@ fn strict_path_text<'a>(path: &'a Path, label: &str) -> Result<&'a str, CliError
     })
 }
 
-/// Collect a truthful doctor snapshot. Optional capabilities are represented
-/// as unavailable records; only configuration or plan derivation failures
-/// abort collection.
-///
-/// ffmpeg discovery is delegated to the injected ffmpeg-only platform
-/// capability. That capability may canonicalize an explicit absolute path or
-/// search its snapshotted, fully validated `PATH`; this function never reads
-/// ambient executable-search state.
-///
-/// # Errors
-///
-/// [`CliError`] with `config`, `capability`, or `internal` identity.
-pub fn collect_doctor_snapshot(
+fn detect_topology(
     fs: &dyn FileSystem,
-    runner: &dyn fmn_platform::process::ProcessRunner,
-    locator: &dyn fmn_platform::process::FfmpegLocator,
-    command: &DoctorCommand,
-) -> Result<DoctorSnapshot, CliError> {
-    let config = resolve_common_config(fs, &command.common)?;
+) -> (fmn_platform::topology::HardwareTopology, TopologySource) {
     let logical = std::thread::available_parallelism()
         .ok()
         .and_then(|count| u32::try_from(count.get()).ok())
         .unwrap_or(1);
-    let (topology, topology_source) = if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") {
         match fmn_platform::topology::HardwareTopology::detect_linux(fs) {
             Ok(topology) => (topology, TopologySource::LinuxSysfs),
             Err(error) => (
@@ -1483,22 +1484,32 @@ pub fn collect_doctor_snapshot(
                 ),
             },
         )
-    };
+    }
+}
 
-    let output_format = planning_output_format(&config.file_writer.pixel_format);
+fn derive_execution_plan(
+    fs: &dyn FileSystem,
+    config: &fmn_config::Config,
+    intent: fmn_runtime::RenderIntent,
+    output_format: fmn_runtime::OutputPixelFormat,
+) -> Result<
+    (
+        fmn_runtime::ExecutionPlan,
+        fmn_platform::topology::HardwareTopology,
+        TopologySource,
+    ),
+    CliError,
+> {
+    let (topology, topology_source) = detect_topology(fs);
     let surface =
         fmn_runtime::SurfaceSpec::lumen(config.camera.resolution.0, config.camera.resolution.1);
     let mut request = match config.determinism.mode {
-        fmn_config::config::DeterminismMode::Certified => fmn_runtime::PlanRequest::certified(
-            fmn_runtime::RenderIntent::Offline,
-            surface,
-            output_format,
-        ),
-        fmn_config::config::DeterminismMode::Standard => fmn_runtime::PlanRequest::standard(
-            fmn_runtime::RenderIntent::Offline,
-            surface,
-            output_format,
-        ),
+        fmn_config::config::DeterminismMode::Certified => {
+            fmn_runtime::PlanRequest::certified(intent, surface, output_format)
+        }
+        fmn_config::config::DeterminismMode::Standard => {
+            fmn_runtime::PlanRequest::standard(intent, surface, output_format)
+        }
     };
     let engine = match (config.determinism.mode, config.render.engine) {
         (fmn_config::config::DeterminismMode::Certified, fmn_config::config::Engine::Cpu) => {
@@ -1537,6 +1548,35 @@ pub fn collect_doctor_snapshot(
     }
     let plan = fmn_runtime::ExecutionPlan::derive(request, &topology, None)
         .map_err(execution_plan_error)?;
+    Ok((plan, topology, topology_source))
+}
+
+/// Collect a truthful doctor snapshot. Optional capabilities are represented
+/// as unavailable records; only configuration or plan derivation failures
+/// abort collection.
+///
+/// ffmpeg discovery is delegated to the injected ffmpeg-only platform
+/// capability. That capability may canonicalize an explicit absolute path or
+/// search its snapshotted, fully validated `PATH`; this function never reads
+/// ambient executable-search state.
+///
+/// # Errors
+///
+/// [`CliError`] with `config`, `capability`, or `internal` identity.
+pub fn collect_doctor_snapshot(
+    fs: &dyn FileSystem,
+    runner: &dyn fmn_platform::process::ProcessRunner,
+    locator: &dyn fmn_platform::process::FfmpegLocator,
+    command: &DoctorCommand,
+) -> Result<DoctorSnapshot, CliError> {
+    let config = resolve_common_config(fs, &command.common)?;
+    let output_format = planning_output_format(&config.file_writer.pixel_format);
+    let (plan, topology, topology_source) = derive_execution_plan(
+        fs,
+        &config,
+        fmn_runtime::RenderIntent::Offline,
+        output_format,
+    )?;
     let plan = ExecutionPlanReport {
         determinism: match plan.determinism {
             fmn_runtime::Determinism::Standard => "standard",
@@ -2117,11 +2157,469 @@ impl RunOutput {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeFrameFormat {
+    PngSequence,
+    Y4m,
+}
+
+impl NativeFrameFormat {
+    const fn pixel_format(self) -> PixelFormat {
+        match self {
+            Self::PngSequence => PixelFormat::Rgba8,
+            Self::Y4m => PixelFormat::Nv12,
+        }
+    }
+
+    const fn planning_format(self) -> fmn_runtime::OutputPixelFormat {
+        match self {
+            Self::PngSequence => fmn_runtime::OutputPixelFormat::Rgba8,
+            Self::Y4m => fmn_runtime::OutputPixelFormat::Nv12,
+        }
+    }
+}
+
+struct NativeRenderSink {
+    frame_config: FrameConfig,
+    tiling: Tiling,
+    engine: EngineIdentity,
+    render_threads: usize,
+    format: NativeFrameFormat,
+    emitter: Option<OrderedEmitter>,
+    receipt: SinkReceipt<NativeArtifactReport>,
+    rgba8_scratch: Option<FrameBuffer>,
+    next_sequence: u64,
+}
+
+impl NativeRenderSink {
+    fn new(
+        fs: Arc<dyn FileSystem>,
+        config: &fmn_config::Config,
+        plan: &fmn_runtime::ExecutionPlan,
+        format: NativeFrameFormat,
+        destination: PathBuf,
+    ) -> Result<Self, CliError> {
+        let (width, height) = config.camera.resolution;
+        let output_layout = FrameLayout::tight(format.pixel_format(), width, height)
+            .map_err(|error| CliError::new("config", error.to_string()))?;
+        let limits = native_sink_limits(&output_layout)?;
+        let (binding, receipt) = match format {
+            NativeFrameFormat::PngSequence => PngSink::new(
+                fs,
+                PngSinkConfig {
+                    target: PngTarget::Sequence {
+                        directory: destination,
+                        stem: "frame".to_owned(),
+                        digits: 6,
+                    },
+                    width,
+                    height,
+                    first_sequence: 0,
+                    compression: if config.determinism.mode
+                        == fmn_config::config::DeterminismMode::Certified
+                    {
+                        fmn_codec::CompressionLevel::Best
+                    } else {
+                        fmn_codec::CompressionLevel::Default
+                    },
+                    threads: plan.output_team.threads().max(1),
+                    limits,
+                    profile: None,
+                },
+            )
+            .map_err(output_adapter_error)?
+            .into_binding("png-sequence"),
+            NativeFrameFormat::Y4m => Y4mSink::new(
+                fs,
+                Y4mSinkConfig {
+                    destination,
+                    width,
+                    height,
+                    fps: (config.camera.fps, 1),
+                    colorspace: fmn_codec::Y4mColorspace::C420Mpeg2,
+                    first_sequence: 0,
+                    limits,
+                    profile: None,
+                },
+            )
+            .map_err(output_adapter_error)?
+            .into_binding("y4m"),
+        };
+        let emitter_config = EmitterConfig::new(output_layout, plan.frames_in_flight, 0)
+            .map_err(|error| CliError::new("render", error.to_string()))?;
+        let emitter = OrderedEmitter::new(emitter_config, vec![binding])
+            .map_err(|error| CliError::new("render", error.to_string()))?;
+        let background = Srgb::from_hex(&config.camera.background_color)
+            .map_err(|error| CliError::new("config", error.to_string()))?
+            .to_linear(config.camera.background_opacity);
+        let frame_config = FrameConfig::new(
+            Viewport { width, height },
+            ScreenMap {
+                scale: f64::from(height) / config.sizes.frame_height,
+                origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+            },
+            background,
+        )
+        .with_aa_policy(config.render.aa);
+        let engine = match plan.engine {
+            fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
+            fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
+            fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
+                return Err(CliError::new(
+                    "capability",
+                    "the selected annex engine has no production CLI renderer",
+                ));
+            }
+        };
+        let rgba8_scratch = (format == NativeFrameFormat::Y4m)
+            .then(|| FrameLayout::tight(PixelFormat::Rgba8, width, height))
+            .transpose()
+            .map_err(|error| CliError::new("config", error.to_string()))?
+            .map(FrameBuffer::new);
+        Ok(Self {
+            frame_config,
+            tiling: Tiling {
+                macro_tile: plan.macro_tile,
+                fine_tile: plan.fine_tile,
+            },
+            engine,
+            render_threads: plan
+                .render_teams
+                .first()
+                .map_or(1, fmn_runtime::TeamPlan::threads),
+            format,
+            emitter: Some(emitter),
+            receipt,
+            rgba8_scratch,
+            next_sequence: 0,
+        })
+    }
+
+    fn finish(mut self) -> Result<NativeArtifactReport, CliError> {
+        let emitter = self
+            .emitter
+            .take()
+            .ok_or_else(|| CliError::new("internal", "native emitter was already finalized"))?;
+        emitter
+            .finish()
+            .map_err(|error| CliError::new("render", error.to_string()))?;
+        self.receipt
+            .take()
+            .map_err(|error| CliError::new("render", error.to_string()))
+    }
+}
+
+impl SceneSink for NativeRenderSink {
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        packet: fmn::animation::FramePacket,
+    ) -> Result<(), IntegrationError> {
+        let stage = packet.materialize_stage();
+        let mut render_plan = RenderPlan::new();
+        let revision = u64::try_from(packet.frame_index())
+            .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
+        render_plan
+            .sync(&stage, revision)
+            .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+        let mono = MonoTable::build(&render_plan, self.frame_config.map)
+            .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+        let mut binning = Binning::build(
+            &render_plan,
+            self.frame_config.viewport,
+            self.tiling,
+            self.frame_config.map,
+        )
+        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+        binning
+            .prune_occluded(&render_plan)
+            .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+        let frame = FrameJob::with_identity(
+            &render_plan,
+            &mono,
+            &binning,
+            self.frame_config,
+            self.engine,
+        )
+        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?
+        .render(self.render_threads)
+        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+
+        let emitter = self
+            .emitter
+            .as_ref()
+            .ok_or_else(|| IntegrationError::new("reel", "emitter was already finalized"))?;
+        let mut reservation = emitter
+            .reserve(self.next_sequence)
+            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+        match self.format {
+            NativeFrameFormat::PngSequence => {
+                rgba16f_to_rgba8(&frame, reservation.frame_mut())
+                    .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+            }
+            NativeFrameFormat::Y4m => {
+                let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
+                    IntegrationError::new("reel", "NV12 conversion scratch is unavailable")
+                })?;
+                rgba16f_to_rgba8(&frame, rgba8)
+                    .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                rgba_to_nv12(
+                    rgba8,
+                    reservation.frame_mut(),
+                    ColorRange::Limited,
+                    ChromaSiting::Left,
+                )
+                .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+            }
+        }
+        reservation
+            .publish()
+            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| IntegrationError::new("reel", "frame sequence exhausted"))?;
+        Ok(())
+    }
+}
+
+fn native_sink_limits(layout: &FrameLayout) -> Result<SinkLimits, CliError> {
+    const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+    const MAX_FRAMES: u64 = 1_000_000;
+    let frame_bytes = u64::try_from(layout.total_bytes()).map_err(|_| {
+        CliError::new(
+            "budget",
+            "one output frame exceeds the target address space",
+        )
+    })?;
+    let max_resident_bytes = frame_bytes
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
+        .ok_or_else(|| CliError::new("budget", "output resident-byte budget overflowed"))?;
+    SinkLimits::new(
+        MAX_FRAMES,
+        max_resident_bytes,
+        MAX_STREAM_BYTES,
+        MAX_STREAM_BYTES,
+    )
+    .map_err(output_adapter_error)
+}
+
+fn output_adapter_error(error: fmn_output::SinkAdapterError) -> CliError {
+    let exit_name = match error {
+        fmn_output::SinkAdapterError::FrameLimitExceeded { .. }
+        | fmn_output::SinkAdapterError::ResidentBytesExceeded { .. }
+        | fmn_output::SinkAdapterError::StreamBytesExceeded { .. }
+        | fmn_output::SinkAdapterError::ArtifactBytesExceeded { .. } => "budget",
+        fmn_output::SinkAdapterError::InvalidConfig(_)
+        | fmn_output::SinkAdapterError::InvalidGeometry { .. }
+        | fmn_output::SinkAdapterError::FrameMismatch { .. } => "config",
+        _ => "render",
+    };
+    CliError::new(exit_name, error.to_string())
+}
+
+fn native_scene_error(error: fmn::Error) -> CliError {
+    CliError::new(error.kind().name(), error.to_string())
+}
+
+fn native_format(command: &RenderCommand) -> Result<NativeFrameFormat, CliError> {
+    match command.format {
+        OutputFormat::PngSequence => Ok(NativeFrameFormat::PngSequence),
+        OutputFormat::Y4m => Ok(NativeFrameFormat::Y4m),
+        OutputFormat::Auto => Err(CliError::new(
+            "capability",
+            "native registered scenes currently require `--format png_sequence` or `--format y4m`; no format is substituted silently",
+        )),
+        OutputFormat::Png | OutputFormat::Gif | OutputFormat::Wav | OutputFormat::Video => {
+            Err(CliError::new(
+                "capability",
+                "this native registration path currently supports canonical PNG sequences and y4m",
+            ))
+        }
+    }
+}
+
+fn execute_builtin_render(
+    fs: Arc<dyn FileSystem>,
+    command: &RenderCommand,
+) -> Result<Vec<(String, NativeArtifactReport, String, usize)>, CliError> {
+    if command.file.as_deref() != Some(Path::new(BUILTIN_SCENE_SOURCE)) {
+        return Err(CliError::new(
+            "capability",
+            format!(
+                "compiled native scene artifacts are not registered yet; use {BUILTIN_SCENE_SOURCE} for the built-in native corpus"
+            ),
+        ));
+    }
+    if command.open || command.finder {
+        return Err(CliError::new(
+            "capability",
+            "host open/reveal integration is not registered; the render artifact can still be written without `--open` or `--finder`",
+        ));
+    }
+    if command.subdivide || command.prerun {
+        return Err(CliError::new(
+            "capability",
+            "the built-in native composition path does not yet support `--subdivide` or `--prerun`",
+        ));
+    }
+    let format = native_format(command)?;
+    let selected: Vec<&str> = if command.write_all {
+        fmn::builtins::PRIMITIVE_SCENE_NAMES.to_vec()
+    } else if command.scene_names.is_empty() {
+        return Err(CliError::new(
+            "scene",
+            format!(
+                "select a built-in scene or pass --write_all; available scenes: {}",
+                fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+            ),
+        ));
+    } else {
+        command.scene_names.iter().map(String::as_str).collect()
+    };
+    if selected.len() > 1 && command.file_name.is_some() {
+        return Err(CliError::new(
+            "config",
+            "--file_name cannot name multiple --write_all artifacts",
+        ));
+    }
+    for name in &selected {
+        if fmn::builtins::primitive_scene(name).is_none() {
+            return Err(CliError::new(
+                "scene",
+                format!(
+                    "unknown built-in scene {name:?}; available scenes: {}",
+                    fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+                ),
+            ));
+        }
+    }
+
+    let config = resolve_render_config(fs.as_ref(), command)?;
+    let (plan, _, _) = derive_execution_plan(
+        fs.as_ref(),
+        &config,
+        fmn_runtime::RenderIntent::Offline,
+        format.planning_format(),
+    )?;
+    let output_directory = command
+        .video_dir
+        .clone()
+        .unwrap_or_else(|| configured_output_directory(&config));
+    let naming = OutputNaming {
+        output_directory,
+        file_name: command.file_name.as_deref().map(PathBuf::from),
+        start_at_play: command.animation_range.map(|range| range.start),
+        end_at_play: command.animation_range.and_then(|range| range.end),
+        open_on_completion: false,
+    };
+    let engine = match plan.engine {
+        fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
+        fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
+        fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
+            return Err(CliError::new(
+                "capability",
+                "the selected annex engine has no production CLI renderer",
+            ));
+        }
+    };
+    let render_threads = plan
+        .render_teams
+        .first()
+        .map_or(1, fmn_runtime::TeamPlan::threads);
+    let mut reports = Vec::with_capacity(selected.len());
+    for name in selected {
+        let destination = match format {
+            NativeFrameFormat::PngSequence => naming.root(name),
+            NativeFrameFormat::Y4m => naming.artifact(name, "y4m"),
+        };
+        let mut sink = NativeRenderSink::new(Arc::clone(&fs), &config, &plan, format, destination)?;
+        let mut scene = fmn::builtins::primitive_scene(name)
+            .ok_or_else(|| CliError::new("internal", "validated built-in scene disappeared"))?;
+        fmn::run_scene(
+            &mut scene,
+            command.runtime_config(&config),
+            config.determinism.seed,
+            &mut sink,
+        )
+        .map_err(native_scene_error)?;
+        let report = sink.finish()?;
+        reports.push((
+            name.to_owned(),
+            report,
+            engine.closure_string(),
+            render_threads,
+        ));
+    }
+    Ok(reports)
+}
+
+fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
+    let mut root = PathBuf::from(&config.directories.base);
+    if let Some((_, output)) = config
+        .directories
+        .subdirs
+        .iter()
+        .find(|(name, _)| name == "output")
+    {
+        root.push(output);
+    }
+    if root.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        root
+    }
+}
+
+fn successful_render_output(
+    command: &RenderCommand,
+    reports: Vec<(String, NativeArtifactReport, String, usize)>,
+) -> RunOutput {
+    let mut stdout = String::new();
+    for (scene, report, engine, render_threads) in reports {
+        if command.common.robot {
+            let _ = writeln!(
+                stdout,
+                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":\"builtin\",\"scene\":{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{}}}",
+                ROBOT_SCHEMA_VERSION,
+                json_string(&scene),
+                json_string(match report.kind {
+                    fmn_output::NativeArtifactKind::PngSequence => "png_sequence",
+                    fmn_output::NativeArtifactKind::Y4m => "y4m",
+                    fmn_output::NativeArtifactKind::Png => "png",
+                    fmn_output::NativeArtifactKind::Gif => "gif",
+                }),
+                json_string(&report.path.to_string_lossy()),
+                report.frame_count,
+                report.bytes,
+                json_string(&engine),
+                render_threads,
+            );
+        } else if !command.common.quiet {
+            let _ = writeln!(
+                stdout,
+                "rendered {scene} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads)",
+                match report.kind {
+                    fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
+                    fmn_output::NativeArtifactKind::Y4m => "y4m",
+                    fmn_output::NativeArtifactKind::Png => "PNG",
+                    fmn_output::NativeArtifactKind::Gif => "GIF",
+                },
+                report.path.display(),
+                report.frame_count,
+                report.bytes,
+            );
+        }
+    }
+    RunOutput::success(stdout)
+}
+
 /// Parse and dispatch with explicit host capabilities.
 #[must_use]
 pub fn run_with_capabilities<I, S>(
     args: I,
-    fs: &dyn FileSystem,
+    fs: Arc<dyn FileSystem>,
     runner: &dyn fmn_platform::process::ProcessRunner,
     locator: &dyn fmn_platform::process::FfmpegLocator,
 ) -> RunOutput
@@ -2154,8 +2652,12 @@ where
         } else {
             format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
         }),
-        Invocation::Doctor(command) => match collect_doctor_snapshot(fs, runner, locator, &command)
-        {
+        Invocation::Doctor(command) => match collect_doctor_snapshot(
+            fs.as_ref(),
+            runner,
+            locator,
+            &command,
+        ) {
             Ok(snapshot) => {
                 let stdout = if command.common.robot {
                     match snapshot.to_ndjson() {
@@ -2183,15 +2685,12 @@ where
             }
             Err(error) => error_output(command.common.robot, &error),
         },
-        Invocation::ClearCache { common } => clear_cache(fs, &common),
+        Invocation::ClearCache { common } => clear_cache(fs.as_ref(), &common),
         Invocation::Render(command) => python_source_refusal(&command).unwrap_or_else(|| {
-            error_output(
-                command.common.robot,
-                &CliError::new(
-                    "capability",
-                    "render composition is unavailable: no production scene-source/SceneSink adapter is registered",
-                ),
-            )
+            match execute_builtin_render(Arc::clone(&fs), &command) {
+                Ok(reports) => successful_render_output(&command, reports),
+                Err(error) => error_output(command.common.robot, &error),
+            }
         }),
         Invocation::Batch(command) => {
             if let Some(output) = python_source_refusal(&command.render) {
@@ -2305,7 +2804,7 @@ where
     let locator = fmn_platform::process::StdFfmpegLocator::from_host_path();
     run_with_capabilities(
         args,
-        &fmn_platform::fs::StdFs,
+        Arc::new(fmn_platform::fs::StdFs),
         &fmn_platform::process::StdProcessRunner,
         &locator,
     )
@@ -2552,6 +3051,10 @@ mod tests {
 
     fn no_ffmpeg_locator() -> fmn_platform::process::StdFfmpegLocator {
         fmn_platform::process::StdFfmpegLocator::default()
+    }
+
+    fn fs_capability(fs: &Arc<VirtualFs>) -> Arc<dyn FileSystem> {
+        Arc::clone(fs) as Arc<dyn FileSystem>
     }
 
     #[cfg(unix)]
@@ -3378,11 +3881,11 @@ mod tests {
 
     #[test]
     fn production_doctor_reports_degraded_capabilities_without_guessing() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
         let output = run_with_capabilities(
             ["doctor", "--robot", "--cache-dir", "/cache"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3422,11 +3925,11 @@ mod tests {
         let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(Some(search_path));
         let canonical = std::fs::canonicalize(&source).expect("canonical source");
         let canonical = canonical.to_str().expect("fixture path is UTF-8");
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
 
         let output = run_with_capabilities(
             ["doctor", "--robot", "--cache-dir", "/cache"],
-            &fs,
+            fs_capability(&fs),
             &SuccessfulFfmpegProbeRunner,
             &locator,
         );
@@ -3571,11 +4074,11 @@ mod tests {
         drop(store);
 
         let root_text = root.to_str().expect("test path is UTF-8");
-        let virtual_fs = VirtualFs::new();
+        let virtual_fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
         let refused = run_with_capabilities(
             ["--clear-cache", "--cache-dir", root_text, "--robot"],
-            &virtual_fs,
+            fs_capability(&virtual_fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3634,11 +4137,11 @@ mod tests {
         drop(store);
 
         let relative_text = relative.to_str().expect("test path is UTF-8");
-        let virtual_fs = VirtualFs::new();
+        let virtual_fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
         let doctor = run_with_capabilities(
             ["doctor", "--robot", "--cache-dir", relative_text],
-            &virtual_fs,
+            fs_capability(&virtual_fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3692,12 +4195,12 @@ mod tests {
 
     #[test]
     fn doctor_refuses_unverified_annexes_and_rejects_certified_annexes() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
         fs.insert("/cfg/metal.yml", b"render:\n  engine: metal\n".to_vec());
         let output = run_with_capabilities(
             ["doctor", "--robot", "--config_file", "/cfg/metal.yml"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3712,7 +4215,7 @@ mod tests {
         );
         let output = run_with_capabilities(
             ["doctor", "--robot", "--config_file", "/cfg/invalid.yml"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3726,7 +4229,7 @@ mod tests {
 
     #[test]
     fn user_caused_execution_plan_failures_are_config_errors() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
         fs.insert(
             "/cfg/odd-nv12.yml",
@@ -3734,7 +4237,7 @@ mod tests {
         );
         let output = run_with_capabilities(
             ["doctor", "--robot", "--config_file", "/cfg/odd-nv12.yml"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3746,11 +4249,11 @@ mod tests {
 
     #[test]
     fn required_ffmpeg_returns_capability_after_the_robot_report() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
         let output = run_with_capabilities(
             ["doctor", "--robot", "--require-ffmpeg"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3764,10 +4267,14 @@ mod tests {
 
     #[test]
     fn batch_dispatch_reports_the_compiled_feature_state() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output =
-            run_with_capabilities(["batch", "--robot"], &fs, &runner, &no_ffmpeg_locator());
+        let output = run_with_capabilities(
+            ["batch", "--robot"],
+            fs_capability(&fs),
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(output.code, 4);
         assert!(output.stderr.is_empty());
         if cfg!(feature = "batch") {
@@ -3783,10 +4290,14 @@ mod tests {
 
     #[test]
     fn robot_errors_never_mix_human_stderr_or_decoration() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
-        let output =
-            run_with_capabilities(["--robot", "-l", "-m"], &fs, &runner, &no_ffmpeg_locator());
+        let output = run_with_capabilities(
+            ["--robot", "-l", "-m"],
+            fs_capability(&fs),
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(output.code, 2);
         assert!(output.stderr.is_empty());
         assert_eq!(output.stdout.lines().count(), 1);
@@ -3795,7 +4306,7 @@ mod tests {
 
         let output = run_with_capabilities(
             ["doctor", "--", "--robot"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
@@ -3806,10 +4317,15 @@ mod tests {
 
     #[test]
     fn help_and_version_dispatch_with_command_specific_streams() {
-        let fs = VirtualFs::new();
+        let fs = Arc::new(VirtualFs::new());
         let runner = fmn_platform::process::ScriptedRunner::new();
 
-        let help = run_with_capabilities(["--help"], &fs, &runner, &no_ffmpeg_locator());
+        let help = run_with_capabilities(
+            ["--help"],
+            fs_capability(&fs),
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(help.code, 0);
         assert!(help.stderr.is_empty());
         assert!(
@@ -3818,8 +4334,12 @@ mod tests {
         );
         assert!(help.stdout.contains("--format"));
 
-        let explicit_render_help =
-            run_with_capabilities(["render", "--help"], &fs, &runner, &no_ffmpeg_locator());
+        let explicit_render_help = run_with_capabilities(
+            ["render", "--help"],
+            fs_capability(&fs),
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(explicit_render_help.code, 0);
         assert!(
             explicit_render_help
@@ -3827,7 +4347,12 @@ mod tests {
                 .starts_with("Usage: fmn render [OPTIONS] [NATIVE_SCENE] [SCENE ...]\n")
         );
 
-        let help = run_with_capabilities(["doctor", "--help"], &fs, &runner, &no_ffmpeg_locator());
+        let help = run_with_capabilities(
+            ["doctor", "--help"],
+            fs_capability(&fs),
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(help.code, 0);
         assert!(help.stderr.is_empty());
         assert!(help.stdout.starts_with("Usage: fmn doctor [OPTIONS]\n"));
@@ -3839,8 +4364,12 @@ mod tests {
                 .is_some_and(|line| { line.contains("[NATIVE_SCENE]") || line.contains("[SCENE") })
         );
 
-        let version =
-            run_with_capabilities(["--robot", "--version"], &fs, &runner, &no_ffmpeg_locator());
+        let version = run_with_capabilities(
+            ["--robot", "--version"],
+            fs_capability(&fs),
+            &runner,
+            &no_ffmpeg_locator(),
+        );
         assert_eq!(version.code, 0);
         assert!(version.stderr.is_empty());
         assert_eq!(
@@ -3853,7 +4382,7 @@ mod tests {
 
         let robot_help = run_with_capabilities(
             ["doctor", "--robot", "--help"],
-            &fs,
+            fs_capability(&fs),
             &runner,
             &no_ffmpeg_locator(),
         );
