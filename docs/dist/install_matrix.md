@@ -8,6 +8,21 @@ tiers, no function-level `#[target_feature]`, no runtime dispatch, no per-call
 `unsafe`). There is no binary-local choice to make at launch; selecting the
 artifact *is* selecting the tier.
 
+## Native artifacts and the optional Python portal
+
+W11 ships two deliberately separate artifact families (ADR-0017):
+
+| Artifact | Host requirements | Entry point | Python source |
+|---|---|---|---|
+| `fmn-<version>-<platform>-<tier>` | none; ffmpeg remains optional | `fmn` | rejected with a named `fmn-python` capability error |
+| `franken-manim` wheel for the declared CPython/platform ABI | supported host CPython and NumPy | `fmn-python`, plus `import manimlib` | supported through the portal |
+
+The native archive never contains or downloads CPython, libpython, PyO3, or
+NumPy and never searches `PATH` for an interpreter. The wheel contains the
+compiled portal and bundled FrankenManim assets, not a Python runtime. Its
+CPython ABI/tag matrix, `manimlib` namespace-conflict policy, and clean-venv
+render proof remain the acceptance surface of fm-vsq.
+
 ## The tiers
 
 | Tier | Instruction set | Meaning |

@@ -14,7 +14,7 @@
 [![LaTeX: none, anywhere](https://img.shields.io/badge/LaTeX-none,_anywhere-teal.svg)](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
 [![Parity Ledger coverage](./docs/api/parity_coverage.svg)](./docs/api/schema.md)
 
-**A sovereign, deterministic rewrite of manim (Grant Sanderson's mathematical-animation engine behind 3Blue1Brown) in pure Rust on the FrankenSuite. API- and semantics-compatible with `manimlib`, it typesets TeX mathematics natively (no LaTeX, no Pango, no system fonts), rasterizes Bézier geometry analytically instead of replaying GPU workarounds, and produces bit-identical certified renders on any machine at any thread count. It installs as one binary that needs nothing but (optionally) ffmpeg.**
+**A sovereign, deterministic rewrite of manim (Grant Sanderson's mathematical-animation engine behind 3Blue1Brown) in pure Rust on the FrankenSuite. API- and semantics-compatible with `manimlib`, it typesets TeX mathematics natively (no LaTeX, no Pango, no system fonts), rasterizes Bézier geometry analytically instead of replaying GPU workarounds, and produces bit-identical certified renders on any machine at any thread count. The native Rust library, `fmn` CLI, and Studio install as one CPython-free binary that needs nothing but (optionally) ffmpeg; existing Python scenes use the separately installed, host-CPython `fmn-python` portal.**
 
 </div>
 
@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_manim/mai
 
 | | `franken_manim` |
 |---|---|
-| Installation | **One binary.** No LaTeX, no dvisvgm, no Pango, no fontconfig, no system fonts, no Python required. ffmpeg is the *single* external tool, and even it is optional (native y4m/PNG/GIF outputs). |
+| Installation | **One native binary.** No LaTeX, dvisvgm, Pango, fontconfig, system fonts, or Python is required for the Rust API, `fmn`, or Studio. ffmpeg is the *single* external tool, and even it is optional (native y4m/PNG/GIF outputs). Existing Python scenes use the optional wheel and a supported host CPython. |
 | Typesetting | Native TeX-math layout (**fmd-math**) on bundled Computer Modern, laid out by TeX's published rules; text shaping on bundled OFL faces. Substring→glyph **span maps come from layout provenance**; manim's render-twice-and-align hack is dead. |
 | Correctness | True arc length, constant-speed paths, a drift-free rational clock on manim's exact sample points, one bit-exact PCG64DXSM RNG, linear-light compositing with manim's gradient aesthetic preserved. Every deliberate difference is a documented **Behavior Note**. |
 | Rendering | Analytic nonzero-winding coverage on the actual quadratic curves, true curve-distance strokes with round caps and principled joins, replacing the Reference's signed-alpha blending tricks and polyline ribbons, with 3b1b's lighting, palette, and ~1.5 px AA *feel* deliberately kept. |
@@ -70,8 +70,8 @@ class SquareToCircle(Scene):
 ```
 
 ```bash
-fmn scene.py SquareToCircle -o                # renders and opens; no LaTeX installed, anywhere
-fmn scene.py SquareToCircle --reproducible    # certified: bit-identical frames on every machine
+fmn-python scene.py SquareToCircle -o                # renders and opens; no LaTeX installed, anywhere
+fmn-python scene.py SquareToCircle --reproducible    # certified: bit-identical frames on every machine
 ```
 
 **Rust (the native API):**
@@ -134,7 +134,7 @@ No single trick makes this a leapfrog. The composition does.
 | **No MVP** | Every subsystem is specified at full strength; sequencing is by dependency, not scope reduction. Gate G0 retires the load-bearing unknowns as compile-tested spikes before any interface freezes. |
 | **Sovereignty: one external tool** | ffmpeg, sandboxed and optional, for encode/mux/transcode, because owning a modern video encoder would be vanity. Everything else, *especially typesetting*, is native. |
 | **Determinism as a product feature** | With LaTeX and Pango gone from every path, the pipeline up to the encode boundary is closed: same content-hashed input ⇒ bit-identical frames across the certified matrix. |
-| **Two front doors, one engine** | A first-class Rust API and `fmn-python`, a PyO3 `manimlib` with normal Python subclassing semantics. |
+| **Two front doors, one engine** | A first-class CPython-free Rust API/CLI and the optional `fmn-python` wheel, a PyO3 `manimlib` loaded by a supported host interpreter. |
 | **One semantics, many engines** | Lumen is one renderer *semantically*: certified CPU, fast CPU, and the GPU Accelerator Annex share the render IR and the test corpus, never a lowest-common-denominator kernel. |
 | **Pinned bits, free scheduler** | Wherever bits are promised, every schedule must reproduce them exactly; everywhere else the scheduler is free. Performance is architecture, not a late micro-optimization pass. |
 
@@ -145,7 +145,7 @@ No single trick makes this a leapfrog. The composition does.
 The constitutional constraints the whole system is built under. They read like restrictions; they are the moat.
 
 1. **The dependency closure is governed.** Authoritative crates introduce no new unreviewed runtime dependencies beyond `std`, the exact pinned nightly, and the Dicklesworthstone FrankenSuite: `franken_numpy`, `frankenscipy`, `franken_markdown` (which this program extends with `fmd-font` and `fmd-math`), `franken_networkx`, `frankenpandas`, `frankentorch`, `asupersync`. The complete transitive closure is pinned, per-package allowlisted, and audited for `unsafe` and native-code exposure; CI fails on any unlisted package.
-2. **One external tool, ever.** ffmpeg is the only subprocess the engine will invoke, under a full security protocol (argv-only, private temp dirs, timeouts, output limits, content-hash into provenance), and its absence yields a *capability error naming the alternative*, never a silent substitution. No TeX, no font tooling, no downloader.
+2. **One external tool, ever.** ffmpeg is the only subprocess the engine will invoke, under a full security protocol (argv-only, private temp dirs, timeouts, output limits, content-hash into provenance), and its absence yields a *capability error naming the alternative*, never a silent substitution. No TeX, no font tooling, no downloader. Standalone `fmn` never embeds, locates, or spawns CPython; a host interpreter imports the optional portal.
 3. **Memory safety is structural.** `#![forbid(unsafe_code)]` in every authoritative crate; `fmn-python` is the sole exception, and ADR-0015 restricts project-authored unsafe there to two CPython buffer slots. SIMD is `std::simd` in crate-wide build tiers selected by SUITE.lock flags and `cfg(target_feature)`; ADR-0016 forbids function-level `#[target_feature]`, and no `unsafe` dispatch trampoline exists anywhere.
 4. **Correct by default, documented when different.** True arc length, one RNG, the rational clock, defined color, fixed Reference bugs: every divergence from Python manim is deliberate, correct, and written up as a migration-guide Behavior Note. There is no quirk-replication obligation anywhere in the program.
 5. **The parallelism contract binds everything.** A frame's bits are a pure function of *(state snapshot, alpha, frame-indexed RNG, input closure)*, never of thread count, scheduling order, or machine load. Three refusals are permanent: GPU work in the certified path, adaptive frame sampling, and per-thread RNG consumed in completion order.
@@ -204,7 +204,7 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 | | `franken_manim` | manim (3b1b) | Manim CE | Motion Canvas | Remotion |
 |---|---|---|---|---|---|
 | Language / runtime | Pure Rust, one binary | Python + OpenGL | Python + Cairo/OpenGL | TypeScript + browser | TypeScript + Chromium |
-| Install footprint | Binary (+ optional ffmpeg) | LaTeX + Pango + GL + ~30 pkgs | LaTeX + Pango + ~30 pkgs | Node toolchain | Node + headless Chromium |
+| Install footprint | Native binary (+ optional Python portal / ffmpeg) | LaTeX + Pango + GL + ~30 pkgs | LaTeX + Pango + ~30 pkgs | Node toolchain | Node + headless Chromium |
 | TeX mathematics | **Native (fmd-math), bundled CM** | External LaTeX + dvisvgm | External LaTeX + dvisvgm | ✗ (KaTeX via web) | ✗ (web libs) |
 | Geometry correctness | True arc length, error-bounded conversion, analytic coverage | Chord heuristics, polyline strokes | Chord heuristics | Browser canvas | Browser canvas |
 | Deterministic output | **Bit-identical certified renders, cross-platform, any thread count** | ✗ | ✗ | ✗ | ✗ |
@@ -219,23 +219,26 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 > The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema.
 
 ```bash
-# Render a scene from a Python file (via fmn-python) or a compiled Rust scene
-fmn scene.py SquareToCircle -o                 # write and open
-fmn scene.py --write_all                       # every scene in the file
-fmn scene.py SquareToCircle -so                # skip to the end, show final frame
-fmn scene.py SquareToCircle --uhd --transparent --vcodec prores_ks
+# Native registrations/artifacts use the standalone CPython-free binary
+fmn <native-scene-artifact> SquareToCircle -o
+
+# Python sources use the separately installed portal
+fmn-python scene.py SquareToCircle -o                 # write and open
+fmn-python scene.py --write_all                       # every scene in the file
+fmn-python scene.py SquareToCircle -so                # skip to the end, show final frame
+fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks
 
 # Certified determinism: the whole input closure content-hashed, bits promised
-fmn scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
+fmn-python scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
 
 # Native outputs that need no ffmpeg at all
-fmn scene.py SquareToCircle --format png_sequence
-fmn scene.py SquareToCircle --format gif
-fmn scene.py SquareToCircle --format y4m
+fmn-python scene.py SquareToCircle --format png_sequence
+fmn-python scene.py SquareToCircle --format gif
+fmn-python scene.py SquareToCircle --format y4m
 
 # Live iteration: supervisor + crash-isolated worker, checkpoint replay
-fmn scene.py SquareToCircle --autoreload
-fmn studio scene.py                            # browser Studio: scrub, inspect, overlays
+fmn-python scene.py SquareToCircle --autoreload
+fmn-python studio scene.py                     # browser Studio: scrub, inspect, overlays
 
 # Batch farms under asupersync, with budgets and per-scene manifests
 fmn batch render_all.toml
@@ -296,11 +299,12 @@ cargo build --release -p fmn-cli --features cli  # produces target/release/fmn
 fmn = { git = "https://github.com/Dicklesworthstone/franken_manim" }
 ```
 
-**4. As a Python module** (wheels bundle the engine and fonts; existing manim imports just work):
+**4. As the optional Python portal** (requires a supported host CPython and NumPy; wheels bundle the engine and fonts, not an interpreter):
 
 ```bash
 pip install franken-manim
 python -c "from manimlib import *"    # the pinned manimlib surface, no LaTeX anywhere
+fmn-python --version                   # portal entry point; distinct from standalone fmn
 ```
 
 ## Quick start
@@ -320,15 +324,15 @@ class Hello(Scene):
         self.wait()
 EOF
 
-# 2. Render it: first run typesets, caches, and encodes; no LaTeX is installed
-fmn hello.py Hello -o
+# 2. Render it through the Python portal; no LaTeX is installed
+fmn-python hello.py Hello -o
 
 # 3. Prove it's reproducible: same bytes on your laptop and your server
-fmn hello.py Hello --reproducible
+fmn-python hello.py Hello --reproducible
 sha256sum media/videos/hello/Hello/frames/*.png
 
 # 4. Iterate live with crash isolation and scrubbing
-fmn studio hello.py
+fmn-python studio hello.py
 ```
 
 ## Configuration
@@ -414,7 +418,7 @@ A few honest boundaries:
 
 **How is it fast if the certified path can't use FMA, fast-math, or GPUs?** Certified and fast are separate engines over one semantic renderer. The speed comes from architecture: a retained render IR that only recompiles what changed, glyph instancing, adaptive AA that supersamples only complex edges, frame-parallel rendering of pure segments, pipelined frame stages, and SIMD build tiers, all bit-safe by construction where bits are promised. The GPU annex accelerates `standard` mode and Studio preview on top.
 
-**Can I use it without Python at all?** Yes. The Rust API is a first-class front door, proven by a compiling prototype before its interface froze. The engine, CLI, Studio, and WASM tiers have no Python dependency of any kind.
+**Can I use it without Python at all?** Yes. The Rust API is a first-class front door, and the engine, standalone `fmn`, Studio, and WASM tiers have no Python dependency of any kind. Only the optional `fmn-python` portal requires host CPython and NumPy; standalone `fmn` rejects `.py`/`.pyw` with a capability error rather than searching for an interpreter.
 
 **What's the relationship to Manim Community Edition?** None, deliberately. The pin is Grant Sanderson's `3b1b/manim` (the engine the actual videos use), chosen as the semantic reference. CE is a divergent dialect; supporting both surfaces would mean conformance politics instead of engineering.
 

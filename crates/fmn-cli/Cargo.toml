@@ -11,6 +11,11 @@ name = "fmn"
 path = "src/main.rs"
 required-features = ["cli"]
 
+[[test]]
+name = "runtime_boundary"
+path = "tests/runtime_boundary.rs"
+required-features = ["cli"]
+
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true

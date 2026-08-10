@@ -7,6 +7,11 @@
 # companion per-package allowlist is SUITE_ALLOWLIST.tsv; the enforcement is
 # crates/fmn-conformance/tests/governed_closure.rs, which fails on any
 # package in the workspace's Cargo.lock that this pair does not admit.
+# The native library/CLI/Studio closure deliberately contains no CPython,
+# libpython, PyO3, or NumPy runtime. ADR-0017 assigns Python source execution
+# to the separately installed fmn-python wheel; ADR-0015 governs its host
+# CPython/PyO3/NumPy boundary instead of pretending an interpreter is a native
+# suite pin or a second tool launched by fmn.
 #
 # THE UPGRADE RITUAL (R17): upgrades are deliberate, never incidental.
 # 1. Bump the pin here (and the allowlist rows it affects) in a commit

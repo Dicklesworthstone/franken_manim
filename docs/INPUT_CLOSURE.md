@@ -28,15 +28,15 @@ items marked *(bytes)* are hashed as raw byte streams.
 
 | # | Item | Form |
 |---|---|---|
-| C1 | Scene sources and every transitively loaded module (Rust scene registration or Python file set as loaded by fmn-python) | bytes, per file, ordered by virtual path |
+| C1 | Scene sources and every transitively loaded module: native registrations/artifacts for standalone `fmn`, or the Python file/module set loaded by the separate `fmn-python` portal | bytes, per file, ordered by virtual path |
 | C2 | Engine identity: the franken_manim commit (or release build id) and the full `SUITE.lock` contents | bytes |
-| C3 | Toolchain: the exact pinned nightly (from `SUITE.lock`), target triple, and the SIMD build tier's target-feature set | structural |
+| C3 | Toolchain: the exact pinned nightly (from `SUITE.lock`), target triple, and the SIMD build tier's target-feature set; for a Python-portal run only, the CPython implementation/version, ABI tag, `fmn-python` wheel hash, and NumPy implementation/version/build identity | structural |
 | C4 | Configuration: the fully-resolved config **bytes** after precedence (defaults → user file → CLI), not the file paths | bytes |
 | C5 | RNG seeds: the root seed and the named-substream layout version (BN-01) | structural |
 | C6 | Assets and fonts: content hash of every asset and font file actually read, keyed by virtual path (bundled fonts included — bundling is not exemption) | bytes, per file |
 | C7 | Execution-engine and backend identities: the semantic renderer version, execution engine (`certified` requires the certified CPU engine), and — in `standard` provenance only — annex device/driver identities | structural |
 | C8 | Locale and timezone as visible to the engine (certified runs pin `C`/UTC; the pin itself is recorded) | structural |
-| C9 | Capability policy: which capability traits were live (fs/process/clock/AssetFetcher implementations by identity, not by pointer) and, when the ffmpeg boundary is used, the process-mechanism identity + policy version and ffmpeg fingerprint (path + content hash + versioned native-image format/architecture attestation + version line) | structural |
+| C9 | Capability policy: which capability traits were live (fs/process/clock/AssetFetcher implementations by identity, not by pointer), whether the separately hosted Python portal was present, and, when the ffmpeg boundary is used, the process-mechanism identity + policy version and ffmpeg fingerprint (path + content hash + versioned native-image format/architecture attestation + version line) | structural |
 | C10 | The determinism mode itself (`standard` vs `certified`) and the declared certified configuration (fixed tile dims, fixed in-flight budget, etc.) | structural |
 
 **Explicitly outside the closure (proven inert under §10.5):** thread count,
@@ -44,6 +44,12 @@ render-team topology, scheduling order, machine load, hardware identity of
 the CPU (within a certified target), and wall-clock time. **Explicitly
 excluded from certification (by construction):** every ffmpeg *product*;
 ffmpeg's identity still enters provenance via C9.
+
+ADR-0017 makes portal absence structural for native runs: standalone `fmn`
+does not embed, locate, or spawn CPython, so Python runtime state is proven
+inert and C3/C9 encode the portal as absent. For `fmn-python` runs, the portal
+fields and all imported module bytes are mandatory closure inputs; forgetting
+one is a certification bug, not permission to weaken the native claim.
 
 ## 3. Hashing rules
 

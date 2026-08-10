@@ -6773,7 +6773,7 @@ manimlib.window:Window.to_default_position	0	self	positional_or_keyword	-	-
 -t,--transparent	-	store_true	-	-	-	Render to a movie file with an alpha channel
 -v,--version	-	store_true	-	-	-	Display the version of manimgl
 -w,--write_file	-	store_true	-	-	-	Render the scene as a movie file
-file	-	store	'?'	-	-	Path to file holding the python code for the scene
+file	-	store	'?'	-	-	Native scene source or compiled artifact; use fmn-python for .py/.pyw
 scene_names	-	store	'*'	-	-	Name of the Scene class you want to see
 
 [config]

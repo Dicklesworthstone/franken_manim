@@ -24,6 +24,9 @@ use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 /// Version of every `fmn` robot-mode record emitted by this crate.
 pub const ROBOT_SCHEMA_VERSION: u32 = 1;
 
+/// Stable refusal for Python source files presented to the standalone binary.
+pub const PYTHON_SOURCE_PORTAL_MESSAGE: &str = "Python scene sources require the CPython-dependent fmn-python entry point; the standalone fmn binary never embeds, locates, or spawns CPython";
+
 /// A stable CLI failure carrying its schema-owned process status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
@@ -166,6 +169,15 @@ pub struct CommonOptions {
 }
 
 /// Semantic render request after parsing and interaction application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneSourceKind {
+    /// A source or artifact owned by the native Rust front door.
+    Native,
+    /// A Python program, owned by the separately installed Python portal.
+    Python,
+}
+
+/// Semantic render request after parsing and interaction application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCommand {
     /// Shared command options.
@@ -225,6 +237,19 @@ pub struct RenderCommand {
 }
 
 impl RenderCommand {
+    /// Classify the selected front-door source without reading it.
+    #[must_use]
+    pub fn scene_source_kind(&self) -> Option<SceneSourceKind> {
+        let extension = self.file.as_deref()?.extension()?.to_str()?;
+        Some(
+            if extension.eq_ignore_ascii_case("py") || extension.eq_ignore_ascii_case("pyw") {
+                SceneSourceKind::Python
+            } else {
+                SceneSourceKind::Native
+            },
+        )
+    }
+
     /// Translate front-door flags into Proscenium's semantic runtime config.
     #[must_use]
     pub fn runtime_config(&self, config: &fmn_config::Config) -> fmn_scene::RuntimeConfig {
@@ -2159,14 +2184,19 @@ where
             Err(error) => error_output(command.common.robot, &error),
         },
         Invocation::ClearCache { common } => clear_cache(fs, &common),
-        Invocation::Render(command) => error_output(
-            command.common.robot,
-            &CliError::new(
-                "capability",
-                "render composition is unavailable: no production scene-source/SceneSink adapter is registered",
-            ),
-        ),
+        Invocation::Render(command) => python_source_refusal(&command).unwrap_or_else(|| {
+            error_output(
+                command.common.robot,
+                &CliError::new(
+                    "capability",
+                    "render composition is unavailable: no production scene-source/SceneSink adapter is registered",
+                ),
+            )
+        }),
         Invocation::Batch(command) => {
+            if let Some(output) = python_source_refusal(&command.render) {
+                return output;
+            }
             let message = if cfg!(feature = "batch") {
                 "batch composition is unavailable: no cancellable production scene service is registered"
             } else {
@@ -2177,14 +2207,25 @@ where
                 &CliError::new("capability", message),
             )
         }
-        Invocation::Studio(command) => error_output(
-            command.render.common.robot,
-            &CliError::new(
-                "capability",
-                "Studio composition is unavailable: no concrete WorkerService or audited host-entropy capability is registered",
-            ),
-        ),
+        Invocation::Studio(command) => python_source_refusal(&command.render).unwrap_or_else(|| {
+            error_output(
+                command.render.common.robot,
+                &CliError::new(
+                    "capability",
+                    "Studio composition is unavailable: no concrete WorkerService or audited host-entropy capability is registered",
+                ),
+            )
+        }),
     }
+}
+
+fn python_source_refusal(command: &RenderCommand) -> Option<RunOutput> {
+    (command.scene_source_kind() == Some(SceneSourceKind::Python)).then(|| {
+        error_output(
+            command.common.robot,
+            &CliError::new("capability", PYTHON_SOURCE_PORTAL_MESSAGE),
+        )
+    })
 }
 
 fn clear_cache(fs: &dyn FileSystem, common: &CommonOptions) -> RunOutput {
@@ -2328,10 +2369,10 @@ fn human_help(command: CommandScope) -> String {
         CommandScope::Doctor => writeln!(out, "Usage: fmn doctor [OPTIONS]"),
         CommandScope::Render | CommandScope::Batch | CommandScope::Studio => writeln!(
             out,
-            "Usage: fmn {} [OPTIONS] [FILE] [SCENE ...]",
+            "Usage: fmn {} [OPTIONS] [NATIVE_SCENE] [SCENE ...]",
             scope_name(command)
         ),
-        CommandScope::Global => writeln!(out, "Usage: fmn [OPTIONS] [FILE] [SCENE ...]"),
+        CommandScope::Global => writeln!(out, "Usage: fmn [OPTIONS] [NATIVE_SCENE] [SCENE ...]"),
     };
     out.push_str("\nCommands:\n");
     for subcommand in SUBCOMMAND_SPECS {
@@ -3773,7 +3814,7 @@ mod tests {
         assert!(help.stderr.is_empty());
         assert!(
             help.stdout
-                .starts_with("Usage: fmn [OPTIONS] [FILE] [SCENE ...]\n")
+                .starts_with("Usage: fmn [OPTIONS] [NATIVE_SCENE] [SCENE ...]\n")
         );
         assert!(help.stdout.contains("--format"));
 
@@ -3783,7 +3824,7 @@ mod tests {
         assert!(
             explicit_render_help
                 .stdout
-                .starts_with("Usage: fmn render [OPTIONS] [FILE] [SCENE ...]\n")
+                .starts_with("Usage: fmn render [OPTIONS] [NATIVE_SCENE] [SCENE ...]\n")
         );
 
         let help = run_with_capabilities(["doctor", "--help"], &fs, &runner, &no_ffmpeg_locator());
@@ -3795,7 +3836,7 @@ mod tests {
                 .stdout
                 .lines()
                 .next()
-                .is_some_and(|line| { line.contains("[FILE]") || line.contains("[SCENE") })
+                .is_some_and(|line| { line.contains("[NATIVE_SCENE]") || line.contains("[SCENE") })
         );
 
         let version =
