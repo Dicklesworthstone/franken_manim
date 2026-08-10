@@ -18,10 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(feature = "batch")]
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "batch")]
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,7 @@ use fmn_core::color::Srgb;
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_output::{
-    ColorDescription, Container, EmitterConfig, EncoderCapabilities, EncoderChoice,
+    ColorDescription, Container, EmitterConfig, EmitterHandle, EncoderCapabilities, EncoderChoice,
     FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegTool, GifSink, GifSinkConfig,
     JobLimits, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget, SinkLimits,
     SinkReceipt, VideoJob, WireFormat, Y4mSink, Y4mSinkConfig,
@@ -2274,6 +2274,7 @@ const RENDER_CANCEL_BUDGET: u8 = 2;
 #[derive(Debug, Default)]
 struct RenderCancellation {
     reason: AtomicU8,
+    emitters: Mutex<Vec<EmitterHandle>>,
 }
 
 impl RenderCancellation {
@@ -2289,6 +2290,24 @@ impl RenderCancellation {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        let emitters = self
+            .emitters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for emitter in emitters.iter() {
+            let _ = emitter.cancel();
+        }
+    }
+
+    fn register_emitter(&self, emitter: EmitterHandle) {
+        let mut emitters = self
+            .emitters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.is_cancelled() {
+            let _ = emitter.cancel();
+        }
+        emitters.push(emitter);
     }
 
     fn cli_checkpoint(&self) -> Result<(), CliError> {
@@ -2359,6 +2378,10 @@ struct RenderSink {
 }
 
 impl RenderSink {
+    fn emitter_handle(&self) -> Option<EmitterHandle> {
+        self.emitter.as_ref().map(OrderedEmitter::handle)
+    }
+
     fn new(
         fs: Arc<dyn FileSystem>,
         config: &fmn_config::Config,
@@ -3162,6 +3185,13 @@ fn execute_native_render_with_cancellation(
                 }
                 let mut sink =
                     RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
+                if let Some(cancellation) = cancellation {
+                    let emitter = sink.emitter_handle().ok_or_else(|| {
+                        CliError::new("internal", "new render sink omitted its emitter")
+                    })?;
+                    cancellation.register_emitter(emitter);
+                    cancellation.cli_checkpoint()?;
+                }
                 let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
                     CliError::new("internal", "validated built-in scene disappeared")
                 })?;
@@ -3239,6 +3269,13 @@ fn execute_native_render_with_cancellation(
         } => {
             let mut sink =
                 RenderSink::new(Arc::clone(&fs), &config, &plan, &target, destination(&name))?;
+            if let Some(cancellation) = cancellation {
+                let emitter = sink.emitter_handle().ok_or_else(|| {
+                    CliError::new("internal", "new render sink omitted its emitter")
+                })?;
+                cancellation.register_emitter(emitter);
+                cancellation.cli_checkpoint()?;
+            }
             let frames = if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
                 let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
                     CliError::new(
@@ -5549,6 +5586,43 @@ mod tests {
             assert_eq!(output.code, 4);
             assert!(output.stdout.contains("disabled in this binary"));
         }
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn batch_cancellation_reaches_the_reel_emitter() {
+        let layout = FrameLayout::tight(PixelFormat::Rgba8, 1, 1).expect("valid test layout");
+        let limits = SinkLimits::new(1, 1_024, 1_024, 1_024).expect("valid sink limits");
+        let (binding, _) = PngSink::new(
+            Arc::new(VirtualFs::new()),
+            PngSinkConfig {
+                target: PngTarget::Single(PathBuf::from("/batch-cancel.png")),
+                width: 1,
+                height: 1,
+                first_sequence: 0,
+                compression: fmn_codec::CompressionLevel::Default,
+                threads: 1,
+                limits,
+                profile: None,
+            },
+        )
+        .expect("valid test PNG sink")
+        .into_binding("batch-cancel");
+        let emitter = OrderedEmitter::new(
+            EmitterConfig::new(layout, 1, 0).expect("valid test emitter config"),
+            vec![binding],
+        )
+        .expect("start test emitter");
+        let cancellation = RenderCancellation::default();
+        cancellation.register_emitter(emitter.handle());
+
+        cancellation.request(RENDER_CANCEL_BUDGET);
+
+        let result = emitter.finish();
+        assert!(matches!(
+            result,
+            Err(ref failure) if failure.error == fmn_output::EmitterError::Cancelled
+        ));
     }
 
     #[test]
