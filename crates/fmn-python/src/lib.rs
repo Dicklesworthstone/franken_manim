@@ -1889,20 +1889,20 @@ impl PyGilProbe {
 }
 
 /// The engine-backed camera-frame state (fm-d3gt): a thin proxy over
-/// Lumen's [`fmn_render::CameraFrame`], the ONE implementation of the
+/// Lumen's [`fmn_scene::studio_bridge::CameraFrame`], the ONE implementation of the
 /// Reference's euler/orientation/shape/fov semantics (fm-0gy).
 ///
 /// The bootstrap's `CameraFrame(Mobject)` owns one of these as its
 /// authoritative state; every camera method delegates here, so orientation,
 /// center, shape, and field of view round-trip exactly (D5, state-real).
 /// This value is also the future renderer-binding seam: a render tranche
-/// hands the same `fmn_render::CameraFrame` to Lumen's `Camera` unchanged.
+/// hands the same `fmn_scene::studio_bridge::CameraFrame` to Lumen's `Camera` unchanged.
 #[pyclass(unsendable, name = "_CameraFrameCore")]
 struct PyCameraFrameCore {
-    frame: fmn_render::CameraFrame,
+    frame: fmn_scene::studio_bridge::CameraFrame,
 }
 
-fn camera_error(error: fmn_render::CameraError) -> PyErr {
+fn camera_error(error: fmn_scene::studio_bridge::CameraError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
@@ -1916,8 +1916,13 @@ impl PyCameraFrameCore {
         euler_axes: &str,
     ) -> PyResult<Self> {
         Ok(Self {
-            frame: fmn_render::CameraFrame::new(frame_shape, center_point, fovy, euler_axes)
-                .map_err(camera_error)?,
+            frame: fmn_scene::studio_bridge::CameraFrame::new(
+                frame_shape,
+                center_point,
+                fovy,
+                euler_axes,
+            )
+            .map_err(camera_error)?,
         })
     }
 

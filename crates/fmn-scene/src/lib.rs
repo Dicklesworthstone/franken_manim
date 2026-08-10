@@ -18,15 +18,18 @@ pub mod journal;
 pub mod runtime;
 pub mod timeline_bundle;
 
-/// Lower-layer scene types exposed through Proscenium for Studio adapters.
+/// Lower-layer scene types exposed through Proscenium for Studio and
+/// portal adapters.
 ///
-/// `fmn-studio` is above `fmn-scene` in the governed crate DAG. Keeping this
-/// narrow facade here lets Studio inspect and scrub the state that Scene
-/// already owns without adding undeclared direct edges to Marionette or
-/// Choreo.
+/// `fmn-studio` and `fmn-python` sit above `fmn-scene` in the governed
+/// crate DAG. Keeping this narrow facade here lets those consumers reach
+/// the state that Scene already owns — including the camera frame the
+/// scene presents to every front door — without adding undeclared direct
+/// edges to Marionette, Choreo, or Lumen.
 pub mod studio_bridge {
     pub use fmn_anim::{AnimError, FramePacket, Timeline};
     pub use fmn_mobject::{Mob, SceneState, Stage, Uniforms};
+    pub use fmn_render::{CameraError, CameraFrame};
 }
 
 pub use events::{
