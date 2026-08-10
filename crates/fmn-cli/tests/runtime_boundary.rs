@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fmn_cli::{BUILTIN_SCENE_SOURCE, PYTHON_SOURCE_PORTAL_MESSAGE};
 use fmn_core::rng::RngRoot;
+use fmn_output::{ManifestMode, ProvenanceManifest};
 use fmn_scene::export_timeline_bundle;
 use fmn_scene::studio_bridge::{Stage, Timeline};
 
@@ -38,6 +39,14 @@ fn compiled_wait_bundle(root: &std::path::Path) -> std::path::PathBuf {
         .expect("compile wait artifact");
     std::fs::write(&path, bytes).expect("write compiled artifact");
     path
+}
+
+fn json_string_field<'a>(record: &'a str, field: &str) -> Option<&'a str> {
+    let prefix = format!("\"{field}\":\"");
+    record
+        .split_once(&prefix)
+        .and_then(|(_, tail)| tail.split_once('"'))
+        .map(|(value, _)| value)
 }
 
 #[test]
@@ -169,7 +178,7 @@ fn batch_renders_multiple_scenes_and_reports_in_request_order() {
 
 #[cfg(feature = "batch")]
 #[test]
-fn batch_budget_cancels_before_publication_and_manifest_gap_is_explicit() {
+fn batch_budget_cancels_before_publication() {
     let budget_root = output_root("batch-budget");
     let budget = run_clean(&[
         "batch",
@@ -201,26 +210,130 @@ fn batch_budget_cancels_before_publication_and_manifest_gap_is_explicit() {
             .count(),
         0
     );
+}
 
-    let manifest_root = output_root("batch-manifest-refusal");
-    let manifest = run_clean(&[
+#[cfg(feature = "batch")]
+#[test]
+fn batch_publishes_complete_fmnp_manifests_and_preflights_no_clobber() {
+    fn render_with_manifests(
+        label: &str,
+        threads: &str,
+        format: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let artifact_root = output_root(&format!("{label}-artifacts"));
+        let manifest_root = output_root(&format!("{label}-manifests"));
+        let output = run_clean(&[
+            "batch",
+            "--robot",
+            "--reproducible",
+            "--manifest-dir",
+            manifest_root.to_str().expect("manifest path is UTF-8"),
+            "--format",
+            format,
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            "--max-scenes",
+            "2",
+            "--video_dir",
+            artifact_root.to_str().expect("output path is UTF-8"),
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+            "rectangle_shift.v1",
+        ]);
+        let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+        assert_eq!(output.status.code(), Some(0), "{stdout}");
+        assert!(output.stderr.is_empty());
+        assert_eq!(stdout.lines().count(), 3, "{stdout}");
+        (artifact_root, manifest_root, stdout)
+    }
+
+    let (artifact_root, manifest_root, stdout) =
+        render_with_manifests("fmnp-one", "1", "png_sequence");
+    let mut first_closure = None;
+    let mut first_outputs = Vec::new();
+    for (index, scene) in ["circle_shift.v1", "rectangle_shift.v1"]
+        .into_iter()
+        .enumerate()
+    {
+        let record = stdout.lines().nth(index).expect("ordered render record");
+        assert!(record.contains(&format!("\"scene\":\"{scene}\"")));
+        assert!(record.contains("\"manifest\":{"));
+        let generation = manifest_root.join(scene);
+        assert!(generation.join("FMN_COMPLETE").is_file());
+        let bytes = std::fs::read(generation.join("manifest.fmnp")).expect("read FMNP");
+        let manifest = ProvenanceManifest::from_bytes(&bytes).expect("verify FMNP");
+        assert_eq!(manifest.mode, ManifestMode::Certified);
+        assert!((1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id)));
+        assert_eq!(manifest.outputs.len(), 1);
+        assert!(manifest.outputs[0].certified);
+        assert_eq!(
+            manifest.outputs[0].digest.to_hex(),
+            json_string_field(record, "artifact_digest").expect("artifact digest robot field")
+        );
+        assert_eq!(
+            manifest.closure_digest.to_hex(),
+            json_string_field(record, "closure_digest").expect("closure digest robot field")
+        );
+        let text = std::fs::read_to_string(generation.join("manifest.txt"))
+            .expect("read human FMNP rendering");
+        for id in 1..=10 {
+            assert!(text.contains(&format!("id = {id}")));
+        }
+        if index == 0 {
+            first_closure = Some(manifest.closure_digest);
+        }
+        first_outputs.push(manifest.outputs[0].digest);
+        assert!(artifact_root.join(scene).join("FMN_COMPLETE").is_file());
+    }
+
+    let (_four_artifacts, four_manifests, four_stdout) =
+        render_with_manifests("fmnp-four", "4", "png_sequence");
+    let four_manifest = ProvenanceManifest::from_bytes(
+        &std::fs::read(four_manifests.join("circle_shift.v1/manifest.fmnp"))
+            .expect("read four-thread FMNP"),
+    )
+    .expect("verify four-thread FMNP");
+    assert_eq!(first_closure, Some(four_manifest.closure_digest));
+    assert_eq!(first_outputs[0], four_manifest.outputs[0].digest);
+    assert!(four_stdout.contains("\"render_threads\":4"));
+
+    let (_still_artifacts, still_manifests, _still_stdout) =
+        render_with_manifests("fmnp-still", "1", "png");
+    let still_manifest = ProvenanceManifest::from_bytes(
+        &std::fs::read(still_manifests.join("circle_shift.v1/manifest.fmnp"))
+            .expect("read final-state PNG FMNP"),
+    )
+    .expect("verify final-state PNG FMNP");
+    assert_ne!(first_closure, Some(still_manifest.closure_digest));
+    assert_eq!(still_manifest.outputs[0].kind, "canonical_png");
+
+    let blocked_output_root = output_root("fmnp-preflight-blocked");
+    let blocked = run_clean(&[
         "batch",
         "--robot",
         "--manifest-dir",
         manifest_root.to_str().expect("manifest path is UTF-8"),
         "--format",
         "png_sequence",
+        "--video_dir",
+        blocked_output_root
+            .to_str()
+            .expect("blocked output path is UTF-8"),
         BUILTIN_SCENE_SOURCE,
         "circle_shift.v1",
     ]);
-    let manifest_stdout = String::from_utf8(manifest.stdout).expect("robot output is UTF-8");
+    let blocked_stdout = String::from_utf8(blocked.stdout).expect("robot output is UTF-8");
 
-    assert_eq!(manifest.status.code(), Some(4), "{manifest_stdout}");
-    assert!(manifest.stderr.is_empty());
-    assert!(manifest_stdout.contains("complete FMNP C1-C10 input-closure producer"));
+    assert_eq!(blocked.status.code(), Some(70), "{blocked_stdout}");
+    assert!(blocked.stderr.is_empty());
+    assert!(blocked_stdout.contains("already exists"));
     assert_eq!(
-        std::fs::read_dir(manifest_root)
-            .expect("list untouched manifest root")
+        std::fs::read_dir(blocked_output_root)
+            .expect("list output root after preflight refusal")
             .count(),
         0
     );

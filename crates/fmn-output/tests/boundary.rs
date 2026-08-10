@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use fmn_frame::ColorRange;
+#[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+use fmn_hash::sha256;
 #[cfg(unix)]
 use fmn_output::{Boundary, BoundaryError, EncoderCapabilities, FfmpegTool, JobLimits};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat, negotiate};
@@ -1488,6 +1490,8 @@ mod private_boundary {
 
         // Published by rename: destination holds the artifact bytes.
         assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
+        assert_eq!(report.artifact_bytes, 9);
+        assert_eq!(report.artifact_digest, sha256(b"FAKEVIDEO"));
         assert_eq!(report.destination, destination);
         assert_eq!(report.invocations.len(), 1);
         let invocation = &report.invocations[0];

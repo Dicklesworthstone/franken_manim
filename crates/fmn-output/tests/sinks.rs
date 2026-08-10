@@ -7,6 +7,7 @@ use fmn_codec::{
     decode_png, decode_wav, decode_y4m,
 };
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
+use fmn_hash::{Sha256, sha256};
 #[cfg(unix)]
 use fmn_output::{
     ColorDescription, Container, EncoderCapabilities, EncoderChoice, FfmpegSink, FfmpegSinkConfig,
@@ -246,6 +247,7 @@ fn canonical_png_sink_strips_padding_profiles_and_publishes_on_finish() {
     assert_eq!(report.path, destination);
     assert_eq!(report.frame_count, 1);
     assert_eq!(report.bytes, bytes.len() as u64);
+    assert_eq!(report.digest, sha256(&bytes));
 
     let ndjson = recorder.snapshot().to_ndjson();
     assert!(ndjson.contains("\"phase\":\"emit\""), "{ndjson}");
@@ -279,12 +281,24 @@ fn png_sequence_bytes(level: CompressionLevel, threads: usize) -> Vec<Vec<u8>> {
     let report = receipt.take().expect("sequence report");
     assert_eq!(report.kind, NativeArtifactKind::PngSequence);
     assert_eq!(report.frame_count, 3);
-    (0..report.frame_count)
+    let members = (0..report.frame_count)
         .map(|offset| {
             let path = report.path.join(format!("shot_{:04}.png", 7 + offset));
             fs.read(&path).expect("sequence member")
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let mut tree = Sha256::new();
+    tree.update(b"fmn-png-sequence-tree/v1\0");
+    for (offset, bytes) in members.iter().enumerate() {
+        let leaf = format!("shot_{:04}.png", 7 + offset);
+        tree.update(&u64::try_from(leaf.len()).unwrap_or(u64::MAX).to_le_bytes());
+        tree.update(leaf.as_bytes());
+        tree.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        tree.update(bytes);
+    }
+    tree.update(&report.frame_count.to_le_bytes());
+    assert_eq!(report.digest, tree.finalize());
+    members
 }
 
 #[test]
@@ -758,6 +772,7 @@ fn gif_sink_is_deterministic_bounded_and_reports_its_artifact() {
         assert_eq!(report.kind, NativeArtifactKind::Gif);
         assert_eq!(report.frame_count, 2);
         assert_eq!(report.bytes, bytes.len() as u64);
+        assert_eq!(report.digest, sha256(&bytes));
         (bytes, report.bytes)
     }
 
@@ -815,6 +830,7 @@ fn y4m_sink_strips_nv12_padding_and_preserves_exact_timeline() {
     assert_eq!(report.kind, NativeArtifactKind::Y4m);
     assert_eq!(report.frame_count, 1);
     assert_eq!(report.bytes, bytes.len() as u64);
+    assert_eq!(report.digest, sha256(&bytes));
 }
 
 #[test]
@@ -1179,6 +1195,7 @@ fn wav_publication_is_native_atomic_and_preflight_bounded() {
     assert_eq!(report.clipped_samples, 2);
     assert_eq!(report.cues_mixed, 3);
     let bytes = fs.read(&destination).expect("WAV bytes");
+    assert_eq!(report.digest, sha256(&bytes));
     let decoded = decode_wav(&bytes, &WavLimits::default()).expect("decode WAV");
     assert_eq!(decoded.channels, 2);
     assert_eq!(decoded.sample_rate, 48_000);
@@ -1624,6 +1641,8 @@ mod ffmpeg_boundary {
             assert_eq!(report.frame_count, 1);
             assert_eq!(report.input_bytes, tight.len() as u64);
             assert_eq!(report.boundary.destination, destination);
+            assert_eq!(report.boundary.artifact_bytes, 14);
+            assert_eq!(report.boundary.artifact_digest, sha256(b"video-artifact"));
             assert_eq!(report.boundary.invocations.len(), 1);
             let invocation = &report.boundary.invocations[0];
             assert_eq!(invocation.provenance.tool_path, tool.path());

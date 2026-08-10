@@ -40,6 +40,11 @@
 /// paths is a review error.
 pub type OrderedMap<K, V> = std::collections::BTreeMap<K, V>;
 
+/// Version of the root-seed, named-substream, and frame-fork derivation
+/// layout recorded by C5 provenance. Incrementing this is a deliberate RNG
+/// stream break even when the underlying PCG primitive stays unchanged.
+pub const RNG_LAYOUT_VERSION: u32 = 1;
+
 const XSHIFT: u32 = 16;
 const INIT_A: u32 = 0x43b0_d7e5;
 const MULT_A: u32 = 0x931e_8875;

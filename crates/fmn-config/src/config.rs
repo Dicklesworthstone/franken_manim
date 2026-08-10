@@ -18,6 +18,10 @@
 use crate::yaml::{self, ParseError, Value, Warning};
 use core::fmt;
 pub use fmn_core::AaPolicy;
+use fmn_hash::{Schema, SerialError, Writer};
+
+/// Canonical fully-resolved configuration document used by C4 provenance.
+pub const RESOLVED_CONFIG_SCHEMA: Schema = Schema::new(*b"FMNF", 1, 1, 0);
 
 /// A configuration failure: parse trouble in one source, or a precise
 /// typed-extraction error naming the key path.
@@ -432,6 +436,67 @@ impl Config {
     pub fn from_value(root: Value) -> Result<Self, ConfigError> {
         crate::generated::config_from_value(root)
     }
+
+    /// Serialize the fully merged, closure-relevant document after all
+    /// precedence and CLI overlays. Map order is retained because open maps
+    /// such as directory aliases are observably ordered; scalar spellings
+    /// have already been resolved to their typed meaning. The one deliberate
+    /// normalization is `render.threads`: §16.7 proves scheduler width inert
+    /// and explicitly excludes it from the input closure, so every valid
+    /// thread policy receives the same structural marker.
+    ///
+    /// # Errors
+    /// Canonical document size/allocation failure.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SerialError> {
+        let mut writer = Writer::new(RESOLVED_CONFIG_SCHEMA);
+        put_config_value(&mut writer, &self.raw, ConfigLocation::Root);
+        writer.finish()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigLocation {
+    Root,
+    Render,
+    Other,
+}
+
+fn put_config_value(writer: &mut Writer, value: &Value, location: ConfigLocation) {
+    match value {
+        Value::Null => {
+            writer.put_u8(0);
+        }
+        Value::Bool(value) => {
+            writer.put_u8(1).put_bool(*value);
+        }
+        Value::Int(value) => {
+            writer.put_u8(2).put_i64(*value);
+        }
+        Value::Float(value) => {
+            writer.put_u8(3).put_f64(*value);
+        }
+        Value::Str(value) => {
+            writer.put_u8(4).put_str(value);
+        }
+        Value::Map(entries) => {
+            writer
+                .put_u8(5)
+                .put_u64(u64::try_from(entries.len()).unwrap_or(u64::MAX));
+            for (key, value) in entries {
+                writer.put_str(key);
+                if location == ConfigLocation::Render && key == "threads" {
+                    writer.put_u8(4).put_str("scheduler-width-proven-inert/v1");
+                } else {
+                    let child_location = if location == ConfigLocation::Root && key == "render" {
+                        ConfigLocation::Render
+                    } else {
+                        ConfigLocation::Other
+                    };
+                    put_config_value(writer, value, child_location);
+                }
+            }
+        }
+    }
 }
 
 /// Build a CLI overlay [`Value`] from dotted paths — the shape fm-c53 hands
@@ -778,6 +843,47 @@ mod tests {
             Some(&Value::Str("#000000".into()))
         );
         assert_eq!(o.get_path("window.full_screen"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn canonical_resolved_bytes_bind_cli_precedence_not_source_spelling() {
+        let defaults = Config::resolve(&[], None)
+            .expect("defaults resolve")
+            .config
+            .canonical_bytes()
+            .expect("defaults serialize");
+        let same = Config::resolve(
+            &[Layer {
+                name: "same",
+                text: "camera:\n  fps: 30\n",
+            }],
+            None,
+        )
+        .expect("equivalent layer resolves")
+        .config
+        .canonical_bytes()
+        .expect("equivalent config serializes");
+        let changed = Config::resolve(&[], Some(overlay([("camera.fps", Value::Int(60))])))
+            .expect("overlay resolves")
+            .config
+            .canonical_bytes()
+            .expect("changed config serializes");
+
+        assert_eq!(defaults, same);
+        assert_ne!(defaults, changed);
+
+        let one_thread = Config::resolve(&[], Some(overlay([("render.threads", Value::Int(1))])))
+            .expect("one-thread config resolves")
+            .config
+            .canonical_bytes()
+            .expect("one-thread config serializes");
+        let sixteen_threads =
+            Config::resolve(&[], Some(overlay([("render.threads", Value::Int(16))])))
+                .expect("sixteen-thread config resolves")
+                .config
+                .canonical_bytes()
+                .expect("sixteen-thread config serializes");
+        assert_eq!(one_thread, sixteen_threads);
     }
 
     #[test]

@@ -44,8 +44,11 @@
 pub mod emitter;
 pub mod ffmpeg;
 pub mod negotiate;
+pub mod provenance;
 pub mod sinks;
 pub mod sound;
+
+pub use fmn_hash::Digest as ArtifactDigest;
 
 pub use emitter::{
     CancelOutcome, EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport,
@@ -60,6 +63,10 @@ pub use ffmpeg::{
 pub use negotiate::{
     ColorDescription, Container, EncoderChoice, NegotiationError, Primaries, Transfer, VideoJob,
     WireFormat,
+};
+pub use provenance::{
+    CLOSURE_SCHEMA, ClosureItem, ManifestError, ManifestIdentity, ManifestMode, ManifestOutput,
+    PROVENANCE_SCHEMA, ProvenanceManifest, StructuralField,
 };
 pub use sinks::{
     FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, GifSink, GifSinkConfig, NativeArtifactKind,

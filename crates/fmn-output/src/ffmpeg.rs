@@ -52,6 +52,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fmn_hash::{Digest, Sha256};
 use fmn_platform::process::{
     FfmpegExecutable, FfmpegLocatorError, MAX_FFMPEG_EXECUTABLE_BYTES, NativeImageAttestation,
     ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
@@ -861,6 +862,10 @@ pub struct BoundaryReport {
     pub invocations: Vec<InvocationReport>,
     /// The atomically published destination.
     pub destination: PathBuf,
+    /// Exact published artifact bytes.
+    pub artifact_bytes: u64,
+    /// SHA-256 of the exact published artifact.
+    pub artifact_digest: Digest,
 }
 
 const WORKDIR_CREATE_ATTEMPTS: u64 = 128;
@@ -1434,6 +1439,8 @@ impl Boundary {
         let outcome = outcome?;
         self.check_outcome(&outcome)?;
         workdir.verify_current("publish ffmpeg artifact")?;
+        let (artifact_bytes, artifact_digest) =
+            hash_private_artifact(artifact, self.limits.max_artifact_bytes)?;
         self.publish(artifact, destination)?;
         Ok(BoundaryReport {
             invocations: vec![invocation_report(
@@ -1446,6 +1453,8 @@ impl Boundary {
                 outcome.stderr,
             )],
             destination: destination.to_path_buf(),
+            artifact_bytes,
+            artifact_digest,
         })
     }
 
@@ -1810,7 +1819,8 @@ impl PreparedFfmpegArtifact {
     /// Artifact revalidation or rename failure.
     pub fn commit(mut self) -> Result<BoundaryReport, BoundaryError> {
         self.workdir.verify_current("commit ffmpeg artifact")?;
-        verify_private_artifact(&self.artifact, self.limits.max_artifact_bytes)?;
+        let (artifact_bytes, artifact_digest) =
+            hash_private_artifact(&self.artifact, self.limits.max_artifact_bytes)?;
         if let Some(parent) = self.destination.parent() {
             std::fs::create_dir_all(parent).map_err(|error| BoundaryError::Workdir {
                 detail: format!("create {}: {error}", parent.display()),
@@ -1833,6 +1843,8 @@ impl PreparedFfmpegArtifact {
         Ok(BoundaryReport {
             invocations: std::mem::take(&mut self.invocations),
             destination: self.destination.clone(),
+            artifact_bytes,
+            artifact_digest,
         })
     }
 }
@@ -1864,6 +1876,46 @@ fn verify_private_artifact(path: &Path, max_bytes: u64) -> Result<(), BoundaryEr
         });
     }
     Ok(())
+}
+
+fn hash_private_artifact(path: &Path, max_bytes: u64) -> Result<(u64, Digest), BoundaryError> {
+    verify_private_artifact(path, max_bytes)?;
+    let mut file = File::open(path).map_err(|error| BoundaryError::Workdir {
+        detail: format!(
+            "open verified artifact {} for hashing: {error}",
+            path.display()
+        ),
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; FILE_HASH_BUFFER_BYTES];
+    let mut bytes = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| BoundaryError::Workdir {
+                detail: format!(
+                    "read verified artifact {} for hashing: {error}",
+                    path.display()
+                ),
+            })?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or(BoundaryError::ArtifactOversized {
+                bytes: u64::MAX,
+                max: max_bytes,
+            })?;
+        if bytes > max_bytes {
+            return Err(BoundaryError::ArtifactOversized {
+                bytes,
+                max: max_bytes,
+            });
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok((bytes, hasher.finalize()))
 }
 
 fn invocation_report(

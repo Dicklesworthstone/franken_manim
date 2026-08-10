@@ -26,13 +26,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fmn_core::color::Srgb;
+use fmn_core::rng::RNG_LAYOUT_VERSION;
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_output::{
-    ColorDescription, Container, EmitterConfig, EmitterHandle, EncoderCapabilities, EncoderChoice,
-    FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegTool, GifSink, GifSinkConfig,
-    JobLimits, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget, SinkLimits,
-    SinkReceipt, VideoJob, WireFormat, Y4mSink, Y4mSinkConfig,
+    ArtifactDigest, ClosureItem, ColorDescription, Container, EmitterConfig, EmitterHandle,
+    EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig,
+    FfmpegTool, GifSink, GifSinkConfig, JobLimits, ManifestIdentity, ManifestMode, ManifestOutput,
+    NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget, ProvenanceManifest,
+    SinkLimits, SinkReceipt, StructuralField, VideoJob, WireFormat, Y4mSink, Y4mSinkConfig,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
@@ -53,6 +55,12 @@ pub const PYTHON_SOURCE_PORTAL_MESSAGE: &str = "Python scene sources require the
 /// Reserved source identifier for the native primitive registrations compiled
 /// into the standalone binary.
 pub const BUILTIN_SCENE_SOURCE: &str = "@builtin";
+
+const SUITE_LOCK_BYTES: &[u8] = include_bytes!("../../../SUITE.lock");
+const SUITE_LOCK_TEXT: &str = include_str!("../../../SUITE.lock");
+const BUILD_ID: &str = env!("FMN_BUILD_ID");
+const TARGET_TRIPLE: &str = env!("FMN_TARGET_TRIPLE");
+const CARGO_PROFILE: &str = env!("FMN_CARGO_PROFILE");
 
 /// A stable CLI failure carrying its schema-owned process status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2222,9 +2230,15 @@ struct VideoArtifactReport {
     path: PathBuf,
     frame_count: u64,
     input_bytes: u64,
+    artifact_bytes: u64,
+    artifact_digest: ArtifactDigest,
     tool_path: PathBuf,
     tool_sha256: String,
     tool_version: String,
+    native_image_format: &'static str,
+    native_image_architecture: &'static str,
+    native_image_bytes: u64,
+    native_image_policy_version: u32,
     encoder: Option<String>,
     process_mechanism: String,
     process_policy_version: u32,
@@ -2263,6 +2277,8 @@ struct CompletedRender {
     artifact: RenderArtifactReport,
     engine: String,
     render_threads: usize,
+    manifest: Option<ProvenanceManifest>,
+    manifest_path: Option<PathBuf>,
 }
 
 const RENDER_ACTIVE: u8 = 0;
@@ -2360,8 +2376,9 @@ enum NativeRenderInput {
     },
     Compiled {
         source: PathBuf,
+        source_item: ClosureItem,
         name: String,
-        bundle: TimelineBundle,
+        bundle: Box<TimelineBundle>,
     },
 }
 
@@ -2375,6 +2392,22 @@ struct RenderSink {
     receipt: RenderReceipt,
     rgba8_scratch: Option<FrameBuffer>,
     next_sequence: u64,
+}
+
+fn resolved_frame_config(config: &fmn_config::Config) -> Result<FrameConfig, CliError> {
+    let (width, height) = config.camera.resolution;
+    let background = Srgb::from_hex(&config.camera.background_color)
+        .map_err(|error| CliError::new("config", error.to_string()))?
+        .to_linear(config.camera.background_opacity);
+    Ok(FrameConfig::new(
+        Viewport { width, height },
+        ScreenMap {
+            scale: f64::from(height) / config.sizes.frame_height,
+            origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+        },
+        background,
+    )
+    .with_aa_policy(config.render.aa))
 }
 
 impl RenderSink {
@@ -2490,18 +2523,7 @@ impl RenderSink {
             .map_err(|error| CliError::new("render", error.to_string()))?;
         let emitter = OrderedEmitter::new(emitter_config, vec![binding])
             .map_err(|error| CliError::new("render", error.to_string()))?;
-        let background = Srgb::from_hex(&config.camera.background_color)
-            .map_err(|error| CliError::new("config", error.to_string()))?
-            .to_linear(config.camera.background_opacity);
-        let frame_config = FrameConfig::new(
-            Viewport { width, height },
-            ScreenMap {
-                scale: f64::from(height) / config.sizes.frame_height,
-                origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
-            },
-            background,
-        )
-        .with_aa_policy(config.render.aa);
+        let frame_config = resolved_frame_config(config)?;
         let engine = match plan.engine {
             fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
             fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
@@ -2661,9 +2683,19 @@ impl RenderSink {
                     path: report.boundary.destination.clone(),
                     frame_count: report.frame_count,
                     input_bytes: report.input_bytes,
+                    artifact_bytes: report.boundary.artifact_bytes,
+                    artifact_digest: report.boundary.artifact_digest,
                     tool_path: invocation.provenance.tool_path.clone(),
                     tool_sha256: invocation.provenance.tool_sha256_hex.clone(),
                     tool_version: invocation.provenance.tool_version.clone(),
+                    native_image_format: native_image_format(
+                        invocation.provenance.native_image.format,
+                    ),
+                    native_image_architecture: native_image_architecture(
+                        invocation.provenance.native_image.architecture,
+                    ),
+                    native_image_bytes: invocation.provenance.native_image.file_bytes,
+                    native_image_policy_version: invocation.provenance.native_image.policy_version,
                     encoder: invocation.provenance.encoder.clone(),
                     process_mechanism: invocation.provenance.process_mechanism.clone(),
                     process_policy_version: invocation.provenance.process_policy_version,
@@ -2758,6 +2790,354 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
             "WAV publication requires a scene sound-cue composition path, which is not registered yet",
         )),
     }
+}
+
+fn native_image_format(format: fmn_platform::process::NativeExecutableFormat) -> &'static str {
+    match format {
+        fmn_platform::process::NativeExecutableFormat::Elf64 => "elf64",
+        fmn_platform::process::NativeExecutableFormat::MachO64 => "mach-o64",
+        fmn_platform::process::NativeExecutableFormat::MachOUniversal => "mach-o-universal",
+        fmn_platform::process::NativeExecutableFormat::Pe32Plus => "pe32+",
+    }
+}
+
+fn native_image_architecture(
+    architecture: fmn_platform::process::NativeExecutableArchitecture,
+) -> &'static str {
+    match architecture {
+        fmn_platform::process::NativeExecutableArchitecture::X86_64 => "x86_64",
+        fmn_platform::process::NativeExecutableArchitecture::Aarch64 => "aarch64",
+    }
+}
+
+fn pinned_toolchain() -> Result<&'static str, CliError> {
+    let mut toolchain = false;
+    for line in SUITE_LOCK_TEXT.lines() {
+        if line.starts_with('[') {
+            toolchain = line == "[toolchain]";
+            continue;
+        }
+        if toolchain {
+            let mut fields = line.split('\t');
+            if fields.next() == Some("rustc")
+                && let Some(value) = fields.next()
+                && !value.is_empty()
+            {
+                return Ok(value);
+            }
+        }
+    }
+    Err(internal("embedded SUITE.lock has no pinned rustc identity"))
+}
+
+fn active_target_features() -> &'static str {
+    match active_compiled_tier() {
+        "x86-64-v3" => "+avx2,+bmi2,+fma",
+        "x86-64-v4" => "+avx512f,+avx512bw,+avx512dq,+avx512vl",
+        "aarch64+neon" => "+neon",
+        _ => "baseline",
+    }
+}
+
+const fn plan_determinism_name(determinism: fmn_runtime::Determinism) -> &'static str {
+    match determinism {
+        fmn_runtime::Determinism::Standard => "standard",
+        fmn_runtime::Determinism::Certified => "certified",
+    }
+}
+
+const fn plan_engine_name(engine: fmn_runtime::ExecutionEngine) -> &'static str {
+    match engine {
+        fmn_runtime::ExecutionEngine::CertifiedCpu => "certified-cpu",
+        fmn_runtime::ExecutionEngine::FastCpu => "fast-cpu",
+        fmn_runtime::ExecutionEngine::Metal => "metal",
+        fmn_runtime::ExecutionEngine::Cuda => "cuda",
+    }
+}
+
+const fn plan_intent_name(intent: fmn_runtime::RenderIntent) -> &'static str {
+    match intent {
+        fmn_runtime::RenderIntent::Preview => "preview",
+        fmn_runtime::RenderIntent::Offline => "offline",
+    }
+}
+
+const fn plan_output_name(format: fmn_runtime::OutputPixelFormat) -> &'static str {
+    match format {
+        fmn_runtime::OutputPixelFormat::Rgba16F => "rgba16f",
+        fmn_runtime::OutputPixelFormat::Rgba8 => "rgba8",
+        fmn_runtime::OutputPixelFormat::Bgra8 => "bgra8",
+        fmn_runtime::OutputPixelFormat::Nv12 => "nv12",
+        fmn_runtime::OutputPixelFormat::P010 => "p010",
+    }
+}
+
+const fn plan_tuning_name(source: fmn_runtime::TuningSource) -> &'static str {
+    match source {
+        fmn_runtime::TuningSource::CertifiedProfile => "certified-profile",
+        fmn_runtime::TuningSource::StandardBaseline => "standard-baseline",
+        fmn_runtime::TuningSource::StandardAutotuneCache => "standard-autotune-cache",
+    }
+}
+
+fn builtin_source_item(scene: &str) -> Result<ClosureItem, CliError> {
+    let bytes = format!("fmn-native-registration/v1\n{scene}\n");
+    ClosureItem::byte_input(
+        1,
+        format!("{BUILTIN_SCENE_SOURCE}/{scene}"),
+        bytes.as_bytes(),
+        "compiled native primitive registration",
+    )
+    .map_err(|error| internal(error.to_string()))
+}
+
+fn output_manifest_entry(mode: ManifestMode, artifact: &RenderArtifactReport) -> ManifestOutput {
+    match artifact {
+        RenderArtifactReport::Native(report) => ManifestOutput {
+            virtual_path: report.path.to_string_lossy().into_owned(),
+            kind: native_artifact_kind_name(report.kind).to_owned(),
+            digest: report.digest,
+            certified: mode == ManifestMode::Certified
+                && matches!(
+                    report.kind,
+                    fmn_output::NativeArtifactKind::Png
+                        | fmn_output::NativeArtifactKind::PngSequence
+                ),
+        },
+        RenderArtifactReport::Video(report) => ManifestOutput {
+            virtual_path: report.path.to_string_lossy().into_owned(),
+            kind: "encoded_video".to_owned(),
+            digest: report.artifact_digest,
+            certified: false,
+        },
+    }
+}
+
+const fn native_artifact_kind_name(kind: fmn_output::NativeArtifactKind) -> &'static str {
+    match kind {
+        fmn_output::NativeArtifactKind::Png => "canonical_png",
+        fmn_output::NativeArtifactKind::PngSequence => "canonical_png_sequence",
+        fmn_output::NativeArtifactKind::Gif => "gif",
+        fmn_output::NativeArtifactKind::Y4m => "y4m",
+    }
+}
+
+fn manifest_artifact_kind(artifact: &RenderArtifactReport) -> &'static str {
+    match artifact {
+        RenderArtifactReport::Native(report) => native_artifact_kind_name(report.kind),
+        RenderArtifactReport::Video(_) => "encoded_video",
+    }
+}
+
+struct ManifestContext<'a> {
+    fs: &'a dyn FileSystem,
+    process_mechanism: fmn_platform::process::ProcessMechanism,
+    command: &'a RenderCommand,
+    config: &'a fmn_config::Config,
+    plan: &'a fmn_runtime::ExecutionPlan,
+    engine: EngineIdentity,
+}
+
+fn render_manifest(
+    context: ManifestContext<'_>,
+    source_item: ClosureItem,
+    artifact: &RenderArtifactReport,
+) -> Result<ProvenanceManifest, CliError> {
+    let ManifestContext {
+        fs,
+        process_mechanism,
+        command,
+        config,
+        plan,
+        engine,
+    } = context;
+    if fs.identity() == "opaque.file_system/v1" {
+        return Err(CliError::new(
+            "capability",
+            "FMNP publication requires a stable versioned FileSystem identity",
+        ));
+    }
+    let mode = match config.determinism.mode {
+        fmn_config::config::DeterminismMode::Standard => ManifestMode::Standard,
+        fmn_config::config::DeterminismMode::Certified => ManifestMode::Certified,
+    };
+    let config_bytes = config
+        .canonical_bytes()
+        .map_err(|error| internal(format!("canonical resolved config: {error}")))?;
+    let frame_config = resolved_frame_config(config)?;
+    let tiling = Tiling {
+        macro_tile: plan.macro_tile,
+        fine_tile: plan.fine_tile,
+    };
+    let renderer_document = fmn_render::engine::journal(engine, &frame_config, tiling);
+    let runtime = command.runtime_config(config);
+
+    let build_item = ClosureItem::byte_input(
+        2,
+        "franken_manim.build",
+        BUILD_ID.as_bytes(),
+        "franken_manim git commit or release build id",
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let suite_item = ClosureItem::byte_input(
+        2,
+        "SUITE.lock",
+        SUITE_LOCK_BYTES,
+        "complete governed dependency and toolchain lock",
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let toolchain = pinned_toolchain()?;
+    let c3 = ClosureItem::structural(
+        3,
+        "native Rust toolchain and target; Python portal absent",
+        &[
+            StructuralField::Text(toolchain),
+            StructuralField::Text(TARGET_TRIPLE),
+            StructuralField::Text(active_target_features()),
+            StructuralField::Text(CARGO_PROFILE),
+            StructuralField::Absent("CPython portal"),
+            StructuralField::Absent("fmn-python wheel"),
+            StructuralField::Absent("NumPy runtime"),
+        ],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let c4 = ClosureItem::byte_input(
+        4,
+        "resolved-config.fmnf",
+        &config_bytes,
+        "fully resolved configuration after defaults, files, and CLI overlay",
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let c5 = ClosureItem::structural(
+        5,
+        "PCG64DXSM root seed and named-substream layout",
+        &[
+            StructuralField::U64(config.determinism.seed),
+            StructuralField::U64(u64::from(RNG_LAYOUT_VERSION)),
+        ],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let c6 = ClosureItem::structural(
+        6,
+        "no asset or font reads on the native primitive/FMTL route",
+        &[
+            StructuralField::Absent("asset reads"),
+            StructuralField::Absent("font reads"),
+        ],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let engine_identity = engine.closure_string();
+    let c7 = ClosureItem::structural(
+        7,
+        "semantic renderer and execution backend",
+        &[
+            StructuralField::Text(&engine_identity),
+            StructuralField::Bytes(&renderer_document),
+        ],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let c8 = ClosureItem::structural(
+        8,
+        "engine-visible locale and timezone are fixed by owned parsers and rational time",
+        &[StructuralField::Text("C"), StructuralField::Text("UTC")],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let c9 = match artifact {
+        RenderArtifactReport::Native(_) => ClosureItem::structural(
+            9,
+            "native capability policy; no external tool invoked",
+            &[
+                StructuralField::Text(fs.identity()),
+                StructuralField::Text(process_mechanism.identity()),
+                StructuralField::U64(u64::from(process_mechanism.policy_version())),
+                StructuralField::Absent("host clock on render path"),
+                StructuralField::Absent("AssetFetcher"),
+                StructuralField::Absent("CPython portal"),
+                StructuralField::Absent("ffmpeg invocation"),
+            ],
+        ),
+        RenderArtifactReport::Video(report) => {
+            let tool_path = report.tool_path.to_string_lossy();
+            ClosureItem::structural(
+                9,
+                "native capabilities plus audited ffmpeg boundary",
+                &[
+                    StructuralField::Text(fs.identity()),
+                    StructuralField::Text(&report.process_mechanism),
+                    StructuralField::U64(u64::from(report.process_policy_version)),
+                    StructuralField::Absent("host clock on render path"),
+                    StructuralField::Absent("AssetFetcher"),
+                    StructuralField::Absent("CPython portal"),
+                    StructuralField::Text(tool_path.as_ref()),
+                    StructuralField::Text(&report.tool_sha256),
+                    StructuralField::Text(&report.tool_version),
+                    StructuralField::Text(report.native_image_format),
+                    StructuralField::Text(report.native_image_architecture),
+                    StructuralField::U64(report.native_image_bytes),
+                    StructuralField::U64(u64::from(report.native_image_policy_version)),
+                ],
+            )
+        }
+    }
+    .map_err(|error| internal(error.to_string()))?;
+    let c10 = ClosureItem::structural(
+        10,
+        "determinism mode and declared execution configuration",
+        &[
+            StructuralField::Text(mode.name()),
+            StructuralField::Text(plan_determinism_name(plan.determinism)),
+            StructuralField::Text(plan_engine_name(plan.engine)),
+            StructuralField::Text(plan_intent_name(plan.intent)),
+            StructuralField::Text(plan_output_name(plan.output_format)),
+            StructuralField::Text(manifest_artifact_kind(artifact)),
+            StructuralField::Text(plan_tuning_name(plan.tuning_source)),
+            StructuralField::U64(u64::try_from(plan.frames_in_flight).unwrap_or(u64::MAX)),
+            StructuralField::U64(u64::from(plan.fine_tile)),
+            StructuralField::U64(u64::from(plan.macro_tile)),
+            StructuralField::Bool(runtime.windowed),
+            StructuralField::Bool(runtime.skip_animations),
+            runtime.start_at_play.map_or(
+                StructuralField::Absent("start_at_play"),
+                StructuralField::U64,
+            ),
+            runtime
+                .end_at_play
+                .map_or(StructuralField::Absent("end_at_play"), StructuralField::U64),
+            StructuralField::Bool(runtime.presenter_mode),
+            StructuralField::Bytes(&renderer_document),
+        ],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let identity = ManifestIdentity {
+        build_id: BUILD_ID.to_owned(),
+        suite_lock_digest: suite_item.digest,
+        toolchain: toolchain.to_owned(),
+        target_triple: TARGET_TRIPLE.to_owned(),
+        target_features: active_target_features().to_owned(),
+        engine: engine_identity,
+        simd_tier: active_compiled_tier().to_owned(),
+        declared_config_digest: c10.digest,
+    };
+    ProvenanceManifest::new(
+        mode,
+        vec![
+            source_item,
+            build_item,
+            suite_item,
+            c3,
+            c4,
+            c5,
+            c6,
+            c7,
+            c8,
+            c9,
+            c10,
+        ],
+        identity,
+        vec![output_manifest_entry(mode, artifact)],
+        None,
+    )
+    .map_err(|error| internal(error.to_string()))
 }
 
 fn ffmpeg_wire_format(
@@ -3027,6 +3407,13 @@ fn resolve_native_render_input(
                 format!("could not read {}: {error}", source.display()),
             )
         })?;
+    let source_item = ClosureItem::byte_input(
+        1,
+        source.to_string_lossy().into_owned(),
+        &bytes,
+        "compiled FMTL/1 scene artifact",
+    )
+    .map_err(|error| internal(error.to_string()))?;
     let bundle = TimelineBundle::from_bytes(&bytes).map_err(bundle_read_error)?;
     if u64::from(bundle.frame_count()) > fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES {
         return Err(CliError::new(
@@ -3040,8 +3427,9 @@ fn resolve_native_render_input(
     }
     Ok(NativeRenderInput::Compiled {
         source: source.to_owned(),
+        source_item,
         name,
-        bundle,
+        bundle: Box::new(bundle),
     })
 }
 
@@ -3051,7 +3439,7 @@ fn execute_native_render(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &RenderCommand,
 ) -> Result<Vec<CompletedRender>, CliError> {
-    execute_native_render_with_cancellation(fs, runner, locator, command, None)
+    execute_native_render_with_cancellation(fs, runner, locator, command, None, false)
 }
 
 fn execute_native_render_with_cancellation(
@@ -3060,6 +3448,7 @@ fn execute_native_render_with_cancellation(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &RenderCommand,
     cancellation: Option<&RenderCancellation>,
+    capture_manifest: bool,
 ) -> Result<Vec<CompletedRender>, CliError> {
     if let Some(cancellation) = cancellation {
         cancellation.cli_checkpoint()?;
@@ -3091,7 +3480,9 @@ fn execute_native_render_with_cancellation(
                 ),
             ));
         }
-        config.camera.fps = bundle.fps();
+        let mut compiled_command = command.clone();
+        compiled_command.fps = Some(bundle.fps());
+        config = resolve_render_config(fs.as_ref(), &compiled_command)?;
     }
     let video_job = match requested_format {
         RequestedRenderFormat::Native(_) => None,
@@ -3119,6 +3510,7 @@ fn execute_native_render_with_cancellation(
         fmn_runtime::RenderIntent::Offline,
         planning_format,
     )?;
+    let process_mechanism = runner.mechanism();
     let target = match (requested_format, video_job) {
         (RequestedRenderFormat::Native(format), None) => RenderTarget::Native(format),
         (RequestedRenderFormat::Video, Some(job)) => {
@@ -3168,12 +3560,32 @@ fn execute_native_render_with_cancellation(
         RenderTarget::Native(NativeFrameFormat::Y4m) => naming.artifact(name, "y4m"),
         RenderTarget::Video(context) => naming.artifact(name, context.job.container.extension()),
     };
-    let report = |source, scene, artifact| CompletedRender {
-        source,
-        scene,
-        artifact,
-        engine: engine.closure_string(),
-        render_threads,
+    let complete = |source, source_item, scene, artifact| -> Result<CompletedRender, CliError> {
+        let manifest = if capture_manifest {
+            Some(render_manifest(
+                ManifestContext {
+                    fs: fs.as_ref(),
+                    process_mechanism,
+                    command,
+                    config: &config,
+                    plan: &plan,
+                    engine,
+                },
+                source_item,
+                &artifact,
+            )?)
+        } else {
+            None
+        };
+        Ok(CompletedRender {
+            source,
+            scene,
+            artifact,
+            engine: engine.closure_string(),
+            render_threads,
+            manifest,
+            manifest_path: None,
+        })
     };
     let mut reports = Vec::new();
     match input {
@@ -3259,11 +3671,19 @@ fn execute_native_render_with_cancellation(
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
-                reports.push(report(RenderSourceReport::Builtin, name, sink.finish()?));
+                let artifact = sink.finish()?;
+                let source_item = builtin_source_item(&name)?;
+                reports.push(complete(
+                    RenderSourceReport::Builtin,
+                    source_item,
+                    name,
+                    artifact,
+                )?);
             }
         }
         NativeRenderInput::Compiled {
             source,
+            source_item,
             name,
             bundle,
         } => {
@@ -3298,11 +3718,12 @@ fn execute_native_render_with_cancellation(
             if let Some(cancellation) = cancellation {
                 cancellation.cli_checkpoint()?;
             }
-            reports.push(report(
+            reports.push(complete(
                 RenderSourceReport::Compiled(source),
+                source_item,
                 name,
                 sink.finish()?,
-            ));
+            )?);
         }
     }
     Ok(reports)
@@ -3333,6 +3754,8 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         artifact,
         engine,
         render_threads,
+        manifest,
+        manifest_path,
     } in reports
     {
         let source_artifact = source.artifact().map_or_else(String::new, |path| {
@@ -3344,12 +3767,25 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         let human_source = source
             .artifact()
             .map_or_else(String::new, |path| format!(" from {}", path.display()));
+        let manifest_json = manifest.as_ref().zip(manifest_path.as_ref()).map_or_else(
+            String::new,
+            |(manifest, path)| {
+                format!(
+                    ",\"manifest\":{{\"path\":{},\"closure_digest\":{}}}",
+                    json_string(&path.to_string_lossy()),
+                    json_string(&manifest.closure_digest.to_hex()),
+                )
+            },
+        );
+        let human_manifest = manifest_path
+            .as_ref()
+            .map_or_else(String::new, |path| format!("; manifest {}", path.display()));
         match artifact {
             RenderArtifactReport::Native(report) => {
                 if command.common.robot {
-                    let _ = writeln!(
+                    let _ = write!(
                         stdout,
-                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{}}}",
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":{},\"artifact\":{},\"frames\":{},\"bytes\":{},\"engine\":{},\"render_threads\":{},\"artifact_digest\":{}",
                         ROBOT_SCHEMA_VERSION,
                         json_string(source.kind()),
                         source_artifact,
@@ -3365,11 +3801,14 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         report.bytes,
                         json_string(&engine),
                         render_threads,
+                        json_string(&report.digest.to_hex()),
                     );
+                    stdout.push_str(&manifest_json);
+                    stdout.push_str("}\n");
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads)",
+                        "rendered {scene}{human_source} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_manifest})",
                         match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -3384,9 +3823,9 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
             }
             RenderArtifactReport::Video(report) => {
                 if command.common.robot {
-                    let _ = writeln!(
+                    let _ = write!(
                         stdout,
-                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":\"video\",\"artifact\":{},\"frames\":{},\"input_bytes\":{},\"engine\":{},\"render_threads\":{},\"ffmpeg\":{{\"path\":{},\"sha256\":{},\"version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{}}}}}",
+                        "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"render\",\"source\":{}{},\"scene\":{},\"format\":\"video\",\"artifact\":{},\"frames\":{},\"input_bytes\":{},\"bytes\":{},\"artifact_digest\":{},\"engine\":{},\"render_threads\":{},\"ffmpeg\":{{\"path\":{},\"sha256\":{},\"version\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{}}}",
                         ROBOT_SCHEMA_VERSION,
                         json_string(source.kind()),
                         source_artifact,
@@ -3394,20 +3833,28 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         json_string(&report.path.to_string_lossy()),
                         report.frame_count,
                         report.input_bytes,
+                        report.artifact_bytes,
+                        json_string(&report.artifact_digest.to_hex()),
                         json_string(&engine),
                         render_threads,
                         json_string(&report.tool_path.to_string_lossy()),
                         json_string(&report.tool_sha256),
                         json_string(&report.tool_version),
+                        json_string(report.native_image_format),
+                        json_string(report.native_image_architecture),
+                        report.native_image_bytes,
+                        report.native_image_policy_version,
                         json_option(report.encoder.as_deref()),
                         json_string(&report.process_mechanism),
                         report.process_policy_version,
                         json_array(&report.argv),
                     );
+                    stdout.push_str(&manifest_json);
+                    stdout.push_str("}\n");
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {})",
+                        "rendered {scene}{human_source} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_manifest})",
                         report.path.display(),
                         report.frame_count,
                         report.input_bytes,
@@ -3528,6 +3975,132 @@ fn prepare_batch_locator(
 }
 
 #[cfg(feature = "batch")]
+fn preflight_batch_manifests(
+    fs: &dyn FileSystem,
+    command: &BatchCommand,
+    jobs: &[BatchJob],
+) -> Result<(), CliError> {
+    let Some(root) = command.manifest_dir.as_deref() else {
+        return Ok(());
+    };
+    match fs.node_kind_no_follow(root).map_err(|error| {
+        CliError::new(
+            "output",
+            format!(
+                "could not inspect manifest directory {}: {error}",
+                root.display()
+            ),
+        )
+    })? {
+        None | Some(FsNodeKind::Directory) => {}
+        Some(kind) => {
+            return Err(CliError::new(
+                "config",
+                format!(
+                    "manifest directory {} is a {kind:?}, not a directory",
+                    root.display()
+                ),
+            ));
+        }
+    }
+    let config = resolve_render_config(fs, &command.render)?;
+    let output_root = command
+        .render
+        .video_dir
+        .clone()
+        .unwrap_or_else(|| configured_output_directory(&config));
+    let png_sequence = requested_render_format(&command.render)?
+        == RequestedRenderFormat::Native(NativeFrameFormat::PngSequence);
+    for job in jobs {
+        let destination = root.join(&job.scene);
+        if png_sequence && destination == output_root.join(&job.scene) {
+            return Err(CliError::new(
+                "config",
+                "--manifest-dir must differ from the PNG-sequence output directory",
+            ));
+        }
+        if fs
+            .node_kind_no_follow(&destination)
+            .map_err(|error| {
+                CliError::new(
+                    "output",
+                    format!(
+                        "could not inspect manifest destination {}: {error}",
+                        destination.display()
+                    ),
+                )
+            })?
+            .is_some()
+        {
+            return Err(CliError::new(
+                "output",
+                format!(
+                    "manifest destination {} already exists; per-scene manifests are no-clobber generations",
+                    destination.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "batch")]
+fn publish_batch_manifests(
+    fs: &Arc<dyn FileSystem>,
+    root: &Path,
+    reports: &mut [CompletedRender],
+) -> Result<(), CliError> {
+    for report in reports {
+        let manifest = report
+            .manifest
+            .as_ref()
+            .ok_or_else(|| internal("batch manifest capture completed without an FMNP document"))?;
+        let binary = manifest
+            .to_bytes()
+            .map_err(|error| internal(format!("serialize FMNP manifest: {error}")))?;
+        let text = manifest.to_text();
+        let destination = root.join(&report.scene);
+        let mut writer = Arc::clone(fs)
+            .begin_atomic_directory(&destination)
+            .map_err(|error| {
+                CliError::new(
+                    "output",
+                    format!(
+                        "could not stage manifest generation {}: {error}",
+                        destination.display()
+                    ),
+                )
+            })?;
+        writer
+            .write_file(Path::new("manifest.fmnp"), &binary)
+            .and_then(|()| writer.write_file(Path::new("manifest.txt"), text.as_bytes()))
+            .map_err(|error| {
+                CliError::new(
+                    "output",
+                    format!(
+                        "could not write manifest generation {}: {error}",
+                        destination.display()
+                    ),
+                )
+            })?;
+        writer
+            .prepare()
+            .and_then(|prepared| prepared.commit())
+            .map_err(|error| {
+                CliError::new(
+                    "output",
+                    format!(
+                        "could not publish manifest generation {}: {error}",
+                        destination.display()
+                    ),
+                )
+            })?;
+        report.manifest_path = Some(destination.join("manifest.fmnp"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "batch")]
 fn batch_output(
     command: &BatchCommand,
     scene_names: &[String],
@@ -3628,15 +4201,6 @@ fn execute_batch(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     command: &BatchCommand,
 ) -> RunOutput {
-    if command.manifest_dir.is_some() {
-        return error_output(
-            command.render.common.robot,
-            &CliError::new(
-                "capability",
-                "--manifest-dir requires the complete FMNP C1-C10 input-closure producer, which is not registered yet",
-            ),
-        );
-    }
     if command.max_scenes == Some(0) {
         return error_output(
             command.render.common.robot,
@@ -3648,6 +4212,9 @@ fn execute_batch(
         Ok(jobs) => jobs,
         Err(error) => return error_output(command.render.common.robot, &error),
     };
+    if let Err(error) = preflight_batch_manifests(fs.as_ref(), command, &jobs) {
+        return error_output(command.render.common.robot, &error);
+    }
     let locator = match prepare_batch_locator(fs.as_ref(), locator, &command.render) {
         Ok(locator) => Arc::new(locator),
         Err(error) => return error_output(command.render.common.robot, &error),
@@ -3712,18 +4279,24 @@ fn execute_batch(
         let task_cancellation = Arc::clone(&cancellation);
         let sender = sender.clone();
         let fail_fast = command.fail_fast;
+        let manifest_dir = command.manifest_dir.clone();
         let Some(handle) = runtime.spawn_blocking(move || {
             let status = if let Some(reason) = batch_cancellation_reason(&task_cancellation) {
                 BatchJobStatus::Cancelled(reason)
             } else {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute_native_render_with_cancellation(
-                        fs,
+                    let mut reports = execute_native_render_with_cancellation(
+                        Arc::clone(&fs),
                         runner,
                         locator.as_ref(),
                         &job.command,
                         Some(task_cancellation.as_ref()),
-                    )
+                        manifest_dir.is_some(),
+                    )?;
+                    if let Some(root) = manifest_dir.as_deref() {
+                        publish_batch_manifests(&fs, root, &mut reports)?;
+                    }
+                    Ok::<_, CliError>(reports)
                 })) {
                     Ok(Ok(reports)) => BatchJobStatus::Succeeded(reports),
                     Ok(Err(error)) => {

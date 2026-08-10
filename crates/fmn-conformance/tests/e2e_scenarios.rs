@@ -78,7 +78,7 @@ use fmn_output::sinks::{
     NativeArtifactKind, NativeArtifactReport, PngSink, PngSinkConfig, PngTarget, SinkLimits,
     Y4mSink, Y4mSinkConfig,
 };
-use fmn_output::{FrameSink, SinkWrite};
+use fmn_output::{FrameSink, ProvenanceManifest, SinkWrite};
 use fmn_platform::fs::FileSystem;
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::FrameArena;
@@ -1096,9 +1096,18 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
 /// request order and publishes each sequence atomically.
 fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let dir = scenario_dir("cli_batch_render")?;
-    let dir_text = dir
+    let artifact_dir = dir.join("artifacts");
+    let manifest_dir = dir.join("manifests");
+    std::fs::create_dir(&artifact_dir)
+        .map_err(|error| fail(format!("create batch artifact directory: {error}")))?;
+    std::fs::create_dir(&manifest_dir)
+        .map_err(|error| fail(format!("create batch manifest directory: {error}")))?;
+    let artifact_text = artifact_dir
         .to_str()
         .ok_or_else(|| fail("CLI batch output path is not UTF-8"))?;
+    let manifest_text = manifest_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI batch manifest path is not UTF-8"))?;
     let scenes = ["circle_shift.v1", "rectangle_shift.v1"];
     let output = fmn_cli::run([
         "batch",
@@ -1113,8 +1122,10 @@ fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         "1",
         "--max-scenes",
         "2",
+        "--manifest-dir",
+        manifest_text,
         "--video_dir",
-        dir_text,
+        artifact_text,
         fmn_cli::BUILTIN_SCENE_SOURCE,
         scenes[0],
         scenes[1],
@@ -1122,8 +1133,9 @@ fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let mut frames = 0_usize;
     let mut complete = true;
     let mut signatures = true;
+    let mut manifests = true;
     for scene in scenes {
-        let sequence = dir.join(scene);
+        let sequence = artifact_dir.join(scene);
         complete &= sequence.join("FMN_COMPLETE").is_file();
         frames = frames.saturating_add(
             std::fs::read_dir(&sequence)
@@ -1135,6 +1147,15 @@ fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         signatures &= std::fs::read(sequence.join("frame_000000.png"))
             .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
             .unwrap_or(false);
+        let generation = manifest_dir.join(scene);
+        manifests &= generation.join("FMN_COMPLETE").is_file()
+            && std::fs::read(generation.join("manifest.fmnp"))
+                .ok()
+                .and_then(|bytes| ProvenanceManifest::from_bytes(&bytes).ok())
+                .is_some_and(|manifest| {
+                    manifest.outputs.len() == 1
+                        && (1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id))
+                });
     }
     let lines: Vec<&str> = output.stdout.lines().collect();
     let ordered_records = lines.len() == 3
@@ -1149,6 +1170,7 @@ fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             .field("format", "png_sequence")
             .field("complete", truth(complete))
             .field("png_signatures", truth(signatures))
+            .field("manifests", truth(manifests))
             .field("ordered_records", truth(ordered_records)),
     );
     ctx.counter("cli_batch_scenes", 2);
@@ -1158,10 +1180,11 @@ fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         || !complete
         || frames != 6
         || !signatures
+        || !manifests
         || !ordered_records
     {
         return Err(fail(format!(
-            "native CLI batch failed: code={} frames={frames} complete={complete} signatures={signatures} ordered={ordered_records} stdout={:?} stderr={:?}",
+            "native CLI batch failed: code={} frames={frames} complete={complete} signatures={signatures} manifests={manifests} ordered={ordered_records} stdout={:?} stderr={:?}",
             output.code, output.stdout, output.stderr
         )));
     }
@@ -2123,6 +2146,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("format", "png_sequence"),
                 FieldPred::str_eq("complete", "true"),
                 FieldPred::str_eq("png_signatures", "true"),
+                FieldPred::str_eq("manifests", "true"),
                 FieldPred::str_eq("ordered_records", "true"),
             ],
         )],

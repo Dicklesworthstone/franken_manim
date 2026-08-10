@@ -288,6 +288,14 @@ pub trait PreparedAtomicDirectory: Send {
 /// listing order ([`FileSystem::list_dir`] returns sorted paths) so no
 /// consumer inherits host directory-iteration order.
 pub trait FileSystem: Send + Sync {
+    /// Stable implementation identity recorded by C9 provenance.
+    ///
+    /// Custom hosts should override the fail-closed default with a versioned
+    /// policy name; pointer/type-debug identities are not durable inputs.
+    fn identity(&self) -> &'static str {
+        "opaque.file_system/v1"
+    }
+
     /// Whether this capability explicitly represents the process's ambient
     /// host filesystem for destructive lifecycle operations.
     ///
@@ -467,6 +475,10 @@ pub trait FileSystem: Send + Sync {
 pub struct StdFs;
 
 impl FileSystem for StdFs {
+    fn identity(&self) -> &'static str {
+        "std.host_file_system/v1"
+    }
+
     fn grants_host_destructive_lifecycle(&self) -> bool {
         true
     }
@@ -1047,6 +1059,10 @@ impl VirtualFs {
 }
 
 impl FileSystem for VirtualFs {
+    fn identity(&self) -> &'static str {
+        "fmn.virtual_file_system/v1"
+    }
+
     fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
         self.with_state(|state| {
             if let Some(kind) = virtual_node_kind(state, path) {

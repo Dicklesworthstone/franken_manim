@@ -22,6 +22,7 @@ use fmn_codec::png::encode_rgba8_segmented_parallel;
 use fmn_codec::y4m::{append_y4m_frame_nv12, y4m_header};
 use fmn_codec::{CompressionLevel, GifStreamEncoder, SampleFormat, Y4mColorspace};
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
+use fmn_hash::{Digest, Sha256, sha256};
 use fmn_platform::clock::Clock;
 use fmn_platform::fs::{
     AtomicDirectoryWriter, AtomicFileWriter, FileSystem, PreparedAtomicDirectory,
@@ -527,6 +528,8 @@ pub struct NativeArtifactReport {
     pub frame_count: u64,
     /// Total published bytes.
     pub bytes: u64,
+    /// Raw-file digest, or the canonical ordered tree digest for a PNG sequence.
+    pub digest: Digest,
 }
 
 /// Successful negotiated ffmpeg publication.
@@ -547,6 +550,8 @@ pub struct WavPublicationReport {
     pub path: PathBuf,
     /// Encoded bytes.
     pub bytes: u64,
+    /// SHA-256 of the exact published WAV bytes.
+    pub digest: Digest,
     /// Interleaved PCM frame count (one sample per channel).
     pub sample_frames: u64,
     /// Mix clipping evidence retained in the report.
@@ -607,6 +612,7 @@ pub struct PngSink {
     prepared_file: Option<Box<dyn PreparedAtomicFile>>,
     prepared_directory: Option<Box<dyn PreparedAtomicDirectory>>,
     artifact_bytes: u64,
+    artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
 }
 
@@ -634,6 +640,10 @@ impl PngSink {
         let state = FrameState::new(config.first_sequence, config.limits);
         state.check_resident(byte_len_from_usize(expected_layout.total_bytes())?)?;
         let scratch_bytes = expected_layout.total_bytes();
+        let mut artifact_hasher = Sha256::new();
+        if matches!(&config.target, PngTarget::Sequence { .. }) {
+            artifact_hasher.update(b"fmn-png-sequence-tree/v1\0");
+        }
         Ok(Self {
             fs,
             config,
@@ -645,6 +655,7 @@ impl PngSink {
             prepared_file: None,
             prepared_directory: None,
             artifact_bytes: 0,
+            artifact_hasher,
             receipt: SinkReceipt::pending(),
         })
     }
@@ -712,6 +723,7 @@ impl PngSink {
         enforce_artifact_limit(artifact_bytes, self.config.limits.max_artifact_bytes)?;
         match &self.config.target {
             PngTarget::Single(_) => {
+                self.artifact_hasher.update(&encoded);
                 self.single_encoded = Some(encoded);
             }
             PngTarget::Sequence {
@@ -727,6 +739,11 @@ impl PngSink {
                     );
                 }
                 let leaf = png_leaf(stem, *digits, sequence);
+                self.artifact_hasher
+                    .update(&u64::try_from(leaf.len()).unwrap_or(u64::MAX).to_le_bytes());
+                self.artifact_hasher.update(leaf.as_bytes());
+                self.artifact_hasher.update(&encoded_bytes.to_le_bytes());
+                self.artifact_hasher.update(&encoded);
                 self.directory_writer
                     .as_mut()
                     .ok_or(SinkAdapterError::AlreadyFinalized)?
@@ -796,11 +813,16 @@ impl PngSink {
                 (NativeArtifactKind::PngSequence, directory.clone())
             }
         };
+        let mut artifact_hasher = self.artifact_hasher.clone();
+        if matches!(&self.config.target, PngTarget::Sequence { .. }) {
+            artifact_hasher.update(&self.state.frame_count.to_le_bytes());
+        }
         Ok(NativeArtifactReport {
             kind,
             path,
             frame_count: self.state.frame_count,
             bytes: self.artifact_bytes,
+            digest: artifact_hasher.finalize(),
         })
     }
 
@@ -891,6 +913,7 @@ pub struct GifSink {
     writer: Option<Box<dyn AtomicFileWriter>>,
     prepared: Option<Box<dyn PreparedAtomicFile>>,
     artifact_bytes: u64,
+    artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
 }
 
@@ -924,6 +947,7 @@ impl GifSink {
             writer: None,
             prepared: None,
             artifact_bytes: 0,
+            artifact_hasher: Sha256::new(),
             receipt: SinkReceipt::pending(),
         })
     }
@@ -964,6 +988,7 @@ impl GifSink {
             writer
                 .write(&header)
                 .map_err(|error| publish_error(&self.config.destination, error))?;
+            self.artifact_hasher.update(&header);
             self.artifact_bytes = header_bytes;
             self.writer = Some(writer);
         }
@@ -1000,6 +1025,7 @@ impl GifSink {
             .ok_or(SinkAdapterError::AlreadyFinalized)?
             .write(&encoded)
             .map_err(|error| publish_error(&self.config.destination, error))?;
+        self.artifact_hasher.update(&encoded);
         self.artifact_bytes = artifact_bytes;
         self.state.commit_frame(frame_bytes);
         Ok(())
@@ -1019,9 +1045,11 @@ impl GifSink {
             .writer
             .take()
             .ok_or(SinkAdapterError::AlreadyFinalized)?;
+        let trailer = GifStreamEncoder::trailer();
         writer
-            .write(&GifStreamEncoder::trailer())
+            .write(&trailer)
             .map_err(|error| publish_error(&self.config.destination, error))?;
+        self.artifact_hasher.update(&trailer);
         self.prepared = Some(
             writer
                 .prepare()
@@ -1043,6 +1071,7 @@ impl GifSink {
             path: self.config.destination.clone(),
             frame_count: self.state.frame_count,
             bytes: self.artifact_bytes,
+            digest: self.artifact_hasher.clone().finalize(),
         })
     }
 
@@ -1131,6 +1160,7 @@ pub struct Y4mSink {
     writer: Option<Box<dyn AtomicFileWriter>>,
     prepared: Option<Box<dyn PreparedAtomicFile>>,
     artifact_bytes: u64,
+    artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
 }
 
@@ -1162,6 +1192,7 @@ impl Y4mSink {
             writer: None,
             prepared: None,
             artifact_bytes: 0,
+            artifact_hasher: Sha256::new(),
             receipt: SinkReceipt::pending(),
         })
     }
@@ -1197,6 +1228,7 @@ impl Y4mSink {
             writer
                 .write(&self.header)
                 .map_err(|error| publish_error(&self.config.destination, error))?;
+            self.artifact_hasher.update(&self.header);
             self.artifact_bytes = byte_len(&self.header)?;
             self.writer = Some(writer);
         }
@@ -1232,6 +1264,7 @@ impl Y4mSink {
             .ok_or(SinkAdapterError::AlreadyFinalized)?
             .write(&self.scratch)
             .map_err(|error| publish_error(&self.config.destination, error))?;
+        self.artifact_hasher.update(&self.scratch);
         self.artifact_bytes = attempted_artifact;
         self.state.commit_frame(payload);
         Ok(())
@@ -1263,6 +1296,7 @@ impl Y4mSink {
             path: self.config.destination.clone(),
             frame_count: self.state.frame_count,
             bytes: self.artifact_bytes,
+            digest: self.artifact_hasher.clone().finalize(),
         })
     }
 
@@ -1655,6 +1689,7 @@ pub fn publish_wav(
     Ok(WavPublicationReport {
         path: config.destination.clone(),
         bytes,
+        digest: sha256(&encoded),
         sample_frames: sample_count / channels,
         clipped_samples: mix.clipped_samples,
         cues_mixed: mix.cues_mixed,

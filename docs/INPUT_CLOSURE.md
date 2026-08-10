@@ -67,6 +67,11 @@ one is a certification bug, not permission to weaken the native claim.
 5. **Absence is encoded.** An item that does not apply (e.g. no ffmpeg
    invoked) is serialized as an explicit `absent` marker, never skipped —
    otherwise "absent" and "forgot to hash" would collide.
+6. **Directory outputs use a canonical tree digest.** A PNG sequence hashes
+   the domain `fmn-png-sequence-tree/v1`, then each published member in frame
+   order as `(leaf-name length, leaf name, byte length, raw bytes)`, followed
+   by the frame count. The atomic `FMN_COMPLETE` publication marker is not an
+   image member and is excluded. Single-file outputs hash their exact bytes.
 
 ## 4. The sidecar provenance manifest (schema sketch)
 
