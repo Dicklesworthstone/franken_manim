@@ -2585,10 +2585,15 @@ impl PyScene {
     /// bootstrap adopts them beforehand. Rendering is a later tranche:
     /// captures flow through a frame-counting probe sink whose recorded
     /// alphas are returned (ordered, one per captured frame).
-    #[pyo3(signature = (pairs, run_time, rate_func, lag_ratio))]
+    /// A camera lerp (cut T3) may ride the segment: `camera` is the
+    /// `(live_core, target_core)` pair; with no mobject pairs the segment
+    /// is a native wait carrying the camera. State-exact at every capture
+    /// boundary and set exactly to the target state at segment end.
+    #[pyo3(signature = (pairs, camera, run_time, rate_func, lag_ratio))]
     fn _play_transforms(
         slf: &Bound<'_, Self>,
         pairs: Vec<(Bound<'_, BridgeMobject>, Bound<'_, BridgeMobject>)>,
+        camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
         run_time: Option<f64>,
         rate_func: Option<&str>,
         lag_ratio: Option<f64>,
@@ -2605,17 +2610,59 @@ impl PyScene {
             }
             animations.push(Box::new(fmn_anim::Transform::new(mob, target_mob)));
         }
+        let effective_run_time = run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME);
+        let camera_lerp = camera
+            .map(|(live, target)| -> PyResult<CameraLerp> {
+                Ok(CameraLerp {
+                    start: live.borrow().frame.clone(),
+                    end: target.borrow().frame.clone(),
+                    core: live.unbind(),
+                    start_time: engine.borrow().stage().time(),
+                    run_time: effective_run_time,
+                    rate: rate_func
+                        .map(named_rate_func)
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
+            .transpose()?;
         let overrides = fmn_scene::PlayOverrides {
             run_time,
             rate_func: rate_func.map(named_rate_func).transpose()?,
             lag_ratio,
         };
-        let mut sink = AlphaProbeSink::default();
-        engine
-            .borrow_mut()
-            .play(animations, overrides, &mut sink)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        Ok(sink.alphas)
+        let mut sink = AlphaProbeSink {
+            camera: camera_lerp,
+            ..AlphaProbeSink::default()
+        };
+        if animations.is_empty() {
+            if sink.camera.is_none() {
+                return Ok(Vec::new());
+            }
+            engine
+                .borrow_mut()
+                .wait(Some(effective_run_time), &mut sink)
+                .map(|_| ())
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        } else {
+            engine
+                .borrow_mut()
+                .play(animations, overrides, &mut sink)
+                .map(|_| ())
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let AlphaProbeSink {
+            alphas,
+            camera,
+            camera_error,
+        } = sink;
+        if let Some(error) = camera_error {
+            return Err(error);
+        }
+        if let Some(camera) = camera {
+            camera.finish_exact(slf.py())?;
+        }
+        Ok(alphas)
     }
 
     /// Adopt a detached mobject graph into this scene's arena WITHOUT
@@ -2671,11 +2718,73 @@ fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
     Ok(fmn_anim::RateFunc::Base(function))
 }
 
-/// The portal's play sink: validates the capture boundary contract and
-/// records each captured frame's alpha (rendering is a later tranche).
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    (1.0 - t) * a + t * b
+}
+
+/// Cut T3 (fm-d3gt): the camera-frame interpolation a play segment
+/// carries. The camera core is its OWN pyclass cell, independent of the
+/// Scene RefCell the segment driver holds — so per-frame interpolation
+/// inside the sink never crosses the live engine borrow, and no Python
+/// dispatch happens mid-segment (the lerp is pure Rust). Semantics mirror
+/// the Reference's frame Transform: componentwise quaternion lerp
+/// (normalized on write, scipy's own read-side rule), linear
+/// center/shape/fovy.
+struct CameraLerp {
+    core: Py<PyCameraFrameCore>,
+    start: fmn_scene::studio_bridge::CameraFrame,
+    end: fmn_scene::studio_bridge::CameraFrame,
+    start_time: f64,
+    run_time: f64,
+    rate: fmn_anim::RateFunc,
+}
+
+impl CameraLerp {
+    fn apply(&self, py: Python<'_>, raw_alpha: f64) -> PyResult<()> {
+        let alpha = self.rate.eval(raw_alpha.clamp(0.0, 1.0));
+        let mut core = self.core.bind(py).borrow_mut();
+        let (start, end) = (&self.start, &self.end);
+        let center = [
+            lerp(start.center()[0], end.center()[0], alpha),
+            lerp(start.center()[1], end.center()[1], alpha),
+            lerp(start.center()[2], end.center()[2], alpha),
+        ];
+        let shape = [
+            lerp(start.shape()[0], end.shape()[0], alpha),
+            lerp(start.shape()[1], end.shape()[1], alpha),
+        ];
+        let fovy = lerp(start.field_of_view(), end.field_of_view(), alpha);
+        let orientation = [
+            lerp(start.orientation()[0], end.orientation()[0], alpha),
+            lerp(start.orientation()[1], end.orientation()[1], alpha),
+            lerp(start.orientation()[2], end.orientation()[2], alpha),
+            lerp(start.orientation()[3], end.orientation()[3], alpha),
+        ];
+        core.frame.set_center(center).map_err(camera_error)?;
+        core.frame.set_shape(shape).map_err(camera_error)?;
+        core.frame.set_field_of_view(fovy).map_err(camera_error)?;
+        core.frame
+            .set_orientation(orientation)
+            .map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn finish_exact(&self, py: Python<'_>) -> PyResult<()> {
+        let mut core = self.core.bind(py).borrow_mut();
+        core.frame = self.end.clone();
+        Ok(())
+    }
+}
+
+/// The portal's play sink: validates the capture boundary contract,
+/// records each captured frame's alpha (rendering is a later tranche),
+/// and — when a camera lerp rides the segment — writes the interpolated
+/// camera state at every capture boundary.
 #[derive(Default)]
 struct AlphaProbeSink {
     alphas: Vec<f64>,
+    camera: Option<CameraLerp>,
+    camera_error: Option<PyErr>,
 }
 
 impl fmn_scene::SceneSink for AlphaProbeSink {
@@ -2685,6 +2794,23 @@ impl fmn_scene::SceneSink for AlphaProbeSink {
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
         self.alphas.push(packet.alpha());
+        if let Some(camera) = &self.camera
+            && self.camera_error.is_none()
+        {
+            let raw = if camera.run_time > 0.0 {
+                (packet.time().to_f64() - camera.start_time) / camera.run_time
+            } else {
+                1.0
+            };
+            // The GIL is held by the pymethod driving this segment;
+            // attach re-enters it. Only the camera core cell is borrowed
+            // — never the Scene.
+            Python::attach(|py| {
+                if let Err(error) = camera.apply(py, raw) {
+                    self.camera_error = Some(error);
+                }
+            });
+        }
         Ok(())
     }
 }

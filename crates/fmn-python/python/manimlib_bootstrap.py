@@ -2787,15 +2787,14 @@ class CameraFrame(Mobject):
             euler_axes,
         )
 
-    @property
-    def animate(self):
-        # T3 (fm-d3gt): the frame's state lives in the engine camera core,
-        # not in stage records — a record-level Transform would silently
-        # animate nothing. Precise refusal until the camera track lands.
-        raise NotImplementedError(
-            "CameraFrame.animate awaits the camera-track cut (T3); "
-            "reorient/move_to/set_height apply instantly meanwhile"
-        )
+    def copy(self, deep=False):
+        # The generic shallow copy shares non-mobject attributes by
+        # reference; the camera core must never be shared, or .animate's
+        # target would mutate the live frame.
+        result = super().copy(deep)
+        if getattr(result, "_core", None) is self._core:
+            result.__dict__["_core"] = _copy.copy(self._core)
+        return result
 
     # -- the positional primitives, routed to the engine camera state
 
@@ -3093,6 +3092,7 @@ class Scene(_SceneCore):
                         "frames with Scene.update meanwhile"
                     )
         pairs = []
+        camera_pair = None
         anim_args = {}
         for proto in proto_animations:
             if not isinstance(proto, _AnimationBuilder):
@@ -3116,6 +3116,16 @@ class Scene(_SceneCore):
                     )
                 anim_args[key] = value
             mobject = proto.mobject
+            if isinstance(mobject, CameraFrame):
+                # Cut T3: the camera lerp rides the same segment; its state
+                # lives in the engine camera core, never in stage records.
+                if camera_pair is not None:
+                    raise NotImplementedError(
+                        "one camera-frame builder per play; merge the "
+                        "reorient chain into a single .animate"
+                    )
+                camera_pair = (mobject._core, mobject.target._core)
+                continue
             if not mobject._is_bound():
                 self.add(mobject)
             target = mobject.target
@@ -3137,6 +3147,7 @@ class Scene(_SceneCore):
                 )
         return self._play_transforms(
             pairs,
+            camera_pair,
             None if run_time is None else float(run_time),
             rate_func,
             None if lag_ratio is None else float(lag_ratio),
