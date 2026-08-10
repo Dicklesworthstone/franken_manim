@@ -74,7 +74,12 @@ fn scratch(tag: &str) -> (PathBuf, MutexGuard<'static, ()>) {
     // A panicking test poisons the mutex; the gate protects a file-system
     // race, not an invariant, so a poisoned gate is still a usable gate.
     let gate = SPAWN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
-    let dir = std::env::temp_dir().join(format!(
+    // The boundary canonicalizes its session paths, and macOS serves
+    // temp_dir from /var -> /private/var; resolve the root up front so
+    // scripted-runner outcomes are keyed by the paths the boundary sees.
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.canonicalize().unwrap_or(tmp);
+    let dir = tmp.join(format!(
         "fmn-boundary-test-{}-{}-{tag}",
         std::process::id(),
         DIR_SEQ.fetch_add(1, Ordering::Relaxed)

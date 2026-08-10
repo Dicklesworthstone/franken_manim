@@ -1490,7 +1490,12 @@ mod ffmpeg_boundary {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        // macOS serves temp_dir from /var -> /private/var; resolve it so
+        // runner outcomes keyed by path match what the boundary
+        // canonicalizes to.
+        let tmp = std::env::temp_dir();
+        let tmp = tmp.canonicalize().unwrap_or(tmp);
+        let path = tmp.join(format!(
             "fmn-sinks-test-{}-{}-{tag}",
             std::process::id(),
             SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
