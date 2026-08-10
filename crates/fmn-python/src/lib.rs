@@ -2599,187 +2599,32 @@ impl PyScene {
     /// boundary and set exactly to the target state at segment end.
     /// Each spec is `(kind, mobject, target, run_time, rate_func,
     /// lag_ratio, params)` and builds one native fmn-anim animation.
-    #[allow(clippy::type_complexity, clippy::too_many_lines)]
+    /// Composition kinds (`animation_group`, `lagged_start`, `succession`)
+    /// carry nested specs under `params["members"]` and the construction
+    /// lag under `params["lag_ratio"]`; the native module owns the group
+    /// timing derivation (`build_timings`, the Reference's rule).
     #[pyo3(signature = (specs, camera, run_time, rate_func, lag_ratio))]
     fn _play_animations(
         slf: &Bound<'_, Self>,
-        specs: Vec<(
-            String,
-            Bound<'_, BridgeMobject>,
-            Option<Bound<'_, BridgeMobject>>,
-            Option<f64>,
-            Option<String>,
-            Option<f64>,
-            Bound<'_, PyDict>,
-        )>,
+        specs: Vec<Bound<'_, PyAny>>,
         camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
         run_time: Option<f64>,
         rate_func: Option<&str>,
         lag_ratio: Option<f64>,
     ) -> PyResult<Vec<f64>> {
-        let anim_error = |error: fmn_anim::AnimError| PyRuntimeError::new_err(error.to_string());
         let engine = Rc::clone(&slf.borrow().engine);
 
         // Resolve every Python-side value before the engine borrow.
-        struct Resolved {
-            kind: String,
-            mob: Mob,
-            target: Option<Mob>,
-            run_time: Option<f64>,
-            rate: Option<String>,
-            lag: Option<f64>,
-            shift: [f64; 3],
-            scale: f64,
-            angle: f64,
-            axis: [f64; 3],
-            about_point: Option<[f64; 3]>,
-            about_edge: [f64; 3],
-            path_arc: f64,
-            path_arc_axis: [f64; 3],
-            stroke_color: Option<[f64; 3]>,
-        }
         let mut resolved = Vec::with_capacity(specs.len());
-        for (kind, mobject, target, spec_rt, spec_rate, spec_lag, params) in &specs {
-            let (mob_engine, mob) = bound_parts(&mobject.borrow())?;
-            if !same_engine(&engine, &mob_engine) {
-                return Err(ForeignStageError::new_err(
-                    "play endpoints must belong to this Scene",
-                ));
-            }
-            let target = target
-                .as_ref()
-                .map(|proxy| -> PyResult<Mob> {
-                    let (target_engine, target_mob) = bound_parts(&proxy.borrow())?;
-                    if !same_engine(&engine, &target_engine) {
-                        return Err(ForeignStageError::new_err(
-                            "play endpoints must belong to this Scene",
-                        ));
-                    }
-                    Ok(target_mob)
-                })
-                .transpose()?;
-            let get3 = |name: &str, default: [f64; 3]| -> PyResult<[f64; 3]> {
-                match params.get_item(name)? {
-                    Some(value) => Ok(value.extract()?),
-                    None => Ok(default),
-                }
-            };
-            let get1 = |name: &str, default: f64| -> PyResult<f64> {
-                match params.get_item(name)? {
-                    Some(value) => Ok(value.extract()?),
-                    None => Ok(default),
-                }
-            };
-            resolved.push(Resolved {
-                kind: kind.clone(),
-                mob,
-                target,
-                run_time: *spec_rt,
-                rate: spec_rate.clone(),
-                lag: *spec_lag,
-                shift: get3("shift", [0.0; 3])?,
-                scale: get1("scale", 1.0)?,
-                angle: get1("angle", std::f64::consts::PI)?,
-                axis: get3("axis", [0.0, 0.0, 1.0])?,
-                about_point: params
-                    .get_item("about_point")?
-                    .map(|value| value.extract())
-                    .transpose()?,
-                about_edge: get3("about_edge", [0.0; 3])?,
-                path_arc: get1("path_arc", 0.0)?,
-                path_arc_axis: get3("path_arc_axis", [0.0, 0.0, 1.0])?,
-                stroke_color: params
-                    .get_item("stroke_color")?
-                    .map(|value| value.extract())
-                    .transpose()?,
-            });
+        for spec in &specs {
+            resolved.push(parse_anim_spec(&engine, spec)?);
         }
-        let need_target = |target: Option<Mob>| {
-            target.ok_or_else(|| PyValueError::new_err("this animation requires a target"))
-        };
 
         let mut scene = engine.borrow_mut();
         let start_time = scene.stage().time();
         let mut animations: Vec<Box<dyn fmn_anim::Animation>> = Vec::with_capacity(resolved.len());
         for spec in resolved {
-            let stage = scene.stage_mut();
-            let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
-                "transform" => {
-                    let mut transform =
-                        fmn_anim::Transform::new(spec.mob, need_target(spec.target)?);
-                    if spec.path_arc != 0.0 {
-                        transform = transform.with_path_arc(spec.path_arc, spec.path_arc_axis);
-                    }
-                    Box::new(transform)
-                }
-                "replacement_transform" => Box::new(fmn_anim::replacement_transform(
-                    spec.mob,
-                    need_target(spec.target)?,
-                )),
-                "transform_from_copy" => Box::new(
-                    fmn_anim::transform_from_copy(stage, spec.mob, need_target(spec.target)?)
-                        .map_err(anim_error)?,
-                ),
-                "fade_in" => Box::new(
-                    fmn_anim::fade_in(stage, spec.mob, spec.shift, spec.scale)
-                        .map_err(anim_error)?,
-                ),
-                "fade_out" => Box::new(
-                    fmn_anim::fade_out(stage, spec.mob, spec.shift, spec.scale)
-                        .map_err(anim_error)?,
-                ),
-                "v_fade_in" => Box::new(fmn_anim::v_fade_in(spec.mob)),
-                "v_fade_out" => Box::new(fmn_anim::v_fade_out(spec.mob)),
-                "show_creation" => Box::new(fmn_anim::show_creation(spec.mob)),
-                "uncreate" => Box::new(fmn_anim::uncreate(spec.mob)),
-                "write" => {
-                    let mut write = fmn_anim::write(stage, spec.mob);
-                    if let Some(rgb) = spec.stroke_color {
-                        #[allow(clippy::cast_possible_truncation)]
-                        let rgb = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32];
-                        write = write.with_stroke_color(Some(rgb));
-                    }
-                    Box::new(write)
-                }
-                "rotate" => {
-                    let mut rotating = fmn_anim::rotate(spec.mob, spec.angle)
-                        .with_axis(spec.axis)
-                        .with_about_edge(spec.about_edge);
-                    if let Some(point) = spec.about_point {
-                        rotating = rotating.with_about_point(point);
-                    }
-                    Box::new(rotating)
-                }
-                "grow_from_center" => {
-                    Box::new(fmn_anim::grow_from_center(stage, spec.mob, None).map_err(anim_error)?)
-                }
-                "grow_arrow" => {
-                    Box::new(fmn_anim::grow_arrow(stage, spec.mob).map_err(anim_error)?)
-                }
-                "fade_transform" => Box::new(
-                    fmn_anim::fade_transform(stage, spec.mob, need_target(spec.target)?)
-                        .map_err(anim_error)?,
-                ),
-                "restore" => Box::new(fmn_anim::restore(stage, spec.mob).map_err(anim_error)?),
-                other => {
-                    return Err(PyValueError::new_err(format!(
-                        "animation kind `{other}` is not routed to the native shelf"
-                    )));
-                }
-            };
-            {
-                let config = &mut animation.state_mut().config;
-                if let Some(value) = spec.run_time {
-                    config.run_time = value;
-                }
-                if let Some(name) = &spec.rate {
-                    config.rate_func = named_rate_func(name)?;
-                }
-                if let Some(value) = spec.lag {
-                    config.lag_ratio = value;
-                }
-            }
-            animations.push(animation);
+            animations.push(build_native_animation(scene.stage_mut(), spec)?);
         }
         let effective_run_time = run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME);
         let camera_lerp = camera
@@ -2908,6 +2753,258 @@ impl PyScene {
 /// rate functions, the same pointers Choreo composes). Parameterized and
 /// arbitrary Python callables refuse precisely — a per-frame Python
 /// rate_func is a crossing-budget decision for a later rung.
+fn anim_error(error: fmn_anim::AnimError) -> PyErr {
+    PyRuntimeError::new_err(error.to_string())
+}
+
+/// One parsed play spec: a leaf animation or a composition carrying
+/// nested members (fm-d3gt, the explicit-animation seam).
+struct AnimSpec {
+    kind: String,
+    mob: Option<Mob>,
+    target: Option<Mob>,
+    run_time: Option<f64>,
+    rate: Option<String>,
+    lag: Option<f64>,
+    shift: [f64; 3],
+    scale: f64,
+    angle: f64,
+    axis: [f64; 3],
+    about_point: Option<[f64; 3]>,
+    about_edge: [f64; 3],
+    about_edge_opt: Option<[f64; 3]>,
+    path_arc: f64,
+    path_arc_axis: [f64; 3],
+    stroke_color: Option<[f64; 3]>,
+    point: [f64; 3],
+    time_span: Option<(f64, f64)>,
+    group_lag: f64,
+    members: Vec<AnimSpec>,
+}
+
+#[allow(clippy::type_complexity)]
+fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpec> {
+    let (kind, mobject, target, run_time, rate, lag, params): (
+        String,
+        Option<Bound<'_, BridgeMobject>>,
+        Option<Bound<'_, BridgeMobject>>,
+        Option<f64>,
+        Option<String>,
+        Option<f64>,
+        Bound<'_, PyDict>,
+    ) = spec.extract()?;
+    let resolve = |proxy: &Bound<'_, BridgeMobject>| -> PyResult<Mob> {
+        let (mob_engine, mob) = bound_parts(&proxy.borrow())?;
+        if same_engine(engine, &mob_engine) {
+            Ok(mob)
+        } else {
+            Err(ForeignStageError::new_err(
+                "play endpoints must belong to this Scene",
+            ))
+        }
+    };
+    let get3 = |name: &str, default: [f64; 3]| -> PyResult<[f64; 3]> {
+        match params.get_item(name)? {
+            Some(value) => Ok(value.extract()?),
+            None => Ok(default),
+        }
+    };
+    let get1 = |name: &str, default: f64| -> PyResult<f64> {
+        match params.get_item(name)? {
+            Some(value) => Ok(value.extract()?),
+            None => Ok(default),
+        }
+    };
+    let members = match params.get_item("members")? {
+        Some(list) => list
+            .try_iter()?
+            .map(|item| parse_anim_spec(engine, &item?))
+            .collect::<PyResult<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    Ok(AnimSpec {
+        kind,
+        mob: mobject.as_ref().map(&resolve).transpose()?,
+        target: target.as_ref().map(&resolve).transpose()?,
+        run_time,
+        rate,
+        lag,
+        shift: get3("shift", [0.0; 3])?,
+        scale: get1("scale", 1.0)?,
+        angle: get1("angle", std::f64::consts::PI)?,
+        axis: get3("axis", [0.0, 0.0, 1.0])?,
+        about_point: params
+            .get_item("about_point")?
+            .map(|value| value.extract())
+            .transpose()?,
+        about_edge: get3("about_edge", [0.0; 3])?,
+        about_edge_opt: params
+            .get_item("about_edge")?
+            .map(|value| value.extract())
+            .transpose()?,
+        path_arc: get1("path_arc", 0.0)?,
+        path_arc_axis: get3("path_arc_axis", [0.0, 0.0, 1.0])?,
+        stroke_color: params
+            .get_item("stroke_color")?
+            .map(|value| value.extract())
+            .transpose()?,
+        point: get3("point", [0.0; 3])?,
+        time_span: params
+            .get_item("time_span")?
+            .map(|value| value.extract())
+            .transpose()?,
+        group_lag: get1("lag_ratio", 0.0)?,
+        members,
+    })
+}
+
+/// Build one native animation from a parsed spec, recursing into
+/// composition members. The native constructors own all timing math.
+#[allow(clippy::too_many_lines)]
+fn build_native_animation(
+    stage: &mut fmn_mobject::Stage,
+    spec: AnimSpec,
+) -> PyResult<Box<dyn fmn_anim::Animation>> {
+    let need_target = |target: Option<Mob>| {
+        target.ok_or_else(|| PyValueError::new_err("this animation requires a target"))
+    };
+    let need_mob = |mob: Option<Mob>| {
+        mob.ok_or_else(|| PyValueError::new_err("this animation requires a mobject"))
+    };
+    let is_composition = matches!(
+        spec.kind.as_str(),
+        "animation_group" | "lagged_start" | "succession"
+    );
+    let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
+        "animation_group" | "lagged_start" => {
+            let mut members = Vec::with_capacity(spec.members.len());
+            for member in spec.members {
+                members.push(build_native_animation(stage, member)?);
+            }
+            let mut group =
+                fmn_anim::AnimationGroup::with_lag_ratio(stage, members, spec.group_lag)
+                    .map_err(anim_error)?;
+            if spec.kind == "lagged_start" {
+                group = group.with_name("LaggedStart");
+            }
+            Box::new(group)
+        }
+        "succession" => {
+            let mut members = Vec::with_capacity(spec.members.len());
+            for member in spec.members {
+                members.push(build_native_animation(stage, member)?);
+            }
+            Box::new(
+                fmn_anim::Succession::with_lag_ratio(stage, members, spec.group_lag)
+                    .map_err(anim_error)?,
+            )
+        }
+        "transform" => {
+            let mut transform =
+                fmn_anim::Transform::new(need_mob(spec.mob)?, need_target(spec.target)?);
+            if spec.path_arc != 0.0 {
+                transform = transform.with_path_arc(spec.path_arc, spec.path_arc_axis);
+            }
+            Box::new(transform)
+        }
+        "replacement_transform" => Box::new(fmn_anim::replacement_transform(
+            need_mob(spec.mob)?,
+            need_target(spec.target)?,
+        )),
+        "transform_from_copy" => Box::new(
+            fmn_anim::transform_from_copy(stage, need_mob(spec.mob)?, need_target(spec.target)?)
+                .map_err(anim_error)?,
+        ),
+        "fade_in" => Box::new(
+            fmn_anim::fade_in(stage, need_mob(spec.mob)?, spec.shift, spec.scale)
+                .map_err(anim_error)?,
+        ),
+        "fade_out" => Box::new(
+            fmn_anim::fade_out(stage, need_mob(spec.mob)?, spec.shift, spec.scale)
+                .map_err(anim_error)?,
+        ),
+        "fade_in_from_point" => Box::new(
+            fmn_anim::fade_in_from_point(stage, need_mob(spec.mob)?, spec.point)
+                .map_err(anim_error)?,
+        ),
+        "fade_out_to_point" => Box::new(
+            fmn_anim::fade_out_to_point(stage, need_mob(spec.mob)?, spec.point)
+                .map_err(anim_error)?,
+        ),
+        "v_fade_in" => Box::new(fmn_anim::v_fade_in(need_mob(spec.mob)?)),
+        "v_fade_out" => Box::new(fmn_anim::v_fade_out(need_mob(spec.mob)?)),
+        "show_creation" => Box::new(fmn_anim::show_creation(need_mob(spec.mob)?)),
+        "uncreate" => Box::new(fmn_anim::uncreate(need_mob(spec.mob)?)),
+        "write" => {
+            let mut write = fmn_anim::write(stage, need_mob(spec.mob)?);
+            if let Some(rgb) = spec.stroke_color {
+                #[allow(clippy::cast_possible_truncation)]
+                let rgb = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32];
+                write = write.with_stroke_color(Some(rgb));
+            }
+            Box::new(write)
+        }
+        "rotate" => {
+            let mut rotating = fmn_anim::rotate(need_mob(spec.mob)?, spec.angle)
+                .with_axis(spec.axis)
+                .with_about_edge(spec.about_edge);
+            if let Some(point) = spec.about_point {
+                rotating = rotating.with_about_point(point);
+            }
+            Box::new(rotating)
+        }
+        "rotating" => {
+            // Rotating's Reference defaults (TAU, 5 s, linear) live in the
+            // native constructor; both pivots stay None unless given,
+            // exactly the Reference's signature.
+            let mut rotating = fmn_anim::Rotating::new(need_mob(spec.mob)?)
+                .with_angle(spec.angle)
+                .with_axis(spec.axis);
+            if let Some(point) = spec.about_point {
+                rotating = rotating.with_about_point(point);
+            }
+            if let Some(edge) = spec.about_edge_opt {
+                rotating = rotating.with_about_edge(edge);
+            }
+            Box::new(rotating)
+        }
+        "grow_from_center" => Box::new(
+            fmn_anim::grow_from_center(stage, need_mob(spec.mob)?, None).map_err(anim_error)?,
+        ),
+        "grow_arrow" => {
+            Box::new(fmn_anim::grow_arrow(stage, need_mob(spec.mob)?).map_err(anim_error)?)
+        }
+        "fade_transform" => Box::new(
+            fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
+                .map_err(anim_error)?,
+        ),
+        "restore" => Box::new(fmn_anim::restore(stage, need_mob(spec.mob)?).map_err(anim_error)?),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "animation kind `{other}` is not routed to the native shelf"
+            )));
+        }
+    };
+    {
+        let config = &mut animation.state_mut().config;
+        if let Some(value) = spec.run_time {
+            config.run_time = value;
+        }
+        if let Some(name) = &spec.rate {
+            config.rate_func = named_rate_func(name)?;
+        }
+        if let Some(value) = spec.lag
+            && !is_composition
+        {
+            config.lag_ratio = value;
+        }
+        if let Some(span) = spec.time_span {
+            config.time_span = Some(span);
+        }
+    }
+    Ok(animation)
+}
+
 fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
     let function: fn(f64) -> f64 = match name {
         "linear" => fmn_core::rate::linear,

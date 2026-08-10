@@ -3111,9 +3111,7 @@ class Scene(_SceneCore):
                 )
             return name
 
-        specs = []
-        camera_pair = None
-        for proto in proto_animations:
+        def build_spec(proto, nested):
             if isinstance(proto, _AnimationBuilder):
                 if proto.overridden_animation is not None:
                     raise NotImplementedError(
@@ -3129,32 +3127,46 @@ class Scene(_SceneCore):
                     spec_args[key] = value
                 mobject = proto.mobject
                 if isinstance(mobject, CameraFrame):
-                    # Cut T3: the camera lerp rides the same segment; its
-                    # state lives in the engine camera core, not records.
-                    if camera_pair is not None:
-                        raise NotImplementedError(
-                            "one camera-frame builder per play; merge the "
-                            "reorient chain into a single .animate"
-                        )
-                    camera_pair = (mobject._core, mobject.target._core)
-                    continue
+                    raise NotImplementedError(
+                        "the camera-frame lerp cannot nest inside a "
+                        "composition; play frame.animate at the top level"
+                    )
                 if not mobject._is_bound():
                     self.add(mobject)
                 target = mobject.target
                 if not target._is_bound():
                     self._adopt(target)
-                specs.append(
-                    (
-                        "transform",
-                        mobject,
-                        target,
-                        spec_args.get("run_time"),
-                        rate_name(spec_args.get("rate_func"), "animate"),
-                        spec_args.get("lag_ratio"),
-                        {},
-                    )
+                return (
+                    "transform",
+                    mobject,
+                    target,
+                    spec_args.get("run_time"),
+                    rate_name(spec_args.get("rate_func"), "animate"),
+                    spec_args.get("lag_ratio"),
+                    {},
                 )
-            elif isinstance(proto, Animation) and getattr(proto, "_native_kind", None):
+            if isinstance(proto, Animation) and getattr(proto, "_native_kind", None):
+                params = dict(proto._native_params())
+                if proto.time_span is not None:
+                    params["time_span"] = proto.time_span
+                if isinstance(proto, AnimationGroup):
+                    params["members"] = [
+                        build_spec(member, True) for member in proto.animations
+                    ]
+                    params["lag_ratio"] = float(
+                        type(proto)._default_lag_ratio
+                        if proto.lag_ratio is None
+                        else proto.lag_ratio
+                    )
+                    return (
+                        proto._native_kind,
+                        None,
+                        None,
+                        None if proto.run_time is None else float(proto.run_time),
+                        rate_name(proto.rate_func, type(proto).__name__),
+                        None,
+                        params,
+                    )
                 mobject = proto.mobject
                 if isinstance(mobject, CameraFrame):
                     raise NotImplementedError(
@@ -3166,27 +3178,42 @@ class Scene(_SceneCore):
                 target = proto._native_target()
                 if target is not None and not target._is_bound():
                     self._adopt(target)
-                specs.append(
-                    (
-                        proto._native_kind,
-                        mobject,
-                        target,
-                        None if proto.run_time is None else float(proto.run_time),
-                        rate_name(proto.rate_func, type(proto).__name__),
-                        None if proto.lag_ratio is None else float(proto.lag_ratio),
-                        proto._native_params(),
-                    )
+                return (
+                    proto._native_kind,
+                    mobject,
+                    target,
+                    None if proto.run_time is None else float(proto.run_time),
+                    rate_name(proto.rate_func, type(proto).__name__),
+                    None if proto.lag_ratio is None else float(proto.lag_ratio),
+                    params,
                 )
-            elif isinstance(proto, Animation):
+            if isinstance(proto, Animation):
                 raise NotImplementedError(
                     type(proto).__name__
                     + " is not yet routed to the native animation shelf"
                 )
-            else:
-                raise NotImplementedError(
-                    "Scene.play accepts mobject.animate builders and the "
-                    "bound Animation classes; got " + type(proto).__name__
-                )
+            raise NotImplementedError(
+                ("a composition member" if nested else "Scene.play")
+                + " accepts mobject.animate builders and the bound "
+                "Animation classes; got " + type(proto).__name__
+            )
+
+        specs = []
+        camera_pair = None
+        for proto in proto_animations:
+            if isinstance(proto, _AnimationBuilder) and isinstance(
+                proto.mobject, CameraFrame
+            ):
+                # Cut T3: the camera lerp rides the same segment; its
+                # state lives in the engine camera core, not records.
+                if camera_pair is not None:
+                    raise NotImplementedError(
+                        "one camera-frame builder per play; merge the "
+                        "reorient chain into a single .animate"
+                    )
+                camera_pair = (proto.mobject._core, proto.mobject.target._core)
+                continue
+            specs.append(build_spec(proto, False))
         return self._play_animations(
             specs,
             camera_pair,
@@ -3256,7 +3283,15 @@ class _NativeAnimation(Animation):
     _native_kind = None
     _target_attr = None
 
-    def __init__(self, mobject, run_time=None, rate_func=None, lag_ratio=None, **kwargs):
+    def __init__(
+        self,
+        mobject,
+        run_time=None,
+        rate_func=None,
+        lag_ratio=None,
+        time_span=None,
+        **kwargs,
+    ):
         _refuse_unrouted(
             type(self).__name__ + "()", [(name, True) for name in sorted(kwargs)]
         )
@@ -3264,6 +3299,9 @@ class _NativeAnimation(Animation):
         self.run_time = run_time
         self.rate_func = rate_func
         self.lag_ratio = lag_ratio
+        self.time_span = (
+            None if time_span is None else (float(time_span[0]), float(time_span[1]))
+        )
 
     def _native_params(self):
         return {}
@@ -3394,6 +3432,40 @@ class Rotate(_NativeAnimation):
         return params
 
 
+class Rotating(_NativeAnimation):
+    _native_kind = "rotating"
+
+    def __init__(
+        self,
+        mobject,
+        angle=_math.tau,
+        axis=_OUT,
+        about_point=None,
+        about_edge=None,
+        run_time=5.0,
+        rate_func=None,
+        suspend_mobject_updating=False,
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "Rotating()",
+            [("suspend_mobject_updating", bool(suspend_mobject_updating))],
+        )
+        super().__init__(mobject, run_time=run_time, rate_func=rate_func, **kwargs)
+        self.angle = float(angle)
+        self.axis = _vec3(axis)
+        self.about_point = None if about_point is None else _vec3(about_point)
+        self.about_edge = None if about_edge is None else _vec3(about_edge)
+
+    def _native_params(self):
+        params = {"angle": self.angle, "axis": self.axis}
+        if self.about_point is not None:
+            params["about_point"] = self.about_point
+        if self.about_edge is not None:
+            params["about_edge"] = self.about_edge
+        return params
+
+
 class GrowFromCenter(_NativeAnimation):
     _native_kind = "grow_from_center"
 
@@ -3455,6 +3527,73 @@ class FadeTransform(_NativeAnimation):
         )
         super().__init__(mobject, **kwargs)
         self.target_mobject = target_mobject
+
+
+class FadeInFromPoint(_NativeAnimation):
+    # Reference fading.py:71 — routed to the native fade_in_from_point,
+    # which encodes the same shift/scale composition.
+    _native_kind = "fade_in_from_point"
+
+    def __init__(self, mobject, point, **kwargs):
+        super().__init__(mobject, **kwargs)
+        self.point = _vec3(point)
+
+    def _native_params(self):
+        return {"point": self.point}
+
+
+class FadeOutToPoint(FadeInFromPoint):
+    _native_kind = "fade_out_to_point"
+
+
+class AnimationGroup(_NativeAnimation):
+    """Reference composition.py: members share one segment; the native
+    module owns the group timing derivation (build_timings — the
+    Reference's `interpolate(start, end, lag_ratio)` rule)."""
+
+    _native_kind = "animation_group"
+    _default_lag_ratio = 0.0
+
+    def __init__(self, *animations, run_time=-1, lag_ratio=None, group=None, group_type=None, **kwargs):
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [("group", group is not None), ("group_type", group_type is not None)],
+        )
+        if (
+            len(animations) == 1
+            and not isinstance(animations[0], (Animation, _AnimationBuilder))
+            and isinstance(animations[0], _collections_abc.Iterable)
+        ):
+            animations = tuple(animations[0])
+        super().__init__(
+            None,
+            run_time=None if run_time == -1 else run_time,
+            lag_ratio=type(self)._default_lag_ratio if lag_ratio is None else lag_ratio,
+            **kwargs,
+        )
+        self.animations = list(animations)
+
+
+class LaggedStart(AnimationGroup):
+    _native_kind = "lagged_start"
+    _default_lag_ratio = 0.05
+
+
+class Succession(AnimationGroup):
+    _native_kind = "succession"
+    _default_lag_ratio = 1.0
+
+
+class LaggedStartMap(LaggedStart):
+    def __init__(self, anim_func, group, run_time=2.0, lag_ratio=0.05, **kwargs):
+        # Reference composition.py:166 verbatim: one animation per member.
+        anim_kwargs = dict(kwargs)
+        anim_kwargs.pop("lag_ratio", None)
+        super().__init__(
+            *(anim_func(submob, **anim_kwargs) for submob in group),
+            run_time=run_time,
+            lag_ratio=lag_ratio,
+        )
 
 
 
@@ -3758,7 +3897,14 @@ def _install_schema_surface():
         ("manimlib.animation.fading", "VFadeIn"): VFadeIn,
         ("manimlib.animation.fading", "VFadeOut"): VFadeOut,
         ("manimlib.animation.fading", "FadeTransform"): FadeTransform,
+        ("manimlib.animation.fading", "FadeInFromPoint"): FadeInFromPoint,
+        ("manimlib.animation.fading", "FadeOutToPoint"): FadeOutToPoint,
+        ("manimlib.animation.composition", "AnimationGroup"): AnimationGroup,
+        ("manimlib.animation.composition", "LaggedStart"): LaggedStart,
+        ("manimlib.animation.composition", "LaggedStartMap"): LaggedStartMap,
+        ("manimlib.animation.composition", "Succession"): Succession,
         ("manimlib.animation.rotation", "Rotate"): Rotate,
+        ("manimlib.animation.rotation", "Rotating"): Rotating,
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
         ("manimlib.animation.transform", "Transform"): Transform,
