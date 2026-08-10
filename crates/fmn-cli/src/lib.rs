@@ -27,9 +27,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use fmn_core::color::Srgb;
-use fmn_core::rng::RNG_LAYOUT_VERSION;
+use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
+use fmn_mobject::SceneState;
 use fmn_output::{
     ArtifactDigest, ClosureItem, ColorDescription, Container, EmitterConfig, EmitterHandle,
     EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig,
@@ -43,8 +44,9 @@ use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
 use fmn_scene::{
-    BundleReadError, CaptureReason, DEFAULT_MAX_BUNDLE_BYTES, IntegrationError, NullSceneSink,
-    OutputNaming, SceneSink, TimelineBundle,
+    AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
+    EffectClass, Entry, IntegrationError, Journal, NullSceneSink, OutputNaming, SceneSink,
+    TimelineBundle,
 };
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
@@ -2437,6 +2439,28 @@ impl NativeStudioFrames {
             }
         }
     }
+
+    fn clock_frame_at(&self, index: usize) -> Result<i64, fmn_studio::ServiceError> {
+        match self {
+            Self::Captured(packets) => packets
+                .get(index)
+                .map(fmn_scene::studio_bridge::FramePacket::frame_index)
+                .ok_or_else(|| studio_service_error("preview frame is outside the scene")),
+            Self::Compiled(_) => i64::try_from(index)
+                .map_err(|_| studio_service_error("preview frame index exceeds i64")),
+        }
+    }
+
+    fn index_for_clock_frame(&self, frame: i64) -> Option<usize> {
+        match self {
+            Self::Captured(packets) => packets
+                .iter()
+                .position(|packet| packet.frame_index() == frame),
+            Self::Compiled(_) => usize::try_from(frame)
+                .ok()
+                .filter(|index| *index < self.len()),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2545,12 +2569,20 @@ struct NativeStudioWorker {
     renderer: NativeStudioRenderer,
     current_frame: usize,
     max_frame_bytes: usize,
+    fps: u32,
+    seed: u64,
+    checkpoint_frames: u64,
+    source_read: Option<AssetRead>,
+    journal_position: usize,
+    journal_tail: Vec<u8>,
+    last_state_hash: Option<fmn_studio::ProtocolDigest>,
+    last_checkpoint_frame: Option<usize>,
 }
 
 impl NativeStudioWorker {
-    fn from_command(fs: &dyn FileSystem, command: &RenderCommand) -> Result<Self, CliError> {
-        let input = resolve_native_render_input(fs, command)?;
-        let (scene, frames, config) = match input {
+    fn from_command(fs: &dyn FileSystem, command: &StudioCommand) -> Result<Self, CliError> {
+        let input = resolve_native_render_input(fs, &command.render)?;
+        let (scene, frames, config, source_read) = match input {
             NativeRenderInput::Builtin { names } => {
                 if names.len() != 1 {
                     return Err(CliError::new(
@@ -2564,11 +2596,11 @@ impl NativeStudioWorker {
                 let mut program = fmn::builtins::primitive_scene(&scene).ok_or_else(|| {
                     CliError::new("scene", "validated built-in scene disappeared")
                 })?;
-                let config = resolve_render_config(fs, command)?;
+                let config = resolve_render_config(fs, &command.render)?;
                 let mut capture = StudioPacketCapture::default();
                 let completed = fmn::run_scene(
                     &mut program,
-                    command.runtime_config(&config),
+                    command.render.runtime_config(&config),
                     config.determinism.seed,
                     &mut capture,
                 )
@@ -2579,10 +2611,20 @@ impl NativeStudioWorker {
                         .show(&mut capture)
                         .map_err(|error| CliError::new("scene", error.to_string()))?;
                 }
-                (scene, NativeStudioFrames::Captured(capture.packets), config)
+                (
+                    scene,
+                    NativeStudioFrames::Captured(capture.packets),
+                    config,
+                    None,
+                )
             }
-            NativeRenderInput::Compiled { name, bundle, .. } => {
-                let mut compiled_command = command.clone();
+            NativeRenderInput::Compiled {
+                name,
+                bundle,
+                source_item,
+                ..
+            } => {
+                let mut compiled_command = command.render.clone();
                 if let Some(requested_fps) = compiled_command.fps
                     && requested_fps != bundle.fps()
                 {
@@ -2596,7 +2638,18 @@ impl NativeStudioWorker {
                 }
                 compiled_command.fps = Some(bundle.fps());
                 let config = resolve_render_config(fs, &compiled_command)?;
-                (name, NativeStudioFrames::Compiled(bundle), config)
+                let path = source_item
+                    .virtual_path
+                    .ok_or_else(|| internal("compiled Studio source omitted its closure path"))?;
+                (
+                    name,
+                    NativeStudioFrames::Compiled(bundle),
+                    config,
+                    Some(AssetRead {
+                        path,
+                        digest: source_item.digest,
+                    }),
+                )
             }
         };
         if frames.len() == 0 {
@@ -2641,6 +2694,14 @@ impl NativeStudioWorker {
             },
             current_frame: 0,
             max_frame_bytes: fmn_studio::ProtocolLimits::default().max_frame_bytes,
+            fps: config.camera.fps,
+            seed: config.determinism.seed,
+            checkpoint_frames: command.checkpoint_frames,
+            source_read,
+            journal_position: 0,
+            journal_tail: Vec::new(),
+            last_state_hash: None,
+            last_checkpoint_frame: None,
         })
     }
 
@@ -2685,6 +2746,173 @@ impl NativeStudioWorker {
         Ok(fmn_studio::WorkerResponse::Frame(stream))
     }
 
+    fn state_bytes(
+        &self,
+        frame: usize,
+        play_count: u64,
+    ) -> Result<Vec<u8>, fmn_studio::ServiceError> {
+        let stage = self.frames.stage_at(frame)?;
+        let clock_frame = self.frames.clock_frame_at(frame)?;
+        let rng = RngRoot::from_seed(self.seed)
+            .substream("scene")
+            .fork_frame(clock_frame.cast_unsigned());
+        SceneState::capture(&stage, clock_frame, self.fps, play_count, &rng)
+            .to_bytes()
+            .map_err(|error| studio_service_error(error.to_string()))
+    }
+
+    fn source_reads(&self) -> Vec<AssetRead> {
+        self.source_read.iter().cloned().collect()
+    }
+
+    fn record_seek(
+        &mut self,
+        command: CommandRecord,
+    ) -> Result<fmn_studio::WorkerResponse, fmn_studio::ServiceError> {
+        let frame = fmn_studio::protocol::studio_seek_frame(&self.scene, &command)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let frame = self.resolve_frame(frame)?;
+        let next_position = self
+            .journal_position
+            .checked_add(1)
+            .ok_or_else(|| studio_service_error("Studio journal position exhausted"))?;
+        let play_count = u64::try_from(next_position)
+            .map_err(|_| studio_service_error("Studio journal position exceeds u64"))?;
+        let state = self.state_bytes(frame, play_count)?;
+        let state_hash = fmn_studio::protocol_digest(&state);
+        let checkpoint = self
+            .last_checkpoint_frame
+            .is_none_or(|last| last.abs_diff(frame) as u64 >= self.checkpoint_frames)
+            .then_some(state);
+        let entry = Entry {
+            command,
+            effect: EffectClass::Pure,
+            reads: self.source_reads(),
+            subprocesses: Vec::new(),
+            checkpoint,
+            state_hash,
+        };
+        let mut segment = Journal::new();
+        segment
+            .record(
+                entry
+                    .try_clone()
+                    .map_err(|error| studio_service_error(error.to_string()))?,
+            )
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let journal = segment
+            .to_bytes()
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let start_entry = u64::try_from(self.journal_position)
+            .map_err(|_| studio_service_error("Studio journal position exceeds u64"))?;
+        self.current_frame = frame;
+        self.journal_position = next_position;
+        self.journal_tail = journal.clone();
+        self.last_state_hash = Some(state_hash);
+        if entry.checkpoint.is_some() {
+            self.last_checkpoint_frame = Some(frame);
+        }
+        Ok(fmn_studio::WorkerResponse::JournalSegment {
+            scene: self.scene.clone(),
+            start_entry,
+            journal,
+        })
+    }
+
+    fn replay(
+        &mut self,
+        replay: fmn_studio::JournalReplay,
+    ) -> Result<fmn_studio::WorkerResponse, fmn_studio::ServiceError> {
+        self.require_scene(&replay.scene)?;
+        let journal = Journal::from_bytes(&replay.journal)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let from = usize::try_from(replay.from_entry)
+            .map_err(|_| studio_service_error("replay start exceeds usize"))?;
+        let through = usize::try_from(replay.through_entry)
+            .map_err(|_| studio_service_error("replay end exceeds usize"))?;
+        let mut state_hashes = Vec::new();
+        state_hashes
+            .try_reserve_exact(through.saturating_sub(from))
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        for (index, entry) in journal.entries()[from..through].iter().enumerate() {
+            if entry
+                .reads
+                .iter()
+                .any(|read| self.source_read.as_ref() != Some(read))
+            {
+                return Err(fmn_studio::ServiceError::new(
+                    fmn_studio::WorkerErrorCode::ReplayFailed,
+                    "the replay journal references a different compiled source",
+                ));
+            }
+            let frame = fmn_studio::protocol::studio_seek_frame(&self.scene, &entry.command)
+                .map_err(|error| studio_service_error(error.to_string()))?;
+            let frame = self.resolve_frame(frame)?;
+            let position = from
+                .checked_add(index)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| studio_service_error("replay position exhausted"))?;
+            let play_count = u64::try_from(position)
+                .map_err(|_| studio_service_error("replay position exceeds u64"))?;
+            let hash = fmn_studio::protocol_digest(&self.state_bytes(frame, play_count)?);
+            state_hashes.push(hash);
+            self.current_frame = frame;
+            self.last_state_hash = Some(hash);
+        }
+        self.journal_position = through;
+        self.last_checkpoint_frame = journal.entries()[..through]
+            .iter()
+            .rposition(|entry| entry.checkpoint.is_some())
+            .and_then(|index| {
+                fmn_studio::protocol::studio_seek_frame(
+                    &self.scene,
+                    &journal.entries()[index].command,
+                )
+                .ok()
+            })
+            .and_then(|frame| usize::try_from(frame).ok());
+        self.journal_tail = replay.journal;
+        Ok(fmn_studio::WorkerResponse::ReplayComplete {
+            from_entry: replay.from_entry,
+            state_hashes,
+        })
+    }
+
+    fn restore_checkpoint(
+        &mut self,
+        checkpoint: fmn_studio::Checkpoint,
+    ) -> Result<fmn_studio::WorkerResponse, fmn_studio::ServiceError> {
+        self.require_scene(&checkpoint.scene)?;
+        let stage = self.frames.stage_at(0)?;
+        let decoded = SceneState::from_bytes(&checkpoint.state, &stage)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let frame = self
+            .frames
+            .index_for_clock_frame(decoded.frames_elapsed)
+            .ok_or_else(|| studio_service_error("checkpoint frame is outside the scene"))?;
+        let journal_position = usize::try_from(checkpoint.after_entry)
+            .ok()
+            .and_then(|position| position.checked_add(1))
+            .ok_or_else(|| studio_service_error("checkpoint journal position exceeds usize"))?;
+        let play_count = u64::try_from(journal_position)
+            .map_err(|_| studio_service_error("checkpoint journal position exceeds u64"))?;
+        let expected = fmn_studio::protocol_digest(&self.state_bytes(frame, play_count)?);
+        if expected != checkpoint.state_hash {
+            return Err(fmn_studio::ServiceError::new(
+                fmn_studio::WorkerErrorCode::CheckpointRejected,
+                "checkpoint state does not match the selected preview frame",
+            ));
+        }
+        self.current_frame = frame;
+        self.journal_position = journal_position;
+        self.last_state_hash = Some(expected);
+        self.last_checkpoint_frame = Some(frame);
+        Ok(fmn_studio::WorkerResponse::Ack {
+            state_hash: Some(expected),
+            journal_len: play_count,
+        })
+    }
+
     fn studio_data(
         &self,
         kind: fmn_studio::StudioDataKind,
@@ -2722,6 +2950,10 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
             fmn_studio::SupervisorRequest::EnumerateScenes => {
                 Ok(fmn_studio::WorkerResponse::Scenes(vec![self.scene.clone()]))
             }
+            fmn_studio::SupervisorRequest::Play { scene, command } => {
+                self.require_scene(&scene)?;
+                self.record_seek(command)
+            }
             fmn_studio::SupervisorRequest::Seek { scene, frame }
             | fmn_studio::SupervisorRequest::Scrub { scene, frame } => {
                 self.require_scene(&scene)?;
@@ -2729,8 +2961,7 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
                 self.current_frame = frame;
                 self.render_frame(frame)
             }
-            fmn_studio::SupervisorRequest::Play { scene, .. }
-            | fmn_studio::SupervisorRequest::Event { scene, .. } => {
+            fmn_studio::SupervisorRequest::Event { scene, .. } => {
                 self.require_scene(&scene)?;
                 Err(fmn_studio::ServiceError::new(
                     fmn_studio::WorkerErrorCode::InvalidRequest,
@@ -2758,23 +2989,9 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
                     .overlay_json(&stage, self.current_frame, layers)?;
                 Ok(self.studio_data(fmn_studio::StudioDataKind::Overlay, bytes))
             }
-            fmn_studio::SupervisorRequest::ReplayJournal(replay)
-                if replay.scene == self.scene && replay.from_entry == replay.through_entry =>
-            {
-                Ok(fmn_studio::WorkerResponse::ReplayComplete {
-                    from_entry: replay.from_entry,
-                    state_hashes: Vec::new(),
-                })
-            }
-            fmn_studio::SupervisorRequest::ReplayJournal(_) => Err(fmn_studio::ServiceError::new(
-                fmn_studio::WorkerErrorCode::ReplayFailed,
-                "the native preview worker cannot replay a nonempty authored journal yet",
-            )),
-            fmn_studio::SupervisorRequest::RestoreCheckpoint(_) => {
-                Err(fmn_studio::ServiceError::new(
-                    fmn_studio::WorkerErrorCode::CheckpointRejected,
-                    "the native preview worker has no installed checkpoint",
-                ))
+            fmn_studio::SupervisorRequest::ReplayJournal(replay) => self.replay(replay),
+            fmn_studio::SupervisorRequest::RestoreCheckpoint(checkpoint) => {
+                self.restore_checkpoint(checkpoint)
             }
             fmn_studio::SupervisorRequest::Hello { .. }
             | fmn_studio::SupervisorRequest::Shutdown => Err(fmn_studio::ServiceError::new(
@@ -2786,6 +3003,14 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
 
     fn active_scene(&self) -> Option<&str> {
         Some(&self.scene)
+    }
+
+    fn journal_tail(&self) -> &[u8] {
+        &self.journal_tail
+    }
+
+    fn last_state_hash(&self) -> Option<fmn_studio::ProtocolDigest> {
+        self.last_state_hash
     }
 }
 
@@ -5073,11 +5298,10 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
     if command.render.scene_source_kind() == Some(SceneSourceKind::Python) {
         return internal_worker_failure(PYTHON_SOURCE_PORTAL_MESSAGE);
     }
-    let mut service =
-        match NativeStudioWorker::from_command(&fmn_platform::fs::StdFs, &command.render) {
-            Ok(service) => service,
-            Err(error) => return internal_worker_failure(error),
-        };
+    let mut service = match NativeStudioWorker::from_command(&fmn_platform::fs::StdFs, &command) {
+        Ok(service) => service,
+        Err(error) => return internal_worker_failure(error),
+    };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let outcome = fmn_studio::serve_worker(
@@ -5355,8 +5579,14 @@ fn execute_studio(
         .publish(&initial, protocol_limits)
         .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
     let tui_frames = command.tui.then(|| frames.clone());
+    let asset_fs = Arc::clone(&fs);
+    let asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync> = Arc::new(move |read| {
+        asset_fs
+            .read_bounded(Path::new(&read.path), DEFAULT_MAX_BUNDLE_BYTES)
+            .is_ok_and(|bytes| fmn_studio::protocol_digest(&bytes) == read.digest)
+    });
     let session = Arc::new(
-        fmn_studio::StudioWorkerSession::new(&scene, supervisor, Arc::new(|_| false))
+        fmn_studio::StudioWorkerSession::new(&scene, supervisor, Box::new(builder), asset_ok)
             .map_err(|error| internal(format!("Studio session: {error}")))?,
     );
     let host = match fmn_studio::StudioHost::bind(

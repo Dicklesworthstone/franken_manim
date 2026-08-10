@@ -38,12 +38,16 @@ fn output_root(label: &str) -> std::path::PathBuf {
 
 fn compiled_wait_bundle(root: &std::path::Path) -> std::path::PathBuf {
     let path = root.join("compiled_wait.fmtl");
+    write_compiled_wait_bundle(&path, 0.25);
+    path
+}
+
+fn write_compiled_wait_bundle(path: &std::path::Path, seconds: f64) {
     let mut timeline = Timeline::new(8).expect("valid bundle fps");
-    timeline.wait(0.25).expect("valid bundle wait");
+    timeline.wait(seconds).expect("valid bundle wait");
     let bytes = export_timeline_bundle(timeline, &mut Stage::new(), &RngRoot::from_seed(0))
         .expect("compile wait artifact");
-    std::fs::write(&path, bytes).expect("write compiled artifact");
-    path
+    std::fs::write(path, bytes).expect("write compiled artifact");
 }
 
 fn json_string_field<'a>(record: &'a str, field: &str) -> Option<&'a str> {
@@ -52,6 +56,27 @@ fn json_string_field<'a>(record: &'a str, field: &str) -> Option<&'a str> {
         .split_once(&prefix)
         .and_then(|(_, tail)| tail.split_once('"'))
         .map(|(value, _)| value)
+}
+
+#[cfg(unix)]
+fn studio_post(authority: &str, target: &str, body: &[u8]) -> String {
+    let mut stream = std::net::TcpStream::connect(authority).expect("connect to Studio API");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("Studio API timeout");
+    write!(
+        stream,
+        "POST {target} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .expect("write Studio API request");
+    stream.write_all(body).expect("write Studio API body");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read Studio API response");
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    response
 }
 
 #[test]
@@ -186,6 +211,100 @@ fn studio_serves_a_real_worker_frame_and_shuts_down_on_stdin_eof() {
     );
     let _ = stream.shutdown(std::net::Shutdown::Both);
     drop(stream);
+    drop(stdout);
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait for graceful Studio shutdown");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("Studio stderr")
+        .read_to_string(&mut stderr)
+        .expect("read Studio stderr");
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn studio_reloads_an_edited_compiled_scene_and_reexecutes_committed_history() {
+    let root = output_root("studio-restart-replay");
+    let source = root.join("edited.fmtl");
+    write_compiled_wait_bundle(&source, 0.5);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
+        .args([
+            "studio",
+            "--robot",
+            "--no-browser",
+            "--checkpoint-frames",
+            "120",
+            "--resolution",
+            "96x54",
+            "--threads",
+            "1",
+            source.to_str().expect("compiled source path is UTF-8"),
+            "EditedWait",
+        ])
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("launch compiled-scene Studio front door");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("Studio stdout"));
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .expect("read Studio readiness record");
+    let url = json_string_field(&ready, "url").expect("readiness URL");
+    let location = url.strip_prefix("http://").expect("loopback HTTP URL");
+    let (authority, target) = location.split_once('/').expect("URL authority and target");
+    let query = target.split_once('?').expect("capability query").1;
+
+    for frame in [1, 2] {
+        let body = format!("frame={frame}&commit=true");
+        let response = studio_post(authority, &format!("/api/scrub?{query}"), body.as_bytes());
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(
+            response.contains(&format!("\"frame_index\":{frame}")),
+            "{response}"
+        );
+    }
+
+    // With unchanged inputs, restart restores the first command's checkpoint
+    // and replays the remaining journal entry before returning to frame two.
+    let unchanged = studio_post(authority, &format!("/api/restart?{query}"), b"");
+    assert!(unchanged.starts_with("HTTP/1.1 200 OK"), "{unchanged}");
+    assert!(unchanged.contains("\"worker_generation\":2"), "{unchanged}");
+    assert!(unchanged.contains("\"reused_entries\":2"), "{unchanged}");
+    assert!(unchanged.contains("\"replayed_entries\":1"), "{unchanged}");
+    assert!(
+        unchanged.contains("\"reexecuted_entries\":0"),
+        "{unchanged}"
+    );
+    assert!(unchanged.contains("\"frame_index\":2"), "{unchanged}");
+
+    // The replacement artifact has two additional frames. A successful
+    // frame-five scrub after restart therefore proves the new worker read the
+    // edited bytes rather than merely replaying a captured old response.
+    write_compiled_wait_bundle(&source, 0.75);
+    let restart = studio_post(authority, &format!("/api/restart?{query}"), b"");
+    assert!(restart.starts_with("HTTP/1.1 200 OK"), "{restart}");
+    assert!(restart.contains("\"worker_generation\":3"), "{restart}");
+    assert!(restart.contains("\"reused_entries\":0"), "{restart}");
+    assert!(restart.contains("\"reexecuted_entries\":2"), "{restart}");
+    assert!(restart.contains("\"frame_index\":2"), "{restart}");
+
+    let expanded = studio_post(
+        authority,
+        &format!("/api/scrub?{query}"),
+        b"frame=5&commit=false",
+    );
+    assert!(expanded.starts_with("HTTP/1.1 200 OK"), "{expanded}");
+    assert!(expanded.contains("\"frame_index\":5"), "{expanded}");
+
     drop(stdout);
     drop(child.stdin.take());
     let status = child.wait().expect("wait for graceful Studio shutdown");
