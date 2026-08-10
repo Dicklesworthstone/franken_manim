@@ -12,6 +12,8 @@
 //! Rust and no engine borrow crosses a Python callback.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(test)]
+mod corpus;
 mod crossing;
 mod ladder;
 mod method_cache;

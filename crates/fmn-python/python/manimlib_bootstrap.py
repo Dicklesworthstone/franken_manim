@@ -8,10 +8,12 @@ pickle state, and schema-driven module/class construction.
 
 from __future__ import annotations
 
+import ast as _ast
 import copy as _copy
 import enum as _enum
 import importlib as _importlib
 import inspect as _inspect
+import math as _math
 import sys as _sys
 import types as _types
 import weakref as _weakref
@@ -537,6 +539,22 @@ def _constant(detail):
     try:
         return float(detail)
     except ValueError:
+        pass
+    # Materialize the ledger's literal forms. The direction/coordinate
+    # constants MUST be real NumPy arrays — the Reference's are, and the
+    # corpus multiplies and adds them (`0.25 * DOWN`); a string here
+    # turns every corpus import into a TypeError.
+    if detail.startswith("np.array(") and detail.endswith(")"):
+        numpy = _importlib.import_module("numpy")
+        return numpy.array(_ast.literal_eval(detail[len("np.array(") : -1]))
+    if detail == "np.pi":
+        return _math.pi
+    try:
+        # Quoted strings, tuples, dicts, and other pure literals.
+        return _ast.literal_eval(detail)
+    except (ValueError, SyntaxError):
+        # Symbolic defaults (config references, derived expressions) keep
+        # their declared spelling until the constants environment lands.
         return detail
 
 
@@ -583,6 +601,101 @@ def _base_names(detail):
     return result
 
 
+def _pinned_manim_config():
+    """The Reference's default_config.yml at the pin, as namespaces.
+
+    Only the sections the ledger's symbolic constant defaults consult;
+    values are the pinned file's, verbatim (fm-d3gt).
+    """
+    ns = _types.SimpleNamespace
+    return ns(
+        camera=ns(resolution=(1920, 1080), fps=30, background_color="#333333", background_opacity=1.0),
+        sizes=ns(
+            frame_height=8.0,
+            small_buff=0.1,
+            med_small_buff=0.25,
+            med_large_buff=0.5,
+            large_buff=1.0,
+            default_mobject_to_edge_buff=0.5,
+            default_mobject_to_mobject_buff=0.25,
+        ),
+        key_bindings=ns(
+            pan_3d="d", pan="f", reset="r", quit="q", select="s", unselect="u",
+            grab="g", x_grab="h", y_grab="v", z_grab="z", resize="t", color="c",
+            information="i", cursor="k",
+        ),
+        colors=ns(
+            blue_e="#1C758A", blue_d="#29ABCA", blue_c="#58C4DD", blue_b="#9CDCEB", blue_a="#C7E9F1",
+            teal_e="#49A88F", teal_d="#55C1A7", teal_c="#5CD0B3", teal_b="#76DDC0", teal_a="#ACEAD7",
+            green_e="#699C52", green_d="#77B05D", green_c="#83C167", green_b="#A6CF8C", green_a="#C9E2AE",
+            yellow_e="#E8C11C", yellow_d="#F4D345", yellow_c="#FFFF00", yellow_b="#FFEA94", yellow_a="#FFF1B6",
+            gold_e="#C78D46", gold_d="#E1A158", gold_c="#F0AC5F", gold_b="#F9B775", gold_a="#F7C797",
+            red_e="#CF5044", red_d="#E65A4C", red_c="#FC6255", red_b="#FF8080", red_a="#F7A1A3",
+            maroon_e="#94424F", maroon_d="#A24D61", maroon_c="#C55F73", maroon_b="#EC92AB", maroon_a="#ECABC1",
+            purple_e="#644172", purple_d="#715582", purple_c="#9A72AC", purple_b="#B189C6", purple_a="#CAA3E8",
+            grey_e="#222222", grey_d="#444444", grey_c="#888888", grey_b="#BBBBBB", grey_a="#DDDDDD",
+            white="#FFFFFF", black="#000000", grey_brown="#736357", dark_brown="#8B4513",
+            light_brown="#CD853F", pink="#D147BD", light_pink="#DC75CD", green_screen="#00FF00",
+            orange="#FF862F", pure_red="#FF0000", pure_green="#00FF00", pure_blue="#0000FF",
+        ),
+        vmobject=ns(default_stroke_width=4.0, default_stroke_color="#DDDDDD", default_fill_color="#888888"),
+        mobject=ns(default_mobject_color="#FFFFFF", default_light_color="#BBBBBB"),
+        text=ns(font="Consolas", alignment="LEFT", font_size_for_unit_height=144),
+        tex=ns(template="default", font_size_for_unit_height=144),
+    )
+
+
+def _resolve_symbolic_constants(rows):
+    """Fixpoint-evaluate the ledger's symbolic constant defaults.
+
+    The corpus does arithmetic on these at import time (FRAME_WIDTH - 1,
+    FRAME_Y_RADIUS * DOWN), so the derived spellings must become real
+    values. Literals resolve through _constant; symbolic spellings
+    evaluate in a closed environment seeded with the pinned
+    manim_config, NumPy, and every constant already resolved — repeated
+    until no pass makes progress. Spellings that never resolve (runtime
+    machinery like EventDispatcher()) keep their declared string, the
+    pre-existing behavior.
+    """
+    numpy = _importlib.import_module("numpy")
+    env = {
+        "manim_config": _pinned_manim_config(),
+        "np": numpy,
+        "version": lambda _name: "1.7.2",
+    }
+    pending = {}
+    resolved = {}
+    for module_name, qualified, kind, _arity, detail, *_rest in rows:
+        if kind != "constant" or "." in qualified:
+            continue
+        value = _constant(detail)
+        if isinstance(value, str) and value == detail and detail != "-":
+            pending[(module_name, qualified)] = detail
+        else:
+            resolved[(module_name, qualified)] = value
+            env.setdefault(qualified, value)
+    progressed = True
+    while progressed and pending:
+        progressed = False
+        for key in list(pending):
+            detail = pending[key]
+            try:
+                # The spelling being evaluated is a row of the committed
+                # docs/api/ledger.tsv — the same repo-controlled schema
+                # this whole surface is synthesized from, never runtime
+                # input — with no builtins and a closed environment.
+                value = eval(detail, {"__builtins__": {}}, env)  # noqa: S307
+            except Exception:
+                continue
+            resolved[key] = value
+            env.setdefault(key[1], value)
+            del pending[key]
+            progressed = True
+    for key, detail in pending.items():
+        resolved[key] = detail
+    return resolved
+
+
 def _install_schema_surface():
     root = _FMN_MODULE
     _sys.modules.setdefault(__name__, root)
@@ -590,6 +703,7 @@ def _install_schema_surface():
     rows = _schema_rows()
     for module_name, *_ in rows:
         _ensure_module(module_name)
+    _resolved_constants = _resolve_symbolic_constants(rows)
 
     specials = {
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
@@ -691,7 +805,13 @@ def _install_schema_surface():
                 )
         elif kind == "constant" and "." not in qualified:
             if not hasattr(module, qualified):
-                setattr(module, qualified, _constant(_detail))
+                setattr(
+                    module,
+                    qualified,
+                    _resolved_constants.get(
+                        (module_name, qualified), _constant(_detail)
+                    ),
+                )
         elif kind == "leaked_import" and "." not in qualified:
             if hasattr(module, qualified):
                 continue
@@ -763,6 +883,124 @@ def _install_schema_surface():
     # The pinned Reference intentionally has no root __all__; wildcard import
     # therefore exposes every non-underscore name in the assembled namespace.
     root.__dict__.pop("__all__", None)
+
+
+def _install_rate_functions():
+    """The Reference's pure easing formulas, verbatim (fm-d3gt).
+
+    manimlib/utils/rate_functions.py at the Reference pin is pure
+    arithmetic; the corpus calls these at import time (custom/** builds
+    squished rate functions at module scope), so they must be real
+    callables before the placeholder pass runs. Engine-side easing stays
+    fmn-anim's; these are the API-semantic Python definitions.
+    """
+    _math_local = _math
+
+    def _bezier(points):
+        degree = len(points) - 1
+
+        def result(t):
+            return sum(
+                ((1 - t) ** (degree - k))
+                * (t**k)
+                * _math_local.comb(degree, k)
+                * point
+                for k, point in enumerate(points)
+            )
+
+        return result
+
+    def linear(t):
+        return t
+
+    def smooth(t):
+        s = 1 - t
+        return (t**3) * (10 * s * s + 5 * s * t + t * t)
+
+    def rush_into(t):
+        return 2 * smooth(0.5 * t)
+
+    def rush_from(t):
+        return 2 * smooth(0.5 * (t + 1)) - 1
+
+    def slow_into(t):
+        return _math_local.sqrt(1 - (1 - t) * (1 - t))
+
+    def double_smooth(t):
+        if t < 0.5:
+            return 0.5 * smooth(2 * t)
+        return 0.5 * (1 + smooth(2 * t - 1))
+
+    def there_and_back(t):
+        new_t = 2 * t if t < 0.5 else 2 * (1 - t)
+        return smooth(new_t)
+
+    def there_and_back_with_pause(t, pause_ratio=1.0 / 3):
+        a = 2.0 / (1.0 - pause_ratio)
+        if t < 0.5 - pause_ratio / 2:
+            return smooth(a * t)
+        if t < 0.5 + pause_ratio / 2:
+            return 1
+        return smooth(a - a * t)
+
+    def running_start(t, pull_factor=-0.5):
+        return _bezier([0, 0, pull_factor, pull_factor, 1, 1, 1])(t)
+
+    def overshoot(t, pull_factor=1.5):
+        return _bezier([0, 0, pull_factor, pull_factor, 1, 1])(t)
+
+    def not_quite_there(func=smooth, proportion=0.7):
+        def result(t):
+            return proportion * func(t)
+
+        return result
+
+    def wiggle(t, wiggles=2):
+        return there_and_back(t) * _math_local.sin(wiggles * _math_local.pi * t)
+
+    def squish_rate_func(func, a=0.4, b=0.6):
+        def result(t):
+            if a == b:
+                return a
+            if t < a:
+                return func(0)
+            if t > b:
+                return func(1)
+            return func((t - a) / (b - a))
+
+        return result
+
+    def lingering(t):
+        return squish_rate_func(lambda t: t, 0, 0.8)(t)
+
+    def exponential_decay(t, half_life=0.1):
+        return 1 - _math_local.exp(-t / half_life)
+
+    functions = {
+        "linear": linear,
+        "smooth": smooth,
+        "rush_into": rush_into,
+        "rush_from": rush_from,
+        "slow_into": slow_into,
+        "double_smooth": double_smooth,
+        "there_and_back": there_and_back,
+        "there_and_back_with_pause": there_and_back_with_pause,
+        "running_start": running_start,
+        "overshoot": overshoot,
+        "not_quite_there": not_quite_there,
+        "wiggle": wiggle,
+        "squish_rate_func": squish_rate_func,
+        "lingering": lingering,
+        "exponential_decay": exponential_decay,
+    }
+    module = _ensure_module("manimlib.utils.rate_functions")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_rate_functions()
 
 
 _install_schema_surface()
