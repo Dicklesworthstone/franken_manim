@@ -11,10 +11,10 @@
 # annex consumption happens once, with fmn-render's `metal` feature (fm-xsz),
 # against rows authored at that time — this spike only proves the mapping.
 #
-# ft-kernel-metal enters by the exact SUITE.lock git revision. This makes the
-# proof reproducible without a sibling frankentorch checkout and keeps the
-# generic gateway on the same governed pin the production annex consumes
-# (UPSTREAM_LEDGER row 8; fm-xsz's §2.9 pin ritual).
+# ft-kernel-metal remains at the exact historical revision ratified by this
+# proof. This keeps the standalone spike reproducible without a sibling
+# frankentorch checkout; the production annex may advance independently under
+# the SUITE.lock ritual (UPSTREAM_LEDGER row 8; fm-xsz's §2.9 pin ritual).
 [package]
 name = "fmn-spike-accelerator"
 version = "0.0.0"
