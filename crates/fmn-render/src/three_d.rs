@@ -1245,6 +1245,25 @@ impl<'a> ThreeDJob<'a> {
         self.draws.len()
     }
 
+    /// Number of draw/tile pairs admitted to the raster pass by the prepared
+    /// screen bounds.
+    ///
+    /// This is the deterministic work unit behind the first bounds rejection
+    /// in the tile raster loop. It deliberately excludes per-primitive and
+    /// adaptive-AA work: callers can compare two camera-bound jobs without
+    /// timing noise, while rendering still pays no counter-maintenance cost.
+    #[must_use]
+    pub fn scheduled_tile_draw_count(&self) -> u64 {
+        let tile = self.tiling.fine_tile.max(1);
+        self.draws.iter().fold(0u64, |count, draw| {
+            count.saturating_add(tile_span_count(
+                draw.bounds,
+                self.camera.pixel_shape(),
+                tile,
+            ))
+        })
+    }
+
     /// Conservative logical bytes admitted while preparing this job.
     #[must_use]
     pub const fn preparation_bytes(&self) -> u64 {
@@ -1752,7 +1771,7 @@ fn compile_vector<'a>(
     } else {
         None
     };
-    let bounds = vector_bounds(camera, &style, normal, &fill_pieces, &curves);
+    let bounds = vector_bounds(camera, &style, &fill_pieces, &curves);
     let vector = CompiledVector {
         fill: fill_pieces,
         curves,
@@ -2069,7 +2088,6 @@ impl PlanarGradientField {
 fn vector_bounds(
     camera: &Camera,
     style: &Style,
-    normal: Vec3,
     fill: &[MonoPiece],
     curves: &[ProjectedCurvePiece],
 ) -> Option<[f64; 4]> {
@@ -2095,24 +2113,30 @@ fn vector_bounds(
             bounds[2] = bounds[2].max(point[0]);
             bounds[3] = bounds[3].max(point[1]);
         }
-        for t in [0.0, 0.5, 1.0] {
-            let s = curve.screen.s0 + (curve.screen.s1 - curve.screen.s0) * t;
-            let widths = projected_half_widths(camera, style, normal, curve.world, t, s);
-            stroke_pad = stroke_pad.max(widths[0]).max(widths[1]);
-        }
     }
     let visible_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
         && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
     if visible_stroke {
-        // Perspective width is directional and may peak between the retained
-        // curve samples. Until the camera table carries an analytic slab for
-        // that rational offset field, the viewport is the only fail-closed
-        // bound: a sampled maximum is an optimization that can clip a legal
-        // stroke. Tile-local distance tests still reject untouched pixels.
-        bounds[0] = bounds[0].min(0.0);
-        bounds[1] = bounds[1].min(0.0);
-        bounds[2] = bounds[2].max(f64::from(camera.pixel_width()));
-        bounds[3] = bounds[3].max(f64::from(camera.pixel_height()));
+        let mut bounded = true;
+        for curve in curves {
+            let Some(reach) = perspective_stroke_reach_px(camera, style, curve.world) else {
+                bounded = false;
+                break;
+            };
+            stroke_pad = stroke_pad.max(reach);
+        }
+        if bounded && style.joint_type == fmn_mobject::JointType::Miter {
+            stroke_pad *= crate::stroke::MITER_LIMIT;
+        } else if !bounded {
+            // A stroke whose offset slab can meet the projection horizon may
+            // legally reach any viewport tile. Keep the old fail-closed bound
+            // for precisely that case; ordinary perspective strokes no longer
+            // inherit its full-frame fanout.
+            bounds[0] = bounds[0].min(0.0);
+            bounds[1] = bounds[1].min(0.0);
+            bounds[2] = bounds[2].max(f64::from(camera.pixel_width()));
+            bounds[3] = bounds[3].max(f64::from(camera.pixel_height()));
+        }
     }
     if !bounds[0].is_finite() {
         return None;
@@ -2124,6 +2148,84 @@ fn vector_bounds(
         bounds[2] + pad,
         bounds[3] + pad,
     ])
+}
+
+/// Conservative screen-space radius of a perspective stroke around one
+/// projected centreline piece.
+///
+/// Camera projection is affine in homogeneous clip space. For an offset `d`
+/// with `|d| <= h`, each clip component changes by at most `h` times the norm
+/// of that component's affine row. With positive centreline weights,
+/// `X(t)/W(t)` and `Y(t)/W(t)` are weighted averages of their control ratios.
+/// Therefore
+///
+/// `|(X+dX)/(W+dW) - X/W| <= (|dX| + max|X/W| |dW|) / (min W - |dW|)`.
+///
+/// The piece has already been clipped into the camera volume, so its Bernstein
+/// weights are non-negative. When the offset can consume the lower `W` bound,
+/// no finite slab is honest and the caller retains the viewport fallback.
+fn perspective_stroke_reach_px(camera: &Camera, style: &Style, world: [Vec3; 3]) -> Option<f64> {
+    const ROUNDING_MARGIN: f64 = 256.0 * f64::EPSILON;
+
+    let widest = f64::from(style.stroke_width.max(style.stroke_width_end).max(0.0));
+    let half_world = stroke_half_world(camera, style, widest);
+    if half_world == 0.0 {
+        return Some(0.0);
+    }
+
+    let clip = world.map(|point| camera.project(point, style.is_fixed_in_frame).clip);
+    if clip.iter().flatten().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let w_scale = clip
+        .iter()
+        .map(|point| point[3].abs())
+        .fold(1.0f64, f64::max);
+    let min_w = clip
+        .iter()
+        .map(|point| point[3])
+        .fold(f64::INFINITY, f64::min)
+        - ROUNDING_MARGIN * w_scale;
+    if min_w <= 0.0 {
+        return None;
+    }
+
+    let frame = camera.frame();
+    let view = frame.view_matrix();
+    let factors = frame.frame_rescale_factors();
+    let fixed = style.is_fixed_in_frame;
+    let world_mix = 1.0 - fixed;
+    let projection_row = |row: usize| -> Vec3 {
+        std::array::from_fn(|column| {
+            factors[row] * (world_mix * view[row][column] + if row == column { fixed } else { 0.0 })
+        })
+    };
+    let inflate = |value: f64| value * (1.0 + ROUNDING_MARGIN) + ROUNDING_MARGIN;
+    let delta_x = inflate(half_world * length(projection_row(0)));
+    let delta_y = inflate(half_world * length(projection_row(1)));
+    // clip W = 1 - projected Z, so its directional row is the negated Z row
+    // and has the same Euclidean norm.
+    let delta_w = inflate(half_world * length(projection_row(2)));
+    let denominator = min_w - delta_w;
+    if denominator <= 0.0 || !denominator.is_finite() {
+        return None;
+    }
+
+    let ratio = |axis: usize| -> Option<f64> {
+        clip.iter().try_fold(0.0f64, |largest, point| {
+            (point[3] > 0.0).then(|| largest.max((point[axis] / point[3]).abs()))
+        })
+    };
+    let ratio_x = ratio(0)?;
+    let ratio_y = ratio(1)?;
+    let x = inflate(
+        0.5 * f64::from(camera.pixel_width()) * (delta_x + ratio_x * delta_w) / denominator,
+    );
+    let y = inflate(
+        0.5 * f64::from(camera.pixel_height()) * (delta_y + ratio_y * delta_w) / denominator,
+    );
+    let reach = inflate((x * x + y * y).sqrt());
+    reach.is_finite().then_some(reach)
 }
 
 fn compile_surface<'a>(
@@ -2535,6 +2637,41 @@ fn bounds_intersect(bounds: Option<[f64; 4]>, rectangle: [u32; 4]) -> bool {
         && bounds[1] <= f64::from(rectangle[3])
 }
 
+fn tile_span_count(bounds: Option<[f64; 4]>, viewport: (u32, u32), tile: u32) -> u64 {
+    let Some([min_x, min_y, max_x, max_y]) = bounds else {
+        return 0;
+    };
+    if ![min_x, min_y, max_x, max_y]
+        .iter()
+        .all(|value| value.is_finite())
+        || viewport.0 == 0
+        || viewport.1 == 0
+    {
+        return 0;
+    }
+    let axis_span = |min: f64, max: f64, extent: u32| -> u64 {
+        if max < 0.0 || min > f64::from(extent) {
+            return 0;
+        }
+        let tile = tile.max(1);
+        let tiles = extent.div_ceil(tile);
+        let first = if min <= 0.0 {
+            0
+        } else {
+            ((min / f64::from(tile)).ceil() as u32).saturating_sub(1)
+        }
+        .min(tiles - 1);
+        let last = if max <= 0.0 {
+            0
+        } else {
+            (max / f64::from(tile)).floor() as u32
+        }
+        .min(tiles - 1);
+        u64::from(last.saturating_sub(first).saturating_add(1))
+    };
+    axis_span(min_x, max_x, viewport.0).saturating_mul(axis_span(min_y, max_y, viewport.1))
+}
+
 fn orient(a: [f64; 2], b: [f64; 2], point: [f64; 2]) -> f64 {
     (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
 }
@@ -2628,6 +2765,7 @@ fn bezier_tangent(control: [Vec3; 3], t: f64) -> Vec3 {
     )
 }
 
+#[cfg(test)]
 fn projected_half_widths(
     camera: &Camera,
     style: &Style,
@@ -2680,6 +2818,7 @@ fn stroke_half_world(camera: &Camera, style: &Style, width_units: f64) -> f64 {
     0.5 * width_units * fmn_core::constants::STROKE_WIDTH_CONVERSION * zoom
 }
 
+#[cfg(test)]
 fn projected_half_widths_for(
     camera: &Camera,
     style: &Style,
@@ -3763,6 +3902,71 @@ mod tests {
         plan
     }
 
+    fn variable_stroke_vector_plan(
+        points: &[Vec3],
+        stroke: [f32; 4],
+        widths: [f32; 2],
+        camera_revision: u64,
+        configure: impl FnOnce(&mut Uniforms),
+    ) -> RenderPlan {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+        let denominator = points.len().saturating_sub(1).max(1) as f32;
+        for (index, point) in points.iter().enumerate() {
+            let alpha = index as f32 / denominator;
+            let width = widths[0] + (widths[1] - widths[0]) * alpha;
+            buffer.write(
+                index,
+                "point",
+                &[point[0] as f32, point[1] as f32, point[2] as f32],
+            );
+            buffer.write(index, "fill_rgba", &[0.0; 4]);
+            buffer.write(index, "stroke_rgba", &stroke);
+            buffer.write(index, "stroke_width", &[width]);
+            buffer.write(index, "fill_border_width", &[0.0]);
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        configure(stage.uniforms_mut(mob).expect("live mobject"));
+        stage.add_to_scene(mob).expect("rooted");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera_revision)
+            .expect("valid variable-width vector fixture");
+        plan
+    }
+
+    fn assert_covered_stroke_samples_inside_bounds(job: &ThreeDJob<'_>) {
+        const GRID: u32 = 4;
+        for draw in &job.draws {
+            let CompiledPrimitive::Vector(vector) = &draw.primitive else {
+                continue;
+            };
+            let bounds = draw.bounds.expect("visible vector bounds");
+            for y in 0..job.camera.pixel_height() {
+                for x in 0..job.camera.pixel_width() {
+                    for sample_y in 0..GRID {
+                        for sample_x in 0..GRID {
+                            let point = [
+                                f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(GRID),
+                                f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(GRID),
+                            ];
+                            let covered = vector_stroke_sample(job.camera, vector.get(), point)
+                                .is_some_and(|sample| sample.0 > 0.0);
+                            if covered {
+                                assert!(
+                                    point[0] >= bounds[0]
+                                        && point[0] <= bounds[2]
+                                        && point[1] >= bounds[1]
+                                        && point[1] <= bounds[3],
+                                    "covered perspective-stroke sample {point:?} escaped {bounds:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn gradient_vector_plan(
         points: &[Vec3],
         fill_start: [f32; 4],
@@ -4331,6 +4535,129 @@ mod tests {
         assert!(
             (billboard_mean - flat_mean).abs() > 0.1,
             "tilted world-plane width must foreshorten: billboard={billboard:?}, flat={flat:?}"
+        );
+    }
+
+    #[test]
+    fn perspective_stroke_slabs_contain_adversarial_fragments_and_preserve_pixels() {
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (80, 48),
+            samples: 4,
+            background: color("#05070A", 1.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .expect("perspective corpus camera");
+        let billboard = variable_stroke_vector_plan(
+            &[[-2.7, -1.1, -0.4], [0.2, 1.8, 1.4], [2.4, -0.6, 0.3]],
+            [0.2, 0.8, 1.0, 0.9],
+            [6.0, 28.0],
+            camera.revision(),
+            |_| {},
+        );
+        let corner = path_points(
+            &[[-2.4, -1.2, 0.7], [0.0, 1.4, 1.5], [2.3, -1.0, 0.1]],
+            false,
+        );
+        let flat_miter = variable_stroke_vector_plan(
+            &corner,
+            [1.0, 0.35, 0.1, 0.85],
+            [18.0, 42.0],
+            camera.revision(),
+            |uniforms| {
+                uniforms.flat_stroke = true;
+                uniforms.joint_type = JointType::Miter;
+            },
+        );
+        let user_clipped = variable_stroke_vector_plan(
+            &[[-3.0, 0.9, -0.5], [0.0, -1.8, 1.1], [3.0, 0.8, 0.4]],
+            [0.55, 1.0, 0.25, 0.8],
+            [12.0, 24.0],
+            camera.revision(),
+            |uniforms| uniforms.clip_planes[0] = [1.0, 0.0, 0.0, 0.0],
+        );
+        let draws = [
+            ThreeDDraw::Vector(VectorDraw::new(&billboard, 0)),
+            ThreeDDraw::Vector(VectorDraw::new(&flat_miter, 0)),
+            ThreeDDraw::Vector(VectorDraw::new(&user_clipped, 0)),
+        ];
+        let bounded = ThreeDJob::new(&camera, &draws, Tiling::default())
+            .expect("bounded perspective-vector corpus");
+        assert_covered_stroke_samples_inside_bounds(&bounded);
+
+        let one = bounded.render(1).expect("one-thread bounded frame");
+        let four = bounded.render(4).expect("four-thread bounded frame");
+        let sixteen = bounded.render(16).expect("sixteen-thread bounded frame");
+        assert_eq!(one.as_bytes(), four.as_bytes());
+        assert_eq!(one.as_bytes(), sixteen.as_bytes());
+
+        let mut forced_full =
+            ThreeDJob::new(&camera, &draws, Tiling::default()).expect("full-bound oracle job");
+        for draw in &mut forced_full.draws {
+            draw.bounds = Some([
+                0.0,
+                0.0,
+                f64::from(camera.pixel_width()),
+                f64::from(camera.pixel_height()),
+            ]);
+        }
+        let forced = forced_full.render(1).expect("full-bound oracle frame");
+        assert_eq!(
+            one.as_bytes(),
+            forced.as_bytes(),
+            "work-elimination bounds changed the perspective vector corpus"
+        );
+        assert!(
+            bounded.scheduled_tile_draw_count() < forced_full.scheduled_tile_draw_count(),
+            "the adversarial corpus eliminated no draw/tile work"
+        );
+    }
+
+    #[test]
+    fn small_perspective_stroke_avoids_viewport_fanout_but_horizon_risk_falls_back() {
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (320, 180),
+            samples: 1,
+            background: color("#000000", 1.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .expect("fanout camera");
+        let tiling = Tiling::default();
+        let viewport_tiles = u64::from(camera.pixel_width().div_ceil(tiling.fine_tile.max(1)))
+            * u64::from(camera.pixel_height().div_ceil(tiling.fine_tile.max(1)));
+
+        let small = variable_stroke_vector_plan(
+            &[[-0.7, -0.3, 0.2], [0.0, 0.45, 0.7], [0.8, -0.2, 0.4]],
+            [1.0, 1.0, 1.0, 1.0],
+            [6.0, 10.0],
+            camera.revision(),
+            |_| {},
+        );
+        let small_draws = [ThreeDDraw::Vector(VectorDraw::new(&small, 0))];
+        let small_job = ThreeDJob::new(&camera, &small_draws, tiling).expect("small stroke job");
+        assert!(
+            small_job.scheduled_tile_draw_count() < viewport_tiles / 4,
+            "small stroke still fans out to {} of {viewport_tiles} tiles",
+            small_job.scheduled_tile_draw_count()
+        );
+
+        let near_z = 0.85 * camera.frame().focal_distance() / camera.frame().scale();
+        let near = variable_stroke_vector_plan(
+            &[
+                [-0.2, -0.1, near_z],
+                [0.0, 0.1, near_z],
+                [0.2, -0.1, near_z],
+            ],
+            [1.0, 0.2, 0.2, 1.0],
+            [400.0, 400.0],
+            camera.revision(),
+            |_| {},
+        );
+        let near_draws = [ThreeDDraw::Vector(VectorDraw::new(&near, 0))];
+        let near_job = ThreeDJob::new(&camera, &near_draws, tiling).expect("near-plane stroke job");
+        assert_eq!(
+            near_job.scheduled_tile_draw_count(),
+            viewport_tiles,
+            "a slab that can meet the projection horizon must stay fail-closed"
         );
     }
 
