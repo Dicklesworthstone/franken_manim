@@ -15,6 +15,7 @@ import enum as _enum
 import importlib as _importlib
 import inspect as _inspect
 import math as _math
+import re as _re
 import sys as _sys
 import types as _types
 import weakref as _weakref
@@ -756,6 +757,20 @@ class Mobject(_BridgeMobject):
             self.scale(length / old_length, **kwargs)
         return self
 
+    def replace(self, mobject, dim_to_match=0, stretch=False):
+        if not mobject.has_points() and not mobject.submobjects:
+            self.scale(0)
+            return self
+        if stretch:
+            for dim in range(3):
+                self.rescale_to_fit(mobject.length_over_dim(dim), dim, stretch=True)
+        else:
+            self.rescale_to_fit(
+                mobject.length_over_dim(dim_to_match), dim_to_match, stretch=False
+            )
+        self.shift(mobject.get_center() - self.get_center())
+        return self
+
     def stretch_to_fit_width(self, width, **kwargs):
         return self.rescale_to_fit(width, 0, stretch=True, **kwargs)
 
@@ -1056,6 +1071,17 @@ class Mobject(_BridgeMobject):
     def get_start_and_end(self):
         return (self.get_start(), self.get_end())
 
+    def get_points(self):
+        # Stage keeps transforms in an independent placement. Bake that
+        # representation first so the familiar writable NumPy view is in
+        # world coordinates, exactly like the Reference's point records.
+        self._bake_placement()
+        return self.points
+
+    def reverse_points(self):
+        self._reverse_points()
+        return self
+
     def has_points(self):
         return self._has_points()
 
@@ -1322,6 +1348,17 @@ class VMobject(Mobject):
     def get_group_class(self):
         return getattr(_FMN_ROOT, "VGroup", VMobject)
 
+    def set_points_as_corners(self, points):
+        self._set_points_as_corners([_vec3(point) for point in points])
+        return self
+
+    def get_arc_length(self, n_sample_points=None):
+        # BN-03: Chisel's error-bounded true length is the definition. The
+        # Reference sampling knob remains accepted for source compatibility,
+        # but cannot weaken the answer back to a chord approximation.
+        del n_sample_points
+        return self._get_arc_length()
+
     # Style surface (fm-d3gt): Reference bodies (vectorized_mobject.py at
     # the pin) over the live engine record views (`stroke_rgba`,
     # `stroke_width`, `fill_rgba`, `fill_border_width`) and the typed
@@ -1345,7 +1382,14 @@ class VMobject(Mobject):
         behind=None,
         flat=None,
         recurse=True,
+        background=None,
     ):
+        # R13's pinned era shim: pre-2023 manimgl called this knob
+        # `background`; the Reference pin renamed it to `behind`.
+        if background is not None:
+            if behind is not None and bool(behind) != bool(background):
+                raise TypeError("set_stroke received conflicting behind/background values")
+            behind = background
         self.set_rgba_array_by_color(color, opacity, "stroke_rgba", recurse)
 
         if width is not None:
@@ -1367,8 +1411,9 @@ class VMobject(Mobject):
 
         return self
 
-    def set_backstroke(self, color="#000000", width=3):
-        self.set_stroke(color, width, behind=True)
+    def set_backstroke(self, color="#000000", width=3, background=None):
+        behind = True if background is None else bool(background)
+        self.set_stroke(color, width, behind=behind)
         return self
 
     def set_flat_stroke(self, flat_stroke=True, recurse=True):
@@ -1626,6 +1671,54 @@ class VGroup(VMobject):
         self._ingest_args(*vmobjects)
 
 
+class ParametricCurve(VMobject):
+    """Atlas sampling over a construction-time Python parameter function."""
+
+    def __init__(
+        self,
+        t_func,
+        t_range=(0, 1, 0.1),
+        epsilon=1e-8,
+        discontinuities=(),
+        use_smoothing=True,
+        **kwargs,
+    ):
+        if not callable(t_func):
+            raise TypeError("t_func must be callable")
+        _install_live_state(self)
+        self.t_func = t_func
+        self.t_range = tuple(float(value) for value in t_range)
+        self.epsilon = float(epsilon)
+        self.discontinuities = tuple(float(value) for value in discontinuities)
+        self.use_smoothing = bool(use_smoothing)
+        specs = self._build_parametric_curve(
+            _native_shell_factory,
+            self.t_func,
+            self.t_range,
+            self.epsilon,
+            list(self.discontinuities),
+            self.use_smoothing,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def get_point_from_function(self, t):
+        return _np.array(self.t_func(t))
+
+    def get_t_func(self):
+        return self.t_func
+
+    def get_function(self):
+        if hasattr(self, "underlying_function"):
+            return self.underlying_function
+        if hasattr(self, "function"):
+            return self.function
+
+    def get_x_range(self):
+        if hasattr(self, "x_range"):
+            return self.x_range
+
+
 class Rectangle(VMobject):
     def __init__(self, width=4.0, height=2.0, **kwargs):
         _install_live_state(self)
@@ -1777,6 +1870,9 @@ class Line(VMobject):
     def get_length(self):
         vect = self.get_vector()
         return float(_np.sqrt((vect * vect).sum()))
+
+    def get_arc_length(self):
+        return self._get_arc_length()
 
     def get_projection(self, point):
         unit_vect = self.get_unit_vector()
@@ -2443,6 +2539,7 @@ class Tex(VMobject):
     corpus ratchet consumes those names from this exact message."""
 
     _native_text_mode = False
+    _native_group_single_part = False
 
     def __init__(
         self,
@@ -2464,12 +2561,12 @@ class Tex(VMobject):
                 ("alignment", alignment != "\\centering"),
                 ("template", template != ""),
                 ("additional_preamble", additional_preamble != ""),
-                ("isolate", bool(isolate)),
             ],
         )
         color_map = dict(t2c or {})
         color_map.update(tex_to_color_map or {})
         _install_live_state(self)
+        self.isolate = isolate
         separator = getattr(self, "_tex_arg_separator", " ")
         self.tex_strings = [str(part) for part in tex_strings]
         self.tex_string = separator.join(self.tex_strings)
@@ -2482,10 +2579,161 @@ class Tex(VMobject):
             separator,
             bool(self._native_text_mode),
             self.font_size,
-            color_map or None,
+            None,
+            bool(self._native_group_single_part),
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
+        self.set_color_by_tex_to_color_map(color_map)
+
+    def _selector_byte_spans(self, selector):
+        """Reference Selector parsing with native UTF-8 span coordinates."""
+
+        source = self.tex_string
+
+        def one(value):
+            if isinstance(value, str):
+                if not value:
+                    return []
+                return [match.span() for match in _re.finditer(_re.escape(value), source)]
+            if isinstance(value, _re.Pattern):
+                return [match.span() for match in value.finditer(source)]
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and all(index is None or isinstance(index, int) for index in value)
+            ):
+                length = len(source)
+                result = tuple(
+                    default
+                    if index is None
+                    else min(index, length)
+                    if index >= 0
+                    else max(index + length, 0)
+                    for index, default in zip(value, (0, length))
+                )
+                return [result]
+            return None
+
+        spans = one(selector)
+        if spans is None:
+            spans = []
+            try:
+                selectors = iter(selector)
+            except TypeError as error:
+                raise TypeError(f"Invalid selector: {selector!r}") from error
+            for value in selectors:
+                selected = one(value)
+                if selected is None:
+                    raise TypeError(f"Invalid selector: {value!r}")
+                spans.extend(selected)
+        return [
+            (
+                len(source[:start].encode("utf-8")),
+                len(source[:end].encode("utf-8")),
+            )
+            for start, end in spans
+            if start <= end
+        ]
+
+    def _tex_submobject(self, ordinal):
+        current = self
+        for index in self._tex_sub_paths[ordinal]:
+            current = current.submobjects[index]
+        return current
+
+    def _selected_tex_ordinals(self, selector):
+        return [
+            [
+                ordinal
+                for ordinal, (sub_start, sub_end) in enumerate(self._tex_sub_spans)
+                if start <= sub_start and sub_end <= end
+            ]
+            for start, end in self._selector_byte_spans(selector)
+        ]
+
+    def get_parts_by_tex(self, selector):
+        groups = []
+        for ordinals in self._selected_tex_ordinals(selector):
+            if ordinals:
+                groups.append(
+                    VGroup(*(self._tex_submobject(ordinal) for ordinal in ordinals))
+                )
+        return VGroup(*groups)
+
+    def get_part_by_tex(self, selector, index=0):
+        return self.get_parts_by_tex(selector)[index]
+
+    def set_color_by_tex(self, selector, color):
+        self.get_parts_by_tex(selector).set_color(color)
+        return self
+
+    def set_color_by_tex_to_color_map(self, color_map):
+        for selector, color in color_map.items():
+            self.set_color_by_tex(selector, color)
+        return self
+
+    def get_tex(self):
+        return self.tex_string
+
+    def make_number_changeable(self, value, index=0, replace_all=False, **config):
+        substr = str(value)
+        occurrences = [
+            ordinals for ordinals in self._selected_tex_ordinals(substr) if ordinals
+        ]
+        if not occurrences or index >= len(occurrences):
+            return VMobject()
+        selected = occurrences if replace_all else [occurrences[index]]
+        if any(
+            len(self._tex_sub_paths[ordinal]) != 1
+            for ordinals in selected
+            for ordinal in ordinals
+        ):
+            raise NotImplementedError(
+                "Tex.make_number_changeable across nested part groups awaits "
+                "the grouped-span replacement seam"
+            )
+
+        if "num_decimal_places" not in config:
+            config["num_decimal_places"] = (
+                len(substr.split(".", 1)[1]) if "." in substr else 0
+            )
+        replacements = []
+        for ordinals in selected:
+            part = VGroup(*(self._tex_submobject(ordinal) for ordinal in ordinals))
+            decimal = DecimalNumber(float(value), **config)
+            decimal.replace(part)
+            decimal.match_style(part)
+            replacements.append((ordinals, decimal))
+
+        by_first = {ordinals[0]: (set(ordinals), decimal) for ordinals, decimal in replacements}
+        removed = {ordinal for ordinals, _ in replacements for ordinal in ordinals[1:]}
+        children = []
+        spans = []
+        paths = []
+        for ordinal, span in enumerate(self._tex_sub_spans):
+            replacement = by_first.get(ordinal)
+            if replacement is not None:
+                selected_ordinals, decimal = replacement
+                children.append(decimal)
+                spans.append(
+                    (
+                        min(self._tex_sub_spans[item][0] for item in selected_ordinals),
+                        max(self._tex_sub_spans[item][1] for item in selected_ordinals),
+                    )
+                )
+                paths.append([len(children) - 1])
+            elif ordinal not in removed:
+                children.append(self._tex_submobject(ordinal))
+                spans.append(span)
+                paths.append([len(children) - 1])
+        self.set_submobjects(children)
+        self._tex_sub_spans = spans
+        self._tex_sub_paths = paths
+        self.tex_string = self.tex_string.replace(substr, "\\decimalmob", len(replacements))
+        self.tex_strings = [self.tex_string]
+        decimal_mobs = [decimal for _, decimal in replacements]
+        return VGroup(*decimal_mobs) if replace_all else decimal_mobs[0]
 
 
 class TexText(Tex):
@@ -2497,6 +2745,8 @@ class OldTex(Tex):
     pin): joins `tex_strings` with `arg_separator` and typesets in math
     mode over the same fmd-math engine."""
 
+    _native_group_single_part = True
+
     def __init__(
         self,
         *tex_strings,
@@ -2505,13 +2755,10 @@ class OldTex(Tex):
         tex_to_color_map=None,
         **kwargs,
     ):
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [("isolate", bool(isolate))],
-        )
         self._tex_arg_separator = str(arg_separator)
         super().__init__(
             *tex_strings,
+            isolate=isolate,
             tex_to_color_map=tex_to_color_map,
             **kwargs,
         )
@@ -2790,6 +3037,8 @@ class Sphere(Surface):
         _refuse_unrouted("Sphere()", [(name, True) for name in sorted(kwargs)])
         _install_live_state(self)
         self.radius = float(radius)
+        self.clockwise = bool(clockwise)
+        self.true_normals = bool(true_normals)
         self._solid_params = ("sphere", self.radius)
         specs = self._build_sphere(
             _native_surface_shell_factory,
@@ -2797,11 +3046,16 @@ class Sphere(Surface):
             (float(u_range[0]), float(u_range[1])),
             (float(v_range[0]), float(v_range[1])),
             (int(resolution[0]), int(resolution[1])),
-            bool(true_normals),
-            bool(clockwise),
+            self.true_normals,
+            self.clockwise,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return _np.array(
+            self._sphere_uv(self.radius, bool(self.clockwise), float(u), float(v))
+        )
 
 
 class Cube(SGroup):
@@ -4110,6 +4364,7 @@ def _install_schema_surface():
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
+        ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.geometry", "Arc"): Arc,

@@ -9,7 +9,9 @@ import copy
 import enum
 import gc
 import importlib
+import math
 import pickle
+import re
 import sys
 import threading
 import types
@@ -378,6 +380,85 @@ assert isinstance(interactive_scene.checkpoint_paste(), bytes)
 geometry = importlib.import_module("manimlib.mobject.geometry")
 circle = geometry.Circle()
 assert isinstance(circle, VMobject)
+
+# Existing Chisel/Scribe semantics are live through the portal, rather than
+# being shadowed by schema placeholders. Arc length remains true for either
+# curvature sign (BN-03), and Tex selectors consume the native UTF-8 span map.
+line = geometry.Line((-1.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+assert math.isclose(line.get_arc_length(), 2.0, rel_tol=0.0, abs_tol=1e-9)
+curved_line = geometry.Line(
+    (-1.0, 0.0, 0.0),
+    (1.0, 0.0, 0.0),
+    path_arc=-math.pi / 2.0,
+)
+assert curved_line.get_arc_length() > curved_line.get_length()
+assert curved_line.get_arc_length() == VMobject.get_arc_length(curved_line, 2)
+rotated_line = line.copy().rotate(math.pi / 2.0)
+assert np.allclose(rotated_line.get_points()[0], rotated_line.get_start())
+rotated_line.get_points()[0] = [3.0, 4.0, 0.0]
+assert np.allclose(rotated_line.get_start(), [3.0, 4.0, 0.0])
+corners = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+)
+assert np.allclose(corners.get_points()[::2], [[0, 0, 0], [1, 1, 0], [2, 0, 0]])
+corners.reverse_points()
+assert np.allclose(corners.get_points()[::2], [[2, 0, 0], [1, 1, 0], [0, 0, 0]])
+line.set_stroke(manimlib.BLACK, 3, background=True)
+assert line.uniforms["stroke_behind"] is True
+try:
+    line.set_stroke(behind=True, background=False)
+except TypeError as error:
+    assert "conflicting behind/background" in str(error)
+else:
+    raise AssertionError("conflicting era-shim kwargs must be rejected")
+
+tex = manimlib.Tex("E = mc^2", isolate=["mc"])
+mc_parts = tex.get_parts_by_tex("mc")
+assert len(mc_parts) == 1 and len(mc_parts[0]) == 2
+assert tex.get_part_by_tex(re.compile(r"m.")) is not None
+assert len(tex.get_parts_by_tex((0, 1))) == 1
+assert len(tex.get_parts_by_tex("not present")) == 0
+tex.set_color_by_tex("mc", manimlib.BLUE)
+assert all(
+    leaf.get_fill_color() == manimlib.BLUE
+    for leaf in tex.get_part_by_tex("mc")
+)
+tex.set_color_by_tex_to_color_map({re.compile(r"E"): manimlib.RED})
+assert all(
+    leaf.get_fill_color() == manimlib.RED
+    for leaf in tex.get_part_by_tex("E")
+)
+assert tex.get_tex() == "E = mc^2"
+
+changeable = manimlib.Tex("x = 0.00").make_number_changeable("0.00")
+assert isinstance(changeable, manimlib.DecimalNumber)
+changeable.set_value(1.25)
+assert math.isclose(changeable.get_value(), 1.25)
+
+repeated_tex = manimlib.Tex("x", "+", "x")
+assert len(repeated_tex.get_parts_by_tex("x")) == 2
+
+functions = importlib.import_module("manimlib.mobject.functions")
+curve = functions.ParametricCurve(
+    lambda t: np.array([t, t * t, 0.0]),
+    t_range=(0.0, 1.0, 0.25),
+)
+assert curve.has_points()
+assert np.allclose(curve.get_point_from_function(0.5), [0.5, 0.25, 0.0])
+assert curve.get_t_func() is curve.t_func
+assert curve.get_arc_length() > math.sqrt(2.0)
+
+three_dimensions = importlib.import_module("manimlib.mobject.three_dimensions")
+sphere = three_dimensions.Sphere(radius=2.0, clockwise=True, resolution=(5, 3))
+assert np.allclose(sphere.uv_func(0.0, 0.0), [0.0, 0.0, -2.0])
+assert np.allclose(sphere.uv_func(0.0, math.pi / 2.0), [2.0, 0.0, 0.0])
+
+old_tex = importlib.import_module("manimlib.mobject.svg.old_tex_mobject").OldTex
+quadratic_label = old_tex(
+    "-{b \\over 2} \\pm \\sqrt{{b^2 \\over 4} - c}",
+    font_size=30,
+)[0]
+assert len(quadratic_label) > 12, len(quadratic_label)
 assert issubclass(InteractiveScene, Scene)
 assert issubclass(Animation, object)
 assert issubclass(manimlib.Group, Mobject)

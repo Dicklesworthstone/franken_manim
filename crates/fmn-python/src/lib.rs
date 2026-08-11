@@ -1493,6 +1493,49 @@ impl BridgeMobject {
             .ok_or_else(|| PyValueError::new_err("Cannot get points of Mobject with no points"))
     }
 
+    /// Materialize this entry's object-to-world placement into its point
+    /// records before exposing manim's writable `get_points()` view.
+    /// This changes representation only; geometry and placement together
+    /// remain identical.
+    fn _bake_placement(slf: &Bound<'_, Self>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.bake_placement(mob))?
+            .map(|_| ())
+            .map_err(stage_error)
+    }
+
+    /// Chisel's shared-anchor encoding for a corner polyline, installed
+    /// into the current Stage entry with the normal schema/revision rules.
+    fn _set_points_as_corners(slf: &Bound<'_, Self>, anchors: Vec<[f64; 3]>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        let mut path = fmn_library::QuadPath::new();
+        path.set_points_as_corners(&anchors).map_err(native_error)?;
+        with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
+    }
+
+    /// Reference `reverse_points` through Marionette's family operation,
+    /// which reverses every record row with its point and repairs path
+    /// break handles/base normals.
+    fn _reverse_points(slf: &Bound<'_, Self>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.reverse_family_points(mob))?.map_err(stage_error)
+    }
+
+    /// True arc length over this entry's current world-space shared-anchor
+    /// path. The optional sampling parameter on manim's VMobject surface is
+    /// deliberately unnecessary: Chisel's error-bounded quadrature is the
+    /// definition (BN-03), including for negative `path_arc` lines.
+    fn _get_arc_length(slf: &Bound<'_, Self>) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            let points = stage.get_points(mob).unwrap_or_default();
+            fmn_library::VMobject::from_points(points)
+                .path()
+                .map(|path| path.get_arc_length())
+        })?
+        .map_err(native_error)
+    }
+
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
     fn _put_start_and_end_on(
         slf: &Bound<'_, Self>,
@@ -1724,6 +1767,15 @@ impl BridgeMobject {
         install_native_tree(slf, factory, sphere.build())
     }
 
+    /// `Sphere.uv_func` through the exact function used by the native
+    /// surface builder (including its fmn-dmath transcendental path).
+    #[staticmethod]
+    fn _sphere_uv(radius: f64, clockwise: bool, u: f64, v: f64) -> [f64; 3] {
+        fmn_library::Sphere::new(radius)
+            .clockwise(clockwise)
+            .uv_func(u, v)
+    }
+
     /// `ParametricSurface(uv_func, ...)`: the native sampler over a
     /// Python callable. The callable runs during construction only (no
     /// engine borrow is held); its first error aborts the build.
@@ -1771,6 +1823,57 @@ impl BridgeMobject {
             return Err(error);
         }
         install_native_tree(slf, factory, surface)
+    }
+
+    /// `ParametricCurve(t_func, ...)`: Atlas owns the bounded range
+    /// sampling and Chisel owns the shared-anchor smoothing. The Python
+    /// callback is evaluated only while constructing the detached value;
+    /// its first exception is preserved verbatim.
+    fn _build_parametric_curve<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        t_func: &Bound<'py, PyAny>,
+        t_range: &Bound<'py, PyAny>,
+        epsilon: f64,
+        discontinuities: Vec<f64>,
+        use_smoothing: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let func = t_func.clone().unbind();
+        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
+        let closure_errors = Rc::clone(&error_cell);
+        let curve = fmn_library::ParametricCurve::new(move |t| {
+            Python::attach(|py| {
+                let sample = func
+                    .bind(py)
+                    .call1((t,))
+                    .and_then(|value| value.extract::<Vec<f64>>());
+                match sample {
+                    Ok(point) if point.len() >= 3 => [point[0], point[1], point[2]],
+                    Ok(_) => {
+                        if closure_errors.borrow().is_none() {
+                            *closure_errors.borrow_mut() =
+                                Some(PyValueError::new_err("t_func must return three components"));
+                        }
+                        [0.0; 3]
+                    }
+                    Err(error) => {
+                        if closure_errors.borrow().is_none() {
+                            *closure_errors.borrow_mut() = Some(error);
+                        }
+                        [0.0; 3]
+                    }
+                }
+            })
+        })
+        .t_range(range3(t_range)?)
+        .epsilon(epsilon)
+        .discontinuities(discontinuities)
+        .use_smoothing(use_smoothing)
+        .build();
+        if let Some(error) = error_cell.borrow_mut().take() {
+            return Err(error);
+        }
+        install_native_tree(slf, factory, curve.map_err(native_error)?)
     }
 
     /// `SurfaceMesh(uv_surface, ...)` — the rebuild oracle: the source
@@ -2114,6 +2217,7 @@ impl BridgeMobject {
         text_mode: bool,
         font_size: f64,
         t2c: Option<&Bound<'py, PyDict>>,
+        group_single_part: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         let source = parts.join(separator);
         let pairs = t2c_pairs(t2c)?;
@@ -2137,7 +2241,16 @@ impl BridgeMobject {
             // input; never wrap it in a generic message.
             .map_err(native_error)
         })?;
-        if parts.len() <= 1 {
+        let spans: Vec<(usize, usize)> = built
+            .typeset
+            .subs
+            .iter()
+            .map(|sub| (sub.span.start, sub.span.end))
+            .collect();
+        if parts.is_empty() || (parts.len() == 1 && !group_single_part) {
+            let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
+            slf.as_any().setattr("_tex_sub_spans", spans)?;
+            slf.as_any().setattr("_tex_sub_paths", paths)?;
             return install_native_tree(slf, factory, built.vmob);
         }
         // Half-open byte ranges of each part in the joined source; a part
@@ -2155,13 +2268,22 @@ impl BridgeMobject {
         let subs = &built.typeset.subs;
         let mut tree = Mobject::from(built.vmob.clone());
         let children = std::mem::take(&mut tree.submobjects);
+        if children.len() != spans.len() {
+            return Err(PyRuntimeError::new_err(format!(
+                "native Tex span table has {} entries for {} primitives",
+                spans.len(),
+                children.len()
+            )));
+        }
         let mut buckets: Vec<Vec<Mobject>> = (0..parts.len()).map(|_| Vec::new()).collect();
+        let mut paths = vec![Vec::new(); children.len()];
         for (index, child) in children.into_iter().enumerate() {
             let start = subs.get(index).map_or(0, |sub| sub.span.start);
             let part = ranges
                 .iter()
                 .position(|&(from, to)| from <= start && start < to)
                 .unwrap_or(parts.len() - 1);
+            paths[index] = vec![part, buckets[part].len()];
             buckets[part].push(child);
         }
         tree.submobjects = buckets
@@ -2176,6 +2298,8 @@ impl BridgeMobject {
                 node
             })
             .collect();
+        slf.as_any().setattr("_tex_sub_spans", spans)?;
+        slf.as_any().setattr("_tex_sub_paths", paths)?;
         install_native_tree(slf, factory, tree)
     }
 
