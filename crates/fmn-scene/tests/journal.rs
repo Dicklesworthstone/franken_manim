@@ -14,7 +14,8 @@ use fmn_mobject::{Mob, Mobject, SceneState, Stage};
 use fmn_scene::journal::{BUNDLE_SCHEMA, JOURNAL_SCHEMA};
 use fmn_scene::{
     AssetRead, CommandKind, CommandRecord, EffectClass, Entry, ImpureEffectTag, InvalidationReason,
-    Journal, ReplayAudit, ReproBundle, SubprocessRecord, plan_replay,
+    Journal, MAX_RENDER_BACKEND_IDENTITY_BYTES, RenderBackendRecord, RenderBackendRole,
+    ReplayAudit, ReproBundle, SubprocessRecord, plan_replay,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
@@ -102,13 +103,22 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
 }
 
 #[test]
-fn journal_minor_one_reads_legacy_minor_zero_without_events() {
+fn journal_minor_two_reads_legacy_journals_without_newer_streams() {
     let mut writer = Writer::new(Schema::new(*b"FMNA", 3, 1, 0));
     writer.put_u32(0);
-    let legacy = writer.finish().expect("legacy fixture encodes");
-    let decoded = Journal::from_bytes(&legacy).expect("minor-zero journal remains readable");
-    assert!(decoded.entries().is_empty());
-    assert!(decoded.events().is_empty());
+    let minor_zero = writer.finish().expect("minor-zero fixture encodes");
+
+    let mut writer = Writer::new(Schema::new(*b"FMNA", 3, 1, 1));
+    writer.put_u32(0);
+    writer.put_u32(0);
+    let minor_one = writer.finish().expect("minor-one fixture encodes");
+
+    for legacy in [&minor_zero, &minor_one] {
+        let decoded = Journal::from_bytes(legacy).expect("legacy journal remains readable");
+        assert!(decoded.entries().is_empty());
+        assert!(decoded.events().is_empty());
+        assert!(decoded.render_backends().is_empty());
+    }
 }
 
 #[test]
@@ -141,6 +151,11 @@ fn journal_collection_counts_are_preflighted_before_reserve() {
     events.put_u32(0);
     events.put_u32(COUNT);
 
+    let mut backends = Writer::new(JOURNAL_SCHEMA);
+    backends.put_u32(0);
+    backends.put_u32(0);
+    backends.put_u32(COUNT);
+
     let mut closure = Writer::new(BUNDLE_SCHEMA);
     closure.put_str("");
     closure.put_u64(0);
@@ -171,6 +186,12 @@ fn journal_collection_counts_are_preflighted_before_reserve() {
             "input event",
             Journal::from_bytes(&events.finish().unwrap()).unwrap_err(),
             u64::from(COUNT) * 27,
+            0,
+        ),
+        (
+            "render backend",
+            Journal::from_bytes(&backends.finish().unwrap()).unwrap_err(),
+            u64::from(COUNT) * 41,
             0,
         ),
         (
@@ -208,6 +229,52 @@ fn journal_collection_counts_are_preflighted_before_reserve() {
             .to_bytes()
             .unwrap(),
         valid_bytes
+    );
+}
+
+#[test]
+fn render_backend_identities_round_trip_deduplicate_and_bind_role() {
+    let identity = b"canonical fast-cpu engine journal".to_vec();
+    let stream = RenderBackendRecord::new(RenderBackendRole::FrameStream, identity.clone())
+        .expect("bounded identity is valid");
+    let native = RenderBackendRecord::new(RenderBackendRole::NativePresentation, identity)
+        .expect("the same identity may serve a distinct role");
+    let mut journal = Journal::new();
+    journal
+        .record_render_backends(&[stream.clone(), stream.clone(), native.clone()])
+        .expect("valid backend records append");
+
+    assert_eq!(journal.render_backends(), &[stream.clone(), native.clone()]);
+    let bytes = journal.to_bytes().expect("journal encodes");
+    let decoded = Journal::from_bytes(&bytes).expect("journal decodes");
+    assert_eq!(decoded.render_backends(), &[stream, native]);
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+}
+
+#[test]
+fn render_backend_identity_refuses_tampering_and_oversize() {
+    let identity = b"canonical backend";
+    let wrong_digest = sha256(b"different backend");
+    assert_eq!(
+        RenderBackendRecord::from_parts(RenderBackendRole::FrameStream, identity, wrong_digest,)
+            .unwrap_err()
+            .to_string(),
+        "malformed journal: render backend identity digest"
+    );
+    assert_eq!(
+        RenderBackendRecord::new(RenderBackendRole::FrameStream, Vec::new())
+            .unwrap_err()
+            .to_string(),
+        "malformed journal: empty render backend identity"
+    );
+    assert_eq!(
+        RenderBackendRecord::new(
+            RenderBackendRole::FrameStream,
+            vec![0; MAX_RENDER_BACKEND_IDENTITY_BYTES + 1],
+        )
+        .unwrap_err()
+        .to_string(),
+        "malformed journal: render backend identity exceeds limit"
     );
 }
 

@@ -2461,6 +2461,14 @@ mod tests {
         Box::new(UnusedBuilder)
     }
 
+    fn test_render_backend() -> fmn_scene::RenderBackendRecord {
+        fmn_scene::RenderBackendRecord::new(
+            fmn_scene::RenderBackendRole::FrameStream,
+            b"host-test-render-backend".to_vec(),
+        )
+        .unwrap()
+    }
+
     fn test_supervisor_with_protocol_limits(
         limits: ProtocolLimits,
     ) -> (Supervisor, Arc<dyn Clock>) {
@@ -2811,6 +2819,7 @@ mod tests {
                             digest: sha256(&rgba),
                             bytes: rgba,
                         },
+                        render_backends: vec![test_render_backend()],
                     },
                     ProtocolLimits::default(),
                 )
@@ -3037,6 +3046,7 @@ mod tests {
                             digest: sha256(&rgba),
                             bytes: rgba,
                         },
+                        render_backends: vec![test_render_backend()],
                     },
                     ProtocolLimits::default(),
                 )
@@ -3462,6 +3472,7 @@ mod tests {
                 digest: sha256(&bytes),
                 bytes,
             },
+            render_backends: vec![test_render_backend()],
         });
 
         let error = handler

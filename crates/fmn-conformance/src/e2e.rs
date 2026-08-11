@@ -126,7 +126,8 @@ const MAX_REPRO_EFFECT_TAGS: usize = 16;
 const MAX_REPRO_JOURNAL_BYTES: usize = SerialLimits::DEFAULT.max_field;
 // FMNA framing (24-byte header + 32-byte checksum), entry count, and the
 // empty input-event count carried by journals produced through RunCtx.
-const EMPTY_REPRO_JOURNAL_BYTES: usize = 56 + 4 + 4;
+// FMNA/3 header + entry count + input-event count + render-backend count.
+const EMPTY_REPRO_JOURNAL_BYTES: usize = 56 + 4 + 4 + 4;
 
 /// Canonical span (event) names for the e2e log contract.
 ///

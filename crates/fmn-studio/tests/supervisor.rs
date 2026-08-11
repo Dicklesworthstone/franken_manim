@@ -17,16 +17,17 @@ use fmn_platform::clock::{Clock, FakeClock};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_scene::{
     AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventError, EventPayload,
-    InputEvent, Journal, JournalError, Key, Modifiers, Scene,
+    InputEvent, Journal, JournalError, Key, Modifiers, RenderBackendRecord, RenderBackendRole,
+    Scene,
 };
 use fmn_studio::{
     BuildError, ChannelError, ChannelFailureKind, Checkpoint, CheckpointSource, CrashReport,
-    FramingError, JournalReplay, LaunchError, ProtocolError, ProtocolLimits, ProtocolVersion,
-    RebuildDriver, RequestEnvelope, ResponseEnvelope, ServiceError, StudioDataKind, Supervisor,
-    SupervisorConfig, SupervisorError, SupervisorReply, SupervisorRequest, TransportCapabilities,
-    WorkerArtifact, WorkerChannel, WorkerErrorCode, WorkerLauncher, WorkerResponse,
-    WorkerServeError, WorkerServeOutcome, WorkerService, read_response, serve_worker,
-    write_request,
+    FrameEncoding, FramePayload, FrameStream, FramingError, JournalReplay, LaunchError,
+    ProtocolError, ProtocolLimits, ProtocolVersion, RebuildDriver, RequestEnvelope,
+    ResponseEnvelope, ServiceError, StudioDataKind, Supervisor, SupervisorConfig, SupervisorError,
+    SupervisorReply, SupervisorRequest, TransportCapabilities, WorkerArtifact, WorkerChannel,
+    WorkerErrorCode, WorkerLauncher, WorkerResponse, WorkerServeError, WorkerServeOutcome,
+    WorkerService, read_response, serve_worker, write_request,
 };
 
 fn lock_poisoned<T>(error: PoisonError<T>) -> T {
@@ -111,6 +112,7 @@ struct FakeState {
     diverge_next_replay: bool,
     skew_handshake: bool,
     wrong_build_handshake: bool,
+    frame_response: Option<FrameStream>,
     journal_segment: Option<(u64, Vec<u8>)>,
     checkpoint_response: Option<Checkpoint>,
     inspection_scene: Option<String>,
@@ -216,7 +218,9 @@ impl WorkerChannel for FakeChannel {
             }
             SupervisorRequest::EnumerateScenes => {
                 let mut state = self.state.lock().unwrap_or_else(lock_poisoned);
-                if let Some((start_entry, journal)) = state.journal_segment.take() {
+                if let Some(frame) = state.frame_response.take() {
+                    WorkerResponse::Frame(frame)
+                } else if let Some((start_entry, journal)) = state.journal_segment.take() {
                     WorkerResponse::JournalSegment {
                         scene: "Demo".to_owned(),
                         start_entry,
@@ -571,8 +575,12 @@ fn repeated_crash_history_evicts_oldest_and_zero_disables_retention() {
 
 #[test]
 fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
+    let empty_journal_bytes = Journal::new().to_bytes().unwrap().len();
+    assert_eq!(empty_journal_bytes, 68);
     let limits = ProtocolLimits {
-        max_field_bytes: 64,
+        // Keep this at the smallest field budget that admits the current empty
+        // journal, so max_field remains the active crash-message ceiling.
+        max_field_bytes: empty_journal_bytes,
         max_crash_message_bytes: 128,
         ..ProtocolLimits::default()
     };
@@ -586,7 +594,7 @@ fn locally_synthesized_crash_message_honors_the_effective_wire_budget() {
     );
     assert_eq!(
         crash.message,
-        "worker channel Closed: short diagnostic; stderr tail: \u{fffd}\u{fffd}\u{fffd}"
+        "worker channel Closed: short diagnostic; stderr tail: \u{fffd}\u{fffd}\u{fffd}\u{fffd}"
     );
     ResponseEnvelope {
         request_id: 1,
@@ -1212,6 +1220,11 @@ fn stdio_worker_deadline_cancels_a_blocked_checkpoint_write() {
 fn journal_segment_replaces_only_its_declared_tail() {
     let replacement_command = command(99);
     let mut replacement = Journal::new();
+    let segment_backend = RenderBackendRecord::new(
+        RenderBackendRole::NativePresentation,
+        b"native presentation backend".to_vec(),
+    )
+    .unwrap();
     replacement
         .record(Entry {
             command: replacement_command.clone(),
@@ -1234,6 +1247,9 @@ fn journal_segment_replaces_only_its_declared_tail() {
     replacement
         .record_event(segment_event.clone())
         .expect("segment event records");
+    replacement
+        .record_render_backend(&segment_backend)
+        .expect("segment backend records");
     let state = Arc::new(Mutex::new(FakeState {
         journal_segment: Some((1, replacement.to_bytes().expect("segment encodes"))),
         ..FakeState::default()
@@ -1241,6 +1257,11 @@ fn journal_segment_replaces_only_its_declared_tail() {
     let clock = Arc::new(FakeClock::new());
     let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
     let mut original = make_journal(2, Some(0));
+    let original_backend = RenderBackendRecord::new(
+        RenderBackendRole::FrameStream,
+        b"fast-cpu stream backend".to_vec(),
+    )
+    .unwrap();
     let original_event = InputEvent::new(
         1,
         RationalTime::zero(30),
@@ -1253,6 +1274,9 @@ fn journal_segment_replaces_only_its_declared_tail() {
     original
         .record_event(original_event.clone())
         .expect("original event records");
+    original
+        .record_render_backend(&original_backend)
+        .expect("original backend records");
     let first = original.entries()[0].command.clone();
     supervisor
         .install_session("Demo", original)
@@ -1265,6 +1289,11 @@ fn journal_segment_replaces_only_its_declared_tail() {
             .expect("segment accepted"),
         SupervisorReply::Worker(WorkerResponse::JournalSegment { start_entry: 1, .. })
     ));
+    assert_eq!(
+        supervisor.render_backends(),
+        &[original_backend, segment_backend],
+        "tail replacement must preserve both observed backend identities"
+    );
 
     let report = supervisor
         .rebuild_and_restart(&mut builder, &[first, replacement_command], &|_| true)
@@ -1276,6 +1305,62 @@ fn journal_segment_replaces_only_its_declared_tail() {
         state.lock().unwrap_or_else(lock_poisoned).replayed_events,
         vec![original_event, segment_event],
         "the retained and segment-local input streams must both reach replay"
+    );
+}
+
+#[test]
+fn accepted_frames_update_the_durable_session_backend_identity_once() {
+    let backend = RenderBackendRecord::new(
+        RenderBackendRole::FrameStream,
+        b"canonical fast-cpu engine journal".to_vec(),
+    )
+    .unwrap();
+    let pixels = vec![0, 0, 0, 255];
+    let frame = FrameStream {
+        scene: "Demo".to_owned(),
+        frame_index: 0,
+        width: 1,
+        height: 1,
+        stride: 4,
+        encoding: FrameEncoding::Rgba8,
+        payload: FramePayload::Pipe {
+            digest: sha256(&pixels),
+            bytes: pixels,
+        },
+        render_backends: vec![backend.clone()],
+    };
+    let state = Arc::new(Mutex::new(FakeState {
+        frame_response: Some(frame.clone()),
+        ..FakeState::default()
+    }));
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = fake_supervisor(Arc::clone(&state), Arc::clone(&clock), Duration::ZERO);
+    supervisor
+        .install_session("Demo", Journal::new())
+        .expect("session");
+    let empty_digest = supervisor.journal_cache_digest();
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).expect("start");
+
+    assert!(matches!(
+        supervisor
+            .request(SupervisorRequest::EnumerateScenes, &|_| true)
+            .expect("frame accepted"),
+        SupervisorReply::Worker(WorkerResponse::Frame(_))
+    ));
+    assert_eq!(supervisor.render_backends(), std::slice::from_ref(&backend));
+    let recorded_digest = supervisor.journal_cache_digest();
+    assert_ne!(recorded_digest, empty_digest);
+
+    state.lock().unwrap_or_else(lock_poisoned).frame_response = Some(frame);
+    supervisor
+        .request(SupervisorRequest::EnumerateScenes, &|_| true)
+        .expect("duplicate backend frame accepted");
+    assert_eq!(supervisor.render_backends(), std::slice::from_ref(&backend));
+    assert_eq!(
+        supervisor.journal_cache_digest(),
+        recorded_digest,
+        "a repeated identity must not rewrite or grow the durable journal"
     );
 }
 

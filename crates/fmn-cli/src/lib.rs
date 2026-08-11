@@ -39,7 +39,7 @@ use fmn_output::{
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
-use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob};
+use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob, journal as render_engine_journal};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
 use fmn_render::{FrameArena, PixelTileCache};
@@ -47,7 +47,7 @@ use fmn_scene::studio_bridge::SceneState;
 use fmn_scene::{
     AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
     EffectClass, Entry, IntegrationError, Journal, LifecycleEvent, LifecyclePhase, NullSceneSink,
-    OutputNaming, SceneSink, TimelineBundle,
+    OutputNaming, RenderBackendRecord, RenderBackendRole, SceneSink, TimelineBundle,
 };
 
 /// Version of every `fmn` robot-mode record emitted by this crate.
@@ -2568,6 +2568,7 @@ impl NativeStudioRenderer {
         stage: &fmn_scene::studio_bridge::Stage,
     ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
         let (render_plan, mono, binning) = self.prepare(stage, frame_index)?;
+        let mut render_backends = Vec::new();
         #[cfg(feature = "metal")]
         if let Some(preview) = self.preview.as_mut() {
             match preview
@@ -2575,13 +2576,36 @@ impl NativeStudioRenderer {
                 .map_err(|error| studio_service_error(error.to_string()))?
             {
                 fmn_studio::StudioPreviewOutput::Stream(frame) => {
-                    return self.encode_rgba8(scene, frame_index, frame.frame.as_bytes());
+                    let backend = RenderBackendRecord::new(
+                        RenderBackendRole::FrameStream,
+                        render_engine_journal(frame.identity(), &self.frame_config, self.tiling),
+                    )
+                    .map_err(|error| studio_service_error(error.to_string()))?;
+                    render_backends
+                        .try_reserve(1)
+                        .map_err(|error| studio_service_error(error.to_string()))?;
+                    render_backends.push(backend);
+                    return self.encode_rgba8(
+                        scene,
+                        frame_index,
+                        frame.frame.as_bytes(),
+                        render_backends,
+                    );
                 }
-                fmn_studio::StudioPreviewOutput::Native(_) => {
+                fmn_studio::StudioPreviewOutput::Native(report) => {
                     // Native presentation intentionally performs no pixel
                     // readback. The browser and terminal transports still
                     // require a CPU-visible PNG, so retain their existing
                     // explicit CPU stream beside the native window.
+                    let backend = RenderBackendRecord::new(
+                        RenderBackendRole::NativePresentation,
+                        report.backend_journal(),
+                    )
+                    .map_err(|error| studio_service_error(error.to_string()))?;
+                    render_backends
+                        .try_reserve(2)
+                        .map_err(|error| studio_service_error(error.to_string()))?;
+                    render_backends.push(backend);
                 }
             }
         }
@@ -2604,7 +2628,18 @@ impl NativeStudioRenderer {
         let mut rgba = FrameBuffer::new(layout);
         rgba16f_to_rgba8(&frame, &mut rgba)
             .map_err(|error| studio_service_error(error.to_string()))?;
-        self.encode_rgba8(scene, frame_index, rgba.as_bytes())
+        let stream_backend = RenderBackendRecord::new(
+            RenderBackendRole::FrameStream,
+            render_engine_journal(self.engine, &self.frame_config, self.tiling),
+        )
+        .map_err(|error| studio_service_error(error.to_string()))?;
+        if render_backends.capacity() == 0 {
+            render_backends
+                .try_reserve(1)
+                .map_err(|error| studio_service_error(error.to_string()))?;
+        }
+        render_backends.push(stream_backend);
+        self.encode_rgba8(scene, frame_index, rgba.as_bytes(), render_backends)
     }
 
     fn encode_rgba8(
@@ -2612,6 +2647,7 @@ impl NativeStudioRenderer {
         scene: &str,
         frame_index: usize,
         rgba: &[u8],
+        render_backends: Vec<RenderBackendRecord>,
     ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
         let png = fmn_codec::encode_rgba8(
             self.frame_config.viewport.width,
@@ -2629,6 +2665,7 @@ impl NativeStudioRenderer {
             stride: 0,
             encoding: fmn_studio::FrameEncoding::Png,
             payload: fmn_studio::FramePayload::Pipe { bytes: png, digest },
+            render_backends,
         })
     }
 

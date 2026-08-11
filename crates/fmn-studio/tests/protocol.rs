@@ -9,15 +9,23 @@ use std::io::{Cursor, Read};
 use fmn_hash::{Schema, Writer, sha256};
 use fmn_scene::{
     CommandKind, CommandRecord, EffectClass, Entry, EventPayload, Journal, JournalError, Key,
-    Modifiers,
+    Modifiers, RenderBackendRecord, RenderBackendRole,
 };
 use fmn_studio::{
     CURRENT_VERSION, Checkpoint, CrashReport, DebugLayerSet, FrameEncoding, FramePayload,
-    FrameStream, FramingError, JournalReplay, ProtocolError, ProtocolLimits, ProtocolVersion,
-    REQUEST_SCHEMA, RequestEnvelope, ResponseEnvelope, StudioDataKind, SupervisorRequest,
-    TransportCapabilities, WorkerErrorCode, WorkerResponse, read_request, read_response,
-    write_request, write_response,
+    FrameStream, FramingError, JournalReplay, MAX_FRAME_RENDER_BACKENDS, ProtocolError,
+    ProtocolLimits, ProtocolVersion, REQUEST_SCHEMA, RequestEnvelope, ResponseEnvelope,
+    StudioDataKind, SupervisorRequest, TransportCapabilities, WorkerErrorCode, WorkerResponse,
+    read_request, read_response, write_request, write_response,
 };
+
+fn test_render_backend() -> RenderBackendRecord {
+    RenderBackendRecord::new(
+        RenderBackendRole::FrameStream,
+        b"protocol-test-render-backend".to_vec(),
+    )
+    .unwrap()
+}
 
 fn command(label: &str) -> CommandRecord {
     CommandRecord {
@@ -154,6 +162,13 @@ fn every_response_variant_round_trips_canonically() {
                 digest: sha256(&rgba),
                 bytes: rgba,
             },
+            render_backends: vec![
+                RenderBackendRecord::new(
+                    RenderBackendRole::FrameStream,
+                    b"canonical fast-cpu backend".to_vec(),
+                )
+                .unwrap(),
+            ],
         }),
         WorkerResponse::Frame(FrameStream {
             scene: "Demo".to_owned(),
@@ -166,6 +181,7 @@ fn every_response_variant_round_trips_canonically() {
                 digest: sha256(&png),
                 bytes: png,
             },
+            render_backends: vec![test_render_backend()],
         }),
         WorkerResponse::Frame(FrameStream {
             scene: "Demo".to_owned(),
@@ -179,6 +195,7 @@ fn every_response_variant_round_trips_canonically() {
                 len: 8,
                 digest: sha256(b"region contents"),
             },
+            render_backends: vec![test_render_backend()],
         }),
         WorkerResponse::Checkpoint(checkpoint()),
         WorkerResponse::JournalSegment {
@@ -351,6 +368,76 @@ fn malformed_semantics_fail_before_crossing_the_pipe() {
         RequestEnvelope::from_bytes(&writer.finish().unwrap(), limits),
         Err(ProtocolError::Malformed("supervisor request tag"))
     ));
+}
+
+#[test]
+fn frame_backend_provenance_is_required_bounded_and_authenticated() {
+    let limits = ProtocolLimits::default();
+    let rgba = vec![0, 0, 0, 255];
+    let frame = FrameStream {
+        scene: "Demo".to_owned(),
+        frame_index: 0,
+        width: 1,
+        height: 1,
+        stride: 4,
+        encoding: FrameEncoding::Rgba8,
+        payload: FramePayload::Pipe {
+            digest: sha256(&rgba),
+            bytes: rgba,
+        },
+        render_backends: Vec::new(),
+    };
+    assert_eq!(
+        response(1, WorkerResponse::Frame(frame)).to_bytes(limits),
+        Err(ProtocolError::Malformed(
+            "frame has no render backend identity"
+        ))
+    );
+
+    let mut writer = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+    writer.put_u64(2);
+    writer.put_u8(3);
+    writer.put_str("Demo");
+    writer.put_u64(0);
+    writer.put_u32(1);
+    writer.put_u32(1);
+    writer.put_u32(4);
+    writer.put_u8(1);
+    writer.put_u8(0);
+    writer.put_digest(&sha256(&[0, 0, 0, 255]));
+    writer.put_bytes(&[0, 0, 0, 255]);
+    writer.put_u32(1);
+    writer.put_u8(RenderBackendRole::FrameStream.wire_code());
+    writer.put_digest(&sha256(b"different backend"));
+    writer.put_bytes(b"actual backend");
+    assert!(matches!(
+        ResponseEnvelope::from_bytes(&writer.finish().unwrap(), limits),
+        Err(ProtocolError::InvalidJournal(JournalError::Malformed(
+            "render backend identity digest"
+        )))
+    ));
+
+    let mut writer = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+    writer.put_u64(3);
+    writer.put_u8(3);
+    writer.put_str("Demo");
+    writer.put_u64(0);
+    writer.put_u32(1);
+    writer.put_u32(1);
+    writer.put_u32(4);
+    writer.put_u8(1);
+    writer.put_u8(0);
+    writer.put_digest(&sha256(&[0, 0, 0, 255]));
+    writer.put_bytes(&[0, 0, 0, 255]);
+    writer.put_u32(u32::try_from(MAX_FRAME_RENDER_BACKENDS + 1).unwrap());
+    assert_eq!(
+        ResponseEnvelope::from_bytes(&writer.finish().unwrap(), limits),
+        Err(ProtocolError::CountLimit {
+            field: "frame render backend",
+            limit: MAX_FRAME_RENDER_BACKENDS,
+            needed: MAX_FRAME_RENDER_BACKENDS + 1,
+        })
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@ use fmn_codec::{CompressionLevel, encode_rgba8};
 use fmn_core::rng::RngRoot;
 use fmn_hash::sha256;
 use fmn_mobject::{Mobject, Stage};
+use fmn_scene::{RenderBackendRecord, RenderBackendRole};
 use fmn_studio::{
     CapabilityToken, DebugLayerSet, DebugOverlaySnapshot, FrameEncoding, FrameHub, FramePayload,
     FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, NodeOverlay,
@@ -21,6 +22,14 @@ struct PayloadWitness<'a> {
     payload: &'a [u8],
     saw_borrowed_payload: bool,
     bytes: Vec<u8>,
+}
+
+fn test_render_backend() -> RenderBackendRecord {
+    RenderBackendRecord::new(
+        RenderBackendRole::FrameStream,
+        b"studio-test-render-backend".to_vec(),
+    )
+    .unwrap()
 }
 
 impl Write for PayloadWitness<'_> {
@@ -67,6 +76,7 @@ fn frame_hub_validates_converts_and_bounds_multipart_png() {
             digest: sha256(&rgba),
             bytes: rgba,
         },
+        render_backends: vec![test_render_backend()],
     };
     let hub = FrameHub::new(2, 1024 * 1024).unwrap();
     let frame = hub.publish(&stream, Default::default()).unwrap();
@@ -114,6 +124,7 @@ fn frame_hub_rejects_invalid_or_mismatched_png_without_history_mutation() {
             digest: sha256(&bytes),
             bytes,
         },
+        render_backends: vec![test_render_backend()],
     };
     let hub = FrameHub::new(2, png.len()).unwrap();
     let first = hub
@@ -175,6 +186,7 @@ fn frame_hub_binds_png_decode_pixels_to_session_frame_budget() {
             digest: sha256(&png),
             bytes: png.clone(),
         },
+        render_backends: vec![test_render_backend()],
     };
     let hub = FrameHub::new(1, png.len()).unwrap();
     let compressed_only = ProtocolLimits {

@@ -14,16 +14,23 @@ use std::io::{Read, Write};
 use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer, sha256};
 use fmn_scene::{
     CommandKind, CommandRecord, EventPayload, Journal, JournalError, Key, Modifiers, MouseButton,
+    RenderBackendRecord, RenderBackendRole,
 };
 
 /// Canonical request envelope schema.
 pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 0);
 /// Canonical response envelope schema.
-pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 0);
+pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 1);
 const STUDIO_SEEK_COMMAND_SCHEMA: Schema = Schema::new(*b"FMNI", 3, 1, 0);
 
 /// The live protocol version advertised during the mandatory handshake.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 2 };
+
+/// Maximum distinct renderer/backend identities attached to one frame.
+///
+/// Current production frames carry one CPU stream identity, or a native
+/// presentation identity plus the companion CPU stream identity.
+pub const MAX_FRAME_RENDER_BACKENDS: usize = 4;
 
 const STUDIO_SEEK_LABEL_PREFIX: &str = "studio seek frame ";
 
@@ -463,6 +470,8 @@ pub struct FrameStream {
     pub encoding: FrameEncoding,
     /// Pipe or shared-memory transport.
     pub payload: FramePayload,
+    /// Renderer/backend identities that actually participated in this frame.
+    pub render_backends: Vec<RenderBackendRecord>,
 }
 
 impl FrameStream {
@@ -474,6 +483,19 @@ impl FrameStream {
         }
         let payload_len = self.payload.len()?;
         limit_payload("frame", payload_len, limits.max_frame_bytes)?;
+        limit_count(
+            "frame render backend",
+            self.render_backends.len(),
+            MAX_FRAME_RENDER_BACKENDS,
+        )?;
+        if self.render_backends.is_empty() {
+            return Err(ProtocolError::Malformed(
+                "frame has no render backend identity",
+            ));
+        }
+        for backend in &self.render_backends {
+            backend.validate()?;
+        }
         match &self.payload {
             FramePayload::Pipe { bytes, digest } => {
                 // ubs:ignore - public content-integrity digest, not an authentication secret.
@@ -1276,7 +1298,7 @@ fn put_response(writer: &mut Writer, response: &WorkerResponse) -> Result<(), Pr
         }
         WorkerResponse::Frame(frame) => {
             writer.put_u8(3);
-            put_frame(writer, frame);
+            put_frame(writer, frame)?;
         }
         WorkerResponse::Checkpoint(checkpoint) => {
             writer.put_u8(4);
@@ -1855,7 +1877,7 @@ fn get_replay(
     })
 }
 
-fn put_frame(writer: &mut Writer, frame: &FrameStream) {
+fn put_frame(writer: &mut Writer, frame: &FrameStream) -> Result<(), ProtocolError> {
     writer.put_str(&frame.scene);
     writer.put_u64(frame.frame_index);
     writer.put_u32(frame.width);
@@ -1875,6 +1897,16 @@ fn put_frame(writer: &mut Writer, frame: &FrameStream) {
             writer.put_digest(digest);
         }
     }
+    writer.put_u32(wire_count(
+        "frame render backend",
+        frame.render_backends.len(),
+    )?);
+    for backend in &frame.render_backends {
+        writer.put_u8(backend.role().wire_code());
+        writer.put_digest(&backend.digest());
+        writer.put_bytes(backend.identity());
+    }
+    Ok(())
 }
 
 fn get_frame(
@@ -1900,6 +1932,22 @@ fn get_frame(
         },
         _ => return Err(ProtocolError::Malformed("frame transport")),
     };
+    let mut render_backends = Vec::new();
+    if reader.version().1 >= 1 {
+        let count = count(
+            reader.get_u32()?,
+            "frame render backend",
+            MAX_FRAME_RENDER_BACKENDS,
+        )?;
+        require_collection_payload(reader, "frame render backend", count, 41)?;
+        render_backends = vec_with_capacity(count, "frame render backend")?;
+        for _ in 0..count {
+            let role = RenderBackendRole::from_wire_code(reader.get_u8()?)?;
+            let digest = reader.get_digest()?;
+            let identity = reader.get_bytes()?;
+            render_backends.push(RenderBackendRecord::from_parts(role, identity, digest)?);
+        }
+    }
     Ok(FrameStream {
         scene,
         frame_index,
@@ -1908,6 +1956,7 @@ fn get_frame(
         stride,
         encoding,
         payload,
+        render_backends,
     })
 }
 

@@ -226,10 +226,35 @@ fn studio_serves_a_real_worker_frame_and_shuts_down_on_stdin_eof() {
 
 #[cfg(all(unix, feature = "metal", not(target_os = "macos")))]
 #[test]
-fn studio_metal_request_uses_the_declared_cpu_stream_fallback() {
+fn studio_metal_request_uses_the_declared_cpu_stream_fallback() -> Result<(), String> {
     let root = output_root("studio-metal-fallback");
     let config = root.join("fmn.yml");
     std::fs::write(&config, b"render:\n  engine: metal\n").expect("write Metal config");
+    let invocation = fmn_cli::parse_args([
+        "studio",
+        "--no-browser",
+        "--config_file",
+        config.to_str().expect("config path is UTF-8"),
+        "--resolution",
+        "96x54",
+        "--threads",
+        "1",
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ])
+    .expect("parse Metal Studio composition");
+    let fmn_cli::Invocation::Studio(command) = invocation else {
+        return Err("Metal Studio invocation parsed to another front door".to_owned());
+    };
+    let composed = fmn_cli::compose_studio_preview_frame(&fmn_platform::fs::StdFs, &command, 0)
+        .expect("compose Linux CPU fallback frame");
+    assert_eq!(composed.render_backends.len(), 1);
+    assert_eq!(
+        composed.render_backends[0].role(),
+        fmn_scene::RenderBackendRole::FrameStream
+    );
+    assert!(!composed.render_backends[0].identity().is_empty());
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
         .args([
             "studio",
@@ -300,6 +325,7 @@ fn studio_metal_request_uses_the_declared_cpu_stream_fallback() {
         .expect("read Studio stderr");
     assert_eq!(status.code(), Some(0), "{stderr}");
     assert!(stderr.is_empty(), "{stderr}");
+    Ok(())
 }
 
 #[cfg(feature = "metal")]

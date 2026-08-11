@@ -1053,6 +1053,8 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     stream
         .validate(fmn_studio::ProtocolLimits::default())
         .map_err(|error| fail(format!("validate Studio frame protocol: {error}")))?;
+    let backend_is_stream = stream.render_backends.len() == 1
+        && stream.render_backends[0].role() == fmn_scene::RenderBackendRole::FrameStream;
     let fmn_studio::FramePayload::Pipe { bytes, .. } = stream.payload else {
         return Err(fail(
             "Studio scenario did not return its bounded pipe frame",
@@ -1072,20 +1074,27 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             .field("scene", stream.scene.as_str())
             .field("frame", stream.frame_index)
             .field("encoding", "png")
+            .field("backend_is_stream", truth(backend_is_stream))
             .field("dimensions_match", truth(dimensions_match)),
     );
     ctx.counter("studio_preview_frames", 1);
     ctx.counter("studio_png_dimensions", u64::from(dimensions_match));
-    if stream.scene != "circle_shift.v1" || stream.frame_index != 1 || !dimensions_match {
+    ctx.counter("studio_backend_journaled", u64::from(backend_is_stream));
+    if stream.scene != "circle_shift.v1"
+        || stream.frame_index != 1
+        || !backend_is_stream
+        || !dimensions_match
+    {
         return Err(fail(format!(
-            "Studio preview drifted: scene={:?} frame={} dimensions={}x{}",
-            stream.scene, stream.frame_index, decoded.width, decoded.height
+            "Studio preview drifted: scene={:?} frame={} backend_stream={} dimensions={}x{}",
+            stream.scene, stream.frame_index, backend_is_stream, decoded.width, decoded.height
         )));
     }
     Ok(RunOutcome::ok()
         .with_artifact("studio_frame.png", bytes)
         .with_counter("studio_preview_frames", 1)
-        .with_counter("studio_png_dimensions", 1))
+        .with_counter("studio_png_dimensions", 1)
+        .with_counter("studio_backend_journaled", 1))
 }
 
 /// The shipped CLI's first positive native-registration path: one program
@@ -2303,6 +2312,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Assertion::FileInventory(vec!["studio_frame.png".to_owned()]),
             counter_eq("studio_preview_frames", 1),
             counter_eq("studio_png_dimensions", 1),
+            counter_eq("studio_backend_journaled", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.studio.preview",
@@ -2310,6 +2320,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("scene", "circle_shift.v1"),
                 FieldPred::u64_eq("frame", 1),
                 FieldPred::str_eq("encoding", "png"),
+                FieldPred::str_eq("backend_is_stream", "true"),
                 FieldPred::str_eq("dimensions_match", "true"),
             ],
         )],

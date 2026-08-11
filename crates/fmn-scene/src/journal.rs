@@ -29,8 +29,10 @@
 //! closure, content-addressed, so every bug report is a deterministic
 //! replay — and the journal's content hash for provenance sidecars. Since
 //! schema minor 1.1, the same container carries the exact typed input stream
-//! (sequence + rational-clock timestamp + payload); minor 1.0 remains readable
-//! as a command-only journal with an empty event stream.
+//! (sequence + rational-clock timestamp + payload). Minor 1.2 adds the
+//! renderer/backend identities actually used by the session, separate from
+//! replay-command identity. Minors 1.0 and 1.1 remain readable with absent
+//! newer streams represented as empty.
 
 use fmn_anim::RationalTime;
 use fmn_anim::purity::{ImpureEffect, Purity};
@@ -41,7 +43,7 @@ use std::collections::TryReserveError;
 use crate::events::{EventError, EventPayload, EventType, InputEvent, Key, Modifiers, MouseButton};
 
 /// The journal's versioned container schema (FMNA/3).
-pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 1);
+pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 2);
 /// The repro bundle's versioned container schema (FMNA/4).
 pub const BUNDLE_SCHEMA: Schema = Schema::new(*b"FMNA", 4, 1, 0);
 
@@ -54,6 +56,13 @@ const MIN_SUBPROCESS_BYTES: u64 = LENGTH_PREFIX_BYTES + DIGEST_BYTES + LENGTH_PR
 // A key event is the smallest input event: sequence, time, fps, event type,
 // key tag, key value, and modifier bits.
 const MIN_INPUT_EVENT_BYTES: u64 = 8 + 8 + 4 + 1 + 1 + 4 + 1;
+const MIN_RENDER_BACKEND_BYTES: u64 = 1 + DIGEST_BYTES + LENGTH_PREFIX_BYTES;
+
+/// Maximum canonical identity document retained for one renderer/backend.
+///
+/// Engine journals are small structured documents. A fixed ceiling prevents a
+/// worker from turning provenance into an unbounded session-journal payload.
+pub const MAX_RENDER_BACKEND_IDENTITY_BYTES: usize = 64 * 1024;
 
 /// A journal failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -360,6 +369,128 @@ pub struct SubprocessRecord {
     pub destination: String,
 }
 
+/// How a renderer/backend participated in a presented Studio frame.
+///
+/// Native presentation and CPU-visible streaming are intentionally distinct:
+/// a Metal Studio frame may use both, because the native surface has no pixel
+/// readback while browser and terminal clients still require PNG bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderBackendRole {
+    /// Produced the CPU-visible frame stream delivered to browser/TUI clients.
+    FrameStream,
+    /// Presented a native surface without CPU pixel readback.
+    NativePresentation,
+}
+
+impl RenderBackendRole {
+    /// Stable wire code used by the journal and Studio IPC.
+    #[must_use]
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::FrameStream => 0,
+            Self::NativePresentation => 1,
+        }
+    }
+
+    /// Recover a stable wire code.
+    pub fn from_wire_code(code: u8) -> Result<Self, JournalError> {
+        match code {
+            0 => Ok(Self::FrameStream),
+            1 => Ok(Self::NativePresentation),
+            _ => Err(JournalError::Malformed("render backend role")),
+        }
+    }
+}
+
+/// One canonical renderer/backend identity actually used by the session.
+///
+/// The digest is redundant by design: it is the stable lookup key while the
+/// canonical bytes remain the inspectable provenance document. Construction
+/// and decoding always verify that the two agree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderBackendRecord {
+    role: RenderBackendRole,
+    identity: Vec<u8>,
+    digest: Digest,
+}
+
+impl RenderBackendRecord {
+    /// Construct from an owned canonical identity document.
+    pub fn new(role: RenderBackendRole, identity: Vec<u8>) -> Result<Self, JournalError> {
+        Self::validate_identity(&identity)?;
+        let digest = sha256(&identity);
+        Ok(Self {
+            role,
+            identity,
+            digest,
+        })
+    }
+
+    /// Decode a record while authenticating its claimed digest before owning
+    /// the identity bytes.
+    pub fn from_parts(
+        role: RenderBackendRole,
+        identity: &[u8],
+        digest: Digest,
+    ) -> Result<Self, JournalError> {
+        Self::validate_identity(identity)?;
+        // ubs:ignore - renderer identities are public content hashes, not secrets.
+        if sha256(identity) != digest {
+            return Err(JournalError::Malformed("render backend identity digest"));
+        }
+        Ok(Self {
+            role,
+            identity: try_clone_bytes(identity, "render backend identity bytes")?,
+            digest,
+        })
+    }
+
+    fn validate_identity(identity: &[u8]) -> Result<(), JournalError> {
+        if identity.is_empty() {
+            return Err(JournalError::Malformed("empty render backend identity"));
+        }
+        if identity.len() > MAX_RENDER_BACKEND_IDENTITY_BYTES {
+            return Err(JournalError::Malformed(
+                "render backend identity exceeds limit",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Participation role for this identity.
+    #[must_use]
+    pub const fn role(&self) -> RenderBackendRole {
+        self.role
+    }
+
+    /// Canonical backend identity bytes.
+    #[must_use]
+    pub fn identity(&self) -> &[u8] {
+        &self.identity
+    }
+
+    /// SHA-256 of [`Self::identity`].
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+
+    /// Recheck the size and content-integrity contract without allocating.
+    pub fn validate(&self) -> Result<(), JournalError> {
+        Self::validate_identity(&self.identity)?;
+        // ubs:ignore - renderer identities are public content hashes, not secrets.
+        if sha256(&self.identity) != self.digest {
+            return Err(JournalError::Malformed("render backend identity digest"));
+        }
+        Ok(())
+    }
+
+    /// Fallibly copy the owned identity document.
+    pub fn try_clone(&self) -> Result<Self, JournalError> {
+        Self::from_parts(self.role, &self.identity, self.digest)
+    }
+}
+
 /// One journal entry: a command, its effect, everything it read, and
 /// the state it produced.
 #[derive(Debug, Clone)]
@@ -452,6 +583,7 @@ impl Entry {
 pub struct Journal {
     entries: Vec<Entry>,
     events: Vec<InputEvent>,
+    render_backends: Vec<RenderBackendRecord>,
 }
 
 impl Journal {
@@ -497,6 +629,16 @@ impl Journal {
             .try_reserve(additional)
             .map_err(|source| JournalError::StorageUnavailable {
                 collection: "events",
+                additional,
+                source,
+            })
+    }
+
+    fn reserve_render_backends(&mut self, additional: usize) -> Result<(), JournalError> {
+        self.render_backends
+            .try_reserve(additional)
+            .map_err(|source| JournalError::StorageUnavailable {
+                collection: "render backends",
                 additional,
                 source,
             })
@@ -556,6 +698,70 @@ impl Journal {
         &self.events
     }
 
+    /// Renderer/backend identities actually used during this session.
+    ///
+    /// Records are unique by `(role, digest)` and retain first-observation
+    /// order, making the serialized journal deterministic without one entry per
+    /// rendered frame.
+    #[must_use]
+    pub fn render_backends(&self) -> &[RenderBackendRecord] {
+        &self.render_backends
+    }
+
+    /// Record one renderer/backend identity, deduplicating an existing match.
+    pub fn record_render_backend(
+        &mut self,
+        record: &RenderBackendRecord,
+    ) -> Result<(), JournalError> {
+        self.record_render_backends(std::slice::from_ref(record))
+    }
+
+    /// Atomically record a batch of renderer/backend identities.
+    ///
+    /// A repeated `(role, digest)` with different canonical bytes is rejected as
+    /// a collision. The journal is not mutated until every incoming record has
+    /// validated and all required storage has been reserved.
+    pub fn record_render_backends(
+        &mut self,
+        records: &[RenderBackendRecord],
+    ) -> Result<(), JournalError> {
+        let mut additions = try_vec_with_capacity(records.len(), "render backend batch scratch")?;
+        for record in records {
+            record.validate()?;
+            let existing = self
+                .render_backends
+                .iter()
+                .chain(additions.iter())
+                .find(|candidate| {
+                    candidate.role() == record.role() && candidate.digest() == record.digest()
+                });
+            if let Some(existing) = existing {
+                if existing.identity() != record.identity() {
+                    return Err(JournalError::Malformed(
+                        "render backend identity digest collision",
+                    ));
+                }
+                continue;
+            }
+            additions.push(record.try_clone()?);
+        }
+        self.reserve_render_backends(additions.len())?;
+        self.render_backends.extend(additions);
+        Ok(())
+    }
+
+    /// Fallibly copy the complete durable session journal.
+    pub fn try_clone(&self) -> Result<Self, JournalError> {
+        let mut cloned = Self::new();
+        cloned.reserve_entries(self.entries.len())?;
+        for entry in &self.entries {
+            cloned.entries.push(entry.try_clone()?);
+        }
+        cloned.record_events(&self.events)?;
+        cloned.record_render_backends(&self.render_backends)?;
+        Ok(cloned)
+    }
+
     /// Serialize into the versioned canonical container.
     ///
     /// # Errors
@@ -592,6 +798,12 @@ impl Journal {
         w.put_u32(wire_count(self.events.len())?);
         for event in &self.events {
             put_input_event(&mut w, event);
+        }
+        w.put_u32(wire_count(self.render_backends.len())?);
+        for backend in &self.render_backends {
+            w.put_u8(backend.role().wire_code());
+            w.put_digest(&backend.digest());
+            w.put_bytes(backend.identity());
         }
         w.finish()
     }
@@ -653,12 +865,29 @@ impl Journal {
         let mut journal = Self {
             entries,
             events: Vec::new(),
+            render_backends: Vec::new(),
         };
         if r.version().1 >= 1 {
             let event_count = r.get_u32()? as usize;
             require_collection_payload(&r, "input event", event_count, MIN_INPUT_EVENT_BYTES)?;
             for _ in 0..event_count {
                 journal.record_event(get_input_event(&mut r)?)?;
+            }
+        }
+        if r.version().1 >= 2 {
+            let backend_count = r.get_u32()? as usize;
+            require_collection_payload(
+                &r,
+                "render backend",
+                backend_count,
+                MIN_RENDER_BACKEND_BYTES,
+            )?;
+            for _ in 0..backend_count {
+                let role = RenderBackendRole::from_wire_code(r.get_u8()?)?;
+                let digest = r.get_digest()?;
+                let identity = r.get_bytes()?;
+                let backend = RenderBackendRecord::from_parts(role, identity, digest)?;
+                journal.record_render_backend(&backend)?;
             }
         }
         r.finish()?;
@@ -1211,6 +1440,7 @@ mod tests {
                 state_hash: sha256(b"state"),
             }],
             events: Vec::new(),
+            render_backends: Vec::new(),
         }
         .to_bytes()
         .unwrap();

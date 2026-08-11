@@ -31,10 +31,10 @@ pub use inspect::{
 };
 pub use protocol::{
     CURRENT_VERSION, Checkpoint, CrashReport, DebugLayerSet, FrameEncoding, FramePayload,
-    FrameStream, FramingError, JournalReplay, ProtocolError, ProtocolLimits, ProtocolVersion,
-    REQUEST_SCHEMA, RESPONSE_SCHEMA, RequestEnvelope, ResponseEnvelope, StudioDataKind,
-    SupervisorRequest, TransportCapabilities, WorkerErrorCode, WorkerResponse, read_request,
-    read_response, write_request, write_response,
+    FrameStream, FramingError, JournalReplay, MAX_FRAME_RENDER_BACKENDS, ProtocolError,
+    ProtocolLimits, ProtocolVersion, REQUEST_SCHEMA, RESPONSE_SCHEMA, RequestEnvelope,
+    ResponseEnvelope, StudioDataKind, SupervisorRequest, TransportCapabilities, WorkerErrorCode,
+    WorkerResponse, read_request, read_response, write_request, write_response,
 };
 pub use scrub::{
     ScrubMode, ScrubResult, commit_timeline_frame, preview_timeline_frame, scrub_timeline,

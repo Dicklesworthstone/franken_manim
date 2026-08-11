@@ -26,7 +26,8 @@ use fmn_cache::Namespace;
 use fmn_hash::{Digest, SerialError, sha256};
 use fmn_platform::clock::Clock;
 use fmn_scene::{
-    AssetRead, CommandRecord, Journal, JournalError, ReplayAudit, ReplayPlan, plan_replay,
+    AssetRead, CommandRecord, Journal, JournalError, RenderBackendRecord, ReplayAudit, ReplayPlan,
+    plan_replay,
 };
 
 use crate::protocol::{
@@ -1143,6 +1144,12 @@ impl Supervisor {
         self.journal_cache_digest
     }
 
+    /// Renderer/backend identities durably observed in the current session.
+    #[must_use]
+    pub fn render_backends(&self) -> &[RenderBackendRecord] {
+        self.journal.render_backends()
+    }
+
     /// Fallibly own the current command stream for an incremental rebuild.
     ///
     /// The caller can pass this directly to [`Self::rebuild_and_restart`].
@@ -1266,6 +1273,10 @@ impl Supervisor {
                 Ok(SupervisorReply::Worker(WorkerResponse::Checkpoint(
                     checkpoint,
                 )))
+            }
+            Ok(WorkerResponse::Frame(frame)) => {
+                self.accept_frame_backends(&frame)?;
+                Ok(SupervisorReply::Worker(WorkerResponse::Frame(frame)))
             }
             Ok(response @ WorkerResponse::JournalSegment { .. }) => {
                 if let WorkerResponse::JournalSegment {
@@ -1626,6 +1637,36 @@ impl Supervisor {
         Ok(())
     }
 
+    fn accept_frame_backends(
+        &mut self,
+        frame: &crate::protocol::FrameStream,
+    ) -> Result<(), SupervisorError> {
+        let scene = try_clone_string(
+            self.scene.as_deref().ok_or(SupervisorError::NoSession)?,
+            "frame backend session scene bytes",
+        )?;
+        // ubs:ignore - scene names are public routing identifiers, not secrets.
+        if frame.scene != scene {
+            return Err(SupervisorError::InvalidSession(
+                "worker returned a frame for a different scene",
+            ));
+        }
+        if frame
+            .render_backends
+            .iter()
+            .all(|backend| self.journal.render_backends().contains(backend))
+        {
+            return Ok(());
+        }
+
+        // A backend normally appears only once per session. Build the amended
+        // journal off to the side so a size/allocation refusal cannot partially
+        // mutate the supervisor's recovery authority.
+        let mut amended = self.journal.try_clone()?;
+        amended.record_render_backends(&frame.render_backends)?;
+        self.install_session(scene, amended)
+    }
+
     fn merge_journal_segment(
         &mut self,
         scene: &str,
@@ -1656,6 +1697,8 @@ impl Supervisor {
         }
         merged.record_events(self.journal.events())?;
         merged.record_events(segment.events())?;
+        merged.record_render_backends(self.journal.render_backends())?;
+        merged.record_render_backends(segment.render_backends())?;
         self.install_session(
             try_clone_string(scene, "merged session scene bytes")?,
             merged,

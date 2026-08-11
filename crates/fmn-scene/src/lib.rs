@@ -43,8 +43,9 @@ pub use interactive::{
 };
 pub use journal::{
     AssetRead, BundleDivergence, CommandKind, CommandRecord, EffectClass, Entry, ImpureEffectTag,
-    InvalidationReason, Journal, JournalError, ReplayAudit, ReplayPlan, ReproBundle,
-    SubprocessRecord, plan_replay,
+    InvalidationReason, Journal, JournalError, MAX_RENDER_BACKEND_IDENTITY_BYTES,
+    RenderBackendRecord, RenderBackendRole, ReplayAudit, ReplayPlan, ReproBundle, SubprocessRecord,
+    plan_replay,
 };
 pub use runtime::{
     BlankScene, CameraOrientation, CaptureReason, CompletionRequest, EndScene, HoldController,
