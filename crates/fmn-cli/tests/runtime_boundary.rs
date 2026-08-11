@@ -224,6 +224,113 @@ fn studio_serves_a_real_worker_frame_and_shuts_down_on_stdin_eof() {
     assert!(stderr.is_empty(), "{stderr}");
 }
 
+#[cfg(all(unix, feature = "metal", not(target_os = "macos")))]
+#[test]
+fn studio_metal_request_uses_the_declared_cpu_stream_fallback() {
+    let root = output_root("studio-metal-fallback");
+    let config = root.join("fmn.yml");
+    std::fs::write(&config, b"render:\n  engine: metal\n").expect("write Metal config");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
+        .args([
+            "studio",
+            "--robot",
+            "--no-browser",
+            "--config_file",
+            config.to_str().expect("config path is UTF-8"),
+            "--resolution",
+            "96x54",
+            "--threads",
+            "1",
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("launch Metal-enabled Studio front door");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("Studio stdout"));
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .expect("read Studio readiness record");
+    assert!(ready.contains("\"kind\":\"studio_ready\""), "{ready}");
+
+    let url = json_string_field(&ready, "url").expect("readiness URL");
+    let location = url.strip_prefix("http://").expect("loopback HTTP URL");
+    let (authority, target) = location.split_once('/').expect("URL authority and target");
+    let query = target.split_once('?').expect("capability query").1;
+    let mut stream = std::net::TcpStream::connect(authority).expect("connect to Studio stream");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("stream timeout");
+    write!(
+        stream,
+        "GET /stream?{query} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write stream request");
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    while !response
+        .windows(8)
+        .any(|window| window == b"\x89PNG\r\n\x1a\n")
+    {
+        let read = stream
+            .read(&mut chunk)
+            .expect("read Studio fallback stream");
+        assert_ne!(read, 0, "Studio stream closed before its fallback PNG");
+        response.extend_from_slice(&chunk[..read]);
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    drop(stream);
+    drop(stdout);
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait for graceful Studio shutdown");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("Studio stderr")
+        .read_to_string(&mut stderr)
+        .expect("read Studio stderr");
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn certified_studio_metal_refuses_before_launching_a_worker() {
+    let root = output_root("studio-certified-metal-refusal");
+    let config = root.join("fmn.yml");
+    std::fs::write(
+        &config,
+        b"determinism:\n  mode: certified\nrender:\n  engine: metal\n",
+    )
+    .expect("write certified Metal config");
+    let output = run_clean(&[
+        "studio",
+        "--robot",
+        "--no-browser",
+        "--config_file",
+        config.to_str().expect("config path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(3), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("\"exit_name\":\"config\""), "{stdout}");
+    assert!(stdout.contains("requires render.engine=cpu"), "{stdout}");
+    assert!(!stdout.contains("studio_ready"), "{stdout}");
+}
+
 #[cfg(unix)]
 #[test]
 fn studio_reloads_an_edited_compiled_scene_and_reexecutes_committed_history() {

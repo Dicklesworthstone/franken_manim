@@ -1526,6 +1526,44 @@ fn derive_execution_plan(
     ),
     CliError,
 > {
+    derive_execution_plan_with_annex(fs, config, intent, output_format, false)
+}
+
+fn derive_studio_execution_plan(
+    fs: &dyn FileSystem,
+    config: &fmn_config::Config,
+    output_format: fmn_runtime::OutputPixelFormat,
+) -> Result<
+    (
+        fmn_runtime::ExecutionPlan,
+        fmn_platform::topology::HardwareTopology,
+        TopologySource,
+    ),
+    CliError,
+> {
+    derive_execution_plan_with_annex(
+        fs,
+        config,
+        fmn_runtime::RenderIntent::Preview,
+        output_format,
+        cfg!(feature = "metal"),
+    )
+}
+
+fn derive_execution_plan_with_annex(
+    fs: &dyn FileSystem,
+    config: &fmn_config::Config,
+    intent: fmn_runtime::RenderIntent,
+    output_format: fmn_runtime::OutputPixelFormat,
+    studio_metal: bool,
+) -> Result<
+    (
+        fmn_runtime::ExecutionPlan,
+        fmn_platform::topology::HardwareTopology,
+        TopologySource,
+    ),
+    CliError,
+> {
     let (topology, topology_source) = detect_topology(fs);
     let surface =
         fmn_runtime::SurfaceSpec::lumen(config.camera.resolution.0, config.camera.resolution.1);
@@ -1552,6 +1590,11 @@ fn derive_execution_plan(
         }
         (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Cpu) => {
             fmn_runtime::ExecutionEngine::FastCpu
+        }
+        (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Metal)
+            if studio_metal =>
+        {
+            fmn_runtime::ExecutionEngine::Metal
         }
         (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Metal) => {
             return Err(CliError::new(
@@ -2508,22 +2551,40 @@ impl NativeStudioFrames {
     }
 }
 
-#[derive(Clone, Copy)]
 struct NativeStudioRenderer {
     frame_config: FrameConfig,
     tiling: Tiling,
     engine: EngineIdentity,
     render_threads: usize,
+    #[cfg(feature = "metal")]
+    preview: Option<fmn_studio::StudioPreviewRenderer>,
 }
 
 impl NativeStudioRenderer {
     fn render(
-        self,
+        &mut self,
         scene: &str,
         frame_index: usize,
         stage: &fmn_scene::studio_bridge::Stage,
     ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
         let (render_plan, mono, binning) = self.prepare(stage, frame_index)?;
+        #[cfg(feature = "metal")]
+        if let Some(preview) = self.preview.as_mut() {
+            match preview
+                .render(&render_plan, &mono, &binning, self.frame_config)
+                .map_err(|error| studio_service_error(error.to_string()))?
+            {
+                fmn_studio::StudioPreviewOutput::Stream(frame) => {
+                    return self.encode_rgba8(scene, frame_index, frame.frame.as_bytes());
+                }
+                fmn_studio::StudioPreviewOutput::Native(_) => {
+                    // Native presentation intentionally performs no pixel
+                    // readback. The browser and terminal transports still
+                    // require a CPU-visible PNG, so retain their existing
+                    // explicit CPU stream beside the native window.
+                }
+            }
+        }
         let frame = FrameJob::with_identity(
             &render_plan,
             &mono,
@@ -2543,10 +2604,19 @@ impl NativeStudioRenderer {
         let mut rgba = FrameBuffer::new(layout);
         rgba16f_to_rgba8(&frame, &mut rgba)
             .map_err(|error| studio_service_error(error.to_string()))?;
+        self.encode_rgba8(scene, frame_index, rgba.as_bytes())
+    }
+
+    fn encode_rgba8(
+        &self,
+        scene: &str,
+        frame_index: usize,
+        rgba: &[u8],
+    ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
         let png = fmn_codec::encode_rgba8(
             self.frame_config.viewport.width,
             self.frame_config.viewport.height,
-            rgba.as_bytes(),
+            rgba,
             fmn_codec::CompressionLevel::Fast,
         );
         let digest = fmn_studio::protocol_digest(&png);
@@ -2563,7 +2633,7 @@ impl NativeStudioRenderer {
     }
 
     fn prepare(
-        self,
+        &self,
         stage: &fmn_scene::studio_bridge::Stage,
         revision: usize,
     ) -> Result<(RenderPlan, MonoTable, Binning), fmn_studio::ServiceError> {
@@ -2589,7 +2659,7 @@ impl NativeStudioRenderer {
     }
 
     fn overlay_json(
-        self,
+        &self,
         stage: &fmn_scene::studio_bridge::Stage,
         frame_index: usize,
         layers: fmn_studio::DebugLayerSet,
@@ -2705,16 +2775,42 @@ impl NativeStudioWorker {
         }
         // Studio is an interactive preview front door even when ordinary
         // render defaults would otherwise select offline semantics.
-        let (plan, _, _) = derive_execution_plan(
-            fs,
-            &config,
-            fmn_runtime::RenderIntent::Preview,
-            fmn_runtime::OutputPixelFormat::Rgba8,
-        )?;
+        let (plan, _, _) =
+            derive_studio_execution_plan(fs, &config, fmn_runtime::OutputPixelFormat::Rgba8)?;
+        let render_threads = plan
+            .render_teams
+            .first()
+            .map_or(1, fmn_runtime::TeamPlan::threads);
+        #[cfg(feature = "metal")]
+        let mut preview = None;
         let engine = match plan.engine {
             fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
             fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
-            fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
+            fmn_runtime::ExecutionEngine::Metal => {
+                #[cfg(feature = "metal")]
+                {
+                    preview = Some(
+                        fmn_studio::StudioPreviewRenderer::new(
+                            fmn_studio::StudioPreviewConfig::new(
+                                config.camera.resolution.0,
+                                config.camera.resolution.1,
+                                format!("FrankenManim Studio — {scene}"),
+                                render_threads,
+                            ),
+                        )
+                        .map_err(|error| CliError::new("capability", error.to_string()))?,
+                    );
+                    EngineIdentity::fast()
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    return Err(CliError::new(
+                        "capability",
+                        "the selected annex engine has no production Studio renderer",
+                    ));
+                }
+            }
+            fmn_runtime::ExecutionEngine::Cuda => {
                 return Err(CliError::new(
                     "capability",
                     "the selected annex engine has no production Studio renderer",
@@ -2732,10 +2828,9 @@ impl NativeStudioWorker {
                     fine_tile: plan.fine_tile,
                 },
                 engine,
-                render_threads: plan
-                    .render_teams
-                    .first()
-                    .map_or(1, fmn_runtime::TeamPlan::threads),
+                render_threads,
+                #[cfg(feature = "metal")]
+                preview,
             },
             current_frame: 0,
             max_frame_bytes: fmn_studio::ProtocolLimits::default().max_frame_bytes,
@@ -2774,7 +2869,7 @@ impl NativeStudioWorker {
     }
 
     fn render_frame(
-        &self,
+        &mut self,
         frame: usize,
     ) -> Result<fmn_studio::WorkerResponse, fmn_studio::ServiceError> {
         let stage = self.frames.stage_at(frame)?;
@@ -6139,6 +6234,12 @@ fn execute_studio(
     }
     let fs: Arc<dyn FileSystem> = Arc::new(fmn_platform::fs::StdFs);
     let scene = studio_scene_name(fs.as_ref(), &command.render)?;
+    let config = resolve_render_config(fs.as_ref(), &command.render)?;
+    // Validate the complete Studio execution policy in the supervisor before
+    // entropy, socket, or worker-process side effects. The disposable worker
+    // derives the same plan again before constructing its renderer.
+    let _ =
+        derive_studio_execution_plan(fs.as_ref(), &config, fmn_runtime::OutputPixelFormat::Rgba8)?;
     let mut token_bytes = [0_u8; 32];
     fmn_platform::entropy::HostEntropy::fill(
         &fmn_platform::entropy::StdHostEntropy,
@@ -7892,6 +7993,35 @@ mod tests {
         assert!(output.stdout.contains("requires render.engine=cpu"));
         assert_eq!(platform_name("linux", "x86_64"), "linux-x86-64");
         assert_eq!(platform_name("macos", "aarch64"), "macos-aarch64");
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn studio_plan_accepts_the_compiled_metal_annex_without_relaxing_offline_render() {
+        let fs = VirtualFs::new();
+        fs.insert("/cfg/metal.yml", b"render:\n  engine: metal\n".to_vec());
+        let command =
+            render(parse_args(["--config_file", "/cfg/metal.yml"]).expect("valid render command"));
+        let config = resolve_render_config(&fs, &command).expect("valid Metal config");
+
+        let (studio, _, _) =
+            derive_studio_execution_plan(&fs, &config, fmn_runtime::OutputPixelFormat::Rgba8)
+                .expect("the compiled Studio Metal annex is selectable");
+        assert_eq!(studio.engine, fmn_runtime::ExecutionEngine::Metal);
+
+        let offline = derive_execution_plan(
+            &fs,
+            &config,
+            fmn_runtime::RenderIntent::Offline,
+            fmn_runtime::OutputPixelFormat::Rgba8,
+        )
+        .expect_err("offline Metal remains owned by fm-sq8.3");
+        assert_eq!(offline.exit_name(), "capability");
+        assert!(
+            offline
+                .to_string()
+                .contains("no verified compiled Metal backend")
+        );
     }
 
     #[test]

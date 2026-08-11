@@ -1443,12 +1443,13 @@ impl<'a> FrameJob<'a> {
     ) -> Result<FrameJob<'a>, FrameJobError> {
         let mut arena = FrameArena::new();
         arena.begin_frame();
+        let identity = EngineIdentity::metal();
         let (draws, cols) = Self::prepare(
             plan,
             mono,
             binning,
             config,
-            EngineIdentity::metal(),
+            identity,
             &mut arena,
         )?;
         Ok(FrameJob {
