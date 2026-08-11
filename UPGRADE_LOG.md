@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-11
 **Dependency-graph audit HEAD:** `fe7f1b19a61dbebbb70188f7224db7bbfb50aee6`
-**Final validation HEAD:** `02ac48443b2c701da15e52b1fd4f43487be2b373`
+**Security migration commit:** `64a0458e5de0596e2cb89ed7415c2b78cdccb260`
+**Final validation source:** the exact tree recorded by that commit
 **Project:** FrankenManim
 **Manifests:** root workspace, `fuzz`, `wasm-smoke`, and the non-member G0 spikes
 
@@ -14,19 +15,22 @@
 | Ordinary latest-stable updates available | 0 |
 | Already current | 2 |
 | Governed exact pins preserved | 6 |
-| Deliberate migrations requiring attention | 2 |
-| Updates applied | 0 |
+| Deliberate migrations requiring attention | 1 |
+| Updates applied | 1 |
 
 This repository does not admit routine semver drift. `SUITE.lock`,
 `SUITE_ALLOWLIST.tsv`, ADR-0008, and `docs/GOVERNANCE.md` require exact
 dependency identity and a Gauntlet-backed review for every admitted change.
-The audit therefore preserved all authority files and lockfiles.
+The initial audit therefore rejected routine semver drift. The user then
+explicitly approved the governed PyO3 security migration tracked by fm-kg6g;
+that isolated migration is now applied and validated. The remaining
+wasm-bindgen delta stays pending its own Gauntlet-backed tranche.
 
-## Requires attention
+## Applied
 
 ### PyO3: 0.26.0 -> 0.29.2
 
-**Priority:** Security migration; tracked by `fm-kg6g`.
+**Status:** Applied by `fm-kg6g` at `64a0458e5de0596e2cb89ed7415c2b78cdccb260`.
 
 `cargo audit` found two vulnerabilities in the exact ADR-0015 pin:
 
@@ -39,28 +43,31 @@ Both are fixed by PyO3 0.29.0 or newer. The latest stable release inspected
 was 0.29.2 (2026-08-05). The portal's current production tests passed, but that
 does not remove vulnerable code from the dependency closure.
 
-This is not a pin-only update. The clean migration is expected to touch 11-12
-files and must:
+This was not a pin-only update. The migration touched the approved 12 files
+and:
 
-- amend ADR-0015 while retaining `abi3 = off` and the audited FFI boundary;
-- declare `#[pymodule(gil_used = true)]` unless a new review proves
-  free-threaded safety;
-- replace the deprecated `pyo3/extension-module` mechanism with
-  `PYO3_BUILD_EXTENSION_MODULE` in extension builds;
-- migrate the G0-5 spike's removed `.downcast()` calls to `.cast()`;
-- refresh the production and spike locks plus every affected exact allowlist
-  record;
-- re-run embedded and extension imports, the G0-5 suite, NumPy live views,
-  copy/deepcopy/pickle, subclass/MRO dispatch, weakrefs and dictionary cycles,
-  method-cache invalidation, PG-8 state goldens, the governed closure, the
-  security audit, and the full Gauntlet.
+- amended ADR-0015 while retaining `abi3 = off` and the exact three-item
+  project-authored unsafe boundary;
+- declared `#[pymodule(gil_used = true)]` for production and spike modules;
+- replaced the unifiable `pyo3/extension-module` feature with the
+  process-scoped `PYO3_BUILD_EXTENSION_MODULE` build setting;
+- migrated the G0-5 spike's removed `.downcast()` calls to `.cast()`;
+- refreshed the production and spike locks plus every affected exact
+  allowlist record; and
+- revalidated embedded and extension imports, the unchanged G0-5 suite,
+  NumPy live views and detach, copy/deepcopy/pickle, subclass/MRO dispatch,
+  weakrefs and dictionary cycles, method-cache invalidation, PG-8 state
+  goldens, the governed closure, both lockfiles' security audits, and the full
+  repository test gate.
 
 PyO3 0.29.1/0.29.2 also contain directly relevant fixes for populated
 `#[pyclass(dict)]` deallocation leaks, `__dict__` reference cycles, type-object
 reference leaks, weak-reference pointer arithmetic, and interpreter-shutdown
-soundness. The library-updater circuit breaker requires explicit user approval
-before a migration spanning ten or more files, so no partial compatibility
-shim or split-version graph was introduced.
+soundness. The user explicitly approved the library-updater circuit breaker
+before implementation; no partial compatibility shim or split-version graph
+was introduced.
+
+## Requires attention
 
 ### wasm-bindgen: 0.2.126 -> 0.2.127
 
@@ -103,40 +110,47 @@ does not yet have a Python packaging manifest or Node lockfile.
 
 ## Security and policy checks
 
-- `cargo audit`: **failed**, solely as a green-bar claim, with the two PyO3
-  vulnerabilities above; it also reports the already-known unmaintained
-  `paste 1.0.15` reached transitively through pinned `nalgebra/simba` and Metal.
-- `cargo deny check`: **not an authoritative project gate** because no
-  `deny.toml` exists. Its default policy rejected the project's approved git
-  sources and ordinary MIT/Apache licenses, while independently confirming the
-  same two PyO3 advisories and the `paste` warning.
-- `cargo outdated --workspace --depth 1`: exited 0 and found only the
-  `wasm-bindgen` patch delta. Cargo also printed the known malformed
-  asupersync test-fixture diagnostic while walking that checkout.
-- The repository's authoritative governed-closure test remains the exact
-  allowlist/checksum/pin gate; dependency updates must pass it in addition to a
-  vulnerability audit.
+- Root `cargo audit`: exited 0 with RUSTSEC-2026-0176 and
+  RUSTSEC-2026-0177 absent. It retains the already-known allowed warning for
+  unmaintained `paste 1.0.15` through pinned `nalgebra/simba` and Metal.
+- `cargo audit --file spikes/g0-5-python-ext/Cargo.lock`: exited 0 with no
+  advisories or warnings across the independent 18-package spike lock.
+- `cargo test -p fmn-conformance --test governed_closure`: 14 passed. This is
+  the authoritative exact allowlist/checksum/pin gate.
+- `cargo outdated --workspace --depth 1`: exited 0 and found only the pending
+  `wasm-bindgen` patch delta. Cargo printed the known malformed asupersync
+  test-fixture diagnostic while walking that checkout.
 
-## Executable evidence on the audited graph
+## Executable evidence on the migrated graph
 
-- `cargo test --offline -p fmn-cli --features batch,metal --test runtime_boundary`:
-  25 passed.
-- `cargo test --offline -p fmn-conformance --test e2e_scenarios fast_tier_scenarios_pass`:
-  passed.
-- `cargo test --offline -p fmn-python`: 16 passed; expected unsendable
-  cross-thread refusal diagnostics were emitted by the acceptance suite.
-- `cargo test --offline -p fmn-wasm`: 22 passed, 2 manual browser tests ignored.
-- `cargo test --offline` at final validation HEAD: exited 0 across the complete
-  workspace and doctest set. The Python bridge's expected unsendable
-  cross-thread refusal diagnostics were caught by its passing negative tests.
-- `cargo fmt --check`, `cargo check --offline --all-targets`, and
-  `cargo clippy --offline --all-targets -- -D warnings` at final validation
-  HEAD: each exited 0.
-- `python3 scripts/video_corpus.py verify` at final validation HEAD: exited 0;
-  all 8 allowlisted sources reproduced byte-for-byte at their locked pins.
+- `cargo test -p fmn-python`: 16 passed, including the complete embedded
+  Python bridge acceptance. Expected unsendable cross-thread refusal
+  diagnostics were caught by the passing negative tests.
+- The host-ABI extension built with `PYO3_BUILD_EXTENSION_MODULE=1`, imported
+  directly from `libmanimlib.so`, exposed all 663 unique public root names,
+  and passed the same complete `tests/bridge.py` acceptance externally.
+  `ldd` showed no `libpython` dependency.
+- The unchanged G0-5 `test_extensibility.py` suite passed 29/29 after a release
+  extension build on PyO3 0.29.2.
+- PG-8's committed bundle replay and canonical state-golden test passed; the
+  full workspace run reported 14 passed and its one real timing producer
+  ignored by design.
+- `FMN_E2E_FULL=1 cargo test -p fmn-conformance --test e2e_scenarios`: all 5
+  fast/full catalog and regression-drill tests passed.
+- `cargo test` on the final migration tree exited 0 across the complete
+  workspace and doctest set.
+- `cargo fmt --check`, `cargo check --all-targets`, and
+  `cargo clippy --all-targets -- -D warnings`: each exited 0 on the final
+  migration tree.
+- `python3 scripts/video_corpus.py verify`: exited 0; all 8 allowlisted sources
+  reproduced byte-for-byte at their locked pins.
+- `ubs` over all 12 migration files exited 0 with no critical findings.
 
-These prove the current graph still works; they do not waive the PyO3 security
-migration or the full Gauntlet required for either candidate update.
+The first isolated local all-target check exhausted temporary storage while
+compiling unchanged WASM dependencies, and two RCH retries stalled with fresh
+heartbeats but no compiler progress. Neither is treated as source evidence.
+The local rerun with bounded build concurrency completed successfully and is
+the recorded final result.
 
 ## Commands used
 
@@ -145,14 +159,22 @@ cargo outdated --workspace --depth 1
 cargo search <direct dependency>
 cargo info <direct dependency>
 cargo audit
-cargo deny check
-cargo test --offline -p fmn-cli --features batch,metal --test runtime_boundary
-cargo test --offline -p fmn-conformance --test e2e_scenarios fast_tier_scenarios_pass
-cargo test --offline -p fmn-python
-cargo test --offline -p fmn-wasm
+cargo audit --file spikes/g0-5-python-ext/Cargo.lock
+cargo test -p fmn-python
+PYO3_BUILD_EXTENSION_MODULE=1 cargo build -p fmn-python
+python3 - <<'PY'
+# import the built libmanimlib.so, then compile/exec tests/bridge.py
+PY
+PYO3_BUILD_EXTENSION_MODULE=1 cargo build --release  # G0-5 spike
+python3 spikes/g0-5-python-ext/py/test_extensibility.py
+cargo test -p fmn-conformance --test governed_closure
+cargo test -p fmn-conformance --test perf_pg8 \
+  committed_pg8_baseline_bundles_replay_through_the_verifier -- --exact
+FMN_E2E_FULL=1 cargo test -p fmn-conformance --test e2e_scenarios
 cargo fmt --check
-cargo check --offline --all-targets
-cargo clippy --offline --all-targets -- -D warnings
-cargo test --offline
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo test
 python3 scripts/video_corpus.py verify
+ubs <the 12 migration files>
 ```
