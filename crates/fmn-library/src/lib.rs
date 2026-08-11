@@ -164,6 +164,6 @@ pub use vmobject::{DashError, MAX_DASHES, VMobject};
 // above-library consumers (the Python portal's native-builder seam) can
 // construct them through their declared fmn-library edge, mirroring
 // fmn-scene's studio_bridge facade pattern (plan §19).
-pub use fmn_geom::rotation_matrix;
+pub use fmn_geom::{QuadPath, rotation_matrix};
 pub use fmn_tex::TexEngine;
 pub use fmn_text::FontBook;

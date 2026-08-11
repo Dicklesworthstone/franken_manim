@@ -807,20 +807,25 @@ impl Sphere {
         self
     }
 
+    /// Reference `Sphere.uv_func`: map angular parameters to the sphere
+    /// using the same deterministic transcendental path as construction.
+    #[must_use]
+    pub fn uv_func(&self, u: f64, v: f64) -> Vec3 {
+        let sign = if self.clockwise { -1.0 } else { 1.0 };
+        let (sin_u, cos_u) = (fmn_dmath::sin(sign * u), fmn_dmath::cos(sign * u));
+        let (sin_v, cos_v) = (fmn_dmath::sin(v), fmn_dmath::cos(v));
+        [
+            self.radius * cos_u * sin_v,
+            self.radius * sin_u * sin_v,
+            -self.radius * cos_v,
+        ]
+    }
+
     /// Sample the sphere.
     #[must_use]
     pub fn build(self) -> Surface {
         let radius = self.radius;
-        let sign = if self.clockwise { -1.0 } else { 1.0 };
-        let mut surface = self.spec.sample(move |u, v| {
-            let (sin_u, cos_u) = (fmn_dmath::sin(sign * u), fmn_dmath::cos(sign * u));
-            let (sin_v, cos_v) = (fmn_dmath::sin(v), fmn_dmath::cos(v));
-            [
-                radius * cos_u * sin_v,
-                radius * sin_u * sin_v,
-                -radius * cos_v,
-            ]
-        });
+        let mut surface = self.spec.sample(|u, v| self.uv_func(u, v));
         if self.true_normals && radius != 0.0 {
             let factor = (radius + self.spec.normal_nudge) / radius;
             let column = surface.points().iter().map(|&p| mul(p, factor)).collect();
