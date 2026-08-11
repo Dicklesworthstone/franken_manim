@@ -19,10 +19,10 @@
 //! [`Surface::RustApi`] and [`Surface::CliInProcess`] are live: the former
 //! drives the public `fmn-scene`/`fmn-render` lifecycle directly, the
 //! latter drives `fmn_cli`'s in-process runner (never a subprocess).
-//! [`Surface::PythonPending`] and [`Surface::StudioPending`] are declared
-//! so the enum is stable when those bindings land — a spec on a pending
-//! surface is skipped, never stubbed: the harness refuses to fabricate
-//! behavior a real binding has not provided.
+//! [`Surface::PythonPending`] remains declared and skipped until its real
+//! front door lands. [`Surface::StudioInProcess`] drives the production
+//! Studio composition root; the CLI crate separately proves subprocess
+//! isolation and loopback publication.
 //!
 //! ## The log contract and `LogExpect`
 //!
@@ -234,8 +234,8 @@ pub enum Surface {
     CliInProcess,
     /// The Python binding: declared, landing with its bead, never stubbed.
     PythonPending,
-    /// Studio: declared, landing with its bead, never stubbed.
-    StudioPending,
+    /// Studio's production composition root in-process.
+    StudioInProcess,
 }
 
 impl Surface {
@@ -246,26 +246,23 @@ impl Surface {
             Self::RustApi => "rust_api",
             Self::CliInProcess => "cli_in_process",
             Self::PythonPending => "python",
-            Self::StudioPending => "studio",
+            Self::StudioInProcess => "studio_in_process",
         }
     }
 
     /// Whether this surface has landed.
     #[must_use]
     pub const fn is_pending(self) -> bool {
-        matches!(self, Self::PythonPending | Self::StudioPending)
+        matches!(self, Self::PythonPending)
     }
 
     /// The skip reason for a pending surface, `None` for a live one.
     #[must_use]
     pub const fn pending_reason(self) -> Option<&'static str> {
         match self {
-            Self::RustApi | Self::CliInProcess => None,
+            Self::RustApi | Self::CliInProcess | Self::StudioInProcess => None,
             Self::PythonPending => {
                 Some("surface pending: the Python binding lands with its bead (never stubbed)")
-            }
-            Self::StudioPending => {
-                Some("surface pending: Studio lands with its bead (never stubbed)")
             }
         }
     }

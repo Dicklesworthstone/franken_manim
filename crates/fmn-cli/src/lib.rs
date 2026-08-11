@@ -3069,6 +3069,37 @@ impl NativeStudioWorker {
     }
 }
 
+/// Compose one Studio preview frame through the same scene registration,
+/// execution-plan selection, and renderer owner used by the disposable worker.
+///
+/// This is the in-process front door used by the Gauntlet and embedded hosts;
+/// the shipped `fmn studio` command adds supervisor/worker isolation around the
+/// same composition root.
+///
+/// # Errors
+///
+/// Returns the same typed configuration, capability, scene, and render errors
+/// as the production Studio worker.
+pub fn compose_studio_preview_frame(
+    fs: &dyn FileSystem,
+    command: &StudioCommand,
+    frame: i64,
+) -> Result<fmn_studio::FrameStream, CliError> {
+    let mut worker = NativeStudioWorker::from_command(fs, command)?;
+    let frame = worker
+        .resolve_frame(frame)
+        .map_err(|error| CliError::new("scene", error.to_string()))?;
+    match worker
+        .render_frame(frame)
+        .map_err(|error| CliError::new("render", error.to_string()))?
+    {
+        fmn_studio::WorkerResponse::Frame(stream) => Ok(stream),
+        _ => Err(internal(
+            "Studio preview composition returned a non-frame response",
+        )),
+    }
+}
+
 impl fmn_studio::WorkerService for NativeStudioWorker {
     fn build_id(&self) -> fmn_studio::ProtocolDigest {
         self.build_id

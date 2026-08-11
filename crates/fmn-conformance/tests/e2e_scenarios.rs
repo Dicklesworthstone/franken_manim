@@ -47,10 +47,10 @@
 //! Each feature bead registers at least one e2e scenario when it lands
 //! user-visible behavior; the fast tier runs per-commit and the full
 //! matrix is env-gated (`FMN_E2E_FULL=1`) for the nightly budget. The
-//! Python and Studio surfaces are **Pending**: they are declared in
-//! [`Surface`] but intentionally have no registered scenarios here —
-//! they land with their owning beads, and no stubbed behavior stands in
-//! for them. Every seeded class carries one deliberately-injected
+//! The Python surface remains **Pending**. Studio is live through the
+//! production CLI composition root and has a registered frame scenario;
+//! the CLI crate separately proves the subprocess supervisor boundary.
+//! Every seeded class carries one deliberately-injected
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
@@ -1025,6 +1025,67 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .exit_code(2)
         .with_counter("cli_rule_named", 1))
+}
+
+/// Studio's first real Gauntlet row: select a shipped scene through the CLI
+/// schema and compose its preview through the same worker renderer root used by
+/// `fmn studio`. The CLI runtime-boundary suite separately proves that this
+/// root survives the disposable-worker and loopback-host boundary.
+fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let invocation = fmn_cli::parse_args([
+        "studio",
+        "--no-browser",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ])
+    .map_err(|error| fail(format!("parse Studio scenario: {error}")))?;
+    let fmn_cli::Invocation::Studio(command) = invocation else {
+        return Err(fail("Studio scenario parsed to a different front door"));
+    };
+    let stream = fmn_cli::compose_studio_preview_frame(&fmn_platform::fs::StdFs, &command, 1)
+        .map_err(|error| fail(format!("compose Studio preview: {error}")))?;
+    stream
+        .validate(fmn_studio::ProtocolLimits::default())
+        .map_err(|error| fail(format!("validate Studio frame protocol: {error}")))?;
+    let fmn_studio::FramePayload::Pipe { bytes, .. } = stream.payload else {
+        return Err(fail(
+            "Studio scenario did not return its bounded pipe frame",
+        ));
+    };
+    let decoded = fmn_codec::decode_png(
+        &bytes,
+        &fmn_codec::PngLimits {
+            max_pixels: u64::from(stream.width) * u64::from(stream.height),
+            ..fmn_codec::PngLimits::default()
+        },
+    )
+    .map_err(|error| fail(format!("decode Studio preview PNG: {error}")))?;
+    let dimensions_match = decoded.width == 96 && decoded.height == 54;
+    ctx.event(
+        LogEvent::new("e2e.studio.preview")
+            .field("scene", stream.scene.as_str())
+            .field("frame", stream.frame_index)
+            .field("encoding", "png")
+            .field("dimensions_match", truth(dimensions_match)),
+    );
+    ctx.counter("studio_preview_frames", 1);
+    ctx.counter("studio_png_dimensions", u64::from(dimensions_match));
+    if stream.scene != "circle_shift.v1" || stream.frame_index != 1 || !dimensions_match {
+        return Err(fail(format!(
+            "Studio preview drifted: scene={:?} frame={} dimensions={}x{}",
+            stream.scene, stream.frame_index, decoded.width, decoded.height
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_frame.png", bytes)
+        .with_counter("studio_preview_frames", 1)
+        .with_counter("studio_png_dimensions", 1))
 }
 
 /// The shipped CLI's first positive native-registration path: one program
@@ -2233,6 +2294,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.studio_builtin_preview.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::StudioInProcess,
+        Invocation::new(studio_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["studio_frame.png".to_owned()]),
+            counter_eq("studio_preview_frames", 1),
+            counter_eq("studio_png_dimensions", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.preview",
+            vec![
+                FieldPred::str_eq("scene", "circle_shift.v1"),
+                FieldPred::u64_eq("frame", 1),
+                FieldPred::str_eq("encoding", "png"),
+                FieldPred::str_eq("dimensions_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.cli_prerun_subdivide_y4m.v1",
         ScenarioClass::RenderMatrix,
         Surface::CliInProcess,
@@ -2822,12 +2904,18 @@ fn catalog_invariants_hold() {
         assert_eq!(drills, 1, "{class:?} must carry exactly one drill");
     }
 
-    // The Pending surfaces are declared, never stubbed: nothing registers
-    // against them until their owning beads land real behavior.
+    // Pending surfaces are declared, never stubbed: nothing registers against
+    // them until their owning bead lands real behavior.
     assert!(
         scenarios
             .iter()
-            .all(|s| !matches!(s.surface, Surface::PythonPending | Surface::StudioPending)),
+            .all(|s| !matches!(s.surface, Surface::PythonPending)),
         "a Pending surface acquired a stub scenario"
+    );
+    assert!(
+        scenarios
+            .iter()
+            .any(|scenario| scenario.surface == Surface::StudioInProcess),
+        "Studio lost its production composition scenario"
     );
 }

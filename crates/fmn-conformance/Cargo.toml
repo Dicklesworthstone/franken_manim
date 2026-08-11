@@ -7,7 +7,7 @@ repository.workspace = true
 description = "The Gauntlet"
 
 [features]
-metal = ["fmn-render/metal"]
+metal = ["fmn-render/metal", "fmn-cli/metal"]
 
 [dependencies]
 fmn-core.workspace = true
@@ -47,6 +47,7 @@ fmn-codec.workspace = true
 # W10 e2e CLI scenarios drive fmn_cli's in-process runner (fm-fjq; dev-only,
 # so the shipped edge set and the crate DAG gate are unaffected).
 fmn-cli = { workspace = true, features = ["batch"] }
+fmn-studio.workspace = true
 # The §16.5 fuzz campaign's targets (tests/fuzz_campaign.rs): the pinned font
 # parser and the config YAML subset. Same posture as above — the campaign is a
 # Gauntlet consumer, not a shipped edge.

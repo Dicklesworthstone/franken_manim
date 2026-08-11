@@ -424,22 +424,20 @@ fn drill_without_a_target_is_spec_invalid() {
 
 #[test]
 fn pending_surfaces_skip_without_running() {
-    for surface in [Surface::PythonPending, Surface::StudioPending] {
-        let spec = ScenarioSpec::new(
-            "pending.surface.v1",
-            ScenarioClass::RenderMatrix,
-            surface,
-            // Would fail if it ever ran: pending surfaces must be skipped,
-            // never stubbed into a pass.
-            Invocation::new(|_ctx| Err(ScenarioError::new("must not run"))),
-        );
-        let report = runner(Mode::Check).run_gated(spec, true);
-        assert!(
-            matches!(report.status, Status::Skipped(_)),
-            "{surface}: {}",
-            report.summary()
-        );
-    }
+    let spec = ScenarioSpec::new(
+        "pending.surface.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonPending,
+        // Would fail if it ever ran: pending surfaces must be skipped,
+        // never stubbed into a pass.
+        Invocation::new(|_ctx| Err(ScenarioError::new("must not run"))),
+    );
+    let report = runner(Mode::Check).run_gated(spec, true);
+    assert!(
+        matches!(report.status, Status::Skipped(_)),
+        "{}",
+        report.summary()
+    );
     assert!(
         !logs_root().join("pending.surface.v1.ndjson").exists(),
         "a skipped run leaves no log artifact"

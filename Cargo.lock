@@ -675,6 +675,7 @@ dependencies = [
  "fmn-render",
  "fmn-runtime",
  "fmn-scene",
+ "fmn-studio",
  "fmn-tex",
  "fmn-text",
 ]

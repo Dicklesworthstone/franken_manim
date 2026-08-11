@@ -1444,14 +1444,7 @@ impl<'a> FrameJob<'a> {
         let mut arena = FrameArena::new();
         arena.begin_frame();
         let identity = EngineIdentity::metal();
-        let (draws, cols) = Self::prepare(
-            plan,
-            mono,
-            binning,
-            config,
-            identity,
-            &mut arena,
-        )?;
+        let (draws, cols) = Self::prepare(plan, mono, binning, config, identity, &mut arena)?;
         Ok(FrameJob {
             plan,
             mono,
