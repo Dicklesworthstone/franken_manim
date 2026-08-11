@@ -2,11 +2,28 @@
 
 **Status:** Ratified, 2026-07-23. The executable form is
 `spikes/g0-5-python-ext` (a non-member PyO3 cdylib over the G0-1 arena;
-29-test Python suite green via `run.sh`; pyo3 0.26.0 pinned by the spike's
-own committed lockfile under ADR-0003's dev tier). **fmn-python (W10,
-fm-aqv) implements the production bridge from this note**, not from the
-spike's internals. Risk R10's pivot rule is served: the gap list below is
-the tier-in input for the Parity Ledger *before* G4a.
+29-test Python suite green via `run.sh`; exact PyO3 pin in the spike's own
+committed lockfile under ADR-0003's dev tier). **fmn-python (W10, fm-aqv)
+implements the production bridge from this note**, not from the spike's
+internals. Risk R10's pivot rule is served: the gap list below is the tier-in
+input for the Parity Ledger *before* G4a.
+
+## Security migration revalidation (fm-kg6g, 2026-08-11)
+
+The original ratification and crossing-cost measurements below used PyO3
+0.26.0. fm-kg6g advances both the maintained spike and production fmn-python
+portal to exact PyO3 0.29.2, keeps `abi3` off, and declares
+`#[pymodule(gil_used = true)]`; no free-threaded module claim is implied.
+Extension linkage now comes from the process-scoped
+`PYO3_BUILD_EXTENSION_MODULE=1` build setting rather than a unifiable Cargo
+feature. The 29-test suite is re-run unchanged against that graph, so its
+subclass/MRO, proxy identity, weakref, copy, live-view, detach, and exception
+claims remain executable rather than documentary.
+
+The ns/call table remains the historical PG-8 seed and was not silently
+rebaselined onto different dependency bits or host conditions. Current
+performance evidence stays in the canonical PG-8 bundles and is interpreted
+under their own producer identity and comparability rules.
 
 ## Proven claims
 
@@ -103,11 +120,11 @@ required, only the G1/G2/G4 wiring notes above.
 ## Governance record
 
 - The spike is a **non-member crate** with its own committed `Cargo.lock`
-  (the ADR-0003 fuzz-crate pattern): pyo3 and its 18 transitive packages
-  carry `class=dev` allowlist rows (pinned version + checksum) and can
-  never reach a shipped artifact. The **pending ffi row for pyo3 is
-  untouched** — the shipped consumption decision (version, abi3 policy,
-  features) is made once, by fm-aqv, at W10.
+  (the ADR-0003 fuzz-crate pattern). Its exact PyO3 0.29.2 graph is checked
+  against the same reviewed allowlist records consumed by the shipped
+  fmn-python crate, but the spike itself remains `class=dev` and can never
+  reach a shipped artifact. ADR-0015 owns the production version, ABI,
+  feature, and unsafe-boundary decision.
 - `governed_closure` gained the ADR-0003 refinement (`audit_with_aux`):
   it now walks committed non-member lockfiles (this spike's, and
   `fuzz/Cargo.lock` when fm-ntp lands) under uniform admission/checksum

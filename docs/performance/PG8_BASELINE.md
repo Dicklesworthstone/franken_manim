@@ -16,6 +16,13 @@ same benchmark definitions on a declared pinned bare-metal profile after
 fm-inr.1's live attestation lands; fm-inr.4 publishes this table at that
 point without re-recording.
 
+The PyO3 0.26 identity above is intentionally historical: these committed
+samples were produced on that exact graph. The fm-kg6g security migration to
+PyO3 0.29.2 replays the bit-locked bundles and bridge state goldens but does
+not relabel or overwrite their producer identity. A new timing baseline would
+require a fresh canonical producer run under the same pinned-host attestation
+and comparability rules, not an incidental dependency-upgrade run.
+
 All four workloads are fixed before the clock is read: 64 built-in mobjects
 (`point` ×3 + `rgba` ×4 lanes, 4 records each), 60 frames of `dt = 1/30`
 per repetition, 24 retained repetitions (21 valid + 3 host-quality budget),

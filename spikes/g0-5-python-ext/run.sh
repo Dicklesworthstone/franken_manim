@@ -9,8 +9,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "==> cargo build --release (local: links host CPython)"
-RCH_CARGO_WRAPPER_BYPASS=1 cargo build --release --target-dir target
+echo "==> cargo build --release (local extension: host CPython ABI, no libpython link)"
+PYO3_BUILD_EXTENSION_MODULE=1 RCH_CARGO_WRAPPER_BYPASS=1 \
+  cargo build --release --target-dir target
 
 echo "==> exposing fmn_spike_bridge on sys.path"
 ln -sf ../target/release/libfmn_spike_bridge.so py/fmn_spike_bridge.so

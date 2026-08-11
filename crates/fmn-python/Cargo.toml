@@ -10,10 +10,6 @@ description = "The PyO3 `manimlib` bridge"
 name = "manimlib"
 crate-type = ["cdylib", "rlib"]
 
-[features]
-default = []
-extension-module = ["pyo3/extension-module"]
-
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true

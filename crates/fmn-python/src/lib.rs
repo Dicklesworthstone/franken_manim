@@ -4255,7 +4255,7 @@ fn execute_bootstrap(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
 /// Initialize the extension module. The module name is intentionally
 /// `manimlib`, so a built cdylib is directly importable under the Reference's
 /// package name.
-#[pymodule]
+#[pymodule(gil_used = true)]
 fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;

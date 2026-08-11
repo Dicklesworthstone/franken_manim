@@ -30,15 +30,14 @@ allocation through CPython's descriptor.
 
 The other boundary choice is packaging. Workspace tests must embed and link
 CPython, while a Python extension must not link libpython in the ordinary
-extension-module configuration. Making `extension-module` a default feature
-would therefore make `cargo test` non-executable; enabling it only for the
-extension artifact gives both modes without two manifests or a compatibility
-wrapper. W11, not W10, owns the wheel/ABI matrix and namespace packaging.
+extension-module configuration. The build mode therefore has to be selected
+for the extension artifact without changing the dependency graph used by
+`cargo test`. W11, not W10, owns the wheel/ABI matrix and namespace packaging.
 
 ## Decision
 
-1. **fmn-python consumes exactly PyO3 0.26.0.** The root workspace pins
-   `=0.26.0` with default features disabled and `macros` enabled. Its complete
+1. **fmn-python consumes exactly PyO3 0.29.2.** The root workspace pins
+   `=0.29.2` with default features disabled and `macros` enabled. Its complete
    transitive graph is promoted from the G0-5-only dev rows to reviewed
    `ffi`/`build`/`runtime` rows in `SUITE_ALLOWLIST.tsv`, keyed by the same
    `(name, version)` records under ADR-0008. The obsolete `pyo3/TBD` pending
@@ -47,10 +46,12 @@ wrapper. W11, not W10, owns the wheel/ABI matrix and namespace packaging.
    deliberately uses the full buffer protocol, and W11 owns any later ABI
    matrix. A future abi3 claim requires its own measurements and ADR; it is not
    an opportunistic feature toggle.
-3. **`extension-module` is opt-in.** fmn-python always builds an `rlib` and
-   `cdylib` named `manimlib`. Default builds link the active CPython and run the
-   embedded Python acceptance suite. `--features extension-module` builds the
-   importable artifact used by W11's wheel work.
+3. **Extension linkage is selected by the build environment.** fmn-python
+   always builds an `rlib` and `cdylib` named `manimlib`. Default builds link
+   the active CPython and run the embedded Python acceptance suite.
+   `PYO3_BUILD_EXTENSION_MODULE=1 cargo build -p fmn-python` builds the
+   importable artifact used by W11's wheel work. There is no Cargo feature
+   whose unification can accidentally change workspace-test linkage.
 4. **Project-authored unsafe is exactly two CPython buffer slots.**
    `PyRecordView::__getbuffer__` validates the descriptor pointer and writable
    request, publishes the pinned generation as bytes, and transfers one owner
@@ -89,14 +90,14 @@ wrapper. W11, not W10, owns the wheel/ABI matrix and namespace packaging.
   receive a precise `TypeError` rather than silent reinterpretation.
 - The default workspace gate can execute fmn-python's real Python suite, while
   the same source builds an importable cdylib with
-  `cargo build -p fmn-python --features extension-module`.
+  `PYO3_BUILD_EXTENSION_MODULE=1 cargo build -p fmn-python`.
 - The buffer owner deliberately presents one byte-oriented CPython buffer.
   NumPy applies the schema-derived structured dtype and record stride. No
   second layout, copy, or dtype-specific FFI implementation exists.
 - Cross-thread proxy access is a defined refusal, not supported concurrency.
-  Under PyO3 0.26 the `unsendable` guard raises `pyo3_runtime.PanicException`;
-  fmn-python publishes the worker-thread policy explicitly. W11 must preserve
-  this restriction in user-facing packaging documentation.
+  The `unsendable` guard raises `pyo3_runtime.PanicException`; fmn-python
+  publishes the worker-thread policy explicitly. W11 must preserve this
+  restriction in user-facing packaging documentation.
 - The import bootstrap may create a parity-surface class whose semantic Rust
   binding has not landed yet. Such methods fail with a symbol-qualified
   `NotImplementedError`; they never silently fake geometry. The core
@@ -124,3 +125,33 @@ invalid sentinel) is never cached as a hit, and the cache holds a strong
 reference to each keyed type so a keyed pointer can never dangle or be
 recycled while an entry lives. Any further project-authored unsafe in
 fmn-python still requires an amendment to this ADR.
+
+## Amendment 2 — fm-kg6g upgrades the security boundary to PyO3 0.29.2
+
+**Status:** Accepted
+**Date:** 2026-08-11
+**Bead:** fm-kg6g (the PyO3 security migration)
+
+Decision 1 is amended from PyO3 0.26.0 to the exact 0.29.2 release. This
+removes RUSTSEC-2026-0176 (out-of-bounds list/tuple iterator access) and
+RUSTSEC-2026-0177 (a missing `Sync` bound on `PyCFunction::new_closure`)
+without introducing a second PyO3 graph. The production crate and the G0-5
+executable spike use the same exact version and audited checksums.
+
+Decision 3 is amended to use PyO3's process-scoped
+`PYO3_BUILD_EXTENSION_MODULE=1` build configuration. The former Cargo
+`extension-module` feature is removed from the production manifest and from
+the spike; ordinary builds continue to embed and link the active CPython,
+while extension builds omit that link. `abi3` remains off.
+
+PyO3 0.28 made free-threaded module support the default declaration, but this
+portal has not established that claim. Both module entry points therefore use
+`#[pymodule(gil_used = true)]`. The single-threaded scene-worker confinement,
+callback reentrancy law, and `unsendable` proxy policy remain binding.
+
+The re-audit found no expansion of project-authored unsafe code. Its exact
+inventory remains the two CPython buffer slots plus the read-only
+`method_cache::type_version_tag` observer admitted by Amendment 1. PyO3 0.29.2
+still exposes the required full-ABI `Py_buffer` slots and
+`PyTypeObject::tp_version_tag`; limited-ABI/abi3 packaging would invalidate
+that proof and still requires a separate ADR.

@@ -202,7 +202,7 @@ fn copy_proxy<'py>(
 
     let stage_obj = proxy.getattr("_stage")?;
     let stage_ref = stage_obj
-        .downcast::<PyStage>()
+        .cast::<PyStage>()
         .map_err(|_| PyRuntimeError::new_err("proxy _stage attribute is not a Stage"))?;
 
     // 2. Mirror proxies for every old family member that has one, of the
@@ -244,10 +244,10 @@ fn copy_proxy<'py>(
     //    member; family-external mobjects and plain values stay shared.
     for new_proxy in &mirrors {
         let dict = new_proxy.getattr("__dict__")?;
-        let dict = dict.downcast::<PyDict>().expect("__dict__ is a dict");
+        let dict = dict.cast::<PyDict>().expect("__dict__ is a dict");
         let mut remaps: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
         for (key, value) in dict.iter() {
-            let Ok(value_proxy) = value.downcast::<BridgeMobject>() else {
+            let Ok(value_proxy) = value.cast::<BridgeMobject>() else {
                 continue;
             };
             let Some(value_mob) = value_proxy.borrow().mob else {
@@ -626,7 +626,7 @@ impl BridgeMobject {
         let (_, mob) = slf.borrow().bound()?;
         let stage_obj = slf.getattr("_stage")?;
         let stage_ref = stage_obj
-            .downcast::<PyStage>()
+            .cast::<PyStage>()
             .map_err(|_| PyRuntimeError::new_err("proxy _stage attribute is not a Stage"))?;
         stage_ref
             .borrow()
@@ -716,7 +716,7 @@ impl PyRecordView {
 // module
 // --------------------------------------------------------------------------
 
-#[pymodule]
+#[pymodule(gil_used = true)]
 fn fmn_spike_bridge(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStage>()?;
     m.add_class::<BridgeMobject>()?;
