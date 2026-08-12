@@ -216,15 +216,13 @@ fn begin_animations(
     }
 }
 
-/// One sample's stepping plan. Playback and skip both step one frame at
-/// `1/fps`; skip differs only by disabling capture (the Reference's
-/// `update_frame` returns before `camera.capture` when skipping).
+/// One sample prepared through the animation and clock phases. Playback and
+/// skip both prepare the same sample at `1/fps`; the completion call decides
+/// whether to capture it.
 #[derive(Debug, Clone, Copy)]
 struct StepPlan {
     sample: FrameSample,
     dt: f64,
-    advance: i64,
-    capture: bool,
 }
 
 /// The host-language release point inside step 4 of the six-step frame
@@ -261,40 +259,6 @@ pub struct AnimationBoundary {
     pub dt: f64,
     /// Current segment sample; the rational clock has not advanced yet.
     pub sample: FrameSample,
-}
-
-/// Steps 1–6 for one sample.
-fn frame_step(
-    stage: &mut Stage,
-    clock: &mut RationalFrameClock,
-    rng: &RngRoot,
-    animations: &mut [Box<dyn Animation>],
-    plan: &StepPlan,
-    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
-    emit: &mut dyn FnMut(FramePacket),
-) -> Result<(), AnimError> {
-    // Steps 1–2, per animation, interleaved exactly as the Reference does.
-    for animation in animations.iter_mut() {
-        animation.update_mobjects(stage, plan.dt);
-        let alpha = plan.sample.time.to_f64() / animation.state().config.run_time;
-        animation.interpolate(stage, alpha);
-    }
-    // Step 3: time advances (the rational clock is the source of truth;
-    // its one exact-to-f64 conversion replaces the Stage mirror).
-    clock
-        .advance_frames(plan.advance)
-        .map_err(AnimError::Clock)?;
-    // Step 4: scene updaters, observing post-interpolation state.
-    stage.update_at_time(plan.dt, clock.now().to_f64());
-    // Step 5 preparation: the sole serial-front-end mutation point for
-    // journaled input. It runs in skip mode too, because skip preserves state
-    // evolution and differs only by suppressing capture/emission.
-    boundary(stage, clock.now());
-    // Steps 5–6: freeze and emit.
-    if plan.capture {
-        emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
-    }
-    Ok(())
 }
 
 /// The Reference's `finish_animations`: finish each animation, apply
@@ -563,12 +527,7 @@ pub fn prepare_play_frame(
     // Host-language updaters observe post-increment scene time, exactly as
     // the Reference's Scene.increment_time → update_mobjects order requires.
     stage.set_time_from_clock(clock.now().to_f64());
-    open.prepared = Some(StepPlan {
-        sample,
-        dt,
-        advance: 1,
-        capture: true,
-    });
+    open.prepared = Some(StepPlan { sample, dt });
     Ok(Some(SceneUpdaterBoundary {
         dt,
         time: clock.now(),
@@ -733,12 +692,7 @@ pub fn prepare_wait_frame(
     let dt = clock.dt().to_f64();
     clock.advance_frames(1).map_err(AnimError::Clock)?;
     stage.set_time_from_clock(clock.now().to_f64());
-    open.prepared = Some(StepPlan {
-        sample,
-        dt,
-        advance: 1,
-        capture: true,
-    });
+    open.prepared = Some(StepPlan { sample, dt });
     Ok(Some(SceneUpdaterBoundary {
         dt,
         time: clock.now(),
@@ -832,12 +786,29 @@ pub fn advance_play_with_boundary(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    advance_play_with_boundary_mode(
+        stage, animations, clock, rng, open, upto, true, boundary, emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_play_with_boundary_mode(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    open: &mut OpenSegment,
+    upto: i64,
+    capture: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<(), AnimError> {
     let target = upto.clamp(open.stepped, open.segment.n_frames());
     while open.stepped < target {
         prepare_play_frame(stage, clock, animations, open)?.ok_or(AnimError::InvalidFramePhase(
             "the segment ended before the requested target",
         ))?;
-        complete_play_frame(stage, clock, rng, open, true, boundary, emit)?;
+        complete_play_frame(stage, clock, rng, open, capture, boundary, emit)?;
     }
     match animations.iter().find_map(|a| a.deferred_error()) {
         Some(err) => Err(err),
@@ -938,44 +909,29 @@ pub fn play_segment_with_boundary(
     // `finish_animations` — so a failing composition is still unmarked from
     // animating, removers apply, and the final zero-dt updater pass runs
     // before the same error surfaces that skip mode reports.
-    let body: Result<(), AnimError> = if skip {
-        // State evolution is frame-for-frame identical to playback; only the
-        // expensive capture/emission boundary is suppressed.
-        let dt = clock.dt().to_f64();
-        let mut outcome = Ok(());
-        for sample in segment.samples() {
-            let plan = StepPlan {
-                sample,
-                dt,
-                advance: 1,
-                capture: false,
-            };
-            if let Err(err) = frame_step(stage, clock, rng, animations, &plan, boundary, emit) {
-                outcome = Err(err);
-                break;
-            }
-        }
-        outcome
-    } else {
-        let mut open = OpenSegment {
-            report: report.clone(),
-            segment,
-            stepped: 0,
-            current_sample: None,
-            next_animation: 0,
-            prepared: None,
-        };
-        advance_play_with_boundary(
-            stage,
-            clock,
-            rng,
-            animations,
-            &mut open,
-            segment.n_frames(),
-            boundary,
-            emit,
-        )
+    let mut open = OpenSegment {
+        report: report.clone(),
+        segment,
+        stepped: 0,
+        current_sample: None,
+        next_animation: 0,
+        prepared: None,
     };
+    // Both modes use the exact same stepped driver. Skip changes one thing:
+    // `complete_play_frame` suppresses capture/emission. In particular, a
+    // composition's deferred error is observed before the same clock advance
+    // in both modes rather than being delayed until skip reaches the endpoint.
+    let body = advance_play_with_boundary_mode(
+        stage,
+        animations,
+        clock,
+        rng,
+        &mut open,
+        segment.n_frames(),
+        !skip,
+        boundary,
+        emit,
+    );
     finish_animations(stage, animations);
     body?;
     // A composition operator that begins members just in time has no error

@@ -147,6 +147,15 @@ fn suspend_resume_matrix() {
         ["child"],
         "updates flow after resume"
     );
+
+    log.borrow_mut().clear();
+    stage.update_mobject_with_recurse(parent, 0.2, false);
+    assert!(
+        log.borrow().is_empty(),
+        "recurse=false does not descend into child updaters"
+    );
+    stage.update_mobject_with_recurse(parent, 0.2, true);
+    assert_eq!(log.borrow().as_slice(), ["child"]);
 }
 
 #[test]

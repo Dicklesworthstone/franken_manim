@@ -24,6 +24,18 @@ from manimlib import Animation, InteractiveScene, Mobject, Scene, VMobject
 
 bridge_errors = importlib.import_module("manimlib.exceptions")
 
+# Schema constants use a deliberately closed AST grammar: ordinary literal
+# and arithmetic expressions resolve, while executable/private forms refuse.
+assert manimlib._constant_expression("1 + 2 * 3", {}) == 7
+assert manimlib._constant_expression("value[1]", {"value": (4, 9)}) == 9
+for forbidden_constant in ("__import__('os')", "(1).__class__", "lambda: 1"):
+    try:
+        manimlib._constant_expression(forbidden_constant, {})
+    except (AttributeError, ValueError):
+        pass
+    else:
+        raise AssertionError(f"executable schema constant accepted: {forbidden_constant}")
+
 
 class TracingMobject(Mobject):
     def __init__(self):
@@ -245,6 +257,36 @@ assert updates == [0.5]
 assert parent.get_field("point", 0)[0] == 1.5
 
 
+# The Python updater surface shares Marionette's durable suspension flag.
+# Scene traversal is child-first, a suspended parent prunes its subtree, and
+# resuming a child clears the ancestor chain exactly like the Reference.
+suspension_scene = Scene()
+suspension_parent = Mobject()
+suspension_child = Mobject()
+suspension_parent.add(suspension_child)
+suspension_order = []
+suspension_parent.add_updater(
+    lambda mob, dt: suspension_order.append(("parent", dt)), call=False
+)
+suspension_child.add_updater(
+    lambda mob, dt: suspension_order.append(("child", dt)), call=False
+)
+suspension_scene.add(suspension_parent)
+suspension_parent.suspend_updating(recurse=False)
+suspension_scene.update(0.25)
+assert suspension_order == []
+suspension_child.resume_updating(recurse=False, call_updater=False)
+suspension_scene.update(0.25)
+assert suspension_order == [("child", 0.25), ("parent", 0.25)]
+suspension_order.clear()
+suspension_parent.suspend_updating()
+suspension_parent.resume_updating()
+assert suspension_order == [("child", 0.0), ("parent", 0.0)]
+suspension_order.clear()
+suspension_parent.update(0.5, recurse=False)
+assert suspension_order == [("parent", 0.5)]
+
+
 class ExplodingUpdater(Mobject):
     pass
 
@@ -432,6 +474,70 @@ callback_scene.play(callback_animation)
 assert np.allclose(callback_alphas, [0.0, 1.0, 1.0])
 assert np.allclose(callback_mover.get_x(), 1.0)
 
+# Restore is a Transform onto Marionette's saved-state copy, so its standard
+# path-arc parameters route through the same native path function.
+restore_scene = Scene()
+restore_mover = geometry.Rectangle(width=1.0, height=1.0)
+restore_scene.add(restore_mover)
+restore_mover.save_state()
+assert restore_mover.saved_state is not None
+assert restore_mover.saved_state.target is restore_mover.target
+restore_mover.shift([2.0, 1.0, 0.0])
+restore_scene.play(
+    manimlib.Restore(restore_mover, path_arc=math.pi / 3.0),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(restore_mover.get_center(), [0.0, 0.0, 0.0])
+
+# A saved state is a real family copy even before scene adoption. The first
+# animation may adopt the already-mutated source; Restore must still target
+# the earlier detached state, including its child graph.
+detached_restore_scene = Scene()
+detached_restore_child = geometry.Rectangle(width=0.5, height=0.5)
+detached_restore_mover = manimlib.VGroup(detached_restore_child)
+detached_restore_mover.save_state()
+detached_saved = detached_restore_mover.saved_state
+detached_restore_mover.shift([3.0, -2.0, 0.0])
+detached_restore_scene.play(
+    manimlib.Restore(detached_restore_mover, path_arc=math.pi / 6.0),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert detached_restore_mover.saved_state is detached_saved
+assert np.allclose(detached_restore_mover.get_center(), [0.0, 0.0, 0.0])
+assert np.allclose(detached_restore_child.get_center(), [0.0, 0.0, 0.0])
+
+state_links = geometry.Rectangle(width=0.25, height=0.25)
+first_target = state_links.generate_target()
+state_links.save_state()
+assert state_links.saved_state.target is first_target
+second_target = state_links.generate_target()
+assert second_target.saved_state is state_links.saved_state
+plain_state_copy = state_links.copy()
+assert plain_state_copy.target is None
+assert plain_state_copy.saved_state is None
+
+explicit_target_scene = Scene()
+explicit_target_mover = geometry.Rectangle(width=0.5, height=0.5)
+explicit_target_scene.add(explicit_target_mover)
+explicit_target_mover.generate_target().shift([1.25, 0.0, 0.0])
+explicit_target_scene.play(
+    manimlib.MoveToTarget(explicit_target_mover),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(explicit_target_mover.get_center(), [1.25, 0.0, 0.0])
+
+sampled_rate_scene = Scene()
+sampled_rate_mover = geometry.Rectangle(width=0.5, height=0.5)
+sampled_rate_scene.play(
+    sampled_rate_mover.animate.shift([2.0, 0.0, 0.0]),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.there_and_back_with_pause,
+)
+assert np.allclose(sampled_rate_mover.get_center(), [0.0, 0.0, 0.0])
+
 abort_scene = Scene()
 abort_mover = geometry.Rectangle(width=1.0, height=1.0)
 abort_scene.add(abort_mover)
@@ -562,6 +668,39 @@ assert np.allclose(
     [1.0, 2.0, 0.0],
 )
 assert np.min(np.linalg.norm(bound_arrow_points - [4.0, 2.0, 0.0], axis=1)) < 1e-6
+
+# Line.set_angle keeps its start fixed by default. DashedLine reads endpoints
+# from its first/last native dash children, matching the Reference override.
+dashed = geometry.DashedLine([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0])
+dashed_start = dashed.get_start().copy()
+assert dashed.set_angle(math.pi / 2.0) is dashed
+assert np.allclose(dashed.get_start(), dashed_start)
+assert np.allclose(dashed.get_unit_vector(), [0.0, 1.0, 0.0], atol=1e-9)
+
+quarter_arc = geometry.Arc(
+    start_angle=0.0,
+    angle=math.pi / 2.0,
+    radius=2.0,
+    arc_center=[1.0, -1.0, 0.0],
+)
+assert np.allclose(
+    quarter_arc.pfp(0.5),
+    [1.0 + math.sqrt(2.0), -1.0 + math.sqrt(2.0), 0.0],
+    atol=2e-3,
+)
+
+selector_tex = manimlib.Tex(r"\cos(\theta) + \sin(\theta)")
+selected_thetas = selector_tex[r"\theta"]
+assert len(selected_thetas) == 2
+assert all(len(part) > 0 for part in selected_thetas)
+
+brace_module = importlib.import_module("manimlib.mobject.svg.brace")
+brace_line = geometry.Line([-1.0, -1.0, 0.0], [1.0, 1.0, 0.0])
+line_brace = brace_module.LineBrace(brace_line, buff=0.1)
+assert isinstance(line_brace, brace_module.Brace)
+brace_tip = line_brace.get_tip()
+brace_label = line_brace.get_tex("1")
+assert np.dot(brace_label.get_center() - brace_tip, line_brace.get_direction()) > 0
 
 # Existing Chisel/Scribe semantics are live through the portal, rather than
 # being shadowed by schema placeholders. Arc length remains true for either

@@ -1486,6 +1486,24 @@ impl BridgeMobject {
             .map_err(stage_error)
     }
 
+    /// Recreate the Reference's `saved_state` pointer after a detached
+    /// mobject and its previously-copied state have both entered a Scene.
+    fn _link_saved_state(slf: &Bound<'_, Self>, saved: &Bound<'_, BridgeMobject>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        let (engine, mob) = bound_parts(&slf.borrow())?;
+        let (saved_engine, saved_mob) = bound_parts(&saved.borrow())?;
+        if !same_engine(&engine, &saved_engine) {
+            return Err(ForeignStageError::new_err(
+                "saved state belongs to a different Scene",
+            ));
+        }
+        engine
+            .borrow_mut()
+            .stage_mut()
+            .link_saved_state(mob, saved_mob)
+            .map_err(stage_error)
+    }
+
     /// Reference `get_start`: this entry's own first world-space point.
     fn _get_start(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
@@ -1528,6 +1546,39 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.reverse_family_points(mob))?.map_err(stage_error)
     }
 
+    /// Whether this node's updater traversal is suspended. Ancestor pruning
+    /// is applied by the scene target collector; this is the Reference's
+    /// public self-state query used by `Mobject.update`.
+    fn _is_updating_suspended(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.is_updating_suspended(mob))
+    }
+
+    /// Route `Mobject.suspend_updating` to Marionette's durable updater flag.
+    fn _suspend_updating(slf: &Bound<'_, Self>, recurse: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.suspend_updating(mob, recurse))
+    }
+
+    /// Clear suspension on the selected family and ancestor chain. Python
+    /// owns the immediate callback pass so no Stage borrow crosses a host
+    /// callable; `Mobject.resume_updating` invokes it after this returns.
+    fn _resume_updating(slf: &Bound<'_, Self>, recurse: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.resume_updating(mob, recurse, false);
+        })
+    }
+
+    /// Run only Marionette-owned updaters for this mobject. The bootstrap
+    /// first performs the matching Python family pass outside any Stage
+    /// borrow, preserving the portal's callback-safety boundary.
+    fn _update_native_mobject(slf: &Bound<'_, Self>, dt: f64, recurse: bool) -> PyResult<()> {
+        with_stage(slf, |stage, mob| {
+            stage.update_mobject_with_recurse(mob, dt, recurse);
+        })
+    }
+
     /// True arc length over this entry's current world-space shared-anchor
     /// path. The optional sampling parameter on manim's VMobject surface is
     /// deliberately unnecessary: Chisel's error-bounded quadrature is the
@@ -1541,6 +1592,13 @@ impl BridgeMobject {
                 .map(|path| path.get_arc_length())
         })?
         .map_err(native_error)
+    }
+
+    /// The project contract's true-arclength `point_from_proportion`
+    /// (BN-03), routed to Chisel through Marionette for both proxy states.
+    fn _point_from_proportion(slf: &Bound<'_, Self>, alpha: f64) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.point_from_proportion(mob, alpha))?.map_err(stage_error)
     }
 
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
@@ -1595,6 +1653,42 @@ impl BridgeMobject {
             .buff(buff)
             .build();
         install_native_tree(slf, factory, built)
+    }
+
+    /// Native `Brace(mobject, direction, buff)` over the target's live
+    /// world-space family geometry. The returned point index tracks the
+    /// analytic curl tip through later affine transforms.
+    fn _build_brace<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        target: &Bound<'_, BridgeMobject>,
+        direction: [f64; 3],
+        buff: f64,
+    ) -> PyResult<(Bound<'py, PyList>, usize)> {
+        let points = with_stage(target, |stage, mob| {
+            stage
+                .family(mob)
+                .into_iter()
+                .flat_map(|member| stage.get_points(member).unwrap_or_default())
+                .collect::<Vec<_>>()
+        })?;
+        let target = fmn_library::VMobject::from_points(points);
+        let brace = fmn_library::Brace::around(&target, direction).buff(buff);
+        install_brace_tree(slf, factory, brace)
+    }
+
+    /// Native `LineBrace`: Atlas owns its arbitrary-angle geometry and this
+    /// portal only installs the resulting retained family.
+    fn _build_line_brace<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        direction: [f64; 3],
+        buff: f64,
+    ) -> PyResult<(Bound<'py, PyList>, usize)> {
+        let brace = fmn_library::line_brace(start, end, direction).buff(buff);
+        install_brace_tree(slf, factory, brace)
     }
 
     /// `ValueTracker` initialization: replace the detached nursery with a
@@ -2930,17 +3024,43 @@ fn scene_proxy_handles(
     Ok(handles)
 }
 
-/// Mobjects receiving updater dispatch this frame, in stage order.
+/// Collect one unsuspended updater subtree in the Reference's child-first
+/// order. A suspended parent prunes its entire subtree even when descendants
+/// are not individually marked suspended. The explicit stack keeps a valid
+/// deeply nested family from consuming the scene worker's call stack.
+fn collect_update_targets(stage: &Stage, root: Mob, targets: &mut Vec<Mob>) {
+    let mut stack = vec![(root, false)];
+    while let Some((mob, visited)) = stack.pop() {
+        if visited {
+            if !targets.contains(&mob) {
+                targets.push(mob);
+            }
+            continue;
+        }
+        if stage.is_updating_suspended(mob) || targets.contains(&mob) {
+            continue;
+        }
+        stack.push((mob, true));
+        if let Some(entry) = stage.get(mob) {
+            stack.extend(
+                entry
+                    .submobjects()
+                    .iter()
+                    .rev()
+                    .map(|&child| (child, false)),
+            );
+        }
+    }
+}
+
+/// Mobjects receiving updater dispatch this frame, in the same child-first,
+/// suspension-pruned order as Marionette's native updater pass.
 fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
     let scene_cell = scene.borrow();
     let runtime = scene_cell.engine.borrow();
     let mut targets = Vec::new();
     for &root in runtime.stage().roots() {
-        for member in runtime.stage().family(root) {
-            if !targets.contains(&member) {
-                targets.push(member);
-            }
-        }
+        collect_update_targets(runtime.stage(), root, &mut targets);
     }
     targets
 }
@@ -3809,7 +3929,13 @@ fn build_native_animation(
             fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
                 .map_err(anim_error)?,
         ),
-        "restore" => Box::new(fmn_anim::restore(stage, need_mob(spec.mob)?).map_err(anim_error)?),
+        "restore" => {
+            let mut restore = fmn_anim::restore(stage, need_mob(spec.mob)?).map_err(anim_error)?;
+            if spec.path_arc != 0.0 {
+                restore = restore.with_path_arc(spec.path_arc, spec.path_arc_axis);
+            }
+            Box::new(restore)
+        }
         other => {
             return Err(PyValueError::new_err(format!(
                 "animation kind `{other}` is not routed to the native shelf"
@@ -4425,6 +4551,33 @@ fn native_shell_specs<'py>(
         out.append((shell, child_specs))?;
     }
     Ok(out)
+}
+
+/// Install a native brace and retain the analytic tip's point index. Point
+/// identity, rather than a frozen coordinate, makes `get_tip()` live after
+/// ordinary Mobject transforms.
+fn install_brace_tree<'py>(
+    slf: &Bound<'py, BridgeMobject>,
+    factory: &Bound<'py, PyAny>,
+    brace: fmn_library::Brace,
+) -> PyResult<(Bound<'py, PyList>, usize)> {
+    let tip = brace.tip();
+    let built = brace.build();
+    let tip_index = built
+        .points()
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            let distance = |point: &&[f64; 3]| {
+                let dx = point[0] - tip[0];
+                let dy = point[1] - tip[1];
+                let dz = point[2] - tip[2];
+                dx * dx + dy * dy + dz * dz
+            };
+            distance(left).total_cmp(&distance(right))
+        })
+        .map_or(0, |(index, _)| index);
+    Ok((install_native_tree(slf, factory, built)?, tip_index))
 }
 
 /// Install a built native family on a constructing proxy: the root's own

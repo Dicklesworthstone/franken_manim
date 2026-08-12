@@ -288,6 +288,22 @@ fn fixture_link_topology_save_then_generate() -> Result<(), String> {
 }
 
 #[test]
+fn an_existing_family_can_be_linked_as_saved_state() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[1.0, 0.0, 0.0]]));
+    let saved = stage.copy_family(mob).expect("saved family copy");
+    stage.shift(mob, [3.0, 0.0, 0.0]);
+
+    stage
+        .link_saved_state(mob, saved)
+        .expect("same-stage saved-state link");
+    stage.restore_mobject(mob).expect("linked state restores");
+
+    assert_eq!(stage.saved_state(mob), Some(saved));
+    assert_eq!(stage.get_center(mob), [1.0, 0.0, 0.0]);
+}
+
+#[test]
 fn fixture_link_topology_generate_then_save() -> Result<(), String> {
     let case = parse_cases()?
         .into_iter()

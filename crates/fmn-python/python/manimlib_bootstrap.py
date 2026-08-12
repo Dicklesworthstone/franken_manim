@@ -44,6 +44,7 @@ _ONES = _np.array([1.0, 1.0, 1.0])
 # manimlib/default_config.yml `sizes`: the Reference's default buffers.
 _DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
 _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
+_SMALL_BUFF = 0.1
 
 # Function object -> catalog name, filled by _install_rate_functions;
 # Scene.play maps rate_func callables into the engine's named catalog.
@@ -307,6 +308,8 @@ def _install_live_state(mobject):
     mobject.submobjects = _LiveSubmobjects(mobject)
     mobject.uniforms = _LiveUniforms(mobject)
     mobject.updaters = []
+    mobject.saved_state = None
+    mobject.target = None
 
 
 class _AnimationBuilder:
@@ -444,7 +447,17 @@ def _copy_mobject_graph(root, deep, memo=None):
         memo[id(old)] = new
         _install_live_state(new)
 
-    internal = {"submobjects", "uniforms", "updaters", "_scene"}
+    # Reference copy() temporarily stashes these relationship pointers and
+    # installs None on the copy; generate_target/save_state reconnect only
+    # their one prescribed cross-link afterward.
+    internal = {
+        "submobjects",
+        "uniforms",
+        "updaters",
+        "_scene",
+        "target",
+        "saved_state",
+    }
     for old, new in pairs:
         mapped_children = [mapping[child] for child in old.submobjects]
         new.submobjects.extend(mapped_children)
@@ -511,6 +524,25 @@ class Mobject(_BridgeMobject):
             self.submobjects.extend(args[0])
         else:
             raise Exception(f"Invalid argument to Group of type {type(args[0])}")
+
+    def point_from_proportion(self, alpha):
+        # Reference Mobject's raw-record interpolation. VMobject overrides
+        # this with BN-03's true-arclength path implementation below.
+        points = self.get_points()
+        end = len(points) - 1
+        alpha = float(alpha)
+        if alpha >= 1.0:
+            index, residue = end - 1, 1.0
+        elif alpha <= 0.0:
+            index, residue = 0, 0.0
+        else:
+            value = end * alpha
+            index, residue = int(value), value % 1.0
+        return _interpolate(points[index], points[index + 1], residue)
+
+    def pfp(self, alpha):
+        """Abbreviation for point_from_proportion."""
+        return self.point_from_proportion(alpha)
 
     def init_data(self):
         pass
@@ -1235,8 +1267,40 @@ class Mobject(_BridgeMobject):
             target.updaters.clear()
         return self
 
+    def _update_python_family(self, dt, recurse):
+        # Reference Mobject.update is child-first and snapshots each updater
+        # list at that node's turn. Suspension prunes the whole subtree.
+        if self._is_updating_suspended():
+            return
+        if recurse:
+            for submobject in list(self.submobjects):
+                submobject._update_python_family(dt, True)
+        for updater in list(self.updaters):
+            self._dispatch_updater(updater, dt)
+
+    def update(self, dt=0, recurse=True):
+        dt = float(dt)
+        recurse = bool(recurse)
+        self._update_python_family(dt, recurse)
+        # Native updaters run only after host callbacks have returned, so the
+        # Stage RefCell is never held across Python code.
+        self._update_native_mobject(dt, recurse)
+        return self
+
+    def suspend_updating(self, recurse=True):
+        self._suspend_updating(bool(recurse))
+        return self
+
+    def resume_updating(self, recurse=True, call_updater=True):
+        recurse = bool(recurse)
+        self._resume_updating(recurse)
+        if call_updater:
+            self.update(0.0, recurse=recurse)
+        return self
+
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
+        self.target.saved_state = self.saved_state
         return self.target
 
     def become(self, mobject, match_updaters=False):
@@ -1251,12 +1315,13 @@ class Mobject(_BridgeMobject):
         return self
 
     def save_state(self, use_deepcopy=False):
-        # The engine snapshot Restore consumes (Stage::save_state). Note:
-        # a save taken while detached does not survive scene adoption
-        # (copy_into starts a fresh entry); Restore then refuses with the
-        # engine's MissingSavedState.
-        del use_deepcopy
-        self._save_state()
+        # Keep the Reference-visible family copy. This is also the exact
+        # pre-adoption state Restore needs when scene code calls save_state
+        # on a detached graph and mutates it before its first play.
+        self.saved_state = self.copy(deep=use_deepcopy)
+        self.saved_state.target = self.target
+        if self._is_bound():
+            self._link_saved_state(self.saved_state)
         return self
 
     @property
@@ -1391,6 +1456,9 @@ class VMobject(Mobject):
         # but cannot weaken the answer back to a chord approximation.
         del n_sample_points
         return self._get_arc_length()
+
+    def point_from_proportion(self, alpha):
+        return _np.array(self._point_from_proportion(float(alpha)))
 
     # Style surface (fm-d3gt): Reference bodies (vectorized_mobject.py at
     # the pin) over the live engine record views (`stroke_rgba`,
@@ -1951,6 +2019,14 @@ class Line(VMobject):
         vect = self.get_vector()
         return _math.atan2(vect[1], vect[0])
 
+    def set_angle(self, angle, about_point=None):
+        # Reference geometry.py:723-730: preserve the start by default and
+        # rotate only the delta from the line's current planar bearing.
+        if about_point is None:
+            about_point = self.get_start()
+        self.rotate(float(angle) - self.get_angle(), about_point=about_point)
+        return self
+
     def get_length(self):
         vect = self.get_vector()
         return float(_np.sqrt((vect * vect).sum()))
@@ -1990,6 +2066,16 @@ class DashedLine(Line):
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
+
+    def get_start(self):
+        if self.submobjects:
+            return self.submobjects[0].get_start()
+        return super().get_start()
+
+    def get_end(self):
+        if self.submobjects:
+            return self.submobjects[-1].get_end()
+        return super().get_end()
 
 
 class Arrow(Line):
@@ -2750,6 +2836,11 @@ class Tex(VMobject):
                 )
         return VGroup(*groups)
 
+    def __getitem__(self, value):
+        if isinstance(value, (int, slice)):
+            return super().__getitem__(value)
+        return self.get_parts_by_tex(value)
+
     def get_part_by_tex(self, selector, index=0):
         return self.get_parts_by_tex(selector)[index]
 
@@ -2827,6 +2918,83 @@ class Tex(VMobject):
 
 class TexText(Tex):
     _native_text_mode = True
+
+
+class Brace(Tex):
+    """Atlas's parametric brace with Reference-compatible live tip helpers."""
+
+    def __init__(
+        self,
+        mobject,
+        direction=_DOWN,
+        buff=0.2,
+        tex_string=r"\underbrace{\qquad}",
+        **kwargs,
+    ):
+        _install_live_state(self)
+        self.tex_string = str(tex_string)
+        self.tex_strings = [self.tex_string]
+        specs, tip_index = self._build_brace(
+            _native_shell_factory,
+            mobject,
+            _vec3(direction),
+            float(buff),
+        )
+        self.tip_point_index = int(tip_index)
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def set_initial_width(self, width):
+        self.set_width(float(width), stretch=True)
+        return self
+
+    def get_tip(self):
+        return self.get_points()[self.tip_point_index].copy()
+
+    def get_direction(self):
+        vector = self.get_tip() - self.get_center()
+        norm = float(_np.linalg.norm(vector))
+        return vector / norm if norm else _np.array(_DOWN)
+
+    def put_at_tip(self, mob, use_next_to=True, **kwargs):
+        if use_next_to:
+            mob.next_to(self.get_tip(), _np.round(self.get_direction()), **kwargs)
+        else:
+            mob.move_to(self.get_tip())
+            buff = float(kwargs.get("buff", _DEFAULT_MOBJECT_TO_MOBJECT_BUFF))
+            mob.shift(self.get_direction() * (mob.get_width() / 2.0 + buff))
+        return self
+
+    def get_text(self, text, **kwargs):
+        buff = kwargs.pop("buff", _SMALL_BUFF)
+        result = Text(text, **kwargs)
+        self.put_at_tip(result, buff=buff)
+        return result
+
+    def get_tex(self, *tex, **kwargs):
+        buff = kwargs.pop("buff", _SMALL_BUFF)
+        result = Tex(*tex, **kwargs)
+        self.put_at_tip(result, buff=buff)
+        return result
+
+
+class LineBrace(Brace):
+    def __init__(self, line, direction=_UP, **kwargs):
+        buff = float(kwargs.pop("buff", 0.2))
+        tex_string = kwargs.pop("tex_string", r"\underbrace{\qquad}")
+        _install_live_state(self)
+        self.tex_string = str(tex_string)
+        self.tex_strings = [self.tex_string]
+        specs, tip_index = self._build_line_brace(
+            _native_shell_factory,
+            _vec3(line.get_start()),
+            _vec3(line.get_end()),
+            _vec3(direction),
+            buff,
+        )
+        self.tip_point_index = int(tip_index)
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class OldTex(Tex):
@@ -3014,6 +3182,10 @@ class PMobject(Mobject):
     def add_point(self, point, rgba=None, color=None, opacity=None):
         rgbas = None if rgba is None else [rgba]
         return self.add_points([point], rgbas, color, opacity)
+
+    def point_from_proportion(self, alpha):
+        points = self.get_points()
+        return points[int(float(alpha) * (len(points) - 1))]
 
 
 class DotCloud(PMobject):
@@ -3994,6 +4166,12 @@ class Scene(_SceneCore):
                     )
                 if not mobject._is_bound():
                     self.add(mobject)
+                if proto._native_kind == "restore":
+                    saved_state = getattr(mobject, "saved_state", None)
+                    if saved_state is not None:
+                        if not saved_state._is_bound():
+                            self._adopt(saved_state)
+                        mobject._link_saved_state(saved_state)
                 target = proto._native_target()
                 if target is not None and not target._is_bound():
                     self._adopt(target)
@@ -4438,6 +4616,22 @@ class GrowArrow(_NativeAnimation):
 class Restore(_NativeAnimation):
     _native_kind = "restore"
 
+    def __init__(
+        self,
+        mobject,
+        path_arc=0.0,
+        path_arc_axis=_OUT,
+        path_func=None,
+        **kwargs,
+    ):
+        _refuse_unrouted("Restore()", [("path_func", path_func is not None)])
+        super().__init__(mobject, **kwargs)
+        self.path_arc = float(path_arc)
+        self.path_arc_axis = _vec3(path_arc_axis)
+
+    def _native_params(self):
+        return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
+
 
 class Transform(_NativeAnimation):
     _native_kind = "transform"
@@ -4464,6 +4658,14 @@ class Transform(_NativeAnimation):
 
     def _native_params(self):
         return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
+
+
+class MoveToTarget(Transform):
+    def __init__(self, mobject, **kwargs):
+        target = getattr(mobject, "target", None)
+        if target is None:
+            raise Exception("MoveToTarget called on mobject without attribute 'target'")
+        super().__init__(mobject, target, **kwargs)
 
 
 class ReplacementTransform(Transform):
@@ -4631,6 +4833,84 @@ _UnavailablePygletWindow.__qualname__ = "PygletWindow"
 _UnavailablePygletWindow.__module__ = "manimlib.window"
 
 
+def _constant_expression(detail, env):
+    """Evaluate only the closed expression grammar used by schema constants.
+
+    This deliberately is not Python evaluation. Unknown names, private
+    attributes, calls outside the three listed constructors, and every other
+    syntax form refuse so runtime-shaped schema entries remain symbolic.
+    """
+
+    def visit(node):
+        if isinstance(node, _ast.Constant):
+            return node.value
+        if isinstance(node, _ast.List):
+            return [visit(item) for item in node.elts]
+        if isinstance(node, _ast.Tuple):
+            return tuple(visit(item) for item in node.elts)
+        if isinstance(node, _ast.Dict):
+            return {visit(key): visit(value) for key, value in zip(node.keys, node.values)}
+        if isinstance(node, _ast.Name):
+            if node.id not in env:
+                raise ValueError(f"unknown schema constant name: {node.id}")
+            return env[node.id]
+        if isinstance(node, _ast.Attribute):
+            if node.attr.startswith("_"):
+                raise ValueError("private schema constant attributes are forbidden")
+            return getattr(visit(node.value), node.attr)
+        if isinstance(node, _ast.Subscript):
+            return visit(node.value)[visit(node.slice)]
+        if isinstance(node, _ast.UnaryOp):
+            operand = visit(node.operand)
+            if isinstance(node.op, _ast.UAdd):
+                return +operand
+            if isinstance(node.op, _ast.USub):
+                return -operand
+            raise ValueError("unsupported schema constant unary operator")
+        if isinstance(node, _ast.BinOp):
+            left = visit(node.left)
+            right = visit(node.right)
+            if isinstance(node.op, _ast.Add):
+                return left + right
+            if isinstance(node.op, _ast.Sub):
+                return left - right
+            if isinstance(node.op, _ast.Mult):
+                return left * right
+            if isinstance(node.op, _ast.Div):
+                return left / right
+            if isinstance(node.op, _ast.BitOr):
+                return left | right
+            raise ValueError("unsupported schema constant binary operator")
+        if isinstance(node, _ast.BoolOp) and isinstance(node.op, _ast.Or):
+            result = None
+            for item in node.values:
+                result = visit(item)
+                if result:
+                    return result
+            return result
+        if isinstance(node, _ast.Call) and not node.keywords:
+            args = [visit(arg) for arg in node.args]
+            if isinstance(node.func, _ast.Name):
+                if node.func.id == "dict":
+                    return dict(*args)
+                if node.func.id == "list":
+                    return list(*args)
+                if node.func.id == "version" and "version" in env:
+                    return env["version"](*args)
+            if (
+                isinstance(node.func, _ast.Attribute)
+                and node.func.attr == "values"
+                and not args
+            ):
+                owner = visit(node.func.value)
+                if isinstance(owner, dict):
+                    return owner.values()
+            raise ValueError("unsupported schema constant call")
+        raise ValueError(f"unsupported schema constant syntax: {type(node).__name__}")
+
+    return visit(_ast.parse(detail, mode="eval").body)
+
+
 def _constant(detail):
     if detail == "-":
         return None
@@ -4652,13 +4932,13 @@ def _constant(detail):
     # turns every corpus import into a TypeError.
     if detail.startswith("np.array(") and detail.endswith(")"):
         numpy = _importlib.import_module("numpy")
-        return numpy.array(_ast.literal_eval(detail[len("np.array(") : -1]))
+        return numpy.array(_constant_expression(detail[len("np.array(") : -1], {}))
     if detail == "np.pi":
         return _math.pi
     try:
         # Quoted strings, tuples, dicts, and other pure literals.
-        return _ast.literal_eval(detail)
-    except (ValueError, SyntaxError):
+        return _constant_expression(detail, {})
+    except (AttributeError, KeyError, TypeError, ValueError, SyntaxError):
         # Symbolic defaults (config references, derived expressions) keep
         # their declared spelling until the constants environment lands.
         return detail
@@ -4787,12 +5067,8 @@ def _resolve_symbolic_constants(rows):
         for key in list(pending):
             detail = pending[key]
             try:
-                # The spelling being evaluated is a row of the committed
-                # docs/api/ledger.tsv — the same repo-controlled schema
-                # this whole surface is synthesized from, never runtime
-                # input — with no builtins and a closed environment.
-                value = eval(detail, {"__builtins__": {}}, env)  # noqa: S307
-            except Exception:
+                value = _constant_expression(detail, env)
+            except (AttributeError, KeyError, TypeError, ValueError, SyntaxError):
                 continue
             resolved[key] = value
             env.setdefault(key[1], value)
@@ -4886,9 +5162,12 @@ def _install_schema_surface():
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
         ("manimlib.animation.transform", "Transform"): Transform,
+        ("manimlib.animation.transform", "MoveToTarget"): MoveToTarget,
         ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
         ("manimlib.animation.transform", "Restore"): Restore,
+        ("manimlib.mobject.svg.brace", "Brace"): Brace,
+        ("manimlib.mobject.svg.brace", "LineBrace"): LineBrace,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
@@ -5181,9 +5460,24 @@ def _install_rate_functions():
         "lingering": lingering,
         "exponential_decay": exponential_decay,
     }
+    native_catalog = {
+        "linear",
+        "smooth",
+        "rush_into",
+        "rush_from",
+        "slow_into",
+        "double_smooth",
+        "there_and_back",
+        "lingering",
+    }
     module = _ensure_module("manimlib.utils.rate_functions")
     for name, function in functions.items():
-        _RATE_FUNC_NAMES[function] = name
+        # Only names implemented directly by fmn-core cross as names. The
+        # other Reference callables take the already-landed sampled-curve
+        # path, preserving default/parameterized semantics without a Python
+        # crossing during the segment.
+        if name in native_catalog:
+            _RATE_FUNC_NAMES[function] = name
         setattr(module, name, function)
         if not hasattr(_FMN_MODULE, name):
             setattr(_FMN_MODULE, name, function)

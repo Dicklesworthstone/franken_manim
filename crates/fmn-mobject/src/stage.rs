@@ -1078,6 +1078,25 @@ impl Stage {
         self.get(mob).and_then(|e| e.saved_state)
     }
 
+    /// Link an existing same-stage family as `mob`'s saved state.
+    ///
+    /// Binding tiers use this when the Reference saved a detached Python
+    /// family before either graph entered a scene: both graphs are adopted
+    /// independently, then this recreates the ordinary `saved_state`
+    /// pointer without taking a late snapshot of already-mutated data.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if either handle is not live in this
+    /// stage.
+    pub fn link_saved_state(&mut self, mob: Mob, saved: Mob) -> Result<(), StageError> {
+        self.try_get(mob)?;
+        self.try_get(saved)?;
+        self.get_mut(mob)
+            .expect("liveness checked above")
+            .saved_state = Some(saved);
+        Ok(())
+    }
+
     /// Reference `Mobject.restore` (named for the per-mobject slot — the
     /// whole-stage [`Stage::restore`] is the snapshot path): `become` the
     /// saved state. The saved link survives, so repeated restores work,
@@ -1476,7 +1495,19 @@ impl Stage {
     /// slot §9.1's `Animation::update_mobjects` drives for starting/target
     /// copies, while [`Stage::update`] remains the whole-scene pass.
     pub fn update_mobject(&mut self, mob: Mob, dt: f64) {
-        self.update_mob(mob, dt);
+        self.update_mobject_with_recurse(mob, dt, true);
+    }
+
+    /// Reference `Mobject.update(dt, recurse)`: choose between the whole
+    /// child-first family pass and this node's own updater list. Front doors
+    /// use the explicit flag rather than approximating `recurse = false` by
+    /// temporarily mutating the family graph.
+    pub fn update_mobject_with_recurse(&mut self, mob: Mob, dt: f64, recurse: bool) {
+        if recurse {
+            self.update_mob(mob, dt);
+        } else {
+            self.update_mob_self(mob, dt);
+        }
     }
 
     /// Suspend updating on `mob` (and, with `recurse`, its children,
@@ -1563,6 +1594,15 @@ impl Stage {
             .unwrap_or_default();
         for child in children {
             self.update_mob(child, dt);
+        }
+        self.update_mob_self(mob, dt);
+    }
+
+    /// Run only one node's updater snapshot. The caller owns family order;
+    /// this helper is also the exact `recurse = false` path.
+    fn update_mob_self(&mut self, mob: Mob, dt: f64) {
+        if self.get(mob).is_none_or(|entry| entry.updating_suspended) {
+            return;
         }
         let updaters = self
             .get(mob)

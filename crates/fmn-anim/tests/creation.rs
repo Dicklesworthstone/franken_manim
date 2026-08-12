@@ -205,7 +205,6 @@ fn surface_show_creation_uses_uv_grid_partial_reveal() {
     );
 
     let mut reverse = uncreate_surface(surface, (3, 3), 1);
-    reverse.state_mut().config.rate_func = RateFunc::linear();
     reverse.begin(&mut stage).expect("surface uncreate begins");
     assert_eq!(
         stage.get_points(surface).expect("full reverse start"),
