@@ -7,7 +7,7 @@
 use fmn_anim::animation::Animation;
 use fmn_anim::{
     DrawBorderThenFill, IntRound, RateFunc, RevealBounds, show_creation, show_increasing_subsets,
-    show_passing_flash, show_submobjects_one_by_one, uncreate, write,
+    show_passing_flash, show_submobjects_one_by_one, show_surface_creation, uncreate, write,
 };
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
@@ -47,6 +47,28 @@ fn xs_of(stage: &Stage, mob: Mob) -> Vec<f32> {
         .into_iter()
         .map(|point| point[0] as f32)
         .collect()
+}
+
+fn surface3(stage: &mut Stage) -> Mob {
+    let schema = RecordSchema::new(
+        &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+        &["point"],
+        &["point", "d_normal_point"],
+    )
+    .expect("surface schema");
+    let mut buffer = RecordBuffer::new(schema, 9).expect("3x3 surface");
+    let mut points = Vec::new();
+    let mut normals = Vec::new();
+    for u in [0.0_f32, 1.0, 2.0] {
+        for v in [0.0_f32, 1.0, 2.0] {
+            points.extend_from_slice(&[u, v, 0.0]);
+            normals.extend_from_slice(&[u, v, 1.0]);
+        }
+    }
+    buffer.write_range("point", 0, &points);
+    buffer.write_range("d_normal_point", 0, &normals);
+    buffer.write_range("rgba", 0, &[1.0; 36]);
+    stage.add(Mobject::from_buffer(buffer))
 }
 
 // ------------------------------------------------------------ ShowPartial
@@ -136,6 +158,50 @@ fn show_creation_lag_reveals_children_successively() {
     anim.interpolate(&mut stage, 0.5);
     assert_eq!(xs_of(&stage, c1), vec![0.0, 1.0, 2.0, 2.0, 2.0]);
     assert_eq!(xs_of(&stage, c2), vec![0.0; 5]);
+}
+
+#[test]
+fn surface_show_creation_uses_uv_grid_partial_reveal() {
+    let mut stage = Stage::new();
+    let surface = surface3(&mut stage);
+    let original = stage.get_points(surface).expect("points");
+    let mut anim = show_surface_creation(surface, (3, 3), 1);
+    anim.state_mut().config.rate_func = RateFunc::linear();
+    anim.begin(&mut stage).expect("surface animation begins");
+    assert_eq!(
+        stage.get_points(surface).expect("collapsed points"),
+        vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ]
+    );
+    anim.interpolate(&mut stage, 0.5);
+    assert_eq!(
+        stage.get_points(surface).expect("half surface"),
+        vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ]
+    );
+    anim.finish(&mut stage);
+    assert_eq!(
+        stage.get_points(surface).expect("restored surface"),
+        original
+    );
 }
 
 // ---------------------------------------------------- DrawBorderThenFill

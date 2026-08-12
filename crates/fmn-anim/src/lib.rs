@@ -79,18 +79,20 @@ pub use composition::{
 };
 pub use creation::{
     DrawBorderThenFill, IntRound, RevealBounds, ShowIncreasingSubsets, ShowPartial, show_creation,
-    show_increasing_subsets, show_passing_flash, show_submobjects_one_by_one, uncreate, write,
+    show_increasing_subsets, show_passing_flash, show_submobjects_one_by_one,
+    show_surface_creation, uncreate, uncreate_surface, write,
 };
 pub use fading::{
     FadeTransform, VFade, fade_in, fade_in_from_point, fade_out, fade_out_to_point, fade_transform,
     fade_transform_pieces, v_fade_in, v_fade_in_then_out, v_fade_out,
 };
 pub use frame::{
-    FramePacket, OpenSegment, OpenWait, SceneUpdaterBoundary, advance_play,
-    advance_play_with_boundary, complete_play_frame, complete_wait_frame, finish_open_play,
-    finish_open_wait, open_play, open_play_with_mode, open_wait, play_segment,
-    play_segment_with_boundary, prepare_play_frame, prepare_wait_frame, validate_play,
-    wait_segment, wait_segment_upto, wait_segment_with_boundary,
+    AnimationBoundary, FramePacket, OpenSegment, OpenWait, SceneUpdaterBoundary, abort_open_play,
+    abort_open_wait, advance_play, advance_play_with_boundary, complete_play_frame,
+    complete_wait_frame, finish_open_play, finish_open_wait, open_play, open_play_with_mode,
+    open_wait, play_segment, play_segment_with_boundary, prepare_play_animation,
+    prepare_play_frame, prepare_wait_frame, validate_play, wait_segment, wait_segment_upto,
+    wait_segment_with_boundary,
 };
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{

@@ -754,6 +754,26 @@ pub trait Animation {
         self.teardown(stage);
     }
 
+    /// Abandon a begun animation after a host callback fails.
+    ///
+    /// Unlike [`Self::finish`], abort never interpolates the final endpoint,
+    /// runs remover cleanup, or calls a resumed updater. It only releases the
+    /// lifecycle state that `begin` acquired so the Scene is not left with a
+    /// permanently animating or suspended family. The already-observed
+    /// partial frame state and rational time remain intact, matching Python
+    /// exception propagation rather than pretending the segment completed.
+    fn abort(&mut self, stage: &mut Stage) {
+        let mobject = self.state().mobject();
+        if !stage.contains(mobject) {
+            return;
+        }
+        stage.set_animating_status(mobject, false, true);
+        if self.state().config.suspend_mobject_updating && self.state().mobject_was_updating {
+            stage.resume_updating(mobject, true, false);
+        }
+        self.teardown(stage);
+    }
+
     /// Subclass slot run at the end of [`Animation::finish`] (the
     /// Reference's `finish` overrides — Transform's `unlock_data` call
     /// site). Default: nothing.

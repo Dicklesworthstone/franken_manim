@@ -23,11 +23,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use fmn_anim::{
-    AnimError, Animation, FramePacket, ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc,
-    RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind, SegmentReport,
-    complete_play_frame, complete_wait_frame, finish_open_play, finish_open_wait,
-    open_play_with_mode, open_wait, play_segment_with_boundary, prepare_play_frame,
-    prepare_wait_frame, validate_play, wait_segment_with_boundary,
+    AnimError, Animation, AnimationBoundary, FramePacket, ImpureEffect, OpenSegment, OpenWait,
+    Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
+    SegmentReport, abort_open_play, abort_open_wait, complete_play_frame, complete_wait_frame,
+    finish_open_play, finish_open_wait, open_play_with_mode, open_wait, play_segment_with_boundary,
+    prepare_play_animation, prepare_play_frame, prepare_wait_frame, validate_play,
+    wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -1038,6 +1039,24 @@ impl Scene {
         .map_err(Into::into)
     }
 
+    /// Run one top-level animation's step-1/2 pair and yield before the next.
+    ///
+    /// Host-language animation slots use this earlier release point for
+    /// callbacks whose mutations must be visible to subsequent animations
+    /// and to the later scene-updater phase.
+    pub fn prepare_stepped_play_animation(
+        &mut self,
+        play: &mut SteppedPlay,
+    ) -> Result<Option<AnimationBoundary>, SceneError> {
+        prepare_play_animation(
+            &mut self.stage,
+            &self.clock,
+            &mut play.animations,
+            &mut play.open,
+        )
+        .map_err(Into::into)
+    }
+
     /// Complete step 4 and capture one frame previously returned by
     /// [`Self::prepare_stepped_play_frame`].
     ///
@@ -1121,6 +1140,19 @@ impl Scene {
         finish_result?;
         post_result?;
         Ok(report)
+    }
+
+    /// Consume a stepped play after a host-language callback exception.
+    ///
+    /// The original exception remains the caller's primary error. This
+    /// infallible cleanup clears animation lifecycle state and advances the
+    /// play counter without publishing successful finish/post-play events.
+    pub fn abort_stepped_play(&mut self, mut play: SteppedPlay, sink: &mut dyn SceneSink) {
+        let _report = abort_open_play(&mut self.stage, &mut play.animations, play.open);
+        self.sync_stage_time();
+        self.event_error.take();
+        self.post_play(SegmentKind::Play, sink, false)
+            .expect("non-notifying post-play is infallible");
     }
 
     /// Drive one play through `prepare overrides → pre_play →
@@ -1334,6 +1366,15 @@ impl Scene {
         finish_result?;
         post_result?;
         Ok(report)
+    }
+
+    /// Consume a stepped wait after a host-language updater exception.
+    pub fn abort_stepped_wait(&mut self, wait: SteppedWait, sink: &mut dyn SceneSink) {
+        let _report = abort_open_wait(wait.open);
+        self.sync_stage_time();
+        self.event_error.take();
+        self.post_play(SegmentKind::Wait, sink, false)
+            .expect("non-notifying post-play is infallible");
     }
 
     /// Wait for `duration`, or the configured default when `None`.

@@ -245,6 +245,24 @@ pub struct SceneUpdaterBoundary {
     pub sample: FrameSample,
 }
 
+/// One completed step-2 animation interpolation in an open frame.
+///
+/// A host-language animation slot can use this yield to run its callback
+/// after the slot's native placeholder and before the next animation in the
+/// list. The Scene borrow is owned by the caller, so it can be dropped at this
+/// exact ordering point without weakening Stage ownership.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationBoundary {
+    /// Index in the play's top-level animation list.
+    pub animation_index: usize,
+    /// Raw `sample_time / animation_run_time`, matching Choreo's driver.
+    pub alpha: f64,
+    /// The frame-local delta used by `update_mobjects`.
+    pub dt: f64,
+    /// Current segment sample; the rational clock has not advanced yet.
+    pub sample: FrameSample,
+}
+
 /// Steps 1–6 for one sample.
 fn frame_step(
     stage: &mut Stage,
@@ -393,6 +411,8 @@ pub struct OpenSegment {
     report: SegmentReport,
     segment: FrameSegment,
     stepped: i64,
+    current_sample: Option<FrameSample>,
+    next_animation: usize,
     prepared: Option<StepPlan>,
 }
 
@@ -453,8 +473,64 @@ pub fn open_play_with_mode(
         report: prologue.report(SegmentKind::Play),
         segment,
         stepped: 0,
+        current_sample: None,
+        next_animation: 0,
         prepared: None,
     })
+}
+
+/// Run one animation's interleaved `update_mobjects` + `interpolate` pair
+/// and yield before the next animation.
+///
+/// Returning `Ok(None)` means either every animation for the current frame
+/// has run (call [`prepare_play_frame`] to advance the clock) or the segment
+/// has no frame left.
+///
+/// # Errors
+/// A composition's deferred failure or an invalid caller phase.
+pub fn prepare_play_animation(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+) -> Result<Option<AnimationBoundary>, AnimError> {
+    if open.prepared.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared frame before advancing another animation",
+        ));
+    }
+    if let Some(error) = animations
+        .iter()
+        .find_map(|animation| animation.deferred_error())
+    {
+        return Err(error);
+    }
+    if open.current_sample.is_none() {
+        if open.stepped >= open.segment.n_frames() {
+            return Ok(None);
+        }
+        open.current_sample = open.segment.sample(open.stepped + 1);
+        open.next_animation = 0;
+    }
+    if open.next_animation >= animations.len() {
+        return Ok(None);
+    }
+    let sample = open.current_sample.ok_or(AnimError::InvalidFramePhase(
+        "the open segment lost its current sample",
+    ))?;
+    let index = open.next_animation;
+    let dt = clock.dt().to_f64();
+    let animation = &mut animations[index];
+    animation.update_mobjects(stage, dt);
+    let alpha = sample.time.to_f64() / animation.state().config.run_time;
+    animation.interpolate(stage, alpha);
+    open.next_animation += 1;
+    Ok(Some(AnimationBoundary {
+        animation_index: index,
+        alpha,
+        dt,
+        sample,
+    }))
 }
 
 /// Prepare the next frame through steps 1–3, stopping immediately before
@@ -478,27 +554,11 @@ pub fn prepare_play_frame(
             "complete the prepared frame before preparing another",
         ));
     }
-    if let Some(error) = animations
-        .iter()
-        .find_map(|animation| animation.deferred_error())
-    {
-        return Err(error);
-    }
-    if open.stepped >= open.segment.n_frames() {
+    while prepare_play_animation(stage, clock, animations, open)?.is_some() {}
+    let Some(sample) = open.current_sample else {
         return Ok(None);
-    }
-    let sample = open
-        .segment
-        .sample(open.stepped + 1)
-        .ok_or(AnimError::InvalidFramePhase(
-            "the open segment lost its next frame sample",
-        ))?;
+    };
     let dt = clock.dt().to_f64();
-    for animation in animations.iter_mut() {
-        animation.update_mobjects(stage, dt);
-        let alpha = sample.time.to_f64() / animation.state().config.run_time;
-        animation.interpolate(stage, alpha);
-    }
     clock.advance_frames(1).map_err(AnimError::Clock)?;
     // Host-language updaters observe post-increment scene time, exactly as
     // the Reference's Scene.increment_time → update_mobjects order requires.
@@ -540,6 +600,8 @@ pub fn complete_play_frame(
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
     }
     open.stepped += 1;
+    open.current_sample = None;
+    open.next_animation = 0;
     Ok(())
 }
 
@@ -556,7 +618,7 @@ pub fn finish_open_play(
     animations: &mut [Box<dyn Animation>],
     open: OpenSegment,
 ) -> Result<SegmentReport, AnimError> {
-    if open.prepared.is_some() {
+    if open.prepared.is_some() || open.current_sample.is_some() {
         return Err(AnimError::InvalidFramePhase(
             "complete the prepared frame before finishing the segment",
         ));
@@ -571,12 +633,36 @@ pub fn finish_open_play(
     Ok(open.report)
 }
 
+/// Abandon an open play without landing its endpoint.
+///
+/// This path is for host-language exceptions raised while a stepped frame is
+/// between release boundaries. It consumes every open phase, releases each
+/// animation's begin-time lifecycle state, and deliberately preserves the
+/// partial scene state and clock position already observed by the host.
+#[must_use]
+pub fn abort_open_play(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    open: OpenSegment,
+) -> SegmentReport {
+    for animation in animations {
+        animation.abort(stage);
+    }
+    open.report
+}
+
 /// A declarative wait opened for borrow-released scene-updater stepping.
 pub struct OpenWait {
     report: SegmentReport,
     segment: FrameSegment,
     stepped: i64,
     prepared: Option<StepPlan>,
+}
+
+/// Consume a wait abandoned at a host-language updater boundary.
+#[must_use]
+pub fn abort_open_wait(open: OpenWait) -> SegmentReport {
+    open.report
 }
 
 impl fmt::Debug for OpenWait {
@@ -875,6 +961,8 @@ pub fn play_segment_with_boundary(
             report: report.clone(),
             segment,
             stepped: 0,
+            current_sample: None,
+            next_animation: 0,
             prepared: None,
         };
         advance_play_with_boundary(

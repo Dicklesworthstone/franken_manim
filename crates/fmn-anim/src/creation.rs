@@ -1,9 +1,11 @@
 //! The partial-reveal mechanism — family 2 of the five (§9.4, fm-cye):
-//! every class here drives frames through the one data-plane operation
-//! `Stage::pointwise_become_partial` (vectorized_mobject.py:1050), ported
-//! from the pinned Reference's `animation/creation.py` (with the
-//! `ShowPartial` bounds vocabulary shared by `indication.py`'s passing
-//! flashes):
+//! every class here drives frames through the appropriate typed form of
+//! the one partial-reveal data-plane operation: quadratic paths use
+//! `Stage::pointwise_become_partial` (vectorized_mobject.py:1050), while
+//! sampled UV grids use `Stage::surface_pointwise_become_partial`
+//! (surface.py:176). Both are ported from the pinned Reference's
+//! `animation/creation.py` call site (with the `ShowPartial` bounds
+//! vocabulary shared by `indication.py`'s passing flashes):
 //!
 //! - [`ShowPartial`] is the mechanism: per zipped family pair, restrict
 //!   the live submobject to a proportion window of its starting copy.
@@ -102,12 +104,22 @@ impl RevealBounds {
 pub struct ShowPartial {
     state: AnimState,
     bounds: RevealBounds,
+    geometry: PartialGeometry,
     /// Stored-but-never-read in the pinned Reference (creation.py:30) —
     /// kept as inert constructor surface for the Parity Ledger.
     should_match_start: bool,
     /// `ShowPassingFlash.finish` restores every pair to the full run
     /// (indication.py:188); runs in the [`Animation::teardown`] slot.
     restore_on_teardown: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartialGeometry {
+    QuadraticPath,
+    SurfaceGrid {
+        resolution: (usize, usize),
+        axis: usize,
+    },
 }
 
 impl ShowPartial {
@@ -122,6 +134,7 @@ impl ShowPartial {
         Self {
             state: AnimState::new(mobject, config),
             bounds,
+            geometry: PartialGeometry::QuadraticPath,
             should_match_start: false,
             restore_on_teardown: false,
         }
@@ -131,6 +144,13 @@ impl ShowPartial {
     #[must_use]
     pub fn with_config(mut self, config: AnimConfig) -> Self {
         self.state.config = config;
+        self
+    }
+
+    /// Select the Reference's sampled-Surface reveal plane.
+    #[must_use]
+    pub fn with_surface_grid(mut self, resolution: (usize, usize), axis: usize) -> Self {
+        self.geometry = PartialGeometry::SurfaceGrid { resolution, axis };
         self
     }
 
@@ -156,20 +176,49 @@ impl Animation for ShowPartial {
         AnimationSignature::Pure
     }
 
-    /// Validate up front what the Reference's `assert isinstance(...,
-    /// VMobject)` enforces per call: every family member with points must
-    /// be vmobject-shaped, so interpolation can never silently skip.
+    /// Validate the selected typed geometry up front, so interpolation can
+    /// never silently skip a schema or grid mismatch.
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
         let mobject = self.state.mobject();
         if !stage.contains(mobject) {
             return Err(AnimError::StaleHandle(mobject));
         }
+        let surface = match self.geometry {
+            PartialGeometry::QuadraticPath => None,
+            PartialGeometry::SurfaceGrid { resolution, axis } => {
+                let axis_len = if axis == 0 {
+                    resolution.0
+                } else {
+                    resolution.1
+                };
+                if axis > 1 || axis_len < 2 {
+                    return Err(AnimError::Stage(StageError::SchemaMismatch));
+                }
+                Some((resolution, resolution.0.checked_mul(resolution.1)))
+            }
+        };
         for member in stage.family(mobject) {
             if let Some(entry) = stage.get(member)
                 && !entry.buffer.is_empty()
-                && entry.buffer.schema().offset("joint_angle").is_none()
             {
-                return Err(AnimError::Stage(StageError::SchemaMismatch));
+                if let Some((_resolution, expected_len)) = surface {
+                    let schema = entry.buffer.schema();
+                    let fields = schema.fields();
+                    let ordinary_surface_schema = fields.len() == 3
+                        && fields[0].name == "point"
+                        && fields[0].width == 3
+                        && fields[1].name == "d_normal_point"
+                        && fields[1].width == 3
+                        && fields[2].name == "rgba"
+                        && fields[2].width == 4;
+                    if expected_len != Some(entry.buffer.len()) || !ordinary_surface_schema {
+                        return Err(AnimError::Stage(StageError::SchemaMismatch));
+                    }
+                } else if entry.buffer.schema().offset("joint_angle").is_none() {
+                    // The Reference's ShowPartial asserts VMobject for this
+                    // branch; Surface selects the typed branch above.
+                    return Err(AnimError::Stage(StageError::SchemaMismatch));
+                }
             }
         }
         Ok(())
@@ -180,9 +229,23 @@ impl Animation for ShowPartial {
             return; // rows are pairs once begin has run
         };
         let (a, b) = self.bounds.eval(sub_alpha);
+        if stage
+            .get(starting)
+            .is_none_or(|entry| entry.buffer.is_empty())
+        {
+            return;
+        }
         // setup validated the family; a failure here means a handle died
         // mid-play, which the frame model makes unreachable.
-        let _ = stage.pointwise_become_partial(submob, starting, a, b);
+        match self.geometry {
+            PartialGeometry::QuadraticPath => {
+                let _ = stage.pointwise_become_partial(submob, starting, a, b);
+            }
+            PartialGeometry::SurfaceGrid { resolution, axis } => {
+                let _ = stage
+                    .surface_pointwise_become_partial(submob, starting, resolution, axis, a, b);
+            }
+        }
     }
 
     /// indication.py:188 — after `finish`, every pair returns to the full
@@ -193,7 +256,22 @@ impl Animation for ShowPartial {
         }
         for row in self.state.families().to_vec() {
             if let [submob, starting] = *row {
-                let _ = stage.pointwise_become_partial(submob, starting, 0.0, 1.0);
+                if stage
+                    .get(starting)
+                    .is_none_or(|entry| entry.buffer.is_empty())
+                {
+                    continue;
+                }
+                match self.geometry {
+                    PartialGeometry::QuadraticPath => {
+                        let _ = stage.pointwise_become_partial(submob, starting, 0.0, 1.0);
+                    }
+                    PartialGeometry::SurfaceGrid { resolution, axis } => {
+                        let _ = stage.surface_pointwise_become_partial(
+                            submob, starting, resolution, axis, 0.0, 1.0,
+                        );
+                    }
+                }
             }
         }
     }
@@ -209,11 +287,34 @@ pub fn show_creation(mobject: Mob) -> ShowPartial {
     anim
 }
 
+/// `ShowCreation` over a sampled Surface-shaped record
+/// family. The grid metadata is explicit constructor data supplied by the
+/// front door; Choreo remains independent of the higher Menagerie crate.
+#[must_use]
+pub fn show_surface_creation(mobject: Mob, resolution: (usize, usize), axis: usize) -> ShowPartial {
+    show_creation(mobject).with_surface_grid(resolution, axis)
+}
+
 /// `Uncreate` (creation.py:56): ShowCreation under `smooth(1 - t)`, as a
 /// remover, with the (inert) `should_match_start = true`.
 #[must_use]
 pub fn uncreate(mobject: Mob) -> ShowPartial {
     let mut anim = show_creation(mobject);
+    anim.state_mut().config.name = "Uncreate".to_owned();
+    anim.state_mut().config.rate_func = RateFunc::Base(smooth_reversed);
+    anim.state_mut().config.remover = true;
+    anim.should_match_start = true;
+    anim
+}
+
+/// [`uncreate`] over a sampled Surface grid.
+#[must_use]
+pub fn uncreate_surface(
+    mobject: Mob,
+    resolution: (usize, usize),
+    axis: usize,
+) -> ShowPartial {
+    let mut anim = show_surface_creation(mobject, resolution, axis);
     anim.state_mut().config.name = "Uncreate".to_owned();
     anim.state_mut().config.rate_func = RateFunc::Base(smooth_reversed);
     anim.state_mut().config.remover = true;

@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fmn_anim::frame::{
-    FramePacket, complete_play_frame, finish_open_play, open_play, play_segment,
+    FramePacket, abort_open_play, complete_play_frame, finish_open_play, open_play, play_segment,
     prepare_play_frame, wait_segment, wait_segment_with_boundary,
 };
 use fmn_anim::{
@@ -220,6 +220,50 @@ fn stepped_release_window_preserves_step_four_and_capture_order() {
         assert!((animated_x - expected).abs() < 1e-5);
         assert!((follower_x - expected).abs() < 1e-5);
     }
+}
+
+#[test]
+fn aborting_a_released_frame_clears_animation_lifecycle_without_landing_endpoint() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).expect("rooted");
+    let ticks = Rc::new(RefCell::new(0usize));
+    let seen_ticks = Rc::clone(&ticks);
+    stage
+        .add_dt_updater(
+            mob,
+            move |_stage, me, _dt| {
+                if me == mob {
+                    *seen_ticks.borrow_mut() += 1;
+                }
+            },
+            false,
+        )
+        .expect("updater");
+    let mut clock = RationalFrameClock::new(30).expect("fps");
+    let mut animations = vec![shift_animation(&mut stage, mob, 3.0, 1.0)];
+    animations[0].state_mut().config.suspend_mobject_updating = true;
+    let mut open = open_play(&mut stage, &clock, &mut animations).expect("opens");
+    let release = prepare_play_frame(&mut stage, &mut clock, &mut animations, &mut open)
+        .expect("prepares")
+        .expect("one frame");
+    assert!(stage.is_animating(mob));
+    assert!(stage.is_updating_suspended(mob));
+    assert_eq!(*ticks.borrow(), 0);
+    let partial_x = stage.get_center(mob)[0];
+    assert!(partial_x > 0.0 && partial_x < 3.0);
+
+    let report = abort_open_play(&mut stage, &mut animations, open);
+    assert_eq!(report.n_frames, 30);
+    assert_eq!(clock.now(), release.time);
+    assert!(!stage.is_animating(mob));
+    assert!(!stage.is_updating_suspended(mob));
+    assert_eq!(
+        *ticks.borrow(),
+        0,
+        "abort must not call the resumed updater"
+    );
+    assert_eq!(stage.get_center(mob)[0], partial_x, "abort is not finish");
 }
 
 #[test]

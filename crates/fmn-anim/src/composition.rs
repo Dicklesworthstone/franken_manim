@@ -420,6 +420,13 @@ impl Animation for AnimationGroup {
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 
+    fn abort(&mut self, stage: &mut Stage) {
+        for animation in &mut self.animations {
+            animation.abort(stage);
+        }
+        stage.set_animating_status(self.state.mobject(), false, true);
+    }
+
     /// A member's deferred failure (a nested [`Succession`], say) surfaces
     /// through the composition that contains it.
     fn deferred_error(&self) -> Option<AnimError> {
@@ -615,6 +622,11 @@ impl Animation for Succession {
         if self.deferred.is_none() {
             self.animations[self.active].finish(stage);
         }
+        stage.set_animating_status(self.state.mobject(), false, true);
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.animations[self.active].abort(stage);
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 
