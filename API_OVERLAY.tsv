@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	ef043ee481375aa1c1fedbb5b123ba411f0325902cddae6637fd1006781c74d4
+ledger_reviewed_digest	8a3dab9203552ff9d4b074f4147aad5917f24d5060693695ea9ae6ca71307d6d
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -222,7 +222,9 @@ manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#t
 manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-python/tests/bridge.py	queues the exact rational-time request through the public portal; Reel owns sample-grid placement
 manimlib.scene.scene:Scene.bring_to_back	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	prepends the complete argument batch through the native draw list without a z-sort
 manimlib.scene.scene:Scene.bring_to_front	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	re-adds the complete argument batch through the native stable z-order operation
+manimlib.scene.scene:Scene.get_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns a fresh identity-preserving snapshot of the native top-level draw list
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
+manimlib.scene.scene:Scene.remove_all_except	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	resets the complete draw list through the ordinary stable native add operation
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
 
