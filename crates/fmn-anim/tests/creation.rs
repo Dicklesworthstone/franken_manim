@@ -7,7 +7,8 @@
 use fmn_anim::animation::Animation;
 use fmn_anim::{
     DrawBorderThenFill, IntRound, RateFunc, RevealBounds, show_creation, show_increasing_subsets,
-    show_passing_flash, show_submobjects_one_by_one, show_surface_creation, uncreate, write,
+    show_passing_flash, show_submobjects_one_by_one, show_surface_creation, uncreate,
+    uncreate_surface, write,
 };
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
@@ -201,6 +202,30 @@ fn surface_show_creation_uses_uv_grid_partial_reveal() {
     assert_eq!(
         stage.get_points(surface).expect("restored surface"),
         original
+    );
+
+    let mut reverse = uncreate_surface(surface, (3, 3), 1);
+    reverse.state_mut().config.rate_func = RateFunc::linear();
+    reverse.begin(&mut stage).expect("surface uncreate begins");
+    assert_eq!(
+        stage.get_points(surface).expect("full reverse start"),
+        original
+    );
+    reverse.finish(&mut stage);
+    assert!(reverse.is_remover());
+    assert_eq!(
+        stage.get_points(surface).expect("collapsed reverse end"),
+        vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ]
     );
 }
 

@@ -309,11 +309,7 @@ pub fn uncreate(mobject: Mob) -> ShowPartial {
 
 /// [`uncreate`] over a sampled Surface grid.
 #[must_use]
-pub fn uncreate_surface(
-    mobject: Mob,
-    resolution: (usize, usize),
-    axis: usize,
-) -> ShowPartial {
+pub fn uncreate_surface(mobject: Mob, resolution: (usize, usize), axis: usize) -> ShowPartial {
     let mut anim = show_surface_creation(mobject, resolution, axis);
     anim.state_mut().config.name = "Uncreate".to_owned();
     anim.state_mut().config.rate_func = RateFunc::Base(smooth_reversed);
