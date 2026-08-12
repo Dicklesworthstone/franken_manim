@@ -669,6 +669,76 @@ assert np.allclose(
 )
 assert np.min(np.linalg.norm(bound_arrow_points - [4.0, 2.0, 0.0], axis=1)) < 1e-6
 
+# Generic endpoint placement applies one affine transform to the complete
+# family in both proxy states. Detached families distribute the Reference
+# algorithm over their private nursery roots; bound families recurse through
+# the scene Stage.
+detached_endpoint_parent = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+)
+detached_endpoint_child = geometry.Square(side_length=0.5).shift([1.0, 1.0, 0.0])
+detached_endpoint_parent.add(detached_endpoint_child)
+assert detached_endpoint_parent.put_start_and_end_on(
+    [0.0, 0.0, 0.0], [0.0, 4.0, 0.0]
+) is detached_endpoint_parent
+assert np.allclose(detached_endpoint_parent.get_start(), [0.0, 0.0, 0.0])
+assert np.allclose(detached_endpoint_parent.get_end(), [0.0, 4.0, 0.0])
+assert np.allclose(detached_endpoint_child.get_center(), [-2.0, 2.0, 0.0])
+
+bound_endpoint_parent = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+)
+bound_endpoint_child = geometry.Square(side_length=0.5).shift([1.0, 1.0, 0.0])
+bound_endpoint_parent.add(bound_endpoint_child)
+endpoint_scene = Scene()
+endpoint_scene.add(bound_endpoint_parent)
+bound_endpoint_parent.put_start_and_end_on([0.0, 0.0, 0.0], [0.0, 4.0, 0.0])
+assert np.allclose(bound_endpoint_parent.get_start(), [0.0, 0.0, 0.0])
+assert np.allclose(bound_endpoint_parent.get_end(), [0.0, 4.0, 0.0])
+assert np.allclose(bound_endpoint_child.get_center(), [-2.0, 2.0, 0.0])
+
+# Closed-loop refusal happens before any member moves.
+closed_endpoint_parent = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+)
+closed_endpoint_child = geometry.Square(side_length=0.5).shift([2.0, 1.0, 0.0])
+closed_endpoint_parent.add(closed_endpoint_child)
+closed_parent_before = closed_endpoint_parent.get_points().copy()
+closed_child_before = closed_endpoint_child.get_points().copy()
+try:
+    closed_endpoint_parent.put_start_and_end_on(
+        [0.0, 0.0, 0.0], [0.0, 4.0, 0.0]
+    )
+except Exception as error:
+    assert str(error) == "Cannot position endpoints of closed loop"
+else:
+    raise AssertionError("closed-loop endpoint placement did not refuse")
+assert np.array_equal(closed_endpoint_parent.get_points(), closed_parent_before)
+assert np.array_equal(closed_endpoint_child.get_points(), closed_child_before)
+
+# A slice aligner made from scene-bound children adopts into that scene and
+# remains usable by the ordinary Reference next_to algorithm.
+bound_slice_source = manimlib.VGroup(
+    geometry.Square(side_length=1.0).shift([-1.0, 0.0, 0.0]),
+    geometry.Square(side_length=1.0).shift([1.0, 0.0, 0.0]),
+    geometry.Square(side_length=1.0).shift([3.0, 0.0, 0.0]),
+)
+bound_slice_target = manimlib.VGroup(
+    geometry.Square(side_length=1.0).shift([4.0, 0.0, 0.0]),
+    geometry.Square(side_length=1.0).shift([6.0, 0.0, 0.0]),
+    geometry.Square(side_length=1.0).shift([8.0, 0.0, 0.0]),
+)
+slice_scene = Scene()
+slice_scene.add(bound_slice_source, bound_slice_target)
+bound_slice_source.next_to(
+    bound_slice_target,
+    manimlib.RIGHT,
+    buff=0.25,
+    index_of_submobject_to_align=slice(0, 2),
+)
+assert np.allclose(bound_slice_source[0].get_center(), [7.25, 0.0, 0.0])
+assert np.allclose(bound_slice_source[1].get_center(), [9.25, 0.0, 0.0])
+
 # Line.set_angle keeps its start fixed by default. DashedLine reads endpoints
 # from its first/last native dash children, matching the Reference override.
 dashed = geometry.DashedLine([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0])

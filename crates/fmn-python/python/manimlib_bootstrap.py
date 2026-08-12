@@ -990,7 +990,37 @@ class Mobject(_BridgeMobject):
         return self.match_coord(mobject_or_point, 2, direction)
 
     def put_start_and_end_on(self, start, end):
-        self._put_start_and_end_on(_vec3(start), _vec3(end))
+        start = _np.array(_vec3(start))
+        end = _np.array(_vec3(end))
+        if self._is_bound():
+            # A bound Stage owns the real family graph, so its native
+            # implementation applies the affine transform recursively.
+            self._put_start_and_end_on(_vec3(start), _vec3(end))
+            return self
+
+        # Reference Mobject.put_start_and_end_on (mobject.py:1299). The
+        # ordinary Python transforms distribute over a detached proxy's
+        # private family, whereas a direct nursery-Stage call can only see
+        # the root and would leave its children behind.
+        curr_start, curr_end = self.get_start_and_end()
+        curr_vect = curr_end - curr_start
+        if _np.all(curr_vect == 0):
+            raise Exception("Cannot position endpoints of closed loop")
+        target_vect = end - start
+        self.scale(
+            _np.linalg.norm(target_vect) / _np.linalg.norm(curr_vect),
+            about_point=curr_start,
+        )
+        self.rotate(
+            _math.atan2(target_vect[1], target_vect[0])
+            - _math.atan2(curr_vect[1], curr_vect[0])
+        )
+        self.rotate(
+            _math.atan2(curr_vect[2], _np.linalg.norm(curr_vect[:2]))
+            - _math.atan2(target_vect[2], _np.linalg.norm(target_vect[:2])),
+            axis=_np.array([-target_vect[1], target_vect[0], 0.0]),
+        )
+        self.shift(start - self.get_start())
         return self
 
     def arrange(self, direction=_RIGHT, center=True, **kwargs):
