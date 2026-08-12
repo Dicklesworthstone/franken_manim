@@ -3051,6 +3051,25 @@ fn scene_proxy_handles(
     Ok(handles)
 }
 
+fn bind_scene_mobjects(
+    scene: &Bound<'_, PyScene>,
+    objects: &Bound<'_, PyTuple>,
+    method: &str,
+) -> PyResult<Vec<Mob>> {
+    let mut proxies = Vec::with_capacity(objects.len());
+    for object in objects.iter() {
+        proxies.push(object.cast::<BridgeMobject>().map_err(|_| {
+            PyTypeError::new_err(format!("Scene.{method} accepts only Mobject instances"))
+        })?);
+    }
+
+    let py = scene.py();
+    proxies
+        .into_iter()
+        .map(|proxy| bind_graph(py, scene, proxy))
+        .collect()
+}
+
 /// Collect one unsuspended updater subtree in the Reference's child-first
 /// order. A suspended parent prunes its entire subtree even when descendants
 /// are not individually marked suspended. The explicit stack keeps a valid
@@ -3151,19 +3170,40 @@ impl PyScene {
         slf: &Bound<'py, Self>,
         mobjects: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, Self>> {
-        let py = slf.py();
-        let mut handles = Vec::with_capacity(mobjects.len());
-        for object in mobjects.iter() {
-            let proxy = object
-                .cast::<BridgeMobject>()
-                .map_err(|_| PyTypeError::new_err("Scene.add accepts only Mobject instances"))?;
-            handles.push(bind_graph(py, slf, proxy)?);
-        }
+        let handles = bind_scene_mobjects(slf, mobjects, "add")?;
         slf.borrow()
             .engine
             .borrow_mut()
             .add(&handles)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok(slf.clone())
+    }
+
+    #[pyo3(signature = (*mobjects))]
+    fn bring_to_front<'py>(
+        slf: &Bound<'py, Self>,
+        mobjects: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let handles = bind_scene_mobjects(slf, mobjects, "bring_to_front")?;
+        slf.borrow()
+            .engine
+            .borrow_mut()
+            .bring_to_front(&handles)
+            .map_err(native_error)?;
+        Ok(slf.clone())
+    }
+
+    #[pyo3(signature = (*mobjects))]
+    fn bring_to_back<'py>(
+        slf: &Bound<'py, Self>,
+        mobjects: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let handles = bind_scene_mobjects(slf, mobjects, "bring_to_back")?;
+        slf.borrow()
+            .engine
+            .borrow_mut()
+            .bring_to_back(&handles)
+            .map_err(native_error)?;
         Ok(slf.clone())
     }
 

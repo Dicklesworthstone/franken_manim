@@ -188,6 +188,45 @@ else:
     raise AssertionError("cross-Scene handle was accepted")
 
 
+# Public Scene draw-order edits route through the native runtime. Promotion
+# is the same stable add operation as the Reference; demotion prepends the
+# whole argument batch without a z-sort and can adopt a detached mobject.
+order_scene = Scene()
+order_back = Mobject()
+order_middle = Mobject()
+order_front = Mobject()
+order_scene.add(order_back, order_middle, order_front)
+assert order_scene.bring_to_front(order_back) is order_scene
+assert order_scene.mobjects == [order_middle, order_front, order_back]
+assert order_scene.bring_to_back(order_back, order_front) is order_scene
+assert order_scene.mobjects == [order_back, order_front, order_middle]
+
+detached_back = Mobject()
+assert order_scene.bring_to_back(detached_back) is order_scene
+assert order_scene.mobjects == [detached_back, order_back, order_front, order_middle]
+assert order_scene.mobjects[0] is detached_back
+
+order_before_refusal = list(order_scene.mobjects)
+try:
+    order_scene.bring_to_front(object())
+except TypeError:
+    pass
+else:
+    raise AssertionError("Scene.bring_to_front accepted a non-Mobject")
+assert order_scene.mobjects == order_before_refusal
+
+foreign_order_scene = Scene()
+foreign_order_mobject = Mobject()
+foreign_order_scene.add(foreign_order_mobject)
+try:
+    order_scene.bring_to_back(foreign_order_mobject)
+except bridge_errors.ForeignStageError:
+    pass
+else:
+    raise AssertionError("Scene.bring_to_back accepted a foreign-stage Mobject")
+assert order_scene.mobjects == order_before_refusal
+
+
 # Bound copy uses Marionette's CopyMap, then Python remaps __dict__ aliases.
 parent.label = child
 parent.buddy = outsider
