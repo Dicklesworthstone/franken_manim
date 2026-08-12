@@ -26,7 +26,7 @@ use fmn_anim::{DeclaredOp, DeclaredUpdater};
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 /// The four PG-8 scene classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,9 +205,153 @@ impl Pg8Class {
 
 static PYTHON_INIT: Once = Once::new();
 
-/// The harness rebuilds the process-global `sys.modules["manimlib"]` entry
-/// per measurement; concurrent measurements would race. Serialize them.
-static MEASURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Run a PG-8 workload with an exclusively owned temporary `manimlib`.
+///
+/// The bridge's scene and mobject proxies are intentionally thread-confined.
+/// CPython cannot collect every cycle containing a PyO3 extension object, so
+/// leaving the temporary module or workload globals alive until a later
+/// measurement can make their finalizers run on that later measurement's OS
+/// thread. Tear down the entire graph while the creating thread still owns
+/// it, and fail the measurement if Python reports an unraisable destructor.
+fn with_owned_python_module<T>(
+    body: impl for<'py> FnOnce(
+        Python<'py>,
+        &Bound<'py, PyModule>,
+        &Bound<'py, PyDict>,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = crate::python_embedding_lock();
+    PYTHON_INIT.call_once(Python::initialize);
+    Python::attach(|py| {
+        let sys = py.import("sys").map_err(|error| error.to_string())?;
+        let gc = py.import("gc").map_err(|error| error.to_string())?;
+        let weakref = py.import("weakref").map_err(|error| error.to_string())?;
+        let modules = sys.getattr("modules").map_err(|error| error.to_string())?;
+        let module_names = || -> Result<Vec<String>, String> {
+            modules
+                .call_method0("keys")
+                .and_then(|keys| {
+                    keys.try_iter()?
+                        .map(|item| item.and_then(|name| name.extract::<String>()))
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+        };
+        let existing = module_names()?;
+        if existing
+            .iter()
+            .any(|name| name == "manimlib" || name.starts_with("manimlib."))
+        {
+            return Err("PG-8 harness found a pre-existing manimlib module".to_owned());
+        }
+
+        let hook_globals = PyDict::new(py);
+        hook_globals
+            .set_item("_fmn_unraisable", PyList::empty(py))
+            .map_err(|error| error.to_string())?;
+        let hook_source = std::ffi::CString::new(
+            r#"import sys as _fmn_sys
+_fmn_old_unraisablehook = _fmn_sys.unraisablehook
+def _fmn_capture_unraisable(event):
+    _fmn_unraisable.append(
+        f'{type(event.exc_value).__name__}: {event.exc_value}'
+    )
+_fmn_sys.unraisablehook = _fmn_capture_unraisable
+"#,
+        )
+        .map_err(|_| "unraisable-hook source contains NUL".to_owned())?;
+        py.run(
+            hook_source.as_c_str(),
+            Some(&hook_globals),
+            Some(&hook_globals),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let module = PyModule::new(py, "manimlib").map_err(|error| error.to_string())?;
+        modules
+            .set_item("manimlib", &module)
+            .map_err(|error| error.to_string())?;
+        let module_weakref = weakref
+            .getattr("ref")
+            .and_then(|constructor| constructor.call1((&module,)))
+            .map_err(|error| error.to_string())?;
+        let globals = PyDict::new(py);
+        globals
+            .set_item("__name__", "__fmn_pg8_harness__")
+            .map_err(|error| error.to_string())?;
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::manimlib(py, &module).map_err(|error| error.to_string())?;
+            body(py, &module, &globals)
+        }));
+
+        // Python callbacks retain their globals and the globals retain the
+        // scene graph. Break that cycle before clearing PyO3's built-in
+        // function <-> extension-module cycle.
+        globals.clear();
+        let mut cleanup_errors = Vec::new();
+        match module_names() {
+            Ok(names) => {
+                for name in names {
+                    if name == "manimlib" || name.starts_with("manimlib.") {
+                        if let Ok(value) = modules.get_item(&name)
+                            && let Ok(owned_module) = value.cast_into::<PyModule>()
+                        {
+                            owned_module.dict().clear();
+                        }
+                        if let Err(error) = modules.del_item(&name) {
+                            cleanup_errors.push(format!("remove module {name}: {error}"));
+                        }
+                    }
+                }
+            }
+            Err(error) => cleanup_errors.push(format!("enumerate modules: {error}")),
+        }
+        module.dict().clear();
+        drop(module);
+        if let Err(error) = gc.call_method0("collect") {
+            cleanup_errors.push(format!("collect Python cycles: {error}"));
+        }
+
+        match hook_globals.get_item("_fmn_old_unraisablehook") {
+            Ok(Some(old_hook)) => {
+                if let Err(error) = sys.setattr("unraisablehook", old_hook) {
+                    cleanup_errors.push(format!("restore unraisable hook: {error}"));
+                }
+            }
+            Ok(None) => cleanup_errors.push("prior unraisable hook is missing".to_owned()),
+            Err(error) => cleanup_errors.push(format!("read prior unraisable hook: {error}")),
+        }
+        match hook_globals.get_item("_fmn_unraisable") {
+            Ok(Some(errors)) => match errors.extract::<Vec<String>>() {
+                Ok(errors) if errors.is_empty() => {}
+                Ok(errors) => cleanup_errors.push(format!(
+                    "Python teardown emitted unraisable errors: {errors:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("read unraisable errors: {error}"));
+                }
+            },
+            Ok(None) => cleanup_errors.push("unraisable capture is missing".to_owned()),
+            Err(error) => cleanup_errors.push(format!("read unraisable capture: {error}")),
+        }
+        match module_weakref.call0() {
+            Ok(value) if value.is_none() => {}
+            Ok(_) => cleanup_errors.push("temporary manimlib module survived teardown".to_owned()),
+            Err(error) => cleanup_errors.push(format!("read module weak reference: {error}")),
+        }
+
+        let result = match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
+        if cleanup_errors.is_empty() {
+            result
+        } else {
+            Err(cleanup_errors.join("; "))
+        }
+    })
+}
 
 /// The pure-Rust twin of the `native-builtins` workload: same mobjects,
 /// same declared shift updaters, no interpreter in the loop.
@@ -319,28 +463,10 @@ pub fn measure(
     mobjects: usize,
     dt: f64,
 ) -> Result<HarnessRun, String> {
-    let _guard = MEASURE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    PYTHON_INIT.call_once(Python::initialize);
-    Python::attach(|py| {
-        let module = PyModule::new(py, "manimlib").map_err(|error| error.to_string())?;
-        py.import("sys")
-            .and_then(|sys| sys.getattr("modules"))
-            .and_then(|modules| modules.set_item("manimlib", &module))
-            .map_err(|error| error.to_string())?;
-        crate::manimlib(py, &module).map_err(|error| error.to_string())?;
-
+    with_owned_python_module(|py, _module, globals| {
         let source = std::ffi::CString::new(format!("{}{}", PYTHON_PRELUDE, class.source()))
             .map_err(|_| "workload source contains NUL".to_owned())?;
-        let globals = PyDict::new(py);
-        globals
-            .set_item(
-                "__name__",
-                pyo3::types::PyString::new(py, "__fmn_pg8_harness__"),
-            )
-            .map_err(|error| error.to_string())?;
-        py.run(source.as_c_str(), Some(&globals), Some(&globals))
+        py.run(source.as_c_str(), Some(globals), Some(globals))
             .map_err(|error| format!("{} workload: {error}", class.name()))?;
         let build = globals
             .get_item("build")
@@ -466,5 +592,20 @@ mod tests {
         assert!(sample.invalid_reason.is_some());
         let sample = observation(std::time::Duration::from_nanos(7), None);
         assert!(sample.invalid_reason.is_none());
+    }
+
+    #[test]
+    fn repeated_measurements_teardown_before_the_owner_thread_changes() {
+        for class in Pg8Class::ALL {
+            let first = std::thread::spawn(move || measure(class, 1, 0, 1, 1, 1.0 / 30.0))
+                .join()
+                .expect("first owner thread")
+                .expect("first measurement");
+            let second = std::thread::spawn(move || measure(class, 1, 0, 1, 1, 1.0 / 30.0))
+                .join()
+                .expect("second owner thread")
+                .expect("second measurement");
+            assert_eq!(first.result_state, second.result_state, "{}", class.name());
+        }
     }
 }

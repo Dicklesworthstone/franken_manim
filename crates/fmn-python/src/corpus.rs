@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyModule, PyString};
+use pyo3::types::PyString;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -216,17 +216,7 @@ mod tests {
             return;
         }
 
-        let _lock = crate::python_test_lock();
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::new(py, "manimlib").expect("create bridge module");
-            py.import("sys")
-                .expect("sys")
-                .getattr("modules")
-                .expect("sys.modules")
-                .set_item("manimlib", &module)
-                .expect("install manimlib");
-            crate::manimlib(py, &module).expect("initialize manimlib");
+        crate::with_python_test_module("source-unedited corpus", move |py, _module, _globals| {
             put_videos_ref_on_sys_path(py, &videos_ref);
 
             let mut refused = 0_usize;

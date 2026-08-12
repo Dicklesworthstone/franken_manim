@@ -417,8 +417,6 @@ impl PyNativeUpdater {
 
 #[cfg(test)]
 mod tests {
-    use pyo3::prelude::*;
-    use pyo3::types::{PyDict, PyModule, PyString};
     use std::ffi::CString;
 
     /// Run the ladder acceptance corpus (`tests/ladder.py`) against the
@@ -426,24 +424,10 @@ mod tests {
     /// the explicit opt-in surface.
     #[test]
     fn ladder_acceptance_suite() {
-        let _lock = crate::python_test_lock();
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::new(py, "manimlib").expect("create test module");
-            py.import("sys")
-                .expect("sys")
-                .getattr("modules")
-                .expect("sys.modules")
-                .set_item("manimlib", &module)
-                .expect("install module");
-            crate::manimlib(py, &module).expect("initialize manimlib");
+        crate::with_python_test_module("acceleration ladder acceptance", |py, _module, globals| {
             let source = CString::new(include_str!("../tests/ladder.py"))
                 .expect("test source contains no NUL");
-            let globals = PyDict::new(py);
-            globals
-                .set_item("__name__", PyString::new(py, "__fmn_ladder_tests__"))
-                .expect("test module name");
-            py.run(source.as_c_str(), Some(&globals), Some(&globals))
+            py.run(source.as_c_str(), Some(globals), Some(globals))
                 .expect("ladder acceptance suite");
         });
     }

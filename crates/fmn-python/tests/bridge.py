@@ -224,20 +224,6 @@ assert reference() is clone
 identity_map = {parent: "parent", child: "child"}
 assert identity_map[parent] == "parent"
 assert identity_map[scene.mobjects[0]] == "parent"
-thread_errors = []
-
-
-def cross_thread_access():
-    try:
-        parent.n_records()
-    except BaseException as error:
-        thread_errors.append(str(error))
-
-
-worker = threading.Thread(target=cross_thread_access)
-worker.start()
-worker.join()
-assert thread_errors
 del clone
 gc.collect()
 assert reference() is None

@@ -4290,37 +4290,190 @@ fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// process-global interpreter and one `sys.modules["manimlib"]` slot, so
 /// concurrent module construction races. Poison-tolerant: a panicked suite
 /// must not wedge the others.
-#[cfg(test)]
-pub(crate) fn python_test_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn python_embedding_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// Run one embedded-Python suite with explicit owner-thread teardown.
+///
+/// PyO3's `unsendable` guard intentionally refuses to destroy a proxy on a
+/// thread other than the one which created it. Merely serializing the Rust
+/// test functions is therefore insufficient: the test harness may run the
+/// next suite on another OS thread while the previous suite still has
+/// module cycles in `sys.modules`. Keep the lock through module removal and
+/// cyclic GC, capture every unraisable destructor error, and require the
+/// temporary root module to become unreachable before releasing the lock.
+#[cfg(test)]
+pub(crate) fn with_python_test_module(
+    suite: &'static str,
+    body: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>, &Bound<'py, PyDict>),
+) {
+    let _lock = python_embedding_lock();
+    Python::initialize();
+    Python::attach(|py| {
+        let sys = py.import("sys").expect("import sys");
+        let gc = py.import("gc").expect("import gc");
+        let weakref = py.import("weakref").expect("import weakref");
+        let modules = sys.getattr("modules").expect("sys.modules");
+        let module_names = || -> PyResult<HashSet<String>> {
+            modules
+                .call_method0("keys")?
+                .try_iter()?
+                .map(|item| item.and_then(|name| name.extract::<String>()))
+                .collect()
+        };
+        let before = module_names().expect("snapshot sys.modules");
+        assert!(
+            before
+                .iter()
+                .all(|name| name != "manimlib" && !name.starts_with("manimlib.")),
+            "{suite}: a prior Python suite leaked manimlib modules"
+        );
+        let videos_ref = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/videos_ref")
+            .canonicalize()
+            .ok();
+
+        let hook_globals = PyDict::new(py);
+        hook_globals
+            .set_item("_fmn_unraisable", PyList::empty(py))
+            .expect("install unraisable capture list");
+        let hook_source = CString::new(
+            r#"import sys as _fmn_sys
+_fmn_old_unraisablehook = _fmn_sys.unraisablehook
+def _fmn_capture_unraisable(event):
+    _fmn_unraisable.append(
+        f'{type(event.exc_value).__name__}: {event.exc_value}'
+    )
+_fmn_sys.unraisablehook = _fmn_capture_unraisable
+"#,
+        )
+        .expect("unraisable hook source contains no NUL");
+        py.run(
+            hook_source.as_c_str(),
+            Some(&hook_globals),
+            Some(&hook_globals),
+        )
+        .expect("install unraisable hook");
+
+        let module = PyModule::new(py, "manimlib").expect("create test module");
+        modules
+            .set_item("manimlib", &module)
+            .expect("install manimlib");
+        let module_weakref = weakref
+            .getattr("ref")
+            .and_then(|constructor| constructor.call1((&module,)))
+            .expect("weak-reference the temporary manimlib module");
+        let suite_globals = PyDict::new(py);
+        suite_globals
+            .set_item("__name__", format!("__fmn_{suite}_tests__"))
+            .expect("set suite module name");
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manimlib(py, &module).expect("initialize manimlib");
+            body(py, &module, &suite_globals);
+        }));
+        // Python callbacks retain their globals, while suite globals retain
+        // PyO3 instances and their callbacks. Some of those extension types
+        // are intentionally outside Python's cyclic-GC graph, so the
+        // embedding host must break the cycle explicitly on the owner.
+        suite_globals.clear();
+
+        let after = module_names().expect("snapshot suite-added modules");
+        for name in after.difference(&before) {
+            let is_manimlib = name == "manimlib" || name.starts_with("manimlib.");
+            let is_corpus_module = videos_ref.as_ref().is_some_and(|root| {
+                modules
+                    .get_item(name)
+                    .and_then(|module| module.getattr("__file__"))
+                    .and_then(|path| path.extract::<String>())
+                    .is_ok_and(|path| std::path::Path::new(&path).starts_with(root))
+            });
+            if is_manimlib || is_corpus_module {
+                if let Ok(value) = modules.get_item(name)
+                    && let Ok(owned_module) = value.cast_into::<PyModule>()
+                {
+                    owned_module.dict().clear();
+                }
+                let removal = modules.del_item(name);
+                assert!(
+                    removal.is_ok(),
+                    "{suite}: remove module {name}: {:?}",
+                    removal.err()
+                );
+            }
+        }
+        // PyO3 functions added with `module.add_function` keep the extension
+        // module as their `__self__`. CPython does not collect that builtin
+        // function <-> module-dict cycle by itself, so explicitly clear the
+        // temporary module exactly as an embedding host would during worker
+        // teardown. This also releases suite globals before the owner thread
+        // can change.
+        module.dict().clear();
+        drop(module);
+        gc.call_method0("collect")
+            .expect("collect suite-owned Python cycles");
+
+        let old_hook = hook_globals
+            .get_item("_fmn_old_unraisablehook")
+            .expect("lookup prior unraisable hook")
+            .expect("prior unraisable hook exists");
+        sys.setattr("unraisablehook", old_hook)
+            .expect("restore prior unraisable hook");
+        let unraisable: Vec<String> = hook_globals
+            .get_item("_fmn_unraisable")
+            .expect("lookup unraisable capture")
+            .expect("unraisable capture exists")
+            .extract()
+            .expect("extract unraisable errors");
+        assert!(
+            unraisable.is_empty(),
+            "{suite}: Python teardown emitted unraisable errors: {unraisable:?}"
+        );
+        let surviving_module = module_weakref.call0().expect("read module weak reference");
+        let referrer_types = if surviving_module.is_none() {
+            Vec::new()
+        } else {
+            gc.call_method1("get_referrers", (&surviving_module,))
+                .expect("inspect leaked module referrers")
+                .try_iter()
+                .expect("iterate leaked module referrers")
+                .map(|item| {
+                    item.and_then(|value| value.get_type().name().map(|name| name.to_string()))
+                        .unwrap_or_else(|error| format!("<unreadable: {error}>"))
+                })
+                .collect()
+        };
+        assert!(
+            surviving_module.is_none(),
+            "{suite}: temporary manimlib module survived owner-thread teardown; \
+             referrer types: {referrer_types:?}"
+        );
+        assert!(
+            module_names()
+                .expect("verify restored sys.modules")
+                .iter()
+                .all(|name| name != "manimlib" && !name.starts_with("manimlib.")),
+            "{suite}: embedded Python suite left a manimlib module installed"
+        );
+
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::types::PyString;
 
     #[test]
     fn production_bridge_acceptance_suite() {
-        let _lock = crate::python_test_lock();
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::new(py, "manimlib").expect("create test module");
-            py.import("sys")
-                .expect("sys")
-                .getattr("modules")
-                .expect("sys.modules")
-                .set_item("manimlib", &module)
-                .expect("install module");
-            manimlib(py, &module).expect("initialize manimlib");
+        crate::with_python_test_module("bridge acceptance", |py, _module, globals| {
             let source = CString::new(include_str!("../tests/bridge.py"))
                 .expect("test source contains no NUL");
-            let globals = PyDict::new(py);
-            globals
-                .set_item("__name__", PyString::new(py, "__fmn_bridge_tests__"))
-                .expect("test module name");
-            py.run(source.as_c_str(), Some(&globals), Some(&globals))
+            py.run(source.as_c_str(), Some(globals), Some(globals))
                 .expect("Python bridge acceptance suite");
 
             // fm-7if keeps affine motion out of object-space records until the
@@ -4400,5 +4553,120 @@ mod tests {
                 "an API read synchronizes placement back to RecordBuffer"
             );
         });
+    }
+
+    #[test]
+    fn python_suite_cycles_are_collected_before_the_owner_thread_changes() {
+        fn run_on_fresh_thread(suite: &'static str) -> std::thread::ThreadId {
+            std::thread::spawn(move || {
+                let owner = std::thread::current().id();
+                crate::with_python_test_module(suite, |_py, module, _globals| {
+                    let instance = module
+                        .getattr("Mobject")
+                        .and_then(|class| class.call0())
+                        .expect("construct teardown probe");
+                    instance
+                        .setattr("_teardown_cycle", &instance)
+                        .expect("make an owned Python cycle");
+                    module
+                        .setattr("_teardown_probe", instance)
+                        .expect("retain the probe from the temporary module");
+                });
+                owner
+            })
+            .join()
+            .expect("Python teardown probe thread")
+        }
+
+        let first = run_on_fresh_thread("first owner-thread teardown probe");
+        let second = run_on_fresh_thread("second owner-thread teardown probe");
+        assert_ne!(
+            first, second,
+            "the regression requires distinct test owners"
+        );
+    }
+
+    #[test]
+    fn cross_thread_unsendable_access_is_a_typed_refusal() {
+        const CHILD_ENV: &str = "FMN_UNSENDABLE_PROBE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // PyO3 implements its `unsendable` refusal by catching a Rust
+            // panic and translating it into `PanicException`. The default
+            // panic hook necessarily writes the caught panic to stderr.
+            // Contain that intentional negative control in a child copy of
+            // this test binary so the ordinary all-target gate remains
+            // stderr-clean without installing a process-global hook which
+            // could hide an unrelated concurrent panic.
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("locate current test binary"),
+            )
+            .args([
+                "--exact",
+                "tests::cross_thread_unsendable_access_is_a_typed_refusal",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("run isolated unsendable negative control");
+            assert!(
+                output.status.success(),
+                "isolated unsendable negative control failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("unsendable, but sent to another thread"),
+                "the isolated control did not exercise PyO3's thread guard: {stderr}"
+            );
+            return;
+        }
+
+        crate::with_python_test_module(
+            "isolated unsendable negative control",
+            |py, module, _globals| {
+                let object = module
+                    .getattr("Mobject")
+                    .and_then(|class| class.call0())
+                    .expect("construct thread-confined probe")
+                    .unbind();
+                let (object, error) = py.detach(|| {
+                    std::thread::spawn(move || {
+                        Python::attach(|py| {
+                            let locals = PyDict::new(py);
+                            locals
+                                .set_item("_fmn_probe", object.bind(py))
+                                .expect("install foreign-thread probe");
+                            let source = CString::new(
+                                "try:\n\
+                                 \x20\x20\x20\x20_fmn_probe.n_records()\n\
+                                 except BaseException as _fmn_error:\n\
+                                 \x20\x20\x20\x20_fmn_error_text = str(_fmn_error)\n\
+                                 else:\n\
+                                 \x20\x20\x20\x20raise AssertionError('foreign-thread access succeeded')\n",
+                            )
+                            .expect("foreign-thread probe source contains no NUL");
+                            py.run(source.as_c_str(), Some(&locals), Some(&locals))
+                                .expect("catch the PyO3 refusal inside Python");
+                            let error = locals
+                                .get_item("_fmn_error_text")
+                                .expect("lookup foreign-thread refusal")
+                                .expect("foreign-thread refusal was recorded")
+                                .extract::<String>()
+                                .expect("extract foreign-thread refusal");
+                            locals.clear();
+                            (object, error)
+                        })
+                    })
+                    .join()
+                    .expect("foreign-thread refusal probe")
+                });
+                assert!(
+                    error.contains("unsendable, but sent to another thread"),
+                    "unexpected cross-thread refusal: {error}"
+                );
+                drop(object);
+            },
+        );
     }
 }
