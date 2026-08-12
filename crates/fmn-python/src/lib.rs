@@ -1551,8 +1551,8 @@ impl BridgeMobject {
             if points.len() < 3 {
                 return Ok(());
             }
-            let mut path = fmn_library::QuadPath::from_points(points)
-                .map_err(StageError::Geometry)?;
+            let mut path =
+                fmn_library::QuadPath::from_points(points).map_err(StageError::Geometry)?;
             path.make_smooth(approx).map_err(StageError::Geometry)?;
             stage.set_points(mob, path.points())
         })?
