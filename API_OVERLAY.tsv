@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	8a3dab9203552ff9d4b074f4147aad5917f24d5060693695ea9ae6ca71307d6d
+ledger_reviewed_digest	14597faf98d87b1e21752dc8134722cbd6863cdc7acd26f3035b857bbe9230c8
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -219,9 +219,11 @@ manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_p
 manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
 manimlib.mobject.numbers:DecimalNumber	improved	BN-08	crates/fmn-library/src/numbers.rs#tests	uses native glyph layout and bounded incremental updates
 manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#tests	uses native delimiters and entry layout without TeX
+manimlib.scene.scene:Scene.add_mobjects_among	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	filters one arbitrary iterable to Mobjects before routing the complete batch through native stable add
 manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-python/tests/bridge.py	queues the exact rational-time request through the public portal; Reel owns sample-grid placement
 manimlib.scene.scene:Scene.bring_to_back	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	prepends the complete argument batch through the native draw list without a z-sort
 manimlib.scene.scene:Scene.bring_to_front	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	re-adds the complete argument batch through the native stable z-order operation
+manimlib.scene.scene:Scene.get_mobject_copies	same	docs/g0/G0-5-python-ext-ratification.md	crates/fmn-python/tests/bridge.py	returns one independent native family copy for every current top-level placement
 manimlib.scene.scene:Scene.get_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns a fresh identity-preserving snapshot of the native top-level draw list
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
 manimlib.scene.scene:Scene.remove_all_except	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	resets the complete draw list through the ordinary stable native add operation
