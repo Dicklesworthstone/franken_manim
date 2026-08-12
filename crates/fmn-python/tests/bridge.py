@@ -431,6 +431,48 @@ empty_surround = shape_matchers.SurroundingRectangle(Mobject())
 assert not empty_surround.has_points()
 assert isinstance(surround, geometry.Rectangle)
 
+# Retargeting after scene entry rebuilds the same arena object through the
+# native matcher. Identity and style survive, and bad targets refuse before
+# touching the live geometry.
+matcher_scene = Scene()
+matcher_scene.add(box_group, surround)
+surround_identity = id(surround)
+surround_before_refusal = surround.get_points().copy()
+try:
+    surround.surround([0.0, 0.0, 0.0])
+except TypeError as error:
+    assert str(error) == "SurroundingRectangle.surround expects a Mobject"
+else:
+    raise AssertionError("a non-Mobject surrounding target was accepted")
+assert np.array_equal(surround.get_points(), surround_before_refusal)
+
+right_box.shift([1.0, 1.5, 0.0])
+live_target_box = box_group.get_bounding_box()
+assert surround.surround(box_group, buff=0.75) is surround
+assert id(surround) == surround_identity
+assert np.allclose(
+    surround.get_bounding_box()[0][:2], live_target_box[0][:2] - 0.75
+)
+assert np.allclose(
+    surround.get_bounding_box()[2][:2], live_target_box[2][:2] + 0.75
+)
+assert surround.get_stroke_color() == manimlib.BLUE
+assert np.allclose(surround.get_stroke_width(), 2.0)
+surround.set_buff(0.1)
+assert np.allclose(
+    surround.get_bounding_box()[0][:2], live_target_box[0][:2] - 0.1
+)
+
+bound_empty_target = Mobject()
+matcher_scene.add(bound_empty_target, empty_surround)
+empty_surround.surround(bound_empty_target)
+assert not empty_surround.has_points()
+empty_surround.surround(box_group, buff=0.2)
+assert empty_surround.has_points()
+assert np.allclose(
+    empty_surround.get_bounding_box()[2][:2], live_target_box[2][:2] + 0.2
+)
+
 # Engine-driven plays release the Scene RefCell after interpolation and the
 # rational clock advance, then invoke Python scene updaters before native
 # scene updaters and immutable capture. This used to refuse every such play.

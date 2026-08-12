@@ -1655,6 +1655,32 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// Retarget a scene-bound `SurroundingRectangle` without replacing its
+    /// arena entry. Atlas remains the one geometry implementation; only the
+    /// newly built world-space point run and primitive hint replace the live
+    /// entry, while the Python layer reapplies its existing style.
+    fn _rebuild_surrounding_rectangle(
+        slf: &Bound<'_, Self>,
+        min: [f64; 3],
+        max: [f64; 3],
+        has_extent: bool,
+        buff: f64,
+    ) -> PyResult<()> {
+        let extent = has_extent.then_some((min, max));
+        let built = fmn_library::SurroundingRectangle::from_extent(extent)
+            .buff(buff)
+            .build();
+        let points = built.points().to_vec();
+        let shape = built.shape();
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_points(mob, &points)?;
+            stage.set_shape(mob, shape);
+            Ok(())
+        })?
+        .map_err(stage_error)
+    }
+
     /// Native `Brace(mobject, direction, buff)` over the target's live
     /// world-space family geometry. The returned point index tracks the
     /// analytic curl tip through later affine transforms.

@@ -1889,11 +1889,6 @@ class SurroundingRectangle(Rectangle):
         _apply_vmobject_style_kwargs(self, kwargs)
 
     def surround(self, mobject, buff=None):
-        if self._is_bound():
-            raise NotImplementedError(
-                "SurroundingRectangle.surround on a scene-bound rectangle "
-                "awaits the live shape-matcher rebuild seam"
-            )
         if not isinstance(mobject, _BridgeMobject):
             raise TypeError("SurroundingRectangle.surround expects a Mobject")
         style = self.get_style()
@@ -1901,15 +1896,23 @@ class SurroundingRectangle(Rectangle):
         self.buff = self.buff if buff is None else float(buff)
         rows = mobject._bbox_rows()
         has_extent = any(member._has_points() for member in _family_preorder(mobject))
-        specs = self._build_surrounding_rectangle(
-            _native_shell_factory,
-            _vec3(rows[0]),
-            _vec3(rows[2]),
-            has_extent,
-            self.buff,
-        )
-        self.submobjects.clear()
-        _hang_native_children(self, specs)
+        if self._is_bound():
+            self._rebuild_surrounding_rectangle(
+                _vec3(rows[0]),
+                _vec3(rows[2]),
+                has_extent,
+                self.buff,
+            )
+        else:
+            specs = self._build_surrounding_rectangle(
+                _native_shell_factory,
+                _vec3(rows[0]),
+                _vec3(rows[2]),
+                has_extent,
+                self.buff,
+            )
+            self.submobjects.clear()
+            _hang_native_children(self, specs)
         self.set_style(**style)
         return self
 
