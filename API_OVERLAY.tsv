@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	58bafff0f5089d064ec7a221d0bdc54653f6d90317feec58fabbfdab81972981
+ledger_reviewed_digest	4e3b08b8bcc9ad85a4fb1948c18b3ec1b37c299a725cd0cc4f0891bd9038392f
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -220,6 +220,8 @@ manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#
 manimlib.mobject.numbers:DecimalNumber	improved	BN-08	crates/fmn-library/src/numbers.rs#tests	uses native glyph layout and bounded incremental updates
 manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#tests	uses native delimiters and entry layout without TeX
 manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-python/tests/bridge.py	queues the exact rational-time request through the public portal; Reel owns sample-grid placement
+manimlib.scene.scene:Scene.bring_to_back	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	prepends the complete argument batch through the native draw list without a z-sort
+manimlib.scene.scene:Scene.bring_to_front	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	re-adds the complete argument batch through the native stable z-order operation
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
 

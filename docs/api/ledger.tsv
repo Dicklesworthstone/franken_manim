@@ -2093,8 +2093,8 @@ manimlib.scene.scene	Scene.add_sound	Scene.add_sound	method	0	(self[positional_o
 manimlib.scene.scene	Scene.affects_mobject_list	Scene.affects_mobject_list	method	0	(func[positional_or_keyword]:Callable[..., T])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.assemble_render_groups	Scene.assemble_render_groups	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.begin_animations	Scene.begin_animations	method	0	(self[positional_or_keyword], animations[positional_or_keyword]:Iterable[Animation])	unreviewed	-	-	-
-manimlib.scene.scene	Scene.bring_to_back	Scene.bring_to_back	method	0	(self[positional_or_keyword], *mobjects[var_positional]:Mobject)	unreviewed	-	-	-
-manimlib.scene.scene	Scene.bring_to_front	Scene.bring_to_front	method	0	(self[positional_or_keyword], *mobjects[var_positional]:Mobject)	unreviewed	-	-	-
+manimlib.scene.scene	Scene.bring_to_back	Scene.bring_to_back	method	0	(self[positional_or_keyword], *mobjects[var_positional]:Mobject)	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	prepends the complete argument batch through the native draw list without a z-sort
+manimlib.scene.scene	Scene.bring_to_front	Scene.bring_to_front	method	0	(self[positional_or_keyword], *mobjects[var_positional]:Mobject)	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	re-adds the complete argument batch through the native stable z-order operation
 manimlib.scene.scene	Scene.clear	Scene.clear	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.construct	Scene.construct	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.default_camera_config	Scene.default_camera_config	attribute	0	default=dict()	unreviewed	-	-	-
