@@ -3621,23 +3621,12 @@ class Scene(_SceneCore):
     render = run
 
     def play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
-        # Cut T2 (fm-d3gt): mobject.animate builders drive the engine's
-        # six-step play contract. Explicit Animation classes and custom
-        # rate callables refuse precisely until their bindings land.
+        # Mobject.animate builders and explicit native Animation classes drive
+        # the engine's six-step contract. When live Python mobject updaters are
+        # present, the Rust bridge uses Choreo's step-4 release window: no
+        # Scene/Stage borrow survives the Python callback phase.
         if not proto_animations:
             return
-        # Python updaters cannot tick inside an engine-driven segment yet:
-        # the frame-boundary hook needs a borrow-release window so a
-        # native->Python dispatch never crosses the live Scene borrow
-        # (fm-p107). Refuse rather than silently freezing them.
-        for root in self._engine_roots():
-            for member in _family_preorder(root):
-                if getattr(member, "updaters", None):
-                    raise NotImplementedError(
-                        "Scene.play with live Python updaters awaits the "
-                        "frame-boundary release window (fm-p107); drive "
-                        "frames with Scene.update meanwhile"
-                    )
         def rate_payload(value, where, run_time_hint):
             if value is None or isinstance(value, str):
                 return value

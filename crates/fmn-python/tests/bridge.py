@@ -389,6 +389,32 @@ empty_surround = shape_matchers.SurroundingRectangle(Mobject())
 assert not empty_surround.has_points()
 assert isinstance(surround, geometry.Rectangle)
 
+# Engine-driven plays release the Scene RefCell after interpolation and the
+# rational clock advance, then invoke Python scene updaters before native
+# scene updaters and immutable capture. This used to refuse every such play.
+release_scene = Scene()
+release_mover = geometry.Rectangle(width=1.0, height=1.0)
+release_observations = []
+release_mover.add_updater(
+    lambda mob, dt: release_observations.append(
+        (dt, release_scene.time(), mob.get_x())
+    ),
+    call=False,
+)
+release_scene.add(release_mover)
+release_scene.play(
+    release_mover.animate.shift(manimlib.RIGHT),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert len(release_observations) == 1
+assert np.allclose(release_observations[0], [1.0 / 30.0, 1.0 / 30.0, 1.0])
+release_observations.clear()
+release_scene.wait(1.0 / 30.0)
+assert len(release_observations) == 2
+assert np.allclose([row[0] for row in release_observations], [0.0, 1.0 / 30.0])
+assert np.allclose([row[1] for row in release_observations], [1.0 / 30.0, 2.0 / 30.0])
+
 # Existing Chisel/Scribe semantics are live through the portal, rather than
 # being shadowed by schema placeholders. Arc length remains true for either
 # curvature sign (BN-03), and Tex selectors consume the native UTF-8 span map.

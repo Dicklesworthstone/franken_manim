@@ -2803,6 +2803,47 @@ fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
     targets
 }
 
+/// Run the portal half of Scene.update_mobjects with no Scene/Stage borrow
+/// live. Choreo's stepped play releases exactly at this call site; ordinary
+/// `Scene.update(dt)` uses the same helper before its native updater pass.
+fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
+    let targets = update_targets(scene);
+    let py = scene.py();
+    let python_start = Instant::now();
+    for target in targets {
+        let Some(proxy) = live_proxy(py, scene, target) else {
+            continue;
+        };
+        crossing::record(CrossingClass::Other);
+        let updaters = proxy.getattr("updaters")?;
+        let snapshot: Vec<Py<PyAny>> = updaters
+            .try_iter()?
+            .map(|item| item.map(Bound::unbind))
+            .collect::<PyResult<_>>()?;
+        for updater in snapshot {
+            crossing::record(CrossingClass::UpdaterCall);
+            let args = PyTuple::new(
+                py,
+                [updater.bind(py).clone(), dt.into_pyobject(py)?.into_any()],
+            )?;
+            method_cache::call_cached1(&proxy, "_dispatch_updater", &args)?;
+        }
+    }
+    Ok(u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX))
+}
+
+fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+    let py = scene.py();
+    for target in update_targets(scene) {
+        if let Some(proxy) = live_proxy(py, scene, target)
+            && proxy.getattr("updaters")?.is_truthy()?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[pymethods]
 impl PyScene {
     #[new]
@@ -2875,29 +2916,7 @@ impl PyScene {
     /// no Scene/Stage borrow live, one native→Python crossing per updater.
     /// After they finish, Marionette advances time and runs native updaters.
     fn update(slf: &Bound<'_, Self>, dt: f64) -> PyResult<()> {
-        let targets = update_targets(slf);
-        let py = slf.py();
-        let python_start = Instant::now();
-        for target in targets {
-            let Some(proxy) = live_proxy(py, slf, target) else {
-                continue;
-            };
-            crossing::record(CrossingClass::Other);
-            let updaters = proxy.getattr("updaters")?;
-            let snapshot: Vec<Py<PyAny>> = updaters
-                .try_iter()?
-                .map(|item| item.map(Bound::unbind))
-                .collect::<PyResult<_>>()?;
-            for updater in snapshot {
-                crossing::record(CrossingClass::UpdaterCall);
-                let args = PyTuple::new(
-                    py,
-                    [updater.bind(py).clone(), dt.into_pyobject(py)?.into_any()],
-                )?;
-                method_cache::call_cached1(&proxy, "_dispatch_updater", &args)?;
-            }
-        }
-        let python_ns = u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let python_ns = run_python_updaters(slf, dt)?;
         let native_start = Instant::now();
         slf.borrow().engine.borrow_mut().stage_mut().update(dt);
         let native_ns = u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -3034,12 +3053,17 @@ impl PyScene {
             resolved.push(parse_anim_spec(&engine, spec)?);
         }
 
-        let mut scene = engine.borrow_mut();
-        let start_time = scene.stage().time();
-        let mut animations: Vec<Box<dyn fmn_anim::Animation>> = Vec::with_capacity(resolved.len());
-        for spec in resolved {
-            animations.push(build_native_animation(scene.stage_mut(), spec)?);
-        }
+        let release_for_python_updaters = has_python_updaters(slf)?;
+        let (animations, start_time) = {
+            let mut scene = engine.borrow_mut();
+            let start_time = scene.stage().time();
+            let mut animations: Vec<Box<dyn fmn_anim::Animation>> =
+                Vec::with_capacity(resolved.len());
+            for spec in resolved {
+                animations.push(build_native_animation(scene.stage_mut(), spec)?);
+            }
+            (animations, start_time)
+        };
         let effective_run_time = run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME);
         let camera_lerp = camera
             .map(|(live, target)| -> PyResult<CameraLerp> {
@@ -3062,37 +3086,71 @@ impl PyScene {
             camera: camera_lerp,
             ..AlphaProbeSink::default()
         };
+        let map_play_error = |error: fmn_scene::SceneError| {
+            let text = error.to_string();
+            if text.contains("become between records of different schemas") {
+                // The engine's precise cross-schema refusal, plus the design
+                // it awaits: revealing a sampled Surface is the Reference's
+                // Surface.pointwise_become_partial u-slice mechanism — an
+                // fmn-anim/fmn-mobject tranche, not a binding.
+                PyRuntimeError::new_err(format!(
+                    "{text}; revealing a sampled Surface awaits the engine's \
+                     surface partial-reveal mechanism \
+                     (Surface.pointwise_become_partial)"
+                ))
+            } else {
+                PyRuntimeError::new_err(text)
+            }
+        };
         if animations.is_empty() {
             if sink.camera.is_none() {
                 return Ok(Vec::new());
             }
-            scene
+            engine
+                .borrow_mut()
                 .wait(Some(effective_run_time), &mut sink)
                 .map(|_| ())
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        } else if release_for_python_updaters {
+            // Choreo stops after interpolation + rational clock advance. The
+            // Scene RefCell borrow is then genuinely gone while Python
+            // updaters run; completing the same frame performs native scene
+            // updaters, event dispatch, immutable freeze, and capture.
+            let mut play = engine
+                .borrow_mut()
+                .begin_stepped_play(animations, overrides, &mut sink)
+                .map_err(&map_play_error)?
+                .ok_or_else(|| PyRuntimeError::new_err("a nonempty play did not open"))?;
+            loop {
+                let release = engine
+                    .borrow_mut()
+                    .prepare_stepped_play_frame(&mut play)
+                    .map_err(&map_play_error)?;
+                let Some(release) = release else {
+                    break;
+                };
+                let python_ns = run_python_updaters(slf, release.dt)?;
+                let native_start = Instant::now();
+                engine
+                    .borrow_mut()
+                    .complete_stepped_play_frame(&mut play, &mut sink)
+                    .map_err(&map_play_error)?;
+                let native_ns =
+                    u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                crossing::record_phase(python_ns, native_ns);
+            }
+            engine
+                .borrow_mut()
+                .finish_stepped_play(play, &mut sink)
+                .map(|_| ())
+                .map_err(&map_play_error)?;
         } else {
-            scene
+            engine
+                .borrow_mut()
                 .play(animations, overrides, &mut sink)
                 .map(|_| ())
-                .map_err(|error| {
-                    let text = error.to_string();
-                    if text.contains("become between records of different schemas") {
-                        // The engine's precise cross-schema refusal, plus the
-                        // design it awaits: revealing a sampled Surface is the
-                        // Reference's Surface.pointwise_become_partial u-slice
-                        // mechanism — an fmn-anim/fmn-mobject tranche, not a
-                        // binding.
-                        PyRuntimeError::new_err(format!(
-                            "{text}; revealing a sampled Surface awaits the \
-                         engine's surface partial-reveal mechanism \
-                         (Surface.pointwise_become_partial)"
-                        ))
-                    } else {
-                        PyRuntimeError::new_err(text)
-                    }
-                })?;
+                .map_err(&map_play_error)?;
         }
-        drop(scene);
         let AlphaProbeSink {
             alphas,
             camera,
@@ -3194,9 +3252,43 @@ impl PyScene {
     #[pyo3(signature = (duration = None))]
     fn _wait(slf: &Bound<'_, Self>, duration: Option<f64>) -> PyResult<()> {
         let engine = Rc::clone(&slf.borrow().engine);
+        if !has_python_updaters(slf)? {
+            return engine
+                .borrow_mut()
+                .wait(duration, &mut fmn_scene::NullSceneSink)
+                .map(|_| ())
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()));
+        }
+
+        // The Reference performs one zero-dt Scene.update_mobjects pass
+        // before planning wait frames. Run the Python half while unborrowed;
+        // begin_stepped_wait immediately follows with the native half.
+        run_python_updaters(slf, 0.0)?;
+        let mut sink = fmn_scene::NullSceneSink;
+        let mut wait = engine
+            .borrow_mut()
+            .begin_stepped_wait(duration, &mut sink)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        loop {
+            let release = engine
+                .borrow_mut()
+                .prepare_stepped_wait_frame(&mut wait)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let Some(release) = release else {
+                break;
+            };
+            let python_ns = run_python_updaters(slf, release.dt)?;
+            let native_start = Instant::now();
+            engine
+                .borrow_mut()
+                .complete_stepped_wait_frame(&mut wait, &mut sink)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let native_ns = u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            crossing::record_phase(python_ns, native_ns);
+        }
         engine
             .borrow_mut()
-            .wait(duration, &mut fmn_scene::NullSceneSink)
+            .finish_stepped_wait(wait, &mut sink)
             .map(|_| ())
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
