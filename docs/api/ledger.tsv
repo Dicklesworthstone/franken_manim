@@ -2149,7 +2149,7 @@ manimlib.scene.scene	Scene.random_seed	Scene.random_seed	attribute	0	default=0	u
 manimlib.scene.scene	Scene.redo	Scene.redo	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.remove	Scene.remove	method	0	(self[positional_or_keyword], *mobjects_to_remove[var_positional]:Mobject)	unreviewed	-	-	-
 manimlib.scene.scene	Scene.remove_all_except	Scene.remove_all_except	method	0	(self[positional_or_keyword], *mobjects_to_keep[var_positional]:Mobject)	unreviewed	-	-	-
-manimlib.scene.scene	Scene.replace	Scene.replace	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject, *replacements[var_positional]:Mobject)	unreviewed	-	-	-
+manimlib.scene.scene	Scene.replace	Scene.replace	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject, *replacements[var_positional]:Mobject)	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
 manimlib.scene.scene	Scene.restore_state	Scene.restore_state	method	0	(self[positional_or_keyword], scene_state[positional_or_keyword]:SceneState)	unreviewed	-	-	-
 manimlib.scene.scene	Scene.revert_to_original_skipping_status	Scene.revert_to_original_skipping_status	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.run	Scene.run	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
