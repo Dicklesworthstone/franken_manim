@@ -67,6 +67,35 @@ def _outer_interpolate(start, end, alpha):
     return result.reshape((*_np.shape(alpha), *_np.shape(start)))
 
 
+def _binary_search(function, target, lower_bound, upper_bound, tolerance=1e-4):
+    # manimlib/utils/simple_functions.py binary_search, verbatim. This is
+    # intentionally the Reference's monotonic-coordinate search rather than
+    # Chisel's true-arclength inverse: CoordinateSystem uses it only when a
+    # graph does not retain its underlying function.
+    left = lower_bound
+    right = upper_bound
+    middle = (left + right) / 2
+    while abs(right - left) > tolerance:
+        left_value, middle_value, right_value = [
+            function(value) for value in (left, middle, right)
+        ]
+        if left_value == target:
+            return left_value
+        if right_value == target:
+            return right_value
+        if left_value <= target and right_value >= target:
+            if middle_value > target:
+                right = middle
+            else:
+                left = middle
+        elif left_value > target and right_value < target:
+            left, right = right, left
+        else:
+            return None
+        middle = (left + right) / 2
+    return middle
+
+
 def _axis_number_to_point(axis, x_min, x_max, number):
     # NumberLine.number_to_point (number_line.py:134) over the axis
     # proxy's LIVE own points — exact after any rescale/move/stretch.
@@ -1512,6 +1541,40 @@ class VMobject(Mobject):
         self._set_points_as_corners([_vec3(point) for point in points])
         return self
 
+    def get_num_points(self):
+        return len(self.get_points())
+
+    def get_num_curves(self):
+        return self.get_num_points() // 2
+
+    def quick_point_from_proportion(self, alpha):
+        # Reference VMobject's equal-curve-count approximation. This remains
+        # distinct from FrankenManim's deliberately improved true-arclength
+        # `point_from_proportion`, and is needed by CoordinateSystem's pinned
+        # function-less graph search.
+        num_curves = self.get_num_curves()
+        if num_curves == 0:
+            return self.get_center()
+        alpha = float(alpha)
+        if alpha >= 1.0:
+            curve_index, residue = num_curves - 1, 1.0
+        elif alpha <= 0.0:
+            curve_index, residue = 0, 0.0
+        else:
+            value = num_curves * alpha
+            curve_index, residue = int(value), value % 1.0
+        points = self.get_points()[2 * curve_index : 2 * curve_index + 3]
+        return (
+            (1.0 - residue) ** 2 * points[0]
+            + 2.0 * (1.0 - residue) * residue * points[1]
+            + residue**2 * points[2]
+        )
+
+    def make_smooth(self, approx=True, recurse=True):
+        for submob in _family_preorder(self) if recurse else [self]:
+            submob._make_smooth(bool(approx))
+        return self
+
     def get_arc_length(self, n_sample_points=None):
         # BN-03: Chisel's error-bounded true length is the definition. The
         # Reference sampling knob remains accepted for source compatibility,
@@ -2325,7 +2388,132 @@ class UnitInterval(NumberLine):
         )
 
 
-class Axes(VGroup):
+class CoordinateSystem:
+    """The Reference's coordinate-system mixin over live axis geometry.
+
+    Concrete axes own their construction in Atlas; this layer owns the
+    familiar Python callable boundary and delegates every sampled curve to
+    the already-native ``ParametricCurve`` builder.
+    """
+
+    dimension = 2
+
+    def __init__(
+        self,
+        x_range=(-8.0, 8.0, 1.0),
+        y_range=(-4.0, 4.0, 1.0),
+        num_sampled_graph_points_per_tick=5,
+    ):
+        self.x_range = tuple(x_range) if len(x_range) == 3 else (*x_range, 1)
+        self.y_range = tuple(y_range) if len(y_range) == 3 else (*y_range, 1)
+        self.num_sampled_graph_points_per_tick = num_sampled_graph_points_per_tick
+
+    def coords_to_point(self, *coords):
+        del coords
+        raise NotImplementedError("CoordinateSystem.coords_to_point is abstract")
+
+    def point_to_coords(self, point):
+        del point
+        raise NotImplementedError("CoordinateSystem.point_to_coords is abstract")
+
+    def c2p(self, *coords):
+        return self.coords_to_point(*coords)
+
+    def p2c(self, point):
+        return self.point_to_coords(point)
+
+    def get_origin(self):
+        return self.c2p(*[0] * self.dimension)
+
+    def get_axes(self):
+        raise NotImplementedError("CoordinateSystem.get_axes is abstract")
+
+    def get_all_ranges(self):
+        raise NotImplementedError("CoordinateSystem.get_all_ranges is abstract")
+
+    def get_axis(self, index):
+        return self.get_axes()[index]
+
+    def get_x_axis(self):
+        return self.get_axis(0)
+
+    def get_y_axis(self):
+        return self.get_axis(1)
+
+    def get_graph(self, function, x_range=None, bind=False, **kwargs):
+        x_range = x_range or self.x_range
+        t_range = _np.ones(3)
+        t_range[: len(x_range)] = x_range
+        t_range[2] /= self.num_sampled_graph_points_per_tick
+
+        graph = ParametricCurve(
+            lambda t: self.c2p(t, function(t)),
+            t_range=tuple(t_range),
+            **kwargs,
+        )
+        graph.underlying_function = function
+        graph.x_range = x_range
+        if bind:
+            self.bind_graph_to_func(graph, function)
+        return graph
+
+    def get_parametric_curve(self, function, **kwargs):
+        dimension = self.dimension
+        graph = ParametricCurve(
+            lambda t: self.coords_to_point(*function(t)[:dimension]),
+            **kwargs,
+        )
+        graph.underlying_function = function
+        return graph
+
+    def input_to_graph_point(self, x, graph):
+        if hasattr(graph, "underlying_function"):
+            return self.coords_to_point(x, graph.underlying_function(x))
+        alpha = _binary_search(
+            function=lambda value: self.point_to_coords(
+                graph.quick_point_from_proportion(value)
+            )[0],
+            target=x,
+            lower_bound=self.x_range[0],
+            upper_bound=self.x_range[1],
+        )
+        if alpha is None:
+            return None
+        return graph.quick_point_from_proportion(alpha)
+
+    def i2gp(self, x, graph):
+        return self.input_to_graph_point(x, graph)
+
+    def bind_graph_to_func(
+        self,
+        graph,
+        func,
+        jagged=False,
+        get_discontinuities=None,
+    ):
+        x_values = _np.array(
+            [self.x_axis.p2n(point) for point in graph.get_points()]
+        )
+
+        def get_graph_points():
+            xs = x_values
+            if get_discontinuities:
+                epsilon = 1e-6
+                added_xs = [
+                    value
+                    for discontinuity in get_discontinuities()
+                    for value in (discontinuity - epsilon, discontinuity + epsilon)
+                ]
+                xs[:] = sorted([*x_values, *added_xs])[: len(x_values)]
+            return self.c2p(xs, func(xs))
+
+        graph.add_updater(lambda current: current.set_points_as_corners(get_graph_points()))
+        if not jagged:
+            graph.add_updater(lambda current: current.make_smooth(approx=True))
+        return graph
+
+
+class Axes(VGroup, CoordinateSystem):
     def __init__(
         self,
         x_range=(-8.0, 8.0, 1.0),
@@ -5239,6 +5427,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Vector"): Vector,
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
         ("manimlib.mobject.number_line", "UnitInterval"): UnitInterval,
+        ("manimlib.mobject.coordinate_systems", "CoordinateSystem"): CoordinateSystem,
         ("manimlib.mobject.coordinate_systems", "Axes"): Axes,
         ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,
         ("manimlib.mobject.coordinate_systems", "NumberPlane"): NumberPlane,

@@ -1539,6 +1539,26 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
     }
 
+    /// Chisel's anchor-mode smoothing over this entry's current world-space
+    /// shared-anchor path. Python owns family recursion so `recurse=False`
+    /// remains exact without introducing a second Stage traversal contract.
+    fn _make_smooth(slf: &Bound<'_, Self>, approx: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            let Some(points) = stage.get_points(mob) else {
+                return Err(StageError::StaleHandle);
+            };
+            if points.len() < 3 {
+                return Ok(());
+            }
+            let mut path = fmn_library::QuadPath::from_points(points)
+                .map_err(StageError::Geometry)?;
+            path.make_smooth(approx).map_err(StageError::Geometry)?;
+            stage.set_points(mob, path.points())
+        })?
+        .map_err(stage_error)
+    }
+
     /// Reference `reverse_points` through Marionette's family operation,
     /// which reverses every record row with its point and repairs path
     /// break handles/base normals.
