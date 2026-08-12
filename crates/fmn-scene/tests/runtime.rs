@@ -131,7 +131,20 @@ fn stable_scene_membership_operations_are_marionettes_one_rule() {
     scene.bring_to_front(&[a]).expect("live root");
     assert_eq!(scene.mobjects(), &[b, c, a]);
 
-    scene.remove(&[c]);
+    let x = scene.stage_mut().add(point());
+    let y = scene.stage_mut().add(point());
+    scene.replace(c, &[x, y]).expect("live replacements");
+    assert_eq!(scene.mobjects(), &[b, x, y, a]);
+
+    let absent = scene.stage_mut().add(point());
+    scene
+        .replace(absent, &[a])
+        .expect("absent source is a no-op");
+    assert_eq!(scene.mobjects(), &[b, x, y, a]);
+
+    scene.replace(x, &[]).expect("zero replacements remove");
+    assert_eq!(scene.mobjects(), &[b, y, a]);
+    scene.remove(&[y]);
     assert_eq!(scene.mobjects(), &[b, a]);
     scene.clear();
     assert!(scene.mobjects().is_empty());

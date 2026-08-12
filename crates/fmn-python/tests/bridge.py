@@ -227,6 +227,82 @@ else:
 assert order_scene.mobjects == order_before_refusal
 
 
+# Scene.replace is an exact top-level splice. Its absent-source guard runs
+# before replacement binding, matching the Reference's membership test.
+replace_scene = Scene()
+replace_back = Mobject()
+replace_middle = Mobject()
+replace_front = Mobject()
+replace_scene.add(replace_back, replace_middle, replace_front)
+replacement_left = Mobject()
+replacement_right = Mobject()
+assert replace_scene.replace(
+    replace_middle,
+    replacement_left,
+    replacement_right,
+) is replace_scene
+assert replace_scene.mobjects == [
+    replace_back,
+    replacement_left,
+    replacement_right,
+    replace_front,
+]
+assert replace_scene.mobjects[1] is replacement_left
+assert replace_scene.mobjects[2] is replacement_right
+
+assert replace_scene.replace(replacement_left) is replace_scene
+assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+
+detached_source = Mobject()
+detached_replacement = Mobject()
+assert replace_scene.replace(detached_source, detached_replacement) is replace_scene
+assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert not detached_source._is_bound()
+assert not detached_replacement._is_bound()
+
+nonmobject_replacement = Mobject()
+assert replace_scene.replace(object(), nonmobject_replacement) is replace_scene
+assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert not nonmobject_replacement._is_bound()
+
+family_scene = Scene()
+family_root = Mobject()
+family_child = Mobject()
+family_root.submobjects.append(family_child)
+family_scene.add(family_root)
+nonroot_replacement = Mobject()
+assert family_scene.replace(family_child, nonroot_replacement) is family_scene
+assert family_scene.mobjects == [family_root]
+assert not nonroot_replacement._is_bound()
+
+replace_before_refusal = list(replace_scene.mobjects)
+try:
+    replace_scene.replace(replacement_right, object())
+except TypeError:
+    pass
+else:
+    raise AssertionError("Scene.replace accepted a non-Mobject replacement")
+assert replace_scene.mobjects == replace_before_refusal
+
+foreign_replace_scene = Scene()
+foreign_replacement = Mobject()
+foreign_replace_scene.add(foreign_replacement)
+foreign_source_replacement = Mobject()
+assert replace_scene.replace(
+    foreign_replacement,
+    foreign_source_replacement,
+) is replace_scene
+assert replace_scene.mobjects == replace_before_refusal
+assert not foreign_source_replacement._is_bound()
+try:
+    replace_scene.replace(replacement_right, foreign_replacement)
+except bridge_errors.ForeignStageError:
+    pass
+else:
+    raise AssertionError("Scene.replace accepted a foreign-stage replacement")
+assert replace_scene.mobjects == replace_before_refusal
+
+
 # Bound copy uses Marionette's CopyMap, then Python remaps __dict__ aliases.
 parent.label = child
 parent.buddy = outsider

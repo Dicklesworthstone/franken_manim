@@ -916,6 +916,12 @@ impl Scene {
         Ok(self)
     }
 
+    /// Splice replacements into one exact top-level member's draw-list slot.
+    pub fn replace(&mut self, mob: Mob, replacements: &[Mob]) -> Result<&mut Self, SceneError> {
+        self.stage.replace_in_scene(mob, replacements)?;
+        Ok(self)
+    }
+
     /// Clear the scene draw list without deleting arena entries.
     pub fn clear(&mut self) -> &mut Self {
         for mob in self.stage.roots().to_vec() {

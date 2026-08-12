@@ -3070,6 +3070,24 @@ fn bind_scene_mobjects(
         .collect()
 }
 
+/// Resolve `object` only when it is the exact top-level member that the
+/// Reference's `Scene.replace` membership test would find. Non-mobjects,
+/// detached mobjects, foreign-scene mobjects, and family descendants are all
+/// absent from this scene and therefore make replacement a side-effect-free
+/// no-op, including leaving replacement arguments detached.
+fn scene_root_handle(scene: &Bound<'_, PyScene>, object: &Bound<'_, PyAny>) -> Option<Mob> {
+    let proxy = object.cast::<BridgeMobject>().ok()?;
+    let engine = Rc::clone(&scene.borrow().engine);
+    let (object_engine, mob) = {
+        let cell = proxy.borrow();
+        (Rc::clone(cell.engine.as_ref()?), cell.mob?)
+    };
+    if !same_engine(&engine, &object_engine) {
+        return None;
+    }
+    engine.borrow().mobjects().contains(&mob).then_some(mob)
+}
+
 /// Collect one unsuspended updater subtree in the Reference's child-first
 /// order. A suspended parent prunes its entire subtree even when descendants
 /// are not individually marked suspended. The explicit stack keeps a valid
@@ -3203,6 +3221,24 @@ impl PyScene {
             .engine
             .borrow_mut()
             .bring_to_back(&handles)
+            .map_err(native_error)?;
+        Ok(slf.clone())
+    }
+
+    #[pyo3(signature = (mobject, *replacements))]
+    fn replace<'py>(
+        slf: &Bound<'py, Self>,
+        mobject: &Bound<'py, PyAny>,
+        replacements: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let Some(source) = scene_root_handle(slf, mobject) else {
+            return Ok(slf.clone());
+        };
+        let replacements = bind_scene_mobjects(slf, replacements, "replace")?;
+        slf.borrow()
+            .engine
+            .borrow_mut()
+            .replace(source, &replacements)
             .map_err(native_error)?;
         Ok(slf.clone())
     }
