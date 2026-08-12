@@ -1735,6 +1735,57 @@ class Square(Rectangle):
         super().__init__(side_length, side_length, **kwargs)
 
 
+class SurroundingRectangle(Rectangle):
+    """Atlas's native shape matcher over Marionette's live family extent."""
+
+    def __init__(self, mobject, buff=0.1, color="#FFFF00", **kwargs):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("SurroundingRectangle expects a Mobject")
+        _install_live_state(self)
+        self.mobject = mobject
+        self.buff = float(buff)
+        rows = mobject._bbox_rows()
+        has_extent = any(member._has_points() for member in _family_preorder(mobject))
+        specs = self._build_surrounding_rectangle(
+            _native_shell_factory,
+            _vec3(rows[0]),
+            _vec3(rows[2]),
+            has_extent,
+            self.buff,
+        )
+        _hang_native_children(self, specs)
+        kwargs.setdefault("color", color)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def surround(self, mobject, buff=None):
+        if self._is_bound():
+            raise NotImplementedError(
+                "SurroundingRectangle.surround on a scene-bound rectangle "
+                "awaits the live shape-matcher rebuild seam"
+            )
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("SurroundingRectangle.surround expects a Mobject")
+        style = self.get_style()
+        self.mobject = mobject
+        self.buff = self.buff if buff is None else float(buff)
+        rows = mobject._bbox_rows()
+        has_extent = any(member._has_points() for member in _family_preorder(mobject))
+        specs = self._build_surrounding_rectangle(
+            _native_shell_factory,
+            _vec3(rows[0]),
+            _vec3(rows[2]),
+            has_extent,
+            self.buff,
+        )
+        self.submobjects.clear()
+        _hang_native_children(self, specs)
+        self.set_style(**style)
+        return self
+
+    def set_buff(self, buff):
+        return self.surround(self.mobject, buff)
+
+
 class Arc(VMobject):
     def __init__(
         self,
@@ -4367,6 +4418,7 @@ def _install_schema_surface():
         ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
+        ("manimlib.mobject.shape_matchers", "SurroundingRectangle"): SurroundingRectangle,
         ("manimlib.mobject.geometry", "Arc"): Arc,
         ("manimlib.mobject.geometry", "Circle"): Circle,
         ("manimlib.mobject.geometry", "Dot"): Dot,

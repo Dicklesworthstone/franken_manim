@@ -367,6 +367,28 @@ geometry = importlib.import_module("manimlib.mobject.geometry")
 circle = geometry.Circle()
 assert isinstance(circle, VMobject)
 
+# Shape matchers consume the real family bounding box and retain the native
+# empty-target rule.  A generated schema shell used to fail here before any
+# geometry reached Atlas.
+shape_matchers = importlib.import_module("manimlib.mobject.shape_matchers")
+left_box = geometry.Rectangle(width=2.0, height=1.0).shift([-1.5, 0.5, 0.0])
+right_box = geometry.Rectangle(width=1.0, height=2.0).shift([2.0, -0.5, 0.0])
+box_group = manimlib.VGroup(left_box, right_box)
+surround = shape_matchers.SurroundingRectangle(
+    box_group, buff=0.25, color=manimlib.BLUE, stroke_width=2.0
+)
+target_box = box_group.get_bounding_box()
+surround_box = surround.get_bounding_box()
+assert np.allclose(surround_box[0][:2], target_box[0][:2] - 0.25)
+assert np.allclose(surround_box[2][:2], target_box[2][:2] + 0.25)
+assert surround.get_stroke_color() == manimlib.BLUE
+assert np.allclose(surround.get_stroke_width(), 2.0)
+surround.set_buff(0.5)
+assert np.allclose(surround.get_bounding_box()[0][:2], target_box[0][:2] - 0.5)
+empty_surround = shape_matchers.SurroundingRectangle(Mobject())
+assert not empty_surround.has_points()
+assert isinstance(surround, geometry.Rectangle)
+
 # Existing Chisel/Scribe semantics are live through the portal, rather than
 # being shadowed by schema placeholders. Arc length remains true for either
 # curvature sign (BN-03), and Tex selectors consume the native UTF-8 span map.

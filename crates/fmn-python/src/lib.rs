@@ -1571,6 +1571,25 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// `SurroundingRectangle(mobject, buff)`: feed Marionette's
+    /// authoritative family extent into Atlas's one shape-matcher
+    /// implementation.  `has_extent` distinguishes an empty family from a
+    /// genuine zero-size family at the origin.
+    fn _build_surrounding_rectangle<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        min: [f64; 3],
+        max: [f64; 3],
+        has_extent: bool,
+        buff: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let extent = has_extent.then_some((min, max));
+        let built = fmn_library::SurroundingRectangle::from_extent(extent)
+            .buff(buff)
+            .build();
+        install_native_tree(slf, factory, built)
+    }
+
     /// `ValueTracker` initialization: replace the detached nursery with a
     /// native tracker entry (`Stage::add_value_tracker` and kin) —
     /// state-real in both proxy states, and `copy_into` carries the

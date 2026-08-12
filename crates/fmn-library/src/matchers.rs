@@ -58,8 +58,19 @@ impl SurroundingRectangle {
     /// at `(0, 0)` would be a silent lie about where the caller's content is.
     #[must_use]
     pub fn new(target: &VMobject) -> Self {
+        Self::from_extent(target.extent())
+    }
+
+    /// Build from an already-authoritative family extent.
+    ///
+    /// Marionette's live [`fmn_mobject::Stage`] owns family bounding boxes;
+    /// front doors must not copy a bound family into a detached [`VMobject`]
+    /// merely to feed this matcher.  `None` retains the same empty-target
+    /// semantics as [`Self::new`].
+    #[must_use]
+    pub fn from_extent(extent: Option<(Vec3, Vec3)>) -> Self {
         Self {
-            extent: target.extent(),
+            extent,
             buff: SMALL_BUFF,
             style: Style::default()
                 .stroke(fmn_core::constants::YELLOW, DEFAULT_STROKE, 1.0)
@@ -313,6 +324,23 @@ mod tests {
                 tmax[dim] + 0.1
             );
         }
+    }
+
+    #[test]
+    fn an_authoritative_family_extent_uses_the_same_matcher_path() {
+        let extent = Some(([-2.0, -1.5, 0.0], [3.0, 0.5, 0.0]));
+        let rect = SurroundingRectangle::from_extent(extent).buff(0.25).build();
+        let (min, max) = rect.extent().expect("the rectangle has extent");
+        assert_eq!(min, [-2.25, -1.75, 0.0]);
+        assert_eq!(max, [3.25, 0.75, 0.0]);
+
+        assert!(
+            SurroundingRectangle::from_extent(None)
+                .build()
+                .points()
+                .is_empty(),
+            "an empty live family must not fabricate a box at the origin"
+        );
     }
 
     #[test]
