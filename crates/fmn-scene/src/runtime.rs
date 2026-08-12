@@ -922,6 +922,19 @@ impl Scene {
         Ok(self)
     }
 
+    /// Replace the complete draw list with one batch using ordinary add order.
+    ///
+    /// This is the Reference's `remove_all_except`: despite the name, handles
+    /// need not already be scene roots. Validate the complete batch before
+    /// clearing so a stale native handle cannot destroy the current scene.
+    pub fn remove_all_except(&mut self, mobs: &[Mob]) -> Result<&mut Self, SceneError> {
+        if mobs.iter().any(|&mob| !self.stage.contains(mob)) {
+            return Err(StageError::StaleHandle.into());
+        }
+        self.clear();
+        self.add(mobs)
+    }
+
     /// Clear the scene draw list without deleting arena entries.
     pub fn clear(&mut self) -> &mut Self {
         for mob in self.stage.roots().to_vec() {

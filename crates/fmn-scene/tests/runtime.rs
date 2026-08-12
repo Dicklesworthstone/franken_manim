@@ -146,6 +146,33 @@ fn stable_scene_membership_operations_are_marionettes_one_rule() {
     assert_eq!(scene.mobjects(), &[b, y, a]);
     scene.remove(&[y]);
     assert_eq!(scene.mobjects(), &[b, a]);
+
+    scene
+        .remove_all_except(&[a, b, a])
+        .expect("live batch replaces the draw list");
+    assert_eq!(scene.mobjects(), &[b, a, a]);
+
+    let stale = scene.stage_mut().add(point());
+    scene
+        .stage_mut()
+        .delete(stale)
+        .expect("detached handle dies");
+    assert!(matches!(
+        scene.remove_all_except(&[stale]),
+        Err(SceneError::Stage(StageError::StaleHandle))
+    ));
+    assert_eq!(
+        scene.mobjects(),
+        &[b, a, a],
+        "stale batch refusal must not clear the scene"
+    );
+
+    scene
+        .remove_all_except(&[])
+        .expect("empty batch clears the draw list");
+    assert!(scene.mobjects().is_empty());
+
+    scene.add(&[a]).expect("cleared handles remain live");
     scene.clear();
     assert!(scene.mobjects().is_empty());
     assert!(

@@ -303,6 +303,61 @@ else:
 assert replace_scene.mobjects == replace_before_refusal
 
 
+# Scene.get_mobjects returns a fresh ordered snapshot of the native draw list.
+# Scene.remove_all_except resets that list through native clear + stable add,
+# preserving batch duplicates and adopting detached mobjects.
+membership_scene = Scene()
+membership_back = Mobject().set_z_index(-1)
+membership_old = Mobject()
+membership_front = Mobject().set_z_index(1)
+membership_scene.add(membership_old, membership_front, membership_back)
+membership_snapshot = membership_scene.get_mobjects()
+assert membership_snapshot == [membership_back, membership_old, membership_front]
+assert membership_snapshot is not membership_scene.get_mobjects()
+assert membership_snapshot[0] is membership_back
+membership_snapshot.clear()
+assert membership_scene.mobjects == [membership_back, membership_old, membership_front]
+
+membership_detached = Mobject()
+assert membership_scene.remove_all_except(
+    membership_front,
+    membership_detached,
+    membership_front,
+    membership_back,
+) is membership_scene
+assert membership_scene.get_mobjects() == [
+    membership_back,
+    membership_detached,
+    membership_front,
+    membership_front,
+]
+assert membership_scene.get_mobjects()[1] is membership_detached
+assert membership_detached._is_bound()
+
+membership_before_refusal = membership_scene.get_mobjects()
+try:
+    membership_scene.remove_all_except(membership_back, object())
+except TypeError:
+    pass
+else:
+    raise AssertionError("Scene.remove_all_except accepted a non-Mobject")
+assert membership_scene.get_mobjects() == membership_before_refusal
+
+foreign_membership_scene = Scene()
+foreign_membership_mobject = Mobject()
+foreign_membership_scene.add(foreign_membership_mobject)
+try:
+    membership_scene.remove_all_except(foreign_membership_mobject)
+except bridge_errors.ForeignStageError:
+    pass
+else:
+    raise AssertionError("Scene.remove_all_except accepted a foreign-stage Mobject")
+assert membership_scene.get_mobjects() == membership_before_refusal
+
+assert membership_scene.remove_all_except() is membership_scene
+assert membership_scene.get_mobjects() == []
+
+
 # Bound copy uses Marionette's CopyMap, then Python remaps __dict__ aliases.
 parent.label = child
 parent.buddy = outsider

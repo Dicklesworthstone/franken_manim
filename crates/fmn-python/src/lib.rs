@@ -3243,6 +3243,24 @@ impl PyScene {
         Ok(slf.clone())
     }
 
+    fn get_mobjects<'py>(slf: &Bound<'py, Self>) -> Vec<Py<PyAny>> {
+        Self::_engine_roots(slf)
+    }
+
+    #[pyo3(signature = (*mobjects_to_keep))]
+    fn remove_all_except<'py>(
+        slf: &Bound<'py, Self>,
+        mobjects_to_keep: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let handles = bind_scene_mobjects(slf, mobjects_to_keep, "remove_all_except")?;
+        slf.borrow()
+            .engine
+            .borrow_mut()
+            .remove_all_except(&handles)
+            .map_err(native_error)?;
+        Ok(slf.clone())
+    }
+
     #[pyo3(signature = (*mobjects))]
     fn remove<'py>(
         slf: &Bound<'py, Self>,
