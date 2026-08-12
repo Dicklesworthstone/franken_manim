@@ -358,6 +358,88 @@ assert membership_scene.remove_all_except() is membership_scene
 assert membership_scene.get_mobjects() == []
 
 
+# Python-owned Scene collection helpers filter arbitrary iterables before
+# routing through native add, and copy each native top-level placement.
+class AmongMobject(Mobject):
+    pass
+
+
+among_scene = Scene()
+among_front = AmongMobject().set_z_index(1)
+among_back = Mobject().set_z_index(-1)
+among_seen = []
+
+
+def among_values():
+    for value in (object(), among_front, "ignored", among_back, None):
+        among_seen.append(value)
+        yield value
+
+
+assert among_scene.add_mobjects_among(among_values()) is among_scene
+assert len(among_seen) == 5
+assert among_scene.mobjects == [among_back, among_front]
+assert among_scene.mobjects[1] is among_front
+
+among_failed = Mobject()
+
+
+def failing_among_values():
+    yield among_failed
+    raise RuntimeError("iterator failure")
+
+
+among_before_failure = among_scene.get_mobjects()
+try:
+    among_scene.add_mobjects_among(failing_among_values())
+except RuntimeError as error:
+    assert str(error) == "iterator failure"
+else:
+    raise AssertionError("Scene.add_mobjects_among swallowed an iterator failure")
+assert among_scene.get_mobjects() == among_before_failure
+assert not among_failed._is_bound()
+
+try:
+    among_scene.add_mobjects_among(1)
+except TypeError:
+    pass
+else:
+    raise AssertionError("Scene.add_mobjects_among accepted a non-iterable")
+assert among_scene.get_mobjects() == among_before_failure
+
+foreign_among_scene = Scene()
+foreign_among_mobject = Mobject()
+foreign_among_scene.add(foreign_among_mobject)
+try:
+    among_scene.add_mobjects_among([foreign_among_mobject])
+except bridge_errors.ForeignStageError:
+    pass
+else:
+    raise AssertionError("Scene.add_mobjects_among accepted a foreign-stage Mobject")
+assert among_scene.get_mobjects() == among_before_failure
+
+copy_source = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
+)
+copy_source.label = {"shared": True}
+copy_scene = Scene()
+copy_scene.add(copy_source, copy_source)
+copy_roots_before = copy_scene.get_mobjects()
+scene_copies = copy_scene.get_mobject_copies()
+assert len(scene_copies) == 2
+assert scene_copies[0] is not copy_source
+assert scene_copies[1] is not copy_source
+assert scene_copies[0] is not scene_copies[1]
+assert type(scene_copies[0]) is type(copy_source)
+assert scene_copies[0].label is copy_source.label
+assert np.allclose(scene_copies[0].get_points(), copy_source.get_points())
+scene_copies[0].shift([3.0, 0.0, 0.0])
+assert not np.allclose(scene_copies[0].get_points(), copy_source.get_points())
+assert copy_scene.get_mobjects() == copy_roots_before
+assert all(copy not in copy_scene.get_mobjects() for copy in scene_copies)
+assert copy_scene.get_mobject_copies() is not scene_copies
+
+
 # Bound copy uses Marionette's CopyMap, then Python remaps __dict__ aliases.
 parent.label = child
 parent.buddy = outsider

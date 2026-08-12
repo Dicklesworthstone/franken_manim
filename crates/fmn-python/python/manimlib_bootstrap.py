@@ -4096,6 +4096,13 @@ class Scene(_SceneCore):
     def mobjects(self):
         return self._engine_roots()
 
+    def add_mobjects_among(self, values):
+        self.add(*(value for value in values if isinstance(value, Mobject)))
+        return self
+
+    def get_mobject_copies(self):
+        return [mobject.copy() for mobject in self.mobjects]
+
     def run(self):
         return self._run_lifecycle()
 
