@@ -1135,7 +1135,7 @@ manimlib.mobject.mobject	Mobject.digest_mobject_attrs	Mobject.digest_mobject_att
 manimlib.mobject.mobject	Mobject.dim	Mobject.dim	attribute	0	default=3	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.f_always	Mobject.f_always	property	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.fade	Mobject.fade	method	0	(self[positional_or_keyword], darkness[positional_or_keyword]:float=0.5, recurse[positional_or_keyword]:bool=True)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.family_members_with_points	Mobject.family_members_with_points	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.family_members_with_points	Mobject.family_members_with_points	method	0	(self[positional_or_keyword])	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
 manimlib.mobject.mobject	Mobject.fix_in_frame	Mobject.fix_in_frame	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=True)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.flip	Mobject.flip	method	0	(self[positional_or_keyword], axis[positional_or_keyword]:Vect3=UP, **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.generate_target	Mobject.generate_target	method	0	(self[positional_or_keyword], use_deepcopy[positional_or_keyword]:bool=False)	unreviewed	-	-	-
@@ -1156,7 +1156,7 @@ manimlib.mobject.mobject	Mobject.get_depth	Mobject.get_depth	method	0	(self[posi
 manimlib.mobject.mobject	Mobject.get_edge_center	Mobject.get_edge_center	method	0	(self[positional_or_keyword], direction[positional_or_keyword]:Vect3)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.get_end	Mobject.get_end	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.get_event_listners	Mobject.get_event_listeners	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.get_family	Mobject.get_family	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=True)	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.get_family	Mobject.get_family	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=True)	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
 manimlib.mobject.mobject	Mobject.get_family_event_listners	Mobject.get_family_event_listeners	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.get_gloss	Mobject.get_gloss	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.get_grid	Mobject.get_grid	method	0	(self[positional_or_keyword], n_rows[positional_or_keyword]:int, n_cols[positional_or_keyword]:int, height[positional_or_keyword]:float | None=None, width[positional_or_keyword]:float | None=None, group_by_rows[positional_or_keyword]:bool=False, group_by_cols[positional_or_keyword]:bool=False, **kwargs[var_keyword])	unreviewed	-	-	-
@@ -2110,13 +2110,13 @@ manimlib.scene.scene	Scene.get_animation_time_progression	Scene.get_animation_ti
 manimlib.scene.scene	Scene.get_group	Scene.get_group	method	0	(self[positional_or_keyword], *mobjects[var_positional])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.get_image	Scene.get_image	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.get_mobject_copies	Scene.get_mobject_copies	method	0	(self[positional_or_keyword])	same	docs/g0/G0-5-python-ext-ratification.md	crates/fmn-python/tests/bridge.py	returns one independent native family copy for every current top-level placement
-manimlib.scene.scene	Scene.get_mobject_family_members	Scene.get_mobject_family_members	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
+manimlib.scene.scene	Scene.get_mobject_family_members	Scene.get_mobject_family_members	method	0	(self[positional_or_keyword])	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	flattens each live top-level placement's public family without changing scene membership
 manimlib.scene.scene	Scene.get_mobjects	Scene.get_mobjects	method	0	(self[positional_or_keyword])	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns a fresh identity-preserving snapshot of the native top-level draw list
 manimlib.scene.scene	Scene.get_run_time	Scene.get_run_time	method	0	(self[positional_or_keyword], animations[positional_or_keyword]:Iterable[Animation])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.get_state	Scene.get_state	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
-manimlib.scene.scene	Scene.get_time	Scene.get_time	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
+manimlib.scene.scene	Scene.get_time	Scene.get_time	method	0	(self[positional_or_keyword])	improved	BN-02	crates/fmn-python/tests/bridge.py	exposes the native drift-free rational frame clock through the familiar float result
 manimlib.scene.scene	Scene.get_time_progression	Scene.get_time_progression	method	0	(self[positional_or_keyword], run_time[positional_or_keyword]:float, n_iterations[positional_or_keyword]:int | None=None, desc[positional_or_keyword]:str='', override_skip_animations[positional_or_keyword]:bool=False)	unreviewed	-	-	-
-manimlib.scene.scene	Scene.get_top_level_mobjects	Scene.get_top_level_mobjects	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
+manimlib.scene.scene	Scene.get_top_level_mobjects	Scene.get_top_level_mobjects	method	0	(self[positional_or_keyword])	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	keeps only placements appearing in exactly one current family, including duplicate-placement elimination
 manimlib.scene.scene	Scene.get_wait_time_progression	Scene.get_wait_time_progression	method	0	(self[positional_or_keyword], duration[positional_or_keyword]:float, stop_condition[positional_or_keyword]:Callable[[], bool] | None=None)	unreviewed	-	-	-
 manimlib.scene.scene	Scene.get_window	Scene.get_window	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.scene.scene	Scene.hold_loop	Scene.hold_loop	method	0	(self[positional_or_keyword])	unreviewed	-	-	-

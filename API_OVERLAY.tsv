@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	14597faf98d87b1e21752dc8134722cbd6863cdc7acd26f3035b857bbe9230c8
+ledger_reviewed_digest	b25b8f4460f0cfd239cc558dd5929f3325acdd081c2da95d029c1a8b51534b86
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -212,6 +212,8 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 [status]
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
 manimlib.mobject.mobject:Mobject.add_updater	improved	BN-07	crates/fmn-mobject/tests/dynamics.rs	call=true performs one corrected immediate update
+manimlib.mobject.mobject:Mobject.family_members_with_points	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
+manimlib.mobject.mobject:Mobject.get_family	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
 manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md	crates/fmn-mobject/tests/render_order.rs	preserves the declared insertion-first render-order contract
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
@@ -224,7 +226,10 @@ manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-python/tests/brid
 manimlib.scene.scene:Scene.bring_to_back	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	prepends the complete argument batch through the native draw list without a z-sort
 manimlib.scene.scene:Scene.bring_to_front	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	re-adds the complete argument batch through the native stable z-order operation
 manimlib.scene.scene:Scene.get_mobject_copies	same	docs/g0/G0-5-python-ext-ratification.md	crates/fmn-python/tests/bridge.py	returns one independent native family copy for every current top-level placement
+manimlib.scene.scene:Scene.get_mobject_family_members	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	flattens each live top-level placement's public family without changing scene membership
 manimlib.scene.scene:Scene.get_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns a fresh identity-preserving snapshot of the native top-level draw list
+manimlib.scene.scene:Scene.get_time	improved	BN-02	crates/fmn-python/tests/bridge.py	exposes the native drift-free rational frame clock through the familiar float result
+manimlib.scene.scene:Scene.get_top_level_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	keeps only placements appearing in exactly one current family, including duplicate-placement elimination
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
 manimlib.scene.scene:Scene.remove_all_except	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	resets the complete draw list through the ordinary stable native add operation
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
