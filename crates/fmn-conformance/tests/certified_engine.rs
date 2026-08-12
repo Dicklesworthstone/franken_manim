@@ -14,11 +14,11 @@
 //! three-platform sweep. G0-6 demonstrated the shape with a single frame
 //! constant; this is the shape applied to a corpus.
 //!
-//! Locking the raw frame rather than a PNG is deliberate: §16.7's certified
-//! artifact kinds start with *raw frames*, and the canonical PNG is one
-//! table lookup away through a kernel that does no arithmetic at all
-//! (`fmn_frame::convert::rgba16f_to_rgba8`). Locking the raw frame locks the
-//! thing the engine actually decides.
+//! The raw frame remains the renderer's defining lock: §16.7's certified
+//! artifact kinds start there. Each raw lock now has a canonical PNG companion
+//! produced by the table-only `Rgba16F -> Rgba8` conversion and the owned
+//! deterministic encoder. The companion does not replace the engine oracle;
+//! it makes the exact locked result directly reviewable in the Look Gallery.
 //!
 //! ## The three corpora, and who asked for them
 //!
@@ -42,6 +42,7 @@
 //! force here — **a drift is a finding to adjudicate, never a number to
 //! re-bless**. These bytes are the product promise.
 
+use fmn_conformance::gallery::canonical_png_panel;
 use fmn_conformance::golden::{GoldenStore, Scope};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, GREEN_B, MAROON_C, RED_C, TEAL_B, WHITE, YELLOW_C};
@@ -156,7 +157,12 @@ fn render_frame(
 
 /// The scalar definition of a scene's frame, single-threaded.
 fn definition(stage: &Stage) -> Vec<u8> {
-    render(stage, Tier::Scalar, 1)
+    encode_frame(&definition_frame(stage)).expect("the frame encodes into its canonical document")
+}
+
+/// The scalar definition before canonical-document serialization.
+fn definition_frame(stage: &Stage) -> FrameBuffer {
+    render_frame(stage, EngineIdentity::certified(), 1, AaPolicy::Adaptive)
 }
 
 /// Linear-channel and perceptual divergence between two raw frames.
@@ -1115,13 +1121,33 @@ fn metal_three_d_pg_a_profiles_glow_and_surface_work() {
 fn the_corpus_is_bit_locked_across_the_certified_matrix() {
     let mut failures = Vec::new();
     for (name, stage) in corpus() {
-        let doc = definition(&stage);
+        let frame = definition_frame(&stage);
+        let doc = encode_frame(&frame).expect("the frame encodes into its canonical document");
+        let png = canonical_png_panel(&frame).expect("the certified frame has a canonical PNG");
         assert!(
             doc.len() > 1000,
             "{name} encoded to {} bytes — that is not a frame",
             doc.len()
         );
-        dump(name, &doc);
+        assert!(
+            png.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "{name} did not encode as a PNG"
+        );
+        let decoded = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+            .expect("the canonical panel decodes through the owned codec");
+        assert_eq!((decoded.width, decoded.height), (WIDTH, HEIGHT));
+        let mut expected_rgba8 = FrameBuffer::new(
+            FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT)
+                .expect("the corpus dimensions form a tight RGBA8 frame"),
+        );
+        fmn_frame::convert::rgba16f_to_rgba8(&frame, &mut expected_rgba8)
+            .expect("the certified frame converts canonically");
+        assert_eq!(
+            decoded.rgba,
+            expected_rgba8.plane(0),
+            "{name} PNG did not preserve the canonical RGBA8 projection"
+        );
+        dump(name, &doc, &png).expect("the requested certified artifacts are written");
         // Every entry is checked before any is reported. A loop that panicked on
         // the first drift would hide the shape of a regression — one frame moving
         // is a bug in one kernel, three moving is a bug in the composite — and it
@@ -1130,24 +1156,28 @@ fn the_corpus_is_bit_locked_across_the_certified_matrix() {
         if let Err(e) = store().check(name, &doc) {
             failures.push(e.to_string());
         }
+        if let Err(e) = store().check(&format!("{name}.png"), &png) {
+            failures.push(e.to_string());
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// Write a frame's canonical document to `$FMN_DUMP_FRAMES` when it is set.
+/// Write a frame's canonical document and PNG panel to `$FMN_DUMP_FRAMES`.
 ///
-/// The bytes a golden locks are the bytes a reviewer needs when it moves, and
-/// `.actual` sidecars only appear on drift. This makes them available on demand
-/// — for a Look Gallery panel, a repro bundle, or an eyeball before a bless —
-/// without a second, private path to the pixels.
-fn dump(name: &str, doc: &[u8]) {
+/// The bytes the golden locks are the bytes a reviewer needs when it moves, and
+/// `.actual` sidecars only appear on drift. This makes both the renderer oracle
+/// and its directly reviewable projection available on demand — for a Look
+/// Gallery panel, a repro bundle, or an eyeball before a bless — without a
+/// second, private path to the pixels.
+fn dump(name: &str, doc: &[u8], png: &[u8]) -> std::io::Result<()> {
     let Ok(dir) = std::env::var("FMN_DUMP_FRAMES") else {
-        return;
+        return Ok(());
     };
     let dir = PathBuf::from(dir);
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(dir.join(format!("{name}.frame")), doc);
-    }
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(format!("{name}.frame")), doc)?;
+    std::fs::write(dir.join(format!("{name}.png")), png)
 }
 
 #[test]

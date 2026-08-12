@@ -53,11 +53,15 @@
 //!    [`GalleryManifest::regressions_since`] diffs two manifest revisions for
 //!    panels whose verdict worsened.
 //!
-//! This module depends on `std` only: it works over borrowed RGBA8 planes so
-//! the conformance library keeps its documented edge set (the PNG decode of
-//! the real pairs lives in `tests/look_gallery.rs`, where fmn-codec is a
-//! dev-dependency).
+//! [`canonical_png_panel`] is the deliberate bridge from certified Lumen
+//! frames to this review plane. It applies fmn-frame's bit-exact canonical
+//! transfer and fmn-codec's owned deterministic PNG encoder, so the panel a
+//! human reviews is itself a certified, lockable artifact rather than output
+//! from a throwaway decoder.
 
+use fmn_codec::{CompressionLevel, encode_rgba8};
+use fmn_frame::convert::rgba16f_to_rgba8;
+use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read as _, Write as _};
@@ -135,6 +139,30 @@ impl<'a> RgbaView<'a> {
             pixels,
         })
     }
+}
+
+/// Encode one certified linear-light frame as the canonical Look Gallery PNG.
+///
+/// The conversion is the certified `Rgba16F -> Rgba8` table lookup and the
+/// encoder uses the owned deterministic best-compression route. The resulting
+/// bytes contain no timestamps and are identical across thread counts and the
+/// certified platform matrix when the input frame is identical.
+///
+/// # Errors
+/// [`FrameError`] if `frame` is not `Rgba16F` or its dimensions cannot form a
+/// valid tight `Rgba8` layout. No alternate conversion is selected silently.
+pub fn canonical_png_panel(frame: &FrameBuffer) -> Result<Vec<u8>, FrameError> {
+    let width = frame.layout().width();
+    let height = frame.layout().height();
+    let layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)?;
+    let mut rgba8 = FrameBuffer::new(layout);
+    rgba16f_to_rgba8(frame, &mut rgba8)?;
+    Ok(encode_rgba8(
+        width,
+        height,
+        rgba8.plane(0),
+        CompressionLevel::Best,
+    ))
 }
 
 /// The three smoke-alarm numbers for one reference/candidate pair.

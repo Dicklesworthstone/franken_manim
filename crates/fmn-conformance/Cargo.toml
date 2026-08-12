@@ -17,6 +17,10 @@ fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-render.workspace = true
 fmn-frame.workspace = true
+# The Look Gallery consumes the certified frame conversion and the owned,
+# deterministic PNG encoder to turn raw-frame goldens into reviewable panels
+# without a throwaway external decoder (fm-qtd).
+fmn-codec.workspace = true
 fmn-library.workspace = true
 fmn-scene.workspace = true
 fmn-output.workspace = true
@@ -40,10 +44,6 @@ fmd-math.workspace = true
 fmd-font.workspace = true
 
 [dev-dependencies]
-# Gauntlet-only integration proofs for codec surfaces. Frame/runtime are
-# ordinary dependencies because the PG-5 producer is the shipped Gauntlet
-# consumer of their certified schedule and raw-frame evidence.
-fmn-codec.workspace = true
 # W10 e2e CLI scenarios drive fmn_cli's in-process runner (fm-fjq; dev-only,
 # so the shipped edge set and the crate DAG gate are unaffected).
 fmn-cli = { workspace = true, features = ["batch"] }

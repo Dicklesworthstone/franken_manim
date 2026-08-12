@@ -8,9 +8,10 @@
 //! without them simply skips the measurement and says so.
 
 use fmn_conformance::gallery::{
-    GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, compare_pair,
-    edge_distance_luma, render_pairs,
+    GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, canonical_png_panel,
+    compare_pair, edge_distance_luma, render_pairs,
 };
+use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -93,6 +94,19 @@ fn identical_images_have_perfect_metrics() {
             "identical images must have zero error at every percentile, got {value}"
         );
     }
+}
+
+#[test]
+fn canonical_panel_refuses_a_non_certified_source_format() {
+    let layout = FrameLayout::tight(PixelFormat::Rgba8, 2, 2).expect("valid small frame");
+    let frame = FrameBuffer::new(layout);
+    assert_eq!(
+        canonical_png_panel(&frame),
+        Err(FrameError::FormatMismatch {
+            expected: "Rgba16F source",
+            got: PixelFormat::Rgba8,
+        })
+    );
 }
 
 #[test]

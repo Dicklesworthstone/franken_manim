@@ -104,7 +104,9 @@ EXPECTED: dict[str, set[str]] = {
     # geometry through the sovereign transcendental funnel (ADR-0014,
     # fm-t1v.1). frame/runtime: the PG-5 producer consumes the real certified
     # raw-frame and scheduler surfaces rather than duplicating them
-    # (fm-inr.3.2). cache/platform/text/tex: the PG-7 producer measures the real
+    # (fm-inr.3.2). codec: the Look Gallery's canonical panels route through
+    # the owned deterministic PNG encoder (fm-qtd). cache/platform/text/tex:
+    # the PG-7 producer measures the real
     # Scribe cold, cached, and 10k-glyph workloads through the governed
     # host/cache capabilities rather than a synthetic duplicate (§17.2,
     # fm-inr.2.2).
@@ -117,6 +119,7 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-anim",
         "fmn-render",
         "fmn-frame",
+        "fmn-codec",
         "fmn-library",
         "fmn-scene",
         "fmn-output",
