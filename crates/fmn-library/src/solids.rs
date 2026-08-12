@@ -77,11 +77,11 @@
 //!   are ported. The pin has **no procedural checkerboard helper** —
 //!   textured examples reference image assets — so there is nothing
 //!   further to port; this note is the documented omission.
-//! * **Not ported (other tiers own them).** `sort_faces_back_to_front` /
-//!   `always_sort_to_camera` (camera-coupled updater behavior, W9/Lumen;
-//!   the triangle data they permute is here) and `pointwise_become_partial`
-//!   (partial-surface *animation*, Choreo; `preferred_creation_axis` is
-//!   stored for it).
+//! * **Other-tier operations.** `sort_faces_back_to_front` /
+//!   `always_sort_to_camera` remain camera-coupled W9/Lumen behavior (the
+//!   triangle data they permute is here). Surface partial reveal lives in
+//!   Marionette's typed UV-grid operation and Choreo's `ShowPartial` driver;
+//!   this crate supplies their `preferred_creation_axis` constructor data.
 //! * **`ShapeTag`.** Surfaces are not paths, so they enter the arena as
 //!   [`ShapeTag::General`]; the semantic raster hints of §10.8 do not
 //!   apply to UV grids.

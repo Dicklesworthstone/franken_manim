@@ -22,7 +22,7 @@
 //! site in the pinned tree; it is deliberately not ported.
 
 use fmn_core::types::Vec3;
-use fmn_geom::{DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath};
+use fmn_geom::{DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, QuadPath, bezier};
 
 use crate::StageError;
 use crate::stage::{Mob, Stage};
@@ -365,6 +365,156 @@ impl Stage {
         Ok(())
     }
 
+    /// Reference `Surface.pointwise_become_partial` (surface.py:176):
+    /// collapse the sampled UV grid outside `[a, b]` along `axis`, keeping
+    /// the grid shape and every non-point record unchanged.
+    ///
+    /// Surface resolution is constructor data rather than a raster hint, so
+    /// the caller supplies it explicitly. This keeps ordinary surfaces on
+    /// [`crate::ShapeTag::General`] while giving Choreo one state-real
+    /// partial-reveal operation shared by every front door.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`]; [`StageError::SchemaMismatch`] when the
+    /// records are not matching ordinary Surface schemas, the resolution
+    /// does not describe the record count, or `axis` is not a revealable UV
+    /// dimension.
+    pub fn surface_pointwise_become_partial(
+        &mut self,
+        mob: Mob,
+        source: Mob,
+        resolution: (usize, usize),
+        axis: usize,
+        a: f64,
+        b: f64,
+    ) -> Result<(), StageError> {
+        let source_entry = self.try_get(source)?;
+        let source_schema = source_entry.buffer.schema().clone();
+        let source_len = source_entry.buffer.len();
+        let source_placement = source_entry.placement();
+        let source_points = source_entry
+            .buffer
+            .read_column("point")
+            .ok_or(StageError::SchemaMismatch)?;
+        let source_normals = source_entry
+            .buffer
+            .read_column("d_normal_point")
+            .ok_or(StageError::SchemaMismatch)?;
+
+        let (nu, nv) = resolution;
+        let axis_len = if axis == 0 { nu } else { nv };
+        let fields = source_schema.fields();
+        let ordinary_surface_schema = fields.len() == 3
+            && fields[0].name == "point"
+            && fields[0].width == 3
+            && fields[1].name == "d_normal_point"
+            && fields[1].width == 3
+            && fields[2].name == "rgba"
+            && fields[2].width == 4;
+        if axis > 1
+            || resolution.0.checked_mul(resolution.1) != Some(source_len)
+            || (source_len != 0 && axis_len < 2)
+            || !ordinary_surface_schema
+        {
+            return Err(StageError::SchemaMismatch);
+        }
+        let destination = self.try_get(mob)?;
+        if destination.buffer.schema() != &source_schema {
+            return Err(StageError::SchemaMismatch);
+        }
+        if source_len == 0 {
+            return Ok(());
+        }
+        {
+            let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            entry.set_placement(source_placement);
+            if entry.buffer.len() != source_len {
+                entry
+                    .buffer
+                    .resize_preserving_order(source_len)
+                    .map_err(StageError::Record)?;
+            }
+        }
+        if a <= 0.0 && b >= 1.0 {
+            let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            entry.buffer.write_range("point", 0, &source_points);
+            entry
+                .buffer
+                .write_range("d_normal_point", 0, &source_normals);
+            return Ok(());
+        }
+
+        let mut points: Vec<Vec3> = source_points
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|row| [f64::from(row[0]), f64::from(row[1]), f64::from(row[2])])
+            .collect();
+        let max_index = i64::try_from(axis_len - 1).map_err(|_| StageError::SchemaMismatch)?;
+        let (lower_index, lower_residue) = bezier::integer_interpolate(0, max_index, a);
+        let (upper_index, upper_residue) = bezier::integer_interpolate(0, max_index, b);
+        let lower_index = usize::try_from(lower_index).map_err(|_| StageError::SchemaMismatch)?;
+        let upper_index = usize::try_from(upper_index).map_err(|_| StageError::SchemaMismatch)?;
+        let lerp = |p: Vec3, q: Vec3, alpha: f64| {
+            [
+                (1.0 - alpha) * p[0] + alpha * q[0],
+                (1.0 - alpha) * p[1] + alpha * q[1],
+                (1.0 - alpha) * p[2] + alpha * q[2],
+            ]
+        };
+        if axis == 0 {
+            for v in 0..nv {
+                let lower = lerp(
+                    points[lower_index * nv + v],
+                    points[(lower_index + 1) * nv + v],
+                    lower_residue,
+                );
+                for u in 0..lower_index {
+                    points[u * nv + v] = lower;
+                }
+                let upper = lerp(
+                    points[upper_index * nv + v],
+                    points[(upper_index + 1) * nv + v],
+                    upper_residue,
+                );
+                for u in upper_index + 1..nu {
+                    points[u * nv + v] = upper;
+                }
+            }
+        } else {
+            for u in 0..nu {
+                let row = u * nv;
+                let lower = lerp(
+                    points[row + lower_index],
+                    points[row + lower_index + 1],
+                    lower_residue,
+                );
+                for v in 0..lower_index {
+                    points[row + v] = lower;
+                }
+                let upper = lerp(
+                    points[row + upper_index],
+                    points[row + upper_index + 1],
+                    upper_residue,
+                );
+                for v in upper_index + 1..nv {
+                    points[row + v] = upper;
+                }
+            }
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let flat: Vec<f32> = points
+            .iter()
+            .flat_map(|point| point.iter().map(|value| *value as f32))
+            .collect();
+        self.get_mut(mob)
+            .ok_or(StageError::StaleHandle)?
+            .buffer
+            .write_range("point", 0, &flat);
+        Ok(())
+    }
+
     /// `point_from_proportion` under the original name, constant-speed by
     /// true arc length (BN-03): the point `alpha` of the way along `mob`'s
     /// path measured by arc length, via the W2 inverse-arclength layer.
@@ -586,6 +736,29 @@ impl Stage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Mobject, RecordBuffer, RecordSchema};
+
+    fn surface(stage: &mut Stage) -> Mob {
+        let schema = RecordSchema::new(
+            &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+            &["point"],
+            &["point", "d_normal_point"],
+        )
+        .expect("surface schema");
+        let mut buffer = RecordBuffer::new(schema, 9).expect("3x3 surface");
+        let mut points = Vec::new();
+        let mut normals = Vec::new();
+        for u in [0.0_f32, 1.0, 2.0] {
+            for v in [0.0_f32, 1.0, 2.0] {
+                points.extend_from_slice(&[u, v, 0.0]);
+                normals.extend_from_slice(&[u, v, 1.0]);
+            }
+        }
+        buffer.write_range("point", 0, &points);
+        buffer.write_range("d_normal_point", 0, &normals);
+        buffer.write_range("rgba", 0, &[1.0; 36]);
+        stage.add(Mobject::from_buffer(buffer))
+    }
 
     #[test]
     fn polyline_length_sums_consecutive_gaps() {
@@ -603,6 +776,63 @@ mod tests {
         assert_eq!(
             checked_aligned_submobject_count(MAX_ALIGNED_SUBMOBJECTS - 1, 1),
             Ok(MAX_ALIGNED_SUBMOBJECTS)
+        );
+    }
+
+    #[test]
+    fn surface_partial_reveal_collapses_uv_flanks_and_restores_pointlikes() {
+        let mut stage = Stage::new();
+        let source = surface(&mut stage);
+        let destination = stage.copy_family(source).expect("surface copy");
+
+        stage
+            .surface_pointwise_become_partial(destination, source, (3, 3), 1, 0.5, 0.5)
+            .expect("middle v slice");
+        let points = stage.get_points(destination).expect("surface points");
+        assert_eq!(
+            points,
+            vec![
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+            ]
+        );
+        stage
+            .get_mut(destination)
+            .expect("destination")
+            .buffer
+            .write_range("d_normal_point", 0, &[0.0; 27]);
+        stage
+            .surface_pointwise_become_partial(destination, source, (3, 3), 1, 0.0, 1.0)
+            .expect("full surface");
+        assert_eq!(
+            stage
+                .get(destination)
+                .expect("destination")
+                .buffer
+                .read_column("d_normal_point"),
+            stage
+                .get(source)
+                .expect("source")
+                .buffer
+                .read_column("d_normal_point")
+        );
+    }
+
+    #[test]
+    fn surface_partial_reveal_refuses_false_grid_metadata() {
+        let mut stage = Stage::new();
+        let source = surface(&mut stage);
+        let destination = stage.copy_family(source).expect("surface copy");
+        assert_eq!(
+            stage.surface_pointwise_become_partial(destination, source, (2, 4), 1, 0.0, 0.5,),
+            Err(StageError::SchemaMismatch)
         );
     }
 }
