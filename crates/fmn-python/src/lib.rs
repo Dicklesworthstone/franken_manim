@@ -3058,7 +3058,7 @@ fn bind_scene_mobjects(
 ) -> PyResult<Vec<Mob>> {
     let mut proxies = Vec::with_capacity(objects.len());
     for object in objects.iter() {
-        proxies.push(object.cast::<BridgeMobject>().map_err(|_| {
+        proxies.push(object.cast_into::<BridgeMobject>().map_err(|_| {
             PyTypeError::new_err(format!("Scene.{method} accepts only Mobject instances"))
         })?);
     }
@@ -3066,7 +3066,7 @@ fn bind_scene_mobjects(
     let py = scene.py();
     proxies
         .into_iter()
-        .map(|proxy| bind_graph(py, scene, proxy))
+        .map(|proxy| bind_graph(py, scene, &proxy))
         .collect()
 }
 
