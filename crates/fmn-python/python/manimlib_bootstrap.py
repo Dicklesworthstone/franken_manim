@@ -566,6 +566,38 @@ class Mobject(_BridgeMobject):
         self.submobjects.extend(mobjects)
         return self
 
+    def get_family(self, recurse=True):
+        if not recurse:
+            return [self]
+
+        # Preserve the Reference's path-wise preorder semantics: a shared
+        # descendant appears once for every path that reaches it.  The
+        # engine's internal family walker intentionally deduplicates shared
+        # descendants, so this compatibility-facing traversal must remain
+        # separate.  Enter/exit markers keep the implementation iterative
+        # while still refusing genuine cycles.
+        family = []
+        visiting = set()
+        stack = [(True, self)]
+        while stack:
+            entering, mobject = stack.pop()
+            marker = id(mobject)
+            if not entering:
+                visiting.remove(marker)
+                continue
+            if not isinstance(mobject, _BridgeMobject):
+                raise TypeError("submobjects must be Mobject instances")
+            if marker in visiting:
+                raise _FamilyCycleError("submobjects would create a family cycle")
+            visiting.add(marker)
+            family.append(mobject)
+            stack.append((False, mobject))
+            stack.extend((True, child) for child in reversed(list(mobject.submobjects)))
+        return family
+
+    def family_members_with_points(self):
+        return [mobject for mobject in self.get_family() if mobject.has_points()]
+
     # ----------------------------------------------------------------------
     # Positional surface (fm-d3gt): Reference signatures and bodies over the
     # engine's Stage primitives. Defined here, before the schema placeholder
@@ -4095,6 +4127,25 @@ class Scene(_SceneCore):
     @property
     def mobjects(self):
         return self._engine_roots()
+
+    def get_time(self):
+        return self.time()
+
+    def get_top_level_mobjects(self):
+        mobjects = self.get_mobjects()
+        families = [mobject.get_family() for mobject in mobjects]
+        return [
+            mobject
+            for mobject in mobjects
+            if sum(mobject in family for family in families) == 1
+        ]
+
+    def get_mobject_family_members(self):
+        return [
+            member
+            for mobject in self.mobjects
+            for member in mobject.get_family()
+        ]
 
     def add_mobjects_among(self, values):
         self.add(*(value for value in values if isinstance(value, Mobject)))

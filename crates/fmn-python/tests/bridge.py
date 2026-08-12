@@ -418,6 +418,77 @@ else:
     raise AssertionError("Scene.add_mobjects_among accepted a foreign-stage Mobject")
 assert among_scene.get_mobjects() == among_before_failure
 
+# Family introspection preserves Reference preorder and path-wise duplicates,
+# while Scene helpers expose fresh snapshots over live engine roots.
+family_shared = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+)
+family_left = Mobject(family_shared)
+family_right = Mobject(family_shared)
+family_root = Mobject(family_left, family_right)
+family_expected = [
+    family_root,
+    family_left,
+    family_shared,
+    family_right,
+    family_shared,
+]
+family_actual = family_root.get_family()
+assert len(family_actual) == len(family_expected)
+assert all(actual is expected for actual, expected in zip(family_actual, family_expected))
+assert family_root.get_family() is not family_actual
+assert family_root.get_family(recurse=False) == [family_root]
+assert family_root.get_family(recurse=False)[0] is family_root
+family_with_points = family_root.family_members_with_points()
+assert len(family_with_points) == 2
+assert all(member is family_shared for member in family_with_points)
+assert family_root.family_members_with_points() is not family_with_points
+
+family_scene = Scene()
+family_isolated = Mobject()
+family_duplicate = Mobject()
+family_scene.add(
+    family_root,
+    family_shared,
+    family_isolated,
+    family_duplicate,
+    family_duplicate,
+)
+family_roots_before = family_scene.get_mobjects()
+top_level = family_scene.get_top_level_mobjects()
+assert len(top_level) == 2
+assert top_level[0] is family_root
+assert top_level[1] is family_isolated
+assert family_scene.get_top_level_mobjects() is not top_level
+
+scene_family_expected = [
+    family_root,
+    family_left,
+    family_shared,
+    family_right,
+    family_shared,
+    family_shared,
+    family_isolated,
+    family_duplicate,
+    family_duplicate,
+]
+scene_family_actual = family_scene.get_mobject_family_members()
+assert len(scene_family_actual) == len(scene_family_expected)
+assert all(
+    actual is expected
+    for actual, expected in zip(scene_family_actual, scene_family_expected)
+)
+assert family_scene.get_mobject_family_members() is not scene_family_actual
+assert family_scene.get_time() == 0.0
+family_scene.wait(1.0 / 30.0)
+assert abs(family_scene.get_time() - (1.0 / 30.0)) < 1e-15
+family_roots_after = family_scene.get_mobjects()
+assert len(family_roots_after) == len(family_roots_before)
+assert all(
+    after is before
+    for after, before in zip(family_roots_after, family_roots_before)
+)
+
 copy_source = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
 )
