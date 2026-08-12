@@ -1217,6 +1217,9 @@ class Mobject(_BridgeMobject):
         self._bake_placement()
         return self.points
 
+    def get_num_points(self):
+        return len(self.get_points())
+
     def reverse_points(self):
         self._reverse_points()
         return self
@@ -1540,9 +1543,6 @@ class VMobject(Mobject):
     def set_points_as_corners(self, points):
         self._set_points_as_corners([_vec3(point) for point in points])
         return self
-
-    def get_num_points(self):
-        return len(self.get_points())
 
     def get_num_curves(self):
         return self.get_num_points() // 2
@@ -2492,7 +2492,15 @@ class CoordinateSystem:
         get_discontinuities=None,
     ):
         x_values = _np.array(
-            [self.x_axis.p2n(point) for point in graph.get_points()]
+            [
+                _axis_point_to_number(
+                    self.x_axis,
+                    self.x_range[0],
+                    self.x_range[1],
+                    point,
+                )
+                for point in graph.get_points()
+            ]
         )
 
         def get_graph_points():

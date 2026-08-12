@@ -1229,9 +1229,158 @@ curve = functions.ParametricCurve(
     t_range=(0.0, 1.0, 0.25),
 )
 assert curve.has_points()
+assert Mobject().get_num_points() == 0
+assert curve.get_num_points() == len(curve.get_points())
+assert curve.get_num_curves() == curve.get_num_points() // 2
 assert np.allclose(curve.get_point_from_function(0.5), [0.5, 0.25, 0.0])
 assert curve.get_t_func() is curve.t_func
 assert curve.get_arc_length() > math.sqrt(2.0)
+
+# CoordinateSystem is the Python callable seam over Atlas's native graph
+# sampler. The concrete axes keep their live coordinate transform, graph
+# metadata/style remain Reference-visible, and the tick step is divided by
+# num_sampled_graph_points_per_tick before native construction.
+coordinate_systems = importlib.import_module("manimlib.mobject.coordinate_systems")
+assert issubclass(manimlib.Axes, coordinate_systems.CoordinateSystem)
+graph_axes = manimlib.Axes(
+    x_range=(0.0, 2.0, 1.0),
+    y_range=(0.0, 4.0, 1.0),
+    width=4.0,
+    height=4.0,
+    num_sampled_graph_points_per_tick=2,
+)
+assert graph_axes.get_axis(0) is graph_axes.x_axis
+assert graph_axes.get_x_axis() is graph_axes.x_axis
+assert graph_axes.get_y_axis() is graph_axes.y_axis
+assert np.allclose(graph_axes.get_origin(), graph_axes.c2p(0.0, 0.0))
+assert np.allclose(graph_axes.p2c(graph_axes.c2p(0.5, 0.25)), [0.5, 0.25])
+sampled_xs = []
+
+
+def sampled_square(x):
+    sampled_xs.append(float(x))
+    return x * x
+
+
+static_graph = graph_axes.get_graph(
+    sampled_square,
+    x_range=(0.0, 2.0, 1.0),
+    color=manimlib.RED,
+    stroke_width=7.0,
+    use_smoothing=False,
+)
+assert isinstance(static_graph, functions.ParametricCurve)
+assert static_graph.underlying_function is sampled_square
+assert static_graph.x_range == (0.0, 2.0, 1.0)
+assert static_graph.t_range == (0.0, 2.0, 0.5)
+assert np.allclose(sampled_xs, [0.0, 0.5, 1.0, 1.5, 2.0])
+assert static_graph.get_stroke_color() == manimlib.RED
+assert math.isclose(static_graph.get_stroke_width(), 7.0)
+assert np.allclose(static_graph.get_start(), graph_axes.c2p(0.0, 0.0))
+assert np.allclose(static_graph.get_end(), graph_axes.c2p(2.0, 4.0))
+assert np.allclose(
+    graph_axes.input_to_graph_point(0.5, static_graph),
+    graph_axes.c2p(0.5, 0.25),
+)
+assert np.allclose(graph_axes.i2gp(1.5, static_graph), graph_axes.c2p(1.5, 2.25))
+
+parametric_graph = graph_axes.get_parametric_curve(
+    lambda t: np.array([t, 2.0 * t]),
+    t_range=(0.0, 1.0, 0.5),
+    use_smoothing=False,
+)
+assert np.allclose(parametric_graph.get_start(), graph_axes.c2p(0.0, 0.0))
+assert np.allclose(parametric_graph.get_end(), graph_axes.c2p(1.0, 2.0))
+
+# The pinned function-less fallback deliberately uses quick curve-count
+# interpolation and the Reference binary search, not true arclength.
+unit_axes = manimlib.Axes(
+    x_range=(0.0, 1.0, 0.25),
+    y_range=(0.0, 1.0, 0.25),
+    width=2.0,
+    height=2.0,
+)
+functionless_graph = functions.ParametricCurve(
+    lambda t: unit_axes.c2p(t, t),
+    t_range=(0.0, 1.0, 0.05),
+    use_smoothing=False,
+)
+fallback_point = unit_axes.input_to_graph_point(0.4, functionless_graph)
+assert math.isclose(
+    unit_axes.point_to_coords(fallback_point)[0],
+    0.4,
+    rel_tol=0.0,
+    abs_tol=2e-4,
+)
+
+# bind=True retains the Reference's vectorized-function contract and routes
+# smoothing into Chisel after each corner refresh. The updater changes the
+# same graph object and remains usable by ordinary graph-point queries.
+bound_scale = [1.0]
+bound_graph = unit_axes.get_graph(
+    lambda x: bound_scale[0] * np.asarray(x),
+    bind=True,
+    use_smoothing=False,
+)
+assert len(bound_graph.updaters) == 2
+bound_before = bound_graph.get_points().copy()
+bound_scale[0] = 0.5
+bound_graph.update(0.0)
+assert not np.allclose(bound_graph.get_points(), bound_before)
+assert np.allclose(
+    unit_axes.i2gp(0.75, bound_graph),
+    unit_axes.c2p(0.75, 0.375),
+)
+
+discontinuous_graph = unit_axes.get_graph(
+    lambda x: np.asarray(x),
+    use_smoothing=False,
+)
+unit_axes.bind_graph_to_func(
+    discontinuous_graph,
+    lambda x: np.asarray(x),
+    jagged=True,
+    get_discontinuities=lambda: [0.5],
+)
+assert len(discontinuous_graph.updaters) == 1
+discontinuous_xs = unit_axes.point_to_coords(discontinuous_graph.get_points())[0]
+assert np.any(np.isclose(discontinuous_xs, 0.5 - 1e-6, atol=1e-12))
+assert np.any(np.isclose(discontinuous_xs, 0.5 + 1e-6, atol=1e-12))
+
+
+def refuse_vectorized_graph_callback(x):
+    if np.ndim(x) != 0:
+        raise LookupError("vectorized graph callback failed")
+    return x
+
+
+try:
+    unit_axes.get_graph(
+        refuse_vectorized_graph_callback,
+        bind=True,
+        use_smoothing=False,
+    )
+except LookupError as error:
+    assert str(error) == "vectorized graph callback failed"
+else:
+    raise AssertionError("a bound graph callback exception was swallowed")
+
+# Family recursion is Python-owned while each smoothing operation is native,
+# so recurse=False cannot accidentally rewrite a child path.
+smooth_root = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+)
+smooth_child = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [0.5, -1.0, 0.0], [1.0, 0.0, 0.0]]
+)
+smooth_root.add(smooth_child)
+smooth_root_before = smooth_root.get_points().copy()
+smooth_child_before = smooth_child.get_points().copy()
+assert smooth_root.make_smooth(approx=True, recurse=False) is smooth_root
+assert not np.allclose(smooth_root.get_points(), smooth_root_before)
+assert np.allclose(smooth_child.get_points(), smooth_child_before)
+assert smooth_child.make_smooth(approx=False) is smooth_child
+assert smooth_child.has_points()
 
 three_dimensions = importlib.import_module("manimlib.mobject.three_dimensions")
 sphere = three_dimensions.Sphere(radius=2.0, clockwise=True, resolution=(5, 3))

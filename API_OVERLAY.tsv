@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	b25b8f4460f0cfd239cc558dd5929f3325acdd081c2da95d029c1a8b51534b86
+ledger_reviewed_digest	6ff9fb16912196fdf1fc4433f2e1dd61c49cd676aeb8ef3c89095f00642ddb03
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -211,9 +211,21 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 # symbol	status	evidence	tests	notes
 [status]
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
+manimlib.mobject.coordinate_systems:CoordinateSystem.bind_graph_to_func	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	refreshes live graph points with vectorized functions, optional discontinuities, and declared smoothing
+manimlib.mobject.coordinate_systems:CoordinateSystem.c2p	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live coordinate transform
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	indexes the concrete axes family without copying or retyping children
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_graph	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	builds the sampled function through native ParametricCurve while preserving range, style, metadata, and optional binding
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_origin	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	maps a dimension-sized zero coordinate through the live axes
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_parametric_curve	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	maps the callable's declared coordinate prefix through native ParametricCurve construction
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_x_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	returns the identity-preserving first concrete axis
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_y_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	returns the identity-preserving second concrete axis
+manimlib.mobject.coordinate_systems:CoordinateSystem.i2gp	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	preserves the input_to_graph_point alias over metadata-backed and function-less graphs
+manimlib.mobject.coordinate_systems:CoordinateSystem.input_to_graph_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	uses retained functions directly and the pinned quick-curve binary-search fallback otherwise
+manimlib.mobject.coordinate_systems:CoordinateSystem.p2c	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live inverse coordinate transform
 manimlib.mobject.mobject:Mobject.add_updater	improved	BN-07	crates/fmn-mobject/tests/dynamics.rs	call=true performs one corrected immediate update
 manimlib.mobject.mobject:Mobject.family_members_with_points	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
 manimlib.mobject.mobject:Mobject.get_family	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
+manimlib.mobject.mobject:Mobject.get_num_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the current live RecordBuffer row count
 manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md	crates/fmn-mobject/tests/render_order.rs	preserves the declared insertion-first render-order contract
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
@@ -232,6 +244,9 @@ manimlib.scene.scene:Scene.get_time	improved	BN-02	crates/fmn-python/tests/bridg
 manimlib.scene.scene:Scene.get_top_level_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	keeps only placements appearing in exactly one current family, including duplicate-placement elimination
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
 manimlib.scene.scene:Scene.remove_all_except	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	resets the complete draw list through the ordinary stable native add operation
+manimlib.mobject.types.vectorized_mobject:VMobject.get_num_curves	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	derives the quadratic-curve count from the live shared-anchor record count
+manimlib.mobject.types.vectorized_mobject:VMobject.make_smooth	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	routes approximate and true anchor modes through Chisel while preserving Python family recursion
+manimlib.mobject.types.vectorized_mobject:VMobject.quick_point_from_proportion	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	preserves the equal-curve-count quadratic approximation separately from true-arclength point_from_proportion
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
 
