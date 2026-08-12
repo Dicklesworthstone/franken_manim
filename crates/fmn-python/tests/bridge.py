@@ -400,6 +400,35 @@ else:
     raise AssertionError("Scene.construct exception did not propagate")
 assert failing_lifecycle_scene.calls == ["setup", "construct", "tear_down"]
 
+# Scene.add_sound is a real native request boundary, not a schema placeholder.
+# The call-site time stays on Choreo's exact rational grid while the relative
+# offset remains separate for Reel's eventual sample-grid conversion (BN-14).
+sound_scene = Scene()
+assert sound_scene.add_sound("click.wav", -0.125, -6.0, -12.0) is None
+assert sound_scene._sound_request_facts() == [
+    ("click.wav", 0, 30, -0.125, -6.0, -12.0)
+]
+sound_scene.wait(0.25)
+assert sound_scene.add_sound("tone.wav", gain=-3.0) is None
+assert sound_scene._sound_request_facts()[1] == (
+    "tone.wav",
+    8,
+    30,
+    0.0,
+    -3.0,
+    None,
+)
+sound_requests_before_refusal = sound_scene._sound_request_facts()
+try:
+    sound_scene.add_sound("bad.wav", gain_to_background=-math.inf)
+except ValueError as error:
+    assert str(error) == (
+        "invalid scene configuration: sound gain_to_background must be finite"
+    )
+else:
+    raise AssertionError("a non-finite sound gain reached the native request list")
+assert sound_scene._sound_request_facts() == sound_requests_before_refusal
+
 interactive_scene = InteractiveScene()
 assert isinstance(interactive_scene.checkpoint_paste(), bytes)
 

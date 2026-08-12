@@ -4299,6 +4299,25 @@ class Scene(_SceneCore):
             )
         self._wait(None if duration is None else float(duration))
 
+    def add_sound(
+        self,
+        sound_file,
+        time_offset=0,
+        gain=None,
+        gain_to_background=None,
+    ):
+        # Native Scene owns both exact call-site time and validation. Keep the
+        # relative float offset separate so Reel performs the only conversion
+        # from the rational frame grid to the output sample grid (BN-14).
+        self._add_sound(
+            sound_file,
+            float(time_offset),
+            None if gain is None else float(gain),
+            None
+            if gain_to_background is None
+            else float(gain_to_background),
+        )
+
     @staticmethod
     def _dispatch_updater_batch(mobjects, dt):
         # fm-zoi rung 1: one native→Python crossing per frame. Iterates the

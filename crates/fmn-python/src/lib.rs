@@ -72,6 +72,7 @@ create_exception!(
 
 type Engine = Rc<EngineState>;
 type ProxyPairs = Vec<(Py<PyAny>, Py<PyAny>)>;
+type SoundRequestFact = (String, i64, u32, f64, Option<f64>, Option<f64>);
 
 /// One scene worker's runtime plus pin releases deferred by proxy destruction.
 ///
@@ -3189,6 +3190,43 @@ impl PyScene {
     fn time(&self) -> f64 {
         crossing::record(CrossingClass::Other);
         self.engine.borrow().stage().time()
+    }
+
+    #[pyo3(signature = (sound_file, time_offset=0.0, gain=None, gain_to_background=None))]
+    fn _add_sound(
+        &self,
+        sound_file: String,
+        time_offset: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::Other);
+        self.engine
+            .borrow_mut()
+            .add_sound(sound_file, time_offset, gain, gain_to_background)
+            .map(|_| ())
+            .map_err(native_error)
+    }
+
+    /// Engine-truth diagnostics for the permanent bridge acceptance suite.
+    /// Each tuple is `(path, frame, fps, offset, gain, background_gain)`.
+    fn _sound_request_facts(&self) -> Vec<SoundRequestFact> {
+        crossing::record(CrossingClass::Other);
+        self.engine
+            .borrow()
+            .sound_requests()
+            .iter()
+            .map(|request| {
+                (
+                    request.sound_file.to_string_lossy().into_owned(),
+                    request.time.frames(),
+                    request.time.fps(),
+                    request.time_offset,
+                    request.gain,
+                    request.gain_to_background,
+                )
+            })
+            .collect()
     }
 
     fn _engine_roots<'py>(slf: &Bound<'py, Self>) -> Vec<Py<PyAny>> {

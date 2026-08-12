@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	d5cd403d271013cbbaaccb64eb155a49caf112abfa9a6e9aa39cc82e5c16084e
+ledger_reviewed_digest	58bafff0f5089d064ec7a221d0bdc54653f6d90317feec58fabbfdab81972981
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -219,7 +219,7 @@ manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_p
 manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
 manimlib.mobject.numbers:DecimalNumber	improved	BN-08	crates/fmn-library/src/numbers.rs#tests	uses native glyph layout and bounded incremental updates
 manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#tests	uses native delimiters and entry layout without TeX
-manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-conformance/tests/sound_pipeline.rs	places audio exactly on the rational sample grid
+manimlib.scene.scene:Scene.add_sound	improved	BN-14	crates/fmn-python/tests/bridge.py	queues the exact rational-time request through the public portal; Reel owns sample-grid placement
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
 
