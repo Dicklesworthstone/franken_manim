@@ -23,9 +23,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use fmn_anim::{
-    AnimError, Animation, FramePacket, ImpureEffect, Purity, RateFunc, RationalFrameClock,
-    RationalTime, SegmentKind, SegmentReport, play_segment_with_boundary, validate_play,
-    wait_segment_with_boundary,
+    AnimError, Animation, FramePacket, ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc,
+    RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind, SegmentReport,
+    complete_play_frame, complete_wait_frame, finish_open_play, finish_open_wait,
+    open_play_with_mode, open_wait, play_segment_with_boundary, prepare_play_frame,
+    prepare_wait_frame, validate_play, wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -604,6 +606,47 @@ pub struct Scene {
     event_error: Option<EventError>,
 }
 
+/// One play whose frame loop is intentionally split around the step-4
+/// host-language updater boundary.
+///
+/// The session owns its animations and Choreo cursor while [`Scene`] keeps
+/// the arena, clock, journal, and sink lifecycle. Front ends call
+/// [`Scene::prepare_stepped_play_frame`], release their Scene borrow to run
+/// callbacks, then call [`Scene::complete_stepped_play_frame`] for the same
+/// frame. Ordinary Rust scenes continue to use [`Scene::play`].
+pub struct SteppedPlay {
+    animations: Vec<Box<dyn Animation>>,
+    open: OpenSegment,
+    sink_error: Option<IntegrationError>,
+}
+
+/// One wait split around the same host-language scene-updater boundary as
+/// [`SteppedPlay`].
+pub struct SteppedWait {
+    open: OpenWait,
+    sink_error: Option<IntegrationError>,
+}
+
+impl fmt::Debug for SteppedWait {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SteppedWait")
+            .field("open", &self.open)
+            .field("has_sink_error", &self.sink_error.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Debug for SteppedPlay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SteppedPlay")
+            .field("animation_count", &self.animations.len())
+            .field("stepped", &self.open.stepped())
+            .field("frames", &self.open.segment().n_frames())
+            .field("has_sink_error", &self.sink_error.is_some())
+            .finish()
+    }
+}
+
 impl fmt::Debug for Scene {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Scene")
@@ -937,6 +980,149 @@ impl Scene {
         Ok(self)
     }
 
+    /// Begin a play whose scene-updater phase is driven through an explicit
+    /// borrow-release window.
+    ///
+    /// This performs the same overrides, validation, preflight, lifecycle
+    /// events, and animation prologue as [`Self::play`], but stops before the
+    /// first frame. An empty animation list remains a warning-only no-op,
+    /// represented as `Ok(None)`.
+    pub fn begin_stepped_play(
+        &mut self,
+        mut animations: Vec<Box<dyn Animation>>,
+        overrides: PlayOverrides,
+        sink: &mut dyn SceneSink,
+    ) -> Result<Option<SteppedPlay>, SceneError> {
+        if animations.is_empty() {
+            return Ok(None);
+        }
+        for animation in &mut animations {
+            animation.update_rate_info(
+                overrides.run_time,
+                overrides.rate_func.clone(),
+                overrides.lag_ratio,
+            );
+        }
+        validate_play(&self.stage, &self.clock, &animations)?;
+        let animation_anchors: Vec<Mob> = animations
+            .iter()
+            .flat_map(|animation| animation.preflight_mobjects())
+            .collect();
+        self.pre_play(SegmentKind::Play, &animation_anchors, sink)?;
+        self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Play))?;
+        let open =
+            open_play_with_mode(&mut self.stage, &self.clock, &mut animations, self.skipping)?;
+        Ok(Some(SteppedPlay {
+            animations,
+            open,
+            sink_error: None,
+        }))
+    }
+
+    /// Advance a stepped play through animation interpolation and rational
+    /// clock step 3, then yield before any scene updater runs.
+    ///
+    /// The caller must release its Scene borrow, execute host-language scene
+    /// updaters using the returned `dt`, and pair a successful boundary with
+    /// exactly one [`Self::complete_stepped_play_frame`] call.
+    pub fn prepare_stepped_play_frame(
+        &mut self,
+        play: &mut SteppedPlay,
+    ) -> Result<Option<SceneUpdaterBoundary>, SceneError> {
+        prepare_play_frame(
+            &mut self.stage,
+            &mut self.clock,
+            &mut play.animations,
+            &mut play.open,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Complete step 4 and capture one frame previously returned by
+    /// [`Self::prepare_stepped_play_frame`].
+    ///
+    /// Sink failures are retained and surfaced after deterministic segment
+    /// completion, matching [`Self::play`].
+    pub fn complete_stepped_play_frame(
+        &mut self,
+        play: &mut SteppedPlay,
+        sink: &mut dyn SceneSink,
+    ) -> Result<(), SceneError> {
+        let capture = !self.skipping;
+        let Scene {
+            stage,
+            clock,
+            rng_root,
+            event_dispatcher,
+            event_inbox,
+            queued_events,
+            recorded_events,
+            next_event_sequence,
+            event_error,
+            ..
+        } = self;
+        let mut boundary = |stage: &mut Stage, time: RationalTime| {
+            drain_event_queue(
+                event_dispatcher,
+                event_inbox,
+                queued_events,
+                recorded_events,
+                next_event_sequence,
+                event_error,
+                stage,
+                time,
+            );
+        };
+        let mut emit = |packet| {
+            if play.sink_error.is_none()
+                && let Err(error) = sink.capture(CaptureReason::Segment, packet)
+            {
+                play.sink_error = Some(error);
+            }
+        };
+        complete_play_frame(
+            stage,
+            clock,
+            rng_root,
+            &mut play.open,
+            capture,
+            &mut boundary,
+            &mut emit,
+        )?;
+        Ok(())
+    }
+
+    /// Finish a stepped play through the ordinary animation cleanup,
+    /// zero-dt updater pass, lifecycle notifications, and play-count update.
+    pub fn finish_stepped_play(
+        &mut self,
+        mut play: SteppedPlay,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SegmentReport, SceneError> {
+        let report = finish_open_play(&mut self.stage, &mut play.animations, play.open)?;
+        self.sync_stage_time();
+        let event_error = self.event_error.take();
+        let finish_result = if play.sink_error.is_none() && event_error.is_none() {
+            self.emit_event(sink, LifecyclePhase::FinishSegment, Some(SegmentKind::Play))
+        } else {
+            Ok(())
+        };
+        let post_result = self.post_play(
+            SegmentKind::Play,
+            sink,
+            play.sink_error.is_none() && event_error.is_none(),
+        );
+        if let Some(error) = play.sink_error {
+            return Err(error.into());
+        }
+        if let Some(error) = event_error {
+            return Err(error.into());
+        }
+        finish_result?;
+        post_result?;
+        Ok(report)
+    }
+
     /// Drive one play through `prepare overrides → pre_play →
     /// begin/progress/finish → post_play`.
     ///
@@ -1034,6 +1220,120 @@ impl Scene {
         finish_result?;
         post_result?;
         Ok(Some(report))
+    }
+
+    /// Begin a declarative wait whose per-frame scene updater phase can run
+    /// after the caller releases its Scene borrow.
+    pub fn begin_stepped_wait(
+        &mut self,
+        duration: Option<f64>,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SteppedWait, SceneError> {
+        let duration = duration.unwrap_or(self.config.default_wait_time);
+        if !duration.is_finite() || duration < 0.0 {
+            return Err(SceneError::InvalidConfig(
+                "wait duration must be finite and non-negative",
+            ));
+        }
+        self.clock.segment(duration).map_err(AnimError::Clock)?;
+        self.pre_play(SegmentKind::Wait, &[], sink)?;
+        self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
+        let open = open_wait(&mut self.stage, &self.clock, duration, self.skipping)?;
+        Ok(SteppedWait {
+            open,
+            sink_error: None,
+        })
+    }
+
+    /// Advance a stepped wait's rational clock, yielding before scene
+    /// updaters exactly like [`Self::prepare_stepped_play_frame`].
+    pub fn prepare_stepped_wait_frame(
+        &mut self,
+        wait: &mut SteppedWait,
+    ) -> Result<Option<SceneUpdaterBoundary>, SceneError> {
+        prepare_wait_frame(&mut self.stage, &mut self.clock, &mut wait.open).map_err(Into::into)
+    }
+
+    /// Complete native scene updaters, input dispatch, and capture for one
+    /// prepared wait frame.
+    pub fn complete_stepped_wait_frame(
+        &mut self,
+        wait: &mut SteppedWait,
+        sink: &mut dyn SceneSink,
+    ) -> Result<(), SceneError> {
+        let capture = !self.skipping;
+        let Scene {
+            stage,
+            clock,
+            rng_root,
+            event_dispatcher,
+            event_inbox,
+            queued_events,
+            recorded_events,
+            next_event_sequence,
+            event_error,
+            ..
+        } = self;
+        let mut boundary = |stage: &mut Stage, time: RationalTime| {
+            drain_event_queue(
+                event_dispatcher,
+                event_inbox,
+                queued_events,
+                recorded_events,
+                next_event_sequence,
+                event_error,
+                stage,
+                time,
+            );
+        };
+        let mut emit = |packet| {
+            if wait.sink_error.is_none()
+                && let Err(error) = sink.capture(CaptureReason::Segment, packet)
+            {
+                wait.sink_error = Some(error);
+            }
+        };
+        complete_wait_frame(
+            stage,
+            clock,
+            rng_root,
+            &mut wait.open,
+            capture,
+            &mut boundary,
+            &mut emit,
+        )?;
+        Ok(())
+    }
+
+    /// Finish a stepped wait through the ordinary lifecycle and play-count
+    /// transition.
+    pub fn finish_stepped_wait(
+        &mut self,
+        wait: SteppedWait,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SegmentReport, SceneError> {
+        let report = finish_open_wait(wait.open)?;
+        self.sync_stage_time();
+        let event_error = self.event_error.take();
+        let finish_result = if wait.sink_error.is_none() && event_error.is_none() {
+            self.emit_event(sink, LifecyclePhase::FinishSegment, Some(SegmentKind::Wait))
+        } else {
+            Ok(())
+        };
+        let post_result = self.post_play(
+            SegmentKind::Wait,
+            sink,
+            wait.sink_error.is_none() && event_error.is_none(),
+        );
+        if let Some(error) = wait.sink_error {
+            return Err(error.into());
+        }
+        if let Some(error) = event_error {
+            return Err(error.into());
+        }
+        finish_result?;
+        post_result?;
+        Ok(report)
     }
 
     /// Wait for `duration`, or the configured default when `None`.

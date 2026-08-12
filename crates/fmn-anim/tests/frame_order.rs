@@ -6,7 +6,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fmn_anim::frame::{FramePacket, play_segment, wait_segment, wait_segment_with_boundary};
+use fmn_anim::frame::{
+    FramePacket, complete_play_frame, finish_open_play, open_play, play_segment,
+    prepare_play_frame, wait_segment, wait_segment_with_boundary,
+};
 use fmn_anim::{
     AnimConfig, AnimError, AnimState, Animation, FrameSample, RationalFrameClock, RationalTime,
     prepare_animation,
@@ -162,6 +165,60 @@ fn scene_updaters_observe_post_interpolation_state() {
             (follower_x - animated_x).abs() < 1e-5,
             "follower must see this frame's interpolation: {follower_x} vs {animated_x}"
         );
+    }
+}
+
+#[test]
+fn stepped_release_window_preserves_step_four_and_capture_order() {
+    let mut stage = Stage::new();
+    let animated = square(&mut stage);
+    let follower = square(&mut stage);
+    stage.add_to_scene(animated).expect("rooted");
+    stage.add_to_scene(follower).expect("rooted");
+    stage
+        .add_updater(
+            follower,
+            move |stage, me| {
+                stage.set_x(me, stage.get_center(animated)[0]);
+            },
+            false,
+        )
+        .expect("registers");
+
+    let mut clock = RationalFrameClock::new(30).expect("fps");
+    let root = rng();
+    let mut animations = vec![shift_animation(&mut stage, animated, 2.0, 1.0)];
+    let mut open = open_play(&mut stage, &clock, &mut animations).expect("opens");
+    let mut packets = Vec::new();
+
+    while let Some(release) =
+        prepare_play_frame(&mut stage, &mut clock, &mut animations, &mut open).expect("prepares")
+    {
+        assert_eq!(stage.time(), release.time.to_f64());
+        // Model a host-language updater. It runs after interpolation and
+        // clock advance, but before the native scene updater and freeze.
+        stage.shift(animated, [0.25, 0.0, 0.0]);
+        complete_play_frame(
+            &mut stage,
+            &clock,
+            &root,
+            &mut open,
+            true,
+            &mut |_, _| {},
+            &mut |packet| packets.push(packet),
+        )
+        .expect("completes");
+    }
+    finish_open_play(&mut stage, &mut animations, open).expect("finishes");
+
+    assert_eq!(packets.len(), 30);
+    for packet in packets {
+        stage.restore(packet.state());
+        let expected = 2.0 * packet.alpha() + 0.25;
+        let animated_x = stage.get_center(animated)[0];
+        let follower_x = stage.get_center(follower)[0];
+        assert!((animated_x - expected).abs() < 1e-5);
+        assert!((follower_x - expected).abs() < 1e-5);
     }
 }
 

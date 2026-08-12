@@ -52,7 +52,7 @@ pub use runtime::{
     HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase, NullSceneSink,
     OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram, SceneRegistration,
     SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError, SceneSink,
-    SceneStateRestore, SoundRequest, ThreeDAddOptions, ThreeDScene,
+    SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait, ThreeDAddOptions, ThreeDScene,
 };
 pub use timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, BundleSegmentKind, DEFAULT_MAX_BUNDLE_BYTES,

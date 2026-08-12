@@ -44,6 +44,7 @@
 //! instead uses one large step and then applies `run_time` a second time — the
 //! defect corrected and documented in BN-10.
 
+use std::fmt;
 use std::rc::Rc;
 
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
@@ -218,11 +219,30 @@ fn begin_animations(
 /// One sample's stepping plan. Playback and skip both step one frame at
 /// `1/fps`; skip differs only by disabling capture (the Reference's
 /// `update_frame` returns before `camera.capture` when skipping).
+#[derive(Debug, Clone, Copy)]
 struct StepPlan {
     sample: FrameSample,
     dt: f64,
     advance: i64,
     capture: bool,
+}
+
+/// The host-language release point inside step 4 of the six-step frame
+/// contract.
+///
+/// Choreo has completed animation updates/interpolation and advanced the
+/// rational clock, but has not yet run native scene updaters or frozen the
+/// frame. A front end may release its Scene borrow, run its own ordered scene
+/// updaters using [`Self::dt`], then resume this exact frame through
+/// [`complete_play_frame`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneUpdaterBoundary {
+    /// The frame-local updater delta (`1 / fps`).
+    pub dt: f64,
+    /// Exact scene time after step 3.
+    pub time: RationalTime,
+    /// The sample that will be frozen after native scene updaters run.
+    pub sample: FrameSample,
 }
 
 /// Steps 1–6 for one sample.
@@ -373,6 +393,7 @@ pub struct OpenSegment {
     report: SegmentReport,
     segment: FrameSegment,
     stepped: i64,
+    prepared: Option<StepPlan>,
 }
 
 impl OpenSegment {
@@ -412,13 +433,271 @@ pub fn open_play(
     clock: &RationalFrameClock,
     animations: &mut [Box<dyn Animation>],
 ) -> Result<OpenSegment, AnimError> {
-    let prologue = play_prologue(stage, clock, animations, false)?;
+    open_play_with_mode(stage, clock, animations, false)
+}
+
+/// Open a play while carrying the caller's effective skip mode into purity
+/// classification and begin-state retention.
+///
+/// # Errors
+/// As [`open_play`].
+pub fn open_play_with_mode(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+    skip: bool,
+) -> Result<OpenSegment, AnimError> {
+    let prologue = play_prologue(stage, clock, animations, skip)?;
     let segment = prologue.segment;
     Ok(OpenSegment {
         report: prologue.report(SegmentKind::Play),
         segment,
         stepped: 0,
+        prepared: None,
     })
+}
+
+/// Prepare the next frame through steps 1–3, stopping immediately before
+/// scene updaters.
+///
+/// This is the borrow-release half of Choreo's stepped front-door API. The
+/// returned boundary must be paired with one [`complete_play_frame`] call
+/// before another frame can be prepared.
+///
+/// # Errors
+/// A composition's deferred failure, a clock failure, or an invalid caller
+/// phase.
+pub fn prepare_play_frame(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+) -> Result<Option<SceneUpdaterBoundary>, AnimError> {
+    if open.prepared.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared frame before preparing another",
+        ));
+    }
+    if let Some(error) = animations
+        .iter()
+        .find_map(|animation| animation.deferred_error())
+    {
+        return Err(error);
+    }
+    if open.stepped >= open.segment.n_frames() {
+        return Ok(None);
+    }
+    let sample = open
+        .segment
+        .sample(open.stepped + 1)
+        .ok_or(AnimError::InvalidFramePhase(
+            "the open segment lost its next frame sample",
+        ))?;
+    let dt = clock.dt().to_f64();
+    for animation in animations.iter_mut() {
+        animation.update_mobjects(stage, dt);
+        let alpha = sample.time.to_f64() / animation.state().config.run_time;
+        animation.interpolate(stage, alpha);
+    }
+    clock.advance_frames(1).map_err(AnimError::Clock)?;
+    // Host-language updaters observe post-increment scene time, exactly as
+    // the Reference's Scene.increment_time → update_mobjects order requires.
+    stage.set_time_from_clock(clock.now().to_f64());
+    open.prepared = Some(StepPlan {
+        sample,
+        dt,
+        advance: 1,
+        capture: true,
+    });
+    Ok(Some(SceneUpdaterBoundary {
+        dt,
+        time: clock.now(),
+        sample,
+    }))
+}
+
+/// Resume one prepared frame: finish step 4, run the serial capture
+/// boundary, then freeze/emit steps 5–6 when `capture` is true.
+///
+/// # Errors
+/// The caller did not first prepare a frame.
+#[allow(clippy::too_many_arguments)]
+pub fn complete_play_frame(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    rng: &RngRoot,
+    open: &mut OpenSegment,
+    capture: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<(), AnimError> {
+    let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
+        "prepare a frame before completing it",
+    ))?;
+    stage.update_at_time(plan.dt, clock.now().to_f64());
+    boundary(stage, clock.now());
+    if capture {
+        emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
+    }
+    open.stepped += 1;
+    Ok(())
+}
+
+/// Finish and consume an open play after all desired frames have completed.
+///
+/// This runs the same animation finish/remover/zero-dt updater epilogue as
+/// [`play_segment`]. A prepared-but-uncompleted frame is refused so a front
+/// end cannot silently capture a different state than it advanced.
+///
+/// # Errors
+/// An invalid caller phase or a composition's deferred failure.
+pub fn finish_open_play(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    open: OpenSegment,
+) -> Result<SegmentReport, AnimError> {
+    if open.prepared.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared frame before finishing the segment",
+        ));
+    }
+    finish_animations(stage, animations);
+    if let Some(error) = animations
+        .iter()
+        .find_map(|animation| animation.deferred_error())
+    {
+        return Err(error);
+    }
+    Ok(open.report)
+}
+
+/// A declarative wait opened for borrow-released scene-updater stepping.
+pub struct OpenWait {
+    report: SegmentReport,
+    segment: FrameSegment,
+    stepped: i64,
+    prepared: Option<StepPlan>,
+}
+
+impl fmt::Debug for OpenWait {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenWait")
+            .field("report", &self.report)
+            .field("stepped", &self.stepped)
+            .field("prepared", &self.prepared.is_some())
+            .finish()
+    }
+}
+
+/// Open a wait after the Reference's initial zero-dt native updater pass.
+///
+/// Host-language front ends run their own zero-dt updater pass immediately
+/// before calling this function, while no Scene borrow is held.
+///
+/// # Errors
+/// [`AnimError::Clock`] for an invalid duration.
+pub fn open_wait(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    duration: f64,
+    skip: bool,
+) -> Result<OpenWait, AnimError> {
+    update_scene_mobjects(stage, 0.0);
+    let segment = clock.segment(duration).map_err(AnimError::Clock)?;
+    let purity = classify_wait(stage, false);
+    let report = SegmentReport {
+        kind: SegmentKind::Wait,
+        purity: purity.clone(),
+        begin_state: (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot())),
+        base_frame: clock.now().frames(),
+        n_frames: segment.n_frames(),
+        run_time: duration,
+    };
+    Ok(OpenWait {
+        report,
+        segment,
+        stepped: 0,
+        prepared: None,
+    })
+}
+
+/// Advance a wait's clock and yield before its scene updater phase.
+///
+/// # Errors
+/// A clock failure or invalid caller phase.
+pub fn prepare_wait_frame(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    open: &mut OpenWait,
+) -> Result<Option<SceneUpdaterBoundary>, AnimError> {
+    if open.prepared.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared wait frame before preparing another",
+        ));
+    }
+    if open.stepped >= open.segment.n_frames() {
+        return Ok(None);
+    }
+    let sample = open
+        .segment
+        .sample(open.stepped + 1)
+        .ok_or(AnimError::InvalidFramePhase(
+            "the open wait lost its next frame sample",
+        ))?;
+    let dt = clock.dt().to_f64();
+    clock.advance_frames(1).map_err(AnimError::Clock)?;
+    stage.set_time_from_clock(clock.now().to_f64());
+    open.prepared = Some(StepPlan {
+        sample,
+        dt,
+        advance: 1,
+        capture: true,
+    });
+    Ok(Some(SceneUpdaterBoundary {
+        dt,
+        time: clock.now(),
+        sample,
+    }))
+}
+
+/// Complete a prepared wait frame through native scene updaters and capture.
+///
+/// # Errors
+/// The caller did not first prepare a wait frame.
+#[allow(clippy::too_many_arguments)]
+pub fn complete_wait_frame(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    rng: &RngRoot,
+    open: &mut OpenWait,
+    capture: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<(), AnimError> {
+    let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
+        "prepare a wait frame before completing it",
+    ))?;
+    stage.update_at_time(plan.dt, clock.now().to_f64());
+    boundary(stage, clock.now());
+    if capture {
+        emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
+    }
+    open.stepped += 1;
+    Ok(())
+}
+
+/// Consume a completed or deliberately shortened open wait.
+///
+/// # Errors
+/// A frame is still prepared but not completed.
+pub fn finish_open_wait(mut open: OpenWait) -> Result<SegmentReport, AnimError> {
+    if open.prepared.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared wait frame before finishing the segment",
+        ));
+    }
+    open.report.n_frames = open.stepped;
+    Ok(open.report)
 }
 
 /// Step an open segment forward until `upto` of its frames have run,
@@ -468,21 +747,11 @@ pub fn advance_play_with_boundary(
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
     let target = upto.clamp(open.stepped, open.segment.n_frames());
-    let dt = clock.dt().to_f64();
-    for sample in open
-        .segment
-        .samples()
-        .skip(usize::try_from(open.stepped).unwrap_or(usize::MAX))
-        .take(usize::try_from(target - open.stepped).unwrap_or(0))
-    {
-        let plan = StepPlan {
-            sample,
-            dt,
-            advance: 1,
-            capture: true,
-        };
-        frame_step(stage, clock, rng, animations, &plan, boundary, emit)?;
-        open.stepped += 1;
+    while open.stepped < target {
+        prepare_play_frame(stage, clock, animations, open)?.ok_or(AnimError::InvalidFramePhase(
+            "the segment ended before the requested target",
+        ))?;
+        complete_play_frame(stage, clock, rng, open, true, boundary, emit)?;
     }
     match animations.iter().find_map(|a| a.deferred_error()) {
         Some(err) => Err(err),
@@ -606,6 +875,7 @@ pub fn play_segment_with_boundary(
             report: report.clone(),
             segment,
             stepped: 0,
+            prepared: None,
         };
         advance_play_with_boundary(
             stage,

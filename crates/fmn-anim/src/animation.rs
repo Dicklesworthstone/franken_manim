@@ -383,6 +383,10 @@ pub enum AnimError {
         /// Frames the schedule actually covers.
         total: i64,
     },
+    /// A resumable frame was prepared twice or completed without its
+    /// matching preparation. This names a front-end driver bug rather than
+    /// allowing the clock and capture stream to drift apart.
+    InvalidFramePhase(&'static str),
 }
 
 impl std::fmt::Display for AnimError {
@@ -427,6 +431,9 @@ impl std::fmt::Display for AnimError {
                     f,
                     "seek to frame {frame} outside the schedule's 1..={total}"
                 )
+            }
+            Self::InvalidFramePhase(message) => {
+                write!(f, "invalid resumable frame phase: {message}")
             }
         }
     }

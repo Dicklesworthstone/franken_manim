@@ -260,20 +260,36 @@ impl FrameSegment {
         }
     }
 
+    /// Return one 1-based sample without walking the preceding frame grid.
+    ///
+    /// Resumable front ends use this to prepare exactly one frame, release
+    /// their arena borrow for a host-language updater phase, then resume the
+    /// same sample for capture. Keeping the lookup O(1) avoids turning that
+    /// release window into quadratic segment work.
+    #[must_use]
+    pub fn sample(&self, frame: i64) -> Option<FrameSample> {
+        if !(1..=self.n_frames).contains(&frame) {
+            return None;
+        }
+        let time = RationalTime {
+            frames: frame,
+            fps: self.fps,
+        };
+        let raw = time.to_f64() / self.run_time;
+        Some(FrameSample {
+            frame,
+            time,
+            alpha: raw.clamp(0.0, 1.0),
+        })
+    }
+
     /// The emitted samples, in frame order. Alphas are nondecreasing, the
     /// first is strictly positive, the last is exactly 1 whenever the grid
     /// end reaches or exceeds `run_time`.
     pub fn samples(&self) -> impl Iterator<Item = FrameSample> + '_ {
-        let fps = self.fps;
-        let run_time = self.run_time;
-        (1..=self.n_frames).map(move |frame| {
-            let time = RationalTime { frames: frame, fps };
-            let raw = time.to_f64() / run_time;
-            FrameSample {
-                frame,
-                time,
-                alpha: raw.clamp(0.0, 1.0),
-            }
+        (1..=self.n_frames).map(|frame| {
+            self.sample(frame)
+                .expect("the iterator only produces in-range frame indices")
         })
     }
 }

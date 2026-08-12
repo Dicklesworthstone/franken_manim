@@ -317,6 +317,114 @@ fn first_play_preflight_includes_unrooted_animation_closure() {
 }
 
 #[test]
+fn stepped_play_releases_before_native_scene_updaters_and_capture() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 10,
+            ..RuntimeConfig::default()
+        },
+        7,
+    )
+    .expect("scene");
+    let animated = scene.add_mobject(point()).expect("animated root");
+    let follower = scene.add_mobject(point()).expect("follower root");
+    scene
+        .stage_mut()
+        .add_updater(
+            follower,
+            move |stage, me| {
+                stage.set_x(me, stage.get_center(animated)[0]);
+            },
+            false,
+        )
+        .expect("native updater");
+    let builder = animated
+        .animate()
+        .set_anim_args(AnimateArgs {
+            run_time: Some(1.0),
+            rate_func: Some(fmn_core::rate::linear),
+            ..AnimateArgs::default()
+        })
+        .and_then(|builder| builder.shift([2.0, 0.0, 0.0]))
+        .expect("records");
+    let animation = prepare_animation(builder, scene.stage_mut()).expect("prepares");
+    let mut sink = PacketSink::default();
+    let mut play = scene
+        .begin_stepped_play(vec![animation], PlayOverrides::default(), &mut sink)
+        .expect("begins")
+        .expect("nonempty play");
+
+    while let Some(boundary) = scene
+        .prepare_stepped_play_frame(&mut play)
+        .expect("prepares frame")
+    {
+        assert_eq!(scene.time(), boundary.time);
+        // This mutation stands in for Python work performed while the
+        // BridgeScene RefCell borrow is released.
+        scene.stage_mut().shift(animated, [0.25, 0.0, 0.0]);
+        scene
+            .complete_stepped_play_frame(&mut play, &mut sink)
+            .expect("completes frame");
+    }
+    scene
+        .finish_stepped_play(play, &mut sink)
+        .expect("finishes play");
+
+    let packet = sink.packet.expect("last frame captured");
+    let captured = packet.materialize_stage();
+    assert!((captured.get_center(animated)[0] - 2.25).abs() < 1e-5);
+    assert!((captured.get_center(follower)[0] - 2.25).abs() < 1e-5);
+    assert_eq!(scene.play_count(), 1);
+    assert!((scene.stage().get_center(animated)[0] - 2.0).abs() < 1e-5);
+    assert!((scene.stage().get_center(follower)[0] - 2.0).abs() < 1e-5);
+}
+
+#[test]
+fn stepped_wait_uses_the_same_scene_updater_release_window() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 10,
+            ..RuntimeConfig::default()
+        },
+        7,
+    )
+    .expect("scene");
+    let source = scene.add_mobject(point()).expect("source root");
+    let follower = scene.add_mobject(point()).expect("follower root");
+    scene
+        .stage_mut()
+        .add_updater(
+            follower,
+            move |stage, me| {
+                stage.set_x(me, stage.get_center(source)[0]);
+            },
+            false,
+        )
+        .expect("native updater");
+    let mut sink = PacketSink::default();
+    let mut wait = scene
+        .begin_stepped_wait(Some(1.0), &mut sink)
+        .expect("begins");
+    while scene
+        .prepare_stepped_wait_frame(&mut wait)
+        .expect("prepares")
+        .is_some()
+    {
+        scene.stage_mut().shift(source, [0.1, 0.0, 0.0]);
+        scene
+            .complete_stepped_wait_frame(&mut wait, &mut sink)
+            .expect("completes");
+    }
+    let report = scene
+        .finish_stepped_wait(wait, &mut sink)
+        .expect("finishes");
+    assert_eq!(report.n_frames, 10);
+    let captured = sink.packet.expect("last frame").materialize_stage();
+    assert!((captured.get_center(source)[0] - 1.0).abs() < 1e-5);
+    assert!((captured.get_center(follower)[0] - 1.0).abs() < 1e-5);
+}
+
+#[test]
 fn immutable_packets_materialize_with_live_handles_and_cow_isolation() {
     let mut scene = Scene::default();
     let mob = scene.add_mobject(point()).expect("root");
