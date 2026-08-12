@@ -38,8 +38,8 @@ use fmn_mobject::{
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::create_exception;
 use pyo3::exceptions::{
-    PyBufferError, PyImportError, PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError,
-    PyValueError,
+    PyBufferError, PyImportError, PyKeyError, PyNotImplementedError, PyOverflowError,
+    PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -1162,6 +1162,13 @@ impl BridgeMobject {
         with_buffer(slf, |buffer| buffer.resize(len))?.map_err(record_error_to_py)
     }
 
+    /// Reference `resize_preserving_order`, exposed only to the Python skin's
+    /// semantic methods (not as a public manim API addition).
+    fn _resize_preserving_order(slf: &Bound<'_, Self>, len: usize) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_buffer(slf, |buffer| buffer.resize_preserving_order(len))?.map_err(record_error_to_py)
+    }
+
     fn n_records(slf: &Bound<'_, Self>) -> PyResult<usize> {
         crossing::record(CrossingClass::Other);
         with_buffer_ref(slf, RecordBuffer::len)
@@ -1895,6 +1902,108 @@ impl BridgeMobject {
         install_native_tree(slf, factory, curve.map_err(native_error)?)
     }
 
+    /// Build the native VectorField geometry from already-evaluated portal
+    /// samples. Python owns callback dispatch so it can release the Scene
+    /// borrow; Atlas/Lumen still own arrow geometry, tanh length mapping,
+    /// joint policy, and per-record stroke columns.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_vector_field_samples<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        sample_points: Vec<[f64; 3]>,
+        out_vects: Vec<[f64; 3]>,
+        output_norms: Vec<f64>,
+        max_displayed_vect_len: f64,
+        stroke_width: f64,
+        stroke_opacity: f64,
+        tip_width_ratio: f64,
+        tip_len_to_width: f64,
+        flat_stroke: bool,
+        color: Option<&Bound<'py, PyAny>>,
+        magnitude_range: Option<(f64, f64)>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let n = sample_points.len();
+        if n < 2 {
+            return Err(PyValueError::new_err(
+                "VectorField needs at least two sample points",
+            ));
+        }
+        if out_vects.len() != n || output_norms.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "VectorField callback returned {} vectors and {} norms for {n} samples",
+                out_vects.len(),
+                output_norms.len()
+            )));
+        }
+        if !max_displayed_vect_len.is_finite() || max_displayed_vect_len <= 0.0 {
+            return Err(PyValueError::new_err(
+                "VectorField max displayed length must be positive and finite",
+            ));
+        }
+        if [
+            stroke_width,
+            stroke_opacity,
+            tip_width_ratio,
+            tip_len_to_width,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "VectorField style controls must be finite",
+            ));
+        }
+
+        let mut style = fmn_library::VectorFieldStyle {
+            stroke_width,
+            stroke_opacity,
+            tip_width_ratio,
+            tip_len_to_width,
+            flat_stroke,
+            magnitude_range: Some(
+                magnitude_range
+                    .unwrap_or_else(|| (0.0, output_norms.iter().copied().fold(0.0, f64::max))),
+            ),
+            ..fmn_library::VectorFieldStyle::default()
+        };
+        if let Some(color) = color {
+            style.color = Some(srgb_from_py(color)?);
+            style.color_map = None;
+        }
+        let geometry = fmn_library::fields::vector_field_geometry(
+            &style,
+            &sample_points,
+            &out_vects,
+            &output_norms,
+            max_displayed_vect_len,
+        );
+        let stroke_color = style
+            .color
+            .unwrap_or(fmn_core::constants::DEFAULT_MOBJECT_COLOR);
+        let mut visual_style = fmn_library::Style::default().stroke(
+            stroke_color,
+            style.stroke_width,
+            style.stroke_opacity,
+        );
+        visual_style.fill_opacity = 0.0;
+        let vmob = fmn_library::VMobject::from_points(geometry.points)
+            .with_style(visual_style)
+            .with_joint_type(fmn_mobject::JointType::NoJoint)
+            .with_flat_stroke(style.flat_stroke)
+            .with_stroke_profile(geometry.stroke_widths);
+        let mut tree = fmn_mobject::Mobject::from(vmob);
+        if !geometry.stroke_rgba.is_empty() {
+            #[allow(clippy::cast_possible_truncation)]
+            let rgba: Vec<f32> = geometry
+                .stroke_rgba
+                .iter()
+                .flat_map(|row| row.iter().map(|value| *value as f32))
+                .collect();
+            tree.buffer.write_range("stroke_rgba", 0, &rgba);
+        }
+        install_native_tree(slf, factory, tree)
+    }
+
     /// `SurfaceMesh(uv_surface, ...)` — the rebuild oracle: the source
     /// surface reconstructs from its stored solid params and the native
     /// wireframe samples it; the bootstrap re-seats the mesh onto the
@@ -2035,6 +2144,39 @@ impl BridgeMobject {
             .build()
             .map_err(native_error)?;
         install_native_tree(slf, factory, built)
+    }
+
+    /// Rebuild a scene-bound filled Arrow at new endpoints without changing
+    /// its arena identity. Atlas owns the outline/tip proportions; Marionette
+    /// writes the new world-space run and resets any old affine placement.
+    #[allow(clippy::too_many_arguments)]
+    fn _rebuild_arrow(
+        slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+        buff: f64,
+        path_arc: f64,
+        thickness: f64,
+        tip_width_ratio: f64,
+        tip_angle: f64,
+    ) -> PyResult<()> {
+        let built = fmn_library::line::Arrow::new(start, end)
+            .buff(buff)
+            .path_arc(path_arc)
+            .thickness(thickness)
+            .tip_width_ratio(tip_width_ratio)
+            .tip_angle(tip_angle)
+            .build()
+            .map_err(native_error)?;
+        let points = built.points().to_vec();
+        let shape = built.shape();
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_points(mob, &points)?;
+            stage.set_shape(mob, shape);
+            Ok(())
+        })?
+        .map_err(stage_error)
     }
 
     /// `NumberLine(x_range, **config)` over the coords shelf.
@@ -3035,16 +3177,30 @@ impl PyScene {
     /// carry nested specs under `params["members"]` and the construction
     /// lag under `params["lag_ratio"]`; the native module owns the group
     /// timing derivation (`build_timings`, the Reference's rule).
-    #[pyo3(signature = (specs, camera, run_time, rate_func, lag_ratio))]
+    #[pyo3(signature = (specs, callbacks, camera, run_time, rate_func, lag_ratio))]
     fn _play_animations(
         slf: &Bound<'_, Self>,
         specs: Vec<Bound<'_, PyAny>>,
+        callbacks: Vec<Option<Py<PyAny>>>,
         camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
         run_time: Option<f64>,
         rate_func: Option<Bound<'_, PyAny>>,
         lag_ratio: Option<f64>,
     ) -> PyResult<Vec<f64>> {
         let engine = Rc::clone(&slf.borrow().engine);
+        if callbacks.len() != specs.len() {
+            return Err(PyValueError::new_err(
+                "animation callback table must align one-for-one with specs",
+            ));
+        }
+        let callback_count = callbacks.iter().flatten().count();
+        if callback_count != 0 && callback_count != callbacks.len() {
+            return Err(PyNotImplementedError::new_err(
+                "mixing Python-authored and native mobject animations awaits \
+                 the per-animation finish release; camera-frame animation may \
+                 still accompany a Python-authored play",
+            ));
+        }
 
         // Resolve every Python-side value before the engine borrow.
         let play_rate = rate_func.as_ref().map(rate_func_from_py).transpose()?;
@@ -3054,6 +3210,10 @@ impl PyScene {
         }
 
         let release_for_python_updaters = has_python_updaters(slf)?;
+        for callback in callbacks.iter().flatten() {
+            crossing::record(CrossingClass::MethodDispatch);
+            callback.bind(slf.py()).call_method0("begin")?;
+        }
         let (animations, start_time) = {
             let mut scene = engine.borrow_mut();
             let start_time = scene.stage().time();
@@ -3111,7 +3271,7 @@ impl PyScene {
                 .wait(Some(effective_run_time), &mut sink)
                 .map(|_| ())
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        } else if release_for_python_updaters {
+        } else if release_for_python_updaters || callback_count != 0 {
             // Choreo stops after interpolation + rational clock advance. The
             // Scene RefCell borrow is then genuinely gone while Python
             // updaters run; completing the same frame performs native scene
@@ -3121,23 +3281,56 @@ impl PyScene {
                 .begin_stepped_play(animations, overrides, &mut sink)
                 .map_err(&map_play_error)?
                 .ok_or_else(|| PyRuntimeError::new_err("a nonempty play did not open"))?;
-            loop {
-                let release = engine
-                    .borrow_mut()
-                    .prepare_stepped_play_frame(&mut play)
-                    .map_err(&map_play_error)?;
-                let Some(release) = release else {
-                    break;
-                };
-                let python_ns = run_python_updaters(slf, release.dt)?;
-                let native_start = Instant::now();
-                engine
-                    .borrow_mut()
-                    .complete_stepped_play_frame(&mut play, &mut sink)
-                    .map_err(&map_play_error)?;
-                let native_ns =
-                    u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                crossing::record_phase(python_ns, native_ns);
+            let drive_result: PyResult<()> = (|| {
+                loop {
+                    if callback_count != 0 {
+                        loop {
+                            let animation = engine
+                                .borrow_mut()
+                                .prepare_stepped_play_animation(&mut play)
+                                .map_err(&map_play_error)?;
+                            let Some(animation) = animation else {
+                                break;
+                            };
+                            let callback = callbacks[animation.animation_index]
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    PyRuntimeError::new_err(
+                                        "a Python animation slot lost its callback",
+                                    )
+                                })?;
+                            crossing::record(CrossingClass::MethodDispatch);
+                            callback
+                                .bind(slf.py())
+                                .call_method1("interpolate", (animation.alpha,))?;
+                        }
+                    }
+                    let release = engine
+                        .borrow_mut()
+                        .prepare_stepped_play_frame(&mut play)
+                        .map_err(&map_play_error)?;
+                    let Some(release) = release else {
+                        break;
+                    };
+                    let python_ns = run_python_updaters(slf, release.dt)?;
+                    let native_start = Instant::now();
+                    engine
+                        .borrow_mut()
+                        .complete_stepped_play_frame(&mut play, &mut sink)
+                        .map_err(&map_play_error)?;
+                    let native_ns =
+                        u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    crossing::record_phase(python_ns, native_ns);
+                }
+                for callback in callbacks.iter().flatten() {
+                    crossing::record(CrossingClass::MethodDispatch);
+                    callback.bind(slf.py()).call_method0("finish")?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = drive_result {
+                engine.borrow_mut().abort_stepped_play(play, &mut sink);
+                return Err(error);
             }
             engine
                 .borrow_mut()
@@ -3269,22 +3462,30 @@ impl PyScene {
             .borrow_mut()
             .begin_stepped_wait(duration, &mut sink)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        loop {
-            let release = engine
-                .borrow_mut()
-                .prepare_stepped_wait_frame(&mut wait)
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-            let Some(release) = release else {
-                break;
-            };
-            let python_ns = run_python_updaters(slf, release.dt)?;
-            let native_start = Instant::now();
-            engine
-                .borrow_mut()
-                .complete_stepped_wait_frame(&mut wait, &mut sink)
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-            let native_ns = u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            crossing::record_phase(python_ns, native_ns);
+        let drive_result: PyResult<()> = (|| {
+            loop {
+                let release = engine
+                    .borrow_mut()
+                    .prepare_stepped_wait_frame(&mut wait)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let Some(release) = release else {
+                    break;
+                };
+                let python_ns = run_python_updaters(slf, release.dt)?;
+                let native_start = Instant::now();
+                engine
+                    .borrow_mut()
+                    .complete_stepped_wait_frame(&mut wait, &mut sink)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let native_ns =
+                    u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                crossing::record_phase(python_ns, native_ns);
+            }
+            Ok(())
+        })();
+        if let Err(error) = drive_result {
+            engine.borrow_mut().abort_stepped_wait(wait, &mut sink);
+            return Err(error);
         }
         engine
             .borrow_mut()
@@ -3309,6 +3510,48 @@ fn anim_error(error: fmn_anim::AnimError) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
 }
 
+/// Timing/lifecycle slot for a top-level Python-authored Animation.
+///
+/// Its interpolation is intentionally empty: Choreo yields immediately after
+/// this slot in step 2, the bridge releases the Scene borrow, and invokes the
+/// Python animation at the slot's exact raw alpha before advancing to the next
+/// animation. The slot still owns native animating/remover semantics and the
+/// segment's authoritative timing.
+struct PythonAnimationSlot {
+    state: fmn_anim::AnimState,
+}
+
+impl PythonAnimationSlot {
+    fn new(mobject: Mob, remover: bool) -> Self {
+        let mut config = fmn_anim::AnimConfig {
+            name: "PythonAnimationSlot".to_owned(),
+            ..fmn_anim::AnimConfig::default()
+        };
+        config.remover = remover;
+        Self {
+            state: fmn_anim::AnimState::new(mobject, config),
+        }
+    }
+}
+
+impl fmn_anim::Animation for PythonAnimationSlot {
+    fn state(&self) -> &fmn_anim::AnimState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        &mut self.state
+    }
+
+    fn interpolate_submobject(
+        &mut self,
+        _stage: &mut fmn_mobject::Stage,
+        _mobs: &[Mob],
+        _sub_alpha: f64,
+    ) {
+    }
+}
+
 /// One parsed play spec: a leaf animation or a composition carrying
 /// nested members (fm-d3gt, the explicit-animation seam).
 struct AnimSpec {
@@ -3331,6 +3574,9 @@ struct AnimSpec {
     point: [f64; 3],
     time_span: Option<(f64, f64)>,
     group_lag: f64,
+    remover: bool,
+    surface_resolution: (usize, usize),
+    surface_axis: usize,
     members: Vec<AnimSpec>,
 }
 
@@ -3365,6 +3611,24 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
     let get1 = |name: &str, default: f64| -> PyResult<f64> {
         match params.get_item(name)? {
             Some(value) => Ok(value.extract()?),
+            None => Ok(default),
+        }
+    };
+    let get_bool = |name: &str, default: bool| -> PyResult<bool> {
+        match params.get_item(name)? {
+            Some(value) => value.extract(),
+            None => Ok(default),
+        }
+    };
+    let get_usize = |name: &str, default: usize| -> PyResult<usize> {
+        match params.get_item(name)? {
+            Some(value) => value.extract(),
+            None => Ok(default),
+        }
+    };
+    let get_usize_pair = |name: &str, default: (usize, usize)| -> PyResult<(usize, usize)> {
+        match params.get_item(name)? {
+            Some(value) => value.extract(),
             None => Ok(default),
         }
     };
@@ -3407,6 +3671,9 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .map(|value| value.extract())
             .transpose()?,
         group_lag: get1("lag_ratio", 0.0)?,
+        remover: get_bool("remover", false)?,
+        surface_resolution: get_usize_pair("surface_resolution", (0, 0))?,
+        surface_axis: get_usize("surface_axis", 1)?,
         members,
     })
 }
@@ -3429,6 +3696,7 @@ fn build_native_animation(
         "animation_group" | "lagged_start" | "succession"
     );
     let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
+        "python_callback" => Box::new(PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover)),
         "animation_group" | "lagged_start" => {
             let mut members = Vec::with_capacity(spec.members.len());
             for member in spec.members {
@@ -3487,7 +3755,17 @@ fn build_native_animation(
         "v_fade_in" => Box::new(fmn_anim::v_fade_in(need_mob(spec.mob)?)),
         "v_fade_out" => Box::new(fmn_anim::v_fade_out(need_mob(spec.mob)?)),
         "show_creation" => Box::new(fmn_anim::show_creation(need_mob(spec.mob)?)),
+        "show_surface_creation" => Box::new(fmn_anim::show_surface_creation(
+            need_mob(spec.mob)?,
+            spec.surface_resolution,
+            spec.surface_axis,
+        )),
         "uncreate" => Box::new(fmn_anim::uncreate(need_mob(spec.mob)?)),
+        "uncreate_surface" => Box::new(fmn_anim::uncreate_surface(
+            need_mob(spec.mob)?,
+            spec.surface_resolution,
+            spec.surface_axis,
+        )),
         "write" => {
             let mut write = fmn_anim::write(stage, need_mob(spec.mob)?);
             if let Some(rgb) = spec.stroke_color {

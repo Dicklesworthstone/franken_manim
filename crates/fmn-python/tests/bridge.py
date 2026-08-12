@@ -415,6 +415,154 @@ assert len(release_observations) == 2
 assert np.allclose([row[0] for row in release_observations], [0.0, 1.0 / 30.0])
 assert np.allclose([row[1] for row in release_observations], [1.0 / 30.0, 2.0 / 30.0])
 
+update_animation = importlib.import_module("manimlib.animation.update")
+callback_scene = Scene()
+callback_mover = geometry.Rectangle(width=1.0, height=1.0)
+callback_alphas = []
+callback_animation = update_animation.UpdateFromAlphaFunc(
+    callback_mover,
+    lambda mob, alpha: (
+        callback_alphas.append(alpha),
+        mob.set_x(alpha),
+    )[-1],
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+callback_scene.play(callback_animation)
+assert np.allclose(callback_alphas, [0.0, 1.0, 1.0])
+assert np.allclose(callback_mover.get_x(), 1.0)
+
+abort_scene = Scene()
+abort_mover = geometry.Rectangle(width=1.0, height=1.0)
+abort_scene.add(abort_mover)
+
+
+def explode_after_begin(mob, alpha):
+    if alpha > 0.0:
+        raise LookupError("callback release failure")
+    mob.set_x(alpha)
+
+
+try:
+    abort_scene.play(
+        update_animation.UpdateFromAlphaFunc(
+            abort_mover,
+            explode_after_begin,
+            run_time=1.0 / 30.0,
+            rate_func=manimlib.linear,
+        )
+    )
+except LookupError as error:
+    assert str(error) == "callback release failure"
+else:
+    raise AssertionError("a Python animation callback exception was swallowed")
+abort_scene.play(
+    abort_mover.animate.shift(manimlib.RIGHT),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(abort_mover.get_x(), 1.0)
+
+# Reference Scene defaults random_seed to zero and resets both RNG modules
+# used by source-unedited scene files.
+Scene()
+python_random = [manimlib.random.random() for _ in range(3)]
+numpy_random = np.random.random(3)
+Scene()
+assert python_random == [manimlib.random.random() for _ in range(3)]
+assert np.allclose(numpy_random, np.random.random(3))
+
+# Custom callbacks can use the RecordBuffer-backed point-cloud and point
+# matching surface without falling back to schema placeholders.
+dot_cloud = manimlib.GlowDot([1.0, 2.0, 0.0], opacity=0.75)
+opacities = dot_cloud.get_opacities()
+assert np.allclose(opacities, [0.75])
+dot_cloud.add_point([3.0, 4.0, 0.0], opacity=0.25, color=manimlib.BLUE)
+assert np.allclose(dot_cloud.get_points(), [[1, 2, 0], [3, 4, 0]])
+assert np.allclose(dot_cloud.get_opacities(), [0.75, 0.25])
+assert np.allclose(dot_cloud.data["radius"], [0.2, 0.2])
+assert np.allclose(dot_cloud.data["glow_factor"], [2.0, 2.0])
+dot_cloud.set_opacity([0.5, 0.125])
+assert np.allclose(dot_cloud.get_opacities(), [0.5, 0.125])
+
+match_source = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [2.0, 1.0, 0.0], [3.0, 0.0, 0.0]]
+).shift([4.0, 0.0, 0.0])
+match_target = VMobject().set_points_as_corners(
+    [[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+)
+match_target.match_points(match_source)
+assert match_target.n_records() == match_source.n_records()
+assert np.allclose(match_target.get_points(), match_source.get_points())
+
+vector_field = importlib.import_module("manimlib.mobject.vector_field")
+field_axes = manimlib.Axes(
+    x_range=(0.0, 2.0, 1.0),
+    y_range=(-1.0, 1.0, 1.0),
+    width=2.0,
+    height=2.0,
+)
+field = vector_field.TimeVaryingVectorField(
+    lambda coords, time: np.column_stack(
+        [np.full(len(coords), time), np.zeros(len(coords)), np.zeros(len(coords))]
+    ),
+    field_axes,
+    sample_coords=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+    max_vect_len=0.5,
+    color=manimlib.BLUE,
+)
+field_before = field.get_points().copy()
+field_scene = Scene()
+field_scene.add(field_axes, field)
+field_scene.wait(1.0 / 30.0)
+assert math.isclose(field.time, 1.0 / 30.0, rel_tol=0.0, abs_tol=1e-12)
+assert not np.allclose(field.get_points(), field_before)
+
+# Fixed-frame state is the renderer-consumed typed uniform, including the
+# Reference's recursive family default and non-recursive override.
+fixed_child = geometry.Square()
+fixed_group = manimlib.Group(fixed_child)
+assert fixed_group.is_fixed_in_frame() is False
+assert fixed_child.is_fixed_in_frame() is False
+assert fixed_group.fix_in_frame() is fixed_group
+assert fixed_group.uniforms["is_fixed_in_frame"] == 1.0
+assert fixed_child.uniforms["is_fixed_in_frame"] == 1.0
+fixed_group.unfix_from_frame(recurse=False)
+assert fixed_group.is_fixed_in_frame() is False
+assert fixed_child.is_fixed_in_frame() is True
+fixed_group.unfix_from_frame()
+assert fixed_child.is_fixed_in_frame() is False
+
+# Sampled surfaces select Choreo's UV-grid partial mechanism rather than the
+# VMobject-only quadratic operator, and finish on the original full grid.
+surface = manimlib.ParametricSurface(
+    lambda u, v: np.array([u, v, u + v]),
+    resolution=(3, 3),
+)
+surface_points = surface.get_points().copy()
+surface_scene = Scene()
+surface_scene.play(
+    manimlib.ShowCreation(surface),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(surface.get_points(), surface_points)
+
+# Filled Arrow endpoint updates rebuild Atlas's length-dependent tip geometry
+# in place, so scene-bound updater callbacks preserve arena identity.
+bound_arrow = manimlib.Vector(manimlib.RIGHT)
+arrow_scene = Scene()
+arrow_scene.add(bound_arrow)
+arrow_identity = id(bound_arrow)
+bound_arrow.put_start_and_end_on([1.0, 2.0, 0.0], [4.0, 2.0, 0.0])
+assert id(bound_arrow) == arrow_identity
+bound_arrow_points = bound_arrow.get_points()
+assert np.allclose(
+    0.5 * (bound_arrow_points[0] + bound_arrow_points[-3]),
+    [1.0, 2.0, 0.0],
+)
+assert np.min(np.linalg.norm(bound_arrow_points - [4.0, 2.0, 0.0], axis=1)) < 1e-6
+
 # Existing Chisel/Scribe semantics are live through the portal, rather than
 # being shadowed by schema placeholders. Arc length remains true for either
 # curvature sign (BN-03), and Tex selectors consume the native UTF-8 span map.

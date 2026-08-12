@@ -316,9 +316,10 @@ mod tests {
                 }
             }
 
-            // Determinism: the first completed scene, run twice
-            // in-process, must reproduce identical structural facts.
-            if let Some((scene, first_facts)) = completed.first() {
+            // Determinism: every completed source-unedited scene must
+            // reproduce identical structural facts in-process. Checking only
+            // the first row hid RNG drift in later scenes such as MaxProcess.
+            for (scene, first_facts) in &completed {
                 let module_path = locked_seed()
                     .into_iter()
                     .find(|(name, _)| name == scene)

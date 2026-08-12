@@ -863,6 +863,22 @@ class Mobject(_BridgeMobject):
             mob.uniforms["depth_test"] = False
         return self
 
+    def fix_in_frame(self, recurse=True):
+        # Reference Mobject.fix_in_frame is exactly this typed-uniform write.
+        # Keep it on the engine-owned Uniforms record so the same value flows
+        # into Lumen's camera projection and snapshot/provenance paths.
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["is_fixed_in_frame"] = 1.0
+        return self
+
+    def unfix_from_frame(self, recurse=True):
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["is_fixed_in_frame"] = 0.0
+        return self
+
+    def is_fixed_in_frame(self):
+        return bool(self.uniforms["is_fixed_in_frame"])
+
     def get_continuous_bounding_box_point(self, direction):
         # Reference Mobject.get_continuous_bounding_box_point verbatim.
         dl, center, ur = self._bbox_rows()
@@ -1085,6 +1101,20 @@ class Mobject(_BridgeMobject):
     def has_points(self):
         return self._has_points()
 
+    def match_points(self, mobject):
+        # Reference mobject.py:311. Placements are a FrankenManim-owned
+        # representation detail, so bake both endpoints before copying the
+        # world-space pointlike columns. RecordBuffer owns the exact
+        # order-preserving resize primitive used by the Reference.
+        self._bake_placement()
+        mobject._bake_placement()
+        self._resize_preserving_order(mobject.n_records())
+        source = mobject.data
+        target = self.data
+        for key in self.pointlike_data_keys:
+            target[key][:] = source[key]
+        return self
+
     # Color surface (fm-d3gt): Reference bodies over the live record views.
     # Style written to a point-free mobject lands in `_data_defaults` (the
     # Reference's ones-row), so it round-trips through the getters before
@@ -1144,6 +1174,9 @@ class Mobject(_BridgeMobject):
 
     def get_opacity(self):
         return float(self._style_data()["rgba"][0, 3])
+
+    def get_opacities(self):
+        return self._style_data()["rgba"][:, 3]
 
     def get_shading(self):
         return _np.array(self.uniforms["shading"])
@@ -2020,19 +2053,24 @@ class Arrow(Line):
         # An Arrow is ONE filled path whose tip proportions are functions
         # of its length; the generic family affine would stretch the tip.
         # Rebuild natively at the new endpoints instead, carrying style.
-        if self._is_bound():
-            raise NotImplementedError(
-                "Arrow.put_start_and_end_on on a scene-bound arrow awaits "
-                "the live-state builder cores (fm-p107)"
-            )
+        # Reference Arrow.put_start_and_end_on explicitly rebuilds with
+        # `buff=0`, independent of the constructor's initial trim.
         style = self.get_style()
-        specs = self._build_arrow(
-            _native_shell_factory,
-            _vec3(start),
-            _vec3(end),
-            *self._arrow_params,
-        )
-        _hang_native_children(self, specs)
+        rebuild_params = (0.0, *self._arrow_params[1:])
+        if self._is_bound():
+            self._rebuild_arrow(
+                _vec3(start),
+                _vec3(end),
+                *rebuild_params,
+            )
+        else:
+            specs = self._build_arrow(
+                _native_shell_factory,
+                _vec3(start),
+                _vec3(end),
+                *rebuild_params,
+            )
+            _hang_native_children(self, specs)
         self.set_style(**style, recurse=False)
         self.start = _np.array(_vec3(start))
         self.end = _np.array(_vec3(end))
@@ -2942,8 +2980,40 @@ class Integer(DecimalNumber):
 
 
 class PMobject(Mobject):
-    """The point-cloud base (Reference MRO anchor). The remaining PMobject
-    surface stays precise schema placeholders."""
+    """The point-cloud base over Marionette's live RecordBuffer."""
+
+    def add_points(
+        self,
+        points,
+        rgbas=None,
+        color=None,
+        opacity=None,
+    ):
+        points = _np.asarray(points, dtype=float).reshape((-1, 3))
+        if len(points) == 0:
+            return self
+        old_len = self.n_records()
+        self.resize(old_len + len(points))
+        data = self.data
+        # Reference `append_points`: every non-point lane on appended rows
+        # inherits the former last row (or the resized zero row for an empty
+        # cloud) before the new positions and any explicit colors land.
+        data[old_len:] = data[old_len - 1]
+        data["point"][old_len:] = points
+        if color is not None:
+            if opacity is None:
+                opacity = float(data["rgba"][old_len - 1, 3]) if old_len else 1.0
+            rgbas = _np.repeat(
+                [_color_to_rgba(color, opacity)], len(points), axis=0
+            )
+        if rgbas is not None:
+            rgbas = _np.asarray(rgbas, dtype=float).reshape((-1, 4))
+            data["rgba"][-len(rgbas):] = rgbas
+        return self
+
+    def add_point(self, point, rgba=None, color=None, opacity=None):
+        rgbas = None if rgba is None else [rgba]
+        return self.add_points([point], rgbas, color, opacity)
 
 
 class DotCloud(PMobject):
@@ -3015,6 +3085,189 @@ class GlowDot(GlowDots):
         super().__init__([center], **kwargs)
 
 
+def _vector_field_sample_coords(coordinate_system, density):
+    density = float(density)
+    if not _math.isfinite(density) or density <= 0:
+        raise ValueError("VectorField density must be positive and finite")
+    axes = []
+    for start, stop, step in coordinate_system.get_all_ranges():
+        sample_step = float(step) / density
+        axes.append(_np.arange(float(start), float(stop) + sample_step, sample_step))
+    mesh = _np.meshgrid(*axes, indexing="ij")
+    coords = _np.stack(mesh, axis=-1).reshape((-1, len(axes)))
+    if coords.shape[1] < 3:
+        coords = _np.pad(coords, ((0, 0), (0, 3 - coords.shape[1])))
+    return coords[:, :3]
+
+
+def _vector_field_c2p_rows(coordinate_system, rows):
+    rows = _np.asarray(rows, dtype=float).reshape((-1, 3))
+    dimension = int(getattr(coordinate_system, "dimension", 2))
+    return _np.asarray(
+        coordinate_system.c2p(*(rows[:, index] for index in range(dimension))),
+        dtype=float,
+    ).reshape((-1, 3))
+
+
+class VectorField(VMobject):
+    """Reference VectorField with Atlas-owned arrow geometry.
+
+    Portal callbacks run only in Python's released updater window. The
+    evaluated coordinate/output rows cross once into Rust, where the native
+    field kernel owns tanh length mapping, tip geometry, and stroke records.
+    """
+
+    def __init__(
+        self,
+        func,
+        coordinate_system,
+        sample_coords=None,
+        density=2.0,
+        magnitude_range=None,
+        color=None,
+        color_map_name="3b1b_colormap",
+        color_map=None,
+        stroke_opacity=1.0,
+        stroke_width=3.0,
+        tip_width_ratio=4.0,
+        tip_len_to_width=0.01,
+        max_vect_len=None,
+        max_vect_len_to_step_size=0.8,
+        flat_stroke=False,
+        norm_to_opacity_func=None,
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "VectorField()",
+            [
+                ("color_map", color_map is not None),
+                (
+                    "color_map_name",
+                    color is None and color_map_name not in (None, "3b1b_colormap"),
+                ),
+                ("norm_to_opacity_func", norm_to_opacity_func is not None),
+                *((name, True) for name in sorted(kwargs)),
+            ],
+        )
+        _install_live_state(self)
+        self.func = func
+        self.coordinate_system = coordinate_system
+        self.sample_coords = (
+            _vector_field_sample_coords(coordinate_system, density)
+            if sample_coords is None
+            else _np.asarray(sample_coords, dtype=float).reshape((-1, 3))
+        )
+        self.stroke_width = float(stroke_width)
+        self.stroke_opacity = float(stroke_opacity)
+        self.tip_width_ratio = float(tip_width_ratio)
+        self.tip_len_to_width = float(tip_len_to_width)
+        self.flat_stroke = bool(flat_stroke)
+        self.color = color
+        self.update_sample_points()
+        if len(self.sample_points) < 2:
+            raise ValueError("VectorField needs at least two sample points")
+        if max_vect_len is None:
+            self.max_displayed_vect_len = float(max_vect_len_to_step_size) * float(
+                _np.linalg.norm(self.sample_points[1] - self.sample_points[0])
+            )
+        else:
+            dimension = int(getattr(coordinate_system, "dimension", 2))
+            unit = _np.zeros((1, 3))
+            unit[0, 0] = 1.0
+            origin = _np.asarray(
+                coordinate_system.c2p(*([0.0] * dimension)), dtype=float
+            )
+            unit_size = _np.linalg.norm(
+                _vector_field_c2p_rows(coordinate_system, unit)[0] - origin
+            )
+            self.max_displayed_vect_len = float(max_vect_len) * float(unit_size)
+        outputs = self._evaluate_outputs()
+        self.magnitude_range = (
+            (0.0, float(_np.linalg.norm(outputs, axis=1).max(initial=0.0)))
+            if magnitude_range is None
+            else (float(magnitude_range[0]), float(magnitude_range[1]))
+        )
+        specs = self._build_geometry(_native_shell_factory, outputs)
+        _hang_native_children(self, specs)
+
+    def _evaluate_outputs(self):
+        outputs = _np.asarray(self.func(self.sample_coords), dtype=float)
+        if outputs.shape != self.sample_coords.shape:
+            raise ValueError(
+                "VectorField callback must return one three-component vector "
+                f"per sample; got {outputs.shape} for {self.sample_coords.shape}"
+            )
+        return outputs
+
+    def _geometry_inputs(self, outputs):
+        output_norms = _np.linalg.norm(outputs, axis=1)
+        dimension = int(getattr(self.coordinate_system, "dimension", 2))
+        origin = _np.asarray(
+            self.coordinate_system.c2p(*([0.0] * dimension)), dtype=float
+        )
+        out_vects = _vector_field_c2p_rows(self.coordinate_system, outputs) - origin
+        return out_vects, output_norms
+
+    def _build_geometry(self, factory, outputs, target=None):
+        out_vects, output_norms = self._geometry_inputs(outputs)
+        if target is None:
+            target = self
+        return target._build_vector_field_samples(
+            factory,
+            [tuple(row) for row in self.sample_points],
+            [tuple(row) for row in out_vects],
+            [float(value) for value in output_norms],
+            self.max_displayed_vect_len,
+            self.stroke_width,
+            self.stroke_opacity,
+            self.tip_width_ratio,
+            self.tip_len_to_width,
+            self.flat_stroke,
+            self.color,
+            self.magnitude_range,
+        )
+
+    def update_sample_points(self):
+        self.sample_points = _vector_field_c2p_rows(
+            self.coordinate_system, self.sample_coords
+        )
+        return self
+
+    def set_sample_coords(self, sample_coords):
+        self.sample_coords = _np.asarray(sample_coords, dtype=float).reshape((-1, 3))
+        return self.update_sample_points()
+
+    def update_vectors(self):
+        scratch = VMobject.__new__(VMobject)
+        _install_live_state(scratch)
+        specs = self._build_geometry(
+            _native_shell_factory, self._evaluate_outputs(), target=scratch
+        )
+        # The field kernel is a single VMobject root; keep an explicit guard
+        # so a future native family expansion cannot be silently discarded.
+        if specs:
+            raise RuntimeError("native VectorField unexpectedly returned children")
+        self.match_points(scratch)
+        self.data[:] = scratch.data
+        return self
+
+
+class TimeVaryingVectorField(VectorField):
+    def __init__(self, time_func, coordinate_system, **kwargs):
+        self.time = 0.0
+        self.time_func = time_func
+        super().__init__(
+            lambda coords: self.time_func(coords, self.time),
+            coordinate_system,
+            **kwargs,
+        )
+        self.add_updater(lambda m, dt: m.increment_time(dt))
+        self.always.update_vectors()
+
+    def increment_time(self, dt):
+        self.time += float(dt)
+
+
 class Surface(Mobject):
     """The Surface-family MRO anchor (Reference Surface(Mobject), NOT a
     VMobject — VGroup's only-VMobjects refusal stays correct for it).
@@ -3055,16 +3308,21 @@ class ParametricSurface(Surface):
         shading = kwargs.pop("shading", None)
         depth_test = kwargs.pop("depth_test", True)
         resolution = kwargs.pop("resolution", (101, 101))
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
         _refuse_unrouted(
             "ParametricSurface()", [(name, True) for name in sorted(kwargs)]
         )
         _install_live_state(self)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
         specs = self._build_parametric_surface(
             _native_surface_shell_factory,
             uv_func,
             (float(u_range[0]), float(u_range[1])),
             (float(v_range[0]), float(v_range[1])),
-            (int(resolution[0]), int(resolution[1])),
+            self.resolution,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
@@ -3090,13 +3348,17 @@ class Sphere(Surface):
         self.radius = float(radius)
         self.clockwise = bool(clockwise)
         self.true_normals = bool(true_normals)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = 1
         self._solid_params = ("sphere", self.radius)
         specs = self._build_sphere(
             _native_surface_shell_factory,
             self.radius,
             (float(u_range[0]), float(u_range[1])),
             (float(v_range[0]), float(v_range[1])),
-            (int(resolution[0]), int(resolution[1])),
+            self.resolution,
             self.true_normals,
             self.clockwise,
         )
@@ -3126,6 +3388,8 @@ class Cube(SGroup):
             + [(name, True) for name in sorted(kwargs)],
         )
         _install_live_state(self)
+        self.resolution = (2, 2)
+        self.preferred_creation_axis = 1
         specs = self._build_cube(_native_surface_shell_factory, float(side_length))
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
@@ -3139,6 +3403,8 @@ class Prism(Cube):
         depth_test = kwargs.pop("depth_test", True)
         _refuse_unrouted("Prism()", [(name, True) for name in sorted(kwargs)])
         _install_live_state(self)
+        self.resolution = (2, 2)
+        self.preferred_creation_axis = 1
         specs = self._build_prism(
             _native_surface_shell_factory, float(width), float(height), float(depth)
         )
@@ -3561,6 +3827,16 @@ class Scene(_SceneCore):
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+        # Reference Scene.__init__: deterministic scenes are the default.
+        # The compatibility portal seeds the two RNG modules source-unedited
+        # scenes actually call; engine-owned randomness remains Marionette's
+        # named PCG64DXSM streams.
+        self.random_seed = kwargs.get(
+            "random_seed", getattr(type(self), "random_seed", 0)
+        )
+        if self.random_seed is not None:
+            getattr(_FMN_ROOT, "random").seed(self.random_seed)
+            _np.random.seed(self.random_seed)
 
     @property
     def frame(self):
@@ -3735,9 +4011,30 @@ class Scene(_SceneCore):
                     params,
                 )
             if isinstance(proto, Animation):
-                raise NotImplementedError(
-                    type(proto).__name__
-                    + " is not yet routed to the native animation shelf"
+                if nested:
+                    raise NotImplementedError(
+                        type(proto).__name__
+                        + " inside a composition awaits the nested Python "
+                        "animation release window"
+                    )
+                mobject = proto.mobject
+                if not isinstance(mobject, _BridgeMobject):
+                    raise TypeError(
+                        type(proto).__name__ + " must animate a Mobject"
+                    )
+                if not mobject._is_bound():
+                    self.add(mobject)
+                params = {"remover": bool(getattr(proto, "remover", False))}
+                if getattr(proto, "time_span", None) is not None:
+                    params["time_span"] = proto.time_span
+                return (
+                    "python_callback",
+                    mobject,
+                    None,
+                    float(proto.run_time),
+                    None,
+                    float(getattr(proto, "lag_ratio", 0.0)),
+                    params,
                 )
             raise NotImplementedError(
                 ("a composition member" if nested else "Scene.play")
@@ -3746,6 +4043,7 @@ class Scene(_SceneCore):
             )
 
         specs = []
+        callbacks = []
         camera_pair = None
         for proto in proto_animations:
             if isinstance(proto, _AnimationBuilder) and isinstance(
@@ -3760,9 +4058,22 @@ class Scene(_SceneCore):
                     )
                 camera_pair = (proto.mobject._core, proto.mobject.target._core)
                 continue
+            if isinstance(proto, Animation) and not getattr(
+                proto, "_native_kind", None
+            ):
+                if run_time is not None:
+                    proto.run_time = float(run_time)
+                if rate_func is not None:
+                    proto.rate_func = rate_func
+                if lag_ratio is not None:
+                    proto.lag_ratio = float(lag_ratio)
+                callbacks.append(proto)
+            else:
+                callbacks.append(None)
             specs.append(build_spec(proto, False))
         return self._play_animations(
             specs,
+            callbacks,
             camera_pair,
             None if run_time is None else float(run_time),
             rate_payload(rate_func, "play", run_time or 1.0),
@@ -3797,27 +4108,99 @@ class InteractiveScene(Scene):
 
 
 class Animation:
-    def __init__(self, mobject=None, run_time=1.0, rate_func=None, **kwargs):
+    def __init__(
+        self,
+        mobject=None,
+        run_time=1.0,
+        rate_func=None,
+        time_span=None,
+        lag_ratio=0.0,
+        name="",
+        remover=False,
+        final_alpha_value=1.0,
+        suspend_mobject_updating=False,
+        **kwargs,
+    ):
         self.mobject = mobject
-        self.run_time = run_time
-        self.rate_func = rate_func if rate_func is not None else (lambda alpha: alpha)
+        self.run_time = float(run_time)
+        self.rate_func = (
+            rate_func
+            if rate_func is not None
+            else getattr(_FMN_ROOT, "smooth", lambda alpha: alpha)
+        )
+        self.time_span = time_span
+        self.lag_ratio = float(lag_ratio)
+        self.name = name or type(self).__name__
+        self.remover = bool(remover)
+        self.final_alpha_value = float(final_alpha_value)
+        self.suspend_mobject_updating = bool(suspend_mobject_updating)
         self.__dict__.update(kwargs)
 
     def begin(self):
-        pass
+        if self.time_span is not None:
+            self.run_time = max(float(self.time_span[1]), self.run_time)
+        self.interpolate(0.0)
 
     def finish(self):
-        pass
+        self.interpolate(self.final_alpha_value)
 
     def interpolate(self, alpha):
-        self.interpolate_mobject(self.rate_func(alpha))
+        self.interpolate_mobject(float(alpha))
         return self
+
+    def time_spanned_alpha(self, alpha):
+        if self.time_span is None:
+            return float(alpha)
+        start, end = self.time_span
+        return _np.clip(float(alpha) * self.run_time - start, 0.0, end - start) / (
+            end - start
+        )
 
     def interpolate_mobject(self, alpha):
         del alpha
 
     def copy(self):
         return _copy.copy(self)
+
+
+class UpdateFromFunc(Animation):
+    def __init__(
+        self,
+        mobject,
+        update_function,
+        suspend_mobject_updating=False,
+        **kwargs,
+    ):
+        self.update_function = update_function
+        super().__init__(
+            mobject,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
+        )
+
+    def interpolate_mobject(self, alpha):
+        del alpha
+        self.update_function(self.mobject)
+
+
+class UpdateFromAlphaFunc(Animation):
+    def __init__(
+        self,
+        mobject,
+        update_function,
+        suspend_mobject_updating=False,
+        **kwargs,
+    ):
+        self.update_function = update_function
+        super().__init__(
+            mobject,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
+        )
+
+    def interpolate_mobject(self, alpha):
+        true_alpha = self.rate_func(self.time_spanned_alpha(alpha))
+        self.update_function(self.mobject, true_alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -3862,10 +4245,41 @@ class ShowCreation(_NativeAnimation):
 
     def __init__(self, mobject, lag_ratio=1.0, **kwargs):
         super().__init__(mobject, lag_ratio=lag_ratio, **kwargs)
+        if (
+            isinstance(mobject, Surface)
+            and hasattr(mobject, "resolution")
+            and hasattr(mobject, "preferred_creation_axis")
+        ):
+            self._native_kind = "show_surface_creation"
+
+    def _native_params(self):
+        if self._native_kind != "show_surface_creation":
+            return {}
+        return {
+            "surface_resolution": tuple(self.mobject.resolution),
+            "surface_axis": int(self.mobject.preferred_creation_axis),
+        }
 
 
 class Uncreate(_NativeAnimation):
     _native_kind = "uncreate"
+
+    def __init__(self, mobject, **kwargs):
+        super().__init__(mobject, **kwargs)
+        if (
+            isinstance(mobject, Surface)
+            and hasattr(mobject, "resolution")
+            and hasattr(mobject, "preferred_creation_axis")
+        ):
+            self._native_kind = "uncreate_surface"
+
+    def _native_params(self):
+        if self._native_kind != "uncreate_surface":
+            return {}
+        return {
+            "surface_resolution": tuple(self.mobject.resolution),
+            "surface_axis": int(self.mobject.preferred_creation_axis),
+        }
 
 
 class Write(_NativeAnimation):
@@ -4408,6 +4822,8 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.shape_matchers", "SurroundingRectangle"): SurroundingRectangle,
+        ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
+        ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         ("manimlib.mobject.geometry", "Arc"): Arc,
         ("manimlib.mobject.geometry", "Circle"): Circle,
         ("manimlib.mobject.geometry", "Dot"): Dot,
@@ -4419,6 +4835,11 @@ def _install_schema_surface():
         ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
         ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,
         ("manimlib.mobject.types.dot_cloud", "GlowDot"): GlowDot,
+        ("manimlib.mobject.vector_field", "VectorField"): VectorField,
+        (
+            "manimlib.mobject.vector_field",
+            "TimeVaryingVectorField",
+        ): TimeVaryingVectorField,
         ("manimlib.mobject.types.surface", "Surface"): Surface,
         ("manimlib.mobject.types.surface", "SGroup"): SGroup,
         ("manimlib.mobject.types.surface", "ParametricSurface"): ParametricSurface,
@@ -4577,7 +4998,14 @@ def _install_schema_surface():
                 continue
             try:
                 origin = _importlib.import_module(_origin)
-                value = getattr(origin, qualified, origin)
+                # A leaked module imported under its own basename (for
+                # example `import random`) is the module, not a same-named
+                # attribute such as `random.random`.
+                value = (
+                    origin
+                    if qualified == _origin.rsplit(".", 1)[-1]
+                    else getattr(origin, qualified, origin)
+                )
             except (ImportError, ValueError):
                 value = _placeholder_function(module_name, qualified)
             setattr(module, qualified, value)
