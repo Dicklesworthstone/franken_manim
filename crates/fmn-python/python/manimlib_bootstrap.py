@@ -5930,7 +5930,7 @@ class Transform(_NativeAnimation):
     ):
         _refuse_unrouted("Transform()", [("path_func", path_func is not None)])
         super().__init__(mobject, **kwargs)
-        if target_mobject is None:
+        if target_mobject is None and not self._allows_deferred_target():
             raise NotImplementedError(
                 "Transform without a target (in-place) awaits its binding"
             )
@@ -5940,6 +5940,45 @@ class Transform(_NativeAnimation):
 
     def _native_params(self):
         return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
+
+    def _allows_deferred_target(self):
+        return False
+
+
+class ApplyMethod(Transform):
+    def __init__(self, method, *args, **kwargs):
+        self.check_validity_of_input(method)
+        self.method = method
+        self.method_args = args
+        super().__init__(method.__self__, None, **kwargs)
+
+    def check_validity_of_input(self, method):
+        if not _inspect.ismethod(method):
+            raise Exception(
+                "Whoops, looks like you accidentally invoked "
+                "the method you want to animate"
+            )
+        assert isinstance(method.__self__, Mobject)
+
+    def create_target(self):
+        method = self.method
+        args = list(self.method_args)
+        if args and isinstance(args[-1], dict):
+            method_kwargs = args.pop()
+        else:
+            method_kwargs = {}
+        target = method.__self__.copy()
+        method.__func__(target, *args, **method_kwargs)
+        return target
+
+    def _allows_deferred_target(self):
+        return True
+
+    def _native_target(self):
+        # Reference Transform.begin creates ApplyMethod's target at play time,
+        # after any edits made between animation construction and Scene.play.
+        self.target_mobject = self.create_target()
+        return self.target_mobject
 
 
 class MoveToTarget(Transform):
@@ -6455,6 +6494,7 @@ def _install_schema_surface():
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
         ("manimlib.animation.transform", "Transform"): Transform,
+        ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,
         ("manimlib.animation.transform", "MoveToTarget"): MoveToTarget,
         ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,

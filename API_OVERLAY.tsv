@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	163a70480af98b5a30a5b13c6601a42ff183bd6a4857259efa132ac4a5fdb88a
+ledger_reviewed_digest	05634f7154d094d243b2fe30ff4212c880299e30d95acf3e9c361b6ac9ed9a31
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -298,6 +298,10 @@ manimlib.mobject.svg.text_mobject:MarkupText.get_parts_by_text	same	scripts/mani
 manimlib.mobject.svg.text_mobject:MarkupText.get_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the original plain or markup source string
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native glyph family in place and returns the original text proxy
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order including constructor t2c maps
+manimlib.animation.transform:ApplyMethod	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored Transform subclass that retains the bound method and builds its independent target at play time
+manimlib.animation.transform:ApplyMethod.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	preserves exact validation public method state variadic method arguments and separate Transform configuration
+manimlib.animation.transform:ApplyMethod.check_validity_of_input	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	accepts only ordinary bound methods whose receiver is a portal Mobject with the exact Reference refusals
+manimlib.animation.transform:ApplyMethod.create_target	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	copies the current source at play time invokes the unbound method on the copy and honors a trailing method-kwargs mapping
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
 manimlib.mobject.geometry:ArrowTip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Triangle subclass backed by Atlas tip geometry rather than a schema-generated shell

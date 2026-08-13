@@ -2252,6 +2252,95 @@ explicit_target_scene.play(
 )
 assert np.allclose(explicit_target_mover.get_center(), [1.25, 0.0, 0.0])
 
+# ApplyMethod is the Reference's method-to-target adapter over Transform.  It
+# must keep the bound method and its arguments as public state, build a fresh
+# independent target at play time, and route that target through the native
+# transform mechanism rather than treating the Python method as a Mobject.
+assert manimlib.ApplyMethod.__bases__ == (manimlib.Transform,)
+assert str(inspect.signature(manimlib.ApplyMethod)) == "(method, *args, **kwargs)"
+assert str(inspect.signature(manimlib.ApplyMethod.__init__)) == (
+    "(self, method, *args, **kwargs)"
+)
+assert str(inspect.signature(manimlib.ApplyMethod.check_validity_of_input)) == (
+    "(self, method)"
+)
+assert str(inspect.signature(manimlib.ApplyMethod.create_target)) == "(self)"
+
+apply_target_source = geometry.Rectangle(width=1.0, height=0.5)
+apply_scale = manimlib.ApplyMethod(
+    apply_target_source.scale,
+    2.0,
+    {"about_point": manimlib.RIGHT},
+    path_arc=math.pi / 6.0,
+)
+assert apply_scale.method.__self__ is apply_target_source
+assert apply_scale.method.__func__ is type(apply_target_source).scale
+assert apply_scale.method_args[0] == 2.0
+assert list(apply_scale.method_args[1]) == ["about_point"]
+assert np.allclose(apply_scale.method_args[1]["about_point"], manimlib.RIGHT)
+assert apply_scale.target_mobject is None
+apply_scale_target = apply_scale.create_target()
+assert apply_scale_target is not apply_target_source
+assert np.allclose(apply_target_source.get_center(), manimlib.ORIGIN)
+assert np.allclose(apply_scale_target.get_center(), manimlib.LEFT)
+assert np.isclose(apply_scale_target.get_width(), 2.0)
+
+delayed_apply_scene = Scene()
+delayed_apply_source = geometry.Rectangle(width=1.0, height=0.5)
+delayed_apply = manimlib.ApplyMethod(delayed_apply_source.shift, manimlib.RIGHT)
+delayed_apply_source.shift(manimlib.UP)
+delayed_apply_samples = []
+delayed_apply_source.add_updater(
+    lambda mob: delayed_apply_samples.append(mob.get_center().copy()),
+    call=False,
+)
+delayed_apply_scene.play(
+    delayed_apply,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(delayed_apply_samples, [[0.5, 1.0, 0.0], [1.0, 1.0, 0.0]])
+assert np.allclose(delayed_apply_source.get_center(), [1.0, 1.0, 0.0])
+assert delayed_apply.target_mobject is not None
+assert delayed_apply.target_mobject is not delayed_apply_source
+
+apply_tracker_scene = Scene()
+apply_tracker = manimlib.ValueTracker(1.0)
+apply_tracker_samples = []
+apply_tracker.add_updater(
+    lambda mob: apply_tracker_samples.append(float(mob.get_value())),
+    call=False,
+)
+apply_tracker_scene.play(
+    manimlib.ApplyMethod(apply_tracker.set_value, 5.0),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(apply_tracker_samples, [3.0, 5.0])
+assert apply_tracker.get_value() == 5.0
+
+try:
+    manimlib.ApplyMethod(lambda: None)
+except Exception as error:
+    assert str(error) == (
+        "Whoops, looks like you accidentally invoked the method you want to animate"
+    )
+else:
+    raise AssertionError("ApplyMethod accepted a free function")
+
+
+class ForeignApplyTarget:
+    def mutate(self):
+        return self
+
+
+try:
+    manimlib.ApplyMethod(ForeignApplyTarget().mutate)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("ApplyMethod accepted a bound non-Mobject method")
+
 sampled_rate_scene = Scene()
 sampled_rate_mover = geometry.Rectangle(width=0.5, height=0.5)
 sampled_rate_scene.play(
