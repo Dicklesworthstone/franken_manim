@@ -6,7 +6,7 @@
 //! rulings (C-2/BN-07, C-7) at the Stage level.
 
 use fmn_core::constants::UP;
-use fmn_mobject::{JointType, Mob, Mobject, Stage};
+use fmn_mobject::{BoundingBox, JointType, Mob, Mobject, Stage};
 
 fn leaf(stage: &mut Stage, pts: &[[f64; 3]]) -> Mob {
     stage.add(Mobject::from_points(pts))
@@ -85,6 +85,34 @@ fn writable_point_views_force_boxes_but_unrelated_views_do_not() {
         "a nonpoint field cannot move a bounding box"
     );
     drop(rgba_view);
+}
+
+#[test]
+fn caller_installed_box_is_identifiable_and_revision_scoped() {
+    let mut stage = Stage::new();
+    let m = leaf(&mut stage, &[[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]]);
+    let transformed = BoundingBox {
+        min: [0.0, -1.0, 0.0],
+        mid: [0.0, 0.0, 0.0],
+        max: [2.0, 1.0, 0.0],
+    };
+
+    stage.install_bounding_box_cache(m, transformed);
+    assert_eq!(stage.installed_bounding_box_cache(m), Some(transformed));
+    assert_eq!(stage.get_bounding_box(m), transformed);
+
+    stage
+        .get_mut(m)
+        .expect("live")
+        .buffer
+        .write(0, "point", &[4.0, 5.0, 0.0]);
+    assert_eq!(stage.installed_bounding_box_cache(m), None);
+    assert_eq!(stage.get_bounding_box(m).max, [4.0, 5.0, 0.0]);
+    assert_eq!(
+        stage.installed_bounding_box_cache(m),
+        None,
+        "an ordinary lazy rematerialization is not a caller-installed box"
+    );
 }
 
 #[test]

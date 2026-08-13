@@ -187,6 +187,7 @@ impl Stage {
         c.signature = Some(sig);
         c.value = value;
         c.materializations += 1;
+        c.caller_installed = false;
         value
     }
 
@@ -213,8 +214,25 @@ impl Stage {
             let mut cache = entry.bbox_cell().borrow_mut();
             cache.signature = Some(signature);
             cache.value = value;
+            cache.caller_installed = true;
         }
         self
+    }
+
+    /// Return a still-current caller-installed Reference bounding box.
+    ///
+    /// This distinguishes the compatibility portal's deliberately transformed
+    /// `[min, mid, max]` rows from an ordinary lazy materialization without
+    /// weakening normal signature-based invalidation.
+    #[must_use]
+    pub fn installed_bounding_box_cache(&self, mob: Mob) -> Option<BoundingBox> {
+        if self.bbox_has_writable_point_view(mob) {
+            return None;
+        }
+        let signature = self.bbox_signature(mob);
+        let entry = self.get(mob)?;
+        let cache = entry.bbox_cell().borrow();
+        (cache.caller_installed && cache.signature == Some(signature)).then_some(cache.value)
     }
 
     // ---------------------------------------------------- critical-point getters

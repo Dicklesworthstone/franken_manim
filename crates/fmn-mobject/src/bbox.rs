@@ -99,6 +99,7 @@ pub(crate) struct BboxCache {
     pub signature: Option<u64>,
     pub value: BoundingBox,
     pub materializations: u64,
+    pub caller_installed: bool,
 }
 
 impl Default for BboxCache {
@@ -107,6 +108,7 @@ impl Default for BboxCache {
             signature: None,
             value: BoundingBox::ZERO,
             materializations: 0,
+            caller_installed: false,
         }
     }
 }
