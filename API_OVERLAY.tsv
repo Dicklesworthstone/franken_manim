@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	7f2a4c2c022629e52b45879adb25cd17cab1f4f175d71851fc2bd4ad3e8876e7
+ledger_reviewed_digest	879a953f36b55e8a312d6b6f834f51577892d63cab15a3386affd1e2fe0b03d1
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -222,6 +222,7 @@ manimlib.mobject.coordinate_systems:CoordinateSystem.get_y_axis	same	scripts/man
 manimlib.mobject.coordinate_systems:CoordinateSystem.i2gp	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	preserves the input_to_graph_point alias over metadata-backed and function-less graphs
 manimlib.mobject.coordinate_systems:CoordinateSystem.input_to_graph_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	uses retained functions directly and the pinned quick-curve binary-search fallback otherwise
 manimlib.mobject.coordinate_systems:CoordinateSystem.p2c	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live inverse coordinate transform
+manimlib.mobject.mobject:Mobject.add	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	inserts children as an ordered identity set and commits each accepted edge into the live Marionette family graph
 manimlib.mobject.mobject:Mobject.add_background_rectangle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	builds the Atlas-backed camera-colored plate and prepends it through the live family-order seam
 manimlib.mobject.mobject:Mobject.add_background_rectangle_to_family_members_with_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adds one bound or detached plate to every pointful member from the pre-mutation public family snapshot
 manimlib.mobject.mobject:Mobject.add_background_rectangle_to_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adds one identity-preserving plate to each immediate child without changing the parent's member order
@@ -233,6 +234,7 @@ manimlib.mobject.mobject:Mobject.apply_function_to_position	same	scripts/manim_r
 manimlib.mobject.mobject:Mobject.apply_function_to_submobject_positions	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the position-only transform to immediate submobjects in stable list order
 manimlib.mobject.mobject:Mobject.apply_matrix	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	embeds smaller matrices in three dimensions routes ordinary families once through Marionette and preserves custom pointlike fields
 manimlib.mobject.mobject:Mobject.apply_points_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves family and pointlike-field order pivot rules transformed bounding-box rows return identity and callback exceptions with member-by-member partial state
+manimlib.mobject.mobject:Mobject.clear	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	removes exactly the immediate child batch through the recursive-removal surface and returns the original proxy
 manimlib.mobject.mobject:Mobject.deepcopy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates through graph-safe deepcopy while preserving internal family aliases and independent extension state
 manimlib.mobject.mobject:Mobject.dim	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact three-dimensional base record width used by matrix embedding and callable point transforms
 manimlib.mobject.mobject:Mobject.fade	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sets absolute family opacity and preserves the base method's intentional non-fluent return
@@ -242,9 +244,12 @@ manimlib.mobject.mobject:Mobject.get_num_points	same	scripts/manim_ref/manimlib/
 manimlib.mobject.mobject:Mobject.is_off_screen	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses strict whole-box comparisons against the authoritative frame radii
 manimlib.mobject.mobject:Mobject.match_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the source color through live style reads and writes without changing opacity or shading
 manimlib.mobject.mobject:Mobject.match_style	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies color opacity and shading through the engine-backed base Mobject style surface
+manimlib.mobject.mobject:Mobject.remove	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	detaches matching edges over the pre-edit family snapshot in parent and argument order while honoring recurse and the reassemble batching hint
 manimlib.mobject.mobject:Mobject.restore	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	restores detached and bound saved-state families and preserves the exact missing-state refusal
+manimlib.mobject.mobject:Mobject.reverse_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reverses immediate child identity order and commits the same order into the native graph
 manimlib.mobject.mobject:Mobject.set_color_by_gradient	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves the pointful color-run branch and delegates point-free families to the native-backed submobject gradient
 manimlib.mobject.mobject:Mobject.set_submobject_colors_by_gradient	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses fmn-core RMS or Reference HSL interpolation and preserves zero one and empty-family edge behavior
+manimlib.mobject.mobject:Mobject.set_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves clear-then-add ordering identity deduplication and the accepted-prefix result of a later Python refusal
 manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md	crates/fmn-mobject/tests/render_order.rs	preserves the declared insertion-first render-order contract
 manimlib.mobject.mobject:Mobject.shift_onto_screen	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	checks top bottom left right in Reference order and forwards border options only when an edge exceeds the frame
 manimlib.mobject.mobject:Mobject.shuffle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the Scene-seeded Python RNG and commits recursive child-first shuffles into live family order
