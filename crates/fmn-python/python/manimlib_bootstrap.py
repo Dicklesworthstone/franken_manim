@@ -678,9 +678,18 @@ class Mobject(_BridgeMobject):
         if self._is_bound():
             low, mid, high = self._get_bbox()
             return _np.array([low, mid, high])
+        # `works_on_bounding_box=True` transforms each member's cached three
+        # rows directly. Preserve the root's transformed family box only while
+        # every member still carries the matching native cache. A later point
+        # or structural mutation invalidates at least one member and returns
+        # this detached graph to ordinary extrema aggregation.
+        family = _family_preorder(self)
+        installed = [member._get_installed_bbox() for member in family]
+        if installed and all(box is not None for box in installed):
+            return _np.array(installed[0])
         lows = []
         highs = []
-        for member in _family_preorder(self):
+        for member in family:
             if not member._has_points():
                 continue
             low, _mid, high = member._get_bbox()
@@ -714,30 +723,58 @@ class Mobject(_BridgeMobject):
         pivot = None if about_point is None else _np.array(_vec3(about_point))
         cached_boxes = []
 
-        for mob in self.get_family():
-            box = mob.get_bounding_box().copy() if works_on_bounding_box else None
-            keys = mob.pointlike_data_keys if mob.has_points() else ()
-            for key in keys:
-                array = _np.array(mob._field_rows(key), dtype=float)
-                if pivot is None:
-                    array[:] = func(array)
-                else:
-                    array[:] = func(array - pivot) + pivot
-                mob._set_field_rows(key, array.tolist())
-            if works_on_bounding_box:
-                if pivot is None:
-                    box[:] = func(box)
-                else:
-                    box[:] = func(box - pivot) + pivot
-                cached_boxes.append((mob, box))
+        def install_cached_boxes():
+            # Install only after all writes observed so far, so each entry is
+            # keyed to the final subtree signature. This also preserves the
+            # Reference's member-by-member partial state if a later callback
+            # raises; the callback exception itself is never translated.
+            for cached_mob, cached_box in cached_boxes:
+                cached_mob._cache_bbox_rows(
+                    [
+                        tuple(float(component) for component in row)
+                        for row in cached_box
+                    ]
+                )
 
-        # Install only after every descendant write, so each cache entry is
-        # keyed to the final subtree signature rather than being invalidated
-        # by a later child in the same Reference family traversal.
-        for mob, box in cached_boxes:
-            mob._cache_bbox_rows(
-                [tuple(float(component) for component in row) for row in box]
-            )
+        try:
+            for mob in self.get_family():
+                box = (
+                    mob.get_bounding_box().copy()
+                    if works_on_bounding_box
+                    else None
+                )
+                keys = mob.pointlike_data_keys if mob.has_points() else ()
+                for key in keys:
+                    array = _np.array(mob._field_rows(key), dtype=float)
+                    if pivot is None:
+                        try:
+                            array[:] = func(array)
+                        except BaseException:
+                            # The Reference passes the live record array in
+                            # this branch, so in-place edits made before a
+                            # callback failure remain observable.
+                            mob._set_field_rows(key, array.tolist())
+                            raise
+                    else:
+                        array[:] = func(array - pivot) + pivot
+                    mob._set_field_rows(key, array.tolist())
+                if works_on_bounding_box:
+                    try:
+                        if pivot is None:
+                            box[:] = func(box)
+                        else:
+                            box[:] = func(box - pivot) + pivot
+                    except BaseException:
+                        # As above, the no-pivot branch may have mutated the
+                        # directly supplied cache array before raising.
+                        cached_boxes.append((mob, box))
+                        raise
+                    cached_boxes.append((mob, box))
+        except BaseException:
+            install_cached_boxes()
+            raise
+
+        install_cached_boxes()
         return self
 
     def apply_function(self, function, **kwargs):
@@ -765,7 +802,11 @@ class Mobject(_BridgeMobject):
         matrix = _np.array(matrix)
         full_matrix[: matrix.shape[0], : matrix.shape[1]] = matrix
 
-        if kwargs.get("works_on_bounding_box", False):
+        family = self.get_family()
+        custom_point_fields = any(
+            tuple(mob.pointlike_data_keys) != ("point",) for mob in family
+        )
+        if kwargs.get("works_on_bounding_box", False) or custom_point_fields:
             self.apply_points_function(
                 lambda points: _np.dot(points, full_matrix.T), **kwargs
             )
@@ -775,10 +816,8 @@ class Mobject(_BridgeMobject):
         about_edge = kwargs.pop("about_edge", _ORIGIN)
         kwargs.pop("works_on_bounding_box", None)
         if kwargs:
-            unexpected = next(iter(kwargs))
-            raise TypeError(
-                f"apply_points_function() got an unexpected keyword argument "
-                f"'{unexpected}'"
+            return self.apply_points_function(
+                lambda points: _np.dot(points, full_matrix.T), **kwargs
             )
         native_matrix = [
             [float(component) for component in row] for row in full_matrix
@@ -1791,6 +1830,8 @@ class Point(Mobject):
 
 
 class VMobject(Mobject):
+    make_smooth_after_applying_functions = False
+
     data_dtype = [
         ("point", 3),
         ("stroke_rgba", 4),

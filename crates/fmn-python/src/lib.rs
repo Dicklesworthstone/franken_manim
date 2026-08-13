@@ -1320,6 +1320,19 @@ impl BridgeMobject {
         })
     }
 
+    /// A still-current bounding box installed by the Reference compatibility
+    /// path, rather than lazily materialized from point extrema.
+    fn _get_installed_bbox(
+        slf: &Bound<'_, Self>,
+    ) -> PyResult<Option<([f64; 3], [f64; 3], [f64; 3])>> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            stage
+                .installed_bounding_box_cache(mob)
+                .map(|bbox| (bbox.min, bbox.mid, bbox.max))
+        })
+    }
+
     /// Whether this entry itself has point records (Reference `has_points`,
     /// not recursing into the family).
     fn _has_points(slf: &Bound<'_, Self>) -> PyResult<bool> {
