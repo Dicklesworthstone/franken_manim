@@ -806,11 +806,29 @@ class Mobject(_BridgeMobject):
         matrix = _np.array(matrix)
         full_matrix[: matrix.shape[0], : matrix.shape[1]] = matrix
 
+        point_mapper_overridden = (
+            getattr(self.apply_points_function, "__func__", None)
+            is not Mobject.apply_points_function
+        )
+        family_walker_overridden = (
+            getattr(self.get_family, "__func__", None) is not Mobject.get_family
+        )
+        if (
+            kwargs.get("works_on_bounding_box", False)
+            or point_mapper_overridden
+            or family_walker_overridden
+        ):
+            self.apply_points_function(
+                lambda points: _np.dot(points, full_matrix.T), **kwargs
+            )
+            return self
+
         family = self.get_family()
         custom_point_fields = any(
             tuple(mob.pointlike_data_keys) != ("point",) for mob in family
         )
-        if kwargs.get("works_on_bounding_box", False) or custom_point_fields:
+        shared_family_paths = len({id(mob) for mob in family}) != len(family)
+        if custom_point_fields or shared_family_paths:
             self.apply_points_function(
                 lambda points: _np.dot(points, full_matrix.T), **kwargs
             )

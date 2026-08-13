@@ -73,6 +73,7 @@ create_exception!(
 type Engine = Rc<EngineState>;
 type ProxyPairs = Vec<(Py<PyAny>, Py<PyAny>)>;
 type SoundRequestFact = (String, i64, u32, f64, Option<f64>, Option<f64>);
+type BoundingBoxRows = ([f64; 3], [f64; 3], [f64; 3]);
 
 /// One scene worker's runtime plus pin releases deferred by proxy destruction.
 ///
@@ -1312,7 +1313,7 @@ impl BridgeMobject {
     }
 
     /// `(min, mid, max)` rows of the Stage-visible family bounding box.
-    fn _get_bbox(slf: &Bound<'_, Self>) -> PyResult<([f64; 3], [f64; 3], [f64; 3])> {
+    fn _get_bbox(slf: &Bound<'_, Self>) -> PyResult<BoundingBoxRows> {
         crossing::record(CrossingClass::Other);
         with_stage(slf, |stage, mob| {
             let bbox = stage.get_bounding_box(mob);
@@ -1322,9 +1323,7 @@ impl BridgeMobject {
 
     /// A still-current bounding box installed by the Reference compatibility
     /// path, rather than lazily materialized from point extrema.
-    fn _get_installed_bbox(
-        slf: &Bound<'_, Self>,
-    ) -> PyResult<Option<([f64; 3], [f64; 3], [f64; 3])>> {
+    fn _get_installed_bbox(slf: &Bound<'_, Self>) -> PyResult<Option<BoundingBoxRows>> {
         crossing::record(CrossingClass::Other);
         with_stage(slf, |stage, mob| {
             stage

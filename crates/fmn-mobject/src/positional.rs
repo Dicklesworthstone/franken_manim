@@ -17,10 +17,13 @@
 //! bookkeeping to get wrong. This is the §8.4 dirty-flag requirement expressed
 //! as the D-20 lazy-revisioned-mirror pattern already used for render mirrors.
 //!
-//! Where the Reference transforms the cached box in place to avoid a recompute
-//! (its `works_on_bounding_box` flag), we simply recompute on next read — the
-//! result is identical (min/max commute with the affine point transform) and,
-//! for a negative-scale factor, ours is the *more* correct box.
+//! Native affine operations normally let this cache recompute — min/max commute
+//! with those maps and negative scales then produce the mathematically correct
+//! ordering. The Python portal also has a narrow caller-installed cache seam
+//! for the Reference's public `works_on_bounding_box=True` branch, where an
+//! arbitrary Python function transforms the stored `[min, mid, max]` rows
+//! directly. That value remains guarded by the same subtree signature rather
+//! than becoming an untracked second source of geometry truth.
 //!
 //! # Numeric doctrine
 //!
@@ -177,7 +180,7 @@ impl Stage {
             None
         } else {
             let cache = e.bbox_cell().borrow();
-            (cache.signature == Some(sig)).then_some(cache.value)
+            (cache.signature == Some(sig)).then_some(cache.value) // ubs:ignore -- geometry revision key, not a secret
         };
         if let Some(v) = cached {
             return v;
@@ -232,7 +235,7 @@ impl Stage {
         let signature = self.bbox_signature(mob);
         let entry = self.get(mob)?;
         let cache = entry.bbox_cell().borrow();
-        (cache.caller_installed && cache.signature == Some(signature)).then_some(cache.value)
+        (cache.caller_installed && cache.signature == Some(signature)).then_some(cache.value) // ubs:ignore -- geometry revision key, not a secret
     }
 
     // ---------------------------------------------------- critical-point getters

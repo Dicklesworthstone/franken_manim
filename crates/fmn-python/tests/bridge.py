@@ -93,6 +93,18 @@ class CustomPointFields(Mobject):
         self.set_field("control", 0, [3.0, 4.0, 0.0])
 
 
+class MatrixPointMapperOverride(CustomPointFields):
+    def apply_points_function(self, *args, **kwargs):
+        self.matrix_point_mapper_calls += 1
+        return super().apply_points_function(*args, **kwargs)
+
+
+class MatrixFamilyWalkerOverride(CustomPointFields):
+    def get_family(self, recurse=True):
+        self.matrix_family_walker_calls += 1
+        return super().get_family(recurse)
+
+
 class UnsupportedDtype(Mobject):
     data_dtype = [("point", np.float64, (3,))]
 
@@ -691,6 +703,7 @@ assert str(inspect.signature(Mobject.apply_points_function)) == (
     "(self, func, about_point=None, about_edge=array([0., 0., 0.]), "
     "works_on_bounding_box=False)"
 )
+assert Mobject.dim == 3
 assert str(inspect.signature(Mobject.apply_function)) == (
     "(self, function, **kwargs)"
 )
@@ -810,6 +823,22 @@ assert custom_point_fields.apply_matrix([[2.0, 0.0], [0.0, 3.0]]) is (
 )
 assert custom_point_fields.get_field("point", 0) == [2.0, 6.0, 0.0]
 assert custom_point_fields.get_field("control", 0) == [6.0, 12.0, 0.0]
+
+matrix_override = MatrixPointMapperOverride()
+matrix_override.matrix_point_mapper_calls = 0
+matrix_override.apply_matrix([[2.0, 0.0], [0.0, 3.0]])
+assert matrix_override.matrix_point_mapper_calls == 1
+assert matrix_override.get_field("point", 0) == [2.0, 6.0, 0.0]
+
+family_walker_override = MatrixFamilyWalkerOverride()
+family_walker_override.matrix_family_walker_calls = 0
+family_walker_override.apply_matrix([[2.0, 0.0], [0.0, 3.0]])
+assert family_walker_override.matrix_family_walker_calls == 1
+
+shared_matrix_leaf = manimlib.Square().shift(manimlib.RIGHT)
+shared_matrix_family = Mobject(Mobject(shared_matrix_leaf), Mobject(shared_matrix_leaf))
+shared_matrix_family.apply_matrix([[2.0, 0.0], [0.0, 1.0]])
+assert np.allclose(shared_matrix_leaf.get_center(), [4.0, 0.0, 0.0])
 
 matrix_refusal = manimlib.Square().shift([1.0, 2.0, 0.0])
 matrix_refusal_points = matrix_refusal.get_points().copy()
