@@ -300,7 +300,8 @@ fn color_gradient_with(
             let alpha = if length == 1 {
                 0.0
             } else {
-                j as f64 * (n_ref - 1) as f64 / (length - 1) as f64
+                let step = (n_ref - 1) as f64 / (length - 1) as f64;
+                j as f64 * step
             };
             let (floor, alpha_mod1) = if j == length - 1 {
                 (n_ref - 2, 1.0)
@@ -322,16 +323,17 @@ fn color_gradient_with(
 fn srgb_to_hsl(color: Srgb) -> [f64; 3] {
     let min = color.r.min(color.g).min(color.b);
     let max = color.r.max(color.g).max(color.b);
-    let lightness = (min + max) / 2.0;
     let range = max - min;
+    let sum = min + max;
+    let lightness = sum / 2.0;
     if range < 0.000_000_5 {
         return [0.0, 0.0, lightness];
     }
 
-    let saturation = if lightness <= 0.5 {
-        range / (max + min)
+    let saturation = if lightness < 0.5 {
+        range / sum
     } else {
-        range / (2.0 - max - min)
+        range / (2.0 - sum)
     };
     let red_distance = (((max - color.r) / 6.0) + (range / 2.0)) / range;
     let green_distance = (((max - color.g) / 6.0) + (range / 2.0)) / range;
