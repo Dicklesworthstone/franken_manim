@@ -205,6 +205,144 @@ except bridge_errors.FamilyCycleError:
 else:
     raise AssertionError("family cycle was accepted")
 
+# The public family-list methods preserve the Reference's ordered
+# identity-set semantics while every accepted edit is mirrored into the
+# detached nursery or bound Marionette graph.  In particular, add is not a
+# raw list extension: repeated and already-present children are ignored.
+assert str(inspect.signature(Mobject.add)) == "(self, *mobjects)"
+assert str(inspect.signature(Mobject.remove)) == (
+    "(self, *to_remove, reassemble=True, recurse=True)"
+)
+assert str(inspect.signature(Mobject.clear)) == "(self)"
+assert str(inspect.signature(Mobject.set_submobjects)) == (
+    "(self, submobject_list)"
+)
+assert str(inspect.signature(Mobject.reverse_submobjects)) == "(self)"
+family_add_root = Mobject()
+family_add_a = Mobject()
+family_add_b = Mobject()
+family_add_c = Mobject()
+assert family_add_root.add(
+    family_add_a,
+    family_add_a,
+    family_add_b,
+    family_add_a,
+) is family_add_root
+assert family_add_root.submobjects == [family_add_a, family_add_b]
+assert family_add_root.add(family_add_a) is family_add_root
+assert family_add_root.submobjects == [family_add_a, family_add_b]
+
+# Self-containment is rejected before any member of the batch mutates the
+# family.  A later invalid ordinary Python value preserves the successfully
+# attached Mobject prefix but is itself never admitted to the safe graph.
+try:
+    family_add_root.add(family_add_c, family_add_root)
+except Exception as error:
+    assert str(error) == "Mobject cannot contain self"
+else:
+    raise AssertionError("Mobject.add accepted self-containment")
+assert family_add_root.submobjects == [family_add_a, family_add_b]
+try:
+    family_add_root.add(family_add_c, object())
+except TypeError as error:
+    assert str(error) == "submobjects must be Mobject instances"
+else:
+    raise AssertionError("Mobject.add accepted a non-Mobject")
+assert family_add_root.submobjects == [family_add_a, family_add_b, family_add_c]
+
+# set_submobjects is Reference clear-then-add, including identity dedup and
+# its observable prefix on a later failure.
+assert family_add_root.set_submobjects(
+    [family_add_b, family_add_b, family_add_c]
+) is family_add_root
+assert family_add_root.submobjects == [family_add_b, family_add_c]
+try:
+    family_add_root.set_submobjects([family_add_a, object(), family_add_b])
+except TypeError as error:
+    assert str(error) == "submobjects must be Mobject instances"
+else:
+    raise AssertionError("Mobject.set_submobjects accepted a non-Mobject")
+assert family_add_root.submobjects == [family_add_a]
+
+# Recursive remove snapshots family order and detaches every matching edge;
+# recurse=False touches only the selected root.  Shared descendants retain
+# their Python identity while both parent edges are edited independently.
+family_remove_shared = Mobject()
+family_remove_left = Mobject(family_remove_shared)
+family_remove_right = Mobject(family_remove_shared)
+family_remove_root = Mobject(family_remove_left, family_remove_right)
+assert family_remove_root.remove(family_remove_shared) is family_remove_root
+assert family_remove_left.submobjects == []
+assert family_remove_right.submobjects == []
+family_remove_left.add(family_remove_shared)
+family_remove_right.add(family_remove_shared)
+assert (
+    family_remove_root.remove(
+        family_remove_shared,
+        recurse=False,
+        reassemble=False,
+    )
+    is family_remove_root
+)
+assert family_remove_left.submobjects == [family_remove_shared]
+assert family_remove_right.submobjects == [family_remove_shared]
+
+family_remove_other = Mobject()
+family_remove_root.add(family_remove_other)
+try:
+    family_remove_root.remove(family_remove_other, object(), recurse=False)
+except TypeError as error:
+    assert str(error) == "submobjects must be Mobject instances"
+else:
+    raise AssertionError("Mobject.remove accepted a non-Mobject")
+assert family_remove_other not in family_remove_root.submobjects
+
+assert family_remove_root.reverse_submobjects() is family_remove_root
+assert family_remove_root.submobjects == [family_remove_right, family_remove_left]
+assert family_remove_root.clear() is family_remove_root
+assert family_remove_root.submobjects == []
+assert family_remove_left.submobjects == [family_remove_shared]
+assert family_remove_right.submobjects == [family_remove_shared]
+
+# The same surface commits real native child order after Scene adoption and
+# keeps the typed foreign-stage and cycle refusals transactional.
+family_mutation_scene = Scene()
+bound_family_root = Mobject()
+bound_family_a = Mobject()
+bound_family_b = Mobject()
+family_mutation_scene.add(bound_family_root)
+assert bound_family_root.add(bound_family_a, bound_family_b, bound_family_a) is (
+    bound_family_root
+)
+assert bound_family_root.submobjects == [bound_family_a, bound_family_b]
+assert bound_family_root.family_size() == 3
+assert bound_family_root.reverse_submobjects() is bound_family_root
+assert bound_family_root.get_family() == [
+    bound_family_root,
+    bound_family_b,
+    bound_family_a,
+]
+
+foreign_family_scene = Scene()
+foreign_family_child = Mobject()
+foreign_family_scene.add(foreign_family_child)
+bound_before_foreign = list(bound_family_root.submobjects)
+try:
+    bound_family_root.add(foreign_family_child)
+except bridge_errors.ForeignStageError:
+    pass
+else:
+    raise AssertionError("Mobject.add accepted a foreign-stage child")
+assert bound_family_root.submobjects == bound_before_foreign
+
+try:
+    bound_family_a.add(bound_family_root)
+except bridge_errors.FamilyCycleError:
+    pass
+else:
+    raise AssertionError("Mobject.add accepted a family cycle")
+assert bound_family_a.submobjects == []
+
 other_scene = Scene()
 try:
     other_scene.add(parent)
