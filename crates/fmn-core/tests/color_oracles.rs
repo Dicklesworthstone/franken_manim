@@ -1,8 +1,9 @@
 //! Round-trip and algebraic oracles for the §6.3 color pipeline (BN-04).
 
 use fmn_core::color::{
-    LinearRgba, PremulRgba, Srgb, interpolate_color, interpolate_color_oklab, oklab_to_srgb,
-    srgb_eotf, srgb_oetf, srgb_to_oklab,
+    LinearRgba, PremulRgba, Srgb, color_gradient_by_hsl, interpolate_color,
+    interpolate_color_by_hsl, interpolate_color_oklab, oklab_to_srgb, srgb_eotf, srgb_oetf,
+    srgb_to_oklab,
 };
 
 #[test]
@@ -117,6 +118,37 @@ fn interpolate_color_hits_its_endpoints() {
     assert_eq!(interpolate_color(c1, c2, 1.0), c2);
     assert_eq!(interpolate_color_oklab(c1, c2, 0.0).to_rgb8(), c1.to_rgb8());
     assert_eq!(interpolate_color_oklab(c1, c2, 1.0).to_rgb8(), c2.to_rgb8());
+}
+
+#[test]
+fn reference_hsl_interpolation_uses_the_long_linear_hue_coordinate() {
+    let red = Srgb::from_hex("#FF0000").unwrap();
+    let blue = Srgb::from_hex("#0000FF").unwrap();
+
+    // `colour.Color` reports red and blue hues as 0 and 2/3. The Reference
+    // linearly interpolates those scalars, so the midpoint is green rather
+    // than the shortest-arc magenta that another HSL policy might choose.
+    let midpoint = interpolate_color_by_hsl(red, blue, 0.5);
+    assert!((midpoint.r - 0.0).abs() < 1e-12);
+    assert!((midpoint.g - 1.0).abs() < 1e-12);
+    assert!((midpoint.b - 0.0).abs() < 1e-12);
+
+    let gradient = color_gradient_by_hsl(&[red, blue], 3);
+    assert_eq!(gradient.len(), 3);
+    assert_eq!(gradient[0], red);
+    assert_eq!(gradient[2], blue);
+    assert_eq!(gradient[1], midpoint);
+
+    // `colour` 0.1.5 deliberately collapses sub-5e-7 channel ranges to an
+    // achromatic HSL value; this is one of its own published regressions.
+    let almost_white = Srgb {
+        r: 0.999_999_999_999_999_9,
+        g: 1.0,
+        b: 0.999_999_999_999_999_4,
+    };
+    let collapsed = interpolate_color_by_hsl(almost_white, red, 0.0);
+    assert_eq!(collapsed.r, collapsed.g);
+    assert_eq!(collapsed.g, collapsed.b);
 }
 
 #[test]

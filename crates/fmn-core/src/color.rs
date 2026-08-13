@@ -228,6 +228,28 @@ pub fn interpolate_color(c1: Srgb, c2: Srgb, alpha: f64) -> Srgb {
     }
 }
 
+/// The Reference's opt-in HSL interpolation.  Its `colour.Color` boundary
+/// stores HSL as `(hue, saturation, lightness)` in the unit interval and
+/// linearly interpolates all three components without shortest-arc hue
+/// wrapping before converting back to sRGB.
+#[must_use]
+pub fn interpolate_color_by_hsl(c1: Srgb, c2: Srgb, alpha: f64) -> Srgb {
+    let hsl1 = srgb_to_hsl(c1);
+    let hsl2 = srgb_to_hsl(c2);
+    hsl_to_srgb([
+        lerp(hsl1[0], hsl2[0], alpha),
+        lerp(hsl1[1], hsl2[1], alpha),
+        lerp(hsl1[2], hsl2[2], alpha),
+    ])
+}
+
+/// The HSL branch of Manim's `color_gradient`, with the same sample points
+/// and final-index correction as [`color_gradient`].
+#[must_use]
+pub fn color_gradient_by_hsl(reference_colors: &[Srgb], length: usize) -> Vec<Srgb> {
+    color_gradient_with(reference_colors, length, interpolate_color_by_hsl)
+}
+
 /// Manim's `average_color`, kept exactly (BN-04): per-channel RMS over
 /// sRGB-encoded components. An empty slice averages to black.
 #[must_use]
@@ -256,6 +278,14 @@ pub fn average_color(colors: &[Srgb]) -> Srgb {
 /// requires at least two reference colors otherwise.
 #[must_use]
 pub fn color_gradient(reference_colors: &[Srgb], length: usize) -> Vec<Srgb> {
+    color_gradient_with(reference_colors, length, interpolate_color)
+}
+
+fn color_gradient_with(
+    reference_colors: &[Srgb],
+    length: usize,
+    interpolate: fn(Srgb, Srgb, f64) -> Srgb,
+) -> Vec<Srgb> {
     if length == 0 {
         return Vec::new();
     }
@@ -277,13 +307,88 @@ pub fn color_gradient(reference_colors: &[Srgb], length: usize) -> Vec<Srgb> {
             } else {
                 (alpha as usize, alpha % 1.0)
             };
-            interpolate_color(
+            interpolate(
                 reference_colors[floor],
                 reference_colors[floor + 1],
                 alpha_mod1,
             )
         })
         .collect()
+}
+
+// These are the formulae used by `colour.Color` 0.1.5 at the Reference pin,
+// including its near-gray tolerance. Keeping the conversion here preserves
+// fmn-core as FrankenManim's one color authority.
+fn srgb_to_hsl(color: Srgb) -> [f64; 3] {
+    let min = color.r.min(color.g).min(color.b);
+    let max = color.r.max(color.g).max(color.b);
+    let lightness = (min + max) / 2.0;
+    let range = max - min;
+    if range < 0.000_000_5 {
+        return [0.0, 0.0, lightness];
+    }
+
+    let saturation = if lightness <= 0.5 {
+        range / (max + min)
+    } else {
+        range / (2.0 - max - min)
+    };
+    let red_distance = (((max - color.r) / 6.0) + (range / 2.0)) / range;
+    let green_distance = (((max - color.g) / 6.0) + (range / 2.0)) / range;
+    let blue_distance = (((max - color.b) / 6.0) + (range / 2.0)) / range;
+    let mut hue = if color.r == max {
+        blue_distance - green_distance
+    } else if color.g == max {
+        (1.0 / 3.0) + red_distance - blue_distance
+    } else {
+        (2.0 / 3.0) + green_distance - red_distance
+    };
+    if hue < 0.0 {
+        hue += 1.0;
+    }
+    if hue > 1.0 {
+        hue -= 1.0;
+    }
+    [hue, saturation, lightness]
+}
+
+fn hsl_to_srgb([hue, saturation, lightness]: [f64; 3]) -> Srgb {
+    if saturation == 0.0 {
+        return Srgb {
+            r: lightness,
+            g: lightness,
+            b: lightness,
+        };
+    }
+    let m2 = if lightness < 0.5 {
+        lightness * (1.0 + saturation)
+    } else {
+        (lightness + saturation) - (saturation * lightness)
+    };
+    let m1 = 2.0 * lightness - m2;
+    let channel = |hue: f64| {
+        let mut hue = hue;
+        while hue < 0.0 {
+            hue += 1.0;
+        }
+        while hue > 1.0 {
+            hue -= 1.0;
+        }
+        if 6.0 * hue < 1.0 {
+            m1 + (m2 - m1) * 6.0 * hue
+        } else if 2.0 * hue < 1.0 {
+            m2
+        } else if 3.0 * hue < 2.0 {
+            m1 + (m2 - m1) * (2.0 / 3.0 - hue) * 6.0
+        } else {
+            m1
+        }
+    };
+    Srgb {
+        r: channel(hue + 1.0 / 3.0),
+        g: channel(hue),
+        b: channel(hue - 1.0 / 3.0),
+    }
 }
 
 // --- Oklab (the opt-in perceptual interpolation) --------------------------
