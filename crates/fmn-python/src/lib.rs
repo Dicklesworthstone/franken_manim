@@ -1215,6 +1215,65 @@ impl BridgeMobject {
         }
     }
 
+    /// Owned f64 rows for one RecordBuffer field. Arbitrary Python point-map
+    /// callables operate on NumPy-owned arrays, then commit through the
+    /// engine-mediated write path instead of leaving a zero-copy writer alive
+    /// across bounding-box cache installation.
+    fn _field_rows(slf: &Bound<'_, Self>, field: &str) -> PyResult<Vec<Vec<f64>>> {
+        crossing::record(CrossingClass::Other);
+        with_buffer_ref(slf, |buffer| {
+            if !buffer
+                .schema()
+                .fields()
+                .iter()
+                .any(|candidate| candidate.name == field)
+            {
+                return None;
+            }
+            Some(
+                (0..buffer.len())
+                    .map(|index| {
+                        buffer
+                            .read(index, field)
+                            .expect("validated schema field exists")
+                            .into_iter()
+                            .map(f64::from)
+                            .collect()
+                    })
+                    .collect(),
+            )
+        })?
+        .ok_or_else(|| PyKeyError::new_err(format!("no `{field}` record field")))
+    }
+
+    /// Atomically validate and engine-write one complete field column.
+    fn _set_field_rows(slf: &Bound<'_, Self>, field: &str, rows: Vec<Vec<f64>>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_buffer(slf, |buffer| {
+            let Some(field_index) = buffer
+                .schema()
+                .fields()
+                .iter()
+                .position(|candidate| candidate.name == field)
+            else {
+                return Err(PyKeyError::new_err(format!("no `{field}` record field")));
+            };
+            let width = buffer.schema().fields()[field_index].width;
+            if rows.len() != buffer.len() || rows.iter().any(|row| row.len() != width) {
+                return Err(PyValueError::new_err(format!(
+                    "field `{field}` expects {} rows of width {width}",
+                    buffer.len()
+                )));
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let values = row.iter().map(|value| *value as f32).collect::<Vec<_>>();
+                let wrote = buffer.write(index, field, &values);
+                debug_assert!(wrote, "validated field row must be writable");
+            }
+            Ok(())
+        })?
+    }
+
     #[pyo3(signature = (writable = true))]
     fn _data_array<'py>(slf: &Bound<'py, Self>, writable: bool) -> PyResult<Bound<'py, PyAny>> {
         crossing::record(CrossingClass::Other);
@@ -1557,6 +1616,50 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.bake_placement(mob))?
             .map(|_| ())
             .map_err(stage_error)
+    }
+
+    /// Preserve the Reference's opt-in transformed bounding-box rows after a
+    /// Python callable has written the pointlike records. Marionette keys the
+    /// value to the current subtree signature, so all later mutations still
+    /// invalidate it through the ordinary native revision path.
+    fn _cache_bbox_rows(slf: &Bound<'_, Self>, rows: [[f64; 3]; 3]) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.install_bounding_box_cache(
+                mob,
+                fmn_mobject::BoundingBox {
+                    min: rows[0],
+                    mid: rows[1],
+                    max: rows[2],
+                },
+            );
+        })
+    }
+
+    /// Native family matrix application for the common linear transform
+    /// branch. The bootstrap distributes this over detached nursery roots but
+    /// calls it once for a scene-bound family.
+    fn _apply_matrix(
+        slf: &Bound<'_, Self>,
+        matrix: [[f64; 3]; 3],
+        about_point: Option<[f64; 3]>,
+        about_edge: Option<[f64; 3]>,
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.apply_points_function(
+                mob,
+                |point| {
+                    [
+                        matrix[0][0] * point[0] + matrix[0][1] * point[1] + matrix[0][2] * point[2],
+                        matrix[1][0] * point[0] + matrix[1][1] * point[1] + matrix[1][2] * point[2],
+                        matrix[2][0] * point[0] + matrix[2][1] * point[1] + matrix[2][2] * point[2],
+                    ]
+                },
+                about_point,
+                about_edge,
+            );
+        })
     }
 
     /// Chisel's shared-anchor encoding for a corner polyline, installed

@@ -198,6 +198,25 @@ impl Stage {
             .map_or(0, |e| e.bbox_cell().borrow().materializations)
     }
 
+    /// Install a caller-computed Reference bounding box under the entry's
+    /// current subtree signature.
+    ///
+    /// Most engine operations deliberately let the lazy cache recompute from
+    /// points. The Python compatibility portal uses this narrow seam for
+    /// `apply_points_function(..., works_on_bounding_box=True)`, whose public
+    /// contract transforms the three cached `[min, mid, max]` rows with the
+    /// user callable instead. Any later point, placement, or family mutation
+    /// changes the signature and invalidates this value automatically.
+    pub fn install_bounding_box_cache(&self, mob: Mob, value: BoundingBox) -> &Self {
+        let signature = self.bbox_signature(mob);
+        if let Some(entry) = self.get(mob) {
+            let mut cache = entry.bbox_cell().borrow_mut();
+            cache.signature = Some(signature);
+            cache.value = value;
+        }
+        self
+    }
+
     // ---------------------------------------------------- critical-point getters
 
     /// The critical point of `mob`'s box in a direction (Reference
