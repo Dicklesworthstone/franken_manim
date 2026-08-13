@@ -1683,6 +1683,22 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
     }
 
+    /// Chisel's bounded longest-curve insertion over an arbitrary valid
+    /// shared-anchor point run.  This is intentionally a pure helper: the
+    /// Python surface owns Reference family recursion and commits the result
+    /// through `VMobject.set_points`, so RecordBuffer style lanes and view
+    /// generations follow the same path as every other portal point edit.
+    fn _insert_n_curves_to_point_list(
+        &self,
+        n: usize,
+        points: Vec<[f64; 3]>,
+        tolerance: f64,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        fmn_library::QuadPath::insert_n_curves_to_point_list(n, &points, tolerance)
+            .map_err(native_error)
+    }
+
     /// Revalidate a Python-authored VMobject point run and refresh the native
     /// shared-anchor metadata through Marionette's one `Stage::set_points`
     /// path.  The Python layer owns Reference record-resize semantics; this

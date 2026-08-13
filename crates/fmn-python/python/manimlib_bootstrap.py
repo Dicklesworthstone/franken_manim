@@ -2032,6 +2032,7 @@ class Point(Mobject):
 
 class VMobject(Mobject):
     make_smooth_after_applying_functions = False
+    tolerance_for_point_equality = 1e-8
 
     data_dtype = [
         ("point", 3),
@@ -2069,6 +2070,73 @@ class VMobject(Mobject):
 
     def get_num_curves(self):
         return self.get_num_points() // 2
+
+    def get_anchors_and_handles(self):
+        points = self.get_points()
+        return [points[0:-1:2], points[1::2], points[2::2]]
+
+    def get_start_anchors(self):
+        return self.get_points()[0:-1:2]
+
+    def get_end_anchors(self):
+        return self.get_points()[2::2]
+
+    def get_anchors(self):
+        return self.get_points()[::2]
+
+    def get_bezier_tuples_from_points(self, points):
+        n_curves = (len(points) - 1) // 2
+        return (points[2 * index : 2 * index + 3] for index in range(n_curves))
+
+    def get_bezier_tuples(self):
+        return self.get_bezier_tuples_from_points(self.get_points())
+
+    def get_subpath_end_indices_from_points(self, points):
+        points = _np.asarray(points)
+        tolerance = 1e-4
+        starts, handles, ends = points[0:-1:2], points[1::2], points[2::2]
+        is_end = (starts == handles).all(1) & (
+            _np.abs(handles - ends) > tolerance
+        ).any(1)
+        end_indices = (2 * index for index, end in enumerate(is_end) if end)
+        return _np.array([*end_indices, len(points) - 1])
+
+    def get_subpath_end_indices(self):
+        # Recompute from the live RecordBuffer view. The Reference caches this
+        # derived list behind explicit dirty flags; the portal's writable
+        # NumPy views can change at any instant, so caching here would make a
+        # direct view write invisibly stale.
+        return self.get_subpath_end_indices_from_points(self.get_points())
+
+    def get_subpaths_from_points(self, points):
+        if len(points) == 0:
+            return []
+        end_indices = self.get_subpath_end_indices_from_points(points)
+        start_indices = [0, *(end_indices[:-1] + 2)]
+        return [
+            points[start : end + 1]
+            for start, end in zip(start_indices, end_indices)
+        ]
+
+    def get_subpaths(self):
+        return self.get_subpaths_from_points(self.get_points())
+
+    def insert_n_curves_to_point_list(self, n, points):
+        return _np.array(
+            self._insert_n_curves_to_point_list(
+                n,
+                [_vec3(point) for point in points],
+                self.tolerance_for_point_equality,
+            )
+        )
+
+    def insert_n_curves(self, n, recurse=True):
+        for mob in _family_preorder(self) if recurse else [self]:
+            if mob.get_num_curves() > 0:
+                mob.set_points(
+                    mob.insert_n_curves_to_point_list(n, mob.get_points())
+                )
+        return self
 
     def quick_point_from_proportion(self, alpha):
         # Reference VMobject's equal-curve-count approximation. This remains
