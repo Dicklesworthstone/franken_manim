@@ -2394,6 +2394,242 @@ assert dashed.set_angle(math.pi / 2.0) is dashed
 assert np.allclose(dashed.get_start(), dashed_start)
 assert np.allclose(dashed.get_unit_vector(), [0.0, 1.0, 0.0], atol=1e-9)
 
+# `become` must keep the Python proxy family and Marionette family aligned
+# when a live redraw changes a generated child's multiplicity.  This is the
+# exact varying-dash-count shape exercised by MaxProcess's always_redraw line.
+many_dashes = geometry.DashedLine(
+    [0.0, 0.0, 0.0], [4.0, 0.0, 0.0], dash_length=0.12
+)
+few_dashes = geometry.DashedLine(
+    [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], dash_length=0.12
+)
+assert len(many_dashes.submobjects) > len(few_dashes.submobjects)
+dash_scene = Scene()
+dash_scene.add(many_dashes)
+many_dashes_identity = id(many_dashes)
+assert many_dashes.become(few_dashes) is many_dashes
+assert id(many_dashes) == many_dashes_identity
+assert len(many_dashes.submobjects) == len(few_dashes.submobjects)
+assert len(many_dashes.get_family()) == 1 + len(many_dashes.submobjects)
+assert np.allclose(
+    many_dashes.submobjects[0].get_points(),
+    few_dashes.submobjects[0].get_points(),
+)
+
+named_source = manimlib.VGroup(geometry.Dot(), geometry.Dot())
+named_source.focus = named_source.submobjects[1]
+named_receiver = manimlib.VGroup(geometry.Dot())
+named_receiver.become(named_source)
+assert named_receiver.focus is named_receiver.submobjects[1]
+
+foreign_dash_scene = Scene()
+foreign_dashes = geometry.DashedLine(
+    [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], dash_length=0.12
+)
+foreign_dash_scene.add(foreign_dashes)
+many_family_before = list(many_dashes.submobjects)
+foreign_family_before = list(foreign_dashes.submobjects)
+try:
+    many_dashes.become(foreign_dashes)
+except bridge_errors.ForeignStageError as error:
+    assert "become endpoints must belong to one Scene" in str(error)
+else:
+    raise AssertionError("become aligned foreign-stage families before refusal")
+assert list(many_dashes.submobjects) == many_family_before
+assert list(foreign_dashes.submobjects) == foreign_family_before
+
+alignment_leaf = geometry.Dot(fill_opacity=1.0)
+assert alignment_leaf.add_n_more_submobjects(2) is alignment_leaf
+assert len(alignment_leaf.submobjects) == 2
+assert all(child.get_num_points() == 1 for child in alignment_leaf.submobjects)
+visible_child = geometry.Dot(fill_opacity=1.0)
+alignment_group = manimlib.VGroup(visible_child)
+alignment_group.add_n_more_submobjects(2)
+assert alignment_group.submobjects[0] is visible_child
+assert len(alignment_group.submobjects) == 3
+assert all(
+    math.isclose(child.get_fill_opacity(), 0.0)
+    for child in alignment_group.submobjects[1:]
+)
+assert math.isclose(visible_child.invisible_copy().get_fill_opacity(), 0.0)
+
+alignment_before = list(alignment_group.submobjects)
+try:
+    alignment_group.add_n_more_submobjects(1 << 16)
+except RuntimeError as error:
+    assert "family alignment requested 65539 direct submobjects" in str(error)
+    assert "maximum is 65536" in str(error)
+else:
+    raise AssertionError("an over-budget family alignment reached allocation")
+assert list(alignment_group.submobjects) == alignment_before
+
+try:
+    alignment_group.align_family(object())
+except TypeError as error:
+    assert "align_family expects a Mobject" in str(error)
+else:
+    raise AssertionError("align_family accepted a non-Mobject")
+assert list(alignment_group.submobjects) == alignment_before
+
+# The polygon lineage is native Atlas geometry, not schema-generated empty
+# shells.  Constructor topology, rounded-corner mutation, and ArrowTip's live
+# queries all remain valid after scene adoption and ordinary transforms.
+assert manimlib.Polygon is geometry.Polygon
+assert manimlib.RegularPolygon is geometry.RegularPolygon
+assert manimlib.Triangle is geometry.Triangle
+assert manimlib.ArrowTip is geometry.ArrowTip
+assert issubclass(geometry.RegularPolygon, geometry.Polygon)
+assert issubclass(geometry.Triangle, geometry.RegularPolygon)
+assert issubclass(geometry.ArrowTip, geometry.Triangle)
+assert str(inspect.signature(geometry.Polygon)) == "(*vertices, **kwargs)"
+assert str(inspect.signature(geometry.RegularPolygon)) == (
+    "(n=6, radius=1.0, start_angle=None, **kwargs)"
+)
+assert str(inspect.signature(geometry.Triangle)) == "(**kwargs)"
+assert list(inspect.signature(geometry.ArrowTip).parameters) == [
+    "angle",
+    "width",
+    "length",
+    "fill_opacity",
+    "fill_color",
+    "stroke_width",
+    "tip_style",
+    "kwargs",
+]
+
+polygon = geometry.Polygon(
+    [0.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    [0.0, 2.0, 0.0],
+    color=manimlib.BLUE,
+)
+assert polygon.get_num_curves() == 3
+assert np.allclose(
+    polygon.get_vertices(),
+    [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+)
+assert polygon.get_fill_color() == manimlib.BLUE
+assert polygon.get_stroke_color() == manimlib.BLUE
+
+rounded = polygon.copy()
+rounded_style = (
+    rounded.get_fill_color(),
+    rounded.get_fill_opacity(),
+    rounded.get_stroke_color(),
+    rounded.get_stroke_opacity(),
+    rounded.get_stroke_width(),
+)
+rounded_before = rounded.get_points().copy()
+assert rounded.round_corners(0.2) is rounded
+assert rounded.get_num_curves() == 9
+assert not np.array_equal(rounded.get_points(), rounded_before)
+assert np.isfinite(rounded.get_points()).all()
+assert (
+    rounded.get_fill_color(),
+    rounded.get_fill_opacity(),
+    rounded.get_stroke_color(),
+    rounded.get_stroke_opacity(),
+    rounded.get_stroke_width(),
+) == rounded_style
+
+default_rounded = geometry.Polygon(
+    [-1.0, -1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+)
+default_rounded.round_corners()
+assert default_rounded.get_num_curves() == 12
+
+concave_rounded = geometry.Polygon(
+    [-1.0, -1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+).round_corners(-0.1)
+assert np.isfinite(concave_rounded.get_points()).all()
+
+bound_polygon = geometry.Polygon(
+    [0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 2.0, 0.0]
+)
+polygon_scene = Scene()
+polygon_scene.add(bound_polygon)
+bound_polygon_identity = id(bound_polygon)
+bound_polygon_points = bound_polygon.get_points().copy()
+bound_polygon.round_corners(0.15)
+assert id(bound_polygon) == bound_polygon_identity
+assert not np.array_equal(bound_polygon.get_points(), bound_polygon_points)
+assert bound_polygon.get_num_curves() == 9
+
+hexagon = geometry.RegularPolygon(n=6, radius=2.0)
+assert len(hexagon.get_vertices()) == 6
+assert np.allclose(np.linalg.norm(hexagon.get_vertices(), axis=1), 2.0)
+assert np.allclose(hexagon.get_vertices()[0], [2.0, 0.0, 0.0])
+triangle = geometry.Triangle()
+assert len(triangle.get_vertices()) == 3
+assert np.allclose(triangle.get_vertices()[0], [0.0, 1.0, 0.0], atol=1e-12)
+
+tip = geometry.ArrowTip(
+    angle=math.pi / 3.0,
+    width=0.4,
+    length=0.7,
+    fill_color=manimlib.RED,
+)
+assert np.allclose(tip.get_tip_point(), tip.get_points()[0])
+assert np.allclose(tip.get_vector(), tip.get_tip_point() - tip.get_base())
+assert math.isclose(tip.get_angle(), math.pi / 3.0, abs_tol=1e-6)
+assert math.isclose(tip.get_length(), 0.7, abs_tol=1e-6)
+assert tip.get_fill_color() == manimlib.RED
+for tip_style in (0, 1, 2, 99):
+    styled_tip = geometry.ArrowTip(tip_style=tip_style)
+    assert styled_tip.has_points()
+    assert np.isfinite(styled_tip.get_points()).all()
+assert np.allclose(
+    geometry.ArrowTip(tip_style=1.5).get_points(),
+    geometry.ArrowTip(tip_style=0).get_points(),
+)
+inner_smooth_tip = geometry.ArrowTip(tip_style=1)
+assert np.allclose(
+    inner_smooth_tip.get_base(), inner_smooth_tip.point_from_proportion(0.5)
+)
+assert not np.allclose(
+    inner_smooth_tip.get_base(),
+    inner_smooth_tip.quick_point_from_proportion(0.5),
+    atol=1e-3,
+)
+assert np.allclose(
+    inner_smooth_tip.get_vector(),
+    inner_smooth_tip.get_tip_point() - inner_smooth_tip.get_base(),
+)
+assert math.isclose(
+    inner_smooth_tip.get_length(),
+    np.linalg.norm(inner_smooth_tip.get_vector()),
+)
+
+try:
+    geometry.Polygon()
+except IndexError as error:
+    assert "tuple index out of range" in str(error)
+else:
+    raise AssertionError("an empty Polygon did not preserve the Reference refusal")
+
+try:
+    geometry.RegularPolygon(1 << 20)
+except ValueError as error:
+    assert "compass directions" in str(error).lower()
+else:
+    raise AssertionError("an over-budget RegularPolygon reached allocation")
+
+for invalid_n, error_type in ((0, ZeroDivisionError), (-1, IndexError), (3.5, TypeError)):
+    try:
+        geometry.RegularPolygon(invalid_n)
+    except error_type:
+        pass
+    else:
+        raise AssertionError(
+            f"RegularPolygon({invalid_n!r}) did not preserve the Reference refusal"
+        )
+
 quarter_arc = geometry.Arc(
     start_angle=0.0,
     angle=math.pi / 2.0,

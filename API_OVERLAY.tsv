@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	1bce388c0a17699efedd021f8f5a9148456614019ab2851e7bd585bd5845c311
+ledger_reviewed_digest	51147a1705d807c7474afa3da13cebc71d38944417f6489bb10c23e367761799
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -223,6 +223,7 @@ manimlib.mobject.coordinate_systems:CoordinateSystem.i2gp	same	scripts/manim_ref
 manimlib.mobject.coordinate_systems:CoordinateSystem.input_to_graph_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	uses retained functions directly and the pinned quick-curve binary-search fallback otherwise
 manimlib.mobject.coordinate_systems:CoordinateSystem.p2c	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live inverse coordinate transform
 manimlib.mobject.mobject:Mobject.add	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	inserts children as an ordered identity set and commits each accepted edge into the live Marionette family graph
+manimlib.mobject.mobject:Mobject.add_n_more_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	pads direct children in Reference repeat-index order with invisible copies under Marionette's fixed resource ceiling
 manimlib.mobject.mobject:Mobject.add_background_rectangle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	builds the Atlas-backed camera-colored plate and prepends it through the live family-order seam
 manimlib.mobject.mobject:Mobject.add_background_rectangle_to_family_members_with_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adds one bound or detached plate to every pointful member from the pre-mutation public family snapshot
 manimlib.mobject.mobject:Mobject.add_background_rectangle_to_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adds one identity-preserving plate to each immediate child without changing the parent's member order
@@ -234,7 +235,9 @@ manimlib.mobject.mobject:Mobject.apply_function_to_position	same	scripts/manim_r
 manimlib.mobject.mobject:Mobject.apply_function_to_submobject_positions	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the position-only transform to immediate submobjects in stable list order
 manimlib.mobject.mobject:Mobject.apply_matrix	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	embeds smaller matrices in three dimensions routes ordinary families once through Marionette and preserves custom pointlike fields
 manimlib.mobject.mobject:Mobject.apply_points_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves family and pointlike-field order pivot rules transformed bounding-box rows return identity and callback exceptions with member-by-member partial state
+manimlib.mobject.mobject:Mobject.align_family	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reconciles Python proxy and native child shapes recursively before become while preserving child order and identity
 manimlib.mobject.mobject:Mobject.append_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the cyclic public resize policy then inherits the final retained record across the appended tail before installing new points
+manimlib.mobject.mobject:Mobject.become	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns family shape copies live records uniforms placement and optional root updaters and remaps named family attributes without replacing the receiver proxy
 manimlib.mobject.mobject:Mobject.are_points_touching	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the inclusive per-row bounding-box mask with the exact scalar buffer expansion
 manimlib.mobject.mobject:Mobject.clear	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	removes exactly the immediate child batch through the recursive-removal surface and returns the original proxy
 manimlib.mobject.mobject:Mobject.clear_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	saves the first complete record as the point-free default then empties the live RecordBuffer through its generation protocol
@@ -253,6 +256,7 @@ manimlib.mobject.mobject:Mobject.get_num_points	same	scripts/manim_ref/manimlib/
 manimlib.mobject.mobject:Mobject.is_off_screen	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses strict whole-box comparisons against the authoritative frame radii
 manimlib.mobject.mobject:Mobject.is_point_touching	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	wraps one point into the inclusive vectorized bounding-box query and returns its NumPy boolean
 manimlib.mobject.mobject:Mobject.is_touching	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the exact buffered axis-separation rule including tangent boxes
+manimlib.mobject.mobject:Mobject.invisible_copy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns an independent family copy with recursive opacity set to zero
 manimlib.mobject.mobject:Mobject.match_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the source color through live style reads and writes without changing opacity or shading
 manimlib.mobject.mobject:Mobject.match_style	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies color opacity and shading through the engine-backed base Mobject style surface
 manimlib.mobject.mobject:Mobject.refresh_bounding_box	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves the fluent cache-control surface while Marionette revision channels own exact downward and upward invalidation
@@ -271,7 +275,22 @@ manimlib.mobject.mobject:Mobject.sort	same	scripts/manim_ref/manimlib/mobject/mo
 manimlib.mobject.mobject:Mobject.space_out_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales the family around forwarded pivots then restores each immediate child's size around its own center
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
+manimlib.mobject.geometry:ArrowTip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Triangle subclass backed by Atlas tip geometry rather than a schema-generated shell
+manimlib.mobject.geometry:ArrowTip.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves dimensions orientation style-code fallback and explicit fill and stroke configuration through the native builder
+manimlib.mobject.geometry:ArrowTip.get_angle	improved	BN-03	crates/fmn-python/tests/bridge.py	derives the live true-length base-to-tip vector angle after construction and transforms
+manimlib.mobject.geometry:ArrowTip.get_base	improved	BN-03	crates/fmn-python/tests/bridge.py	returns the live true-half-length point on the tip path
+manimlib.mobject.geometry:ArrowTip.get_length	improved	BN-03	crates/fmn-python/tests/bridge.py	returns the Euclidean norm of the true-length base-to-tip vector
+manimlib.mobject.geometry:ArrowTip.get_tip_point	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the first live point record
+manimlib.mobject.geometry:ArrowTip.get_vector	improved	BN-03	crates/fmn-python/tests/bridge.py	returns the live tip point minus the true-length base vector
 manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_parity.rs	uses one output-scale arc-density rule that is never coarser
+manimlib.mobject.geometry:Polygon	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass backed by Atlas closed shared-anchor geometry rather than a schema-generated shell
+manimlib.mobject.geometry:Polygon.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves variadic vertices closed point topology exact empty-input refusal and VMobject styling
+manimlib.mobject.geometry:Polygon.get_vertices	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live start-anchor view without the repeated closing anchor
+manimlib.mobject.geometry:Polygon.round_corners	improved	BN-16	crates/fmn-python/tests/bridge.py	uses native cyclic tangent arcs and includes the closing edge in the default shortest-edge radius
+manimlib.mobject.geometry:RegularPolygon	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Polygon subclass over the bounded native compass construction
+manimlib.mobject.geometry:RegularPolygon.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves radius explicit orientation and odd-vertex default orientation with a typed resource refusal
+manimlib.mobject.geometry:Triangle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is the authored three-sided RegularPolygon subclass with caller configuration preserved
+manimlib.mobject.geometry:Triangle.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	forwards caller style and orientation while fixing the native vertex count to three
 manimlib.mobject.types.dot_cloud:DotCloud.compute_bounding_box	same	scripts/manim_ref/manimlib/mobject/types/dot_cloud.py	crates/fmn-python/tests/bridge.py	expands the live point-family extent by the configured world-space radius on all axes
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_point	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	delegates one point and optional rgba color or opacity through the exact multi-point record append
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	uses the authoritative base append semantics then applies explicit rgba or color and opacity only to the appended tail

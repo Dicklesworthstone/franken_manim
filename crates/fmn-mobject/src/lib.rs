@@ -71,9 +71,8 @@ pub enum StageError {
     /// `restore` without a prior `save_state` — the Reference raises
     /// "Trying to restore without having saved".
     NoSavedState,
-    /// `become` between families of different shapes. The Reference aligns
-    /// families first (`align_family`); alignment lands with the Transform
-    /// machinery (fm-cye), and until then the shapes must already agree.
+    /// `become` between families the caller did not first reconcile through
+    /// [`Stage::align_family`].
     FamilyShapeMismatch,
     /// `become` between records of different schemas — the Reference's
     /// `set_data` asserts dtype equality; this is the typed refusal.

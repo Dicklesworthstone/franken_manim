@@ -1504,10 +1504,31 @@ impl BridgeMobject {
         fmn_library::integer_interpolate(start, end, alpha)
     }
 
+    /// Preflight the Python-proxy half of `Mobject.add_n_more_submobjects`
+    /// against Marionette's one family-alignment resource ceiling.
+    #[staticmethod]
+    fn _aligned_submobject_target(current: usize, additional: usize) -> PyResult<usize> {
+        let requested = current.checked_add(additional).ok_or_else(|| {
+            stage_error(fmn_mobject::StageError::SubmobjectBudgetExceeded {
+                requested: usize::MAX,
+                max: fmn_mobject::MAX_ALIGNED_SUBMOBJECTS,
+            })
+        })?;
+        if requested > fmn_mobject::MAX_ALIGNED_SUBMOBJECTS {
+            return Err(stage_error(
+                fmn_mobject::StageError::SubmobjectBudgetExceeded {
+                    requested,
+                    max: fmn_mobject::MAX_ALIGNED_SUBMOBJECTS,
+                },
+            ));
+        }
+        Ok(requested)
+    }
+
     /// `Mobject.become` over `Stage::become_mobject`: per-member data,
-    /// uniform, and placement assignment across zipped equal-shape
-    /// families. Schema or family-shape drift is the engine's precise
-    /// refusal (structural `align_family` awaits its binding).
+    /// uniform, and placement assignment across zipped families after the
+    /// Python proxy graph has run Reference `align_family`. Schema drift or
+    /// an unsynchronized proxy/native graph remains a precise refusal.
     #[pyo3(signature = (other, match_updaters = false))]
     fn _become(
         slf: &Bound<'_, Self>,
@@ -1860,6 +1881,71 @@ impl BridgeMobject {
     // fmn-library builder and installs the built family via
     // `install_native_tree`; the returned nested `(shell, children)` specs
     // are hung on the Python family lists by the bootstrap.
+
+    /// `Polygon(*vertices)` over Atlas's shared-anchor polygon builder.
+    fn _build_polygon<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        vertices: Vec<[f64; 3]>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        install_native_tree(slf, factory, fmn_library::Polygon::new(vertices).build())
+    }
+
+    /// `RegularPolygon(n, radius, start_angle)`: the bounded native
+    /// compass-direction kernel owns both the vertex count and orientation.
+    fn _build_regular_polygon<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        n: usize,
+        radius: f64,
+        start_angle: Option<f64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut polygon = fmn_library::RegularPolygon::new(n).radius(radius);
+        if let Some(angle) = start_angle {
+            polygon = polygon.start_angle(angle);
+        }
+        install_native_tree(slf, factory, polygon.build().map_err(native_error)?)
+    }
+
+    /// `ArrowTip(...)` over the one native tip builder.  As in the
+    /// Reference, values other than the two special style codes fall back
+    /// to the ordinary triangular tip.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_arrow_tip<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        angle: f64,
+        width: f64,
+        length: f64,
+        tip_style: i64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let tip_style = match tip_style {
+            1 => fmn_library::TipStyle::InnerSmooth,
+            2 => fmn_library::TipStyle::Dot,
+            _ => fmn_library::TipStyle::Triangle,
+        };
+        let built = fmn_library::ArrowTip::new()
+            .angle(angle)
+            .width(width)
+            .length(length)
+            .tip_style(tip_style)
+            .build();
+        install_native_tree(slf, factory, built)
+    }
+
+    /// Mutate a detached or scene-bound polygon through Atlas's native
+    /// rounded-corner algorithm.  The complete result is built before the
+    /// Stage write, so malformed geometry cannot leave a partial mutation.
+    fn _round_polygon_corners(
+        slf: &Bound<'_, Self>,
+        vertices: Vec<[f64; 3]>,
+        radius: Option<f64>,
+    ) -> PyResult<()> {
+        let rounded = fmn_library::Polygon::new(vertices)
+            .round_corners(radius)
+            .map_err(native_error)?;
+        with_stage(slf, |stage, mob| stage.set_points(mob, rounded.points()))?.map_err(stage_error)
+    }
 
     /// `Rectangle(width, height)` over the polygon shelf.
     fn _build_rectangle<'py>(

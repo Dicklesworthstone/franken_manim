@@ -1119,10 +1119,9 @@ impl Stage {
     /// is a Rust 2024 reserved keyword, following the
     /// [`Stage::update_mobject`] convention: edit `mob`'s data to be
     /// identical to `other`'s. The Reference aligns families first
-    /// (`align_family`);
-    /// alignment lands with the Transform machinery (fm-cye), so until then
-    /// the two families must already share a shape — equal member count,
-    /// member-for-member equal child counts. Per zipped member: record data
+    /// (`align_family`); callers must therefore run [`Stage::align_family`]
+    /// before this lower-level copy. The two families must arrive with equal
+    /// member counts and member-for-member child counts. Per zipped member: record data
     /// (schema-checked — the Reference's `set_data` asserts dtype
     /// equality), uniforms, and tracker state copy across; outstanding live
     /// views on `mob` detach as under resize (V6). Updater lists are

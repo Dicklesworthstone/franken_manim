@@ -49,6 +49,7 @@ migration guidance users read:
 | BN-13 | Cubic curves use one C1, error-bounded reduction; the simple shortcut cannot lower fidelity | [BN-13-error-bounded-cubic-reduction.md](BN-13-error-bounded-cubic-reduction.md) | W2 | Draft |
 | BN-14 | Sound is sample-exact on the rational frame clock; pre-zero audio clips instead of raising | [BN-14-sample-exact-sound.md](BN-14-sample-exact-sound.md) | W8 | Draft |
 | BN-15 | The CLI is generated, validated, capability-aware, and machine-readable | [BN-15-cli-contract.md](BN-15-cli-contract.md) | W9/W10 | Draft |
+| BN-16 | Polygon default corner rounding measures the complete cyclic edge set | [BN-16-polygon-corner-radius.md](BN-16-polygon-corner-radius.md) | W10 | Draft |
 
 BN-10, BN-12, BN-13, BN-14, and BN-15 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds

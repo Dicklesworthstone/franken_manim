@@ -158,8 +158,9 @@ impl Polygon {
     /// Reference `Polygon.round_corners`: replace each corner with an arc
     /// of the given radius, tangent to both edges.
     ///
-    /// `None` picks the Reference's default, a quarter of the shortest
-    /// edge. A negative radius gives concave corners, as it does there.
+    /// `None` picks a quarter of the shortest edge. Unlike the Reference,
+    /// the complete cyclic edge set participates in that minimum (BN-16).
+    /// A negative radius gives concave corners, as it does there.
     ///
     /// # Errors
     /// The typed arc-component refusal if a corner cannot produce a finite,
@@ -486,13 +487,17 @@ impl From<ArrowTip> for Mobject {
     }
 }
 
-/// The tip's base: the Reference's `point_from_proportion(0.5)`, which for
-/// a triangle is the midpoint of the back edge.
+/// The tip's base at true half arc length (BN-03).
+///
+/// For the ordinary symmetric triangle this is the midpoint of the back
+/// edge, as in the Reference.  The distinction matters for asymmetric custom
+/// tip shapes: production attachment and the public query must share the
+/// engine's one true-proportion definition.
 #[must_use]
 pub fn tip_base(tip: &VMobject) -> Vec3 {
     tip.path()
         .ok()
-        .and_then(|p| p.quick_point_from_proportion(0.5))
+        .and_then(|p| p.point_from_proportion(0.5))
         .unwrap_or(ORIGIN)
 }
 
@@ -985,6 +990,23 @@ mod tests {
         assert!(
             dot.points().len() > triangle.points().len(),
             "a dot is an arc"
+        );
+    }
+
+    #[test]
+    fn asymmetric_tip_base_uses_true_arc_length() {
+        let tip = ArrowTip::new().tip_style(TipStyle::InnerSmooth).build();
+        let path = tip.path().expect("an arrow tip is a valid quadratic path");
+        let true_base = path
+            .point_from_proportion(0.5)
+            .expect("the tip has a halfway point");
+        let quick_base = path
+            .quick_point_from_proportion(0.5)
+            .expect("the tip has a quick halfway point");
+        assert!(space_ops::get_norm(sub(tip_base(&tip), true_base)) < 1e-9);
+        assert!(
+            space_ops::get_norm(sub(true_base, quick_base)) > 1e-3,
+            "the asymmetric fixture must distinguish BN-03 from the quick approximation"
         );
     }
 

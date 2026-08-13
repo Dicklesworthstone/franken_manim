@@ -1792,6 +1792,51 @@ class Mobject(_BridgeMobject):
     def get_group_class(self):
         return getattr(_FMN_ROOT, "Group", Mobject)
 
+    def invisible_copy(self):
+        result = self.copy()
+        result.set_opacity(0)
+        return result
+
+    def add_n_more_submobjects(self, n):
+        n = _operator.index(n)
+        if n <= 0:
+            return self
+        current = len(self.submobjects)
+        target = self._aligned_submobject_target(current, n)
+        if current == 0:
+            center = self.get_center()
+            children = []
+            for _ in range(target):
+                child = self.copy()
+                child.set_points([center])
+                children.append(child)
+            self.set_submobjects(children)
+            return self
+
+        split_factors = [0] * current
+        for index in range(target):
+            split_factors[index * current // target] += 1
+        children = []
+        for child, split_factor in zip(self.submobjects, split_factors):
+            children.append(child)
+            children.extend(
+                child.invisible_copy() for _ in range(1, split_factor)
+            )
+        self.set_submobjects(children)
+        return self
+
+    def align_family(self, mobject):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("align_family expects a Mobject")
+        n1 = len(self.submobjects)
+        n2 = len(mobject.submobjects)
+        if n1 != n2:
+            self.add_n_more_submobjects(max(0, n2 - n1))
+            mobject.add_n_more_submobjects(max(0, n1 - n2))
+        for child1, child2 in zip(self.submobjects, mobject.submobjects):
+            child1.align_family(child2)
+        return self
+
     def __getitem__(self, value):
         if isinstance(value, slice):
             return self.get_group_class()(*self.split()[value])
@@ -1880,13 +1925,30 @@ class Mobject(_BridgeMobject):
 
     def become(self, mobject, match_updaters=False):
         # Reference mobject.py:721: per-member data/uniform assignment
-        # across zipped families, in both proxy states. The engine's
-        # become handles equal-shape, same-schema families; schema or
-        # shape drift refuses precisely (structural align_family awaits
-        # its binding).
+        # across zipped families, in both proxy states.  Reconcile the Python
+        # and native family graphs first, then remap named attributes which
+        # identify members of the source family onto the matching receiver.
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("become expects a Mobject")
+        if (
+            self._is_bound()
+            and mobject._is_bound()
+            and self._scene is not mobject._scene
+        ):
+            raise _ForeignStageError("become endpoints must belong to one Scene")
         if self._is_bound() and not mobject._is_bound():
             self._scene._adopt(mobject)
+        self.align_family(mobject)
+        receiver_family = self.get_family()
+        source_family = mobject.get_family()
         self._become(mobject, match_updaters)
+        for name, value in list(mobject.__dict__.items()):
+            if not isinstance(value, _BridgeMobject):
+                continue
+            for index, member in enumerate(source_family):
+                if value is member:
+                    setattr(self, name, receiver_family[index])
+                    break
         return self
 
     def save_state(self, use_deepcopy=False):
@@ -2559,6 +2621,103 @@ class ParametricCurve(VMobject):
     def get_x_range(self):
         if hasattr(self, "x_range"):
             return self.x_range
+
+
+class Polygon(VMobject):
+    """Atlas's closed shared-anchor polygon over caller-supplied vertices."""
+
+    def __init__(self, *vertices, **kwargs):
+        if not vertices:
+            # Reference geometry.py indexes vertices[0] before any mutation.
+            raise IndexError("tuple index out of range")
+        _install_live_state(self)
+        specs = self._build_polygon(
+            _native_shell_factory, [_vec3(vertex) for vertex in vertices]
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def get_vertices(self):
+        return self.get_start_anchors()
+
+    def round_corners(self, radius=None):
+        vertices = [_vec3(vertex) for vertex in self.get_vertices()]
+        self._round_polygon_corners(
+            vertices, None if radius is None else float(radius)
+        )
+        return self
+
+
+class RegularPolygon(Polygon):
+    """The bounded native regular-polygon compass construction."""
+
+    def __init__(self, n=6, radius=1.0, start_angle=None, **kwargs):
+        n = _operator.index(n)
+        if n == 0:
+            # Reference compass_directions divides TAU by n first.
+            raise ZeroDivisionError("float division by zero")
+        if n < 0:
+            # range(n) produces no vertices and Polygon then indexes [0].
+            raise IndexError("tuple index out of range")
+        _install_live_state(self)
+        specs = self._build_regular_polygon(
+            _native_shell_factory,
+            n,
+            float(radius),
+            None if start_angle is None else float(start_angle),
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Triangle(RegularPolygon):
+    def __init__(self, **kwargs):
+        super().__init__(n=3, **kwargs)
+
+
+class ArrowTip(Triangle):
+    """Atlas's native tip geometry with live Reference query methods."""
+
+    def __init__(
+        self,
+        angle=0,
+        width=0.35,
+        length=0.35,
+        fill_opacity=1.0,
+        fill_color="#FFFFFF",
+        stroke_width=0.0,
+        tip_style=0,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        specs = self._build_arrow_tip(
+            _native_shell_factory,
+            float(angle),
+            float(width),
+            float(length),
+            1 if tip_style == 1 else 2 if tip_style == 2 else 0,
+        )
+        _hang_native_children(self, specs)
+        kwargs.setdefault("fill_opacity", fill_opacity)
+        kwargs.setdefault("fill_color", fill_color)
+        kwargs.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def get_base(self):
+        return self.point_from_proportion(0.5)
+
+    def get_tip_point(self):
+        return self.get_points()[0]
+
+    def get_vector(self):
+        return self.get_tip_point() - self.get_base()
+
+    def get_angle(self):
+        return _math.atan2(self.get_vector()[1], self.get_vector()[0])
+
+    def get_length(self):
+        vector = self.get_vector()
+        return float(_np.sqrt(_np.dot(vector, vector)))
 
 
 class Rectangle(VMobject):
@@ -6081,6 +6240,10 @@ def _install_schema_surface():
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
         ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,
+        ("manimlib.mobject.geometry", "Polygon"): Polygon,
+        ("manimlib.mobject.geometry", "RegularPolygon"): RegularPolygon,
+        ("manimlib.mobject.geometry", "Triangle"): Triangle,
+        ("manimlib.mobject.geometry", "ArrowTip"): ArrowTip,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.shape_matchers", "SurroundingRectangle"): SurroundingRectangle,
