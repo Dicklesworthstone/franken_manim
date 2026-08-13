@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	879a953f36b55e8a312d6b6f834f51577892d63cab15a3386affd1e2fe0b03d1
+ledger_reviewed_digest	652f97a8c9403526fd5267ffa4cab9eb6fe41209ef60249db24430906bc31bdb
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -234,16 +234,26 @@ manimlib.mobject.mobject:Mobject.apply_function_to_position	same	scripts/manim_r
 manimlib.mobject.mobject:Mobject.apply_function_to_submobject_positions	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the position-only transform to immediate submobjects in stable list order
 manimlib.mobject.mobject:Mobject.apply_matrix	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	embeds smaller matrices in three dimensions routes ordinary families once through Marionette and preserves custom pointlike fields
 manimlib.mobject.mobject:Mobject.apply_points_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves family and pointlike-field order pivot rules transformed bounding-box rows return identity and callback exceptions with member-by-member partial state
+manimlib.mobject.mobject:Mobject.are_points_touching	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the inclusive per-row bounding-box mask with the exact scalar buffer expansion
 manimlib.mobject.mobject:Mobject.clear	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	removes exactly the immediate child batch through the recursive-removal surface and returns the original proxy
+manimlib.mobject.mobject:Mobject.compute_bounding_box	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads Marionette's retained world-space family extent and honors class-specific child extent rules without a second cache
 manimlib.mobject.mobject:Mobject.deepcopy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates through graph-safe deepcopy while preserving internal family aliases and independent extension state
 manimlib.mobject.mobject:Mobject.dim	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact three-dimensional base record width used by matrix embedding and callable point transforms
 manimlib.mobject.mobject:Mobject.fade	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sets absolute family opacity and preserves the base method's intentional non-fluent return
 manimlib.mobject.mobject:Mobject.family_members_with_points	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
+manimlib.mobject.mobject:Mobject.get_all_corners	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	emits all eight extent corners in the Reference product order including depth
+manimlib.mobject.mobject:Mobject.get_all_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stacks world-space family point views in path-wise preorder including shared descendants once per path
+manimlib.mobject.mobject:Mobject.get_boundary_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	selects the family point with maximal normalized center-relative projection in the requested direction
+manimlib.mobject.mobject:Mobject.get_bounding_box	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	dynamically dispatches the class-specific extent rule over Marionette's revisioned world-space family box
+manimlib.mobject.mobject:Mobject.get_center_of_mass	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the arithmetic mean of the path-wise family point run
 manimlib.mobject.mobject:Mobject.get_family	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
 manimlib.mobject.mobject:Mobject.get_num_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the current live RecordBuffer row count
 manimlib.mobject.mobject:Mobject.is_off_screen	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses strict whole-box comparisons against the authoritative frame radii
+manimlib.mobject.mobject:Mobject.is_point_touching	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	wraps one point into the inclusive vectorized bounding-box query and returns its NumPy boolean
+manimlib.mobject.mobject:Mobject.is_touching	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the exact buffered axis-separation rule including tangent boxes
 manimlib.mobject.mobject:Mobject.match_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the source color through live style reads and writes without changing opacity or shading
 manimlib.mobject.mobject:Mobject.match_style	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies color opacity and shading through the engine-backed base Mobject style surface
+manimlib.mobject.mobject:Mobject.refresh_bounding_box	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves the fluent cache-control surface while Marionette revision channels own exact downward and upward invalidation
 manimlib.mobject.mobject:Mobject.remove	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	detaches matching edges over the pre-edit family snapshot in parent and argument order while honoring recurse and the reassemble batching hint
 manimlib.mobject.mobject:Mobject.restore	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	restores detached and bound saved-state families and preserves the exact missing-state refusal
 manimlib.mobject.mobject:Mobject.reverse_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reverses immediate child identity order and commits the same order into the native graph
@@ -258,6 +268,7 @@ manimlib.mobject.mobject:Mobject.space_out_submobjects	same	scripts/manim_ref/ma
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
 manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_parity.rs	uses one output-scale arc-density rule that is never coarser
+manimlib.mobject.types.dot_cloud:DotCloud.compute_bounding_box	same	scripts/manim_ref/manimlib/mobject/types/dot_cloud.py	crates/fmn-python/tests/bridge.py	expands the live point-family extent by the configured world-space radius on all axes
 manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
 manimlib.mobject.numbers:DecimalNumber	improved	BN-08	crates/fmn-library/src/numbers.rs#tests	uses native glyph layout and bounded incremental updates
 manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#tests	uses native delimiters and entry layout without TeX
