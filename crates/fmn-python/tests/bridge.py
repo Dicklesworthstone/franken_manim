@@ -2335,7 +2335,7 @@ else:
 try:
     insertion.insert_n_curves(sys.maxsize)
 except ValueError as error:
-    assert "budget" in str(error).lower()
+    assert "above the 65536 cap" in str(error).lower()
 else:
     raise AssertionError("an over-budget curve insertion mutated the portal")
 assert np.array_equal(insertion.get_points(), insertion_before_refusal)
