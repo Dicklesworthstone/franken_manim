@@ -2084,6 +2084,16 @@ class Group(Mobject):
         super().__init__(**kwargs)
         self._ingest_args(*mobjects)
 
+    def _ingest_args(self, *args):
+        if len(args) == 0:
+            return
+        if all(isinstance(mob, _BridgeMobject) for mob in args):
+            self.add(*args)
+        elif isinstance(args[0], _collections_abc.Iterable):
+            self.add(*args[0])
+        else:
+            raise Exception(f"Invalid argument to Group of type {type(args[0])}")
+
 
 class Point(Mobject):
     """The Reference's Point (manimlib/mobject/mobject.py at the pin): one

@@ -2617,6 +2617,10 @@ assert "__init__" in manimlib.Group.__dict__
 iterable_group_children = [geometry.Square(), geometry.Circle()]
 iterable_group = manimlib.Group(iterable_group_children)
 assert list(iterable_group) == iterable_group_children
+deduplicated_group = manimlib.Group(
+    iterable_group_children[0], iterable_group_children[0]
+)
+assert list(deduplicated_group) == iterable_group_children[:1]
 assert fixed_group.is_fixed_in_frame() is False
 assert fixed_child.is_fixed_in_frame() is False
 assert fixed_group.fix_in_frame() is fixed_group
