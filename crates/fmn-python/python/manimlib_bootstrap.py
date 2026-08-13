@@ -16,6 +16,7 @@ import importlib as _importlib
 import inspect as _inspect
 import itertools as _itertools
 import math as _math
+import operator as _operator
 import re as _re
 import sys as _sys
 import types as _types
@@ -193,6 +194,21 @@ class _ColorValue:
 
     def __init__(self, rgb):
         self.rgb = tuple(float(component) for component in rgb)
+
+    def get_rgb(self):
+        return self.rgb
+
+    def get_hex_l(self):
+        return _rgb_to_hex(self.rgb)
+
+    def __eq__(self, other):
+        try:
+            return self.rgb == tuple(float(component) for component in _color_to_rgb(other))
+        except (TypeError, ValueError):
+            return False
+
+    def __repr__(self):
+        return f"Color({self.get_hex_l()!r})"
 
 
 def _color_to_rgb(color):
@@ -6458,6 +6474,209 @@ def _install_rate_functions():
 _install_rate_functions()
 
 
+def _install_bezier_functions():
+    """Bind the high-frequency deterministic Bézier utility surface.
+
+    Array broadcasting remains ordinary NumPy behavior, while Chisel owns
+    the clamped integer interpolation shared with the animation engine.
+    """
+
+    def bezier(points):
+        if len(points) == 0:
+            raise Exception("bezier cannot be calld on an empty list")
+        degree = len(points) - 1
+
+        def result(t):
+            return sum(
+                ((1 - t) ** (degree - k))
+                * (t**k)
+                * _math.comb(degree, k)
+                * point
+                for k, point in enumerate(points)
+            )
+
+        return result
+
+    def interpolate(start, end, alpha):
+        return _interpolate(start, end, alpha)
+
+    def inverse_interpolate(start, end, value):
+        return _np.true_divide(value - start, end - start)
+
+    def integer_interpolate(start, end, alpha):
+        return _BridgeMobject._integer_interpolate(
+            int(start), int(end), float(alpha)
+        )
+
+    functions = {
+        "bezier": bezier,
+        "interpolate": interpolate,
+        "inverse_interpolate": inverse_interpolate,
+        "integer_interpolate": integer_interpolate,
+    }
+    module = _ensure_module("manimlib.utils.bezier")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_bezier_functions()
+
+
+def _install_color_functions():
+    """Expose fmn-core's one color model through the Reference utilities."""
+
+    def color_to_rgb(color):
+        return _color_to_rgb(color)
+
+    def color_to_rgba(color, alpha=1.0):
+        return _color_to_rgba(color, alpha)
+
+    def rgb_to_color(rgb):
+        values = _np.asarray(rgb, dtype=float)
+        if values.shape != (3,) or not _np.isfinite(values).all() or (
+            (values < 0) | (values > 1)
+        ).any():
+            return _ColorValue((1.0, 1.0, 1.0))
+        return _ColorValue(values)
+
+    def rgba_to_color(rgba):
+        return rgb_to_color(rgba[:3])
+
+    def rgb_to_hex(rgb):
+        return _rgb_to_hex(rgb)
+
+    def hex_to_rgb(hex_code):
+        return _np.array(_BridgeMobject._hex_to_rgb(hex_code))
+
+    def invert_color(color):
+        return rgb_to_color(1.0 - color_to_rgb(color))
+
+    def color_to_int_rgb(color):
+        return (255 * color_to_rgb(color)).astype("uint8")
+
+    def color_to_int_rgba(color, opacity=1.0):
+        alpha = int(255 * opacity)
+        return _np.array([*color_to_int_rgb(color), alpha], dtype=_np.uint8)
+
+    def color_to_hex(color):
+        return rgb_to_hex(color_to_rgb(color))
+
+    def hex_to_int(rgb_hex):
+        return int(rgb_hex[1:], 16)
+
+    def int_to_hex(rgb_int):
+        return f"#{rgb_int:06x}".upper()
+
+    def color_gradient(reference_colors, length_of_output, interp_by_hsl=False):
+        if length_of_output == 0:
+            return []
+        length_of_output = _operator.index(length_of_output)
+        if length_of_output < 0:
+            raise ValueError(
+                f"Number of samples, {length_of_output}, must be non-negative."
+            )
+        n_reference_colors = len(reference_colors)
+        if n_reference_colors < 2:
+            if n_reference_colors == 1 and length_of_output == 1:
+                return [_ColorValue(color_to_rgb(reference_colors[0]))]
+            raise IndexError("list index out of range")
+        return _color_gradient(
+            list(reference_colors), length_of_output, bool(interp_by_hsl)
+        )
+
+    def interpolate_color(color1, color2, alpha, interp_by_hsl=False):
+        rgb = _BridgeMobject._interpolate_color(
+            _vec3(color_to_rgb(color1)),
+            _vec3(color_to_rgb(color2)),
+            float(alpha),
+            bool(interp_by_hsl),
+        )
+        return _ColorValue(rgb)
+
+    def interpolate_color_by_hsl(color1, color2, alpha):
+        return interpolate_color(color1, color2, alpha, interp_by_hsl=True)
+
+    def average_color(*colors):
+        if not colors:
+            # The pinned Reference reaches ``tuple(numpy.float64(nan))`` in
+            # this case. Preserve its public exception instead of silently
+            # turning an undefined average into a color.
+            raise TypeError("'numpy.float64' object is not iterable")
+        rgbs = [_vec3(color_to_rgb(color)) for color in colors]
+        return _ColorValue(_BridgeMobject._average_color(rgbs))
+
+    functions = {
+        "average_color": average_color,
+        "color_gradient": color_gradient,
+        "color_to_hex": color_to_hex,
+        "color_to_int_rgb": color_to_int_rgb,
+        "color_to_int_rgba": color_to_int_rgba,
+        "color_to_rgb": color_to_rgb,
+        "color_to_rgba": color_to_rgba,
+        "hex_to_int": hex_to_int,
+        "hex_to_rgb": hex_to_rgb,
+        "int_to_hex": int_to_hex,
+        "interpolate_color": interpolate_color,
+        "interpolate_color_by_hsl": interpolate_color_by_hsl,
+        "invert_color": invert_color,
+        "rgb_to_color": rgb_to_color,
+        "rgb_to_hex": rgb_to_hex,
+        "rgba_to_color": rgba_to_color,
+    }
+    module = _ensure_module("manimlib.utils.color")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_color_functions()
+
+
+def _install_simple_functions():
+    """Reference scalar/array helpers with no optional dependency surface."""
+
+    def sigmoid(x):
+        return 1.0 / (1 + _np.exp(-x))
+
+    def choose(n, k):
+        return _math.comb(n, k)
+
+    def clip(a, min_a, max_a):
+        if a < min_a:
+            return min_a
+        if a > max_a:
+            return max_a
+        return a
+
+    def fdiv(a, b, zero_over_zero_value=None):
+        if zero_over_zero_value is not None:
+            out = _np.full_like(a, zero_over_zero_value)
+            where = _np.logical_or(a != 0, b != 0)
+        else:
+            out = None
+            where = True
+        return _np.true_divide(a, b, out=out, where=where)
+
+    functions = {
+        "binary_search": _binary_search,
+        "choose": choose,
+        "clip": clip,
+        "fdiv": fdiv,
+        "sigmoid": sigmoid,
+    }
+    module = _ensure_module("manimlib.utils.simple_functions")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_simple_functions()
+
+
 def _install_space_ops():
     """The pure-arithmetic space_ops (manimlib/utils/space_ops.py at the
     pin), Reference-verbatim. Rotation/quaternion members stay precise
@@ -6501,6 +6720,51 @@ def _install_space_ops():
         z = complex(*vector) * _np.exp(complex(0, angle))
         return _np.array([z.real, z.imag])
 
+    def cross(v1, v2, out=None):
+        is_2d = isinstance(v1, _np.ndarray) and len(v1.shape) == 2
+        if is_2d:
+            x1, y1, z1 = v1[:, 0], v1[:, 1], v1[:, 2]
+            x2, y2, z2 = v2[:, 0], v2[:, 1], v2[:, 2]
+        else:
+            x1, y1, z1 = v1
+            x2, y2, z2 = v2
+        if out is None:
+            out = _np.empty(_np.shape(v1))
+        out.T[:] = [
+            y1 * z2 - z1 * y2,
+            z1 * x2 - x1 * z2,
+            x1 * y2 - y1 * x2,
+        ]
+        return out
+
+    def angle_of_vector(vector):
+        values = _np.asarray(vector, dtype=float)
+        if values.size < 2:
+            raise ValueError("angle_of_vector needs at least two components")
+        return _BridgeMobject._angle_of_vector(
+            (float(values[0]), float(values[1]), 0.0)
+        )
+
+    def angle_between_vectors(v1, v2):
+        left = _np.asarray(v1, dtype=float)
+        right = _np.asarray(v2, dtype=float)
+        if left.shape == right.shape == (3,):
+            return _BridgeMobject._angle_between_vectors(
+                _vec3(left), _vec3(right)
+            )
+        n1 = get_norm(left)
+        n2 = get_norm(right)
+        if n1 == 0 or n2 == 0:
+            return 0.0
+        cosine = _np.dot(left, right) / _np.float64(n1 * n2)
+        return _math.acos(max(-1.0, min(1.0, cosine)))
+
+    def compass_directions(n=4, start_vect=_RIGHT):
+        angle = _math.tau / n
+        return _np.array(
+            [rotate_vector(start_vect, k * angle) for k in range(n)]
+        )
+
     functions = {
         "get_norm": get_norm,
         "get_dist": get_dist,
@@ -6510,6 +6774,10 @@ def _install_space_ops():
         "midpoint": midpoint,
         "rotate_vector": rotate_vector,
         "rotate_vector_2d": rotate_vector_2d,
+        "cross": cross,
+        "angle_of_vector": angle_of_vector,
+        "angle_between_vectors": angle_between_vectors,
+        "compass_directions": compass_directions,
     }
     module = _ensure_module("manimlib.utils.space_ops")
     for name, function in functions.items():
@@ -6519,6 +6787,80 @@ def _install_space_ops():
 
 
 _install_space_ops()
+
+
+def _install_path_functions():
+    """Reference path factories over NumPy arrays and native rotation axes."""
+
+    straight_path_threshold = 0.01
+
+    def straight_path(start_points, end_points, alpha):
+        return _interpolate(start_points, end_points, alpha)
+
+    def path_along_arc(arc_angle, axis=_OUT):
+        if isinstance(arc_angle, (float, int)) and abs(arc_angle) < straight_path_threshold:
+            return straight_path
+        axis = _np.asarray(axis, dtype=float)
+        if sum(value**2 for value in axis) ** 0.5 == 0:
+            axis = _OUT
+        unit_axis = axis / (sum(value**2 for value in axis) ** 0.5)
+
+        def path(start_points, end_points, alpha):
+            start_points = _np.asarray(start_points)
+            end_points = _np.asarray(end_points)
+            if isinstance(arc_angle, (float, int)):
+                theta = arc_angle
+            else:
+                if isinstance(arc_angle, _np.ndarray) and len(arc_angle) == len(start_points):
+                    # Reference behavior: its zero-avoidance assignment is
+                    # visible through the caller-owned ndarray.
+                    theta_range = arc_angle
+                else:
+                    theta_range = _np.linspace(
+                        arc_angle[0], arc_angle[-1], len(start_points)
+                    )
+                theta_range[_np.abs(theta_range) < straight_path_threshold] = (
+                    straight_path_threshold
+                )
+                theta = theta_range[:, _np.newaxis] * _np.ones(
+                    start_points.shape[1]
+                )
+            start_to_end = end_points - start_points
+            with _np.errstate(divide="ignore", invalid="ignore"):
+                adjustments = _np.nan_to_num(
+                    _np.cross(unit_axis, start_to_end / 2.0) / _np.tan(theta / 2)
+                )
+                arc_centers = start_points + 0.5 * start_to_end + adjustments
+            center_to_start = start_points - arc_centers
+            center_to_perpendicular = _np.cross(unit_axis, center_to_start)
+            return (
+                arc_centers
+                + _np.cos(alpha * theta) * center_to_start
+                + _np.sin(alpha * theta) * center_to_perpendicular
+            )
+
+        return path
+
+    def clockwise_path():
+        return path_along_arc(-_math.pi)
+
+    def counterclockwise_path():
+        return path_along_arc(_math.pi)
+
+    functions = {
+        "clockwise_path": clockwise_path,
+        "counterclockwise_path": counterclockwise_path,
+        "path_along_arc": path_along_arc,
+        "straight_path": straight_path,
+    }
+    module = _ensure_module("manimlib.utils.paths")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_path_functions()
 
 
 def _install_iterable_functions():

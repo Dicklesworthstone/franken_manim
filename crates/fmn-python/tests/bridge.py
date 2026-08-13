@@ -165,6 +165,215 @@ else:
     raise AssertionError("an overflowing RecordBuffer resize was accepted")
 
 
+# Deterministic utility functions are public semantic bindings, not schema
+# placeholders. Core color interpolation and Chisel's integer/angle kernels
+# remain the authorities behind the NumPy-compatible portal surface.
+bezier_utils = importlib.import_module("manimlib.utils.bezier")
+color_utils = importlib.import_module("manimlib.utils.color")
+simple_utils = importlib.import_module("manimlib.utils.simple_functions")
+space_utils = importlib.import_module("manimlib.utils.space_ops")
+path_utils = importlib.import_module("manimlib.utils.paths")
+
+utility_signatures = {
+    bezier_utils.bezier: "(points)",
+    bezier_utils.interpolate: "(start, end, alpha)",
+    bezier_utils.inverse_interpolate: "(start, end, value)",
+    bezier_utils.integer_interpolate: "(start, end, alpha)",
+    color_utils.average_color: "(*colors)",
+    color_utils.color_gradient: (
+        "(reference_colors, length_of_output, interp_by_hsl=False)"
+    ),
+    color_utils.color_to_hex: "(color)",
+    color_utils.color_to_int_rgb: "(color)",
+    color_utils.color_to_int_rgba: "(color, opacity=1.0)",
+    color_utils.color_to_rgb: "(color)",
+    color_utils.color_to_rgba: "(color, alpha=1.0)",
+    color_utils.hex_to_int: "(rgb_hex)",
+    color_utils.hex_to_rgb: "(hex_code)",
+    color_utils.int_to_hex: "(rgb_int)",
+    color_utils.interpolate_color: (
+        "(color1, color2, alpha, interp_by_hsl=False)"
+    ),
+    color_utils.interpolate_color_by_hsl: "(color1, color2, alpha)",
+    color_utils.invert_color: "(color)",
+    color_utils.rgb_to_color: "(rgb)",
+    color_utils.rgb_to_hex: "(rgb)",
+    color_utils.rgba_to_color: "(rgba)",
+    simple_utils.binary_search: (
+        "(function, target, lower_bound, upper_bound, tolerance=0.0001)"
+    ),
+    simple_utils.choose: "(n, k)",
+    simple_utils.clip: "(a, min_a, max_a)",
+    simple_utils.fdiv: "(a, b, zero_over_zero_value=None)",
+    simple_utils.sigmoid: "(x)",
+    space_utils.angle_between_vectors: "(v1, v2)",
+    space_utils.angle_of_vector: "(vector)",
+    space_utils.compass_directions: "(n=4, start_vect=array([1., 0., 0.]))",
+    space_utils.cross: "(v1, v2, out=None)",
+    path_utils.clockwise_path: "()",
+    path_utils.counterclockwise_path: "()",
+    path_utils.path_along_arc: "(arc_angle, axis=array([0., 0., 1.]))",
+    path_utils.straight_path: "(start_points, end_points, alpha)",
+}
+assert len(utility_signatures) == 33
+for function, declared_call_shape in utility_signatures.items():
+    actual_call_shape = str(inspect.signature(function))
+    assert actual_call_shape == declared_call_shape
+    assert getattr(manimlib, function.__name__) is function
+    assert function.__code__.co_name != "unavailable"
+
+quadratic = bezier_utils.bezier(
+    [np.array([0.0, 0.0]), np.array([2.0, 4.0]), np.array([4.0, 0.0])]
+)
+assert np.allclose(quadratic(0.25), [1.0, 1.5])
+assert np.array_equal(
+    bezier_utils.interpolate(
+        np.array([0.0, 2.0]), np.array([4.0, 6.0]), 0.25
+    ),
+    [1.0, 3.0],
+)
+assert np.allclose(
+    bezier_utils.inverse_interpolate(1.0, 5.0, np.array([1.0, 3.0, 5.0])),
+    [0.0, 0.5, 1.0],
+)
+integer_value, integer_residue = bezier_utils.integer_interpolate(0, 10, 0.46)
+assert integer_value == 4 and math.isclose(integer_residue, 0.6)
+assert bezier_utils.integer_interpolate(3, 8, -1.0) == (3, 0.0)
+assert bezier_utils.integer_interpolate(3, 8, 2.0) == (7, 1.0)
+try:
+    bezier_utils.bezier([])
+except Exception as error:
+    assert "empty list" in str(error)
+else:
+    raise AssertionError("empty Bezier controls were accepted")
+
+black_to_white = color_utils.color_gradient(["#000000", "#FFFFFF"], 3)
+assert [color.get_hex_l() for color in black_to_white] == [
+    "#000000",
+    "#B4B4B4",
+    "#FFFFFF",
+]
+assert np.allclose(black_to_white[1].get_rgb(), [2**-0.5] * 3)
+assert [color.get_hex_l() for color in color_utils.color_gradient(["#123456"], 1)] == [
+    "#123456"
+]
+assert color_utils.color_gradient(iter(["#000000"]), 0) == []
+assert color_utils.interpolate_color("#000000", "#FFFFFF", 0.25).get_hex_l() == (
+    "#7F7F7F"
+)
+hsl_midpoint = color_utils.interpolate_color_by_hsl("#FF0000", "#0000FF", 0.5)
+assert np.allclose(color_utils.color_to_rgb(hsl_midpoint), [0.0, 1.0, 0.0])
+assert color_utils.average_color("#000000", "#FFFFFF").get_hex_l() == "#B4B4B4"
+assert np.array_equal(color_utils.color_to_rgba("#123456", 0.25), [18 / 255, 52 / 255, 86 / 255, 0.25])
+assert np.array_equal(color_utils.color_to_int_rgb("#123456"), [18, 52, 86])
+assert np.array_equal(color_utils.color_to_int_rgba("#123456", 0.5), [18, 52, 86, 127])
+assert color_utils.rgb_to_hex([18 / 255, 52 / 255, 86 / 255]) == "#123456"
+assert color_utils.color_to_hex(color_utils.rgba_to_color([1.0, 0.0, 0.0, 0.2])) == "#FF0000"
+assert color_utils.color_to_hex(color_utils.invert_color("#00FF00")) == "#FF00FF"
+assert color_utils.hex_to_int("#123456") == 0x123456
+assert color_utils.int_to_hex(0x123456) == "#123456"
+assert np.allclose(color_utils.hex_to_rgb("#123456"), [18 / 255, 52 / 255, 86 / 255])
+try:
+    color_utils.color_gradient(["#000000"], 2)
+except IndexError as error:
+    assert str(error) == "list index out of range"
+else:
+    raise AssertionError("one-stop multi-sample gradient was accepted")
+try:
+    color_utils.color_gradient(["#000000", "#FFFFFF"], -1)
+except ValueError as error:
+    assert str(error) == "Number of samples, -1, must be non-negative."
+else:
+    raise AssertionError("negative-length gradient was accepted")
+try:
+    color_utils.average_color()
+except TypeError as error:
+    assert str(error) == "'numpy.float64' object is not iterable"
+else:
+    raise AssertionError("undefined empty color average was accepted")
+try:
+    color_utils.hex_to_rgb("not-a-color")
+except ValueError as error:
+    assert "invalid color" in str(error)
+else:
+    raise AssertionError("malformed color text was accepted")
+
+assert simple_utils.choose(8, 3) == 56
+assert simple_utils.clip(-2.0, -1.0, 1.0) == -1.0
+assert simple_utils.clip(2.0, -1.0, 1.0) == 1.0
+assert simple_utils.clip(0.25, -1.0, 1.0) == 0.25
+assert np.allclose(simple_utils.sigmoid(np.array([-1.0, 0.0, 1.0])), [
+    1 / (1 + math.e),
+    0.5,
+    1 / (1 + math.exp(-1)),
+])
+assert np.allclose(
+    simple_utils.fdiv(
+        np.array([0.0, 2.0]), np.array([0.0, 4.0]), zero_over_zero_value=7.0
+    ),
+    [7.0, 0.5],
+)
+assert math.isclose(
+    simple_utils.binary_search(lambda value: value * value, 4.0, 0.0, 4.0),
+    4.0,
+    abs_tol=1e-4,
+)
+assert simple_utils.binary_search(lambda value: value * value, -1.0, 0.0, 4.0) is None
+
+assert math.isclose(space_utils.angle_of_vector([0.0, 1.0]), math.pi / 2)
+assert math.isclose(
+    space_utils.angle_between_vectors([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+    math.pi / 2,
+)
+assert space_utils.angle_between_vectors([0.0] * 4, [1.0] * 4) == 0.0
+out_vector = np.zeros(3)
+assert space_utils.cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], out_vector) is out_vector
+assert np.array_equal(out_vector, [0.0, 0.0, 1.0])
+assert np.array_equal(
+    space_utils.cross(
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+    ),
+    [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+)
+assert np.allclose(
+    space_utils.compass_directions(),
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+    atol=1e-15,
+)
+try:
+    space_utils.angle_of_vector([1.0])
+except ValueError as error:
+    assert "at least two" in str(error)
+else:
+    raise AssertionError("one-dimensional polar vector was accepted")
+
+path_start = np.array([[0.0, 0.0, 0.0], [2.0, 1.0, 0.0]])
+path_end = np.array([[2.0, 0.0, 0.0], [4.0, 1.0, 0.0]])
+assert np.allclose(
+    path_utils.straight_path(path_start, path_end, 0.25),
+    [[0.5, 0.0, 0.0], [2.5, 1.0, 0.0]],
+)
+assert path_utils.path_along_arc(0.0) is path_utils.straight_path
+assert np.allclose(
+    path_utils.counterclockwise_path()(path_start[:1], path_end[:1], 0.5),
+    [[1.0, -1.0, 0.0]],
+)
+assert np.allclose(
+    path_utils.clockwise_path()(path_start[:1], path_end[:1], 0.5),
+    [[1.0, 1.0, 0.0]],
+)
+assert np.allclose(
+    path_utils.path_along_arc(math.pi, axis=np.zeros(3))(
+        path_start[:1], path_end[:1], 0.5
+    ),
+    [[1.0, -1.0, 0.0]],
+)
+per_point_arcs = np.array([0.0, math.pi])
+path_utils.path_along_arc(per_point_arcs)(path_start, path_end, 0.5)
+assert np.array_equal(per_point_arcs, [0.01, math.pi])
+
+
 # Reference point mutation composes the public NumPy resize policies over the
 # live Marionette RecordBuffer.  All subclass lanes move together, while a
 # size-changing write detaches old views through the generation protocol.

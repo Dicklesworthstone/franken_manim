@@ -1,8 +1,8 @@
-<!-- GENERATED from the API schema; never hand-edit. Reference pin: 6199a00d4c1b1127ebe45cb629c3f22538b10e13; reviewed digest: 2e312bda8d8a96bee69b18548b436a7c03f2cb55c878e2f90d1cb09fa2c6f2fb -->
-<svg xmlns="http://www.w3.org/2000/svg" width="280" height="20" role="img" aria-label="Parity Ledger: 166/2482 reviewed (6.6%)">
-<title>Parity Ledger: 166/2482 reviewed (6.6%)</title>
+<!-- GENERATED from the API schema; never hand-edit. Reference pin: 6199a00d4c1b1127ebe45cb629c3f22538b10e13; reviewed digest: 1bce388c0a17699efedd021f8f5a9148456614019ab2851e7bd585bd5845c311 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="20" role="img" aria-label="Parity Ledger: 199/2482 reviewed (8.0%)">
+<title>Parity Ledger: 199/2482 reviewed (8.0%)</title>
 <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#fff" stop-opacity=".7"/><stop offset=".1" stop-color="#aaa" stop-opacity=".1"/><stop offset=".9" stop-opacity=".3"/><stop offset="1" stop-opacity=".5"/></linearGradient>
 <clipPath id="r"><rect width="280" height="20" rx="3"/></clipPath>
 <g clip-path="url(#r)"><rect width="96" height="20" fill="#555"/><rect x="96" width="184" height="20" fill="#e05d44"/><rect width="280" height="20" fill="url(#s)"/></g>
-<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11"><text x="48" y="15" fill="#010101" fill-opacity=".3">parity ledger</text><text x="48" y="14">parity ledger</text><text x="188" y="15" fill="#010101" fill-opacity=".3">166/2482 reviewed (6.6%)</text><text x="188" y="14">166/2482 reviewed (6.6%)</text></g>
+<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11"><text x="48" y="15" fill="#010101" fill-opacity=".3">parity ledger</text><text x="48" y="14">parity ledger</text><text x="188" y="15" fill="#010101" fill-opacity=".3">199/2482 reviewed (8.0%)</text><text x="188" y="14">199/2482 reviewed (8.0%)</text></g>
 </svg>

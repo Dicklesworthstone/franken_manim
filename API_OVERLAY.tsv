@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	2e312bda8d8a96bee69b18548b436a7c03f2cb55c878e2f90d1cb09fa2c6f2fb
+ledger_reviewed_digest	1bce388c0a17699efedd021f8f5a9148456614019ab2851e7bd585bd5845c311
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -307,6 +307,39 @@ manimlib.scene.scene:Scene.get_mobject_family_members	same	docs/RENDER_ORDER.md	
 manimlib.scene.scene:Scene.get_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns a fresh identity-preserving snapshot of the native top-level draw list
 manimlib.utils.iterables:resize_array	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	performs the exact cyclic NumPy resize including same-length identity and trailing shape dimensions
 manimlib.utils.iterables:resize_preserving_order	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	selects proportional floor-index rows without interpolation and preserves the Reference empty-input shape behavior
+manimlib.utils.bezier:bezier	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	constructs the exact arbitrary-degree Bernstein callable and precisely refuses empty control lists
+manimlib.utils.bezier:integer_interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	routes the clamped integer and residue calculation through Chisel's shared interpolation authority
+manimlib.utils.bezier:interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves scalar and NumPy broadcasting under the exact affine expression
+manimlib.utils.bezier:inverse_interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves NumPy true-division broadcasting and boundary values
+manimlib.utils.color:average_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	routes the Reference RMS sRGB average through fmn-core and preserves the empty-input exception
+manimlib.utils.color:color_gradient	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	routes RMS and HSL gradient sample positions through fmn-core and preserves zero, negative, and insufficient-stop behavior
+manimlib.utils.color:color_to_hex	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	coerces the public color then uses colour 0.1.5's exact uppercase long-hex half-boundary rule
+manimlib.utils.color:color_to_int_rgb	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	preserves the Reference uint8 truncation of public color components
+manimlib.utils.color:color_to_int_rgba	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	appends the exact truncated opacity byte to the Reference integer RGB conversion
+manimlib.utils.color:color_to_rgb	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	returns unquantized sRGB components from portal colors and fmn-core parsed hex values
+manimlib.utils.color:color_to_rgba	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	appends the caller opacity to the unquantized public RGB components
+manimlib.utils.color:hex_to_int	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	parses the six hexadecimal payload digits as the Reference integer
+manimlib.utils.color:hex_to_rgb	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	routes strict short and long hex parsing through fmn-core and returns NumPy RGB
+manimlib.utils.color:int_to_hex	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	formats the public integer as uppercase six-digit hex
+manimlib.utils.color:interpolate_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	routes RMS or requested HSL interpolation through fmn-core without an alternate portal color model
+manimlib.utils.color:interpolate_color_by_hsl	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	preserves the public HSL convenience wrapper over fmn-core interpolation
+manimlib.utils.color:invert_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	inverts each unquantized sRGB component and returns a scalar portal color
+manimlib.utils.color:rgb_to_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	constructs a scalar portal color and preserves the invalid-RGB white fallback
+manimlib.utils.color:rgb_to_hex	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	uses colour 0.1.5's exact uppercase force-long quantization including half boundaries
+manimlib.utils.color:rgba_to_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	constructs the scalar color from the first three components and intentionally ignores alpha
+manimlib.utils.paths:clockwise_path	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	returns the negative-pi public arc path factory
+manimlib.utils.paths:counterclockwise_path	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	returns the positive-pi public arc path factory
+manimlib.utils.paths:path_along_arc	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	preserves scalar and per-point angle paths caller-array mutation zero-axis fallback and the exact straight-path threshold
+manimlib.utils.paths:straight_path	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	preserves vectorized affine point interpolation and returns the same callable used by the near-zero arc branch
+manimlib.utils.simple_functions:binary_search	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	binds the existing monotonic-coordinate search including descending and unreachable-target behavior
+manimlib.utils.simple_functions:choose	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	returns the exact integer binomial coefficient through the standard-library authority
+manimlib.utils.simple_functions:clip	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	preserves ordered scalar lower and upper clamping without NumPy coercion
+manimlib.utils.simple_functions:fdiv	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	preserves NumPy true division and the caller-selected zero-over-zero output mask
+manimlib.utils.simple_functions:sigmoid	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	preserves scalar and NumPy array logistic evaluation
+manimlib.utils.space_ops:angle_between_vectors	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes three-dimensional inputs through Chisel and preserves the Reference arbitrary-dimensional zero-safe fallback
+manimlib.utils.space_ops:angle_of_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes two and three dimensional polar projection through Chisel's deterministic atan2 kernel
+manimlib.utils.space_ops:compass_directions	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	rotates the start vector through Chisel's one rotation implementation at exact equal angular steps
+manimlib.utils.space_ops:cross	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves scalar vectorized row and caller-owned output-array semantics
 manimlib.scene.scene:Scene.get_time	improved	BN-02	crates/fmn-python/tests/bridge.py	exposes the native drift-free rational frame clock through the familiar float result
 manimlib.scene.scene:Scene.get_top_level_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	keeps only placements appearing in exactly one current family, including duplicate-placement elimination
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched

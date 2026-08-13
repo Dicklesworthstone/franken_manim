@@ -1418,15 +1418,15 @@ impl BridgeMobject {
             .map_err(|error| PyValueError::new_err(format!("invalid color {value:?}: {error}")))
     }
 
-    /// Format sRGB components as the Reference's uppercase `#RRGGBB`.
+    /// Format sRGB components as the Reference portal's uppercase
+    /// `colour.rgb2hex(..., force_long=True)`. The tiny subtraction is
+    /// colour 0.1.5's declared half-boundary rule (`FLOAT_ERROR = 5e-7`),
+    /// which intentionally maps an exact 0.5 component to `0x7F`.
     #[staticmethod]
     fn _rgb_to_hex(rgb: (f64, f64, f64)) -> String {
-        fmn_core::color::Srgb {
-            r: rgb.0,
-            g: rgb.1,
-            b: rgb.2,
-        }
-        .to_hex()
+        let quantize = |component: f64| (component * 255.0 + 0.5 - 5e-7) as u8;
+        let [r, g, b] = [quantize(rgb.0), quantize(rgb.1), quantize(rgb.2)];
+        format!("#{r:02X}{g:02X}{b:02X}")
     }
 
     /// Route both Reference `color_gradient` branches through fmn-core's
@@ -1456,6 +1456,52 @@ impl BridgeMobject {
             .into_iter()
             .map(|color| [color.r, color.g, color.b])
             .collect())
+    }
+
+    /// Public `interpolate_color` delegates to fmn-core's single declared
+    /// color model, including the Reference's opt-in HSL branch.
+    #[staticmethod]
+    fn _interpolate_color(
+        color1: [f64; 3],
+        color2: [f64; 3],
+        alpha: f64,
+        interp_by_hsl: bool,
+    ) -> [f64; 3] {
+        let color1 = fmn_core::color::Srgb {
+            r: color1[0],
+            g: color1[1],
+            b: color1[2],
+        };
+        let color2 = fmn_core::color::Srgb {
+            r: color2[0],
+            g: color2[1],
+            b: color2[2],
+        };
+        let color = if interp_by_hsl {
+            fmn_core::color::interpolate_color_by_hsl(color1, color2, alpha)
+        } else {
+            fmn_core::color::interpolate_color(color1, color2, alpha)
+        };
+        [color.r, color.g, color.b]
+    }
+
+    /// Public `average_color` is fmn-core's Reference-compatible RMS color
+    /// average, not a second portal-side color model.
+    #[staticmethod]
+    fn _average_color(colors: Vec<[f64; 3]>) -> [f64; 3] {
+        let colors = colors
+            .into_iter()
+            .map(|[r, g, b]| fmn_core::color::Srgb { r, g, b })
+            .collect::<Vec<_>>();
+        let color = fmn_core::color::average_color(&colors);
+        [color.r, color.g, color.b]
+    }
+
+    /// Chisel owns the exact clamped integer interpolation used throughout
+    /// the animation and path surfaces.
+    #[staticmethod]
+    fn _integer_interpolate(start: i64, end: i64, alpha: f64) -> (i64, f64) {
+        fmn_library::integer_interpolate(start, end, alpha)
     }
 
     /// `Mobject.become` over `Stage::become_mobject`: per-member data,
@@ -1982,6 +2028,20 @@ impl BridgeMobject {
             matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
             matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2],
         ]
+    }
+
+    /// Chisel's deterministic polar-angle kernel behind the familiar public
+    /// utility function.
+    #[staticmethod]
+    fn _angle_of_vector(vector: [f64; 3]) -> f64 {
+        fmn_library::angle_of_vector(vector)
+    }
+
+    /// Chisel's deterministic three-dimensional angle kernel. The Python
+    /// surface retains the Reference's arbitrary-dimensional fallback.
+    #[staticmethod]
+    fn _angle_between_vectors(v1: [f64; 3], v2: [f64; 3]) -> f64 {
+        fmn_library::angle_between_vectors(v1, v2)
     }
 
     /// `Arc(start_angle, angle, radius, arc_center)` over the arc shelf.
