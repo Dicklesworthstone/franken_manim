@@ -615,7 +615,17 @@ class Mobject(_BridgeMobject):
         return self.data["point"]
 
     def add(self, *mobjects):
-        self.submobjects.extend(mobjects)
+        # Reference Mobject.add (mobject.py:457) is an ordered identity-set
+        # insertion, not list.extend: repeated arguments and children already
+        # present under this parent are ignored.  Commit one child at a time
+        # through the live-list seam so an ordinary later Python failure keeps
+        # the successfully attached prefix, while Marionette still refuses
+        # foreign stages and cycles before corrupting its graph.
+        if self in mobjects:
+            raise Exception("Mobject cannot contain self")
+        for mobject in mobjects:
+            if mobject not in self.submobjects:
+                self.submobjects.append(mobject)
         return self
 
     def add_to_back(self, *mobjects):
@@ -1118,12 +1128,16 @@ class Mobject(_BridgeMobject):
 
     def set_submobjects(self, submobject_list):
         # Reference Mobject.set_submobjects (mobject.py:508) through the
-        # live-list seam.
+        # live-list seam.  The clear-then-add order is observable on a later
+        # Python error, and add owns Reference identity deduplication.
         if self.submobjects == submobject_list:
             return self
-        self.submobjects.clear()
-        if submobject_list:
-            self.submobjects.extend(submobject_list)
+        self.clear()
+        self.add(*submobject_list)
+        return self
+
+    def reverse_submobjects(self):
+        self.submobjects.reverse()
         return self
 
     def set_z_index(self, z_index, recurse=True):
@@ -1622,11 +1636,25 @@ class Mobject(_BridgeMobject):
     def __len__(self):
         return len(self.split())
 
-    def remove(self, *mobjects):
-        for mobject in mobjects:
-            if mobject in self.submobjects:
-                self.submobjects.remove(mobject)
+    def remove(self, *to_remove, reassemble=True, recurse=True):
+        # Reference Mobject.remove (mobject.py:469) snapshots the family before
+        # editing it, then visits parents in family order and requested
+        # children in argument order.  _LiveSubmobjects owns both detach and
+        # reverse-edge maintenance.  Marionette has no stale family cache to
+        # defer, so `reassemble` remains the accepted batching hint while the
+        # live graph is kept coherent immediately.
+        del reassemble
+        parents = self.get_family(recurse)
+        for parent in parents:
+            for child in to_remove:
+                if not isinstance(child, _BridgeMobject):
+                    raise TypeError("submobjects must be Mobject instances")
+                if child in parent.submobjects:
+                    parent.submobjects.remove(child)
         return self
+
+    def clear(self):
+        return self.remove(*list(self.submobjects), recurse=False)
 
     def add_updater(self, updater, index=None, call=True):
         if index is None:
