@@ -721,15 +721,24 @@ def nonlinear_box_map(rows):
 
 box_mapped = manimlib.Square()
 box_before = box_mapped.get_bounding_box().copy()
+point_map_dtypes = []
+
+
+def dtype_observing_box_map(rows):
+    point_map_dtypes.append(rows.dtype)
+    return nonlinear_box_map(rows)
+
+
 assert (
     box_mapped.apply_points_function(
-        nonlinear_box_map,
+        dtype_observing_box_map,
         about_edge=None,
         works_on_bounding_box=True,
     )
     is box_mapped
 )
 assert np.allclose(box_mapped.get_bounding_box(), nonlinear_box_map(box_before))
+assert point_map_dtypes == [np.dtype(np.float32), np.dtype(float)]
 
 partial_box = manimlib.Square()
 partial_box_points = partial_box.get_points().copy()

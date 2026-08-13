@@ -745,7 +745,11 @@ class Mobject(_BridgeMobject):
                 )
                 keys = mob.pointlike_data_keys if mob.has_points() else ()
                 for key in keys:
-                    array = _np.array(mob._field_rows(key), dtype=float)
+                    # RecordBuffer fields are f32, matching the Reference's
+                    # structured data arrays. Callbacks may legitimately
+                    # branch on dtype, and NumPy arithmetic precision is part
+                    # of their observable Python semantics.
+                    array = _np.array(mob._field_rows(key), dtype=_np.float32)
                     if pivot is None:
                         try:
                             array[:] = func(array)
