@@ -2072,6 +2072,19 @@ class Mobject(_BridgeMobject):
         )
 
 
+class Group(Mobject):
+    """The Reference's heterogeneous Mobject group.
+
+    This class is explicit rather than schema-synthesized because its
+    variadic member constructor is real behavior, not Mobject's ordinary
+    constructor defaults under a different public name.
+    """
+
+    def __init__(self, *mobjects, **kwargs):
+        super().__init__(**kwargs)
+        self._ingest_args(*mobjects)
+
+
 class Point(Mobject):
     """The Reference's Point (manimlib/mobject/mobject.py at the pin): one
     location record with artificial box extents. State-real — the location
@@ -4690,6 +4703,8 @@ class Surface(Mobject):
             self.set_shading(*shading)
         if depth_test:
             self.apply_depth_test()
+        else:
+            self.deactivate_depth_test()
         return self
 
 
@@ -4776,6 +4791,56 @@ class Sphere(Surface):
         return _np.array(
             self._sphere_uv(self.radius, bool(self.clockwise), float(u), float(v))
         )
+
+
+class Cylinder(Surface):
+    """The Reference cylinder over Atlas's native sampled solid."""
+
+    def __init__(
+        self,
+        u_range=(0, _math.tau),
+        v_range=(-1, 1),
+        resolution=(101, 11),
+        height=2,
+        radius=1,
+        axis=_OUT,
+        **kwargs,
+    ):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        _refuse_unrouted("Cylinder()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        self.height = float(height)
+        self.radius = float(radius)
+        self.axis = _np.array(_vec3(axis), dtype=float)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        specs = self._build_cylinder(
+            _native_surface_shell_factory,
+            self.height,
+            self.radius,
+            _vec3(self.axis),
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            self.resolution,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return _np.array(self._cylinder_uv(float(u), float(v)))
 
 
 class Cube(SGroup):
@@ -6216,6 +6281,29 @@ def _surface_init(self, *args, **kwargs):
     self.__dict__.update(kwargs)
 
 
+def _schema_init_refusal(module_name, class_name):
+    """Refuse a generated core class whose own constructor is unbound.
+
+    Inheriting a usable ancestor constructor is not import compatibility: it
+    silently applies the wrong defaults and often interprets positional
+    arguments as unrelated fields. Keep the class subclassable, but make
+    construction name the exact missing semantic seam.
+    """
+
+    def unavailable(self, *args, **kwargs):
+        del self, args, kwargs
+        raise NotImplementedError(
+            f"{module_name}.{class_name} declares class-specific constructor "
+            "semantics that have not landed; refusing to inherit an "
+            "ancestor's incompatible defaults"
+        )
+
+    unavailable.__name__ = "__init__"
+    unavailable.__qualname__ = f"{class_name}.__init__"
+    unavailable.__module__ = module_name
+    return unavailable
+
+
 class _UnavailablePygletWindow:
     """Import-compatible base for the deliberately absent pyglet gateway."""
 
@@ -6489,6 +6577,7 @@ def _install_schema_surface():
 
     specials = {
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
+        ("manimlib.mobject.mobject", "Group"): Group,
         ("manimlib.mobject.mobject", "Point"): Point,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
@@ -6529,6 +6618,7 @@ def _install_schema_surface():
         ("manimlib.mobject.types.surface", "SGroup"): SGroup,
         ("manimlib.mobject.types.surface", "ParametricSurface"): ParametricSurface,
         ("manimlib.mobject.three_dimensions", "Sphere"): Sphere,
+        ("manimlib.mobject.three_dimensions", "Cylinder"): Cylinder,
         ("manimlib.mobject.three_dimensions", "Cube"): Cube,
         ("manimlib.mobject.three_dimensions", "Prism"): Prism,
         ("manimlib.mobject.three_dimensions", "SurfaceMesh"): SurfaceMesh,
@@ -6615,6 +6705,11 @@ def _install_schema_surface():
     class_rows = [
         row for row in rows if row[2] == "class" and "." not in row[1]
     ]
+    declared_initializers = {
+        (module_name, qualified.rsplit(".", 1)[0])
+        for module_name, qualified, kind, _origin, _exported, _detail in rows
+        if kind == "method" and qualified.endswith(".__init__")
+    }
     pending = [
         row for row in class_rows if (row[0], row[1]) not in specials
     ]
@@ -6627,12 +6722,17 @@ def _install_schema_surface():
                 continue
             bases = tuple(classes_by_name[base] for base in names) or (object,)
             attributes = {"__module__": module_name}
-            if not any(
+            is_core_surface = any(
                 isinstance(base, type)
                 and issubclass(base, (Mobject, Scene, Animation))
                 for base in bases
-            ):
+            )
+            if not is_core_surface:
                 attributes["__init__"] = _surface_init
+            elif (module_name, name) in declared_initializers:
+                attributes["__init__"] = _schema_init_refusal(
+                    module_name, name
+                )
             try:
                 if bases == (_enum.Enum,):
                     cls = _enum.Enum(name, {}, module=module_name)

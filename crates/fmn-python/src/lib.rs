@@ -2289,6 +2289,40 @@ impl BridgeMobject {
         install_native_tree(slf, factory, sphere.build())
     }
 
+    /// `Cylinder(height, radius, axis, ...)` over the solids shelf: the
+    /// Reference UV grid followed by its radius/depth/axis transform.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_cylinder<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        height: f64,
+        radius: f64,
+        axis: [f64; 3],
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let cylinder = fmn_library::Cylinder::new(height, radius)
+            .axis(axis)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
+        install_native_tree(slf, factory, cylinder.build())
+    }
+
+    /// `Cylinder.uv_func` through the exact object-space parameterization
+    /// sampled by the native builder.
+    #[staticmethod]
+    fn _cylinder_uv(u: f64, v: f64) -> [f64; 3] {
+        fmn_library::Cylinder::uv_func(u, v)
+    }
+
     /// `Sphere.uv_func` through the exact function used by the native
     /// surface builder (including its fmn-dmath transcendental path).
     #[staticmethod]
