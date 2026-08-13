@@ -552,6 +552,7 @@ def _restore_mobject(cls, engine_state, attributes, children, extras, updaters):
 
 
 class Mobject(_BridgeMobject):
+    dim = 3
     data_dtype = [("point", 3), ("rgba", 4)]
     aligned_data_keys = ["point"]
     pointlike_data_keys = ["point"]
@@ -701,6 +702,101 @@ class Mobject(_BridgeMobject):
             return (0.0, 0.0, 0.0)
         return _vec3(about_point)
 
+    def apply_points_function(
+        self,
+        func,
+        about_point=None,
+        about_edge=_ORIGIN,
+        works_on_bounding_box=False,
+    ):
+        if about_point is None and about_edge is not None:
+            about_point = self.get_bounding_box_point(about_edge)
+        pivot = None if about_point is None else _np.array(_vec3(about_point))
+        cached_boxes = []
+
+        for mob in self.get_family():
+            box = mob.get_bounding_box().copy() if works_on_bounding_box else None
+            keys = mob.pointlike_data_keys if mob.has_points() else ()
+            for key in keys:
+                array = _np.array(mob._field_rows(key), dtype=float)
+                if pivot is None:
+                    array[:] = func(array)
+                else:
+                    array[:] = func(array - pivot) + pivot
+                mob._set_field_rows(key, array.tolist())
+            if works_on_bounding_box:
+                if pivot is None:
+                    box[:] = func(box)
+                else:
+                    box[:] = func(box - pivot) + pivot
+                cached_boxes.append((mob, box))
+
+        # Install only after every descendant write, so each cache entry is
+        # keyed to the final subtree signature rather than being invalidated
+        # by a later child in the same Reference family traversal.
+        for mob, box in cached_boxes:
+            mob._cache_bbox_rows(
+                [tuple(float(component) for component in row) for row in box]
+            )
+        return self
+
+    def apply_function(self, function, **kwargs):
+        if len(kwargs) == 0:
+            kwargs["about_point"] = _ORIGIN
+        self.apply_points_function(
+            lambda points: _np.array([function(point) for point in points]),
+            **kwargs,
+        )
+        return self
+
+    def apply_function_to_position(self, function):
+        self.move_to(function(self.get_center()))
+        return self
+
+    def apply_function_to_submobject_positions(self, function):
+        for submobject in self.submobjects:
+            submobject.apply_function_to_position(function)
+        return self
+
+    def apply_matrix(self, matrix, **kwargs):
+        if "about_point" not in kwargs and "about_edge" not in kwargs:
+            kwargs["about_point"] = _ORIGIN
+        full_matrix = _np.identity(self.dim)
+        matrix = _np.array(matrix)
+        full_matrix[: matrix.shape[0], : matrix.shape[1]] = matrix
+
+        if kwargs.get("works_on_bounding_box", False):
+            self.apply_points_function(
+                lambda points: _np.dot(points, full_matrix.T), **kwargs
+            )
+            return self
+
+        about_point = kwargs.pop("about_point", None)
+        about_edge = kwargs.pop("about_edge", _ORIGIN)
+        kwargs.pop("works_on_bounding_box", None)
+        if kwargs:
+            unexpected = next(iter(kwargs))
+            raise TypeError(
+                f"apply_points_function() got an unexpected keyword argument "
+                f"'{unexpected}'"
+            )
+        native_matrix = [
+            [float(component) for component in row] for row in full_matrix
+        ]
+        native_point = None if about_point is None else _vec3(about_point)
+        native_edge = None if about_edge is None else _vec3(about_edge)
+        for target in self._each_stage_target():
+            target._apply_matrix(native_matrix, native_point, native_edge)
+        return self
+
+    def apply_complex_function(self, function, **kwargs):
+        def real_function(point):
+            x, y, z = point
+            xy_complex = function(complex(x, y))
+            return [xy_complex.real, xy_complex.imag, z]
+
+        return self.apply_function(real_function, **kwargs)
+
     def shift(self, vector):
         vector = _vec3(vector)
         for target in self._each_stage_target():
@@ -796,6 +892,28 @@ class Mobject(_BridgeMobject):
 
     def to_edge(self, edge=_LEFT, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
         return self.align_on_border(edge, buff)
+
+    def shift_onto_screen(self, **kwargs):
+        space_lengths = [_FRAME_X_RADIUS, _FRAME_Y_RADIUS]
+        for vector in (_UP, _DOWN, _LEFT, _RIGHT):
+            dim = int(_np.argmax(_np.abs(vector)))
+            buff = kwargs.get("buff", _DEFAULT_MOBJECT_TO_EDGE_BUFF)
+            max_value = space_lengths[dim] - buff
+            edge_center = self.get_edge_center(vector)
+            if _np.dot(edge_center, vector) > max_value:
+                self.to_edge(vector, **kwargs)
+        return self
+
+    def is_off_screen(self):
+        if self.get_left()[0] > _FRAME_X_RADIUS:
+            return True
+        if self.get_right()[0] < -_FRAME_X_RADIUS:
+            return True
+        if self.get_bottom()[1] > _FRAME_Y_RADIUS:
+            return True
+        if self.get_top()[1] < -_FRAME_Y_RADIUS:
+            return True
+        return False
 
     def next_to(
         self,
@@ -1720,6 +1838,15 @@ class VMobject(Mobject):
         for submob in _family_preorder(self) if recurse else [self]:
             submob._make_smooth(bool(approx))
         return self
+
+    def apply_function(self, function, make_smooth=False, **kwargs):
+        Mobject.apply_function(self, function, **kwargs)
+        if getattr(self, "make_smooth_after_applying_functions", False) or make_smooth:
+            self.make_smooth(approx=True)
+        return self
+
+    def apply_matrix(self, *args, **kwargs):
+        return Mobject.apply_matrix(self, *args, **kwargs)
 
     def get_arc_length(self, n_sample_points=None):
         # BN-03: Chisel's error-bounded true length is the definition. The
