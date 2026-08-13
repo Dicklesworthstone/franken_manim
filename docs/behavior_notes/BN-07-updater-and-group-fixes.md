@@ -1,11 +1,11 @@
-# BN-07 — `add_updater(call=True)` runs once (C-5), and group addition is a value operation (C-6)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14)
 
-**Status:** Draft (W3, fm-yra). Consumed by Choreo (§9.1's
+**Status:** Draft (W3, fm-yra; W10, fm-23ev). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
-Two Appendix-C rulings owned by the dynamic-behavior surface (§8.6). Both
-are deliberate, correct divergences from the pinned Reference (D-05); the
+Three Appendix-C rulings owned by the mobject surface. All are deliberate,
+correct divergences from the pinned Reference (D-05); the
 API names and everything around them carry over exactly.
 
 ## C-5 — `add_updater(call=True)` runs the update pass exactly once
@@ -74,3 +74,31 @@ call `group.add(mob)` — the explicit in-place API, which keeps its
 Reference semantics unchanged.
 
 Locked by `tests/dynamics.rs::c6_group_add_is_a_value_operation`.
+
+## C-14 — `get_grid(width=…)` sizes the width
+
+The pinned Reference's `Mobject.get_grid` correctly routes `height` through
+`grid.set_height(height)`, but its adjacent width branch also calls
+`set_height`:
+
+```python
+if width is not None:
+    grid.set_height(width)
+```
+
+The public argument therefore does not do what its name says. A 3-column by
+2-row grid of 2-by-1 rectangles with zero buffer starts at 6-by-2; asking for
+`width=6` turns the Reference result into 18-by-6 instead of leaving it at
+6-by-2.
+
+**FrankenManim:** `get_grid(width=value)` calls `set_width(value)`.
+`height=value` continues to call `set_height(value)`, and row/column grouping
+is unchanged.
+
+**Migration:** code that worked around the Reference defect by passing the
+desired height as `width=` should pass `height=`. Ordinary callers using the
+argument according to its name now receive the requested width.
+
+Locked by the actual-extension bridge acceptance in
+`crates/fmn-python/tests/bridge.py`, including the 6-by-2 planted negative and
+row/column grouping checks.

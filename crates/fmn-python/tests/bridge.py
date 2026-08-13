@@ -2621,6 +2621,26 @@ deduplicated_group = manimlib.Group(
     iterable_group_children[0], iterable_group_children[0]
 )
 assert list(deduplicated_group) == iterable_group_children[:1]
+
+# Appendix-C C-14: the Reference's width branch calls set_height(width).
+# A 3x2 grid of 2x1 rectangles is already 6x2 with zero buffer, so this
+# planted negative becomes 18x6 under the buggy branch and 6x2 here.
+grid_source = geometry.Rectangle(width=2.0, height=1.0)
+width_grid = grid_source.get_grid(2, 3, width=6.0, buff=0.0)
+assert len(width_grid) == 6
+assert np.allclose(
+    [width_grid.get_width(), width_grid.get_height()], [6.0, 2.0]
+)
+height_grid = grid_source.get_grid(2, 3, height=4.0, buff=0.0)
+assert np.allclose(
+    [height_grid.get_width(), height_grid.get_height()], [12.0, 4.0]
+)
+row_grid = grid_source.get_grid(2, 3, group_by_rows=True, buff=0.0)
+assert len(row_grid) == 2
+assert [len(row) for row in row_grid] == [3, 3]
+column_grid = grid_source.get_grid(2, 3, group_by_cols=True, buff=0.0)
+assert len(column_grid) == 3
+assert [len(column) for column in column_grid] == [2, 2, 2]
 assert fixed_group.is_fixed_in_frame() is False
 assert fixed_child.is_fixed_in_frame() is False
 assert fixed_group.fix_in_frame() is fixed_group

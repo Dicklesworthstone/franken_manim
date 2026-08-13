@@ -1298,9 +1298,9 @@ class Mobject(_BridgeMobject):
         group_by_cols=False,
         **kwargs,
     ):
-        # Reference Mobject.get_grid (mobject.py:786) verbatim — including
-        # its `grid.set_height(width)` in the width branch, an evident
-        # Reference defect kept for parity pending an Appendix-C ruling.
+        # Reference Mobject.get_grid (mobject.py:786), with Appendix-C C-14's
+        # correction: the public `width` argument sizes the width rather than
+        # accidentally calling set_height.
         total = n_rows * n_cols
         grid = self.replicate(total)
         if group_by_cols:
@@ -1309,7 +1309,7 @@ class Mobject(_BridgeMobject):
         if height is not None:
             grid.set_height(height)
         if width is not None:
-            grid.set_height(width)
+            grid.set_width(width)
         group_class = self.get_group_class()
         if group_by_rows:
             return group_class(*(grid[n : n + n_cols] for n in range(0, total, n_cols)))
