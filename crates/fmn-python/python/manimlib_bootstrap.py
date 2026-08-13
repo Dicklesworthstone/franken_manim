@@ -8,6 +8,7 @@ pickle state, and schema-driven module/class construction.
 
 from __future__ import annotations
 
+import abc as _abc
 import ast as _ast
 import collections.abc as _collections_abc
 import copy as _copy
@@ -3707,49 +3708,188 @@ def _refuse_unrouted(class_name, entries):
         )
 
 
-class MarkupText(VMobject):
+class SVGMobject(VMobject):
+    """Structural portal base for native SVG-derived mobjects.
+
+    The schema-owned SVG parser methods remain precise unavailable callables;
+    Scribe-backed text subclasses use native layout provenance instead.
+    """
+
+
+class StringMobject(SVGMobject, _abc.ABC):
+    """Shared substring-selection surface for Tex and MarkupText.
+
+    The Reference discovers submobject labels with a second colored SVG and
+    spatial matching. Scribe and fmd-math retain the source byte span of every
+    glyph, so the portal can preserve the same selection result and object
+    identity directly, including Unicode, without rendering twice.
+    """
+
+    height = None
+
+    def find_spans_by_selector(self, selector):
+        def one(value):
+            if isinstance(value, str):
+                return [match.span() for match in _re.finditer(_re.escape(value), self.string)]
+            if isinstance(value, _re.Pattern):
+                return [match.span() for match in value.finditer(self.string)]
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and all(index is None or isinstance(index, int) for index in value)
+            ):
+                length = len(self.string)
+                span = tuple(
+                    default
+                    if index is None
+                    else min(index, length)
+                    if index >= 0
+                    else max(index + length, 0)
+                    for index, default in zip(value, (0, length))
+                )
+                return [span]
+            return None
+
+        spans = one(selector)
+        if spans is None:
+            spans = []
+            try:
+                selectors = iter(selector)
+            except TypeError as error:
+                raise TypeError(f"Invalid selector: {selector!r}") from error
+            for value in selectors:
+                selected = one(value)
+                if selected is None:
+                    raise TypeError(f"Invalid selector: {value!r}")
+                spans.extend(selected)
+        return [span for span in spans if span[0] <= span[1]]
+
+    @staticmethod
+    def span_contains(span_0, span_1):
+        return span_0[0] <= span_1[0] and span_0[1] >= span_1[1]
+
+    def _byte_span(self, span):
+        start, end = span
+        return (
+            len(self.string[:start].encode("utf-8")),
+            len(self.string[:end].encode("utf-8")),
+        )
+
+    def _selector_byte_spans(self, selector):
+        return [self._byte_span(span) for span in self.find_spans_by_selector(selector)]
+
+    def _string_submobject(self, ordinal):
+        current = self
+        for index in self._string_sub_paths[ordinal]:
+            current = current.submobjects[index]
+        return current
+
+    def get_submob_indices_list_by_span(self, arbitrary_span):
+        start, end = self._byte_span(arbitrary_span)
+        return [
+            ordinal
+            for ordinal, (sub_start, sub_end) in enumerate(self._string_sub_spans)
+            if start <= sub_start and sub_end <= end
+        ]
+
+    def _selected_string_ordinals(self, selector):
+        return [
+            [
+                ordinal
+                for ordinal, (sub_start, sub_end) in enumerate(self._string_sub_spans)
+                if start <= sub_start and sub_end <= end
+            ]
+            for start, end in self._selector_byte_spans(selector)
+        ]
+
+    def get_submob_indices_lists_by_selector(self, selector):
+        return [
+            ordinals
+            for ordinals in self._selected_string_ordinals(selector)
+            if ordinals
+        ]
+
+    def build_parts_from_indices_lists(self, indices_lists):
+        return VGroup(
+            *(
+                VGroup(*(self._string_submobject(ordinal) for ordinal in ordinals))
+                for ordinals in indices_lists
+            )
+        )
+
+    def select_parts(self, selector):
+        return self.build_parts_from_indices_lists(
+            self.get_submob_indices_lists_by_selector(selector)
+        )
+
+    def __getitem__(self, value):
+        if isinstance(value, (int, slice)):
+            return super().__getitem__(value)
+        return self.select_parts(value)
+
+    def select_part(self, selector, index=0):
+        return self.select_parts(selector)[index]
+
+    def select_unisolated_substring(self, pattern):
+        return self.select_parts(pattern)
+
+    def set_parts_color(self, selector, color):
+        self.select_parts(selector).set_color(color)
+        return self
+
+    def set_parts_color_by_dict(self, color_map):
+        for selector, color in color_map.items():
+            self.set_parts_color(selector, color)
+        return self
+
+    def get_string(self):
+        return self.string
+
+
+class MarkupText(StringMobject):
     """The Reference's MarkupText over the Scribe bridge (fmn-library
     text.rs): one glyph per child, shaped by the bundled FontBook. The
-    styled-run maps (t2c/t2f/...), fonts beyond the bundled faces, and
-    span provenance are later tranches — off-default values refuse
-    precisely."""
+    native span map powers isolate, t2c, and substring selection without
+    an SVG labelling pass. Font/weight/gradient maps beyond the bundled
+    tier remain precise refusals."""
 
     _native_markup = True
 
     def __init__(
         self,
-        text,
-        font_size=48,
-        height=None,
-        justify=False,
-        indent=0,
-        alignment="",
-        line_width=None,
-        font="",
-        slant="NORMAL",
-        weight="NORMAL",
-        gradient=None,
-        line_spacing_height=None,
-        text2color=None,
-        text2font=None,
-        text2gradient=None,
-        text2slant=None,
-        text2weight=None,
-        lsh=None,
-        t2c=None,
-        t2f=None,
-        t2g=None,
-        t2s=None,
-        t2w=None,
-        global_config=None,
-        local_configs=None,
-        disable_ligatures=True,
-        isolate=None,
-        use_labelled_svg=True,
-        path_string_config=None,
+        text: str,
+        font_size: int = 48,
+        height: float | None = None,
+        justify: bool = False,
+        indent: float = 0,
+        alignment: str = "",
+        line_width: float | None = None,
+        font: str = "",
+        slant: str = "NORMAL",
+        weight: str = "NORMAL",
+        gradient: Iterable[ManimColor] | None = None,
+        line_spacing_height: float | None = None,
+        text2color: dict = {},
+        text2font: dict = {},
+        text2gradient: dict = {},
+        text2slant: dict = {},
+        text2weight: dict = {},
+        lsh: float | None = None,
+        t2c: dict = {},
+        t2f: dict = {},
+        t2g: dict = {},
+        t2s: dict = {},
+        t2w: dict = {},
+        global_config: dict = {},
+        local_configs: dict = {},
+        disable_ligatures: bool = True,
+        isolate: Selector = _re.compile(r"\w+", _re.U),
         **kwargs,
     ):
-        del use_labelled_svg, path_string_config  # SVG-pipeline knobs; native
+        self.use_labelled_svg = bool(kwargs.pop("use_labelled_svg", False))
+        kwargs.pop("path_string_config", None)
+        self.base_color = kwargs.pop("base_color", "#FFFFFF")
+        self.protect = kwargs.pop("protect", ())
         _refuse_unrouted(
             type(self).__name__ + "()",
             [
@@ -3760,24 +3900,39 @@ class MarkupText(VMobject):
                 ("gradient", gradient is not None),
                 ("line_spacing_height", line_spacing_height is not None),
                 ("lsh", lsh is not None),
-                ("text2color", bool(text2color)),
                 ("text2font", bool(text2font)),
                 ("text2gradient", bool(text2gradient)),
                 ("text2slant", bool(text2slant)),
                 ("text2weight", bool(text2weight)),
-                ("t2c", bool(t2c)),
                 ("t2f", bool(t2f)),
                 ("t2g", bool(t2g)),
                 ("t2s", bool(t2s)),
                 ("t2w", bool(t2w)),
                 ("global_config", bool(global_config)),
                 ("local_configs", bool(local_configs)),
-                ("isolate", isolate is not None),
             ],
         )
         _install_live_state(self)
         self.text = str(text)
+        self.string = self.text
         self.font_size = float(font_size)
+        self.justify = bool(justify)
+        self.indent = float(indent)
+        self.alignment = alignment
+        self.line_width = line_width
+        self.font = font
+        self.slant = slant
+        self.weight = weight
+        self.lsh = line_spacing_height or lsh
+        self.t2c = dict(text2color or t2c)
+        self.t2f = dict(text2font or t2f)
+        self.t2g = dict(text2gradient or t2g)
+        self.t2s = dict(text2slant or t2s)
+        self.t2w = dict(text2weight or t2w)
+        self.global_config = dict(global_config)
+        self.local_configs = dict(local_configs)
+        self.disable_ligatures = bool(disable_ligatures)
+        self.isolate = isolate
         specs = self._build_text(
             _native_shell_factory,
             self.text,
@@ -3790,15 +3945,50 @@ class MarkupText(VMobject):
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
+        self.set_color_by_text_to_color_map(self.t2c)
         if height is not None:
             self.set_height(height)
+
+    def get_parts_by_text(self, selector):
+        return self.select_parts(selector)
+
+    def get_part_by_text(self, selector, **kwargs):
+        return self.select_part(selector, **kwargs)
+
+    def set_color_by_text(self, selector, color):
+        return self.set_parts_color(selector, color)
+
+    def set_color_by_text_to_color_map(self, color_map):
+        return self.set_parts_color_by_dict(color_map)
+
+    def get_text(self):
+        return self.get_string()
 
 
 class Text(MarkupText):
     _native_markup = False
 
+    def __init__(
+        self,
+        text: str,
+        isolate: Selector = (
+            _re.compile(r"\w+", _re.U),
+            _re.compile(r"\S+", _re.U),
+        ),
+        use_labelled_svg: bool = True,
+        path_string_config: dict = {"use_simple_quadratic_approx": True},
+        **kwargs,
+    ):
+        super().__init__(
+            text,
+            isolate=isolate,
+            use_labelled_svg=use_labelled_svg,
+            path_string_config=path_string_config,
+            **kwargs,
+        )
 
-class Tex(VMobject):
+
+class Tex(StringMobject):
     """The Reference's Tex over fmd-math (fmn-library tex.rs). When a
     source exceeds fmd-math's current tier, the engine's refusal names
     the unsupported constructs and is surfaced VERBATIM — the fm-rqc
@@ -3817,10 +4007,12 @@ class Tex(VMobject):
         additional_preamble: str = "",
         tex_to_color_map: dict = {},
         t2c: dict = {},
-        isolate: "Selector" = [],
+        isolate: Selector = [],
         use_labelled_svg: bool = True,
         **kwargs,
     ):
+        self.base_color = kwargs.pop("base_color", "#FFFFFF")
+        self.protect = kwargs.pop("protect", ())
         _refuse_unrouted(
             type(self).__name__ + "()",
             [
@@ -3869,97 +4061,17 @@ class Tex(VMobject):
         _apply_vmobject_style_kwargs(self, kwargs)
         self.set_color_by_tex_to_color_map(color_map)
 
-    def _selector_byte_spans(self, selector):
-        """Reference Selector parsing with native UTF-8 span coordinates."""
-
-        source = self.tex_string
-
-        def one(value):
-            if isinstance(value, str):
-                if not value:
-                    return []
-                return [match.span() for match in _re.finditer(_re.escape(value), source)]
-            if isinstance(value, _re.Pattern):
-                return [match.span() for match in value.finditer(source)]
-            if (
-                isinstance(value, tuple)
-                and len(value) == 2
-                and all(index is None or isinstance(index, int) for index in value)
-            ):
-                length = len(source)
-                result = tuple(
-                    default
-                    if index is None
-                    else min(index, length)
-                    if index >= 0
-                    else max(index + length, 0)
-                    for index, default in zip(value, (0, length))
-                )
-                return [result]
-            return None
-
-        spans = one(selector)
-        if spans is None:
-            spans = []
-            try:
-                selectors = iter(selector)
-            except TypeError as error:
-                raise TypeError(f"Invalid selector: {selector!r}") from error
-            for value in selectors:
-                selected = one(value)
-                if selected is None:
-                    raise TypeError(f"Invalid selector: {value!r}")
-                spans.extend(selected)
-        return [
-            (
-                len(source[:start].encode("utf-8")),
-                len(source[:end].encode("utf-8")),
-            )
-            for start, end in spans
-            if start <= end
-        ]
-
-    def _tex_submobject(self, ordinal):
-        current = self
-        for index in self._tex_sub_paths[ordinal]:
-            current = current.submobjects[index]
-        return current
-
-    def _selected_tex_ordinals(self, selector):
-        return [
-            [
-                ordinal
-                for ordinal, (sub_start, sub_end) in enumerate(self._tex_sub_spans)
-                if start <= sub_start and sub_end <= end
-            ]
-            for start, end in self._selector_byte_spans(selector)
-        ]
-
     def get_parts_by_tex(self, selector):
-        groups = []
-        for ordinals in self._selected_tex_ordinals(selector):
-            if ordinals:
-                groups.append(
-                    VGroup(*(self._tex_submobject(ordinal) for ordinal in ordinals))
-                )
-        return VGroup(*groups)
-
-    def __getitem__(self, value):
-        if isinstance(value, (int, slice)):
-            return super().__getitem__(value)
-        return self.get_parts_by_tex(value)
+        return self.select_parts(selector)
 
     def get_part_by_tex(self, selector, index=0):
-        return self.get_parts_by_tex(selector)[index]
+        return self.select_part(selector, index)
 
     def set_color_by_tex(self, selector, color):
-        self.get_parts_by_tex(selector).set_color(color)
-        return self
+        return self.set_parts_color(selector, color)
 
     def set_color_by_tex_to_color_map(self, color_map):
-        for selector, color in color_map.items():
-            self.set_color_by_tex(selector, color)
-        return self
+        return self.set_parts_color_by_dict(color_map)
 
     def get_tex(self):
         return self.tex_string
@@ -3971,13 +4083,13 @@ class Tex(VMobject):
     def make_number_changeable(self, value, index=0, replace_all=False, **config):
         substr = str(value)
         occurrences = [
-            ordinals for ordinals in self._selected_tex_ordinals(substr) if ordinals
+            ordinals for ordinals in self._selected_string_ordinals(substr) if ordinals
         ]
         if not occurrences or index >= len(occurrences):
             return VMobject()
         selected = occurrences if replace_all else [occurrences[index]]
         if any(
-            len(self._tex_sub_paths[ordinal]) != 1
+            len(self._string_sub_paths[ordinal]) != 1
             for ordinals in selected
             for ordinal in ordinals
         ):
@@ -3992,7 +4104,7 @@ class Tex(VMobject):
             )
         replacements = []
         for ordinals in selected:
-            part = VGroup(*(self._tex_submobject(ordinal) for ordinal in ordinals))
+            part = VGroup(*(self._string_submobject(ordinal) for ordinal in ordinals))
             decimal = DecimalNumber(float(value), **config)
             decimal.replace(part)
             decimal.match_style(part)
@@ -4003,25 +4115,25 @@ class Tex(VMobject):
         children = []
         spans = []
         paths = []
-        for ordinal, span in enumerate(self._tex_sub_spans):
+        for ordinal, span in enumerate(self._string_sub_spans):
             replacement = by_first.get(ordinal)
             if replacement is not None:
                 selected_ordinals, decimal = replacement
                 children.append(decimal)
                 spans.append(
                     (
-                        min(self._tex_sub_spans[item][0] for item in selected_ordinals),
-                        max(self._tex_sub_spans[item][1] for item in selected_ordinals),
+                        min(self._string_sub_spans[item][0] for item in selected_ordinals),
+                        max(self._string_sub_spans[item][1] for item in selected_ordinals),
                     )
                 )
                 paths.append([len(children) - 1])
             elif ordinal not in removed:
-                children.append(self._tex_submobject(ordinal))
+                children.append(self._string_submobject(ordinal))
                 spans.append(span)
                 paths.append([len(children) - 1])
         self.set_submobjects(children)
-        self._tex_sub_spans = spans
-        self._tex_sub_paths = paths
+        self._string_sub_spans = spans
+        self._string_sub_paths = paths
         self.tex_string = self.tex_string.replace(substr, "\\decimalmob", len(replacements))
         self.tex_strings = [self.tex_string]
         self.string = self.tex_string
@@ -6260,6 +6372,11 @@ def _install_schema_surface():
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
         ("manimlib.mobject.mobject", "Point"): Point,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
+        ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
+        (
+            "manimlib.mobject.svg.string_mobject",
+            "StringMobject",
+        ): StringMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
         ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,

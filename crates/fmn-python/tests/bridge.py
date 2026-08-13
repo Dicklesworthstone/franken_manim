@@ -5,6 +5,7 @@ Python behavior: MRO, live NumPy arrays, weakrefs, descriptors, copy/pickle,
 module imports, and callback reentrancy.
 """
 
+import abc
 import copy
 import enum
 import gc
@@ -2793,6 +2794,115 @@ except TypeError as error:
     assert "conflicting behind/background" in str(error)
 else:
     raise AssertionError("conflicting era-shim kwargs must be rejected")
+
+# Tex and native text share the Reference's StringMobject selector surface.
+# The implementation uses Scribe's retained UTF-8 source spans directly,
+# preserving object identity without the Reference's render-twice SVG labels.
+string_module = importlib.import_module("manimlib.mobject.svg.string_mobject")
+svg_module = importlib.import_module("manimlib.mobject.svg.svg_mobject")
+text_module = importlib.import_module("manimlib.mobject.svg.text_mobject")
+StringMobject = string_module.StringMobject
+SVGMobject = svg_module.SVGMobject
+assert issubclass(manimlib.Tex, StringMobject)
+assert issubclass(manimlib.MarkupText, StringMobject)
+assert issubclass(StringMobject, SVGMobject)
+assert issubclass(SVGMobject, VMobject)
+assert StringMobject.__bases__ == (SVGMobject, abc.ABC)
+assert manimlib.Tex.__mro__[:4] == (
+    manimlib.Tex,
+    StringMobject,
+    SVGMobject,
+    VMobject,
+)
+assert manimlib.MarkupText.__mro__[:4] == (
+    manimlib.MarkupText,
+    StringMobject,
+    SVGMobject,
+    VMobject,
+)
+
+plain_text = manimlib.Text("café café")
+assert isinstance(plain_text, StringMobject)
+assert plain_text.get_string() == plain_text.get_text() == "café café"
+assert plain_text.find_spans_by_selector("café") == [(0, 4), (5, 9)]
+assert plain_text.find_spans_by_selector(re.compile(r"caf.")) == [(0, 4), (5, 9)]
+assert plain_text.find_spans_by_selector((-4, None)) == [(5, 9)]
+assert plain_text.find_spans_by_selector("") == [
+    (index, index) for index in range(len(plain_text.string) + 1)
+]
+assert plain_text.find_spans_by_selector(["café", (5, None)]) == [
+    (0, 4),
+    (5, 9),
+    (5, 9),
+]
+assert StringMobject.span_contains((0, 4), (1, 3))
+assert not StringMobject.span_contains((1, 3), (0, 4))
+plain_groups = plain_text.get_parts_by_text("café")
+assert len(plain_groups) == 2
+assert all(len(group) == 4 for group in plain_groups)
+assert plain_groups[0][0] is plain_text.submobjects[0]
+assert plain_text["café"][1][0] is plain_text.submobjects[4]
+assert plain_text.get_part_by_text("café", index=1)[0] is plain_text.submobjects[4]
+assert plain_text.get_submob_indices_list_by_span((0, 4)) == [0, 1, 2, 3]
+assert plain_text.get_submob_indices_lists_by_selector("café") == [
+    [0, 1, 2, 3],
+    [4, 5, 6, 7],
+]
+assert len(plain_text.get_parts_by_text("absent")) == 0
+assert plain_text.set_color_by_text("café", manimlib.BLUE) is plain_text
+assert all(
+    leaf.get_fill_color() == manimlib.BLUE
+    for group in plain_text.get_parts_by_text("café")
+    for leaf in group
+)
+assert plain_text.set_color_by_text_to_color_map(
+    {re.compile(r"caf."): manimlib.YELLOW}
+) is plain_text
+assert all(
+    leaf.get_fill_color() == manimlib.YELLOW
+    for group in plain_text.get_parts_by_text("café")
+    for leaf in group
+)
+try:
+    plain_text.find_spans_by_selector(3.5)
+except TypeError as error:
+    assert "Invalid selector" in str(error)
+else:
+    raise AssertionError("StringMobject accepted an invalid selector")
+
+markup_text = manimlib.MarkupText(
+    "<b>β</b> + β",
+    t2c={"β": manimlib.RED},
+    isolate=re.compile(r"β"),
+)
+assert markup_text.string == markup_text.text == "<b>β</b> + β"
+assert markup_text.isolate.pattern == r"β"
+markup_betas = markup_text.get_parts_by_text("β")
+assert len(markup_betas) == 2
+assert all(len(group) == 1 for group in markup_betas)
+assert all(
+    group[0].get_fill_color() == manimlib.RED
+    for group in markup_betas
+)
+assert markup_text.get_part_by_text("β", index=1)[0] is markup_text.submobjects[2]
+
+markup_signature = inspect.signature(manimlib.MarkupText)
+assert markup_signature.parameters["font_size"].default == 48
+assert markup_signature.parameters["text2color"].default == {}
+assert markup_signature.parameters["t2c"].default == {}
+assert markup_signature.parameters["isolate"].default.pattern == r"\w+"
+text_signature = inspect.signature(manimlib.Text)
+assert list(text_signature.parameters) == [
+    "text",
+    "isolate",
+    "use_labelled_svg",
+    "path_string_config",
+    "kwargs",
+]
+assert text_signature.parameters["use_labelled_svg"].default is True
+assert text_signature.parameters["path_string_config"].default == {
+    "use_simple_quadratic_approx": True
+}
 
 tex = manimlib.Tex("E = mc^2", isolate=["mc"])
 tex_signature = inspect.signature(manimlib.Tex)

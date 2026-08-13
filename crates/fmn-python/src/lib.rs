@@ -2818,6 +2818,11 @@ impl BridgeMobject {
             builder = builder.width(width);
         }
         let built = with_font_book(|book| builder.build(book).map_err(native_error))?;
+        let spans: Vec<(usize, usize)> =
+            built.layout.glyphs.iter().map(|glyph| glyph.span).collect();
+        let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
+        slf.as_any().setattr("_string_sub_spans", spans)?;
+        slf.as_any().setattr("_string_sub_paths", paths)?;
         install_native_tree(slf, factory, built.vmob)
     }
 
@@ -2870,8 +2875,8 @@ impl BridgeMobject {
             .collect();
         if parts.is_empty() || (parts.len() == 1 && !group_single_part) {
             let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
-            slf.as_any().setattr("_tex_sub_spans", spans)?;
-            slf.as_any().setattr("_tex_sub_paths", paths)?;
+            slf.as_any().setattr("_string_sub_spans", spans)?;
+            slf.as_any().setattr("_string_sub_paths", paths)?;
             return install_native_tree(slf, factory, built.vmob);
         }
         // Half-open byte ranges of each part in the joined source; a part
@@ -2919,8 +2924,8 @@ impl BridgeMobject {
                 node
             })
             .collect();
-        slf.as_any().setattr("_tex_sub_spans", spans)?;
-        slf.as_any().setattr("_tex_sub_paths", paths)?;
+        slf.as_any().setattr("_string_sub_spans", spans)?;
+        slf.as_any().setattr("_string_sub_paths", paths)?;
         install_native_tree(slf, factory, tree)
     }
 

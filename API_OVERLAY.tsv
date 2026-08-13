@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	09e9d411bb711e25820267ac9baa2351c19cdd5788d2845c13ea98960e991b6e
+ledger_reviewed_digest	ecddc7715ea1cd8627bb03099149563b7b51b87ef343bd8d2983c04abee83f6b
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -273,6 +273,18 @@ manimlib.mobject.mobject:Mobject.shift_onto_screen	same	scripts/manim_ref/maniml
 manimlib.mobject.mobject:Mobject.shuffle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the Scene-seeded Python RNG and commits recursive child-first shuffles into live family order
 manimlib.mobject.mobject:Mobject.sort	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves stable default point ordering and both callback forms while committing the native child order
 manimlib.mobject.mobject:Mobject.space_out_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales the family around forwarded pivots then restores each immediate child's size around its own center
+manimlib.mobject.svg.string_mobject:StringMobject.build_parts_from_indices_lists	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	builds identity-preserving nested VGroups from native glyph ordinals
+manimlib.mobject.svg.string_mobject:StringMobject.find_spans_by_selector	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	preserves string regex half-open range iterable negative-index and invalid-selector behavior in Python character coordinates
+manimlib.mobject.svg.string_mobject:StringMobject.get_string	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	returns the original source string retained by the native-backed family
+manimlib.mobject.svg.string_mobject:StringMobject.get_submob_indices_list_by_span	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	maps a Python character span to every fully contained native glyph using exact UTF-8 source provenance
+manimlib.mobject.svg.string_mobject:StringMobject.get_submob_indices_lists_by_selector	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	returns one nonempty native glyph-ordinal list per selected occurrence in selector order
+manimlib.mobject.svg.string_mobject:StringMobject.height	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact None class default
+manimlib.mobject.svg.string_mobject:StringMobject.select_part	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested identity-preserving occurrence group
+manimlib.mobject.svg.string_mobject:StringMobject.select_parts	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	selects every occurrence directly from retained native source spans without the Reference's second colored SVG
+manimlib.mobject.svg.string_mobject:StringMobject.select_unisolated_substring	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	selects an unisolated string or regex through complete native span provenance rather than path-count inference
+manimlib.mobject.svg.string_mobject:StringMobject.set_parts_color	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected live glyph family in place and returns the original proxy
+manimlib.mobject.svg.string_mobject:StringMobject.set_parts_color_by_dict	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order over live native glyph families
+manimlib.mobject.svg.string_mobject:StringMobject.span_contains	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	preserves inclusive containment over half-open source spans
 manimlib.mobject.svg.tex_mobject:Tex.get_part_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested occurrence from the identity-preserving VGroup selected through native UTF-8 source spans
 manimlib.mobject.svg.tex_mobject:Tex.get_parts_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	selects string regex range iterable repeated and Unicode occurrences through fmd-math layout provenance rather than render-and-align heuristics
 manimlib.mobject.svg.tex_mobject:Tex.get_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	returns the normalized source string retained by the native typeset family
@@ -281,6 +293,11 @@ manimlib.mobject.svg.tex_mobject:Tex.set_color_by_tex_to_color_map	same	scripts/
 manimlib.mobject.svg.tex_mobject:Tex.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact align-star class default while native fmd-math owns layout
 manimlib.mobject.svg.tex_mobject:TexText	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	is an authored Tex subclass selecting fmd-math text-mainland mode rather than a schema-generated shell
 manimlib.mobject.svg.tex_mobject:TexText.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact empty-environment class override
+manimlib.mobject.svg.text_mobject:MarkupText.get_part_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested identity-preserving native text occurrence
+manimlib.mobject.svg.text_mobject:MarkupText.get_parts_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	selects repeated regex range and Unicode text occurrences through Scribe glyph provenance
+manimlib.mobject.svg.text_mobject:MarkupText.get_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the original plain or markup source string
+manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native glyph family in place and returns the original text proxy
+manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order including constructor t2c maps
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
 manimlib.mobject.geometry:ArrowTip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Triangle subclass backed by Atlas tip geometry rather than a schema-generated shell
