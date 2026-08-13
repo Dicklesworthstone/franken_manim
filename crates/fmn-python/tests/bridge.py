@@ -608,6 +608,119 @@ assert len(family_with_points) == 2
 assert all(member is family_shared for member in family_with_points)
 assert family_root.family_members_with_points() is not family_with_points
 
+# Family spatial queries are ordinary Python compositions over Marionette's
+# world-space points and retained bounding boxes. Shared descendants remain
+# path-wise duplicates, matching the Reference compatibility surface.
+assert str(inspect.signature(Mobject.get_all_points)) == "(self)"
+assert str(inspect.signature(Mobject.get_bounding_box)) == "(self)"
+assert str(inspect.signature(Mobject.compute_bounding_box)) == "(self)"
+assert str(inspect.signature(Mobject.refresh_bounding_box)) == (
+    "(self, recurse_down=False, recurse_up=True)"
+)
+assert str(inspect.signature(Mobject.are_points_touching)) == (
+    "(self, points, buff=0)"
+)
+assert str(inspect.signature(Mobject.is_point_touching)) == (
+    "(self, point, buff=0)"
+)
+assert str(inspect.signature(Mobject.is_touching)) == (
+    "(self, mobject, buff=0.01)"
+)
+assert str(inspect.signature(Mobject.get_all_corners)) == "(self)"
+assert str(inspect.signature(Mobject.get_center_of_mass)) == "(self)"
+assert str(inspect.signature(Mobject.get_boundary_point)) == "(self, direction)"
+assert str(inspect.signature(manimlib.DotCloud.compute_bounding_box)) == "(self)"
+
+family_all_points = family_root.get_all_points()
+shared_points = family_shared.get_points()
+assert family_all_points.dtype == np.float32
+assert family_all_points.shape == (2 * len(shared_points), 3)
+assert np.array_equal(family_all_points[: len(shared_points)], shared_points)
+assert np.array_equal(family_all_points[len(shared_points) :], shared_points)
+assert np.allclose(
+    family_root.compute_bounding_box(),
+    [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]],
+)
+assert family_root.refresh_bounding_box() is family_root
+assert family_root.refresh_bounding_box(True, False) is family_root
+
+empty_spatial = Mobject(Mobject())
+assert empty_spatial.get_all_points().shape == (0, 3)
+assert np.array_equal(empty_spatial.compute_bounding_box(), np.zeros((3, 3)))
+
+mass_probe = Mobject()
+mass_probe.resize(2)
+mass_probe.set_field("point", 0, [-2.0, 0.0, 0.0])
+mass_probe.set_field("point", 1, [1.0, 0.0, 0.0])
+assert np.allclose(mass_probe.get_center_of_mass(), [-0.5, 0.0, 0.0])
+assert np.allclose(mass_probe.get_boundary_point(manimlib.RIGHT), [1.0, 0.0, 0.0])
+assert np.allclose(mass_probe.get_boundary_point(manimlib.LEFT), [-2.0, 0.0, 0.0])
+
+touch_probe = Mobject()
+touch_probe.resize(1)
+touch_probe.set_field("point", 0, [0.0, 0.0, 0.0])
+touch_points = np.array(
+    [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0], [-0.25, 0.0, 0.0]]
+)
+assert np.array_equal(
+    touch_probe.are_points_touching(touch_points, buff=0.25),
+    [True, True, True],
+)
+assert not touch_probe.are_points_touching(
+    np.array([[0.2501, 0.0, 0.0]]), buff=0.25
+)[0]
+assert isinstance(touch_probe.is_point_touching([0.0, 0.0, 0.0]), np.bool_)
+assert touch_probe.is_point_touching([0.25, 0.0, 0.0], buff=0.25)
+
+other_touch_probe = Mobject()
+other_touch_probe.resize(1)
+other_touch_probe.set_field("point", 0, [1.0, 0.0, 0.0])
+assert not touch_probe.is_touching(other_touch_probe, buff=0.999)
+assert touch_probe.is_touching(other_touch_probe, buff=1.0)
+assert isinstance(touch_probe.is_touching(other_touch_probe), bool)
+
+dot_spatial = manimlib.DotCloud([[2.0, 3.0, 0.0]], radius=0.5)
+dot_box = np.array(
+    [[1.5, 2.5, -0.5], [2.0, 3.0, 0.0], [2.5, 3.5, 0.5]]
+)
+assert np.allclose(dot_spatial.compute_bounding_box(), dot_box)
+assert np.allclose(dot_spatial.get_bounding_box(), dot_box)
+assert np.allclose(dot_spatial.get_left(), [1.5, 3.0, 0.0])
+assert dot_spatial.get_width() == 1.0
+assert np.allclose(
+    dot_spatial.get_all_corners(),
+    [
+        [1.5, 2.5, -0.5],
+        [1.5, 2.5, 0.5],
+        [2.5, 2.5, -0.5],
+        [2.5, 2.5, 0.5],
+        [1.5, 3.5, -0.5],
+        [1.5, 3.5, 0.5],
+        [2.5, 3.5, -0.5],
+        [2.5, 3.5, 0.5],
+    ],
+)
+dot_group = Mobject(dot_spatial)
+assert np.allclose(dot_group.get_bounding_box(), dot_box)
+dot_scene = Scene()
+dot_scene.add(dot_group)
+assert np.allclose(dot_group.get_bounding_box(), dot_box)
+
+spatial_camera_frame = manimlib.CameraFrame(
+    frame_shape=(10.0, 6.0), center_point=(1.0, 2.0, 0.0)
+)
+assert np.allclose(
+    spatial_camera_frame.compute_bounding_box(),
+    [[-4.0, -1.0, 0.0], [1.0, 2.0, 0.0], [6.0, 5.0, 0.0]],
+)
+
+live_box = manimlib.Square()
+live_box_before = live_box.get_bounding_box().copy()
+live_box.get_points()[:, 0] += 2.0
+assert np.allclose(
+    live_box.get_bounding_box(), live_box_before + [2.0, 0.0, 0.0]
+)
+
 family_scene = Scene()
 family_isolated = Mobject()
 family_duplicate = Mobject()

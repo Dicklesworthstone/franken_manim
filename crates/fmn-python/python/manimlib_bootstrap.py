@@ -14,6 +14,7 @@ import copy as _copy
 import enum as _enum
 import importlib as _importlib
 import inspect as _inspect
+import itertools as _itertools
 import math as _math
 import re as _re
 import sys as _sys
@@ -668,6 +669,15 @@ class Mobject(_BridgeMobject):
     def family_members_with_points(self):
         return [mobject for mobject in self.get_family() if mobject.has_points()]
 
+    def get_all_points(self):
+        # Reference Mobject.get_all_points keeps path-wise family traversal:
+        # a shared descendant contributes once per path, and every member's
+        # get_points override remains observable.  get_points also bakes the
+        # engine's retained placement before exposing world-space records.
+        if self.submobjects:
+            return _np.vstack([mob.get_points() for mob in self.get_family()])
+        return self.get_points()
+
     # ----------------------------------------------------------------------
     # Positional surface (fm-d3gt): Reference signatures and bodies over the
     # engine's Stage primitives. Defined here, before the schema placeholder
@@ -1223,7 +1233,7 @@ class Mobject(_BridgeMobject):
 
     def get_continuous_bounding_box_point(self, direction):
         # Reference Mobject.get_continuous_bounding_box_point verbatim.
-        dl, center, ur = self._bbox_rows()
+        dl, center, ur = self.get_bounding_box()
         del dl
         corner_vect = ur - center
         direction = _np.array(_vec3(direction))
@@ -1390,10 +1400,48 @@ class Mobject(_BridgeMobject):
     # Positional getters over the same Stage bounding box.
 
     def get_bounding_box(self):
-        return self._bbox_rows()
+        # Dynamic dispatch matters: DotCloud expands the point hull by its
+        # radius, while CameraFrame supplies renderer-owned frame state.
+        return self.compute_bounding_box()
+
+    def compute_bounding_box(self):
+        # Marionette already maintains the revisioned family box over world-
+        # space points.  Use that retained result for the ordinary family,
+        # but preserve class-specific extent rules (notably DotCloud radius)
+        # when one appears below this root.  The slow branch is the Reference
+        # aggregation itself and stores no competing cache.
+        family = self.get_family()
+        if not any(
+            type(mob).compute_bounding_box is not Mobject.compute_bounding_box
+            for mob in family[1:]
+        ):
+            return self._bbox_rows()
+        all_points = _np.vstack(
+            [
+                self.get_points(),
+                *(
+                    mob.get_bounding_box()
+                    for mob in family[1:]
+                    if mob.has_points()
+                ),
+            ]
+        )
+        if len(all_points) == 0:
+            return _np.zeros((3, self.dim))
+        mins = all_points.min(0)
+        maxs = all_points.max(0)
+        return _np.array([mins, (mins + maxs) / 2, maxs])
+
+    def refresh_bounding_box(self, recurse_down=False, recurse_up=True):
+        # RecordBuffer writes, live writable views, family edits, and retained
+        # placements all invalidate Marionette's box through their revision
+        # channels.  Accept the Reference cache-control surface while leaving
+        # invalidation to that existing authority.
+        del recurse_down, recurse_up
+        return self
 
     def get_bounding_box_point(self, direction):
-        bb = self._bbox_rows()
+        bb = self.get_bounding_box()
         direction = _np.array(_vec3(direction))
         indices = (_np.sign(direction) + 1).astype(int)
         return _np.array([bb[indices[i]][i] for i in range(3)])
@@ -1404,8 +1452,28 @@ class Mobject(_BridgeMobject):
     def get_corner(self, direction):
         return self.get_bounding_box_point(direction)
 
+    def get_all_corners(self):
+        bb = self.get_bounding_box()
+        return _np.array(
+            [
+                [bb[indices[-i + 1]][i] for i in range(3)]
+                for indices in _itertools.product([0, 2], repeat=3)
+            ]
+        )
+
     def get_center(self):
-        return self._bbox_rows()[1]
+        return self.get_bounding_box()[1]
+
+    def get_center_of_mass(self):
+        return self.get_all_points().mean(0)
+
+    def get_boundary_point(self, direction):
+        all_points = self.get_all_points()
+        boundary_directions = all_points - self.get_center()
+        norms = _np.linalg.norm(boundary_directions, axis=1)
+        boundary_directions /= _np.repeat(norms, 3).reshape((len(norms), 3))
+        index = _np.argmax(_np.dot(boundary_directions, _np.array(direction).T))
+        return all_points[index]
 
     def get_top(self):
         return self.get_edge_center(_UP)
@@ -1426,8 +1494,27 @@ class Mobject(_BridgeMobject):
         return self.get_edge_center(_IN)
 
     def length_over_dim(self, dim):
-        bb = self._bbox_rows()
+        bb = self.get_bounding_box()
         return abs((bb[2] - bb[0])[dim])
+
+    def are_points_touching(self, points, buff=0):
+        bb = self.get_bounding_box()
+        mins = bb[0] - buff
+        maxs = bb[2] + buff
+        return ((points >= mins) * (points <= maxs)).all(1)
+
+    def is_point_touching(self, point, buff=0):
+        return self.are_points_touching(_np.array(point, ndmin=2), buff)[0]
+
+    def is_touching(self, mobject, buff=0.01):
+        bb1 = self.get_bounding_box()
+        bb2 = mobject.get_bounding_box()
+        return not any(
+            (
+                (bb2[2] < bb1[0] - buff).any(),
+                (bb2[0] > bb1[2] + buff).any(),
+            )
+        )
 
     def get_width(self):
         return self.length_over_dim(0)
@@ -3902,6 +3989,16 @@ class DotCloud(PMobject):
 
     def get_radius(self):
         return self.radius
+
+    def compute_bounding_box(self):
+        # Point-cloud radii are geometry, not merely a render uniform.  Keep
+        # the Reference's class-specific extent rule on top of Marionette's
+        # point-family box so inherited placement helpers see the full dots.
+        bb = super().compute_bounding_box()
+        radius = self.get_radius()
+        bb[0] += _np.full((3,), -radius)
+        bb[2] += _np.full((3,), radius)
+        return bb
 
     def get_glow_factor(self):
         return self.glow_factor
