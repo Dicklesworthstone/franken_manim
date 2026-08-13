@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	191b771600eb9513e2fa0af92163a94d297c3b6249ef9ba3abae86369bef40da
+ledger_reviewed_digest	7f2a4c2c022629e52b45879adb25cd17cab1f4f175d71851fc2bd4ad3e8876e7
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -234,6 +234,7 @@ manimlib.mobject.mobject:Mobject.apply_function_to_submobject_positions	same	scr
 manimlib.mobject.mobject:Mobject.apply_matrix	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	embeds smaller matrices in three dimensions routes ordinary families once through Marionette and preserves custom pointlike fields
 manimlib.mobject.mobject:Mobject.apply_points_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves family and pointlike-field order pivot rules transformed bounding-box rows return identity and callback exceptions with member-by-member partial state
 manimlib.mobject.mobject:Mobject.deepcopy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates through graph-safe deepcopy while preserving internal family aliases and independent extension state
+manimlib.mobject.mobject:Mobject.dim	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact three-dimensional base record width used by matrix embedding and callable point transforms
 manimlib.mobject.mobject:Mobject.fade	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sets absolute family opacity and preserves the base method's intentional non-fluent return
 manimlib.mobject.mobject:Mobject.family_members_with_points	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
 manimlib.mobject.mobject:Mobject.get_family	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
