@@ -369,6 +369,13 @@ macro_rules! forward_spec {
             self
         }
 
+        /// The axis preferred by partial-surface creation animations.
+        #[must_use]
+        pub fn preferred_creation_axis(mut self, axis: usize) -> Self {
+            self.spec.preferred_creation_axis = axis;
+            self
+        }
+
         /// The surface color (all rgba records).
         #[must_use]
         pub fn color(mut self, color: Srgb) -> Self {
@@ -959,12 +966,17 @@ impl Cylinder {
         self
     }
 
+    /// The Reference's object-space cylinder parameterization before the
+    /// constructor's radius, height, and axis transforms.
+    #[must_use]
+    pub fn uv_func(u: f64, v: f64) -> Vec3 {
+        [fmn_dmath::cos(u), fmn_dmath::sin(u), v]
+    }
+
     /// Sample the cylinder.
     #[must_use]
     pub fn build(self) -> Surface {
-        let surface = self
-            .spec
-            .sample(|u, v| [fmn_dmath::cos(u), fmn_dmath::sin(u), v]);
+        let surface = self.spec.sample(Self::uv_func);
         finish_cylinder(surface, self.radius, self.height, self.axis)
     }
 }
