@@ -2613,6 +2613,10 @@ assert not np.allclose(field.get_points(), field_before)
 # Reference's recursive family default and non-recursive override.
 fixed_child = geometry.Square()
 fixed_group = manimlib.Group(fixed_child)
+assert "__init__" in manimlib.Group.__dict__
+iterable_group_children = [geometry.Square(), geometry.Circle()]
+iterable_group = manimlib.Group(iterable_group_children)
+assert list(iterable_group) == iterable_group_children
 assert fixed_group.is_fixed_in_frame() is False
 assert fixed_child.is_fixed_in_frame() is False
 assert fixed_group.fix_in_frame() is fixed_group
@@ -3519,6 +3523,56 @@ three_dimensions = importlib.import_module("manimlib.mobject.three_dimensions")
 sphere = three_dimensions.Sphere(radius=2.0, clockwise=True, resolution=(5, 3))
 assert np.allclose(sphere.uv_func(0.0, 0.0), [0.0, 0.0, -2.0])
 assert np.allclose(sphere.uv_func(0.0, math.pi / 2.0), [2.0, 0.0, 0.0])
+
+# Generated subclasses with class-specific constructors must never inherit an
+# ancestor's incompatible defaults. Cylinder is corpus-used and routes to the
+# already-native solid; the rest fail closed until their semantic builders
+# land instead of constructing an unrelated Mobject/Surface/Animation.
+cylinder = three_dimensions.Cylinder(
+    u_range=(0.0, math.tau),
+    v_range=(-1.0, 1.0),
+    resolution=(5, 3),
+    height=4.0,
+    radius=2.0,
+    axis=manimlib.OUT,
+    color=manimlib.BLUE,
+    depth_test=False,
+)
+assert cylinder.n_records() == 15
+assert cylinder.u_range == (0.0, math.tau)
+assert cylinder.v_range == (-1.0, 1.0)
+assert cylinder.resolution == (5, 3)
+assert cylinder.height == 4.0
+assert cylinder.radius == 2.0
+assert np.array_equal(cylinder.axis, manimlib.OUT)
+assert np.allclose(cylinder.uv_func(0.0, 0.25), [1.0, 0.0, 0.25])
+assert np.allclose(
+    [cylinder.get_width(), cylinder.get_height(), cylinder.get_depth()],
+    [4.0, 4.0, 4.0],
+    atol=1e-6,
+)
+assert cylinder.uniforms["depth_test"] is False
+assert cylinder.get_color() == manimlib.BLUE
+
+right_cylinder = three_dimensions.Cylinder(
+    resolution=(5, 3), height=6.0, radius=1.0, axis=manimlib.RIGHT
+)
+assert np.allclose(
+    [right_cylinder.get_width(), right_cylinder.get_height(), right_cylinder.get_depth()],
+    [6.0, 2.0, 2.0],
+    atol=1e-6,
+)
+
+try:
+    three_dimensions.Torus()
+except NotImplementedError as error:
+    assert str(error) == (
+        "manimlib.mobject.three_dimensions.Torus declares class-specific "
+        "constructor semantics that have not landed; refusing to inherit "
+        "an ancestor's incompatible defaults"
+    )
+else:
+    raise AssertionError("a generated Torus silently inherited Surface defaults")
 
 old_tex = importlib.import_module("manimlib.mobject.svg.old_tex_mobject").OldTex
 quadratic_label = old_tex(
