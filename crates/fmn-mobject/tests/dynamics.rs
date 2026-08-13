@@ -279,6 +279,15 @@ fn value_trackers_encode_and_increment() {
     stage.set_tracker_complex_value(complex, 0.5, 0.5).unwrap();
     assert_eq!(stage.tracker_complex_value(complex), Some((0.5, 0.5)));
 
+    // Binding-tier detached copies restore the exact encoded payload rather
+    // than reconstructing a decoded scalar and losing the tracker kind.
+    let restored = stage.tracker(exp).unwrap();
+    stage.set_tracker_state(exp, None).unwrap();
+    assert_eq!(stage.tracker(exp), None);
+    stage.set_tracker_state(exp, Some(restored)).unwrap();
+    assert_eq!(stage.tracker(exp), Some(restored));
+    assert!((stage.tracker_value(exp).unwrap() - 5.0).abs() < 1e-12);
+
     // Non-trackers refuse tracker operations.
     let mob = stage.add(square());
     assert_eq!(stage.tracker_value(mob), None);

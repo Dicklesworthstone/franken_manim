@@ -4922,6 +4922,7 @@ class ValueTracker(Mobject):
     (§8.6, Stage::add_value_tracker): the value is real engine state in
     both proxy states and survives scene adoption."""
 
+    value_type = _np.float64
     _tracker_kind = 0  # Plain
 
     def __init__(self, value=0, **kwargs):
@@ -4936,7 +4937,7 @@ class ValueTracker(Mobject):
         self._init_value_tracker(type(self)._tracker_kind, float(value), 0.0)
 
     def get_value(self):
-        return self._tracker_value()
+        return self.value_type(self._tracker_value())
 
     def set_value(self, value):
         self._set_tracker_value(float(value))
@@ -4951,6 +4952,7 @@ class ExponentialValueTracker(ValueTracker):
 
 
 class ComplexValueTracker(ValueTracker):
+    value_type = _np.complex128
     _tracker_kind = 2
 
     def __init__(self, value=0, **kwargs):
@@ -4962,7 +4964,7 @@ class ComplexValueTracker(ValueTracker):
 
     def get_value(self):
         re, im = self._tracker_complex_value()
-        return complex(re, im)
+        return self.value_type(complex(re, im))
 
     def set_value(self, value):
         value = complex(value)

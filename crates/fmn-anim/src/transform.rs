@@ -9,7 +9,8 @@
 //!   straight, exactly as the Reference's early return.
 //! - The lerp core routes **only pointlike record fields through the path
 //!   function**; every other field lerps linearly, locked fields are
-//!   skipped entirely, and numeric uniforms lerp linearly
+//!   skipped entirely, numeric uniforms lerp linearly, and Marionette's
+//!   typed ValueTracker lanes lerp in their native encoding
 //!   (mobject.py:1810). The Reference's `const_data_keys` broadcast is a
 //!   pure optimization (a constant column lerps to the same values
 //!   row-wise) and is deliberately not replicated.
@@ -27,7 +28,7 @@
 //! functional maps) lands in later fm-cye slices.
 
 use fmn_core::types::Vec3;
-use fmn_mobject::{Mob, Placement, Stage};
+use fmn_mobject::{Mob, Placement, Stage, Tracker};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, interpolate_linear_column,
@@ -261,6 +262,24 @@ pub fn interpolate_fields(
         let _ = stage.set_placement(submob, Placement::IDENTITY);
     } else if let Some(placement) = placement {
         let _ = stage.set_placement(submob, placement);
+    }
+    // ValueTracker state is the Reference's numeric `uniforms["value"]`
+    // represented as a typed Marionette payload.  Interpolate the encoded
+    // lanes: plain values remain arithmetic, exponential trackers interpolate
+    // their logarithms (therefore geometric values), and complex trackers
+    // interpolate real/imaginary components independently.
+    if let (Some(from_tracker), Some(to_tracker)) = (stage.tracker(from), stage.tracker(to))
+        && from_tracker.kind == to_tracker.kind
+    {
+        let lerp = |x: f64, y: f64| (1.0 - alpha) * x + alpha * y;
+        let tracker = Tracker {
+            kind: from_tracker.kind,
+            lanes: [
+                lerp(from_tracker.lanes[0], to_tracker.lanes[0]),
+                lerp(from_tracker.lanes[1], to_tracker.lanes[1]),
+            ],
+        };
+        let _ = stage.set_tracker_state(submob, Some(tracker));
     }
     // Numeric uniforms lerp linearly (the Reference lerps every shared
     // uniform key); discrete state (flags, joint type) stays the live

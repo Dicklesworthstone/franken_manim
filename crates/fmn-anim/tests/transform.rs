@@ -145,6 +145,50 @@ fn aligned_target_is_shared_not_copied() {
 }
 
 #[test]
+fn transform_interpolates_native_tracker_payloads() {
+    let mut stage = Stage::new();
+
+    let plain = stage.add_value_tracker(1.0);
+    let plain_target = stage.add_value_tracker(5.0);
+    let mut plain_transform = Transform::new(plain, plain_target).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    plain_transform.begin(&mut stage).unwrap();
+    plain_transform.interpolate(&mut stage, 0.25);
+    assert_eq!(stage.tracker_value(plain), Some(2.0));
+    plain_transform.finish(&mut stage);
+    assert_eq!(stage.tracker_value(plain), Some(5.0));
+
+    let exponential = stage.add_exponential_value_tracker(4.0);
+    let exponential_target = stage.add_exponential_value_tracker(16.0);
+    let mut exponential_transform =
+        Transform::new(exponential, exponential_target).with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+    exponential_transform.begin(&mut stage).unwrap();
+    exponential_transform.interpolate(&mut stage, 0.5);
+    assert!(
+        (stage.tracker_value(exponential).unwrap() - 8.0).abs() < 1e-12,
+        "logarithmic lanes make the decoded midpoint geometric"
+    );
+    exponential_transform.finish(&mut stage);
+
+    let complex = stage.add_complex_value_tracker(1.0, -2.0);
+    let complex_target = stage.add_complex_value_tracker(5.0, 6.0);
+    let mut complex_transform = Transform::new(complex, complex_target).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    complex_transform.begin(&mut stage).unwrap();
+    complex_transform.interpolate(&mut stage, 0.25);
+    assert_eq!(stage.tracker_complex_value(complex), Some((2.0, 0.0)));
+    complex_transform.finish(&mut stage);
+    assert_eq!(stage.tracker_complex_value(complex), Some((5.0, 6.0)));
+}
+
+#[test]
 fn a_translation_transform_interpolates_placement_without_rewriting_points() {
     let mut stage = Stage::new();
     let points = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];

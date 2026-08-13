@@ -97,6 +97,25 @@ impl Stage {
         self.get(mob).and_then(|e| e.tracker)
     }
 
+    /// Replace the raw typed tracker payload attached to `mob`.
+    ///
+    /// This is the state-transfer seam used by binding-tier detached-copy
+    /// restoration and by Choreo's Transform interpolation.  Ordinary users
+    /// should prefer the decoded scalar/complex accessors below; this method
+    /// deliberately preserves the encoded lane representation (notably the
+    /// logarithmic lane of [`TrackerKind::Exponential`]).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if `mob` is not live.
+    pub fn set_tracker_state(
+        &mut self,
+        mob: Mob,
+        tracker: Option<Tracker>,
+    ) -> Result<(), StageError> {
+        self.get_mut(mob).ok_or(StageError::StaleHandle)?.tracker = tracker;
+        Ok(())
+    }
+
     /// `get_value` for scalar trackers (`Plain` decodes directly,
     /// `Exponential` decodes through `exp`); `None` for non-trackers and
     /// complex trackers (use [`Stage::tracker_complex_value`]).

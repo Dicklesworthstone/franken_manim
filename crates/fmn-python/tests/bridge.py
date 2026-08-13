@@ -2079,6 +2079,81 @@ assert np.allclose(
     empty_surround.get_bounding_box()[2][:2], live_target_box[2][:2] + 0.2
 )
 
+# ValueTracker targets are native typed state, not record-buffer decoration.
+# Detached copy/deepcopy/pickle must preserve that payload so the ordinary
+# `.animate` builder can mutate its generated target before Scene adoption.
+assert manimlib.ValueTracker.value_type is np.float64
+assert manimlib.ComplexValueTracker.value_type is np.complex128
+assert manimlib.ExponentialValueTracker.__bases__ == (manimlib.ValueTracker,)
+assert manimlib.ComplexValueTracker.__bases__ == (manimlib.ValueTracker,)
+tracker_cases = (
+    (manimlib.ValueTracker(1.25), 1.25),
+    (manimlib.ExponentialValueTracker(4.0), 4.0),
+    (manimlib.ComplexValueTracker(1.0 - 2.0j), 1.0 - 2.0j),
+)
+for tracker, expected in tracker_cases:
+    assert isinstance(tracker.get_value(), tracker.value_type)
+    for clone in (
+        copy.copy(tracker),
+        copy.deepcopy(tracker),
+        pickle.loads(  # ubs:ignore -- trusted round-trip created immediately here
+            pickle.dumps(tracker, protocol=pickle.HIGHEST_PROTOCOL)
+        ),
+    ):
+        assert type(clone) is type(tracker)
+        assert clone.get_value() == expected
+        assert isinstance(clone.get_value(), clone.value_type)
+        clone.increment_value(0.5)
+        assert clone.get_value() == expected + 0.5
+        assert tracker.get_value() == expected
+
+plain_tracker_scene = Scene()
+plain_tracker = manimlib.ValueTracker(1.0)
+plain_tracker_values = []
+plain_tracker.add_updater(
+    lambda mob: plain_tracker_values.append(float(mob.get_value())),
+    call=False,
+)
+plain_tracker_scene.play(
+    plain_tracker.animate.set_value(5.0),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(plain_tracker_values, [3.0, 5.0])
+assert plain_tracker.get_value() == 5.0
+
+exponential_tracker_scene = Scene()
+exponential_tracker = manimlib.ExponentialValueTracker(4.0)
+exponential_tracker_values = []
+exponential_tracker.add_updater(
+    lambda mob: exponential_tracker_values.append(float(mob.get_value())),
+    call=False,
+)
+exponential_tracker_scene.play(
+    exponential_tracker.animate.set_value(16.0),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(exponential_tracker_values, [8.0, 16.0])
+assert math.isclose(
+    exponential_tracker.get_value(), 16.0, rel_tol=0.0, abs_tol=1e-12
+)
+
+complex_tracker_scene = Scene()
+complex_tracker = manimlib.ComplexValueTracker(1.0 - 2.0j)
+complex_tracker_values = []
+complex_tracker.add_updater(
+    lambda mob: complex_tracker_values.append(complex(mob.get_value())),
+    call=False,
+)
+complex_tracker_scene.play(
+    complex_tracker.animate.set_value(5.0 + 6.0j),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(complex_tracker_values, [3.0 + 2.0j, 5.0 + 6.0j])
+assert complex_tracker.get_value() == 5.0 + 6.0j
+
 # Engine-driven plays release the Scene RefCell after interpolation and the
 # rational clock advance, then invoke Python scene updaters before native
 # scene updaters and immutable capture. This used to refuse every such play.

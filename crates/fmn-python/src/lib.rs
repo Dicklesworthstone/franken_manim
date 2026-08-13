@@ -33,7 +33,7 @@ use crossing::CrossingClass;
 
 use fmn_mobject::{
     JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Stage,
-    StageError, Uniforms,
+    StageError, Tracker, TrackerKind, Uniforms,
 };
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::create_exception;
@@ -890,6 +890,25 @@ fn record_state<'py>(
         }
     };
     state.set_item("z_index", z_index)?;
+    let tracker = {
+        let cell = proxy.borrow();
+        if let (Some(engine), Some(mob)) = (&cell.engine, cell.mob) {
+            engine.borrow().stage().tracker(mob)
+        } else {
+            cell.nursery
+                .as_ref()
+                .and_then(|nursery| nursery.stage.tracker(nursery.root))
+        }
+    };
+    let tracker_state = tracker.map(|tracker| {
+        let kind = match tracker.kind {
+            TrackerKind::Plain => 0_u8,
+            TrackerKind::Exponential => 1,
+            TrackerKind::Complex => 2,
+        };
+        (kind, tracker.lanes)
+    });
+    state.set_item("tracker", tracker_state)?;
     Ok(state)
 }
 
@@ -990,10 +1009,27 @@ fn restore_record_state(
     let z_index: i32 = state
         .get_item("z_index")?
         .map_or(Ok(0), |value| value.extract())?;
+    let tracker_state: Option<(u8, [f64; 2])> = match state.get_item("tracker")? {
+        Some(value) => value.extract()?,
+        None => None,
+    };
     let mut detached = Mobject::from_buffer(buffer).with_uniforms(uniforms);
     detached.z_index = z_index;
+    let mut nursery = Nursery::new(detached);
+    if let Some((kind, lanes)) = tracker_state {
+        let kind = match kind {
+            0 => TrackerKind::Plain,
+            1 => TrackerKind::Exponential,
+            2 => TrackerKind::Complex,
+            _ => return Err(PyValueError::new_err("restored tracker kind is invalid")),
+        };
+        nursery
+            .stage
+            .set_tracker_state(nursery.root, Some(Tracker { kind, lanes }))
+            .map_err(stage_error)?;
+    }
     let mut cell = proxy.borrow_mut();
-    cell.nursery = Some(Nursery::new(detached));
+    cell.nursery = Some(nursery);
     cell.mob = None;
     cell.engine = None;
     cell.initialized = true;

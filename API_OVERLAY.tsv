@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	ecddc7715ea1cd8627bb03099149563b7b51b87ef343bd8d2983c04abee83f6b
+ledger_reviewed_digest	163a70480af98b5a30a5b13c6601a42ff183bd6a4857259efa132ac4a5fdb88a
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -396,6 +396,10 @@ manimlib.mobject.types.vectorized_mobject:VMobject.make_smooth_after_applying_fu
 manimlib.mobject.types.vectorized_mobject:VMobject.quick_point_from_proportion	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	preserves the equal-curve-count quadratic approximation separately from true-arclength point_from_proportion
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
+manimlib.mobject.value_tracker:ComplexValueTracker	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	is the authored ValueTracker subclass whose native two-lane payload preserves complex values through copy pickle adoption and animation
+manimlib.mobject.value_tracker:ComplexValueTracker.value_type	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	exposes the exact NumPy complex128 public type marker
+manimlib.mobject.value_tracker:ExponentialValueTracker	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	is the authored ValueTracker subclass whose native logarithmic lane gives geometric Transform interpolation
+manimlib.mobject.value_tracker:ValueTracker.value_type	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	exposes the exact NumPy float64 public type marker
 
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
