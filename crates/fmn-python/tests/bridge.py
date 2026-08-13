@@ -80,6 +80,19 @@ class CustomDtype(Mobject):
         self.set_field("wobble", 1, [0.5, -0.5])
 
 
+class CustomPointFields(Mobject):
+    data_dtype = [
+        ("point", np.float32, (3,)),
+        ("control", np.float32, (3,)),
+    ]
+    pointlike_data_keys = ["point", "control"]
+
+    def init_points(self):
+        self.resize(1)
+        self.set_field("point", 0, [1.0, 2.0, 0.0])
+        self.set_field("control", 0, [3.0, 4.0, 0.0])
+
+
 class UnsupportedDtype(Mobject):
     data_dtype = [("point", np.float64, (3,))]
 
@@ -669,6 +682,230 @@ assert np.allclose(spacing_left.get_center(), [1.0, 0.0, 0.0])
 assert np.allclose(spacing_right.get_center(), [5.0, 0.0, 0.0])
 assert np.allclose(
     [mob.get_width() for mob in spacing_group.submobjects], spacing_widths
+)
+
+# High-demand transform and frame-containment surface. These assertions cover
+# both detached nursery graphs and a Scene-bound native family so a Python
+# shell loop cannot accidentally double-apply the native Stage traversal.
+assert str(inspect.signature(Mobject.apply_points_function)) == (
+    "(self, func, about_point=None, about_edge=array([0., 0., 0.]), "
+    "works_on_bounding_box=False)"
+)
+assert str(inspect.signature(Mobject.apply_function)) == (
+    "(self, function, **kwargs)"
+)
+assert str(inspect.signature(Mobject.apply_function_to_position)) == (
+    "(self, function)"
+)
+assert str(inspect.signature(Mobject.apply_function_to_submobject_positions)) == (
+    "(self, function)"
+)
+assert str(inspect.signature(Mobject.apply_matrix)) == "(self, matrix, **kwargs)"
+assert str(inspect.signature(Mobject.apply_complex_function)) == (
+    "(self, function, **kwargs)"
+)
+assert str(inspect.signature(Mobject.shift_onto_screen)) == "(self, **kwargs)"
+assert str(inspect.signature(Mobject.is_off_screen)) == "(self)"
+assert str(inspect.signature(VMobject.apply_function)) == (
+    "(self, function, make_smooth=False, **kwargs)"
+)
+assert str(inspect.signature(VMobject.apply_matrix)) == "(self, *args, **kwargs)"
+assert VMobject.make_smooth_after_applying_functions is False
+
+
+def nonlinear_box_map(rows):
+    result = rows.copy()
+    result[:, 0] = rows[:, 0] + rows[:, 1] ** 2
+    return result
+
+
+box_mapped = manimlib.Square()
+box_before = box_mapped.get_bounding_box().copy()
+assert (
+    box_mapped.apply_points_function(
+        nonlinear_box_map,
+        about_edge=None,
+        works_on_bounding_box=True,
+    )
+    is box_mapped
+)
+assert np.allclose(box_mapped.get_bounding_box(), nonlinear_box_map(box_before))
+
+partial_box = manimlib.Square()
+partial_box_points = partial_box.get_points().copy()
+partial_box_before = partial_box.get_bounding_box().copy()
+partial_box_calls = 0
+
+
+def mutate_then_fail_on_box(rows):
+    global partial_box_calls
+    partial_box_calls += 1
+    rows[:] += manimlib.RIGHT
+    if partial_box_calls == 2:
+        raise LookupError("box-map boom")
+    return rows
+
+
+try:
+    partial_box.apply_points_function(
+        mutate_then_fail_on_box,
+        about_edge=None,
+        works_on_bounding_box=True,
+    )
+except LookupError as error:
+    assert str(error) == "box-map boom"
+else:
+    raise AssertionError("a mutating bounding-box callback did not propagate")
+assert np.allclose(partial_box.get_points(), partial_box_points + manimlib.RIGHT)
+assert np.allclose(
+    partial_box.get_bounding_box(), partial_box_before + manimlib.RIGHT
+)
+
+# Every member keeps its directly transformed Reference box until a later
+# member revision invalidates that family of caches.
+box_child = manimlib.Square().shift(3 * manimlib.RIGHT)
+box_family = Mobject(manimlib.Square(), box_child)
+family_box_before = box_family.get_bounding_box().copy()
+box_family.apply_points_function(
+    nonlinear_box_map,
+    about_edge=None,
+    works_on_bounding_box=True,
+)
+assert np.allclose(
+    box_family.get_bounding_box(), nonlinear_box_map(family_box_before)
+)
+box_child.shift(manimlib.RIGHT)
+assert np.allclose(box_family.get_right(), [6.0, 0.0, 0.0])
+
+detached_matrix_child = manimlib.Square().shift(manimlib.RIGHT)
+detached_matrix_family = Mobject(detached_matrix_child)
+detached_before = detached_matrix_child.get_center().copy()
+assert detached_matrix_family.apply_matrix([[2.0, 0.0], [0.0, 3.0]]) is (
+    detached_matrix_family
+)
+assert np.allclose(detached_matrix_child.get_center(), [2.0, 0.0, 0.0])
+assert not np.allclose(detached_matrix_child.get_center(), 4.0 * detached_before)
+
+bound_matrix_child = manimlib.Square().shift(manimlib.RIGHT)
+bound_matrix_family = Mobject(bound_matrix_child)
+bound_matrix_scene = Scene()
+bound_matrix_scene.add(bound_matrix_family)
+assert bound_matrix_family.apply_matrix(
+    [[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 1.0]]
+) is bound_matrix_family
+assert np.allclose(bound_matrix_child.get_center(), [2.0, 0.0, 0.0])
+
+custom_point_fields = CustomPointFields()
+assert custom_point_fields.apply_matrix([[2.0, 0.0], [0.0, 3.0]]) is (
+    custom_point_fields
+)
+assert custom_point_fields.get_field("point", 0) == [2.0, 6.0, 0.0]
+assert custom_point_fields.get_field("control", 0) == [6.0, 12.0, 0.0]
+
+matrix_refusal = manimlib.Square().shift([1.0, 2.0, 0.0])
+matrix_refusal_points = matrix_refusal.get_points().copy()
+try:
+    matrix_refusal.apply_matrix(np.ones((4, 4)))
+except ValueError:
+    pass
+else:
+    raise AssertionError("an oversized matrix did not preserve NumPy refusal")
+assert np.array_equal(matrix_refusal.get_points(), matrix_refusal_points)
+
+function_mapped = manimlib.Square().shift([1.0, 2.0, 0.0])
+function_width = function_mapped.get_width()
+assert function_mapped.apply_function(lambda point: point + [2.0, -1.0, 0.0]) is (
+    function_mapped
+)
+assert np.allclose(function_mapped.get_center(), [3.0, 1.0, 0.0])
+assert np.isclose(function_mapped.get_width(), function_width)
+
+position_mapped = manimlib.Square().shift([1.0, 2.0, 0.0])
+position_width = position_mapped.get_width()
+assert position_mapped.apply_function_to_position(lambda point: 2.0 * point) is (
+    position_mapped
+)
+assert np.allclose(position_mapped.get_center(), [2.0, 4.0, 0.0])
+assert np.isclose(position_mapped.get_width(), position_width)
+
+positions_left = manimlib.Square().shift(manimlib.LEFT)
+positions_right = manimlib.Square().shift(manimlib.RIGHT)
+positions_group = Mobject(positions_left, positions_right)
+assert positions_group.apply_function_to_submobject_positions(
+    lambda point: point + [0.0, 2.0, 0.0]
+) is positions_group
+assert np.allclose(positions_left.get_center(), [-1.0, 2.0, 0.0])
+assert np.allclose(positions_right.get_center(), [1.0, 2.0, 0.0])
+
+complex_mapped = manimlib.Square().shift([1.0, 2.0, 3.0])
+assert complex_mapped.apply_complex_function(lambda value: value * (1.0 + 1.0j)) is (
+    complex_mapped
+)
+assert np.allclose(complex_mapped.get_center(), [-1.0, 3.0, 3.0])
+
+callback_partial = Mobject(
+    manimlib.Square().shift(manimlib.LEFT),
+    manimlib.Square().shift(manimlib.RIGHT),
+)
+callback_before = [mob.get_points().copy() for mob in callback_partial.submobjects]
+callback_calls = 0
+
+
+def fail_on_second_member(rows):
+    global callback_calls
+    callback_calls += 1
+    if callback_calls == 2:
+        raise KeyError("point-map boom")
+    return rows + manimlib.UP
+
+
+try:
+    callback_partial.apply_points_function(fail_on_second_member, about_edge=None)
+except KeyError as error:
+    assert error.args == ("point-map boom",)
+else:
+    raise AssertionError("a point-map callback exception did not propagate")
+assert np.allclose(
+    callback_partial.submobjects[0].get_points(), callback_before[0] + manimlib.UP
+)
+assert np.array_equal(
+    callback_partial.submobjects[1].get_points(), callback_before[1]
+)
+
+smooth_probe = utility_marker(0.0, "smooth-transform")
+smooth_calls = []
+smooth_probe.make_smooth = lambda approx=True: smooth_calls.append(approx) or smooth_probe
+assert smooth_probe.apply_function(lambda point: point, make_smooth=True) is smooth_probe
+assert smooth_calls == [True]
+
+screen_probe = manimlib.Square().shift([20.0, -20.0, 0.0])
+assert screen_probe.is_off_screen()
+assert screen_probe.shift_onto_screen() is screen_probe
+assert not screen_probe.is_off_screen()
+screen_box = screen_probe.get_bounding_box().copy()
+screen_probe.shift_onto_screen()
+assert np.array_equal(screen_probe.get_bounding_box(), screen_box)
+
+boundary_probe = Mobject()
+boundary_probe.resize(1)
+inside_boundary = float(
+    np.nextafter(np.float32(manimlib.FRAME_X_RADIUS), np.float32(-np.inf))
+)
+outside_boundary = float(
+    np.nextafter(np.float32(manimlib.FRAME_X_RADIUS), np.float32(np.inf))
+)
+boundary_probe.set_field("point", 0, [inside_boundary, 0.0, 0.0])
+assert not boundary_probe.is_off_screen()
+boundary_probe.set_field("point", 0, [outside_boundary, 0.0, 0.0])
+assert boundary_probe.is_off_screen()
+
+oversized_screen_probe = manimlib.Rectangle(width=20.0, height=10.0)
+assert oversized_screen_probe.shift_onto_screen(buff=0.25) is oversized_screen_probe
+assert np.isclose(
+    oversized_screen_probe.get_right()[0], manimlib.FRAME_X_RADIUS - 0.25
+)
+assert np.isclose(
+    oversized_screen_probe.get_bottom()[1], -manimlib.FRAME_Y_RADIUS + 0.25
 )
 
 style_source = Mobject()
