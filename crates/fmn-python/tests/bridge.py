@@ -165,6 +165,179 @@ else:
     raise AssertionError("an overflowing RecordBuffer resize was accepted")
 
 
+# Reference point mutation composes the public NumPy resize policies over the
+# live Marionette RecordBuffer.  All subclass lanes move together, while a
+# size-changing write detaches old views through the generation protocol.
+iterables = importlib.import_module("manimlib.utils.iterables")
+assert manimlib.resize_array is iterables.resize_array
+assert manimlib.resize_preserving_order is iterables.resize_preserving_order
+assert str(inspect.signature(manimlib.resize_array)) == "(nparray, length)"
+assert str(inspect.signature(manimlib.resize_preserving_order)) == (
+    "(nparray, length)"
+)
+resize_probe = np.array([[1.0], [2.0], [3.0]])
+assert np.array_equal(
+    manimlib.resize_array(resize_probe, 5),
+    [[1.0], [2.0], [3.0], [1.0], [2.0]],
+)
+assert np.array_equal(
+    manimlib.resize_preserving_order(resize_probe, 5),
+    [[1.0], [1.0], [2.0], [2.0], [3.0]],
+)
+assert manimlib.resize_preserving_order(np.zeros((0, 3)), 2).shape == (2,)
+
+assert list(inspect.signature(Mobject.resize_points).parameters) == [
+    "self",
+    "new_length",
+    "resize_func",
+]
+assert (
+    inspect.signature(Mobject.resize_points).parameters["resize_func"].default
+    is manimlib.resize_array
+)
+assert str(inspect.signature(Mobject.set_points)) == "(self, points)"
+assert str(inspect.signature(Mobject.append_points)) == "(self, new_points)"
+assert str(inspect.signature(Mobject.clear_points)) == "(self)"
+assert str(inspect.signature(manimlib.PMobject.add_points)) == (
+    "(self, points, rgbas=None, color=None, opacity=None)"
+)
+assert str(inspect.signature(manimlib.PMobject.add_point)) == (
+    "(self, point, rgba=None, color=None, opacity=None)"
+)
+assert str(inspect.signature(manimlib.PMobject.set_points)) == "(self, points)"
+assert str(inspect.signature(VMobject.set_points)) == "(self, points)"
+assert str(inspect.signature(VMobject.append_points)) == "(self, points)"
+
+mutation = CustomDtype()
+mutation.data["point"][:] = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+mutation.data["rgba"][:] = [
+    [0.1, 0.2, 0.3, 0.4],
+    [0.5, 0.6, 0.7, 0.8],
+]
+mutation.data["wobble"][:] = [[10.0, 11.0], [20.0, 21.0]]
+mutation_before = mutation.data.copy()
+mutation_old_view = mutation.data
+replacement_points = np.array(
+    [
+        [-4.0, 0.0, 0.0],
+        [-2.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+    ]
+)
+assert mutation.set_points(replacement_points) is mutation
+mutation_expected = manimlib.resize_preserving_order(mutation_before, 4)
+mutation_expected["point"][:] = replacement_points
+assert np.array_equal(mutation.data, mutation_expected)
+assert mutation_old_view.shape == (2,)
+mutation_old_view["point"][0] = [99.0, 99.0, 99.0]
+assert np.array_equal(mutation.data, mutation_expected)
+
+# Same-length replacement keeps the current generation live.  Clearing saves
+# the first complete record as the Reference default row, and growing again
+# restores every non-point field from it.
+same_generation = mutation.data
+same_length_points = replacement_points + [0.0, 1.0, 0.0]
+assert mutation.set_points(same_length_points) is mutation
+assert np.array_equal(same_generation["point"], same_length_points)
+saved_default = mutation.data[0].copy()
+cleared_generation = mutation.data
+assert mutation.clear_points() is mutation
+assert mutation.get_points().shape == (0, 3)
+assert cleared_generation.shape == (4,)
+assert mutation.set_points([[7.0, 8.0, 9.0]]) is mutation
+assert np.array_equal(mutation.data["point"], [[7.0, 8.0, 9.0]])
+assert np.array_equal(mutation.data["rgba"][0], saved_default["rgba"])
+assert np.array_equal(mutation.data["wobble"][0], saved_default["wobble"])
+
+# append_points uses the Reference cyclic resize first, then copies the last
+# retained record into the tail before installing the new point rows.
+appended = CustomDtype()
+appended.set_points(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+)
+appended.data["rgba"][:] = [
+    [0.1, 0.0, 0.0, 1.0],
+    [0.2, 0.0, 0.0, 1.0],
+    [0.3, 0.0, 0.0, 1.0],
+]
+appended.data["wobble"][:] = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+append_before = appended.data.copy()
+append_tail = np.array([[3.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+assert appended.append_points(append_tail) is appended
+append_expected = manimlib.resize_array(append_before, 5)
+append_expected[3:] = append_expected[2]
+append_expected["point"][3:] = append_tail
+assert np.array_equal(appended.data, append_expected)
+
+point_cloud = manimlib.PMobject()
+assert point_cloud.set_points([]) is point_cloud
+assert point_cloud.get_points().shape == (0, 3)
+assert point_cloud.set_points([[1.0, 2.0, 3.0]]) is point_cloud
+assert np.array_equal(point_cloud.get_points(), [[1.0, 2.0, 3.0]])
+point_cloud.set_points([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+point_cloud.data["rgba"][:] = [
+    [0.1, 0.0, 0.0, 1.0],
+    [0.2, 0.0, 0.0, 1.0],
+    [0.3, 0.0, 0.0, 1.0],
+]
+point_cloud_before = point_cloud.data.copy()
+point_cloud_tail = np.array([[3.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+point_cloud_rgbas = np.array(
+    [[0.8, 0.1, 0.2, 0.5], [0.7, 0.2, 0.1, 0.25]]
+)
+assert point_cloud.add_points(point_cloud_tail, point_cloud_rgbas) is point_cloud
+point_cloud_expected = manimlib.resize_array(point_cloud_before, 5)
+point_cloud_expected[3:] = point_cloud_expected[2]
+point_cloud_expected["point"][3:] = point_cloud_tail
+point_cloud_expected["rgba"][3:] = point_cloud_rgbas
+assert np.array_equal(point_cloud.data, point_cloud_expected)
+
+# VMobject overrides enforce the shared-anchor odd/even contract before any
+# mutation and refresh the native joint-angle column through Stage::set_points.
+vm_source = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+)
+vm_mutation = VMobject()
+assert vm_mutation.set_points(vm_source.get_points().copy()) is vm_mutation
+assert np.array_equal(
+    vm_mutation.data["joint_angle"], vm_source.data["joint_angle"]
+)
+vm_before_invalid = vm_mutation.data.copy()
+try:
+    vm_mutation.set_points([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+except AssertionError:
+    pass
+else:
+    raise AssertionError("VMobject.set_points accepted an even point run")
+assert np.array_equal(vm_mutation.data, vm_before_invalid)
+try:
+    vm_mutation.append_points([[3.0, 0.0, 0.0]])
+except AssertionError:
+    pass
+else:
+    raise AssertionError("VMobject.append_points accepted an odd append run")
+assert np.array_equal(vm_mutation.data, vm_before_invalid)
+assert vm_mutation.append_points(
+    [[2.5, -0.5, 0.0], [3.0, 0.0, 0.0]]
+) is vm_mutation
+assert vm_mutation.get_num_points() == 7
+
+# A bound write bakes a pending placement exactly once and then replaces the
+# world-space records, rather than leaving an affine transform to double-apply.
+bound_mutation = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+)
+bound_mutation_scene = Scene()
+bound_mutation_scene.add(bound_mutation)
+bound_mutation.shift([10.0, 0.0, 0.0])
+bound_replacement = np.array(
+    [[-2.0, 0.0, 0.0], [-1.5, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+)
+assert bound_mutation.set_points(bound_replacement) is bound_mutation
+assert np.array_equal(bound_mutation.get_points(), bound_replacement)
+
+
 # Live typed uniforms and open extension keys.
 assert custom.uniforms["anti_alias_width"] == 1.5
 custom.uniforms["anti_alias_width"] = 2.25

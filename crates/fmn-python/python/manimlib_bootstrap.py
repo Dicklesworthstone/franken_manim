@@ -140,6 +140,25 @@ def _array_is_constant(arr):
     return len(arr) > 0 and (arr == arr[0]).all()
 
 
+def resize_array(nparray, length):
+    """Reference cyclic resize over an arbitrary NumPy record array."""
+
+    if len(nparray) == length:
+        return nparray
+    return _np.resize(nparray, (length, *nparray.shape[1:]))
+
+
+def resize_preserving_order(nparray, length):
+    """Reference proportional-index resize without interpolation."""
+
+    if len(nparray) == 0:
+        return _np.resize(nparray, length)
+    if len(nparray) == length:
+        return nparray
+    indices = _np.arange(length) * len(nparray) // length
+    return nparray[indices]
+
+
 def _resize_with_interpolation(nparray, length):
     if len(nparray) == length:
         return nparray
@@ -1553,6 +1572,51 @@ class Mobject(_BridgeMobject):
         self._bake_placement()
         return self.points
 
+    def resize_points(self, new_length, resize_func=resize_array):
+        # Reference Mobject.resize_points over the live RecordBuffer.  Python
+        # chooses the public resize policy; Marionette owns the fallible
+        # allocation, generation swap, and revision invalidation.  Copying the
+        # resulting structured rows back preserves every subclass-specific
+        # lane without teaching this surface about any particular schema.
+        data = self.data
+        defaults = self.__dict__.get("_data_defaults")
+        if defaults is None:
+            defaults = _np.ones(1, dtype=data.dtype)
+            self.__dict__["_data_defaults"] = defaults
+        if new_length == 0:
+            if len(data) > 0:
+                defaults[:1] = data[:1]
+            source = data
+        elif len(data) == 0:
+            source = defaults.copy()
+        else:
+            source = data
+        resized = resize_func(source, new_length)
+        if new_length == len(data):
+            data[:] = resized
+            return self
+        self.resize(new_length)
+        if new_length > 0:
+            self.data[:] = resized
+        return self
+
+    def set_points(self, points):
+        self.resize_points(len(points), resize_func=resize_preserving_order)
+        self.data["point"][:] = points
+        return self
+
+    def append_points(self, new_points):
+        n = self.get_num_points()
+        self.resize_points(n + len(new_points))
+        data = self.data
+        data[n:] = data[n - 1]
+        data["point"][n:] = new_points
+        return self
+
+    def clear_points(self):
+        self.resize_points(0)
+        return self
+
     def get_num_points(self):
         return len(self.get_points())
 
@@ -1981,6 +2045,23 @@ class VMobject(Mobject):
 
     def get_group_class(self):
         return getattr(_FMN_ROOT, "VGroup", VMobject)
+
+    def set_points(self, points):
+        if len(points) != 0 and len(points) % 2 != 1:
+            raise AssertionError
+        Mobject.set_points(self, points)
+        self._refresh_vmobject_path_metadata()
+        return self
+
+    def append_points(self, points):
+        if len(points) % 2 != 0:
+            raise AssertionError
+        final_length = self.get_num_points() + len(points)
+        if final_length != 0 and final_length % 2 != 1:
+            raise AssertionError
+        Mobject.append_points(self, points)
+        self._refresh_vmobject_path_metadata()
+        return self
 
     def set_points_as_corners(self, points):
         self._set_points_as_corners([_vec3(point) for point in points])
@@ -3917,6 +3998,13 @@ class Integer(DecimalNumber):
 class PMobject(Mobject):
     """The point-cloud base over Marionette's live RecordBuffer."""
 
+    def set_points(self, points):
+        if len(points) == 0:
+            points = _np.zeros((0, 3))
+        Mobject.set_points(self, points)
+        self.resize_points(len(points))
+        return self
+
     def add_points(
         self,
         points,
@@ -3925,19 +4013,11 @@ class PMobject(Mobject):
         opacity=None,
     ):
         points = _np.asarray(points, dtype=float).reshape((-1, 3))
-        if len(points) == 0:
-            return self
-        old_len = self.n_records()
-        self.resize(old_len + len(points))
+        self.append_points(points)
         data = self.data
-        # Reference `append_points`: every non-point lane on appended rows
-        # inherits the former last row (or the resized zero row for an empty
-        # cloud) before the new positions and any explicit colors land.
-        data[old_len:] = data[old_len - 1]
-        data["point"][old_len:] = points
         if color is not None:
             if opacity is None:
-                opacity = float(data["rgba"][old_len - 1, 3]) if old_len else 1.0
+                opacity = float(data["rgba"][-1, 3])
             rgbas = _np.repeat(
                 [_color_to_rgba(color, opacity)], len(points), axis=0
             )
@@ -6371,6 +6451,23 @@ def _install_space_ops():
 
 
 _install_space_ops()
+
+
+def _install_iterable_functions():
+    """Bind the two record-resize utilities used by Mobject mutation."""
+
+    functions = {
+        "resize_array": resize_array,
+        "resize_preserving_order": resize_preserving_order,
+    }
+    module = _ensure_module("manimlib.utils.iterables")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_iterable_functions()
 
 
 def _install_mobject_functions():

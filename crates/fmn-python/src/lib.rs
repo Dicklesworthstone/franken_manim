@@ -1683,6 +1683,19 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
     }
 
+    /// Revalidate a Python-authored VMobject point run and refresh the native
+    /// shared-anchor metadata through Marionette's one `Stage::set_points`
+    /// path.  The Python layer owns Reference record-resize semantics; this
+    /// call owns the geometry invariant and derived joint-angle column.
+    fn _refresh_vmobject_path_metadata(slf: &Bound<'_, Self>) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            let points = stage.get_points(mob).ok_or(StageError::StaleHandle)?;
+            stage.set_points(mob, &points)
+        })?
+        .map_err(stage_error)
+    }
+
     /// Chisel's anchor-mode smoothing over this entry's current world-space
     /// shared-anchor path. Python owns family recursion so `recurse=False`
     /// remains exact without introducing a second Stage traversal contract.
