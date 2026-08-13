@@ -595,6 +595,14 @@ class Mobject(_BridgeMobject):
         self.submobjects.extend(mobjects)
         return self
 
+    def add_to_back(self, *mobjects):
+        # Reference list_update keeps the last occurrence of each identity:
+        # an existing child therefore wins over the same child in mobjects.
+        candidate = [*mobjects, *self.submobjects]
+        candidate = list(reversed(dict.fromkeys(reversed(candidate))))
+        self.set_submobjects(candidate)
+        return self
+
     def get_family(self, recurse=True):
         if not recurse:
             return [self]
@@ -891,6 +899,12 @@ class Mobject(_BridgeMobject):
             self.set_depth(depth, stretch=True, **kwargs)
         return self
 
+    def space_out_submobjects(self, factor=1.5, **kwargs):
+        self.scale(factor, **kwargs)
+        for submobject in self.submobjects:
+            submobject.scale(1.0 / factor)
+        return self
+
     def set_max_width(self, max_width, **kwargs):
         if self.get_width() > max_width:
             self.set_width(max_width, **kwargs)
@@ -916,6 +930,26 @@ class Mobject(_BridgeMobject):
         # family member in both proxy states.
         for mob in _family_preorder(self) if recurse else [self]:
             mob._set_z_index(int(z_index))
+        return self
+
+    def sort(self, point_to_num_func=lambda p: p[0], submob_func=None):
+        # _LiveSubmobjects commits the final stable Python ordering into the
+        # Stage, so draw order and the compatibility-facing list cannot drift.
+        if submob_func is not None:
+            self.submobjects.sort(key=submob_func)
+        else:
+            self.submobjects.sort(
+                key=lambda mobject: point_to_num_func(mobject.get_center())
+            )
+        return self
+
+    def shuffle(self, recurse=False):
+        if recurse:
+            for submobject in self.submobjects:
+                submobject.shuffle(recurse=True)
+        candidate = list(self.submobjects)
+        getattr(_FMN_ROOT, "random").shuffle(candidate)
+        self.set_submobjects(candidate)
         return self
 
     def arrange_to_fit_dim(self, length, dim, about_edge=_ORIGIN):
@@ -1316,6 +1350,20 @@ class Mobject(_BridgeMobject):
             mob.uniforms["shading"] = shading
         return self
 
+    def fade(self, darkness=0.5, recurse=True):
+        # The base Reference method intentionally has no fluent return. Its
+        # VMobject override remains fluent and scales existing opacities.
+        self.set_opacity(1.0 - darkness, recurse=recurse)
+
+    def match_color(self, mobject):
+        return self.set_color(mobject.get_color())
+
+    def match_style(self, mobject):
+        self.set_color(mobject.get_color())
+        self.set_opacity(mobject.get_opacity())
+        self.set_shading(*mobject.get_shading())
+        return self
+
     # The Reference's container protocol (manimlib/mobject/mobject.py):
     # a mobject iterates, indexes, and measures as its submobject list;
     # slicing regroups through the family's group class.
@@ -1418,6 +1466,42 @@ class Mobject(_BridgeMobject):
             self._link_saved_state(self.saved_state)
         return self
 
+    def restore(self):
+        if self.saved_state is None:
+            raise Exception("Trying to restore without having saved")
+        saved_state = self.saved_state
+        saved_family = _family_preorder(saved_state)
+        if self._is_bound():
+            self.become(saved_state)
+            current_family = _family_preorder(self)
+        else:
+            # Detached parent/child relationships live in Python until scene
+            # adoption. save_state created an isomorphic family copy, so
+            # restore each paired nursery root without pretending the
+            # detached parent nursery already owns the whole graph.
+            current_family = _family_preorder(self)
+            if len(current_family) != len(saved_family) or any(
+                len(current.submobjects) != len(saved.submobjects)
+                for current, saved in zip(current_family, saved_family)
+            ):
+                raise RuntimeError(
+                    "become between families of different shapes "
+                    "(family alignment lands with fm-cye)"
+                )
+            if any(
+                current._engine_state()["fields"] != saved._engine_state()["fields"]
+                for current, saved in zip(current_family, saved_family)
+            ):
+                raise RuntimeError("become between records of different schemas")
+            for current, saved in zip(current_family, saved_family):
+                current._become(saved, False)
+        # Reference become remaps named family-member attributes from the
+        # source family onto the corresponding members of the destination.
+        for name, value in list(saved_state.__dict__.items()):
+            if isinstance(value, _BridgeMobject) and value in saved_family:
+                setattr(self, name, current_family[saved_family.index(value)])
+        return self
+
     @property
     def animate(self):
         """Methods called with mobject.animate.method(...) build a
@@ -1461,6 +1545,9 @@ class Mobject(_BridgeMobject):
 
     def copy(self, deep=False):
         return _copy_mobject_graph(self, bool(deep), {})
+
+    def deepcopy(self):
+        return _copy.deepcopy(self)
 
     def __copy__(self):
         return _copy_mobject_graph(self, False, {})

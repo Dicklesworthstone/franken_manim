@@ -538,6 +538,171 @@ assert deep.nested[0] is deep.label
 assert deep.uniforms["plugin_value"] is not parent.uniforms["plugin_value"]
 
 
+# High-frequency Mobject helpers compose the live Stage-backed organization,
+# copy, state, transform, and style seams instead of schema placeholders.
+method_deep = parent.deepcopy()
+assert method_deep.label is method_deep.submobjects[0]
+assert method_deep.nested is not parent.nested
+assert method_deep.nested[0] is method_deep.label
+assert method_deep.uniforms["plugin_value"] is not parent.uniforms["plugin_value"]
+
+
+def utility_marker(x, name):
+    marker = VMobject().set_points_as_corners(
+        [[x - 0.25, 0.0, 0.0], [x + 0.25, 0.0, 0.0]]
+    )
+    marker.name = name
+    return marker
+
+
+utility_a = utility_marker(2.0, "a")
+utility_b = utility_marker(-1.0, "b")
+utility_c = utility_marker(1.0, "c")
+utility_d = utility_marker(1.0, "d")
+utility_group = Mobject(utility_a, utility_b)
+utility_scene = Scene()
+utility_scene.add(utility_group)
+
+# list_update keeps the last occurrence, so already-present utility_a wins
+# over the same object in the prepend list and every child remains unique.
+assert utility_group.add_to_back(utility_c, utility_a) is utility_group
+assert list(utility_group.submobjects) == [utility_c, utility_a, utility_b]
+assert utility_group.add_to_back(utility_d, utility_d) is utility_group
+assert list(utility_group.submobjects) == [utility_d, utility_c, utility_a, utility_b]
+
+# Python's stable sort is committed into Marionette. Equal-center c/d order is
+# preserved by the default branch; both callback forms remain supported.
+assert utility_group.sort() is utility_group
+assert list(utility_group.submobjects) == [utility_b, utility_d, utility_c, utility_a]
+assert utility_group.sort(point_to_num_func=lambda point: -point[0]) is utility_group
+assert list(utility_group.submobjects) == [utility_a, utility_d, utility_c, utility_b]
+assert utility_group.sort(submob_func=lambda mob: mob.name) is utility_group
+assert [mob.name for mob in utility_group.submobjects] == ["a", "b", "c", "d"]
+# A bound copy is sourced from the Stage, independently proving native child
+# order rather than merely re-reading the compatibility list we just mutated.
+assert [mob.name for mob in utility_group.copy().submobjects] == ["a", "b", "c", "d"]
+
+shuffle_child_members = [utility_marker(i, f"inner-{i}") for i in range(3)]
+shuffle_child = Mobject(*shuffle_child_members)
+shuffle_leaf = utility_marker(5.0, "outer-leaf")
+shuffle_root = Mobject(shuffle_child, shuffle_leaf)
+shuffle_seed = 1729
+shuffle_rng = manimlib.random.Random(shuffle_seed)
+expected_inner = list(shuffle_child_members)
+expected_outer = [shuffle_child, shuffle_leaf]
+shuffle_rng.shuffle(expected_inner)
+shuffle_rng.shuffle(expected_outer)
+manimlib.random.seed(shuffle_seed)
+assert shuffle_root.shuffle(recurse=True) is shuffle_root
+assert list(shuffle_child.submobjects) == expected_inner
+assert list(shuffle_root.submobjects) == expected_outer
+
+detached_restore_child = utility_marker(0.0, "detached-restore")
+detached_restore_group = Mobject(detached_restore_child)
+detached_restore_group.named_child = detached_restore_child
+detached_restore_group.save_state()
+detached_restore_group.named_child = utility_marker(8.0, "wrong-detached-alias")
+detached_restore_group.shift([3.0, -2.0, 0.0])
+assert detached_restore_group.restore() is detached_restore_group
+assert np.allclose(detached_restore_child.get_center(), [0.0, 0.0, 0.0])
+assert detached_restore_group.named_child is detached_restore_child
+
+bound_restore_child = utility_marker(0.0, "bound-restore")
+bound_restore_group = Mobject(bound_restore_child)
+bound_restore_group.named_child = bound_restore_child
+bound_restore_scene = Scene()
+bound_restore_scene.add(bound_restore_group)
+bound_restore_group.save_state()
+bound_restore_group.named_child = utility_marker(8.0, "wrong-bound-alias")
+bound_restore_group.shift([-4.0, 1.5, 0.0])
+assert bound_restore_group.restore() is bound_restore_group
+assert np.allclose(bound_restore_child.get_center(), [0.0, 0.0, 0.0])
+assert bound_restore_group.named_child is bound_restore_child
+
+try:
+    Mobject().restore()
+except Exception as error:
+    assert type(error) is Exception
+    assert str(error) == "Trying to restore without having saved"
+else:
+    raise AssertionError("restore without save_state did not refuse")
+
+shape_restore_group = Mobject(Mobject())
+shape_restore_group.resize(1)
+shape_restore_group.save_state()
+shape_restore_group.set_field("point", 0, [4.0, 0.0, 0.0])
+shape_restore_group.add(Mobject())
+try:
+    shape_restore_group.restore()
+except RuntimeError as error:
+    assert str(error) == (
+        "become between families of different shapes "
+        "(family alignment lands with fm-cye)"
+    )
+else:
+    raise AssertionError("detached restore silently accepted family-shape drift")
+assert shape_restore_group.get_field("point", 0) == [4.0, 0.0, 0.0]
+
+schema_restore_group = Mobject(Mobject())
+schema_restore_group.resize(1)
+schema_restore_group.save_state()
+schema_restore_group.set_field("point", 0, [7.0, 0.0, 0.0])
+schema_restore_group.set_submobjects([VMobject()])
+try:
+    schema_restore_group.restore()
+except RuntimeError as error:
+    assert str(error) == "become between records of different schemas"
+else:
+    raise AssertionError("detached restore silently accepted record-schema drift")
+assert schema_restore_group.get_field("point", 0) == [7.0, 0.0, 0.0]
+
+spacing_left = utility_marker(1.0, "spacing-left")
+spacing_right = utility_marker(3.0, "spacing-right")
+spacing_group = Mobject(spacing_left, spacing_right)
+spacing_widths = [mob.get_width() for mob in spacing_group.submobjects]
+assert (
+    spacing_group.space_out_submobjects(2.0, about_point=[1.0, 0.0, 0.0])
+    is spacing_group
+)
+assert np.allclose(spacing_left.get_center(), [1.0, 0.0, 0.0])
+assert np.allclose(spacing_right.get_center(), [5.0, 0.0, 0.0])
+assert np.allclose(
+    [mob.get_width() for mob in spacing_group.submobjects], spacing_widths
+)
+
+style_source = Mobject()
+style_source.resize(1)
+style_source.set_color("#336699").set_opacity(0.35).set_shading(0.2, 0.4, 0.6)
+style_target = Mobject()
+style_target.resize(1)
+style_target.set_color("#ff0000").set_opacity(0.9).set_shading(0.9, 0.8, 0.7)
+assert style_target.match_color(style_source) is style_target
+assert style_target.get_color() == style_source.get_color()
+assert np.isclose(style_target.get_opacity(), 0.9)
+assert np.allclose(style_target.get_shading(), [0.9, 0.8, 0.7])
+assert style_target.match_style(style_source) is style_target
+assert style_target.get_color() == style_source.get_color()
+assert np.isclose(style_target.get_opacity(), style_source.get_opacity())
+assert np.allclose(style_target.get_shading(), style_source.get_shading())
+
+fade_child = Mobject()
+fade_child.resize(1)
+fade_child.set_opacity(0.25)
+fade_parent = Mobject(fade_child)
+fade_parent.resize(1)
+fade_parent.set_opacity(0.8, recurse=False)
+assert fade_parent.fade(0.1, recurse=False) is None
+assert np.isclose(fade_parent.get_opacity(), 0.9)
+assert np.isclose(fade_child.get_opacity(), 0.25)
+assert fade_parent.fade(0.4) is None
+assert np.isclose(fade_parent.get_opacity(), 0.6)
+assert np.isclose(fade_child.get_opacity(), 0.6)
+
+vmobject_fade = utility_marker(0.0, "vmobject-fade").set_opacity(0.8)
+assert vmobject_fade.fade(0.25) is vmobject_fade
+assert np.isclose(vmobject_fade.get_opacity(), 0.6)
+
+
 # Pickle restores detached state, preserves family aliases, and can rebind.
 pickled_parent = Mobject()
 pickled_child = Mobject()

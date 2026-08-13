@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	6ff9fb16912196fdf1fc4433f2e1dd61c49cd676aeb8ef3c89095f00642ddb03
+ledger_reviewed_digest	2bc24b717fa13157d28e9c2057a31fab41dc0a1fad89e9e688a4380f8ab466a2
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -222,11 +222,20 @@ manimlib.mobject.coordinate_systems:CoordinateSystem.get_y_axis	same	scripts/man
 manimlib.mobject.coordinate_systems:CoordinateSystem.i2gp	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	preserves the input_to_graph_point alias over metadata-backed and function-less graphs
 manimlib.mobject.coordinate_systems:CoordinateSystem.input_to_graph_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	uses retained functions directly and the pinned quick-curve binary-search fallback otherwise
 manimlib.mobject.coordinate_systems:CoordinateSystem.p2c	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live inverse coordinate transform
+manimlib.mobject.mobject:Mobject.add_to_back	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	prepends with Reference list_update last-occurrence dedup and commits the resulting child order into Marionette
 manimlib.mobject.mobject:Mobject.add_updater	improved	BN-07	crates/fmn-mobject/tests/dynamics.rs	call=true performs one corrected immediate update
+manimlib.mobject.mobject:Mobject.deepcopy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates through graph-safe deepcopy while preserving internal family aliases and independent extension state
+manimlib.mobject.mobject:Mobject.fade	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sets absolute family opacity and preserves the base method's intentional non-fluent return
 manimlib.mobject.mobject:Mobject.family_members_with_points	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
 manimlib.mobject.mobject:Mobject.get_family	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
 manimlib.mobject.mobject:Mobject.get_num_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the current live RecordBuffer row count
+manimlib.mobject.mobject:Mobject.match_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the source color through live style reads and writes without changing opacity or shading
+manimlib.mobject.mobject:Mobject.match_style	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies color opacity and shading through the engine-backed base Mobject style surface
+manimlib.mobject.mobject:Mobject.restore	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	restores detached and bound saved-state families and preserves the exact missing-state refusal
 manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md	crates/fmn-mobject/tests/render_order.rs	preserves the declared insertion-first render-order contract
+manimlib.mobject.mobject:Mobject.shuffle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the Scene-seeded Python RNG and commits recursive child-first shuffles into live family order
+manimlib.mobject.mobject:Mobject.sort	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves stable default point ordering and both callback forms while committing the native child order
+manimlib.mobject.mobject:Mobject.space_out_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales the family around forwarded pivots then restores each immediate child's size around its own center
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
 manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_parity.rs	uses one output-scale arc-density rule that is never coarser

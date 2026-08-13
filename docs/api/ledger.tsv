@@ -1088,7 +1088,7 @@ manimlib.mobject.mobject	Mobject.add_mouse_press_listner	Mobject.add_mouse_press
 manimlib.mobject.mobject	Mobject.add_mouse_release_listner	Mobject.add_mouse_release_listener	method	0	(self[positional_or_keyword], callback[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.add_mouse_scroll_listner	Mobject.add_mouse_scroll_listener	method	0	(self[positional_or_keyword], callback[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.add_n_more_submobjects	Mobject.add_n_more_submobjects	method	0	(self[positional_or_keyword], n[positional_or_keyword]:int)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.add_to_back	Mobject.add_to_back	method	0	(self[positional_or_keyword], *mobjects[var_positional]:Mobject)	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.add_to_back	Mobject.add_to_back	method	0	(self[positional_or_keyword], *mobjects[var_positional]:Mobject)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	prepends with Reference list_update last-occurrence dedup and commits the resulting child order into Marionette
 manimlib.mobject.mobject	Mobject.add_updater	Mobject.add_updater	method	0	(self[positional_or_keyword], update_func[positional_or_keyword]:Updater, call[positional_or_keyword]:bool=True)	improved	BN-07	crates/fmn-mobject/tests/dynamics.rs	call=true performs one corrected immediate update
 manimlib.mobject.mobject	Mobject.affects_data	Mobject.affects_data	method	0	(func[positional_or_keyword]:Callable[..., T])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.affects_family_data	Mobject.affects_family_data	method	0	(func[positional_or_keyword]:Callable[..., T])	unreviewed	-	-	-
@@ -1129,12 +1129,12 @@ manimlib.mobject.mobject	Mobject.copy	Mobject.copy	method	0	(self[positional_or_
 manimlib.mobject.mobject	Mobject.data_dtype	Mobject.data_dtype	attribute	0	default=np.dtype([('point', np.float32, (3,)), ('rgba', np.float32, (4,))])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.deactivate_clip_plane	Mobject.deactivate_clip_plane	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]=True)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.deactivate_depth_test	Mobject.deactivate_depth_test	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=True)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.deepcopy	Mobject.deepcopy	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.deepcopy	Mobject.deepcopy	method	0	(self[positional_or_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates through graph-safe deepcopy while preserving internal family aliases and independent extension state
 manimlib.mobject.mobject	Mobject.deserialize	Mobject.deserialize	method	0	(self[positional_or_keyword], data[positional_or_keyword]:bytes)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.digest_mobject_attrs	Mobject.digest_mobject_attrs	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.dim	Mobject.dim	attribute	0	default=3	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.f_always	Mobject.f_always	property	0	(self[positional_or_keyword])	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.fade	Mobject.fade	method	0	(self[positional_or_keyword], darkness[positional_or_keyword]:float=0.5, recurse[positional_or_keyword]:bool=True)	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.fade	Mobject.fade	method	0	(self[positional_or_keyword], darkness[positional_or_keyword]:float=0.5, recurse[positional_or_keyword]:bool=True)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sets absolute family opacity and preserves the base method's intentional non-fluent return
 manimlib.mobject.mobject	Mobject.family_members_with_points	Mobject.family_members_with_points	method	0	(self[positional_or_keyword])	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
 manimlib.mobject.mobject	Mobject.fix_in_frame	Mobject.fix_in_frame	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=True)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.flip	Mobject.flip	method	0	(self[positional_or_keyword], axis[positional_or_keyword]:Vect3=UP, **kwargs[var_keyword])	unreviewed	-	-	-
@@ -1215,13 +1215,13 @@ manimlib.mobject.mobject	Mobject.lock_data	Mobject.lock_data	method	0	(self[posi
 manimlib.mobject.mobject	Mobject.lock_matching_data	Mobject.lock_matching_data	method	0	(self[positional_or_keyword], mobject1[positional_or_keyword]:Mobject, mobject2[positional_or_keyword]:Mobject)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.lock_uniforms	Mobject.lock_uniforms	method	0	(self[positional_or_keyword], keys[positional_or_keyword]:Iterable[str])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.looks_identical	Mobject.looks_identical	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.match_color	Mobject.match_color	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.match_color	Mobject.match_color	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the source color through live style reads and writes without changing opacity or shading
 manimlib.mobject.mobject	Mobject.match_coord	Mobject.match_coord	method	0	(self[positional_or_keyword], mobject_or_point[positional_or_keyword]:Mobject | Vect3, dim[positional_or_keyword]:int, direction[positional_or_keyword]:Vect3=ORIGIN)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.match_depth	Mobject.match_depth	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject, **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.match_dim_size	Mobject.match_dim_size	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject, dim[positional_or_keyword]:int, **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.match_height	Mobject.match_height	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject, **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.match_points	Mobject.match_points	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.match_style	Mobject.match_style	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.match_style	Mobject.match_style	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies color opacity and shading through the engine-backed base Mobject style surface
 manimlib.mobject.mobject	Mobject.match_updaters	Mobject.match_updaters	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.match_width	Mobject.match_width	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject, **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.match_x	Mobject.match_x	method	0	(self[positional_or_keyword], mobject_or_point[positional_or_keyword]:Mobject | Vect3, direction[positional_or_keyword]:Vect3=ORIGIN)	unreviewed	-	-	-
@@ -1260,7 +1260,7 @@ manimlib.mobject.mobject	Mobject.replace_submobject	Mobject.replace_submobject	m
 manimlib.mobject.mobject	Mobject.replicate	Mobject.replicate	method	0	(self[positional_or_keyword], n[positional_or_keyword]:int)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.rescale_to_fit	Mobject.rescale_to_fit	method	0	(self[positional_or_keyword], length[positional_or_keyword]:float, dim[positional_or_keyword]:int, stretch[positional_or_keyword]:bool=False, **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.resize_points	Mobject.resize_points	method	0	(self[positional_or_keyword], new_length[positional_or_keyword]:int, resize_func[positional_or_keyword]:Callable[[np.ndarray, int], np.ndarray]=resize_array)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.restore	Mobject.restore	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.restore	Mobject.restore	method	0	(self[positional_or_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	restores detached and bound saved-state families and preserves the exact missing-state refusal
 manimlib.mobject.mobject	Mobject.resume_updating	Mobject.resume_updating	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=True, call_updater[positional_or_keyword]:bool=True)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.reverse_points	Mobject.reverse_points	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.reverse_submobjects	Mobject.reverse_submobjects	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
@@ -1309,9 +1309,9 @@ manimlib.mobject.mobject	Mobject.set_z_index	Mobject.set_z_index	method	0	(self[
 manimlib.mobject.mobject	Mobject.shader_folder	Mobject.shader_folder	attribute	0	default=''	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.shift	Mobject.shift	method	0	(self[positional_or_keyword], vector[positional_or_keyword]:Vect3)	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.shift_onto_screen	Mobject.shift_onto_screen	method	0	(self[positional_or_keyword], **kwargs[var_keyword])	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.shuffle	Mobject.shuffle	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=False)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.sort	Mobject.sort	method	0	(self[positional_or_keyword], point_to_num_func[positional_or_keyword]:Callable[[np.ndarray], float]=lambda p: p[0], submob_func[positional_or_keyword]:Callable[[Mobject]] | None=None)	unreviewed	-	-	-
-manimlib.mobject.mobject	Mobject.space_out_submobjects	Mobject.space_out_submobjects	method	0	(self[positional_or_keyword], factor[positional_or_keyword]:float=1.5, **kwargs[var_keyword])	unreviewed	-	-	-
+manimlib.mobject.mobject	Mobject.shuffle	Mobject.shuffle	method	0	(self[positional_or_keyword], recurse[positional_or_keyword]:bool=False)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the Scene-seeded Python RNG and commits recursive child-first shuffles into live family order
+manimlib.mobject.mobject	Mobject.sort	Mobject.sort	method	0	(self[positional_or_keyword], point_to_num_func[positional_or_keyword]:Callable[[np.ndarray], float]=lambda p: p[0], submob_func[positional_or_keyword]:Callable[[Mobject]] | None=None)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves stable default point ordering and both callback forms while committing the native child order
+manimlib.mobject.mobject	Mobject.space_out_submobjects	Mobject.space_out_submobjects	method	0	(self[positional_or_keyword], factor[positional_or_keyword]:float=1.5, **kwargs[var_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales the family around forwarded pivots then restores each immediate child's size around its own center
 manimlib.mobject.mobject	Mobject.split	Mobject.split	method	0	(self[positional_or_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.stash_mobject_pointers	Mobject.stash_mobject_pointers	method	0	(func[positional_or_keyword]:Callable[..., T])	unreviewed	-	-	-
 manimlib.mobject.mobject	Mobject.stretch	Mobject.stretch	method	0	(self[positional_or_keyword], factor[positional_or_keyword]:float, dim[positional_or_keyword]:int, **kwargs[var_keyword])	unreviewed	-	-	-
