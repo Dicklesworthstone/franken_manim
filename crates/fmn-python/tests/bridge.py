@@ -207,6 +207,25 @@ assert str(inspect.signature(manimlib.PMobject.add_point)) == (
 assert str(inspect.signature(manimlib.PMobject.set_points)) == "(self, points)"
 assert str(inspect.signature(VMobject.set_points)) == "(self, points)"
 assert str(inspect.signature(VMobject.append_points)) == "(self, points)"
+assert str(inspect.signature(VMobject.get_anchors_and_handles)) == "(self)"
+assert str(inspect.signature(VMobject.get_start_anchors)) == "(self)"
+assert str(inspect.signature(VMobject.get_end_anchors)) == "(self)"
+assert str(inspect.signature(VMobject.get_anchors)) == "(self)"
+assert str(inspect.signature(VMobject.get_bezier_tuples_from_points)) == (
+    "(self, points)"
+)
+assert str(inspect.signature(VMobject.get_bezier_tuples)) == "(self)"
+assert str(inspect.signature(VMobject.get_subpath_end_indices_from_points)) == (
+    "(self, points)"
+)
+assert str(inspect.signature(VMobject.get_subpath_end_indices)) == "(self)"
+assert str(inspect.signature(VMobject.get_subpaths_from_points)) == "(self, points)"
+assert str(inspect.signature(VMobject.get_subpaths)) == "(self)"
+assert str(inspect.signature(VMobject.insert_n_curves_to_point_list)) == (
+    "(self, n, points)"
+)
+assert str(inspect.signature(VMobject.insert_n_curves)) == "(self, n, recurse=True)"
+assert VMobject.tolerance_for_point_equality == 1e-8
 
 mutation = CustomDtype()
 mutation.data["point"][:] = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
@@ -2213,6 +2232,114 @@ corners = VMobject().set_points_as_corners(
 assert np.allclose(corners.get_points()[::2], [[0, 0, 0], [1, 1, 0], [2, 0, 0]])
 corners.reverse_points()
 assert np.allclose(corners.get_points()[::2], [[2, 0, 0], [1, 1, 0], [0, 0, 0]])
+
+# VMobject topology is read directly from the writable shared-anchor record
+# view, while insertion delegates its distribution/subdivision work to
+# Chisel and commits through the ordinary RecordBuffer point-write seam.
+topology = VMobject().set_points(
+    np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.5, -1.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ]
+    )
+)
+anchors_and_handles = topology.get_anchors_and_handles()
+assert len(anchors_and_handles) == 3
+assert all(np.shares_memory(part, topology.get_points()) for part in anchors_and_handles)
+assert np.allclose(topology.get_start_anchors(), topology.get_points()[0:-1:2])
+assert np.allclose(topology.get_end_anchors(), topology.get_points()[2::2])
+live_anchors = topology.get_anchors()
+assert np.shares_memory(live_anchors, topology.get_points())
+live_anchors[0] = [-1.0, 0.0, 0.0]
+assert np.allclose(topology.get_points()[0], [-1.0, 0.0, 0.0])
+bezier_tuples = list(topology.get_bezier_tuples())
+assert len(bezier_tuples) == 3
+assert all(np.shares_memory(curve, topology.get_points()) for curve in bezier_tuples)
+assert np.array_equal(topology.get_subpath_end_indices(), [2, 6])
+subpaths = topology.get_subpaths()
+assert [len(path) for path in subpaths] == [3, 3]
+assert all(np.shares_memory(path, topology.get_points()) for path in subpaths)
+assert np.array_equal(
+    topology.get_subpath_end_indices_from_points(topology.get_points()),
+    [2, 6],
+)
+assert len(topology.get_subpaths_from_points(np.zeros((0, 3)))) == 0
+
+single_insert = topology.insert_n_curves_to_point_list(
+    2, np.array([[2.0, 3.0, 0.0]], dtype=np.float32)
+)
+assert single_insert.dtype == np.float64
+assert single_insert.shape == (5, 3)
+assert np.allclose(single_insert, [[2.0, 3.0, 0.0]] * 5)
+
+insertion = VMobject().set_points(
+    np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.25, 0.5, 0.0],
+            [2.5, 0.0, 0.0],
+        ]
+    )
+)
+insertion.data["stroke_width"][:, 0] = [1.0, 2.0, 3.0, 4.0, 5.0]
+insertion_old_view = insertion.get_points()
+insertion_arc_length = insertion.get_arc_length()
+assert insertion.insert_n_curves(2) is insertion
+assert insertion.get_num_curves() == 4
+assert insertion_old_view.shape == (5, 3)
+insertion_old_view[0] = [99.0, 99.0, 99.0]
+assert not np.allclose(insertion.get_points()[0], insertion_old_view[0])
+assert np.allclose(
+    insertion.data["stroke_width"][:, 0],
+    [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0],
+)
+assert math.isclose(
+    insertion.get_arc_length(), insertion_arc_length, rel_tol=0.0, abs_tol=2e-7
+)
+assert np.isfinite(insertion.data["joint_angle"]).all()
+
+same_length_view = insertion.get_points()
+insertion.insert_n_curves(0)
+same_length_view[0] = [-2.0, 0.0, 0.0]
+assert np.allclose(insertion.get_points()[0], [-2.0, 0.0, 0.0])
+
+family_curve_a = VMobject().set_points_as_corners([[0, 0, 0], [1, 0, 0]])
+family_curve_b = VMobject().set_points_as_corners([[0, 1, 0], [2, 1, 0]])
+curve_family = manimlib.VGroup(family_curve_a, family_curve_b)
+curve_family.insert_n_curves(1, recurse=False)
+assert [mob.get_num_curves() for mob in curve_family] == [1, 1]
+curve_family.insert_n_curves(1)
+assert [mob.get_num_curves() for mob in curve_family] == [2, 2]
+
+bound_insertion = VMobject().set_points_as_corners([[0, 0, 0], [3, 0, 0]])
+bound_insertion_scene = Scene()
+bound_insertion_scene.add(bound_insertion)
+bound_insertion.insert_n_curves(2)
+assert bound_insertion.get_num_curves() == 3
+
+insertion_before_refusal = insertion.get_points().copy()
+try:
+    insertion.insert_n_curves_to_point_list(1, np.zeros((2, 3)))
+except ValueError as error:
+    assert "odd" in str(error).lower() or "even" in str(error).lower()
+else:
+    raise AssertionError("an even shared-anchor run reached Chisel insertion")
+try:
+    insertion.insert_n_curves(sys.maxsize)
+except ValueError as error:
+    assert "budget" in str(error).lower()
+else:
+    raise AssertionError("an over-budget curve insertion mutated the portal")
+assert np.array_equal(insertion.get_points(), insertion_before_refusal)
+
 line.set_stroke(manimlib.BLACK, 3, background=True)
 assert line.uniforms["stroke_behind"] is True
 try:
