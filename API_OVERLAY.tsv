@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	05634f7154d094d243b2fe30ff4212c880299e30d95acf3e9c361b6ac9ed9a31
+ledger_reviewed_digest	052e7e6e8c81a62284792dc48c728f998ce1791fb0d48e12c3628084299cf8f3
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -298,10 +298,30 @@ manimlib.mobject.svg.text_mobject:MarkupText.get_parts_by_text	same	scripts/mani
 manimlib.mobject.svg.text_mobject:MarkupText.get_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the original plain or markup source string
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native glyph family in place and returns the original text proxy
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order including constructor t2c maps
+manimlib.animation.transform:ApplyComplexFunction	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ApplyMethod adapter over the live complex point transformation
+manimlib.animation.transform:ApplyComplexFunction.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	retains the complex callable targets the current source copy and derives the Reference arc before native playback
+manimlib.animation.transform:ApplyComplexFunction.init_path_func	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	sets path_arc to the imaginary logarithm of the callable at one
+manimlib.animation.transform:ApplyFunction	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored Transform adapter whose Python callback builds the play-time target copy
+manimlib.animation.transform:ApplyFunction.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	retains the callback and source while deferring target construction until play
+manimlib.animation.transform:ApplyFunction.create_target	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	passes an independent current source copy to the callback and requires a Mobject result
+manimlib.animation.transform:ApplyMatrix	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ApplyPointwiseFunction adapter over the Reference row-vector matrix mapping
+manimlib.animation.transform:ApplyMatrix.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	normalizes the matrix then routes its point callback through the shared native Transform target
+manimlib.animation.transform:ApplyMatrix.initialize_matrix	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	embeds a two-dimensional matrix in the three-dimensional identity and rejects every other non-3x3 shape
 manimlib.animation.transform:ApplyMethod	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored Transform subclass that retains the bound method and builds its independent target at play time
 manimlib.animation.transform:ApplyMethod.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	preserves exact validation public method state variadic method arguments and separate Transform configuration
 manimlib.animation.transform:ApplyMethod.check_validity_of_input	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	accepts only ordinary bound methods whose receiver is a portal Mobject with the exact Reference refusals
 manimlib.animation.transform:ApplyMethod.create_target	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	copies the current source at play time invokes the unbound method on the copy and honors a trailing method-kwargs mapping
+manimlib.animation.transform:ApplyPointwiseFunction	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ApplyMethod adapter over Mobject apply_function with the Reference three-second default
+manimlib.animation.transform:ApplyPointwiseFunction.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	passes the point callback as the target method argument while preserving Transform configuration
+manimlib.animation.transform:ApplyPointwiseFunctionToCenter	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored Transform adapter that maps only the current source center
+manimlib.animation.transform:ApplyPointwiseFunctionToCenter.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	retains the center callback and source while deferring its target until play
+manimlib.animation.transform:ApplyPointwiseFunctionToCenter.create_target	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	moves an independent current source copy to the callback result
+manimlib.animation.transform:FadeToColor	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ApplyMethod adapter over the live color mutation
+manimlib.animation.transform:FadeToColor.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	builds the color target through Mobject set_color and preserves Transform configuration
+manimlib.animation.transform:ScaleInPlace	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ApplyMethod adapter over the live centered scale mutation
+manimlib.animation.transform:ScaleInPlace.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	builds the scaled target through Mobject scale and preserves Transform configuration
+manimlib.animation.transform:ShrinkToCenter	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ScaleInPlace specialization with a zero requested factor
+manimlib.animation.transform:ShrinkToCenter.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	delegates to ScaleInPlace with the Reference zero scale request
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
 manimlib.mobject.geometry:ArrowTip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Triangle subclass backed by Atlas tip geometry rather than a schema-generated shell

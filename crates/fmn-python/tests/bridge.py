@@ -2341,6 +2341,179 @@ except AssertionError:
 else:
     raise AssertionError("ApplyMethod accepted a bound non-Mobject method")
 
+# The thin transform adapters are authored over the same play-time target
+# seam.  Their documented argument order must not fall through to inherited
+# ApplyMethod/Transform constructors, and each adapter must preserve the
+# Reference target operation while Lumen's native Transform owns playback.
+adapter_call_shapes = {
+    manimlib.ApplyPointwiseFunction: "(function, mobject, run_time=3.0, **kwargs)",
+    manimlib.ApplyPointwiseFunctionToCenter: "(function, mobject, **kwargs)",
+    manimlib.FadeToColor: "(mobject, color, **kwargs)",
+    manimlib.ScaleInPlace: "(mobject, scale_factor, **kwargs)",
+    manimlib.ShrinkToCenter: "(mobject, **kwargs)",
+    manimlib.ApplyFunction: "(function, mobject, **kwargs)",
+    manimlib.ApplyMatrix: "(matrix, mobject, **kwargs)",
+    manimlib.ApplyComplexFunction: "(function, mobject, **kwargs)",
+}
+for adapter, declared_call_shape in adapter_call_shapes.items():
+    actual_call_shape = str(inspect.signature(adapter))
+    assert actual_call_shape == declared_call_shape
+adapter_method_call_shapes = {
+    manimlib.ApplyPointwiseFunction.__init__: (
+        "(self, function, mobject, run_time=3.0, **kwargs)"
+    ),
+    manimlib.ApplyPointwiseFunctionToCenter.__init__: (
+        "(self, function, mobject, **kwargs)"
+    ),
+    manimlib.ApplyPointwiseFunctionToCenter.create_target: "(self)",
+    manimlib.FadeToColor.__init__: "(self, mobject, color, **kwargs)",
+    manimlib.ScaleInPlace.__init__: "(self, mobject, scale_factor, **kwargs)",
+    manimlib.ShrinkToCenter.__init__: "(self, mobject, **kwargs)",
+    manimlib.ApplyFunction.__init__: "(self, function, mobject, **kwargs)",
+    manimlib.ApplyFunction.create_target: "(self)",
+    manimlib.ApplyMatrix.__init__: "(self, matrix, mobject, **kwargs)",
+    manimlib.ApplyMatrix.initialize_matrix: "(self, matrix)",
+    manimlib.ApplyComplexFunction.__init__: "(self, function, mobject, **kwargs)",
+    manimlib.ApplyComplexFunction.init_path_func: "(self)",
+}
+for adapter_method, declared_call_shape in adapter_method_call_shapes.items():
+    actual_call_shape = str(inspect.signature(adapter_method))
+    assert actual_call_shape == declared_call_shape
+assert manimlib.ApplyPointwiseFunction.__bases__ == (manimlib.ApplyMethod,)
+assert manimlib.ApplyPointwiseFunctionToCenter.__bases__ == (manimlib.Transform,)
+assert manimlib.FadeToColor.__bases__ == (manimlib.ApplyMethod,)
+assert manimlib.ScaleInPlace.__bases__ == (manimlib.ApplyMethod,)
+assert manimlib.ShrinkToCenter.__bases__ == (manimlib.ScaleInPlace,)
+assert manimlib.ApplyFunction.__bases__ == (manimlib.Transform,)
+assert manimlib.ApplyMatrix.__bases__ == (manimlib.ApplyPointwiseFunction,)
+assert manimlib.ApplyComplexFunction.__bases__ == (manimlib.ApplyMethod,)
+
+pointwise_source = geometry.Rectangle(width=1.0, height=0.5)
+pointwise_animation = manimlib.ApplyPointwiseFunction(
+    lambda point: point + np.array([1.0, -0.5, 0.0]),
+    pointwise_source,
+)
+assert pointwise_animation.run_time == 3.0
+Scene().play(
+    pointwise_animation,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(pointwise_source.get_center(), [1.0, -0.5, 0.0])
+
+center_source = geometry.Rectangle(width=1.0, height=0.5)
+center_animation = manimlib.ApplyPointwiseFunctionToCenter(
+    lambda point: point + 2.0 * manimlib.RIGHT,
+    center_source,
+)
+center_source.shift(manimlib.UP)
+Scene().play(
+    center_animation,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(center_source.get_center(), [2.0, 1.0, 0.0])
+
+fade_source = geometry.Square().set_color(manimlib.BLUE)
+Scene().play(
+    manimlib.FadeToColor(fade_source, manimlib.RED),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert fade_source.get_color() == manimlib.RED
+
+scale_source = geometry.Rectangle(width=1.0, height=0.5)
+scale_scene = Scene()
+scale_scene.play(
+    manimlib.ScaleInPlace(scale_source, 2.0),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.isclose(scale_source.get_width(), 2.0)
+scale_scene.play(
+    manimlib.ShrinkToCenter(scale_source),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.isclose(scale_source.get_width(), 2.0e-8)
+
+apply_function_calls = []
+
+
+def build_apply_target(mobject):
+    apply_function_calls.append(mobject.get_center().copy())
+    return mobject.scale(2.0).shift(manimlib.RIGHT)
+
+
+function_source = geometry.Rectangle(width=1.0, height=0.5)
+function_animation = manimlib.ApplyFunction(build_apply_target, function_source)
+function_scene = Scene()
+function_source.shift(manimlib.UP)
+assert apply_function_calls == []
+function_scene.play(
+    function_animation,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert len(apply_function_calls) == 1
+assert np.allclose(apply_function_calls[0], manimlib.UP)
+assert np.allclose(function_source.get_center(), [1.0, 1.0, 0.0])
+assert np.isclose(function_source.get_width(), 2.0)
+function_scene.play(
+    function_animation,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert len(apply_function_calls) == 2
+assert np.allclose(apply_function_calls[1], [1.0, 1.0, 0.0])
+assert np.allclose(function_source.get_center(), [2.0, 1.0, 0.0])
+assert np.isclose(function_source.get_width(), 4.0)
+
+invalid_function_animation = manimlib.ApplyFunction(
+    lambda _mobject: 7,
+    geometry.Square(),
+)
+try:
+    Scene().play(invalid_function_animation)
+except Exception as error:
+    assert str(error) == (
+        "Functions passed to ApplyFunction must return object of type Mobject"
+    )
+else:
+    raise AssertionError("ApplyFunction accepted a non-Mobject target")
+
+matrix_source = geometry.Rectangle(width=1.0, height=0.5).shift(manimlib.RIGHT)
+matrix_animation = manimlib.ApplyMatrix([[0.0, -1.0], [1.0, 0.0]], matrix_source)
+assert np.array_equal(
+    matrix_animation.initialize_matrix([[1.0, 0.0], [0.0, 1.0]]),
+    np.identity(3),
+)
+Scene().play(
+    matrix_animation,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(matrix_source.get_center(), manimlib.UP)
+try:
+    manimlib.ApplyMatrix([[1.0]], geometry.Square())
+except Exception as error:
+    assert str(error) == "Matrix has bad dimensions"
+else:
+    raise AssertionError("ApplyMatrix accepted a matrix with bad dimensions")
+
+complex_source = geometry.Rectangle(width=1.0, height=0.5).shift(manimlib.RIGHT)
+complex_animation = manimlib.ApplyComplexFunction(lambda value: 1j * value, complex_source)
+assert np.isclose(complex_animation.path_arc, math.pi / 2.0)
+complex_animation.path_arc = 0.0
+assert complex_animation.init_path_func() is None
+assert np.isclose(complex_animation.path_arc, math.pi / 2.0)
+Scene().play(
+    complex_animation,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(complex_source.get_center(), manimlib.UP)
+
 sampled_rate_scene = Scene()
 sampled_rate_mover = geometry.Rectangle(width=0.5, height=0.5)
 sampled_rate_scene.play(

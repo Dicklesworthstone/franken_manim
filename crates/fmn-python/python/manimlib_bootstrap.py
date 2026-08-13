@@ -5944,6 +5944,11 @@ class Transform(_NativeAnimation):
     def _allows_deferred_target(self):
         return False
 
+    def _native_target(self):
+        if self._allows_deferred_target():
+            self.target_mobject = self.create_target()
+        return self.target_mobject
+
 
 class ApplyMethod(Transform):
     def __init__(self, method, *args, **kwargs):
@@ -5974,11 +5979,84 @@ class ApplyMethod(Transform):
     def _allows_deferred_target(self):
         return True
 
-    def _native_target(self):
-        # Reference Transform.begin creates ApplyMethod's target at play time,
-        # after any edits made between animation construction and Scene.play.
-        self.target_mobject = self.create_target()
-        return self.target_mobject
+
+class ApplyPointwiseFunction(ApplyMethod):
+    def __init__(self, function, mobject, run_time=3.0, **kwargs):
+        super().__init__(mobject.apply_function, function, run_time=run_time, **kwargs)
+
+
+class ApplyPointwiseFunctionToCenter(Transform):
+    def __init__(self, function, mobject, **kwargs):
+        self.function = function
+        super().__init__(mobject, None, **kwargs)
+
+    def create_target(self):
+        return self.mobject.copy().move_to(self.function(self.mobject.get_center()))
+
+    def _allows_deferred_target(self):
+        return True
+
+
+class FadeToColor(ApplyMethod):
+    def __init__(self, mobject, color, **kwargs):
+        super().__init__(mobject.set_color, color, **kwargs)
+
+
+class ScaleInPlace(ApplyMethod):
+    def __init__(self, mobject, scale_factor, **kwargs):
+        super().__init__(mobject.scale, scale_factor, **kwargs)
+
+
+class ShrinkToCenter(ScaleInPlace):
+    def __init__(self, mobject, **kwargs):
+        super().__init__(mobject, 0, **kwargs)
+
+
+class ApplyFunction(Transform):
+    def __init__(self, function, mobject, **kwargs):
+        self.function = function
+        super().__init__(mobject, None, **kwargs)
+
+    def create_target(self):
+        target = self.function(self.mobject.copy())
+        if not isinstance(target, Mobject):
+            raise Exception(
+                "Functions passed to ApplyFunction must return object of type Mobject"
+            )
+        return target
+
+    def _allows_deferred_target(self):
+        return True
+
+
+class ApplyMatrix(ApplyPointwiseFunction):
+    def __init__(self, matrix, mobject, **kwargs):
+        matrix = self.initialize_matrix(matrix)
+
+        def func(point):
+            return _np.dot(point, matrix.T)
+
+        super().__init__(func, mobject, **kwargs)
+
+    def initialize_matrix(self, matrix):
+        matrix = _np.array(matrix)
+        if matrix.shape == (2, 2):
+            new_matrix = _np.identity(3)
+            new_matrix[:2, :2] = matrix
+            matrix = new_matrix
+        elif matrix.shape != (3, 3):
+            raise Exception("Matrix has bad dimensions")
+        return matrix
+
+
+class ApplyComplexFunction(ApplyMethod):
+    def __init__(self, function, mobject, **kwargs):
+        self.function = function
+        kwargs["path_arc"] = float(_np.log(function(complex(1))).imag)
+        super().__init__(mobject.apply_complex_function, function, **kwargs)
+
+    def init_path_func(self):
+        self.path_arc = float(_np.log(self.function(complex(1))).imag)
 
 
 class MoveToTarget(Transform):
@@ -6495,6 +6573,23 @@ def _install_schema_surface():
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
         ("manimlib.animation.transform", "Transform"): Transform,
         ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,
+        (
+            "manimlib.animation.transform",
+            "ApplyPointwiseFunction",
+        ): ApplyPointwiseFunction,
+        (
+            "manimlib.animation.transform",
+            "ApplyPointwiseFunctionToCenter",
+        ): ApplyPointwiseFunctionToCenter,
+        ("manimlib.animation.transform", "FadeToColor"): FadeToColor,
+        ("manimlib.animation.transform", "ScaleInPlace"): ScaleInPlace,
+        ("manimlib.animation.transform", "ShrinkToCenter"): ShrinkToCenter,
+        ("manimlib.animation.transform", "ApplyFunction"): ApplyFunction,
+        ("manimlib.animation.transform", "ApplyMatrix"): ApplyMatrix,
+        (
+            "manimlib.animation.transform",
+            "ApplyComplexFunction",
+        ): ApplyComplexFunction,
         ("manimlib.animation.transform", "MoveToTarget"): MoveToTarget,
         ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
