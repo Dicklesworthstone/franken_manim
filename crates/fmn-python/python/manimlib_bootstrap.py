@@ -168,9 +168,18 @@ def _make_even(iterable_1, iterable_2):
     )
 
 
+class _ColorValue:
+    """A scalar Manim color carrying unquantized native gradient output."""
+
+    def __init__(self, rgb):
+        self.rgb = tuple(float(component) for component in rgb)
+
+
 def _color_to_rgb(color):
     # Hex spellings route through fmn-core's one color model (D4); RGB(A)
     # sequences pass through. Anything else refuses precisely.
+    if isinstance(color, _ColorValue):
+        return _np.array(color.rgb)
     if isinstance(color, str):
         return _np.array(_BridgeMobject._hex_to_rgb(color))
     return _np.array([float(component) for component in color][:3])
@@ -184,6 +193,19 @@ def _rgb_to_hex(rgb):
     return _BridgeMobject._rgb_to_hex(
         (float(rgb[0]), float(rgb[1]), float(rgb[2]))
     )
+
+
+def _color_gradient(colors, length, interp_by_hsl=False):
+    rgbs = [
+        tuple(float(component) for component in _color_to_rgb(color))
+        for color in colors
+    ]
+    return [
+        _ColorValue(rgb)
+        for rgb in _BridgeMobject._color_gradient(
+            rgbs, int(length), bool(interp_by_hsl)
+        )
+    ]
 
 
 class _LiveSubmobjects(list):
@@ -1338,6 +1360,43 @@ class Mobject(_BridgeMobject):
     def get_opacities(self):
         return self._style_data()["rgba"][:, 3]
 
+    def set_color_by_gradient(self, *colors):
+        if self.has_points():
+            self.set_color(colors)
+        else:
+            self.set_submobject_colors_by_gradient(*colors)
+        return self
+
+    def set_submobject_colors_by_gradient(self, *colors, interp_by_hsl=False):
+        if len(colors) == 0:
+            raise Exception("Need at least one color")
+        if len(colors) == 1:
+            return self.set_color(*colors)
+
+        new_colors = _color_gradient(
+            colors, len(self.submobjects), interp_by_hsl=interp_by_hsl
+        )
+        for submobject, color in zip(self.submobjects, new_colors):
+            submobject.set_color(color)
+        return self
+
+    def add_background_rectangle(self, color=None, opacity=1.0, **kwargs):
+        self.background_rectangle = BackgroundRectangle(
+            self, color=color, fill_opacity=opacity, **kwargs
+        )
+        self.add_to_back(self.background_rectangle)
+        return self
+
+    def add_background_rectangle_to_submobjects(self, **kwargs):
+        for submobject in self.submobjects:
+            submobject.add_background_rectangle(**kwargs)
+        return self
+
+    def add_background_rectangle_to_family_members_with_points(self, **kwargs):
+        for mobject in self.family_members_with_points():
+            mobject.add_background_rectangle(**kwargs)
+        return self
+
     def get_shading(self):
         return _np.array(self.uniforms["shading"])
 
@@ -2100,6 +2159,61 @@ class SurroundingRectangle(Rectangle):
 
     def set_buff(self, buff):
         return self.surround(self.mobject, buff)
+
+
+class BackgroundRectangle(SurroundingRectangle):
+    """The Reference's camera-colored plate over Atlas matcher geometry."""
+
+    def __init__(
+        self,
+        mobject,
+        color=None,
+        stroke_width=0,
+        stroke_opacity=0,
+        fill_opacity=0.75,
+        buff=0,
+        **kwargs,
+    ):
+        if color is None:
+            color = _pinned_manim_config().camera.background_color
+        super().__init__(
+            mobject,
+            color=color,
+            stroke_width=stroke_width,
+            stroke_opacity=stroke_opacity,
+            fill_opacity=fill_opacity,
+            buff=buff,
+            **kwargs,
+        )
+        self.color = _rgb_to_hex(_color_to_rgb(color))
+        self.original_fill_opacity = fill_opacity
+
+    def pointwise_become_partial(self, mobject, a, b):
+        del mobject, a
+        self.set_fill(opacity=b * self.original_fill_opacity)
+        return self
+
+    def set_style(
+        self,
+        stroke_color=None,
+        stroke_width=None,
+        fill_color=None,
+        fill_opacity=None,
+        family=True,
+        **kwargs,
+    ):
+        del stroke_color, stroke_width, fill_color, family, kwargs
+        VMobject.set_style(
+            self,
+            stroke_color="#000000",
+            stroke_width=0,
+            fill_color="#000000",
+            fill_opacity=fill_opacity,
+        )
+        return self
+
+    def get_fill_color(self):
+        return self.color
 
 
 class Arc(VMobject):
@@ -5491,6 +5605,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.shape_matchers", "SurroundingRectangle"): SurroundingRectangle,
+        ("manimlib.mobject.shape_matchers", "BackgroundRectangle"): BackgroundRectangle,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         ("manimlib.mobject.geometry", "Arc"): Arc,

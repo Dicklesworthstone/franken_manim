@@ -1358,6 +1358,35 @@ impl BridgeMobject {
         .to_hex()
     }
 
+    /// Route both Reference `color_gradient` branches through fmn-core's
+    /// single color authority. Python performs only its normal public color
+    /// coercion; all interpolation and sample-position semantics live here.
+    #[staticmethod]
+    fn _color_gradient(
+        colors: Vec<[f64; 3]>,
+        length: usize,
+        interp_by_hsl: bool,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        if length > 0 && colors.len() < 2 {
+            return Err(PyValueError::new_err(
+                "color_gradient needs at least two reference colors",
+            ));
+        }
+        let colors = colors
+            .into_iter()
+            .map(|[r, g, b]| fmn_core::color::Srgb { r, g, b })
+            .collect::<Vec<_>>();
+        let gradient = if interp_by_hsl {
+            fmn_core::color::color_gradient_by_hsl(&colors, length)
+        } else {
+            fmn_core::color::color_gradient(&colors, length)
+        };
+        Ok(gradient
+            .into_iter()
+            .map(|color| [color.r, color.g, color.b])
+            .collect())
+    }
+
     /// `Mobject.become` over `Stage::become_mobject`: per-member data,
     /// uniform, and placement assignment across zipped equal-shape
     /// families. Schema or family-shape drift is the engine's precise

@@ -9,6 +9,7 @@ import copy
 import enum
 import gc
 import importlib
+import inspect
 import math
 import pickle
 import re
@@ -702,6 +703,68 @@ vmobject_fade = utility_marker(0.0, "vmobject-fade").set_opacity(0.8)
 assert vmobject_fade.fade(0.25) is vmobject_fade
 assert np.isclose(vmobject_fade.get_opacity(), 0.6)
 
+# The high-demand color helpers route both interpolation policies through
+# fmn-core while preserving Reference branching and exact refusal text.
+assert str(inspect.signature(Mobject.set_color_by_gradient)) == "(self, *colors)"
+assert str(inspect.signature(Mobject.set_submobject_colors_by_gradient)) == (
+    "(self, *colors, interp_by_hsl=False)"
+)
+gradient_group = Mobject(manimlib.Square(), manimlib.Square(), manimlib.Square())
+assert (
+    gradient_group.set_submobject_colors_by_gradient("#FF0000", "#0000FF")
+    is gradient_group
+)
+assert [mob.get_color() for mob in gradient_group.submobjects] == [
+    "#FF0000",
+    "#B400B4",
+    "#0000FF",
+]
+assert (
+    gradient_group.set_submobject_colors_by_gradient(
+        "#FF0000", "#0000FF", interp_by_hsl=True
+    )
+    is gradient_group
+)
+assert [mob.get_color() for mob in gradient_group.submobjects] == [
+    "#FF0000",
+    "#00FF00",
+    "#0000FF",
+]
+gradient_colors_before_refusal = [
+    mob.get_color() for mob in gradient_group.submobjects
+]
+try:
+    gradient_group.set_submobject_colors_by_gradient()
+except Exception as error:
+    assert type(error) is Exception
+    assert str(error) == "Need at least one color"
+else:
+    raise AssertionError("an empty submobject gradient did not refuse")
+assert [mob.get_color() for mob in gradient_group.submobjects] == (
+    gradient_colors_before_refusal
+)
+assert gradient_group.set_submobject_colors_by_gradient("#123456") is gradient_group
+assert all(mob.get_color() == "#123456" for mob in gradient_group.submobjects)
+empty_gradient_group = Mobject()
+assert (
+    empty_gradient_group.set_submobject_colors_by_gradient("#FF0000", "#0000FF")
+    is empty_gradient_group
+)
+
+point_gradient = manimlib.Square()
+assert point_gradient.set_color_by_gradient("#FF0000", "#0000FF") is point_gradient
+point_gradient_colors = point_gradient.get_fill_colors()
+assert point_gradient_colors[0] == "#FF0000"
+assert point_gradient_colors[-1] == "#0000FF"
+
+pointless_gradient = Mobject(*[manimlib.Square() for _ in range(3)])
+assert pointless_gradient.set_color_by_gradient("#FF0000", "#0000FF") is pointless_gradient
+assert [mob.get_color() for mob in pointless_gradient.submobjects] == [
+    "#FF0000",
+    "#B400B4",
+    "#0000FF",
+]
+
 
 # Pickle restores detached state, preserves family aliases, and can rebind.
 pickled_parent = Mobject()
@@ -930,6 +993,14 @@ assert isinstance(circle, VMobject)
 # empty-target rule.  A generated schema shell used to fail here before any
 # geometry reached Atlas.
 shape_matchers = importlib.import_module("manimlib.mobject.shape_matchers")
+assert str(inspect.signature(shape_matchers.BackgroundRectangle)) == (
+    "(mobject, color=None, stroke_width=0, stroke_opacity=0, "
+    "fill_opacity=0.75, buff=0, **kwargs)"
+)
+assert str(inspect.signature(shape_matchers.BackgroundRectangle.set_style)) == (
+    "(self, stroke_color=None, stroke_width=None, fill_color=None, "
+    "fill_opacity=None, family=True, **kwargs)"
+)
 left_box = geometry.Rectangle(width=2.0, height=1.0).shift([-1.5, 0.5, 0.0])
 right_box = geometry.Rectangle(width=1.0, height=2.0).shift([2.0, -0.5, 0.0])
 box_group = manimlib.VGroup(left_box, right_box)
@@ -947,6 +1018,96 @@ assert np.allclose(surround.get_bounding_box()[0][:2], target_box[0][:2] - 0.5)
 empty_surround = shape_matchers.SurroundingRectangle(Mobject())
 assert not empty_surround.has_points()
 assert isinstance(surround, geometry.Rectangle)
+
+# BackgroundRectangle uses the same Atlas extent matcher, the pinned camera
+# background default, and the Reference's deliberately locked public style.
+background_target = geometry.Rectangle(width=2.0, height=1.0)
+background_target_box = background_target.get_bounding_box().copy()
+background = shape_matchers.BackgroundRectangle(
+    background_target, buff=0.2, fill_opacity=0.6
+)
+assert np.allclose(
+    background.get_bounding_box()[0][:2], background_target_box[0][:2] - 0.2
+)
+assert np.allclose(
+    background.get_bounding_box()[2][:2], background_target_box[2][:2] + 0.2
+)
+assert background.get_fill_color() == "#333333"
+assert VMobject.get_fill_color(background) == "#333333"
+assert np.isclose(background.get_fill_opacity(), 0.6)
+assert np.isclose(background.get_stroke_width(), 0.0)
+assert np.isclose(background.get_stroke_opacity(), 0.0)
+assert background.pointwise_become_partial(background_target, 0.2, 0.5) is background
+assert np.isclose(background.get_fill_opacity(), 0.3)
+assert (
+    background.set_style(
+        stroke_color="#FF0000",
+        stroke_width=9,
+        fill_color="#00FF00",
+        fill_opacity=0.25,
+        family=False,
+        ignored_reference_kwarg=True,
+    )
+    is background
+)
+assert background.get_fill_color() == "#333333"
+assert VMobject.get_fill_color(background) == "#000000"
+assert background.get_stroke_color() == "#000000"
+assert np.isclose(background.get_stroke_width(), 0.0)
+assert np.isclose(background.get_fill_opacity(), 0.25)
+
+detached_plate_target = geometry.Rectangle(width=1.0, height=0.5)
+detached_plate_box = detached_plate_target.get_bounding_box().copy()
+assert (
+    detached_plate_target.add_background_rectangle(
+        color="#123456", opacity=0.8, buff=0.15
+    )
+    is detached_plate_target
+)
+detached_plate = detached_plate_target.background_rectangle
+assert isinstance(detached_plate, shape_matchers.BackgroundRectangle)
+assert detached_plate_target.submobjects[0] is detached_plate
+assert detached_plate.get_fill_color() == "#123456"
+assert np.isclose(detached_plate.get_fill_opacity(), 0.8)
+assert np.allclose(
+    detached_plate.get_bounding_box()[0][:2], detached_plate_box[0][:2] - 0.15
+)
+
+bound_plate_scene = Scene()
+bound_plate_target = geometry.Rectangle(width=1.5, height=0.75)
+bound_plate_scene.add(bound_plate_target)
+assert bound_plate_target.add_background_rectangle(buff=0.1) is bound_plate_target
+assert bound_plate_target.background_rectangle._is_bound()
+assert bound_plate_target.submobjects[0] is bound_plate_target.background_rectangle
+assert bound_plate_scene.get_mobjects()[0] is bound_plate_target
+
+immediate_a = geometry.Square(side_length=0.5)
+immediate_b = geometry.Square(side_length=0.75)
+immediate_group = Mobject(immediate_a, immediate_b)
+bound_plate_scene.add(immediate_group)
+assert immediate_group.add_background_rectangle_to_submobjects(opacity=0.4) is immediate_group
+for immediate in (immediate_a, immediate_b):
+    assert immediate.submobjects[0] is immediate.background_rectangle
+    assert immediate.background_rectangle._is_bound()
+    assert np.isclose(immediate.background_rectangle.get_fill_opacity(), 0.4)
+
+family_point_a = geometry.Square(side_length=0.5)
+family_point_b = geometry.Square(side_length=0.75)
+family_point_container = Mobject(family_point_b)
+family_plate_root = Mobject(family_point_a, family_point_container)
+bound_plate_scene.add(family_plate_root)
+assert (
+    family_plate_root.add_background_rectangle_to_family_members_with_points(
+        opacity=0.35
+    )
+    is family_plate_root
+)
+assert not hasattr(family_plate_root, "background_rectangle")
+assert not hasattr(family_point_container, "background_rectangle")
+for point_member in (family_point_a, family_point_b):
+    assert point_member.submobjects[0] is point_member.background_rectangle
+    assert point_member.background_rectangle._is_bound()
+    assert np.isclose(point_member.background_rectangle.get_fill_opacity(), 0.35)
 
 # Retargeting after scene entry rebuilds the same arena object through the
 # native matcher. Identity and style survive, and bad targets refuse before
