@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	eae9332e43f5fd00697940a08d24365ff40a5f7861f3937166a5e414f9764ce8
+ledger_reviewed_digest	191b771600eb9513e2fa0af92163a94d297c3b6249ef9ba3abae86369bef40da
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -227,17 +227,25 @@ manimlib.mobject.mobject:Mobject.add_background_rectangle_to_family_members_with
 manimlib.mobject.mobject:Mobject.add_background_rectangle_to_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adds one identity-preserving plate to each immediate child without changing the parent's member order
 manimlib.mobject.mobject:Mobject.add_to_back	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	prepends with Reference list_update last-occurrence dedup and commits the resulting child order into Marionette
 manimlib.mobject.mobject:Mobject.add_updater	improved	BN-07	crates/fmn-mobject/tests/dynamics.rs	call=true performs one corrected immediate update
+manimlib.mobject.mobject:Mobject.apply_complex_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	maps x plus iy through the Python callable preserves z and forwards the exact point-transform pivot options
+manimlib.mobject.mobject:Mobject.apply_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the callable point by point with the Reference origin default and forwards all explicit pivot options
+manimlib.mobject.mobject:Mobject.apply_function_to_position	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	moves the current center to the callback result without changing the mobject size
+manimlib.mobject.mobject:Mobject.apply_function_to_submobject_positions	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the position-only transform to immediate submobjects in stable list order
+manimlib.mobject.mobject:Mobject.apply_matrix	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	embeds smaller matrices in three dimensions routes ordinary families once through Marionette and preserves custom pointlike fields
+manimlib.mobject.mobject:Mobject.apply_points_function	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves family and pointlike-field order pivot rules transformed bounding-box rows return identity and callback exceptions with member-by-member partial state
 manimlib.mobject.mobject:Mobject.deepcopy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates through graph-safe deepcopy while preserving internal family aliases and independent extension state
 manimlib.mobject.mobject:Mobject.fade	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sets absolute family opacity and preserves the base method's intentional non-fluent return
 manimlib.mobject.mobject:Mobject.family_members_with_points	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	returns the path-wise preorder family members whose live RecordBuffers contain points
 manimlib.mobject.mobject:Mobject.get_family	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	preserves Reference preorder, recurse=False, identity, and shared descendants once per path
 manimlib.mobject.mobject:Mobject.get_num_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the current live RecordBuffer row count
+manimlib.mobject.mobject:Mobject.is_off_screen	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses strict whole-box comparisons against the authoritative frame radii
 manimlib.mobject.mobject:Mobject.match_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the source color through live style reads and writes without changing opacity or shading
 manimlib.mobject.mobject:Mobject.match_style	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies color opacity and shading through the engine-backed base Mobject style surface
 manimlib.mobject.mobject:Mobject.restore	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	restores detached and bound saved-state families and preserves the exact missing-state refusal
 manimlib.mobject.mobject:Mobject.set_color_by_gradient	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves the pointful color-run branch and delegates point-free families to the native-backed submobject gradient
 manimlib.mobject.mobject:Mobject.set_submobject_colors_by_gradient	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses fmn-core RMS or Reference HSL interpolation and preserves zero one and empty-family edge behavior
 manimlib.mobject.mobject:Mobject.set_z_index	same	docs/RENDER_ORDER.md	crates/fmn-mobject/tests/render_order.rs	preserves the declared insertion-first render-order contract
+manimlib.mobject.mobject:Mobject.shift_onto_screen	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	checks top bottom left right in Reference order and forwards border options only when an edge exceeds the frame
 manimlib.mobject.mobject:Mobject.shuffle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the Scene-seeded Python RNG and commits recursive child-first shuffles into live family order
 manimlib.mobject.mobject:Mobject.sort	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves stable default point ordering and both callback forms while committing the native child order
 manimlib.mobject.mobject:Mobject.space_out_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales the family around forwarded pivots then restores each immediate child's size around its own center
@@ -263,7 +271,10 @@ manimlib.scene.scene:Scene.get_top_level_mobjects	same	docs/RENDER_ORDER.md	crat
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
 manimlib.scene.scene:Scene.remove_all_except	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	resets the complete draw list through the ordinary stable native add operation
 manimlib.mobject.types.vectorized_mobject:VMobject.get_num_curves	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	derives the quadratic-curve count from the live shared-anchor record count
+manimlib.mobject.types.vectorized_mobject:VMobject.apply_function	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	delegates the point transform then performs optional approximate smoothing under either the class flag or call flag
+manimlib.mobject.types.vectorized_mobject:VMobject.apply_matrix	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	preserves the vectorized override signature while delegating to the exact Mobject matrix implementation
 manimlib.mobject.types.vectorized_mobject:VMobject.make_smooth	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	routes approximate and true anchor modes through Chisel while preserving Python family recursion
+manimlib.mobject.types.vectorized_mobject:VMobject.make_smooth_after_applying_functions	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact false class default consumed by VMobject apply_function
 manimlib.mobject.types.vectorized_mobject:VMobject.quick_point_from_proportion	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	preserves the equal-curve-count quadratic approximation separately from true-arclength point_from_proportion
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
