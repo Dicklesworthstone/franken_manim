@@ -2795,6 +2795,19 @@ else:
     raise AssertionError("conflicting era-shim kwargs must be rejected")
 
 tex = manimlib.Tex("E = mc^2", isolate=["mc"])
+tex_signature = inspect.signature(manimlib.Tex)
+assert tex_signature.parameters["tex_strings"].annotation == "str"
+assert tex_signature.parameters["font_size"].default == 48
+assert tex_signature.parameters["tex_to_color_map"].default == {}
+assert tex_signature.parameters["t2c"].default == {}
+assert tex_signature.parameters["isolate"].default == []
+assert tex.string == tex.tex_string == "E = mc^2"
+assert tex.alignment == r"\centering"
+assert tex.template == ""
+assert tex.additional_preamble == ""
+assert tex.tex_to_color_map == {}
+assert tex.isolate == ["mc"]
+assert tex.tex_environment == "align*"
 mc_parts = tex.get_parts_by_tex("mc")
 assert len(mc_parts) == 1 and len(mc_parts[0]) == 2
 assert tex.get_part_by_tex(re.compile(r"m.")) is not None
@@ -2811,6 +2824,82 @@ assert all(
     for leaf in tex.get_part_by_tex("E")
 )
 assert tex.get_tex() == "E = mc^2"
+
+tex.scale(0.5)
+assert math.isclose(tex.font_size, 24.0)
+
+multi_tex = manimlib.Tex("x", "+", "y", isolate="=")
+assert multi_tex.get_tex() == "x + y"
+assert multi_tex.string == "x + y"
+assert multi_tex.isolate == ["=", "x", "+", "y"]
+assert len(multi_tex.get_parts_by_tex(["x", "y"])) == 2
+
+trimmed_tex = manimlib.Tex("  x  ")
+assert trimmed_tex.get_tex() == "x"
+assert trimmed_tex.isolate == []
+assert manimlib.Tex("").get_tex() == r"\\"
+
+unicode_tex = manimlib.Tex("α+α")
+unicode_parts = unicode_tex.get_parts_by_tex("α")
+assert len(unicode_parts) == 2
+unicode_tex.set_color_by_tex("α", manimlib.YELLOW)
+assert all(
+    leaf.get_fill_color() == manimlib.YELLOW
+    for group in unicode_parts
+    for leaf in group
+)
+
+tex_text = manimlib.TexText("words")
+assert tex_text.tex_environment == ""
+
+mapped_tex = manimlib.Tex(
+    "x+y",
+    t2c={"x": manimlib.RED},
+    tex_to_color_map={"x": manimlib.BLUE},
+)
+assert mapped_tex.tex_to_color_map == {"x": manimlib.BLUE}
+assert all(
+    leaf.get_fill_color() == manimlib.BLUE
+    for leaf in mapped_tex.get_part_by_tex("x")
+)
+
+for unsupported_tex_kwargs, named_knob in [
+    ({"alignment": r"\raggedright"}, "alignment"),
+    ({"template": "legacy"}, "template"),
+    ({"additional_preamble": r"\usepackage{foo}"}, "additional_preamble"),
+]:
+    try:
+        manimlib.Tex("x", **unsupported_tex_kwargs)
+    except NotImplementedError as error:
+        assert named_knob in str(error)
+    else:
+        raise AssertionError(f"unsupported Tex {named_knob} silently succeeded")
+
+
+class ReadmeHello(Scene):
+    def construct(self):
+        title = manimlib.Text("FrankenManim", font_size=72)
+        formula = manimlib.Tex(r"e^{i\pi} + 1 = 0")
+        formula.next_to(title, manimlib.DOWN)
+        self.play(
+            manimlib.Write(title),
+            manimlib.FadeIn(formula, shift=manimlib.UP),
+        )
+        self.play(formula.animate.set_color_by_tex("i", manimlib.YELLOW))
+        self.wait()
+        self.formula = formula
+
+
+readme_hello = ReadmeHello()
+readme_hello.run()
+assert math.isclose(readme_hello.time(), 3.0)
+readme_i_parts = readme_hello.formula.get_parts_by_tex("i")
+assert len(readme_i_parts) == 1
+assert all(
+    leaf.get_fill_color() == manimlib.YELLOW
+    for group in readme_i_parts
+    for leaf in group
+)
 
 changeable = manimlib.Tex("x = 0.00").make_number_changeable("0.00")
 assert isinstance(changeable, manimlib.DecimalNumber)

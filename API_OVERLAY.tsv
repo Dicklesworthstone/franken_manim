@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	51147a1705d807c7474afa3da13cebc71d38944417f6489bb10c23e367761799
+ledger_reviewed_digest	09e9d411bb711e25820267ac9baa2351c19cdd5788d2845c13ea98960e991b6e
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -273,6 +273,14 @@ manimlib.mobject.mobject:Mobject.shift_onto_screen	same	scripts/manim_ref/maniml
 manimlib.mobject.mobject:Mobject.shuffle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	uses the Scene-seeded Python RNG and commits recursive child-first shuffles into live family order
 manimlib.mobject.mobject:Mobject.sort	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	preserves stable default point ordering and both callback forms while committing the native child order
 manimlib.mobject.mobject:Mobject.space_out_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales the family around forwarded pivots then restores each immediate child's size around its own center
+manimlib.mobject.svg.tex_mobject:Tex.get_part_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested occurrence from the identity-preserving VGroup selected through native UTF-8 source spans
+manimlib.mobject.svg.tex_mobject:Tex.get_parts_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	selects string regex range iterable repeated and Unicode occurrences through fmd-math layout provenance rather than render-and-align heuristics
+manimlib.mobject.svg.tex_mobject:Tex.get_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	returns the normalized source string retained by the native typeset family
+manimlib.mobject.svg.tex_mobject:Tex.set_color_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native-span family in place and returns the original Tex proxy including through the animate builder
+manimlib.mobject.svg.tex_mobject:Tex.set_color_by_tex_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order over the live native-backed family
+manimlib.mobject.svg.tex_mobject:Tex.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact align-star class default while native fmd-math owns layout
+manimlib.mobject.svg.tex_mobject:TexText	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	is an authored Tex subclass selecting fmd-math text-mainland mode rather than a schema-generated shell
+manimlib.mobject.svg.tex_mobject:TexText.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact empty-environment class override
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
 manimlib.mobject.geometry:ArrowTip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Triangle subclass backed by Atlas tip geometry rather than a schema-generated shell

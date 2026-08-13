@@ -3806,21 +3806,21 @@ class Tex(VMobject):
 
     _native_text_mode = False
     _native_group_single_part = False
+    tex_environment = "align*"
 
     def __init__(
         self,
-        *tex_strings,
-        font_size=48,
-        alignment="\\centering",
-        template="",
-        additional_preamble="",
-        tex_to_color_map=None,
-        t2c=None,
-        isolate=None,
-        use_labelled_svg=True,
+        *tex_strings: str,
+        font_size: int = 48,
+        alignment: str = "\\centering",
+        template: str = "",
+        additional_preamble: str = "",
+        tex_to_color_map: dict = {},
+        t2c: dict = {},
+        isolate: "Selector" = [],
+        use_labelled_svg: bool = True,
         **kwargs,
     ):
-        del use_labelled_svg  # SVG-pipeline knob; typesetting is native
         _refuse_unrouted(
             type(self).__name__ + "()",
             [
@@ -3831,11 +3831,28 @@ class Tex(VMobject):
         )
         color_map = dict(t2c or {})
         color_map.update(tex_to_color_map or {})
+        isolate = [] if isolate is None else isolate
+        if len(tex_strings) > 1:
+            if isinstance(isolate, (str, _re.Pattern, tuple)):
+                isolate = [isolate]
+            isolate = [*(isolate or []), *tex_strings]
         _install_live_state(self)
+        self.alignment = alignment
+        self.template = template
+        self.additional_preamble = additional_preamble
+        self.tex_to_color_map = color_map
+        self.use_labelled_svg = bool(use_labelled_svg)
         self.isolate = isolate
         separator = getattr(self, "_tex_arg_separator", " ")
         self.tex_strings = [str(part) for part in tex_strings]
-        self.tex_string = separator.join(self.tex_strings)
+        if self.tex_strings:
+            self.tex_strings[0] = self.tex_strings[0].lstrip()
+            self.tex_strings[-1] = self.tex_strings[-1].rstrip()
+        self.tex_string = separator.join(self.tex_strings).strip()
+        if not self.tex_string:
+            self.tex_strings = [r"\\"]
+            self.tex_string = r"\\"
+        self.string = self.tex_string
         self.font_size = float(font_size)
         # Multiple parts regroup glyph children per part via the typeset's
         # native source spans — the Reference's SingleStringTex structure.
@@ -3947,6 +3964,10 @@ class Tex(VMobject):
     def get_tex(self):
         return self.tex_string
 
+    def _handle_scale_side_effects(self, scale_factor):
+        self.font_size *= scale_factor
+        return self
+
     def make_number_changeable(self, value, index=0, replace_all=False, **config):
         substr = str(value)
         occurrences = [
@@ -4003,12 +4024,14 @@ class Tex(VMobject):
         self._tex_sub_paths = paths
         self.tex_string = self.tex_string.replace(substr, "\\decimalmob", len(replacements))
         self.tex_strings = [self.tex_string]
+        self.string = self.tex_string
         decimal_mobs = [decimal for _, decimal in replacements]
         return VGroup(*decimal_mobs) if replace_all else decimal_mobs[0]
 
 
 class TexText(Tex):
     _native_text_mode = True
+    tex_environment = ""
 
 
 class Brace(Tex):
