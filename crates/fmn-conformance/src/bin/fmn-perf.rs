@@ -8,6 +8,7 @@ use fmn_conformance::perf::{
     SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog, require_compiled_cargo_profile,
     validate_producer_commit,
 };
+use fmn_conformance::perf_host::{HostProfile, HostQualification, attest_current_host};
 use fmn_conformance::perf_pg2::{
     PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
     Pg2Scenario, measure_pg2,
@@ -49,6 +50,7 @@ const EXIT_IO: u8 = 74;
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
 const MAX_BASELINE_BYTES: u64 = 64 * 1024;
 const MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_HOST_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CLI_DIAGNOSTIC_VALUE_BYTES: usize = 160;
 const MAX_CLI_ERROR_DETAIL_BYTES: usize = 1024;
 const MAX_CLI_ERROR_RECORD_BYTES: usize = 8 * 1024;
@@ -90,7 +92,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "pg5-definitions" if arguments.len() == 1 => pg5_definitions(),
         "pg6-definitions" if arguments.len() == 1 => Ok(pg6_definitions()),
         "pg7-definitions" if arguments.len() == 1 => pg7_definitions(),
-        "measure-pg2" if arguments.len() == 5 => measure_pg2_command(
+        "measure-pg2" if matches!(arguments.len(), 5 | 7) => measure_pg2_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -103,8 +105,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             arguments
                 .get(4)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            optional_qualification(arguments, 5)?,
         ),
-        "measure-pg5" if arguments.len() == 5 => measure_pg5_command(
+        "measure-pg5" if matches!(arguments.len(), 5 | 7) => measure_pg5_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -117,8 +120,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             arguments
                 .get(4)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            optional_qualification(arguments, 5)?,
         ),
-        "measure-pg6" if arguments.len() == 5 => measure_pg6_command(
+        "measure-pg6" if matches!(arguments.len(), 5 | 7) => measure_pg6_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -131,8 +135,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             arguments
                 .get(4)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            optional_qualification(arguments, 5)?,
         ),
-        "measure-pg6-peak" if arguments.len() == 5 => measure_pg6_peak_command(
+        "measure-pg6-peak" if matches!(arguments.len(), 5 | 7) => measure_pg6_peak_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -145,8 +150,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             arguments
                 .get(4)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            optional_qualification(arguments, 5)?,
         ),
-        "measure-pg6-soak" if arguments.len() == 6 => measure_pg6_soak_command(
+        "measure-pg6-soak" if matches!(arguments.len(), 6 | 8) => measure_pg6_soak_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -162,8 +168,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             arguments
                 .get(5)
                 .ok_or_else(|| CliError::usage("missing iterations-per-window"))?,
+            optional_qualification(arguments, 6)?,
         ),
-        "measure-pg7" if arguments.len() == 6 => measure_pg7_command(
+        "measure-pg7" if matches!(arguments.len(), 6 | 8) => measure_pg7_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -179,6 +186,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             arguments
                 .get(5)
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            optional_qualification(arguments, 6)?,
         ),
         "catalog" | "verify-baseline" => Err(CliError::usage(format!(
             "{command} requires exactly one path argument"
@@ -188,29 +196,46 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "pg6-definitions" => Err(CliError::usage("pg6-definitions does not accept arguments")),
         "pg7-definitions" => Err(CliError::usage("pg7-definitions does not accept arguments")),
         "measure-pg2" => Err(CliError::usage(
-            "measure-pg2 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+            "measure-pg2 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         "measure-pg5" => Err(CliError::usage(
-            "measure-pg5 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+            "measure-pg5 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         "measure-pg6" => Err(CliError::usage(
-            "measure-pg6 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+            "measure-pg6 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         "measure-pg6-peak" => Err(CliError::usage(
-            "measure-pg6-peak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+            "measure-pg6-peak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         "measure-pg6-soak" => Err(CliError::usage(
-            "measure-pg6-soak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> <iterations-per-window>",
+            "measure-pg6-soak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> <iterations-per-window> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         "measure-pg7" => Err(CliError::usage(
             "measure-pg7 requires <baseline.tsv> <producer-commit> \
-             <cache-root-or-dash> <trace.tsv> <raw.tsv>",
+             <cache-root-or-dash> <trace.tsv> <raw.tsv> \
+             [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         _ => Err(CliError::usage(format!(
             "unknown command {}",
             bounded_argument_debug(command)
         ))),
     }
+}
+
+fn optional_qualification(
+    arguments: &[std::ffi::OsString],
+    first_optional: usize,
+) -> Result<Option<(&OsStr, &OsStr)>, CliError> {
+    if arguments.len() == first_optional {
+        return Ok(None);
+    }
+    let profile = arguments
+        .get(first_optional)
+        .ok_or_else(|| CliError::usage("missing host profile path"))?;
+    let attestation = arguments
+        .get(first_optional + 1)
+        .ok_or_else(|| CliError::usage("missing host attestation output path"))?;
+    Ok(Some((profile.as_os_str(), attestation.as_os_str())))
 }
 
 fn catalog(path: &OsStr) -> Result<String, CliError> {
@@ -422,6 +447,7 @@ fn measure_pg2_command(
     producer_commit: &OsStr,
     trace_path: &OsStr,
     raw_path: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
 ) -> Result<String, CliError> {
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
@@ -446,9 +472,15 @@ fn measure_pg2_command(
     validate_output_parent(raw_path, "raw output")?;
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
 
-    let artifacts = measure_pg2(&baseline, producer_commit, trace_path_text, None)
-        .map_err(|error| CliError::data(error.to_string()))?;
+    let artifacts = measure_pg2(
+        &baseline,
+        producer_commit,
+        trace_path_text,
+        qualification.token(),
+    )
+    .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -463,7 +495,7 @@ fn measure_pg2_command(
         .count();
     let invalid_samples = artifacts.batch.samples.len() - valid_samples;
 
-    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
     if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
         return Err(CliError::io(format!(
             "{}; trace output {trace_path_text:?} was already published and was not deleted",
@@ -471,6 +503,7 @@ fn measure_pg2_command(
         )));
     }
 
+    let attestation = qualification.json_fragment();
     Ok(format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg2-measurement\",\
          \"gate\":\"pg-2\",\"scenario\":\"{}\",\"benchmark_definition\":\"{}\",\
@@ -478,7 +511,7 @@ fn measure_pg2_command(
          \"sample_count\":{},\"valid_samples\":{},\"invalid_samples\":{},\
          \"bare_metal\":{},\"isolation_qualified\":{},\
          \"frame_digest\":\"{}\",\"trace_path\":\"{}\",\
-         \"trace_digest\":\"{}\",\"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"trace_digest\":\"{}\",\"raw_path\":\"{}\",\"raw_digest\":\"{}\"{attestation},\
          \"status\":\"measured-not-evaluated\"}}\n",
         escape_json(&baseline.policy.scenario),
         artifacts.batch.key.benchmark_definition,
@@ -502,6 +535,7 @@ fn measure_pg5_command(
     producer_commit: &OsStr,
     trace_path: &OsStr,
     raw_path: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
 ) -> Result<String, CliError> {
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
@@ -522,9 +556,15 @@ fn measure_pg5_command(
     validate_output_parent(raw_path, "raw output")?;
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
 
-    let artifacts = measure_pg5(&baseline, producer_commit, trace_path_text, None)
-        .map_err(|error| CliError::data(error.to_string()))?;
+    let artifacts = measure_pg5(
+        &baseline,
+        producer_commit,
+        trace_path_text,
+        qualification.token(),
+    )
+    .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -538,7 +578,7 @@ fn measure_pg5_command(
         .filter(|sample| sample.value != 0)
         .count();
 
-    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
     if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
         return Err(CliError::io(format!(
             "{}; trace output {trace_path_text:?} was already published and was not deleted",
@@ -546,6 +586,7 @@ fn measure_pg5_command(
         )));
     }
 
+    let attestation = qualification.json_fragment();
     Ok(format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg5-measurement\",\
          \"gate\":\"pg-5\",\"scenario\":\"{PG5_SCENARIO}\",\
@@ -555,7 +596,7 @@ fn measure_pg5_command(
          \"bare_metal\":{},\"isolation_qualified\":{},\
          \"reference_digest\":\"{}\",\
          \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
-         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\"{attestation},\
          \"status\":\"measured-not-evaluated\"}}\n",
         artifacts.batch.key.benchmark_definition,
         artifacts.batch.key.config_digest,
@@ -579,6 +620,7 @@ fn measure_pg7_command(
     cache_root: &OsStr,
     trace_path: &OsStr,
     raw_path: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
 ) -> Result<String, CliError> {
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
@@ -610,6 +652,14 @@ fn measure_pg7_command(
             "cache root, trace output, and raw output paths must be distinct",
         ));
     }
+    if let Some((_, attestation_path)) = qualification_arguments
+        && cache_root_text != "-"
+        && cache_root_text == utf8_argument(attestation_path, "host attestation output path")?
+    {
+        return Err(CliError::data(
+            "cache root and host attestation output paths must be distinct",
+        ));
+    }
     match scenario {
         Pg7Scenario::FormulaCached if cache_root_text == "-" || cache_root_text.is_empty() => {
             return Err(CliError::data(
@@ -633,6 +683,7 @@ fn measure_pg7_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     require_release_perf_front_door()?;
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
 
     let store = if scenario == Pg7Scenario::FormulaCached {
         validate_cache_root(cache_root)?;
@@ -654,9 +705,9 @@ fn measure_pg7_command(
         producer_commit,
         store.as_ref(),
         trace_path_text,
-        None,
+        qualification.token(),
     )
-        .map_err(|error| CliError::data(error.to_string()))?;
+    .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -671,7 +722,7 @@ fn measure_pg7_command(
         .count();
     let invalid_samples = artifacts.batch.samples.len() - valid_samples;
 
-    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
     if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
         return Err(CliError::io(format!(
             "{}; trace output {trace_path_text:?} was already published and was not deleted",
@@ -679,6 +730,7 @@ fn measure_pg7_command(
         )));
     }
 
+    let attestation = qualification.json_fragment();
     Ok(format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg7-measurement\",\
          \"gate\":\"pg-7\",\"scenario\":\"{}\",\"benchmark_definition\":\"{}\",\
@@ -687,7 +739,7 @@ fn measure_pg7_command(
          \"bare_metal\":{},\"isolation_qualified\":{},\
          \"result_digest\":\"{}\",\"cache_state\":\"{}\",\
          \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
-         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\"{attestation},\
          \"status\":\"measured-not-evaluated\"}}\n",
         escape_json(&baseline.policy.scenario),
         artifacts.batch.key.benchmark_definition,
@@ -712,6 +764,7 @@ fn measure_pg6_command(
     producer_commit: &OsStr,
     trace_path: &OsStr,
     raw_path: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
 ) -> Result<String, CliError> {
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
@@ -732,9 +785,15 @@ fn measure_pg6_command(
     validate_output_parent(raw_path, "raw output")?;
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
 
-    let artifacts = measure_pg6(&baseline, producer_commit, trace_path_text, None)
-        .map_err(|error| CliError::data(error.to_string()))?;
+    let artifacts = measure_pg6(
+        &baseline,
+        producer_commit,
+        trace_path_text,
+        qualification.token(),
+    )
+    .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -748,7 +807,7 @@ fn measure_pg6_command(
         .filter(|sample| sample.value != 0)
         .count();
 
-    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
     if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
         return Err(CliError::io(format!(
             "{}; trace output {trace_path_text:?} was already published and was not deleted",
@@ -756,6 +815,7 @@ fn measure_pg6_command(
         )));
     }
 
+    let attestation = qualification.json_fragment();
     Ok(format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-measurement\",\
          \"gate\":\"pg-6\",\"scenario\":\"{PG6_SCENARIO}\",\
@@ -764,7 +824,7 @@ fn measure_pg6_command(
          \"nonzero_samples\":{},\"bare_metal\":{},\
          \"isolation_qualified\":{},\"result_digest\":\"{}\",\
          \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
-         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\"{attestation},\
          \"status\":\"measured-not-evaluated\"}}\n",
         artifacts.batch.key.benchmark_definition,
         artifacts.batch.key.config_digest,
@@ -786,6 +846,7 @@ fn measure_pg6_peak_command(
     producer_commit: &OsStr,
     trace_path: &OsStr,
     raw_path: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
 ) -> Result<String, CliError> {
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
@@ -806,11 +867,18 @@ fn measure_pg6_peak_command(
     validate_output_parent(raw_path, "raw output")?;
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
 
     let probe =
         || fmn_platform::topology::current_rss_bytes(&StdFs).map_err(|error| error.to_string());
-    let artifacts = measure_pg6_peak(&baseline, producer_commit, trace_path_text, &probe, None)
-        .map_err(|error| CliError::data(error.to_string()))?;
+    let artifacts = measure_pg6_peak(
+        &baseline,
+        producer_commit,
+        trace_path_text,
+        &probe,
+        qualification.token(),
+    )
+    .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -831,7 +899,7 @@ fn measure_pg6_peak_command(
         .map(|sample| sample.value)
         .max();
 
-    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
     if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
         return Err(CliError::io(format!(
             "{}; trace output {trace_path_text:?} was already published and was not deleted",
@@ -842,6 +910,7 @@ fn measure_pg6_peak_command(
     let peak = peak_rss_bytes
         .map(|value| value.to_string())
         .unwrap_or_else(|| "null".to_owned());
+    let attestation = qualification.json_fragment();
     Ok(format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-peak-measurement\",\
          \"gate\":\"pg-6\",\"scenario\":\"{PG6_PEAK_SCENARIO}\",\
@@ -850,7 +919,7 @@ fn measure_pg6_peak_command(
          \"invalid_samples\":{},\"peak_rss_bytes\":{},\
          \"bare_metal\":{},\"isolation_qualified\":{},\
          \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
-         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\"{attestation},\
          \"status\":\"measured-not-evaluated\"}}\n",
         artifacts.batch.key.benchmark_definition,
         artifacts.batch.key.config_digest,
@@ -873,6 +942,7 @@ fn measure_pg6_soak_command(
     trace_path: &OsStr,
     raw_path: &OsStr,
     iterations_per_window: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
 ) -> Result<String, CliError> {
     let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
     let baseline =
@@ -898,6 +968,7 @@ fn measure_pg6_soak_command(
     validate_output_parent(raw_path, "raw output")?;
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
 
     // The one production residency capability: fmn-platform over the host
     // filesystem. Unsupported hosts flow through as retained-invalid samples.
@@ -909,7 +980,7 @@ fn measure_pg6_soak_command(
         trace_path_text,
         definition,
         &mut probe,
-        None,
+        qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
@@ -931,7 +1002,7 @@ fn measure_pg6_soak_command(
         .filter(|sample| sample.invalid_reason.is_none() && sample.value != 0)
         .count();
 
-    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
     if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
         return Err(CliError::io(format!(
             "{}; trace output {trace_path_text:?} was already published and was not deleted",
@@ -939,6 +1010,7 @@ fn measure_pg6_soak_command(
         )));
     }
 
+    let attestation = qualification.json_fragment();
     Ok(format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-soak-measurement\",\
          \"gate\":\"pg-6\",\"scenario\":\"{PG6_SOAK_SCENARIO}\",\
@@ -948,7 +1020,7 @@ fn measure_pg6_soak_command(
          \"leaked_windows\":{},\"bare_metal\":{},\
          \"isolation_qualified\":{},\
          \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
-         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\"{attestation},\
          \"status\":\"measured-not-evaluated\"}}\n",
         artifacts.batch.key.benchmark_definition,
         artifacts.batch.key.config_digest,
@@ -984,6 +1056,95 @@ fn validate_cache_root(path: &OsStr) -> Result<(), CliError> {
         ));
     }
     validate_output_parent(path.as_os_str(), "cache root")
+}
+
+struct PreparedQualification {
+    token: Option<HostQualification>,
+    output_path: Option<PathBuf>,
+}
+
+impl PreparedQualification {
+    fn token(&self) -> Option<&HostQualification> {
+        self.token.as_ref()
+    }
+
+    fn publish_then_trace(&self, trace_path: &OsStr, trace_bytes: &[u8]) -> Result<(), CliError> {
+        if let (Some(token), Some(path)) = (&self.token, &self.output_path) {
+            write_new(
+                path.as_os_str(),
+                token.attestation_tsv().as_bytes(),
+                "host attestation output",
+            )?;
+        }
+        if let Err(error) = write_new(trace_path, trace_bytes, "trace output") {
+            if let Some(path) = &self.output_path {
+                return Err(CliError::io(format!(
+                    "{}; host attestation output {:?} was already published and was not deleted",
+                    error.detail, path
+                )));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn json_fragment(&self) -> String {
+        match (&self.token, &self.output_path) {
+            (Some(token), Some(path)) => format!(
+                ",\"host_attestation_path\":\"{}\",\"host_attestation_digest\":\"{}\"",
+                escape_json(&path.to_string_lossy()),
+                token.evidence().digest
+            ),
+            _ => ",\"host_attestation_path\":null,\"host_attestation_digest\":null".to_owned(),
+        }
+    }
+}
+
+fn prepare_host_qualification(
+    arguments: Option<(&OsStr, &OsStr)>,
+    trace_path: &OsStr,
+    raw_path: &OsStr,
+) -> Result<PreparedQualification, CliError> {
+    let Some((profile_path, attestation_path)) = arguments else {
+        return Ok(PreparedQualification {
+            token: None,
+            output_path: None,
+        });
+    };
+    require_release_perf_front_door()?;
+    preflight_regular_input(profile_path, "host profile")?;
+    let profile_text = read_utf8(profile_path, "host profile", MAX_HOST_PROFILE_BYTES)?;
+    let profile =
+        HostProfile::from_tsv(&profile_text).map_err(|error| CliError::data(error.to_string()))?;
+    let attestation_text = utf8_argument(attestation_path, "host attestation output path")?;
+    let trace_text = utf8_argument(trace_path, "trace output path")?;
+    let raw_text = utf8_argument(raw_path, "raw output path")?;
+    if attestation_text == trace_text || attestation_text == raw_text {
+        return Err(CliError::data(
+            "host attestation, trace, and raw output paths must be distinct",
+        ));
+    }
+    EvidenceRef::from_bytes(EvidenceKind::HostAttestation, attestation_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    validate_output_parent(attestation_path, "host attestation output")?;
+    refuse_existing(attestation_path, "host attestation output")?;
+
+    let raw = Path::new(raw_path);
+    let parent = raw
+        .parent()
+        .ok_or_else(|| CliError::data("raw output has no parent directory"))?;
+    let absolute_parent = fs::canonicalize(parent)
+        .map_err(|error| CliError::io(format!("cannot resolve raw output parent: {error}")))?;
+    let leaf = raw
+        .file_name()
+        .ok_or_else(|| CliError::data("raw output has no file name"))?;
+    let artifact_path = absolute_parent.join(leaf);
+    let token = attest_current_host(&profile, &artifact_path, attestation_text)
+        .map_err(|error| CliError::data(error.to_string()))?;
+    Ok(PreparedQualification {
+        token: Some(token),
+        output_path: Some(PathBuf::from(attestation_path)),
+    })
 }
 
 fn require_release_perf_front_door() -> Result<(), CliError> {
@@ -1401,6 +1562,18 @@ mod tests {
         let error = dispatch(&arguments).unwrap_err();
         assert_eq!(error.exit_code, EXIT_USAGE);
         assert!(error.detail.contains("<baseline.tsv>"));
+
+        let arguments = vec![
+            "measure-pg2".into(),
+            "baseline.tsv".into(),
+            "0123456789abcdef0123456789abcdef01234567".into(),
+            "trace.tsv".into(),
+            "raw.tsv".into(),
+            "profile-without-attestation.tsv".into(),
+        ];
+        let error = dispatch(&arguments).unwrap_err();
+        assert_eq!(error.exit_code, EXIT_USAGE);
+        assert!(error.detail.contains("host-attestation.tsv"));
     }
 
     #[test]
