@@ -1354,10 +1354,7 @@ mod tests {
             "/sys/fs/cgroup/fmn-benchmark/cgroup.procs",
             format!("{pid}\n").into_bytes(),
         );
-        fs.insert(
-            "/sys/class/thermal/thermal_zone0/temp",
-            b"70001\n".to_vec(),
-        );
+        fs.insert("/sys/class/thermal/thermal_zone0/temp", b"70001\n".to_vec());
         let thermal_error = attest_linux_host(
             &profile,
             &fs,
@@ -1366,7 +1363,11 @@ mod tests {
             pid,
         )
         .expect_err("hot host must fail");
-        assert!(thermal_error.to_string().contains("exceeds profile ceiling"));
+        assert!(
+            thermal_error
+                .to_string()
+                .contains("exceeds profile ceiling")
+        );
     }
 
     #[test]
