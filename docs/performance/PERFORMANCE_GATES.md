@@ -58,13 +58,14 @@ Existing repository evidence remains distinct:
   PG-1 denominator.
 - PG-5's canonical producer covers the complete committed scene corpus at
   `{1,4,16}` plus the production frame-parallel and ordered-emitter paths. Its
-  output remains host-unqualified until fm-inr.1; weekly high-core and
+  checked-in output remains host-unqualified because no real pinned-machine
+  profile/observation is committed yet; weekly high-core and
   certified-platform receipts are separate evidence, not inferred successes.
 - PG-6's primitive steady-state allocation producer covers the complete
   committed scene-golden corpus, and the leak-soak producer covers
   `one-hour-soak-leak` on residency-capable (Linux) hosts. Its peak-RSS
   producer covers a bit-locked three-view UHD 3D gallery through the public
-  library and renderer path. All three remain host-unqualified until fm-inr.1;
+  library and renderer path. All three checked-in runs remain host-unqualified;
   no observed pinned-host PG-6 verdict is inferred from shared-host runs.
 - the ignored native Metal probes are PG-A measurement producers, not
   committed pinned-profile baselines.
@@ -141,16 +142,89 @@ concurrently retargeted by their owner.
   leaves the owned cache root intact as evidence-supporting state and never
   cleans it up or reuses it.
 
+Every `measure-*` command above accepts one optional, indivisible final pair:
+`<host-profile.tsv> <host-attestation.tsv>`. Omitting both is explicit
+calibration mode and always records `bare_metal=false`, `isolated=false`, and
+null attestation fields in the robot result. Supplying only one is a usage
+error. Supplying both invokes the live authority described below before any
+benchmark work; the attestation output, trace, and raw bundle must be three
+distinct nonexistent files below `tests/artifacts/perf/`.
+
 Exit `0` means the requested structural/evidence check succeeded; `64` is
 usage error, `65` is malformed, missing, or mismatched data, and `74` is an
 output I/O failure. A measurement record has status
-`measured-not-evaluated`: the producer does not certify the machine it happens
-to run on and cannot turn a target-only baseline into green evidence. Until
-fm-inr.1 lands live pinned-host attestation, PG-2 output forcibly records
-`bare_metal=false` and `isolated=false` even when a supplied context claims
-otherwise; PG-5, PG-6, and PG-7 do the same. The profile name and fingerprints
-are retained for calibration, but the common evaluator must classify the
-bundle as host-unqualified or an identity mismatch rather than pass it.
+`measured-not-evaluated`: even a qualified producer cannot turn a target-only
+baseline into green evidence. Without the optional host pair, every producer
+forcibly records `bare_metal=false` and `isolated=false` even when its baseline
+claims otherwise. With the pair, only the opaque in-process token minted by
+the live authority may set both fields; the baseline's profile, host, compiler,
+`SUITE.lock`, and build-profile identities must exactly match that token. A
+mismatch fails before workload execution. The common evaluator still requires
+a committed observed baseline and replayed raw source before it can pass.
+
+## Pinned-host profile and live-attestation authority
+
+`fmn_conformance::perf_host` owns two bounded schemas:
+`fmn-perf-host-profile/1` and `fmn-perf-host-attestation/1`. A profile is an
+exact key/value TSV manifest for one machine generation. It names the profile
+and platform and pins hashes of `/etc/os-release`, stable CPU identity rows,
+non-serial DMI identity, the complete `HardwareTopology` snapshot, and the
+storage source. It also pins the exact kernel, eight benchmark CPU IDs,
+cgroup-v2 path, governor, turbo/boost leaf and value, thermal sensor and
+ceiling, load ceiling, mount point, and filesystem type. Unknown, duplicate,
+oversized, traversal-bearing, caller-controlled thermal, and incomplete
+profiles are rejected.
+
+On `linux-x86_64`, qualification re-reads every pinned value through bounded
+host capabilities and additionally requires all of the following:
+
+- exactly eight physical cores and eight distinct physical cores in the
+  benchmark CPU set;
+- no CPU hypervisor flag, `/sys/hypervisor/type`, nested PID namespace, or
+  known virtual/cloud DMI marker;
+- exact process affinity plus exact `isolated`, `nohz_full`, and `rcu_nocbs`
+  CPU lists;
+- one unified cgroup-v2 whose effective cpuset is exact and whose
+  `cgroup.procs` contains only the direct measurement binary's PID;
+- the pinned governor on every benchmark CPU, exact turbo policy, temperature
+  and one-minute load within their ceilings, and exact mount/source identity
+  for the raw artifact path.
+
+The package build embeds `rustc --version --verbose` from Cargo's actual
+compiler, the exact `rust-toolchain.toml`, and the exact `SUITE.lock` bytes.
+Those compiled identities—not caller text—must match the baseline. The live
+attestation is published first as content-addressed `host-attestation`
+evidence, then the phase trace, then the raw bundle. Publication is
+create-new/no-clobber throughout; a later race can leave an obviously partial
+evidence set, and the tool never deletes it.
+
+Run the already-built `release-perf` binary directly inside the dedicated
+cgroup. `cargo run` keeps Cargo in the same cgroup, so the exclusive-process
+check correctly refuses it. RCH, containers, VMs, shared runners, missing
+sysfs/cgroup leaves, and ordinary developer machines are calibration-only.
+The `macos-aarch64` schema family is reserved, but qualification currently
+returns a precise unavailable error: `HardwareTopology::fallback` is not
+evidence, and no subprocess-based `sysctl` escape is allowed by D-02. A safe
+native macOS topology/power/isolation capability and real profile still remain
+open under fm-inr.1.
+
+### Baseline-version update ritual
+
+1. Change one reviewed host profile generation; never edit a prior profile in
+   place. A kernel, firmware, topology, power, storage, compiler, or suite-lock
+   change therefore produces a new `BenchmarkKey`.
+2. Build `fmn-perf` under `release-perf`, enter the exact dedicated cgroup,
+   cool/quiesce the host, and run every applicable canonical producer with the
+   profile/attestation pair. Retain invalid repetitions and partial publication
+   artifacts; do not delete or average them away.
+3. Commit the profile, host attestation, phase trace, and canonical raw TSV.
+   Derive the observed baseline only from those exact bytes and verify it with
+   `fmn-perf verify-baseline`; hand-authored medians or copied qualification
+   booleans are invalid.
+4. Run the complete Gauntlet, compare the prior generation, adjudicate every
+   alert/block, then update the scheduled host lane. Until both declared Linux
+   and macOS profiles have real replayable observations for applicable keys,
+   fm-inr.1 and whole-gate claims remain open.
 
 ## Canonical PG-2 workloads
 
@@ -211,8 +285,9 @@ The `fmn-perf-pg5-trace/1` artifact retains every per-scene digest, all three
 mismatch counts, maximum in-flight observations, per-team frame counts, and
 the ordered emitter's maximum outstanding reservations. The producer validates
 that both teams did real work, every frame was emitted in order, and the emitter
-finished with no outstanding or dropped frames. Its batch still forces host
-qualification false until fm-inr.1 supplies live attestation.
+finished with no outstanding or dropped frames. Its batch forces host
+qualification false in calibration mode and accepts true only from the live
+profile token.
 
 This is the permanent per-commit `{1,4,16}` surface only. Weekly `{32,96}+`
 runs and certified-platform receipts are separate lifecycle evidence. When
@@ -243,9 +318,9 @@ The `fmn-perf-pg6-trace/1` artifact retains, per scene, the warm and measured
 frame digests, warm allocation count, measured allocation count, reserved arena
 bytes, and worker-pool slot count. Warm and measured frame digests must be equal,
 and the ordered corpus aggregate must match the compiled self-golden before the
-producer emits evidence. The measured batch still forces host qualification to
-false until fm-inr.1 supplies live attestation; this makes the output useful for
-calibration without inventing a closeable whole-PG-6 verdict.
+producer emits evidence. The measured batch still forces host qualification
+false in calibration mode; this makes shared-host output useful without
+inventing a closeable whole-PG-6 verdict.
 
 ## Canonical PG-6 4K 3D peak-residency workload
 
@@ -270,8 +345,8 @@ are retained as invalid with reason `rss-unsupported-host`; no plausible value
 is substituted.
 
 The strict blocking target is at most 1.5 GB. Like the other current producers,
-the batch forcibly records `bare_metal=false` and `isolated=false` until
-fm-inr.1 supplies live pinned-host attestation. The full-tier e2e catalog runs
+the batch forcibly records `bare_metal=false` and `isolated=false` unless the
+live profile token is supplied. The full-tier e2e catalog runs
 the exact production UHD gallery and certified lock path; scheduling a weekly
 measurement and committing an observed host-qualified baseline remain separate
 evidence work, not properties manufactured by the renderer test.

@@ -29,6 +29,10 @@
 //!   median/MAD summaries, versioned observed baselines, and explicit
 //!   pass/alert/block/inconclusive verdicts. It never turns an unpinned or
 //!   unobserved run into passing PG evidence.
+//! - the pinned-host authority (§17.2, fm-inr.1) — [`perf_host`]: strict host
+//!   profiles, compiled compiler/suite identity, live Linux bare-metal and
+//!   isolation checks, and an opaque token that current producers require
+//!   before recording a qualified measurement.
 //! - the canonical PG-2 producer (fm-inr.2.1) — [`perf_pg2`]: fixed fill and
 //!   stroke fixtures, exact benchmark/configuration digests, bounded raw
 //!   samples, and a content-addressed stage trace over the real Lumen path.
