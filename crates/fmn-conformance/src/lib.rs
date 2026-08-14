@@ -40,6 +40,10 @@
 //!   warm frame plus one arena/output-buffer reuse frame for every committed
 //!   scene-golden case, with exact engine-owned allocation samples and retained
 //!   frame identities.
+//! - the canonical PG-6 peak-residency producer (fm-0q0g) —
+//!   [`perf_pg6_peak`]: eleven real passes over a certified three-view UHD 3D
+//!   gallery through the public library/renderer path, with concurrent
+//!   resident-set sampling and no duplicated pseudo-samples.
 //! - the canonical PG-7 producer (fm-inr.2.2) — [`perf_pg7`]: cold formula,
 //!   cache-proven formula-hit, and exact 10,000-glyph native-text fixtures
 //!   with result self-goldens and bounded integer latency samples.
@@ -101,6 +105,7 @@ pub mod perf;
 pub mod perf_pg2;
 pub mod perf_pg5;
 pub mod perf_pg6;
+pub mod perf_pg6_peak;
 pub mod perf_pg7;
 pub mod perf_pg8;
 pub mod ratchet;

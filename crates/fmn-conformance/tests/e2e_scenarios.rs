@@ -35,7 +35,9 @@
 //!   checked-in definition to a representative `{1, 4, 16}` certified render,
 //!   while PG-6 warms and reuses the real frame arena/output buffer for a
 //!   registered corpus scene and requires an equal digest with zero measured
-//!   allocations.
+//!   allocations. PG-6's full tier also renders the exact three-view UHD 3D
+//!   gallery through the production solid/surface and renderer APIs and checks
+//!   every frame against its certified lock.
 //! - **LOG ASSERTIONS** — the preflight typeset fires before frame zero
 //!   with the typeset count recorded; the segment purity classification
 //!   is recorded for play (pure) and wait (stateful); the engine identity
@@ -62,6 +64,10 @@ use fmn_conformance::e2e::{
 use fmn_conformance::golden::Scope;
 use fmn_conformance::perf_pg5::{PG5_DIRECT_THREADS, Pg5Definition, pg5_identity};
 use fmn_conformance::perf_pg6::{PG6_THREADS, Pg6Definition, pg6_identity};
+use fmn_conformance::perf_pg6_peak::{
+    PG6_PEAK_CASE_COUNT, PG6_PEAK_HEIGHT, PG6_PEAK_WIDTH, Pg6PeakDefinition,
+    render_locked_gallery_once,
+};
 use fmn_conformance::scene_goldens::{self, TILING};
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_C, WHITE};
@@ -1859,6 +1865,53 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("pg6_measured_allocations", 0))
 }
 
+/// PG-6's scheduled full-tier corpus proof. This is the same three-frame UHD
+/// production function the peak-RSS sampler runs during every repetition; the
+/// e2e row validates real rendering and lock identity, not a reduced proxy.
+fn pg6_peak_gallery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let definition = Pg6PeakDefinition::new();
+    definition
+        .validate_corpus_lock()
+        .map_err(|error| fail(format!("PG-6 peak corpus identity: {error}")))?;
+    let cases = render_locked_gallery_once()
+        .map_err(|error| fail(format!("PG-6 peak gallery render: {error}")))?;
+    let complete = cases.len() == PG6_PEAK_CASE_COUNT;
+    let distinct = complete
+        && cases[0].frame_digest != cases[1].frame_digest
+        && cases[0].frame_digest != cases[2].frame_digest
+        && cases[1].frame_digest != cases[2].frame_digest;
+    let preparation_bytes = cases
+        .iter()
+        .map(|case| case.preparation_bytes)
+        .max()
+        .unwrap_or(0);
+
+    ctx.record_asset(
+        "pg6.gallery-4k-3d-peak.definition",
+        definition.to_tsv().as_bytes(),
+    );
+    ctx.event(
+        LogEvent::new("performance.pg6.peak_gallery")
+            .field("frames", cases.len())
+            .field("width", u64::from(PG6_PEAK_WIDTH))
+            .field("height", u64::from(PG6_PEAK_HEIGHT))
+            .field("distinct_digests", distinct)
+            .field("max_preparation_bytes", preparation_bytes)
+            .field("benchmark_definition", definition.digest().to_string()),
+    );
+    ctx.counter("pg6_peak_frames", cases.len() as u64);
+    ctx.counter("pg6_peak_distinct_digests", u64::from(distinct));
+    if !complete || !distinct || preparation_bytes == 0 {
+        return Err(fail(format!(
+            "PG-6 peak gallery proof incomplete: frames={}, distinct={distinct}, max_preparation_bytes={preparation_bytes}",
+            cases.len(),
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("pg6_peak_frames", PG6_PEAK_CASE_COUNT as u64)
+        .with_counter("pg6_peak_distinct_digests", 1))
+}
+
 // ---------------------------------------------------------------------------
 // Log-machinery scenarios
 // ---------------------------------------------------------------------------
@@ -2603,6 +2656,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(
+        spec(
+            "lifecycle.pg6_peak_gallery_4k_3d.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(pg6_peak_gallery_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("pg6_peak_frames", PG6_PEAK_CASE_COUNT as u64),
+                counter_eq("pg6_peak_distinct_digests", 1),
+            ],
+            vec![LogExpect::span_present(
+                "performance.pg6.peak_gallery",
+                vec![
+                    FieldPred::u64_eq("frames", PG6_PEAK_CASE_COUNT as u64),
+                    FieldPred::u64_eq("width", u64::from(PG6_PEAK_WIDTH)),
+                    FieldPred::u64_eq("height", u64::from(PG6_PEAK_HEIGHT)),
+                    FieldPred::bool_eq("distinct_digests", true),
+                    FieldPred::u64_ge("max_preparation_bytes", 1),
+                ],
+            )],
+        )
+        .tier(Tier::Full),
+    );
 
     // LOG ASSERTIONS (machinery proofs).
     specs.push(spec(

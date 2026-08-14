@@ -62,9 +62,10 @@ Existing repository evidence remains distinct:
   certified-platform receipts are separate evidence, not inferred successes.
 - PG-6's primitive steady-state allocation producer covers the complete
   committed scene-golden corpus, and the leak-soak producer covers
-  `one-hour-soak-leak` on residency-capable (Linux) hosts. Peak RSS
-  (`gallery-4k-3d-peak`) still requires the 4K 3D gallery corpus and remains
-  inconclusive while its evidence is absent.
+  `one-hour-soak-leak` on residency-capable (Linux) hosts. Its peak-RSS
+  producer covers a bit-locked three-view UHD 3D gallery through the public
+  library and renderer path. All three remain host-unqualified until fm-inr.1;
+  no observed pinned-host PG-6 verdict is inferred from shared-host runs.
 - the ignored native Metal probes are PG-A measurement producers, not
   committed pinned-profile baselines.
 - Studio's edit-to-frame report remains an input to PG-4, not a whole-gate
@@ -99,8 +100,9 @@ concurrently retargeted by their owner.
   configuration, fixed certified ExecutionPlan, one-thread reference
   self-golden, and all three schedule mechanisms.
 - `pg6-definitions` reports the exact compiled corpus-lock, benchmark,
-  configuration, and frame-result self-golden identities for the primitive
-  steady-state allocation workload.
+  configuration, and frame-result self-golden identities for both the
+  primitive steady-state allocation workload and the UHD 3D peak-residency
+  workload.
 - `pg7-definitions` reports the exact compiled benchmark-definition,
   configuration, fixture-input, and result-self-golden digests for all three
   native-typesetting workloads.
@@ -122,6 +124,11 @@ concurrently retargeted by their owner.
   It renders one warm frame and one caller-buffer/arena reuse frame for every
   committed scene, retaining both frame digests and the engine-owned allocation
   ledger for each measured frame.
+- `measure-pg6-peak <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>`
+  runs eleven independent complete passes over the certified three-view UHD 3D
+  gallery. A concurrent one-millisecond resident-set sampler plus explicit
+  before/after probes retains one peak byte count per pass; unsupported hosts
+  retain eleven named invalid samples and do no synthetic rendering work.
 - `measure-pg6-soak <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>
   <iterations-per-window>` applies the same identity and exclusive-publication
   rules to the leak soak: three windows of full-corpus steady-state rendering,
@@ -240,6 +247,35 @@ producer emits evidence. The measured batch still forces host qualification to
 false until fm-inr.1 supplies live attestation; this makes the output useful for
 calibration without inventing a closeable whole-PG-6 verdict.
 
+## Canonical PG-6 4K 3D peak-residency workload
+
+The `fmn-perf-pg6-peak-definition/1` bytes bind three camera states over one
+native gallery assembled from `Sphere`, `Torus`, `Cylinder`, and all six
+`Cube` faces. Each state renders at 3840×2160 through Lumen's public certified
+`ThreeDJob`, with four camera samples, four render threads, fixed 128/16 tiling,
+raw RGBA16F output, and default fail-closed 3D preparation limits. The three
+resulting frame digests are exact rows in
+`gallery_3d.certified.lock`; corpus, camera, renderer, or library drift is a
+hard producer error before evidence publication.
+
+One sample is one complete front/quarter/orbit gallery pass. The producer runs
+eleven real passes: nine required by policy plus two retained-invalid slots.
+It never repeats one observation to enlarge the denominator. While each pass
+is live, a one-millisecond sampler polls `current_rss_bytes` concurrently and
+combines those observations with explicit before/after probes. The largest
+observed `VmRSS` becomes that pass's `bytes` sample, while the phase trace
+retains every frame digest and each job's conservative preparation-byte
+admission. If the host cannot report resident set size, all eleven observations
+are retained as invalid with reason `rss-unsupported-host`; no plausible value
+is substituted.
+
+The strict blocking target is at most 1.5 GB. Like the other current producers,
+the batch forcibly records `bare_metal=false` and `isolated=false` until
+fm-inr.1 supplies live pinned-host attestation. The full-tier e2e catalog runs
+the exact production UHD gallery and certified lock path; scheduling a weekly
+measurement and committing an observed host-qualified baseline remain separate
+evidence work, not properties manufactured by the renderer test.
+
 ## Canonical PG-6 leak-soak workload
 
 The `fmn-perf-pg6-soak-definition/1` bytes bind the same 27-scene certified
@@ -260,8 +296,7 @@ wasm) retain all three samples as invalid with reason `rss-unsupported-host`
 and skip the burn: the gate is inconclusive there, never synthesized. The
 `fmn-perf-pg6-soak-trace/1` artifact retains each window's start/end resident
 bytes, leaked bytes, and iteration count. `fmn-perf measure-pg6-soak` is the
-producing front door; `gallery-4k-3d-peak` remains the one PG-6 row without a
-producer, pending the 4K 3D gallery corpus.
+producing front door.
 
 ## Canonical PG-7 workloads
 

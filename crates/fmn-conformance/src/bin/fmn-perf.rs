@@ -22,6 +22,10 @@ use fmn_conformance::perf_pg6::{
     PG6_WARMUP_FRAMES_PER_SCENE, Pg6Definition, Pg6SoakDefinition, measure_pg6, measure_pg6_soak,
     pg6_identity,
 };
+use fmn_conformance::perf_pg6_peak::{
+    PG6_PEAK_CASE_COUNT, PG6_PEAK_DEFINITION_SCHEMA, PG6_PEAK_HEIGHT, PG6_PEAK_SAMPLE_COUNT,
+    PG6_PEAK_SCENARIO, PG6_PEAK_THREADS, PG6_PEAK_WIDTH, Pg6PeakDefinition, measure_pg6_peak,
+};
 use fmn_conformance::perf_pg7::{
     PG7_DEFINITION_SCHEMA, PG7_SAMPLE_COUNT, PG7_WARMUP_ITERATIONS, Pg7Definition, Pg7Scenario,
     measure_pg7,
@@ -66,7 +70,8 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(CliError::usage(
             "expected catalog, verify-baseline, pg2-definitions, measure-pg2, \
-             pg5-definitions, measure-pg5, pg6-definitions, measure-pg6, measure-pg6-soak, \
+             pg5-definitions, measure-pg5, pg6-definitions, measure-pg6, measure-pg6-peak, \
+             measure-pg6-soak, \
              pg7-definitions, or measure-pg7",
         ));
     };
@@ -114,6 +119,20 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
         ),
         "measure-pg6" if arguments.len() == 5 => measure_pg6_command(
+            arguments
+                .get(1)
+                .ok_or_else(|| CliError::usage("missing baseline path"))?,
+            arguments
+                .get(2)
+                .ok_or_else(|| CliError::usage("missing producer commit"))?,
+            arguments
+                .get(3)
+                .ok_or_else(|| CliError::usage("missing trace output path"))?,
+            arguments
+                .get(4)
+                .ok_or_else(|| CliError::usage("missing raw output path"))?,
+        ),
+        "measure-pg6-peak" if arguments.len() == 5 => measure_pg6_peak_command(
             arguments
                 .get(1)
                 .ok_or_else(|| CliError::usage("missing baseline path"))?,
@@ -176,6 +195,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         )),
         "measure-pg6" => Err(CliError::usage(
             "measure-pg6 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
+        )),
+        "measure-pg6-peak" => Err(CliError::usage(
+            "measure-pg6-peak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>",
         )),
         "measure-pg6-soak" => Err(CliError::usage(
             "measure-pg6-soak requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> <iterations-per-window>",
@@ -359,6 +381,7 @@ fn pg5_definitions() -> Result<String, CliError> {
 
 fn pg6_definitions() -> String {
     let definition = Pg6Definition::new();
+    let peak = Pg6PeakDefinition::new();
     format!(
         "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-definition\",\
          \"definition_schema\":\"{PG6_DEFINITION_SCHEMA}\",\"gate\":\"pg-6\",\
@@ -368,11 +391,27 @@ fn pg6_definitions() -> String {
          \"engine\":\"{}\",\"tier\":\"{}\",\
          \"thread_profile\":\"fixed-4\",\"threads\":{PG6_THREADS},\
          \"sample_count\":{PG6_SAMPLE_COUNT},\
-         \"warmup_frames_per_scene\":{PG6_WARMUP_FRAMES_PER_SCENE}}}\n",
+         \"warmup_frames_per_scene\":{PG6_WARMUP_FRAMES_PER_SCENE}}}\n\
+         {{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-definition\",\
+         \"definition_schema\":\"{PG6_PEAK_DEFINITION_SCHEMA}\",\"gate\":\"pg-6\",\
+         \"scenario\":\"{PG6_PEAK_SCENARIO}\",\
+         \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
+         \"corpus_lock_digest\":\"{}\",\
+         \"engine\":\"{}\",\"tier\":\"{}\",\
+         \"thread_profile\":\"fixed-4-plus-rss-sampler\",\
+         \"threads\":{PG6_PEAK_THREADS},\"sample_count\":{PG6_PEAK_SAMPLE_COUNT},\
+         \"corpus_scenes\":{PG6_PEAK_CASE_COUNT},\
+         \"frame_width_px\":{PG6_PEAK_WIDTH},\
+         \"frame_height_px\":{PG6_PEAK_HEIGHT}}}\n",
         definition.digest(),
         definition.config_digest(),
         definition.corpus_lock_digest(),
         definition.expected_result_digest(),
+        pg6_identity().engine.name(),
+        pg6_identity().tier.name(),
+        peak.digest(),
+        peak.config_digest(),
+        peak.corpus_lock_digest(),
         pg6_identity().engine.name(),
         pg6_identity().tier.name(),
     )
@@ -729,6 +768,92 @@ fn measure_pg6_command(
         artifacts.batch.key.bare_metal,
         artifacts.batch.key.isolated,
         artifacts.result_digest,
+        escape_json(trace_path_text),
+        trace_digest,
+        escape_json(raw_path_text),
+        raw_digest,
+    ))
+}
+
+fn measure_pg6_peak_command(
+    baseline_path: &OsStr,
+    producer_commit: &OsStr,
+    trace_path: &OsStr,
+    raw_path: &OsStr,
+) -> Result<String, CliError> {
+    let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
+    let baseline =
+        Baseline::from_tsv(&baseline_text).map_err(|error| CliError::data(error.to_string()))?;
+    let producer_commit = producer_commit_argument(producer_commit)?;
+    let trace_path_text = utf8_argument(trace_path, "trace output path")?;
+    let raw_path_text = utf8_argument(raw_path, "raw output path")?;
+    if trace_path_text == raw_path_text {
+        return Err(CliError::data(
+            "trace and raw output paths must be distinct",
+        ));
+    }
+    EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    EvidenceRef::from_bytes(EvidenceKind::RawSamples, raw_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    validate_output_parent(trace_path, "trace output")?;
+    validate_output_parent(raw_path, "raw output")?;
+    refuse_existing(trace_path, "trace output")?;
+    refuse_existing(raw_path, "raw output")?;
+
+    let probe =
+        || fmn_platform::topology::current_rss_bytes(&StdFs).map_err(|error| error.to_string());
+    let artifacts = measure_pg6_peak(&baseline, producer_commit, trace_path_text, &probe)
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw = artifacts
+        .batch
+        .to_tsv()
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw_digest = sha256(raw.as_bytes());
+    let trace_digest = sha256(artifacts.trace_tsv.as_bytes());
+    let invalid_samples = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_some())
+        .count();
+    let peak_rss_bytes = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_none())
+        .map(|sample| sample.value)
+        .max();
+
+    write_new(trace_path, artifacts.trace_tsv.as_bytes(), "trace output")?;
+    if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
+        return Err(CliError::io(format!(
+            "{}; trace output {trace_path_text:?} was already published and was not deleted",
+            error.detail
+        )));
+    }
+
+    let peak = peak_rss_bytes
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    Ok(format!(
+        "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg6-peak-measurement\",\
+         \"gate\":\"pg-6\",\"scenario\":\"{PG6_PEAK_SCENARIO}\",\
+         \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
+         \"producer_commit\":\"{}\",\"sample_count\":{},\
+         \"invalid_samples\":{},\"peak_rss_bytes\":{},\
+         \"bare_metal\":{},\"isolation_qualified\":{},\
+         \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"status\":\"measured-not-evaluated\"}}\n",
+        artifacts.batch.key.benchmark_definition,
+        artifacts.batch.key.config_digest,
+        producer_commit,
+        artifacts.batch.samples.len(),
+        invalid_samples,
+        peak,
+        artifacts.batch.key.bare_metal,
+        artifacts.batch.key.isolated,
         escape_json(trace_path_text),
         trace_digest,
         escape_json(raw_path_text),
@@ -1229,9 +1354,13 @@ mod tests {
     #[test]
     fn pg6_definition_surface_is_closed_and_line_oriented() {
         let output = pg6_definitions();
-        assert_eq!(output.lines().count(), 1);
-        assert!(output.starts_with("{\"schema\":\"fmn-perf-cli/1\"") && output.ends_with("}\n"));
+        assert_eq!(output.lines().count(), 2);
+        assert!(output.lines().all(|line| {
+            line.starts_with("{\"schema\":\"fmn-perf-cli/1\"") && line.ends_with('}')
+        }));
         assert!(output.contains("\"scenario\":\"primitive-steady-allocations\""));
+        assert!(output.contains("\"scenario\":\"gallery-4k-3d-peak\""));
+        assert!(output.contains("\"frame_width_px\":3840"));
         assert!(output.contains(&format!("\"sample_count\":{PG6_SAMPLE_COUNT}")));
         assert!(!output.contains("\"status\""));
     }
