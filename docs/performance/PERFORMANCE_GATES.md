@@ -78,10 +78,15 @@ report `inconclusive`.
 
 ## Robot verifier
 
-`cargo run --profile release-perf -p fmn-conformance --bin fmn-perf -- ...`
-provides NDJSON-only policy, evidence, and producer commands:
+From `crates/fmn-conformance/`,
+`cargo run --manifest-path ../../Cargo.toml --profile release-perf \
+-p fmn-conformance --bin fmn-perf -- ...` provides NDJSON-only policy,
+evidence, and producer commands. This working directory is part of the
+artifact-path contract: canonical evidence paths and baseline source rows are
+rooted at this crate's `tests/artifacts/perf/`, while the policy catalog is
+`../../docs/performance/PERF_GATES.tsv`.
 
-- `catalog docs/performance/PERF_GATES.tsv` validates the complete policy
+- `catalog ../../docs/performance/PERF_GATES.tsv` validates the complete policy
   catalog and reports its canonical digest and rows.
 - `verify-baseline <baseline.tsv>` validates a versioned observed baseline,
   loads its declared repository-relative raw-sample source, requires the
@@ -147,8 +152,9 @@ Every `measure-*` command above accepts one optional, indivisible final pair:
 calibration mode and always records `bare_metal=false`, `isolated=false`, and
 null attestation fields in the robot result. Supplying only one is a usage
 error. Supplying both invokes the live authority described below before any
-benchmark work; the attestation output, trace, and raw bundle must be three
-distinct nonexistent files below `tests/artifacts/perf/`.
+benchmark work and repeats the same live checks after the workload; the
+attestation output, trace, and raw bundle must be three distinct nonexistent
+files below `tests/artifacts/perf/`.
 
 Exit `0` means the requested structural/evidence check succeeded; `64` is
 usage error, `65` is malformed, missing, or mismatched data, and `74` is an
@@ -159,8 +165,9 @@ forcibly records `bare_metal=false` and `isolated=false` even when its baseline
 claims otherwise. With the pair, only the opaque in-process token minted by
 the live authority may set both fields; the baseline's profile, host, compiler,
 `SUITE.lock`, and build-profile identities must exactly match that token. A
-mismatch fails before workload execution. The common evaluator still requires
-a committed observed baseline and replayed raw source before it can pass.
+mismatch fails before workload execution. Postflight host drift fails before
+any output is published. The common evaluator still requires a committed
+observed baseline and replayed raw source before it can pass.
 
 ## Pinned-host profile and live-attestation authority
 
@@ -193,14 +200,21 @@ host capabilities and additionally requires all of the following:
 The package build embeds `rustc --version --verbose` from Cargo's actual
 compiler, the exact `rust-toolchain.toml`, and the exact `SUITE.lock` bytes.
 Those compiled identities—not caller text—must match the baseline. The live
-attestation is published first as content-addressed `host-attestation`
-evidence, then the phase trace, then the raw bundle. Publication is
+authority repeats the complete identity, affinity, isolation, power, thermal,
+load, cgroup, and storage checks after the producer returns. Only then is the
+preflight attestation published as content-addressed `host-attestation`
+evidence, followed by the phase trace and raw bundle. Publication is
 create-new/no-clobber throughout; a later race can leave an obviously partial
-evidence set, and the tool never deletes it.
+evidence set, and the tool never deletes it. These start/end observations do
+not claim continuous detection of a transient excursion that fully recovers
+inside a long measurement window; continuous monitoring remains open under
+fm-inr.1.
 
-Run the already-built `release-perf` binary directly inside the dedicated
-cgroup. `cargo run` keeps Cargo in the same cgroup, so the exclusive-process
-check correctly refuses it. RCH, containers, VMs, shared runners, missing
+For a qualified run, change to `crates/fmn-conformance/` and run the already
+built `release-perf` binary directly inside the dedicated cgroup. Store the
+reviewed profile under `tests/artifacts/perf/hosts/`. `cargo run` keeps Cargo in
+the same cgroup, so the exclusive-process check correctly refuses it. RCH,
+containers, VMs, shared runners, missing
 sysfs/cgroup leaves, and ordinary developer machines are calibration-only.
 The `macos-aarch64` schema family is reserved, but qualification currently
 returns a precise unavailable error: `HardwareTopology::fallback` is not

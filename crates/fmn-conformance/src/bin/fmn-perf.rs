@@ -461,9 +461,10 @@ fn measure_pg2_command(
         ));
     }
     // Validate both repository artifact paths and refuse replacement before
-    // the expensive render. The trace is published first, so a later raw-file
-    // race can leave only a clearly incomplete trace, never a plausible bundle
-    // naming bytes that were not written.
+    // the expensive render. The attestation (when qualified) and trace precede
+    // the raw bundle, so a later raw-file race can leave only a clearly
+    // incomplete evidence set, never a plausible bundle naming bytes that
+    // were not written.
     EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path_text, &[])
         .map_err(|error| CliError::data(error.to_string()))?;
     EvidenceRef::from_bytes(EvidenceKind::RawSamples, raw_path_text, &[])
@@ -481,6 +482,7 @@ fn measure_pg2_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -565,6 +567,7 @@ fn measure_pg5_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -708,6 +711,7 @@ fn measure_pg7_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -794,6 +798,7 @@ fn measure_pg6_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -879,6 +884,7 @@ fn measure_pg6_peak_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -983,6 +989,7 @@ fn measure_pg6_soak_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -1066,6 +1073,15 @@ struct PreparedQualification {
 impl PreparedQualification {
     fn token(&self) -> Option<&HostQualification> {
         self.token.as_ref()
+    }
+
+    fn revalidate_postflight(&self) -> Result<(), CliError> {
+        if let Some(token) = &self.token {
+            token
+                .revalidate_current_host()
+                .map_err(|error| CliError::data(format!("postflight {error}")))?;
+        }
+        Ok(())
     }
 
     fn publish_then_trace(&self, trace_path: &OsStr, trace_bytes: &[u8]) -> Result<(), CliError> {

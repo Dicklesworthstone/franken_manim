@@ -93,9 +93,9 @@ pub struct HostProfile {
     pub boost_path: PathBuf,
     /// Exact required contents of the boost/turbo policy leaf.
     pub boost_value: String,
-    /// Sysfs temperature leaf used for the preflight ceiling.
+    /// Sysfs temperature leaf used for the start/end ceiling.
     pub thermal_path: PathBuf,
-    /// Maximum admitted preflight temperature.
+    /// Maximum admitted start/end temperature.
     pub max_temperature_millicelsius: u64,
     /// Maximum admitted one-minute host load, in thousandths.
     pub max_load_milli: u64,
@@ -296,6 +296,9 @@ pub struct HostQualification {
     suite_lock_digest: Digest,
     evidence: EvidenceRef,
     attestation_tsv: String,
+    profile: HostProfile,
+    artifact_path: PathBuf,
+    process_id: u32,
 }
 
 impl HostQualification {
@@ -310,6 +313,50 @@ impl HostQualification {
     #[must_use]
     pub fn evidence(&self) -> &EvidenceRef {
         &self.evidence
+    }
+
+    /// Re-run the complete live authority after the workload. A qualified
+    /// CLI run publishes nothing when thermal, load, cgroup, affinity, power,
+    /// mount, or any exact identity drifted during the measurement window.
+    ///
+    /// # Errors
+    /// The same fail-closed [`HostError`] surface as preflight attestation.
+    pub fn revalidate_current_host(&self) -> Result<(), HostError> {
+        match self.profile.platform {
+            HostPlatform::LinuxX86_64 => {
+                if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                    return Err(HostError::Unsupported(format!(
+                        "profile {} requires linux-x86_64",
+                        self.profile.profile_id
+                    )));
+                }
+                self.revalidate_linux_with_fs(&StdFs)
+            }
+            HostPlatform::MacosAarch64 => Err(HostError::Unsupported(
+                "macos-aarch64 lacks a safe native topology/power/isolation probe; fallback topology cannot qualify a pinned host"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    fn revalidate_linux_with_fs(&self, fs: &dyn FileSystem) -> Result<(), HostError> {
+        let found = attest_linux_host(
+            &self.profile,
+            fs,
+            &self.artifact_path,
+            self.evidence.path.clone(),
+            self.process_id,
+        )?;
+        if found.profile_id != self.profile_id
+            || found.host_fingerprint != self.host_fingerprint
+            || found.toolchain_fingerprint != self.toolchain_fingerprint
+            || found.suite_lock_digest != self.suite_lock_digest
+        {
+            return Err(HostError::Mismatch(
+                "postflight qualification identity changed".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -648,6 +695,9 @@ fn attest_linux_host(
         suite_lock_digest,
         evidence,
         attestation_tsv: attestation,
+        profile: profile.clone(),
+        artifact_path: artifact_path.to_path_buf(),
+        process_id: pid,
     })
 }
 
@@ -1368,6 +1418,30 @@ mod tests {
                 .to_string()
                 .contains("exceeds profile ceiling")
         );
+    }
+
+    #[test]
+    fn postflight_revalidation_catches_environment_drift() {
+        let pid = 71;
+        let fs = synthetic_linux_fs(pid);
+        let profile = synthetic_profile(&fs);
+        let qualification = attest_linux_host(
+            &profile,
+            &fs,
+            Path::new("/data/artifacts/raw.tsv"),
+            "tests/artifacts/perf/run/host.tsv".to_owned(),
+            pid,
+        )
+        .expect("preflight");
+        qualification
+            .revalidate_linux_with_fs(&fs)
+            .expect("stable postflight");
+
+        fs.insert("/proc/loadavg", b"0.501 0.20 0.10 1/100 7\n".to_vec());
+        let error = qualification
+            .revalidate_linux_with_fs(&fs)
+            .expect_err("load drift must invalidate the run");
+        assert!(error.to_string().contains("exceeds profile ceiling"));
     }
 
     #[test]
