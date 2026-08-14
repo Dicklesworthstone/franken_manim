@@ -974,6 +974,8 @@ impl RobustStats {
 pub enum EvidenceKind {
     /// Raw sample bundle.
     RawSamples,
+    /// Live pinned-host qualification record.
+    HostAttestation,
     /// Flamegraph SVG.
     Flamegraph,
     /// Samply/perf CPU profile.
@@ -992,6 +994,7 @@ impl EvidenceKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::RawSamples => "raw-samples",
+            Self::HostAttestation => "host-attestation",
             Self::Flamegraph => "flamegraph",
             Self::CpuProfile => "cpu-profile",
             Self::AllocationProfile => "allocation-profile",
@@ -1003,6 +1006,7 @@ impl EvidenceKind {
     fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "raw-samples" => Self::RawSamples,
+            "host-attestation" => Self::HostAttestation,
             "flamegraph" => Self::Flamegraph,
             "cpu-profile" => Self::CpuProfile,
             "allocation-profile" => Self::AllocationProfile,

@@ -102,6 +102,7 @@ pub mod golden;
 pub mod npy;
 pub mod oracles;
 pub mod perf;
+pub mod perf_host;
 pub mod perf_pg2;
 pub mod perf_pg5;
 pub mod perf_pg6;
