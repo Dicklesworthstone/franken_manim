@@ -62,6 +62,8 @@ use fmn_conformance::e2e::{
     RunOutcome, Runner, ScenarioClass, ScenarioError, ScenarioSpec, Status, Surface, Tier,
 };
 use fmn_conformance::golden::Scope;
+use fmn_conformance::perf::{BenchmarkKey, GateId, MetricUnit};
+use fmn_conformance::perf_host::measurement_identity;
 use fmn_conformance::perf_pg5::{PG5_DIRECT_THREADS, Pg5Definition, pg5_identity};
 use fmn_conformance::perf_pg6::{PG6_THREADS, Pg6Definition, pg6_identity};
 use fmn_conformance::perf_pg6_peak::{
@@ -1031,6 +1033,50 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .exit_code(2)
         .with_counter("cli_rule_named", 1))
+}
+
+/// fm-inr.1: caller-authored baseline qualification bits are not authority.
+/// The real producer identity seam must downgrade them unless a live opaque
+/// host token from `perf_host` is present in the same process.
+fn failure_host_attestation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let key = BenchmarkKey {
+        profile_id: "caller-claimed-host-v1".to_owned(),
+        build_profile: fmn_conformance::perf::COMPILED_CARGO_PROFILE.to_owned(),
+        host_fingerprint: sha256(b"caller-host"),
+        toolchain_fingerprint: sha256(b"caller-toolchain"),
+        suite_lock_digest: sha256(b"caller-suite"),
+        benchmark_definition: sha256(b"definition"),
+        gate: GateId::Pg2,
+        scenario: "fill-canonical".to_owned(),
+        unit: MetricUnit::MegaPixelsPerSecondMilli,
+        engine: "fast-cpu".to_owned(),
+        tier: "portable".to_owned(),
+        thread_profile: "fixed-8".to_owned(),
+        execution_plan_digest: sha256(b"plan"),
+        config_digest: sha256(b"config"),
+        cache_state: "warm".to_owned(),
+        output_mode: "raw".to_owned(),
+        external_tool_fingerprint: None,
+        bare_metal: true,
+        isolated: true,
+    };
+    let (found, evidence) = measurement_identity(&key, None)
+        .map_err(|error| fail(format!("host identity refusal: {error}")))?;
+    let refused = !found.bare_metal && !found.isolated && evidence.is_empty();
+    ctx.event(
+        LogEvent::new("performance.host_attestation")
+            .field("token_present", "false")
+            .field("bare_metal", truth(found.bare_metal))
+            .field("isolated", truth(found.isolated))
+            .field("caller_claim_refused", truth(refused)),
+    );
+    ctx.counter("host_qualification_refused", u64::from(refused));
+    if !refused {
+        return Err(fail(
+            "caller-authored host booleans survived without a live attestation token",
+        ));
+    }
+    Ok(RunOutcome::ok().with_counter("host_qualification_refused", 1))
 }
 
 /// Studio's first real Gauntlet row: select a shipped scene through the CLI
@@ -2551,6 +2597,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("rule", "quality-exclusive"),
                 FieldPred::str_eq("rule_named", "true"),
                 FieldPred::str_eq("stderr_empty", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.host_qualification_requires_live_token.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_host_attestation_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("host_qualification_refused", 1),
+        ],
+        vec![LogExpect::span_present(
+            "performance.host_attestation",
+            vec![
+                FieldPred::str_eq("token_present", "false"),
+                FieldPred::str_eq("bare_metal", "false"),
+                FieldPred::str_eq("isolated", "false"),
+                FieldPred::str_eq("caller_claim_refused", "true"),
             ],
         )],
     ));
