@@ -85,6 +85,7 @@ fn producer_refuses_bad_commit_before_profile_or_corpus_setup() {
         &baseline,
         "not-a-commit",
         "tests/artifacts/perf/pg5-preflight/trace.tsv",
+        None,
     )
     .expect_err("producer commit must fail before profile or corpus setup");
     assert!(error.to_string().contains("producer_commit"), "{error}");
@@ -93,7 +94,7 @@ fn producer_refuses_bad_commit_before_profile_or_corpus_setup() {
 #[test]
 fn producer_refuses_bad_trace_path_before_profile_or_corpus_setup() {
     let baseline = Baseline::targeted(1, policy(), key(), COMMIT).expect("target baseline");
-    let error = measure_pg5(&baseline, COMMIT, "outside.tsv")
+    let error = measure_pg5(&baseline, COMMIT, "outside.tsv", None)
         .expect_err("trace path must fail before profile or corpus setup");
     assert!(error.to_string().contains("artifact path"), "{error}");
 }
@@ -130,6 +131,7 @@ fn release_perf_producer_emits_three_zero_mismatch_schedule_samples() {
         &baseline,
         COMMIT,
         "tests/artifacts/perf/pg5-thread-matrix/trace.tsv",
+        None,
     )
     .expect("release-perf PG-5 producer");
 

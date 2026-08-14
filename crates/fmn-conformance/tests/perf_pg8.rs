@@ -164,6 +164,7 @@ fn producer_refuses_baseline_drift_before_profile_or_sampler() {
         COMMIT,
         &sampler,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     );
     let error = result.expect_err("baseline drift must fail before timing");
     assert!(
@@ -193,6 +194,7 @@ fn producer_refuses_bad_commit_before_profile_or_sampler() {
         "not-a-commit",
         &sampler,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("producer commit must fail before profile or sampling");
     assert!(!sampler_called.get(), "sampler ran before commit preflight");
@@ -211,7 +213,7 @@ fn producer_refuses_bad_trace_path_before_profile_or_sampler() {
             "sampler must not run".to_owned(),
         ))
     };
-    let error = measure_pg8(&baseline, COMMIT, &sampler, "outside.tsv")
+    let error = measure_pg8(&baseline, COMMIT, &sampler, "outside.tsv", None)
         .expect_err("trace path must fail before profile or sampling");
     assert!(!sampler_called.get(), "sampler ran before path preflight");
     assert!(error.to_string().contains("artifact path"), "{error}");
@@ -227,6 +229,7 @@ fn assembler_refuses_bad_commit_before_measurement_content() {
         "not-a-commit",
         &intentionally_drifted_measurement(),
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("producer commit must fail before measurement validation");
     assert!(error.to_string().contains("producer_commit"), "{error}");
@@ -242,6 +245,7 @@ fn assembler_refuses_bad_trace_path_before_measurement_content() {
         COMMIT,
         &intentionally_drifted_measurement(),
         "outside.tsv",
+        None,
     )
     .expect_err("trace path must fail before measurement validation");
     assert!(error.to_string().contains("artifact path"), "{error}");
@@ -259,6 +263,7 @@ fn assembler_refuses_wrong_state_size_before_hashing() {
         COMMIT,
         &measurement,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("the fixed fixture state size must be checked before hashing");
     assert!(error.to_string().contains("result_state"), "{error}");
@@ -279,6 +284,7 @@ fn assembler_refuses_bad_invalid_reason_before_state_hashing() {
         COMMIT,
         &measurement,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("invalid observation detail must be checked before state hashing");
     assert!(error.to_string().contains("invalid_reason"), "{error}");
@@ -297,6 +303,7 @@ fn assembler_refuses_non_native_twin_timing_before_state_hashing() {
         COMMIT,
         &measurement,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("non-native observations must not carry pure-Rust twin timings");
     assert!(
@@ -320,6 +327,7 @@ fn assembler_refuses_wrong_twin_state_shape_before_state_hashing() {
         COMMIT,
         &native_measurement,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("the native twin state size must be checked before state hashing");
     assert!(
@@ -344,6 +352,7 @@ fn assembler_refuses_wrong_twin_state_shape_before_state_hashing() {
         COMMIT,
         &callback_measurement,
         "tests/artifacts/perf/pg8-preflight/trace.tsv",
+        None,
     )
     .expect_err("callback scenarios must not carry a pure-Rust twin state");
     assert!(
@@ -436,6 +445,7 @@ fn canonical_plan_reproduces_the_locked_state_goldens() {
             COMMIT,
             &measurement,
             format!("{directory}/trace.tsv"),
+            None,
         )
         .expect("dev-profile assembly");
         let raw = artifacts.batch.to_tsv().expect("canonical raw bundle");
@@ -574,6 +584,7 @@ fn release_perf_producer_records_replayable_pg8_baseline() {
             &commit,
             &real_sampler,
             format!("{directory}/trace.tsv"),
+            None,
         )
         .expect("release-perf measurement");
         assert_eq!(artifacts.batch.samples.len(), PG8_SAMPLE_COUNT);

@@ -385,6 +385,7 @@ pub fn measure_pg7(
     producer_commit: &str,
     cache: Option<&Store>,
     trace_path: impl Into<String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg7Artifacts, Pg7Error> {
     let scenario = Pg7Scenario::parse(&baseline.policy.scenario).ok_or_else(|| {
         Pg7Error::Identity(format!(
@@ -416,11 +417,13 @@ pub fn measure_pg7(
         }
     }
 
+    let (key, host_evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     let mut batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: Vec::new(),
-        evidence: Vec::new(),
+        evidence: host_evidence,
     };
     let _ = batch.to_tsv()?;
 
@@ -847,15 +850,6 @@ fn text_config_digest(roster: &[String]) -> Result<Digest, Pg7Error> {
     hash.update(&0_f64.to_bits().to_be_bytes());
     hash.update(&1_f64.to_bits().to_be_bytes());
     Ok(hash.finalize())
-}
-
-fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
-    let mut key = baseline.key.clone();
-    // fm-inr.1 owns live host/profile attestation. Caller-supplied booleans
-    // are not evidence until that mechanism lands.
-    key.bare_metal = false;
-    key.isolated = false;
-    key
 }
 
 fn require_release_perf_artifact() -> Result<(), Pg7Error> {

@@ -375,6 +375,7 @@ pub fn assemble_pg8(
     producer_commit: &str,
     measurement: &Pg8Measurement,
     trace_path: impl Into<String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg8Artifacts, Pg8Error> {
     let scenario = Pg8Scenario::parse(&baseline.policy.scenario).ok_or_else(|| {
         Pg8Error::Identity(format!(
@@ -421,11 +422,13 @@ pub fn assemble_pg8(
         (_, None) => {}
     }
 
+    let (key, host_evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     let mut batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: Vec::new(),
-        evidence: Vec::new(),
+        evidence: host_evidence,
     };
     let _ = batch.to_tsv()?;
     batch.samples = scenario_samples(scenario, &measurement.observations);
@@ -501,6 +504,7 @@ pub fn measure_pg8(
     producer_commit: &str,
     sampler: &dyn Fn(Pg8Scenario) -> Result<Pg8Measurement, Pg8Error>,
     trace_path: impl Into<String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg8Artifacts, Pg8Error> {
     let scenario = Pg8Scenario::parse(&baseline.policy.scenario).ok_or_else(|| {
         Pg8Error::Identity(format!(
@@ -517,7 +521,13 @@ pub fn measure_pg8(
     let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
     require_release_perf_artifact()?;
     let measurement = sampler(scenario)?;
-    assemble_pg8(baseline, producer_commit, &measurement, trace_path)
+    assemble_pg8(
+        baseline,
+        producer_commit,
+        &measurement,
+        trace_path,
+        qualification,
+    )
 }
 
 fn scenario_samples(scenario: Pg8Scenario, observations: &[Pg8Observation]) -> Vec<Sample> {
@@ -562,15 +572,6 @@ fn scenario_sample(scenario: Pg8Scenario, observation: &Pg8Observation) -> Sampl
         Ok(value) => Sample::valid(value),
         Err(_) => Sample::invalid(u64::MAX, "measurement exceeds the u64 sample range"),
     }
-}
-
-fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
-    let mut key = baseline.key.clone();
-    // fm-inr.1 owns live host/profile attestation. Caller-supplied booleans
-    // are not evidence until that mechanism lands.
-    key.bare_metal = false;
-    key.isolated = false;
-    key
 }
 
 fn require_release_perf_artifact() -> Result<(), Pg8Error> {

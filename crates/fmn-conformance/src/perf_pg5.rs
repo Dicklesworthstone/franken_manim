@@ -327,6 +327,7 @@ pub fn measure_pg5(
     baseline: &Baseline,
     producer_commit: &str,
     trace_path: impl Into<String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg5Artifacts, Pg5Error> {
     let execution_plan = pipeline_plan()?;
     validate_pipeline_plan(&execution_plan)?;
@@ -411,13 +412,16 @@ pub fn measure_pg5(
         &ordered,
         &cases,
     );
-    let evidence =
+    let trace_evidence =
         EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path, trace_tsv.as_bytes())?;
+    let (key, mut evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
+    evidence.push(trace_evidence);
     let batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: mismatch_counts.into_iter().map(Sample::valid).collect(),
-        evidence: vec![evidence],
+        evidence,
     };
     let _ = batch.to_tsv()?;
 
@@ -436,15 +440,6 @@ pub const fn pg5_identity() -> EngineIdentity {
         tier: Tier::COMPILED,
         ..EngineIdentity::certified()
     }
-}
-
-fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
-    let mut key = baseline.key.clone();
-    // fm-inr.1 owns live host/profile attestation. Caller-supplied booleans
-    // are not evidence, so this producer cannot manufacture a passing gate.
-    key.bare_metal = false;
-    key.isolated = false;
-    key
 }
 
 #[derive(Debug)]

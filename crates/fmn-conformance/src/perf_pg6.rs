@@ -272,6 +272,7 @@ pub fn measure_pg6(
     baseline: &Baseline,
     producer_commit: &str,
     trace_path: impl Into<String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg6Artifacts, Pg6Error> {
     let definition = Pg6Definition::new();
     definition.validate_baseline(baseline)?;
@@ -281,11 +282,13 @@ pub fn measure_pg6(
     require_compiled_cargo_profile(BUILD_PROFILE)?;
     definition.validate_corpus_lock()?;
 
+    let (key, host_evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     let mut batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: Vec::with_capacity(PG6_SAMPLE_COUNT),
-        evidence: Vec::new(),
+        evidence: host_evidence,
     };
     let _ = batch.to_tsv()?;
 
@@ -410,16 +413,6 @@ pub const fn pg6_identity() -> EngineIdentity {
         tier: Tier::COMPILED,
         ..EngineIdentity::certified()
     }
-}
-
-fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
-    let mut key = baseline.key.clone();
-    // fm-inr.1 owns live host/profile attestation. Caller-supplied booleans
-    // are not evidence, so this producer can calibrate without manufacturing
-    // a passing gate on an unattested host.
-    key.bare_metal = false;
-    key.isolated = false;
-    key
 }
 
 fn aggregate_result_digest(
@@ -721,6 +714,7 @@ pub fn measure_pg6_soak(
     trace_path: impl Into<String>,
     definition: Pg6SoakDefinition,
     rss_probe: &mut dyn FnMut() -> Result<Option<u64>, String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg6SoakArtifacts, Pg6Error> {
     definition.validate_baseline(baseline)?;
     validate_producer_commit(producer_commit)?;
@@ -729,11 +723,13 @@ pub fn measure_pg6_soak(
     require_compiled_cargo_profile(BUILD_PROFILE)?;
     Pg6Definition::new().validate_corpus_lock()?;
 
+    let (key, host_evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     let mut batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: Vec::with_capacity(PG6_SOAK_WINDOWS),
-        evidence: Vec::new(),
+        evidence: host_evidence,
     };
     let _ = batch.to_tsv()?;
 

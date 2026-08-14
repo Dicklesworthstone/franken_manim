@@ -339,6 +339,7 @@ pub fn measure_pg6_peak(
     producer_commit: &str,
     trace_path: impl Into<String>,
     rss_probe: &(dyn Fn() -> Result<Option<u64>, String> + Sync),
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg6PeakArtifacts, Pg6Error> {
     let definition = Pg6PeakDefinition::new();
     definition.validate_baseline(baseline)?;
@@ -348,11 +349,13 @@ pub fn measure_pg6_peak(
     require_compiled_cargo_profile(BUILD_PROFILE)?;
     definition.validate_corpus_lock()?;
 
+    let (key, host_evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     let mut batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: Vec::with_capacity(PG6_PEAK_SAMPLE_COUNT),
-        evidence: Vec::new(),
+        evidence: host_evidence,
     };
     let _ = batch.to_tsv()?;
 
@@ -390,15 +393,6 @@ pub fn measure_pg6_peak(
         trace_tsv,
         passes,
     })
-}
-
-fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
-    let mut key = baseline.key.clone();
-    // fm-inr.1 owns live pinned-host attestation. Caller booleans cannot
-    // manufacture a qualifying peak-memory baseline.
-    key.bare_metal = false;
-    key.isolated = false;
-    key
 }
 
 fn sample_peak_rss<T>(

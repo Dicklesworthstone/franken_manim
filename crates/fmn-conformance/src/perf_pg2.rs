@@ -343,6 +343,7 @@ pub fn measure_pg2(
     baseline: &Baseline,
     producer_commit: &str,
     trace_path: impl Into<String>,
+    qualification: Option<&crate::perf_host::HostQualification>,
 ) -> Result<Pg2Artifacts, Pg2Error> {
     let scenario = Pg2Scenario::parse(&baseline.policy.scenario).ok_or_else(|| {
         Pg2Error::Identity(format!(
@@ -361,11 +362,13 @@ pub fn measure_pg2(
 
     // Validate the complete batch identity before doing expensive work.
     // `MeasurementBatch::to_tsv` is the one canonical aggregate validator.
+    let (key, host_evidence) =
+        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     let mut batch = MeasurementBatch {
-        key: calibration_key(baseline),
+        key,
         producer_commit: producer_commit.to_owned(),
         samples: Vec::new(),
-        evidence: Vec::new(),
+        evidence: host_evidence,
     };
     let _ = batch.to_tsv()?;
 
@@ -436,18 +439,6 @@ pub fn measure_pg2(
         trace_tsv,
         frame_digest: result_digest,
     })
-}
-
-fn calibration_key(baseline: &Baseline) -> crate::perf::BenchmarkKey {
-    let mut key = baseline.key.clone();
-    // fm-inr.1 owns live host/profile attestation. Until that mechanism can
-    // prove the producer is actually running on the named isolated bare-metal
-    // profile, caller-supplied booleans are not evidence. Preserve the named
-    // fingerprints but downgrade both qualifications so this tranche can
-    // produce useful calibration data without ever producing a passing gate.
-    key.bare_metal = false;
-    key.isolated = false;
-    key
 }
 
 fn require_release_perf_artifact() -> Result<(), Pg2Error> {

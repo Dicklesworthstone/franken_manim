@@ -447,7 +447,7 @@ fn measure_pg2_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
 
-    let artifacts = measure_pg2(&baseline, producer_commit, trace_path_text)
+    let artifacts = measure_pg2(&baseline, producer_commit, trace_path_text, None)
         .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
@@ -523,7 +523,7 @@ fn measure_pg5_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
 
-    let artifacts = measure_pg5(&baseline, producer_commit, trace_path_text)
+    let artifacts = measure_pg5(&baseline, producer_commit, trace_path_text, None)
         .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
@@ -649,7 +649,13 @@ fn measure_pg7_command(
     } else {
         None
     };
-    let artifacts = measure_pg7(&baseline, producer_commit, store.as_ref(), trace_path_text)
+    let artifacts = measure_pg7(
+        &baseline,
+        producer_commit,
+        store.as_ref(),
+        trace_path_text,
+        None,
+    )
         .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
@@ -727,7 +733,7 @@ fn measure_pg6_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
 
-    let artifacts = measure_pg6(&baseline, producer_commit, trace_path_text)
+    let artifacts = measure_pg6(&baseline, producer_commit, trace_path_text, None)
         .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
@@ -803,7 +809,7 @@ fn measure_pg6_peak_command(
 
     let probe =
         || fmn_platform::topology::current_rss_bytes(&StdFs).map_err(|error| error.to_string());
-    let artifacts = measure_pg6_peak(&baseline, producer_commit, trace_path_text, &probe)
+    let artifacts = measure_pg6_peak(&baseline, producer_commit, trace_path_text, &probe, None)
         .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts
         .batch
@@ -903,6 +909,7 @@ fn measure_pg6_soak_command(
         trace_path_text,
         definition,
         &mut probe,
+        None,
     )
     .map_err(|error| CliError::data(error.to_string()))?;
     let raw = artifacts

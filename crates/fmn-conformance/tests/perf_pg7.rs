@@ -109,6 +109,7 @@ fn producer_refuses_bad_commit_before_profile_or_cache_setup() {
         "not-a-commit",
         None,
         "tests/artifacts/perf/pg7-preflight/trace.tsv",
+        None,
     )
     .expect_err("producer commit must fail before profile or cache setup");
     assert!(error.to_string().contains("producer_commit"), "{error}");
@@ -119,7 +120,7 @@ fn producer_refuses_bad_trace_path_before_profile_or_workload() {
     let scenario = Pg7Scenario::FormulaCold;
     let baseline =
         Baseline::targeted(1, policy(scenario), key(scenario), COMMIT).expect("target baseline");
-    let error = measure_pg7(&baseline, COMMIT, None, "outside.tsv")
+    let error = measure_pg7(&baseline, COMMIT, None, "outside.tsv", None)
         .expect_err("trace path must fail before profile or workload setup");
     assert!(error.to_string().contains("artifact path"), "{error}");
 }
@@ -169,6 +170,7 @@ fn release_perf_producer_emits_replayable_real_samples_and_trace() {
             COMMIT,
             store.as_ref(),
             format!("tests/artifacts/perf/pg7-release-probe/{scenario}-trace.tsv"),
+            None,
         )
         .expect("release-perf measurement");
         assert_eq!(artifacts.batch.samples.len(), PG7_SAMPLE_COUNT);

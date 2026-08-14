@@ -92,6 +92,7 @@ fn producer_refuses_bad_commit_before_profile_or_corpus_setup() {
         &baseline,
         "not-a-commit",
         "tests/artifacts/perf/pg6-preflight/trace.tsv",
+        None,
     )
     .expect_err("producer commit must fail before profile or corpus setup");
     assert!(error.to_string().contains("producer_commit"), "{error}");
@@ -100,7 +101,7 @@ fn producer_refuses_bad_commit_before_profile_or_corpus_setup() {
 #[test]
 fn producer_refuses_bad_trace_path_before_profile_or_corpus_setup() {
     let baseline = Baseline::targeted(1, policy(), key(), COMMIT).expect("target baseline");
-    let error = measure_pg6(&baseline, COMMIT, "outside.tsv")
+    let error = measure_pg6(&baseline, COMMIT, "outside.tsv", None)
         .expect_err("trace path must fail before profile or corpus setup");
     assert!(error.to_string().contains("artifact path"), "{error}");
 }
@@ -136,6 +137,7 @@ fn release_perf_producer_emits_every_zero_allocation_scene_and_replayable_trace(
         &baseline,
         COMMIT,
         "tests/artifacts/perf/pg6-steady-allocations/trace.tsv",
+        None,
     )
     .expect("release-perf corpus producer");
 
@@ -328,6 +330,7 @@ fn soak_producer_refuses_bad_identity_before_profile_or_corpus_setup() {
         "tests/artifacts/perf/pg6-soak/trace.tsv",
         soak_definition(),
         &mut deny_probe,
+        None,
     )
     .expect_err("producer commit must fail before profile or corpus setup");
     assert!(error.to_string().contains("producer_commit"), "{error}");
@@ -338,6 +341,7 @@ fn soak_producer_refuses_bad_identity_before_profile_or_corpus_setup() {
         "outside.tsv",
         soak_definition(),
         &mut deny_probe,
+        None,
     )
     .expect_err("trace path must fail before profile or corpus setup");
     assert!(error.to_string().contains("artifact path"), "{error}");
@@ -361,6 +365,7 @@ fn release_perf_soak_measures_three_flat_windows_and_a_deliberate_leak_blocks() 
         "tests/artifacts/perf/pg6-soak/trace.tsv",
         definition,
         &mut real_probe,
+        None,
     )
     .expect("release-perf soak producer");
     assert_eq!(artifacts.windows.len(), PG6_SOAK_WINDOWS);
@@ -395,6 +400,7 @@ fn release_perf_soak_measures_three_flat_windows_and_a_deliberate_leak_blocks() 
         "tests/artifacts/perf/pg6-soak/leak-trace.tsv",
         definition,
         &mut leak_probe,
+        None,
     )
     .expect("leaking soak still measures");
     assert!(
@@ -540,11 +546,12 @@ fn peak_producer_refuses_bad_identity_before_profile_corpus_or_probe() {
         "not-a-commit",
         "tests/artifacts/perf/pg6-gallery-peak/trace.tsv",
         &deny_probe,
+        None,
     )
     .expect_err("producer commit must fail before measurement setup");
     assert!(error.to_string().contains("producer_commit"), "{error}");
 
-    let error = measure_pg6_peak(&baseline, COMMIT, "outside.tsv", &deny_probe)
+    let error = measure_pg6_peak(&baseline, COMMIT, "outside.tsv", &deny_probe, None)
         .expect_err("trace path must fail before measurement setup");
     assert!(error.to_string().contains("artifact path"), "{error}");
     assert!(!probe_called.load(Ordering::SeqCst));
@@ -564,6 +571,7 @@ fn release_perf_peak_producer_renders_every_sample_and_replays_raw_evidence() {
         COMMIT,
         "tests/artifacts/perf/pg6-gallery-peak/trace.tsv",
         &probe,
+        None,
     )
     .expect("release-perf 4K producer");
     assert_eq!(artifacts.passes.len(), PG6_PEAK_SAMPLE_COUNT);
