@@ -414,8 +414,7 @@ pub fn measure_pg5(
     );
     let trace_evidence =
         EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path, trace_tsv.as_bytes())?;
-    let (key, mut evidence) =
-        crate::perf_host::measurement_identity(&baseline.key, qualification)?;
+    let (key, mut evidence) = crate::perf_host::measurement_identity(&baseline.key, qualification)?;
     evidence.push(trace_evidence);
     let batch = MeasurementBatch {
         key,

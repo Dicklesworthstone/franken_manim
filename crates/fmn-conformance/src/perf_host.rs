@@ -165,9 +165,8 @@ impl HostProfile {
                 .ok_or_else(|| HostError::Profile(format!("missing profile field {name:?}")))
         };
         let platform_text = get("platform")?;
-        let platform = HostPlatform::parse(&platform_text).ok_or_else(|| {
-            HostError::Profile(format!("unsupported platform {platform_text:?}"))
-        })?;
+        let platform = HostPlatform::parse(&platform_text)
+            .ok_or_else(|| HostError::Profile(format!("unsupported platform {platform_text:?}")))?;
         let benchmark_cpus_text = get("benchmark_cpus")?;
         let benchmark_cpus = parse_cpu_list(&benchmark_cpus_text)
             .map_err(|error| HostError::Profile(format!("bad benchmark_cpus: {error}")))?;
@@ -176,14 +175,8 @@ impl HostProfile {
             platform,
             os_release_digest: parse_digest(&get("os_release_digest")?, "os_release_digest")?,
             kernel_release: get("kernel_release")?,
-            cpu_identity_digest: parse_digest(
-                &get("cpu_identity_digest")?,
-                "cpu_identity_digest",
-            )?,
-            dmi_identity_digest: parse_digest(
-                &get("dmi_identity_digest")?,
-                "dmi_identity_digest",
-            )?,
+            cpu_identity_digest: parse_digest(&get("cpu_identity_digest")?, "cpu_identity_digest")?,
+            dmi_identity_digest: parse_digest(&get("dmi_identity_digest")?, "dmi_identity_digest")?,
             topology_digest: parse_digest(&get("topology_digest")?, "topology_digest")?,
             benchmark_cpus,
             cgroup_path: get("cgroup_path")?,
@@ -266,7 +259,11 @@ impl HostProfile {
                 "cgroup_path must be an absolute traversal-free cgroup-v2 path".to_owned(),
             ));
         }
-        validate_sysfs_leaf("boost_path", &self.boost_path, &["/sys/devices/system/cpu/"])?;
+        validate_sysfs_leaf(
+            "boost_path",
+            &self.boost_path,
+            &["/sys/devices/system/cpu/"],
+        )?;
         validate_sysfs_leaf(
             "thermal_path",
             &self.thermal_path,
@@ -333,7 +330,9 @@ impl fmt::Display for HostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Profile(detail) => write!(formatter, "host profile: {detail}"),
-            Self::Unsupported(detail) => write!(formatter, "host attestation unavailable: {detail}"),
+            Self::Unsupported(detail) => {
+                write!(formatter, "host attestation unavailable: {detail}")
+            }
             Self::Mismatch(detail) => write!(formatter, "host attestation mismatch: {detail}"),
             Self::Probe(detail) => write!(formatter, "host attestation probe: {detail}"),
         }
@@ -456,7 +455,11 @@ fn attest_linux_host(
         Path::new("/proc/sys/kernel/osrelease"),
         MAX_KERNEL_BYTES,
     )?;
-    require_text("kernel_release", &profile.kernel_release, kernel_release.trim())?;
+    require_text(
+        "kernel_release",
+        &profile.kernel_release,
+        kernel_release.trim(),
+    )?;
 
     let cpuinfo = read_required(fs, Path::new("/proc/cpuinfo"), MAX_HOST_FILE_BYTES)?;
     if cpuinfo_has_hypervisor(&cpuinfo) {
@@ -603,8 +606,14 @@ fn attest_linux_host(
         ("platform", profile.platform.name().to_owned()),
         ("os_release_digest", profile.os_release_digest.to_string()),
         ("kernel_release", profile.kernel_release.clone()),
-        ("cpu_identity_digest", profile.cpu_identity_digest.to_string()),
-        ("dmi_identity_digest", profile.dmi_identity_digest.to_string()),
+        (
+            "cpu_identity_digest",
+            profile.cpu_identity_digest.to_string(),
+        ),
+        (
+            "dmi_identity_digest",
+            profile.dmi_identity_digest.to_string(),
+        ),
         ("topology_digest", profile.topology_digest.to_string()),
         ("benchmark_cpus", format_cpu_list(&profile.benchmark_cpus)),
         ("cgroup_path", profile.cgroup_path.clone()),
@@ -614,7 +623,10 @@ fn attest_linux_host(
         ("load_milli", load.to_string()),
         ("storage_mount", mount.mount_point.display().to_string()),
         ("storage_fs", mount.fs_type),
-        ("storage_source_digest", profile.storage_source_digest.to_string()),
+        (
+            "storage_source_digest",
+            profile.storage_source_digest.to_string(),
+        ),
         ("toolchain_fingerprint", toolchain_fingerprint.to_string()),
         ("suite_lock_digest", suite_lock_digest.to_string()),
         ("process_id", pid.to_string()),
@@ -881,8 +893,7 @@ fn parse_status_cpu_list(status: &str, field: &str) -> Result<Vec<u32>, HostErro
         .lines()
         .find_map(|line| line.strip_prefix(&prefix))
         .ok_or_else(|| HostError::Probe(format!("/proc/self/status lacks {field}")))?;
-    parse_cpu_list(value.trim())
-        .map_err(|error| HostError::Probe(format!("bad {field}: {error}")))
+    parse_cpu_list(value.trim()).map_err(|error| HostError::Probe(format!("bad {field}: {error}")))
 }
 
 fn require_initial_pid_namespace(status: &str) -> Result<(), HostError> {
@@ -1141,14 +1152,8 @@ mod tests {
             "/sys/fs/cgroup/fmn-benchmark/cgroup.procs",
             format!("{pid}\n").into_bytes(),
         );
-        fs.insert(
-            "/sys/devices/system/cpu/cpufreq/boost",
-            b"0\n".to_vec(),
-        );
-        fs.insert(
-            "/sys/class/thermal/thermal_zone0/temp",
-            b"42000\n".to_vec(),
-        );
+        fs.insert("/sys/devices/system/cpu/cpufreq/boost", b"0\n".to_vec());
+        fs.insert("/sys/class/thermal/thermal_zone0/temp", b"42000\n".to_vec());
         fs.insert("/proc/loadavg", b"0.25 0.20 0.10 1/100 7\n".to_vec());
         fs.insert(
             "/proc/self/mountinfo",
@@ -1161,8 +1166,8 @@ mod tests {
     fn synthetic_profile(fs: &VirtualFs) -> HostProfile {
         let os_release = read_required(fs, Path::new("/etc/os-release"), MAX_HOST_FILE_BYTES)
             .expect("os release");
-        let cpuinfo = read_required(fs, Path::new("/proc/cpuinfo"), MAX_HOST_FILE_BYTES)
-            .expect("cpuinfo");
+        let cpuinfo =
+            read_required(fs, Path::new("/proc/cpuinfo"), MAX_HOST_FILE_BYTES).expect("cpuinfo");
         let topology = HardwareTopology::detect_linux(fs).expect("topology");
         HostProfile {
             profile_id: "linux-8c-test-v1".to_owned(),
@@ -1175,9 +1180,7 @@ mod tests {
                     .as_bytes(),
             ),
             dmi_identity_digest: sha256(
-                canonical_dmi_identity(fs)
-                    .expect("dmi identity")
-                    .as_bytes(),
+                canonical_dmi_identity(fs).expect("dmi identity").as_bytes(),
             ),
             topology_digest: sha256(topology.snapshot_text().as_bytes()),
             benchmark_cpus: (0..8).collect(),
@@ -1291,10 +1294,7 @@ mod tests {
         )
         .expect("qualified synthetic host");
         assert!(qualification.attestation_tsv().contains("bare_metal\ttrue"));
-        assert_eq!(
-            qualification.evidence().kind,
-            EvidenceKind::HostAttestation
-        );
+        assert_eq!(qualification.evidence().kind, EvidenceKind::HostAttestation);
 
         let mut key = BenchmarkKey {
             profile_id: profile.profile_id.clone(),
@@ -1329,6 +1329,57 @@ mod tests {
                 .to_string()
                 .contains("toolchain_fingerprint")
         );
+    }
+
+    #[test]
+    fn linux_attestation_rejects_peer_processes_and_hot_hosts() {
+        let pid = 71;
+        let fs = synthetic_linux_fs(pid);
+        let profile = synthetic_profile(&fs);
+        fs.insert(
+            "/sys/fs/cgroup/fmn-benchmark/cgroup.procs",
+            format!("{pid}\n72\n").into_bytes(),
+        );
+        let peer_error = attest_linux_host(
+            &profile,
+            &fs,
+            Path::new("/data/artifacts/raw.tsv"),
+            "tests/artifacts/perf/run/host.tsv".to_owned(),
+            pid,
+        )
+        .expect_err("peer process must invalidate isolation");
+        assert!(peer_error.to_string().contains("only measurement pid"));
+
+        fs.insert(
+            "/sys/fs/cgroup/fmn-benchmark/cgroup.procs",
+            format!("{pid}\n").into_bytes(),
+        );
+        fs.insert(
+            "/sys/class/thermal/thermal_zone0/temp",
+            b"70001\n".to_vec(),
+        );
+        let thermal_error = attest_linux_host(
+            &profile,
+            &fs,
+            Path::new("/data/artifacts/raw.tsv"),
+            "tests/artifacts/perf/run/host.tsv".to_owned(),
+            pid,
+        )
+        .expect_err("hot host must fail");
+        assert!(thermal_error.to_string().contains("exceeds profile ceiling"));
+    }
+
+    #[test]
+    fn macos_profile_is_explicitly_unsupported_without_native_introspection() {
+        let mut profile = HostProfile::from_tsv(&profile_text()).expect("profile");
+        profile.platform = HostPlatform::MacosAarch64;
+        let error = attest_current_host(
+            &profile,
+            Path::new("/data/artifacts/raw.tsv"),
+            "tests/artifacts/perf/run/host.tsv",
+        )
+        .expect_err("macOS fallback topology is not evidence");
+        assert!(error.to_string().contains("safe native topology"));
     }
 
     #[test]
