@@ -31,6 +31,10 @@ use fmn_conformance::perf_pg7::{
     PG7_DEFINITION_SCHEMA, PG7_SAMPLE_COUNT, PG7_WARMUP_ITERATIONS, Pg7Definition, Pg7Scenario,
     measure_pg7,
 };
+use fmn_conformance::perf_pg8::{
+    PG8_DEFINITION_SCHEMA, PG8_FRAMES_PER_REPETITION, PG8_MOBJECTS, PG8_SAMPLE_COUNT,
+    PG8_WARMUP_ITERATIONS, Pg8Definition, Pg8Scenario,
+};
 use fmn_hash::sha256;
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, FsNodeKind, StdFs};
@@ -74,7 +78,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             "expected catalog, verify-baseline, pg2-definitions, measure-pg2, \
              pg5-definitions, measure-pg5, pg6-definitions, measure-pg6, measure-pg6-peak, \
              measure-pg6-soak, \
-             pg7-definitions, or measure-pg7",
+             pg7-definitions, measure-pg7, or pg8-definitions",
         ));
     };
     match command {
@@ -92,6 +96,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "pg5-definitions" if arguments.len() == 1 => pg5_definitions(),
         "pg6-definitions" if arguments.len() == 1 => Ok(pg6_definitions()),
         "pg7-definitions" if arguments.len() == 1 => pg7_definitions(),
+        "pg8-definitions" if arguments.len() == 1 => Ok(pg8_definitions()),
         "measure-pg2" if matches!(arguments.len(), 5 | 7) => measure_pg2_command(
             arguments
                 .get(1)
@@ -195,6 +200,7 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "pg5-definitions" => Err(CliError::usage("pg5-definitions does not accept arguments")),
         "pg6-definitions" => Err(CliError::usage("pg6-definitions does not accept arguments")),
         "pg7-definitions" => Err(CliError::usage("pg7-definitions does not accept arguments")),
+        "pg8-definitions" => Err(CliError::usage("pg8-definitions does not accept arguments")),
         "measure-pg2" => Err(CliError::usage(
             "measure-pg2 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
@@ -374,6 +380,36 @@ fn pg7_definitions() -> Result<String, CliError> {
         );
     }
     Ok(output)
+}
+
+fn pg8_definitions() -> String {
+    let mut output = String::new();
+    for scenario in Pg8Scenario::ALL {
+        let definition = Pg8Definition::new(scenario);
+        let _ = writeln!(
+            output,
+            "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"pg8-definition\",\
+             \"definition_schema\":\"{PG8_DEFINITION_SCHEMA}\",\"gate\":\"pg-8\",\
+             \"scenario\":\"{}\",\"unit\":\"{}\",\
+             \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
+             \"fixture_input_digest\":\"{}\",\"expected_result_digest\":\"{}\",\
+             \"engine\":\"fmn-python-bridge\",\"tier\":\"portable\",\
+             \"thread_profile\":\"single-thread\",\"cache_state\":\"none\",\
+             \"output_mode\":\"record-buffer-state\",\
+             \"sample_count\":{PG8_SAMPLE_COUNT},\
+             \"warmup_iterations\":{PG8_WARMUP_ITERATIONS},\
+             \"frames_per_repetition\":{PG8_FRAMES_PER_REPETITION},\
+             \"mobjects\":{PG8_MOBJECTS},\"construction_timed\":{}}}",
+            scenario.name(),
+            scenario.unit().name(),
+            definition.digest(),
+            definition.config_digest(),
+            definition.fixture_input_digest(),
+            definition.expected_result_digest(),
+            scenario.rebuilds_per_repetition(),
+        );
+    }
+    output
 }
 
 fn pg5_definitions() -> Result<String, CliError> {
@@ -1569,6 +1605,24 @@ mod tests {
         assert!(output.contains("\"scenario\":\"formula-cold\""));
         assert!(output.contains("\"scenario\":\"formula-cached\""));
         assert!(output.contains("\"scenario\":\"text-10k-glyph\""));
+        assert!(!output.contains("\"status\""));
+    }
+
+    #[test]
+    fn pg8_definition_surface_is_closed_and_line_oriented() {
+        let output = pg8_definitions();
+        assert_eq!(output.lines().count(), 4);
+        assert!(output.lines().all(|line| {
+            line.starts_with("{\"schema\":\"fmn-perf-cli/1\"") && line.ends_with('}')
+        }));
+        for scenario in Pg8Scenario::ALL {
+            assert!(
+                output.contains(&format!("\"scenario\":\"{}\"", scenario.name())),
+                "missing {scenario}"
+            );
+        }
+        assert!(output.contains("\"construction_timed\":true"));
+        assert!(output.contains(&format!("\"sample_count\":{PG8_SAMPLE_COUNT}")));
         assert!(!output.contains("\"status\""));
     }
 
