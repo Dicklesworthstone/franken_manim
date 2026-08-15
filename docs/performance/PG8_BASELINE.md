@@ -22,6 +22,11 @@ PyO3 0.29.2 replays the bit-locked bundles and bridge state goldens but does
 not relabel or overwrite their producer identity. A new timing baseline would
 require a fresh canonical producer run under the same pinned-host attestation
 and comparability rules, not an incidental dependency-upgrade run.
+Consequently, the current `pg8-definitions` digest intentionally differs from
+the four historical `baseline.tsv` files below, and `fmn-perf-pg8 measure-pg8`
+refuses those files before reading the clock. A pinned-host publication must
+create a new target baseline from the current compiled identities; it must not
+edit these old keys to make old timings appear current.
 
 All four workloads are fixed before the clock is read: 64 built-in mobjects
 (`point` ×3 + `rgba` ×4 lanes, 4 records each), 60 frames of `dt = 1/30`
@@ -83,8 +88,14 @@ program's optimization work, not a baseline-recording concern.
   `crates/fmn-conformance/tests/perf_pg8.rs`
   (`committed_pg8_baseline_bundles_replay_through_the_verifier`); any edit
   to the committed bundles fails that test.
-- Producer: `cargo test -p fmn-conformance --profile release-perf \
-  --test perf_pg8 -- --ignored`
+- Compiled identities: `fmn-perf pg8-definitions` (four NDJSON records; no
+  PyO3 in the shipped binary).
+- Real producer: from `crates/fmn-conformance/`,
+  `cargo run --manifest-path ../../Cargo.toml --profile release-perf \
+  -p fmn-conformance --example fmn-perf-pg8 -- measure-pg8 \
+  <current-target-baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>`. The optional final
+  `<host-profile.tsv> <host-attestation.tsv>` pair enables the same live
+  qualification and postflight authority as the native gate producers.
 
 | Bundle | SHA-256 |
 |---|---|

@@ -112,6 +112,10 @@ concurrently retargeted by their owner.
 - `pg7-definitions` reports the exact compiled benchmark-definition,
   configuration, fixture-input, and result-self-golden digests for all three
   native-typesetting workloads.
+- `pg8-definitions` reports the exact compiled benchmark-definition,
+  configuration, fixture-input, and result-self-golden digests for all four
+  Python binding classes. This introspection remains in the shipped,
+  PyO3-free `fmn-perf` binary.
 - `measure-pg2 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` checks
   that the supplied baseline identity names that exact compiled producer, runs
   it, and exclusively creates a content-addressed phase trace followed by the
@@ -146,6 +150,28 @@ concurrently retargeted by their owner.
   below `tests/artifacts/perf/`; the other scenarios require `-`. The producer
   leaves the owned cache root intact as evidence-supporting state and never
   cleans it up or reuses it.
+
+PG-8's real sampler necessarily links the optional `fmn-python` portal and
+therefore cannot enter the shipped `fmn-perf` dependency graph. Its stable
+robot producer is the Gauntlet-only example target:
+
+```bash
+cargo run --manifest-path ../../Cargo.toml --profile release-perf \
+  -p fmn-conformance --example fmn-perf-pg8 -- \
+  measure-pg8 <current-target-baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>
+```
+
+It drives `manimlib::perf_harness` through the existing dev-only edge, then
+routes the observations through the same `measure_pg8`, live-host authority,
+canonical sample/trace schemas, and no-clobber publication rules as the native
+producers. It accepts the same optional final host-profile/attestation pair.
+For a qualified dedicated-cgroup run, build the example first and invoke
+`target/release-perf/examples/fmn-perf-pg8` directly; `cargo run` is for
+calibration because Cargo would violate the exclusive-process check.
+The July shared-host bundles are deliberately historical and their baseline
+files do not name the current compiled definition. The producer refuses them;
+the pinned-host lane must derive a fresh target baseline from the current
+`pg8-definitions` identities rather than rekeying or relabelling old samples.
 
 Every `measure-*` command above accepts one optional, indivisible final pair:
 `<host-profile.tsv> <host-attestation.tsv>`. Omitting both is explicit

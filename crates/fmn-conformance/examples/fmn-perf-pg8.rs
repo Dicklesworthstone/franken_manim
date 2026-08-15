@@ -8,8 +8,8 @@
 #![forbid(unsafe_code)]
 
 use fmn_conformance::perf::{
-    BASELINE_SCHEMA, EvidenceKind, EvidenceRef, MeasurementBatch, SAMPLES_SCHEMA,
-    require_compiled_cargo_profile, validate_producer_commit,
+    BASELINE_SCHEMA, EvidenceKind, EvidenceRef, SAMPLES_SCHEMA, require_compiled_cargo_profile,
+    validate_producer_commit,
 };
 use fmn_conformance::perf_host::{HostProfile, HostQualification, attest_current_host};
 use fmn_conformance::perf_pg8::{
@@ -571,5 +571,19 @@ mod tests {
         let error = dispatch(&arguments).expect_err("incomplete pair");
         assert_eq!(error.exit_code, EXIT_USAGE);
         assert!(error.detail.contains("host-attestation.tsv"));
+    }
+
+    #[test]
+    fn historical_pg8_calibration_is_not_relabelled_as_the_current_producer() {
+        let historical = fmn_conformance::perf::Baseline::from_tsv(include_str!(
+            "../tests/artifacts/perf/pg8-native-builtins/baseline.tsv"
+        ))
+        .expect("historical baseline remains parseable");
+        let error = fmn_conformance::perf_pg8::Pg8Definition::new(
+            fmn_conformance::perf_pg8::Pg8Scenario::NativeBuiltins,
+        )
+        .validate_baseline(&historical)
+        .expect_err("the current producer must refuse a historical definition");
+        assert!(error.to_string().contains("benchmark_definition"));
     }
 }
