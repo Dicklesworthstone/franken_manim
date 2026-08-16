@@ -1,0 +1,5 @@
+# schema: fmn-python-wheel-size/v1
+# budget: each compressed platform wheel must be <= 10485760 bytes (10 MiB)
+# source artifacts are retained outside the repository; this ledger records immutable identities
+version	wheel_tag	bytes	budget_bytes	sha256	verdict	provenance
+0.1.0	cp313-cp313-manylinux_2_34_x86_64	3255555	10485760	358c79043ba8ddc168aebbb99adff7206f2a827268504b45d50dad6d089eef40	pass	local-native-cpython-3.13.7-2026-08-15

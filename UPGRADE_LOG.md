@@ -178,3 +178,47 @@ cargo test
 python3 scripts/video_corpus.py verify
 ubs <the 12 migration files>
 ```
+
+---
+
+## 2026-08-15 — W11 Python build/runtime tools
+
+The first `fm-vsq` wheel tranche adds two exact Python-side authorities without
+changing the governed Cargo runtime graph:
+
+| Dependency | Exact version | Role |
+|---|---:|---|
+| Maturin | 1.14.1 | PEP 517 build backend and local wheel builder |
+| NumPy | 2.5.2 | host-side runtime dependency of the optional portal |
+
+Maturin is exact-pinned in `pyproject.toml` because wheel layout and tags are
+release inputs. It is not present in a shipped wheel's runtime dependency set.
+NumPy remains outside Cargo and the standalone `fmn` artifact; the wheel
+metadata pins it because the audited structured-buffer bridge is part of this
+specific CPython 3.13 portal contract.
+
+Observed proof for the resulting Linux x86-64 artifact:
+
+- Maturin 1.14.1 built
+  `franken_manim-0.1.0-cp313-cp313-manylinux_2_34_x86_64.whl` from the locked
+  Cargo graph with CPython 3.13.7.
+- Archive inspection found the nested full-ABI extension, both authored Python
+  packages, console entry point, CycloneDX SBOM, engine license, and all three
+  bundled-font OFL texts.
+- A new virtual environment installed only the wheel plus NumPy 2.5.2. It
+  imported the exact 663-name wildcard surface, ran version and scene-list
+  robot records, completed a one-frame construct-only lifecycle probe, and
+  refused ordinary render syntax with capability exit 4 because no production
+  frame sink is wired yet.
+- The compressed artifact measured 3,255,555 bytes against the recorded
+  10 MiB per-wheel budget; its SHA-256 is recorded in
+  `docs/dist/PYTHON_WHEEL_SIZE.tsv`.
+- The 2,942,065-byte sdist includes both API schema files and rebuilt into a
+  wheel successfully. The rebuilt wheel is not byte-identical to the direct
+  wheel: Maturin prunes unrelated workspace members in the sdist manifest,
+  changing the native artifact identity, and its generated CycloneDX SBOM
+  retains absolute source URIs. That reproducible-release gap remains open
+  under `fm-vsq`; the successful round trip is functional evidence only.
+
+This is focused Linux packaging evidence, not the cross-platform matrix or a
+pixel-render proof. `fm-vsq` remains open for those acceptance items.

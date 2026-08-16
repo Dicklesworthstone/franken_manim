@@ -155,3 +155,32 @@ inventory remains the two CPython buffer slots plus the read-only
 still exposes the required full-ABI `Py_buffer` slots and
 `PyTypeObject::tp_version_tag`; limited-ABI/abi3 packaging would invalidate
 that proof and still requires a separate ADR.
+
+## Amendment 3 — fm-vsq fixes the wheel layout and namespace policy
+
+**Status:** Accepted
+**Date:** 2026-08-15
+**Bead:** fm-vsq (the Python wheel and namespace matrix)
+
+Decision 3 is extended from the raw extension artifact to the wheel layout.
+The root `pyproject.toml` uses exact Maturin 1.14.1 and packages the existing
+`PyInit_manimlib` extension as the private full-ABI member
+`manimlib.manimlib`. A project-authored `manimlib` package initializer
+re-exports the exact schema surface, while the separate `fmn_python` package
+owns the `fmn-python` console entry point. The wrapper adds no second engine,
+geometry, or compatibility implementation.
+
+The `franken-manim` distribution is the exclusive owner of the top-level
+`manimlib` package in a supported environment. It is not a PEP 420 namespace
+package and it does not attempt import hooks or install-order arbitration with
+another distribution that writes the same package. Co-installation is
+unsupported because Python installers can overwrite and later uninstall one
+another's package files. Users who need another `manimlib` provider use a
+separate virtual environment. The wheel publishes distribution and ABI
+sentinels so diagnostics can verify the active provider.
+
+The initial wheel range is CPython `>=3.13,<3.14`, tagged `cp313-cp313`; abi3
+remains off. NumPy 2.5.2 is an exact host-side runtime requirement, and the
+portable CPU tier is the wheel baseline. The platform matrix and production
+pixel-render smoke remain fm-vsq acceptance until observed on their native
+hosts; a Linux import/construct-only smoke cannot satisfy them.

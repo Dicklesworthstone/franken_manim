@@ -13,6 +13,7 @@ stays in the crates and is linked, not duplicated.
 | [cache_config_conventions.md](cache_config_conventions.md) | Per-platform cache/config directory conventions (replacing appdirs/diskcache), `--clear-cache` and `fmn doctor` behavior, the migration-note policy |
 | [studio_ui.md](studio_ui.md) | Embedded Studio UI assets: compiled-in, versioned with the binary, no runtime file serving (§13.5) |
 | [font_license_bundle.md](font_license_bundle.md) | The font + license bundle manifest: bundled faces, OFL texts, content hashes, the no-corpus-leak check |
+| [python_wheel.md](python_wheel.md) | CPython ABI, exact `manimlib` namespace ownership, console capability boundary, clean-venv ritual, and current matrix gaps |
 
 ## The Behavior Notes' distribution home
 
