@@ -24,7 +24,8 @@ CPython-free.
 
 Native Linux x86-64, macOS AArch64, and Windows x86-64 wheels have been built
 and smoke-tested from exact source commits; immutable size and digest receipts
-are recorded below. Linux AArch64 remains unproven because no native
+are recorded below, including the published `v0.2.0` release-tag artifacts.
+Linux AArch64 remains unproven because no native
 certification host is currently configured, so `fm-vsq` stays open rather than
 substituting cross-compilation or emulation for native evidence.
 
