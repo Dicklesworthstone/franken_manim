@@ -34,7 +34,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fmn-codec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-frame",
@@ -51,18 +51,18 @@ dependencies = [
 
 [[package]]
 name = "fmn-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-dmath",
 ]
 
 [[package]]
 name = "fmn-dmath"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "fmn-frame"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-hash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
 ]

@@ -6865,7 +6865,6 @@ def _install_schema_surface():
         if hasattr(module, name):
             setattr(root, name, getattr(module, name))
 
-    root.__version__ = "0.1.0"
     root.__reference_commit__ = (
         "6199a00d4c1b1127ebe45cb629c3f22538b10e13"
     )

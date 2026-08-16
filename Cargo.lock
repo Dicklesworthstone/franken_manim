@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "fmn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-anim",
  "fmn-config",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-anim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-cache"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-hash",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "fmn",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-codec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-frame",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-hash",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-conformance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmd-font",
  "fmd-math",
@@ -682,18 +682,18 @@ dependencies = [
 
 [[package]]
 name = "fmn-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-dmath",
 ]
 
 [[package]]
 name = "fmn-dmath"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "fmn-frame"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-geom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -709,14 +709,14 @@ dependencies = [
 
 [[package]]
 name = "fmn-hash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
 ]
 
 [[package]]
 name = "fmn-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-anim",
  "fmn-codec",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-mobject"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-output"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-cache",
  "fmn-codec",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "fmn-core",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-anim",
  "fmn-codec",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-cache",
  "fmn-codec",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "fmn-core",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-anim",
  "fmn-config",
@@ -826,14 +826,14 @@ dependencies = [
 
 [[package]]
 name = "fmn-spike-object-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-core",
 ]
 
 [[package]]
 name = "fmn-studio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-anim",
  "fmn-cache",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-tex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmd-math",
  "fmn-cache",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmd-font",
  "fmn-core",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fmn-anim",
  "fmn-core",

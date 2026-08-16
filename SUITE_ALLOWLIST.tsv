@@ -14,31 +14,31 @@
 #   pending = audit owed before first consumption.
 #
 # name	version	source	checksum	features	license	build_script	proc_macro	native_link	build_net	unsafe_audit	class	reason	owner	upgrade_policy
-fmn-core	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	substrate	fm	with-crate
-fmn-dmath	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	certified transcendentals	fm	with-crate
-fmn-hash	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	canonical hashing	fm	with-crate
-fmn-config	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	config	fm	with-crate
-fmn-platform	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	capability traits	fm	with-crate
-fmn-frame	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	frame buffers	fm	with-crate
-fmn-codec	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	native codecs	fm	with-crate
-fmn-cache	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	content-addressed cache	fm	with-crate
-fmn-geom	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Chisel	fm	with-crate
-fmn-mobject	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Marionette	fm	with-crate
-fmn-anim	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Choreo	fm	with-crate
-fmn-render	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Lumen	fm	with-crate
-fmn-text	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Scribe I	fm	with-crate
-fmn-tex	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Scribe II	fm	with-crate
-fmn-library	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Menagerie+Atlas	fm	with-crate
-fmn-scene	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Proscenium	fm	with-crate
-fmn-studio	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Studio	fm	with-crate
-fmn-output	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Reel	fm	with-crate
-fmn-runtime	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	runtime glue	fm	with-crate
-fmn	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	native Rust front door	fm	with-crate
-fmn-cli	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	fmn CLI	fm	with-crate
-fmn-conformance	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Gauntlet	fm	with-crate
-fmn-wasm	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	W5 tier-1 wasm32 browser surface (fm-l97)	fm	with-crate
-fmn-python	0.1.0	workspace	-	-	MIT+rider	no	no	python	no	audited-ffi	workspace	manimlib bridge; sole non-forbid crate, with project unsafe confined to audited __getbuffer__/__releasebuffer__ slots plus the read-only tp_version_tag observer (ADR-0015)	fm	with-crate
-fmn-spike-object-model	0.1.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	G0-1 spike (publish=false)	fm	with-crate
+fmn-core	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	substrate	fm	with-crate
+fmn-dmath	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	certified transcendentals	fm	with-crate
+fmn-hash	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	canonical hashing	fm	with-crate
+fmn-config	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	config	fm	with-crate
+fmn-platform	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	capability traits	fm	with-crate
+fmn-frame	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	frame buffers	fm	with-crate
+fmn-codec	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	native codecs	fm	with-crate
+fmn-cache	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	content-addressed cache	fm	with-crate
+fmn-geom	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Chisel	fm	with-crate
+fmn-mobject	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Marionette	fm	with-crate
+fmn-anim	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Choreo	fm	with-crate
+fmn-render	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Lumen	fm	with-crate
+fmn-text	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Scribe I	fm	with-crate
+fmn-tex	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Scribe II	fm	with-crate
+fmn-library	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Menagerie+Atlas	fm	with-crate
+fmn-scene	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Proscenium	fm	with-crate
+fmn-studio	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Studio	fm	with-crate
+fmn-output	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Reel	fm	with-crate
+fmn-runtime	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	runtime glue	fm	with-crate
+fmn	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	native Rust front door	fm	with-crate
+fmn-cli	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	fmn CLI	fm	with-crate
+fmn-conformance	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	Gauntlet	fm	with-crate
+fmn-wasm	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	W5 tier-1 wasm32 browser surface (fm-l97)	fm	with-crate
+fmn-python	0.2.0	workspace	-	-	MIT+rider	no	no	python	no	audited-ffi	workspace	manimlib bridge; sole non-forbid crate, with project unsafe confined to audited __getbuffer__/__releasebuffer__ slots plus the read-only tp_version_tag observer (ADR-0015)	fm	with-crate
+fmn-spike-object-model	0.2.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	G0-1 spike (publish=false)	fm	with-crate
 fmn-spike-fmd-math	0.0.0	workspace	-	-	MIT+rider	no	no	no	no	forbid	workspace	G0-3 spike (publish=false; renamed from g0-3-fmd-math to the fmn-spike-* convention, fm-q6t)	fm	with-crate
 # --- PyO3 0.29.2 graph (ADR-0015 Amendment 2), shared with the G0-5 spike lock ---
 # The spike remains a non-member dev crate, but fm-aqv consumes the same pinned

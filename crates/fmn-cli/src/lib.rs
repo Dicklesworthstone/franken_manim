@@ -8236,9 +8236,12 @@ mod tests {
         assert!(version.stderr.is_empty());
         assert_eq!(
             version.stdout,
-            concat!(
-                "{\"schema\":\"fmn.cli\",\"version\":1,\"kind\":\"version\",",
-                "\"program\":\"fmn\",\"program_version\":\"0.1.0\"}\n"
+            format!(
+                concat!(
+                    "{{\"schema\":\"fmn.cli\",\"version\":1,\"kind\":\"version\",",
+                    "\"program\":\"fmn\",\"program_version\":\"{}\"}}\n"
+                ),
+                env!("CARGO_PKG_VERSION")
             )
         );
 
