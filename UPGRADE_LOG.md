@@ -1,9 +1,11 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-08-11
+**Initial audit date:** 2026-08-11
+**Last updated:** 2026-08-16
 **Dependency-graph audit HEAD:** `fe7f1b19a61dbebbb70188f7224db7bbfb50aee6`
 **Security migration commit:** `64a0458e5de0596e2cb89ed7415c2b78cdccb260`
-**Final validation source:** the exact tree recorded by that commit
+**PyO3 final validation source:** the exact tree recorded by that commit
+**WASM migration:** `fm-oqxs` (this recorded change)
 **Project:** FrankenManim
 **Manifests:** root workspace, `fuzz`, `wasm-smoke`, and the non-member G0 spikes
 
@@ -15,16 +17,17 @@
 | Ordinary latest-stable updates available | 0 |
 | Already current | 2 |
 | Governed exact pins preserved | 6 |
-| Deliberate migrations requiring attention | 1 |
-| Updates applied | 1 |
+| Deliberate migrations requiring attention | 0 |
+| Updates applied | 2 |
 
 This repository does not admit routine semver drift. `SUITE.lock`,
 `SUITE_ALLOWLIST.tsv`, ADR-0008, and `docs/GOVERNANCE.md` require exact
 dependency identity and a Gauntlet-backed review for every admitted change.
 The initial audit therefore rejected routine semver drift. The user then
 explicitly approved the governed PyO3 security migration tracked by fm-kg6g;
-that isolated migration is now applied and validated. The remaining
-wasm-bindgen delta stays pending its own Gauntlet-backed tranche.
+that isolated migration is now applied and validated. The later `fm-oqxs`
+tranche applies the sole remaining Cargo root delta, wasm-bindgen 0.2.127,
+with its coupled lock/allowlist closure and WASM-specific proof.
 
 ## Applied
 
@@ -67,23 +70,31 @@ soundness. The user explicitly approved the library-updater circuit breaker
 before implementation; no partial compatibility shim or split-version graph
 was introduced.
 
-## Requires attention
-
 ### wasm-bindgen: 0.2.126 -> 0.2.127
 
-**Priority:** Small deliberate upgrade; not a routine update.
+**Status:** Applied by `fm-oqxs` in this recorded change.
 
-0.2.127 is the only ordinary version delta reported by
-`cargo outdated --workspace --depth 1`. Its changelog is predominantly additive
-bindings and fixes, and current FrankenManim usage is limited to the established
-macro/`JsError` surface. Nevertheless, the exact pin is classified
-`deliberate+gauntlet` in `SUITE_ALLOWLIST.tsv`.
+0.2.127 was the only ordinary Cargo root version delta reported by the initial
+audit. Its changelog is predominantly additive bindings and fixes, and current
+FrankenManim usage is limited to the established macro/`JsError` surface. The
+exact pin remains classified `deliberate+gauntlet` in `SUITE_ALLOWLIST.tsv`.
 
-A correct isolated tranche must update both workspace consumers and
-`wasm-smoke`, refresh both lockfiles, reconcile every affected
-`wasm-bindgen`/macro/shared/`js-sys`/`web-sys` allowlist row, and pass the
-workspace, wasm32 browser smoke, native-vs-WASM bit-equivalence, bundle-size,
-and full Gauntlet gates. It was not applied opportunistically during this audit.
+The isolated tranche updates both workspace consumers and `wasm-smoke`,
+refreshes both lockfiles, reconciles every affected
+`wasm-bindgen`/macro/shared/`js-sys`/`web-sys` allowlist row, and passes the
+workspace, wasm32 runtime smoke, native-vs-WASM bit-equivalence, bundle-size,
+and full repository gates. A same-source A/B build measured a 156-byte raw-WASM
+increase (639,566 -> 639,722 bytes, 0.024%) and no optimized web-package change
+(454,043 bytes under both versions). `SIZE_BUDGET.tsv` was rebaselined because
+the July measurements predated substantial Lumen, scene, and WASM capability;
+the dependency itself accounts for only the measured 156-byte raw delta.
+
+The documented WASM packaging tool was also refreshed from wasm-pack 0.13.1
+to 0.15.0 after verifying the official Linux release asset's SHA-256
+(`c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a`).
+The latest tool built the 0.2.127 web package successfully and reproduced the
+same 454,043-byte optimized artifact. wasm-pack is a developer-side tool, not
+a shipped Cargo dependency, so this does not change the governed runtime graph.
 
 ## Preserved governed pins
 
@@ -100,13 +111,19 @@ The G0-8 accelerator spike intentionally retains its historical
 Its manifest comment was corrected during this audit to make that authority
 boundary explicit.
 
+FrankenSQLite 0.3.1 is not a direct or transitive dependency of this workspace,
+so there is no FrankenSQLite version record to change. Asupersync remains the
+exact suite pin above rather than taking an unrelated registry update.
+
 ## Already current
 
 - `rustix =1.1.4` (test-only Studio PTY/dev closure)
 - `libfuzzer-sys =0.4.13` (isolated fuzz workspace)
 
-The generated WASM demo `package.json` has no dependencies, and the repository
-does not yet have a Python packaging manifest or Node lockfile.
+The generated WASM demo `package.json` has no dependencies and no Node lockfile.
+The separately shipped Python portal now has an exact Maturin/NumPy packaging
+manifest; those host-side build/runtime requirements do not enter the Cargo
+runtime closure.
 
 ## Security and policy checks
 
@@ -117,8 +134,9 @@ does not yet have a Python packaging manifest or Node lockfile.
   advisories or warnings across the independent 18-package spike lock.
 - `cargo test -p fmn-conformance --test governed_closure`: 14 passed. This is
   the authoritative exact allowlist/checksum/pin gate.
-- `cargo outdated --workspace --depth 1`: exited 0 and found only the pending
-  `wasm-bindgen` patch delta. Cargo printed the known malformed asupersync
+- The initial `cargo outdated --workspace --depth 1` found only the
+  `wasm-bindgen` patch delta. The post-migration root-dependency audit found no
+  remaining Cargo root update. Cargo printed the known malformed asupersync
   test-fixture diagnostic while walking that checkout.
 
 ## Executable evidence on the migrated graph
@@ -146,6 +164,18 @@ does not yet have a Python packaging manifest or Node lockfile.
   reproduced byte-for-byte at their locked pins.
 - `ubs` over all 12 migration files exited 0 with no critical findings.
 
+WASM-specific proof for `fm-oqxs`:
+
+- `cargo test -p fmn-conformance --test governed_closure`: 14 passed against
+  the refreshed exact versions, checksums, features, and policy rows.
+- `cargo check --target wasm32-unknown-unknown -p fmn-wasm`: exited 0.
+- `./wasm-smoke/run.sh`: exited 0 in a real Node runtime and retained the
+  expected deterministic digest `1f248a71347b82aa`.
+- `FMN_E2E_FULL=1 cargo test -p fmn-conformance --test e2e_scenarios`: all 5
+  fast/full catalog and regression-drill tests passed.
+- The raw and optimized same-source A/B measurements are recorded above and in
+  `crates/fmn-wasm/SIZE_BUDGET.tsv`; the refreshed budget test passed.
+
 The first isolated local all-target check exhausted temporary storage while
 compiling unchanged WASM dependencies, and two RCH retries stalled with fresh
 heartbeats but no compiler progress. Neither is treated as source evidence.
@@ -156,6 +186,7 @@ the recorded final result.
 
 ```text
 cargo outdated --workspace --depth 1
+cargo outdated --root-deps-only
 cargo search <direct dependency>
 cargo info <direct dependency>
 cargo audit
@@ -176,6 +207,8 @@ cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test
 python3 scripts/video_corpus.py verify
+./wasm-smoke/run.sh
+wasm-pack 0.15.0 build --target web --out-dir <fresh-directory> crates/fmn-wasm
 ubs <the 12 migration files>
 ```
 

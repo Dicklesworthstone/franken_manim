@@ -19,7 +19,7 @@ fmn-core = { path = "../crates/fmn-core" }
 fmn-mobject = { path = "../crates/fmn-mobject" }
 fmn-platform = { path = "../crates/fmn-platform" }
 fmn-render = { path = "../crates/fmn-render" }
-wasm-bindgen = "=0.2.126"
+wasm-bindgen = "=0.2.127"
 
 [profile.release]
 # The probe renders at instantiation time in a JS VM; keep the artifact

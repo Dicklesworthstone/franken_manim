@@ -3,6 +3,6 @@
 # size_budget_within_headroom test in crates/fmn-wasm/src/lib.rs.
 # Rebuild and re-measure deliberately; never raise the budget silently.
 artifact	measured_bytes	budget_bytes	measured_on	notes
-cargo-release-wasm	534945	588440	2026-07-31	target/wasm32-unknown-unknown/release/fmn_wasm.wasm (cargo build --target wasm32-unknown-unknown --release -p fmn-wasm; thin LTO). 2026-07-31 re-measure: +FmnPlayer (fm-oee tier 2)
-wasm-bindgen-web-pkg	377436	415180	2026-07-31	demo/wasm/pkg/fmn_wasm_bg.wasm (wasm-pack 0.13.1 build --target web; wasm-bindgen 0.2.126 + wasm-opt). 2026-07-31 re-measure: +FmnPlayer (fm-oee tier 2)
+cargo-release-wasm	639722	703695	2026-08-16	target/wasm32-unknown-unknown/release/fmn_wasm.wasm (cargo build --target wasm32-unknown-unknown --release -p fmn-wasm; thin LTO). fm-oqxs A/B on current source: wasm-bindgen 0.2.126 = 639566 bytes, 0.2.127 = 639722 bytes (+156, 0.024%); the larger rebaseline reflects post-2026-07-31 Lumen/scene/WASM capability growth.
+wasm-bindgen-web-pkg	454043	499448	2026-08-16	demo/wasm/pkg/fmn_wasm_bg.wasm (wasm-pack 0.15.0 build --target web; matching wasm-bindgen 0.2.127 + wasm-opt). fm-oqxs A/B on current source produced the identical optimized size under 0.2.126 and 0.2.127; wasm-pack 0.15.0 also reproduced 454043 bytes. The larger rebaseline reflects post-2026-07-31 Lumen/scene/WASM capability growth.
 demo-timeline-bundle	302437	332681	2026-07-31	demo/wasm/bundle.fmtl (cargo run -p fmn-wasm --example export_bundle; FMTL/1, fm-oee; enforced by demo_bundle_size_within_budget)

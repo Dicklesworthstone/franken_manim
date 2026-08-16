@@ -12,7 +12,7 @@ This directory is the demo's one home (`demo/wasm/`); there is no parallel
 
 ## Build
 
-`wasm-pack` 0.13.1 is installed on this machine and is the documented path
+`wasm-pack` 0.15.0 is the verified documented path
 (it vendors its own pinned `wasm-bindgen` CLI + `wasm-opt`):
 
 ```sh
@@ -20,7 +20,7 @@ wasm-pack build --target web --out-dir ../../demo/wasm/pkg crates/fmn-wasm
 ```
 
 If `wasm-pack` is unavailable, the equivalent two-step path is (requires
-`wasm-bindgen-cli` 0.2.126, `cargo install wasm-bindgen-cli --version 0.2.126`
+`wasm-bindgen-cli` 0.2.127, `cargo install wasm-bindgen-cli --version 0.2.127`
 — installing it is a deliberate local action, not part of this repo):
 
 ```sh
