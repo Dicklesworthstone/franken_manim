@@ -22,7 +22,7 @@ fmn-config.workspace = true
 fmn-cache.workspace = true
 fmn-frame.workspace = true
 fmn-codec.workspace = true
-fmn-platform.workspace = true
+fmn-platform = { workspace = true, features = ["exact-process"] }
 fmn-runtime.workspace = true
 fmn-render.workspace = true
 fmn-scene.workspace = true

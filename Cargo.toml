@@ -50,7 +50,7 @@ fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
 fmn-hash = { path = "crates/fmn-hash" }
 fmn-config = { path = "crates/fmn-config" }
-fmn-platform = { path = "crates/fmn-platform" }
+fmn-platform = { path = "crates/fmn-platform", default-features = false }
 fmn-frame = { path = "crates/fmn-frame" }
 fmn-codec = { path = "crates/fmn-codec" }
 fmn-cache = { path = "crates/fmn-cache" }

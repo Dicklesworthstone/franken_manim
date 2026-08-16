@@ -13,7 +13,7 @@ use fmn_platform::process::{
     NativeExecutableFormat, ProcessCancellation, ProcessOutcome, ProcessRunner, ProcessSpec,
     ProcessStdinLimits, ProcessTermination, ScriptedRunner, StdFfmpegLocator,
 };
-#[cfg(any(unix, windows))]
+#[cfg(all(feature = "exact-process", any(unix, windows)))]
 use fmn_platform::process::{ProcessError, ProcessMechanism};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -1168,7 +1168,7 @@ fn spec(program: &str, argv: &[&str]) -> ProcessSpec {
 /// keeps them all in `/usr/bin`; macOS still ships `echo`, `sleep`, and `cat`
 /// in `/bin`. The exact-image runner takes only absolute paths by design, so
 /// resolve the first candidate that exists on this host.
-#[cfg(unix)]
+#[cfg(all(feature = "exact-process", unix))]
 fn host_bin(name: &str) -> String {
     let candidates = [format!("/usr/bin/{name}"), format!("/bin/{name}")];
     for candidate in &candidates {
@@ -1179,7 +1179,7 @@ fn host_bin(name: &str) -> String {
     panic!("no {name} in /usr/bin or /bin on this host");
 }
 
-#[cfg(unix)]
+#[cfg(all(feature = "exact-process", unix))]
 mod std_runner {
     use super::*;
     use fmn_platform::process::StdProcessRunner;
@@ -1424,7 +1424,7 @@ mod std_runner {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "exact-process", windows))]
 mod windows_std_runner {
     use super::*;
     use fmn_platform::process::StdProcessRunner;
@@ -1635,11 +1635,26 @@ fn relative_program_paths_are_refused_by_contract() {
     let s = spec("echo", &["hi"]);
     let err = ScriptedRunner::new().run(&s).unwrap_err();
     assert!(err.to_string().contains("not absolute"), "{err}");
-    #[cfg(any(unix, windows))]
+    #[cfg(all(feature = "exact-process", any(unix, windows)))]
     {
         use fmn_platform::process::StdProcessRunner;
         assert!(StdProcessRunner.run(&s).is_err());
     }
+}
+
+#[cfg(not(feature = "exact-process"))]
+#[test]
+fn absent_exact_process_feature_fails_closed_without_a_policy_identity() {
+    use fmn_platform::process::{NoProcessRunner, ProcessError, ProcessMechanism};
+
+    let requested = spec(fake_ffmpeg(), &[]);
+    let error = NoProcessRunner.run(&requested).unwrap_err();
+    assert!(matches!(error, ProcessError::CapabilityAbsent { .. }));
+    assert_eq!(
+        NoProcessRunner.mechanism(),
+        ProcessMechanism::ExactImageUnavailable
+    );
+    assert_eq!(NoProcessRunner.mechanism().policy_version(), 0);
 }
 
 /// An absolute path for a fixture program the scripted runner will never

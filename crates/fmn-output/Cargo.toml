@@ -21,7 +21,7 @@ doc = false
 fmn-core.workspace = true
 fmn-dmath.workspace = true
 fmn-hash.workspace = true
-fmn-platform.workspace = true
+fmn-platform = { workspace = true, features = ["exact-process"] }
 fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-cache.workspace = true

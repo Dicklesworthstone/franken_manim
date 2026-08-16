@@ -6,6 +6,14 @@ license.workspace = true
 repository.workspace = true
 description = "Filesystem/process/clock/AssetFetcher capability traits plus HardwareTopology introspection (§17.4)."
 
+[features]
+# Native exact-image spawning is part of the ordinary platform surface, but
+# consumers which only need deterministic filesystem/clock/profile traits may
+# opt out.  That keeps the optional CPython portal from linking a complete
+# process-supervision runtime it cannot currently reach.
+default = ["exact-process"]
+exact-process = ["dep:asupersync"]
+
 [dependencies]
 fmn-core.workspace = true
 
@@ -15,7 +23,7 @@ fmn-core.workspace = true
 # so the substrate is gated out of the wasm graph entirely rather than
 # carried as dead weight.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-asupersync.workspace = true
+asupersync = { workspace = true, optional = true }
 
 # W5 wasm tier 1 (fm-l97): the browser capability implementations bind
 # `performance.now` / `Date.now` through wasm-bindgen extern imports — the

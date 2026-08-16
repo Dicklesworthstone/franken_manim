@@ -4,7 +4,7 @@
 //! the D2 security protocol that belongs to the *mechanism* lives here:
 //!
 //! - **Exact-image, argv-only interface.** [`ProcessSpec`] is an absolute
-//!   native-image path plus an argument vector. [`StdProcessRunner`] delegates
+//!   native-image path plus an argument vector. `StdProcessRunner` delegates
 //!   to asupersync's audited exact-image primitive: Unix uses `posix_spawn`
 //!   with the absolute path (never `posix_spawnp`, `execvp`, or an ENOEXEC
 //!   shell fallback), while Windows uses an explicit `CreateProcessW`
@@ -42,16 +42,19 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 // The io traits are used by the native-image attestation readers and the
-// std runner's pipe plumbing; both are structurally absent on wasm32.
+// std runner's pipe plumbing; both are structurally absent on wasm32, and the
+// latter is absent when the exact-process capability is not selected.
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+use std::io::Write as _;
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::{Read as _, Seek as _, Write as _};
+use std::io::{Read as _, Seek as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 use std::time::Instant;
 
 /// The one executable identity discovery may return.
@@ -1767,7 +1770,7 @@ impl ProcessMechanism {
     }
 
     /// Version of the mechanism's executable-selection and containment policy.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
     #[must_use]
     pub const fn policy_version(self) -> u32 {
         match self {
@@ -1780,11 +1783,12 @@ impl ProcessMechanism {
 
     /// Version of the mechanism's executable-selection and containment policy.
     ///
-    /// wasm32: the exact-image substrate (asupersync's process primitive) is
-    /// structurally absent from the build, so only the in-memory identities
-    /// carry a policy version; the host spawn identities are unreachable and
-    /// report 0 (no policy) rather than naming a substrate that is not here.
-    #[cfg(target_arch = "wasm32")]
+    /// Without the `exact-process` feature (including wasm32), the exact-image
+    /// substrate is structurally absent from the build. Only the in-memory
+    /// identity carries a policy version; host spawn identities are
+    /// unreachable and report 0 rather than naming a substrate that is not
+    /// linked.
+    #[cfg(any(target_arch = "wasm32", not(feature = "exact-process")))]
     #[must_use]
     pub const fn policy_version(self) -> u32 {
         match self {
@@ -1796,7 +1800,7 @@ impl ProcessMechanism {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 fn exact_image_mechanism(
     mechanism: asupersync::process::ExactImageSpawnMechanism,
 ) -> ProcessMechanism {
@@ -1810,7 +1814,7 @@ fn exact_image_mechanism(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 const fn host_exact_image_mechanism() -> ProcessMechanism {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -1940,7 +1944,7 @@ pub enum ProcessError {
     /// The program could not be spawned at all. Only constructible where a
     /// spawn substrate exists; on wasm32 the boundary is absent and every
     /// request is [`Self::CapabilityAbsent`] instead.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
     Spawn {
         /// The program that failed to spawn.
         program: PathBuf,
@@ -2020,15 +2024,16 @@ pub enum ProcessError {
 impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
             Self::Spawn { program, err } => {
                 write!(f, "cannot spawn {}: {err}", program.display())
             }
             Self::CapabilityAbsent { program } => write!(
                 f,
                 "no ProcessRunner capability: cannot run {}; the process boundary \
-                 exists only on native hosts (D2: ffmpeg is the only subprocess) — \
-                 under wasm32 render frames and encode on the host",
+                 must be explicitly enabled and handed to a native product \
+                 (D2: ffmpeg is the only subprocess); under wasm32 render frames \
+                 and encode on the host",
                 program.display()
             ),
             Self::Plumbing { program, detail } => {
@@ -2084,7 +2089,7 @@ impl fmt::Display for ProcessError {
 impl std::error::Error for ProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
             Self::Spawn { err, .. } => Some(err),
             _ => None,
         }
@@ -2165,7 +2170,7 @@ pub trait ProcessRunner: Send + Sync {
 }
 
 /// How often the std runner polls the child while enforcing the timeout.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Every runner (std and scripted alike) refuses relative program paths:
@@ -2181,13 +2186,13 @@ fn require_absolute(spec: &ProcessSpec) -> Result<(), ProcessError> {
 }
 
 /// Host implementation over asupersync's audited exact-image primitive.
-/// Native only: on wasm32 there is no process boundary at all, so the
-/// capability's structural default is [`NoProcessRunner`].
-#[cfg(not(target_arch = "wasm32"))]
+/// Native exact-process builds only: otherwise the capability's structural
+/// default is [`NoProcessRunner`].
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdProcessRunner;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 fn kill_process_tree(child: &mut asupersync::process::ExactImageChild) -> std::io::Result<()> {
     match child.kill_process_tree() {
         Ok(()) => Ok(()),
@@ -2200,7 +2205,7 @@ fn kill_process_tree(child: &mut asupersync::process::ExactImageChild) -> std::i
 /// discarding the rest (so the child is never back-pressured into a pipe
 /// deadlock). Sets `overflow` the moment the cap is exceeded — the poll loop
 /// watches it and kills the child promptly. Returns the captured bytes.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 fn drain(
     mut pipe: impl std::io::Read + Send + 'static,
     cap: u64,
@@ -2228,7 +2233,7 @@ fn drain(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 impl ProcessRunner for StdProcessRunner {
     fn mechanism(&self) -> ProcessMechanism {
         host_exact_image_mechanism()
@@ -2330,7 +2335,7 @@ impl ProcessRunner for StdProcessRunner {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 fn supervise_child(
     mut child: asupersync::process::ExactImageChild,
     program: &std::path::Path,
@@ -2419,7 +2424,7 @@ fn supervise_child(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 struct StdRunningProcess {
     program: PathBuf,
     stdin: Option<asupersync::process::ExactImageChildStdin>,
@@ -2431,7 +2436,7 @@ struct StdRunningProcess {
     finished: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 impl StdRunningProcess {
     fn wait(&mut self) -> Result<ProcessOutcome, ProcessError> {
         self.stdin.take();
@@ -2450,7 +2455,7 @@ impl StdRunningProcess {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 impl RunningProcess for StdRunningProcess {
     fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), ProcessError> {
         if self.cancellation.is_cancelled() {
@@ -2507,7 +2512,7 @@ impl RunningProcess for StdRunningProcess {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 impl Drop for StdRunningProcess {
     fn drop(&mut self) {
         if !self.finished {
