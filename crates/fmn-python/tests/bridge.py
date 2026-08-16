@@ -6,13 +6,17 @@ module imports, and callback reentrancy.
 """
 
 import abc
+import contextlib
 import copy
 import enum
 import gc
 import importlib
 import inspect
+import io
+import json
 import math
 import pickle
+import pathlib
 import re
 import sys
 import threading
@@ -3614,7 +3618,7 @@ assert issubclass(manimlib.EndScene, Exception)
 assert manimlib.np is np
 assert hasattr(Mobject, "add_event_listner")
 assert Mobject.add_event_listener is Mobject.add_event_listner
-assert not hasattr(manimlib, "__all__")
+assert not hasattr(manimlib, "__all__"), repr(getattr(manimlib, "__all__", None))
 
 exported = set()
 classes = set()
@@ -3840,3 +3844,93 @@ gil_stop.append(True)
 gil_worker.join()
 assert gil_observed > 0, "no Python progress during the detached native kernel"
 assert gil_probe.observed() >= gil_observed
+
+
+# W11 PORTAL CONSOLE — the installed entry point exposes real package/version
+# identity, stable robot records, source discovery, and an explicitly named
+# construct-only diagnostic.  Render/Studio syntax fails before source access
+# until the production frame sink exists; lifecycle-only success is never
+# mislabeled as a render.
+def run_portal_console(*arguments):
+    previous = sys.argv
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    sys.argv = ["fmn-python", *arguments]
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = manimlib._console_main()
+    finally:
+        sys.argv = previous
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+assert manimlib.__version__ == _expected_package_version
+assert manimlib.__distribution__ == "franken-manim"
+assert manimlib.__franken_manim__ is True
+assert manimlib.__abi_policy__ == "cpython-3.13-full-abi"
+
+console_code, console_out, console_err = run_portal_console("--version")
+assert console_code == 0
+assert console_out.startswith(
+    f"fmn-python {_expected_package_version} (CPython 3.13."
+)
+assert console_err == ""
+
+console_code, console_out, console_err = run_portal_console("--robot", "--version")
+assert console_code == 0
+console_version = json.loads(console_out)
+assert console_version["schema"] == "fmn-python.cli"
+assert console_version["version"] == 1
+assert console_version["kind"] == "version"
+assert console_version["program_version"] == _expected_package_version
+assert console_version["abi_policy"] == "cpython-3.13-full-abi"
+assert console_version["exit"] == {"code": 0, "identity": "success"}
+assert console_err == ""
+
+# Refusal precedes even source-file access: the default syntax means render,
+# not a quiet lifecycle probe.
+console_code, console_out, console_err = run_portal_console(
+    "missing-source.py", "MissingScene"
+)
+assert console_code == 4
+assert console_out == ""
+assert "composition-unavailable" in console_err
+assert "not yet connected" in console_err
+
+def verify_portal_console_scene():
+    source = pathlib.Path(__file__).with_name("console_scene.py")
+    console_code, console_out, console_err = run_portal_console(
+        "--robot", "--list-scenes", str(source)
+    )
+    assert console_code == 0
+    scene_list = json.loads(console_out)
+    assert scene_list["kind"] == "scene-list"
+    assert scene_list["scenes"] == ["ConsoleScene"]
+    assert console_err == ""
+
+    console_code, console_out, console_err = run_portal_console(
+        "--robot", "--construct-only", str(source), "ConsoleScene"
+    )
+    assert console_code == 0
+    constructed = json.loads(console_out)
+    assert constructed["kind"] == "construct-only"
+    assert constructed["scene"] == "ConsoleScene"
+    assert constructed["root_count"] == 1
+    assert constructed["family_count"] == 1
+    assert constructed["scene_time"] == 1 / 30
+    assert constructed["rendered"] is False
+    assert constructed["exit"] == {"code": 0, "identity": "success"}
+    assert console_err == ""
+
+    console_code, console_out, console_err = run_portal_console(
+        "--robot", "--construct-only", str(source), "NoSuchScene"
+    )
+    assert console_code == 5
+    scene_error = json.loads(console_out)
+    assert scene_error["kind"] == "construct-failed"
+    assert scene_error["exit"] == {"code": 5, "identity": "scene"}
+    assert "NoSuchScene" in scene_error["message"]
+    assert console_err == ""
+
+
+verify_portal_console_scene()

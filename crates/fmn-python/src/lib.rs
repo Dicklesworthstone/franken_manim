@@ -5366,11 +5366,7 @@ fn execute_bootstrap(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     result
 }
 
-/// Initialize the extension module. The module name is intentionally
-/// `manimlib`, so a built cdylib is directly importable under the Reference's
-/// package name.
-#[pymodule(gil_used = true)]
-fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;
     module.add_class::<PyRecordView>()?;
@@ -5397,7 +5393,26 @@ fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         "__thread_policy__",
         "scene and mobject proxies are confined to their creating scene-worker thread",
     )?;
-    execute_bootstrap(py, module)
+    execute_bootstrap(py, module)?;
+    // Packaging identity is owned by Cargo, not a second hand-maintained
+    // Python version string.  W11's wheel and console entry point both read
+    // these sentinels after the schema bootstrap has assembled `manimlib`.
+    // `PyModule::add` records names in PyO3's generated `__all__`.  The
+    // Reference intentionally has no `__all__`, so packaging metadata is set
+    // as an ordinary attribute after the bootstrap has removed that helper.
+    module.setattr("__version__", env!("CARGO_PKG_VERSION"))?;
+    module.setattr("__distribution__", "franken-manim")?;
+    module.setattr("__franken_manim__", true)?;
+    module.setattr("__abi_policy__", "cpython-3.13-full-abi")?;
+    Ok(())
+}
+
+/// Initialize the direct extension module used by the embedded acceptance
+/// suite, by developers loading the Cargo cdylib without a wheel, and as the
+/// wheel package's private `manimlib.manimlib` native member.
+#[pymodule(gil_used = true)]
+fn manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    populate_manimlib(py, module)
 }
 
 /// Serialize the Python-embedding acceptance suites: they share one
@@ -5585,6 +5600,15 @@ mod tests {
     #[test]
     fn production_bridge_acceptance_suite() {
         crate::with_python_test_module("bridge acceptance", |py, _module, globals| {
+            globals
+                .set_item(
+                    "__file__",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bridge.py"),
+                )
+                .expect("set bridge suite source path");
+            globals
+                .set_item("_expected_package_version", env!("CARGO_PKG_VERSION"))
+                .expect("set bridge suite package version");
             let source = CString::new(include_str!("../tests/bridge.py"))
                 .expect("test source contains no NUL");
             py.run(source.as_c_str(), Some(globals), Some(globals))

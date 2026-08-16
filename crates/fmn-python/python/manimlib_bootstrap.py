@@ -7451,3 +7451,225 @@ _install_mobject_functions()
 
 
 _install_schema_surface()
+
+
+def _portal_cli_emit(code, identity, kind, message, robot, **fields):
+    """Emit one bounded human or robot result and return its exit code."""
+
+    import json as _json
+
+    message = str(message)[:1024]
+    if robot:
+        payload = {
+            "schema": "fmn-python.cli",
+            "version": 1,
+            "kind": kind,
+            "status": "success" if code == 0 else "error",
+            "exit": {"code": int(code), "identity": identity},
+            "message": message,
+        }
+        payload.update(fields)
+        print(_json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    elif code == 0:
+        if message:
+            print(message)
+    else:
+        print(f"fmn-python: {identity}/{kind}: {message}", file=_sys.stderr)
+    return int(code)
+
+
+def _portal_cli_help():
+    return """usage: fmn-python [--robot] --version
+       fmn-python [--robot] --list-scenes SOURCE.py
+       fmn-python [--robot] --construct-only SOURCE.py [SCENE]
+       fmn-python SOURCE.py [SCENE] [render flags]
+       fmn-python studio SOURCE.py [SCENE]
+
+The wheel currently proves import, discovery, and explicit construct-only
+lifecycle execution. Render and Studio requests fail with exit 4 until the
+portal frame sink is connected; they never report lifecycle-only work as a
+render."""
+
+
+def _portal_cli_scene_types(source):
+    """Execute one user source and return its locally declared Scene types."""
+
+    import pathlib as _pathlib
+    import runpy as _runpy
+
+    path = _pathlib.Path(source)
+    if path.suffix.lower() not in (".py", ".pyw"):
+        raise ValueError("the Python portal accepts only .py or .pyw scene sources")
+    if not path.is_file():
+        raise FileNotFoundError(f"scene source does not exist: {source}")
+    module_name = "__fmn_scene_source__"
+    namespace = _runpy.run_path(str(path), run_name=module_name)
+    scenes = {}
+    for name, value in namespace.items():
+        if (
+            isinstance(value, type)
+            and value is not Scene
+            and issubclass(value, Scene)
+            and value.__module__ == module_name
+        ):
+            scenes[name] = value
+    return scenes
+
+
+def _console_main():
+    """The wheel's `fmn-python` entry point.
+
+    This first W11 tranche deliberately exposes only operations the portal
+    actually completes.  Ordinary render/Studio syntax is recognized and
+    refused before source execution until Python frames flow through the
+    production Lumen/Reel composition seam.
+    """
+
+    import platform as _platform
+
+    arguments = list(_sys.argv[1:])
+    robot = False
+    if "--robot" in arguments:
+        arguments.remove("--robot")
+        robot = True
+
+    if arguments in (["--help"], ["-h"]):
+        return _portal_cli_emit(0, "success", "help", _portal_cli_help(), robot)
+    if not arguments:
+        return _portal_cli_emit(
+            2,
+            "usage",
+            "usage-error",
+            "missing command or scene source; use --help",
+            robot,
+        )
+    if "--version" in arguments:
+        if arguments != ["--version"]:
+            return _portal_cli_emit(
+                2,
+                "usage",
+                "usage-error",
+                "--version cannot be combined with a scene or another flag",
+                robot,
+            )
+        version = getattr(_FMN_ROOT, "__version__", "unknown")
+        numpy_version = getattr(_np, "__version__", "unknown")
+        message = (
+            f"fmn-python {version} "
+            f"({_platform.python_implementation()} {_platform.python_version()}, "
+            f"NumPy {numpy_version})"
+        )
+        return _portal_cli_emit(
+            0,
+            "success",
+            "version",
+            message,
+            robot,
+            program="fmn-python",
+            program_version=version,
+            distribution="franken-manim",
+            abi_policy="cpython-3.13-full-abi",
+            python_implementation=_platform.python_implementation(),
+            python_version=_platform.python_version(),
+            numpy_version=numpy_version,
+        )
+
+    construct_only = "--construct-only" in arguments
+    list_scenes = "--list-scenes" in arguments
+    if construct_only and list_scenes:
+        return _portal_cli_emit(
+            2,
+            "usage",
+            "usage-error",
+            "choose exactly one of --construct-only or --list-scenes",
+            robot,
+        )
+    if not construct_only and not list_scenes:
+        return _portal_cli_emit(
+            4,
+            "capability",
+            "composition-unavailable",
+            "the fmn-python wheel is installed, but Python frame capture is not yet "
+            "connected to the production Lumen/Reel render or Studio sink; use "
+            "--construct-only only when lifecycle-without-pixels is explicitly intended",
+            robot,
+        )
+
+    control = "--construct-only" if construct_only else "--list-scenes"
+    arguments.remove(control)
+    if any(argument.startswith("-") for argument in arguments):
+        return _portal_cli_emit(
+            2,
+            "usage",
+            "usage-error",
+            f"{control} accepts only SOURCE.py and an optional scene name",
+            robot,
+        )
+    expected = (1, 2) if construct_only else (1,)
+    if len(arguments) not in expected:
+        detail = (
+            "requires SOURCE.py and accepts one optional SCENE"
+            if construct_only
+            else "requires exactly one SOURCE.py"
+        )
+        return _portal_cli_emit(2, "usage", "usage-error", f"{control} {detail}", robot)
+
+    source = arguments[0]
+    try:
+        scenes = _portal_cli_scene_types(source)
+        names = sorted(scenes)
+        if list_scenes:
+            message = "\n".join(names) if names else "no Scene subclasses found"
+            return _portal_cli_emit(
+                0,
+                "success",
+                "scene-list",
+                message,
+                robot,
+                source=source,
+                scenes=names,
+            )
+
+        selected = arguments[1] if len(arguments) == 2 else None
+        if selected is None:
+            if len(names) != 1:
+                raise ValueError(
+                    "select one scene explicitly; discovered: "
+                    + (", ".join(names) if names else "none")
+                )
+            selected = names[0]
+        scene_type = scenes.get(selected)
+        if scene_type is None:
+            raise ValueError(
+                f"scene {selected!r} was not declared by {source}; discovered: "
+                + (", ".join(names) if names else "none")
+            )
+        scene = scene_type()
+        scene.run()
+        roots, family, low, high = scene._engine_facts()
+        scene_time = float(scene.time())
+    except Exception as error:
+        return _portal_cli_emit(
+            5,
+            "scene",
+            "construct-failed",
+            f"{type(error).__name__}: {error}",
+            robot,
+            source=source,
+        )
+
+    return _portal_cli_emit(
+        0,
+        "success",
+        "construct-only",
+        f"constructed {selected} without rendering pixels",
+        robot,
+        source=source,
+        scene=selected,
+        scene_time=scene_time,
+        root_count=int(roots),
+        family_count=int(family),
+        bounds_low=[float(value) for value in low],
+        bounds_high=[float(value) for value in high],
+        rendered=False,
+    )
