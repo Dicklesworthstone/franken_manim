@@ -1,0 +1,229 @@
+"""Installed-artifact acceptance for a native ``franken-manim`` wheel.
+
+Run this file with the Python interpreter from a disposable virtual
+environment containing exactly the wheel under test and its pinned NumPy.
+The optional collision probe writes one inert ``.dist-info`` fixture into that
+environment and therefore deliberately runs last.
+"""
+
+import argparse
+import importlib.metadata
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+SUBPROCESS_TIMEOUT_SECONDS = 60
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def exported_schema_names(path):
+    names = set()
+    in_symbols = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line == "[symbols]":
+            in_symbols = True
+            continue
+        if in_symbols and line.startswith("["):
+            break
+        if not in_symbols or not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        require(len(fields) == 6, f"malformed API schema row: {raw_line}")
+        if fields[4] == "1":
+            names.add(fields[1])
+    return names
+
+
+def console_path():
+    suffix = ".exe" if sys.platform == "win32" else ""
+    path = pathlib.Path(sys.executable).with_name(f"fmn-python{suffix}")
+    require(path.is_file(), f"installed console entry point is missing: {path}")
+    return path
+
+
+def run_console(console, *arguments, expected=0):
+    result = subprocess.run(
+        [str(console), *map(str, arguments)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    require(
+        result.returncode == expected,
+        f"console exit {result.returncode}, expected {expected}: {result.stderr}",
+    )
+    return result
+
+
+def verify_wheel_archive(path):
+    require(path.is_file(), f"wheel does not exist: {path}")
+    require(path.name.endswith(".whl"), f"not a wheel filename: {path.name}")
+    filename_parts = path.name[:-4].split("-")
+    require(len(filename_parts) >= 5, f"malformed wheel filename: {path.name}")
+    python_tag, abi_tag, platform_tag = filename_parts[-3:]
+    require(python_tag == "cp313", f"unexpected Python tag: {python_tag}")
+    require(abi_tag == "cp313", f"unexpected ABI tag: {abi_tag}")
+    require(platform_tag != "any", "native portal wheel cannot be platform-neutral")
+
+    with zipfile.ZipFile(path) as archive:
+        members = set(archive.namelist())
+    native = [
+        member
+        for member in members
+        if member.startswith("manimlib/manimlib.")
+        and member.endswith((".so", ".pyd", ".dll"))
+    ]
+    require(len(native) == 1, f"expected one native extension, found {native}")
+    require("manimlib/__init__.py" in members, "manimlib package wrapper is absent")
+    require("fmn_python/__main__.py" in members, "console package is absent")
+    require("LICENSE" in members, "root engine license is absent")
+    for face in ("computer-modern", "ibm-plex-sans", "noto-sans-math"):
+        require(
+            f"dist/licenses/fonts/{face}-OFL.txt" in members,
+            f"bundled {face} OFL text is absent",
+        )
+    require(
+        any(".dist-info/sboms/" in member for member in members),
+        "wheel CycloneDX SBOM is absent",
+    )
+    return python_tag, abi_tag, platform_tag, native[0]
+
+
+def verify_installed_distribution(schema_path, scene_path):
+    require(sys.implementation.name == "cpython", "portal requires CPython")
+    require(sys.version_info[:2] == (3, 13), "portal requires CPython 3.13")
+
+    import manimlib
+
+    require(manimlib.__distribution__ == "franken-manim", "wrong provider")
+    require(manimlib.__franken_manim__, "provider sentinel is absent")
+    require(
+        manimlib.__abi_policy__ == "cpython-3.13-full-abi",
+        "wrong portal ABI policy",
+    )
+    require(not hasattr(manimlib, "__all__"), "Reference root has no __all__")
+
+    observed = {name for name in vars(manimlib) if not name.startswith("_")}
+    expected = exported_schema_names(schema_path)
+    require(
+        observed == expected,
+        f"wildcard surface drift: missing={sorted(expected - observed)}, "
+        f"extra={sorted(observed - expected)}",
+    )
+    require(len(observed) == 663, f"unexpected wildcard size: {len(observed)}")
+
+    distribution = importlib.metadata.distribution("franken-manim")
+    requires = set(distribution.requires or ())
+    require(requires == {"numpy==2.5.2"}, f"unexpected requirements: {requires}")
+
+    console = console_path()
+    version = run_console(console, "--robot", "--version")
+    version_payload = json.loads(version.stdout)
+    require(version_payload["kind"] == "version", version.stdout)
+    require(version_payload["exit"] == {"code": 0, "identity": "success"}, version.stdout)
+
+    scenes = run_console(console, "--robot", "--list-scenes", scene_path)
+    scenes_payload = json.loads(scenes.stdout)
+    require(scenes_payload["scenes"] == ["ConsoleScene"], scenes.stdout)
+
+    constructed = run_console(
+        console,
+        "--robot",
+        "--construct-only",
+        scene_path,
+        "ConsoleScene",
+    )
+    constructed_payload = json.loads(constructed.stdout)
+    rendered = constructed_payload["rendered"]
+    require(isinstance(rendered, bool) and not rendered, constructed.stdout)
+    require(constructed_payload["scene_time"] == 1 / 30, constructed.stdout)
+
+    refused = run_console(
+        console,
+        "--robot",
+        scene_path,
+        "ConsoleScene",
+        expected=4,
+    )
+    refusal_payload = json.loads(refused.stdout)
+    require(refusal_payload["kind"] == "composition-unavailable", refused.stdout)
+    return console, pathlib.Path(manimlib.__file__).resolve().parent.parent
+
+
+def verify_detectable_collision(console, site_packages):
+    fixture = pathlib.Path(
+        tempfile.mkdtemp(prefix="fmn_namespace_probe-", suffix=".dist-info", dir=site_packages)
+    )
+    provider = "fmn-namespace-collision-probe"
+    (fixture / "METADATA").write_text(
+        f"Metadata-Version: 2.4\nName: {provider}\nVersion: 0\n",
+        encoding="utf-8",
+    )
+    # importlib.metadata exposes only RECORD paths which physically exist. The
+    # fixture claims the already-installed wrapper without touching it, exactly
+    # modelling the stale dual-ownership metadata left by an overlapping wheel.
+    (fixture / "RECORD").write_text("manimlib/__init__.py,,\n", encoding="utf-8")
+
+    refused = run_console(console, "--robot", "--version", expected=4)
+    payload = json.loads(refused.stdout)
+    require(payload["kind"] == "namespace-collision", refused.stdout)
+    require(payload["providers"] == [provider], refused.stdout)
+
+    direct = subprocess.run(
+        [sys.executable, "-c", "import manimlib"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    require(direct.returncode != 0, "direct import accepted a namespace collision")
+    require("separate virtual environment" in direct.stderr, direct.stderr)
+    return fixture
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--wheel", type=pathlib.Path, required=True)
+    parser.add_argument("--schema", type=pathlib.Path, required=True)
+    parser.add_argument("--scene", type=pathlib.Path, required=True)
+    parser.add_argument("--probe-collision", action="store_true")
+    arguments = parser.parse_args()
+
+    archive = verify_wheel_archive(arguments.wheel.resolve())
+    console, site_packages = verify_installed_distribution(
+        arguments.schema.resolve(), arguments.scene.resolve()
+    )
+    collision_fixture = None
+    if arguments.probe_collision:
+        collision_fixture = verify_detectable_collision(console, site_packages)
+
+    print(
+        json.dumps(
+            {
+                "abi_tag": archive[1],
+                "collision_probe": str(collision_fixture) if collision_fixture else None,
+                "distribution": "franken-manim",
+                "kind": "wheel-smoke",
+                "native_member": archive[3],
+                "platform_tag": archive[2],
+                "python_tag": archive[0],
+                "status": "success",
+                "wildcard_names": 663,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

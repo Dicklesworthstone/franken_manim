@@ -56,7 +56,13 @@ last-install-wins behavior. Use one dedicated virtual environment per
 The distribution publishes `manimlib.__distribution__ == "franken-manim"`,
 `manimlib.__franken_manim__ is True`, and
 `manimlib.__abi_policy__ == "cpython-3.13-full-abi"` so diagnostics can verify
-which supported provider is active.
+which supported provider is active. When FrankenManim's package files remain
+loadable and another installed distribution's metadata also claims the
+`manimlib` tree, both direct import and the console fail before native-module
+loading. Robot mode reports exit 4 and kind `namespace-collision`. This is a
+diagnostic for a detectable broken environment, not support for co-installing
+providers: another installer may already have overwritten the very wrapper
+which performs the check.
 
 ## Console boundary
 
@@ -96,7 +102,18 @@ uv pip install --python /tmp/fmn-wheel-smoke/bin/python \
 /tmp/fmn-wheel-smoke/bin/python -c \
   'import manimlib; assert manimlib.__franken_manim__'
 /tmp/fmn-wheel-smoke/bin/fmn-python --robot --version
+/tmp/fmn-wheel-smoke/bin/python crates/fmn-python/tests/wheel_smoke.py \
+  --wheel /tmp/wheels/franken_manim-*.whl \
+  --schema API_SCHEMA.tsv \
+  --scene crates/fmn-python/tests/console_scene.py \
+  --probe-collision
 ```
+
+The final command runs the installed-artifact contract, then creates one inert
+foreign-provider `.dist-info` fixture inside that disposable environment to
+prove the collision refusal. Run it last; it intentionally leaves that virtual
+environment in the refused state and never edits either provider's package
+files.
 
 The permanent release matrix must additionally verify the wheel tag, exact
 663-name wildcard surface, license inventory, clean-venv scene discovery,

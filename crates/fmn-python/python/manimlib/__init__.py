@@ -6,6 +6,12 @@ geometry, animation, rendering, and compatibility semantics remain native or
 in the bootstrap embedded in the extension.
 """
 
+from fmn_python import (
+    _ensure_exclusive_manimlib_namespace as _ensure_exclusive_manimlib_namespace,
+)
+
+_ensure_exclusive_manimlib_namespace()
+
 from . import manimlib as _native
 
 for _name in dir(_native):
