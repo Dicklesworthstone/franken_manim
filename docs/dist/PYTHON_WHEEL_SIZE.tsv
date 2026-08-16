@@ -3,3 +3,6 @@
 # source artifacts are retained outside the repository; this ledger records immutable identities
 version	wheel_tag	bytes	budget_bytes	sha256	verdict	provenance
 0.1.0	cp313-cp313-manylinux_2_34_x86_64	3255554	10485760	d8d75e1d92ab5972260c7d30be77b5af75c6855d04db8a0f3cbd17e58e0acb5d	pass	commit-5cdc8cbb03a78f0207b95026317b0a2d2ce9b321-cpython-3.13.7
+0.1.0	cp313-cp313-manylinux_2_34_x86_64	3626309	10485760	fd75aa17026f4e7afd50b9c4bb3d01b7a8336ebbd96e9f33fd0d96fb05cbf9c6	pass	commit-4dcdcfe8590065782f6b559fb9e0b47e11f881d8-cpython-3.13.1-production-png-smoke
+0.1.0	cp313-cp313-macosx_11_0_arm64	3525607	10485760	9db0a64995b76185b978ca1b25e547b934df34cb1b629277e09c3544978f4651	pass	commit-4dcdcfe8590065782f6b559fb9e0b47e11f881d8-macos-26.2-arm64-cpython-3.13.9-production-png-smoke
+0.1.0	cp313-cp313-win_amd64	3579688	10485760	1f92a7f333ecc71ba8f3c109f31c0c529363d6171169a67fc44a0ce81303c040	pass	commit-4dcdcfe8590065782f6b559fb9e0b47e11f881d8-windows-11-x86_64-cpython-3.13.15-production-png-smoke

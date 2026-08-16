@@ -22,10 +22,11 @@ CPython-free.
   ships the engine license and all bundled-font OFL texts, and does not bundle
   CPython, NumPy, ffmpeg, the private Reference corpus, or a second renderer.
 
-The currently observed artifact is Linux x86-64 only. macOS AArch64,
-Linux AArch64, and Windows x86-64 wheels remain unproven and `fm-vsq` stays
-open until the declared platform matrix is built and smoke-tested on native
-hosts.
+Native Linux x86-64, macOS AArch64, and Windows x86-64 wheels have been built
+and smoke-tested from exact source commits; immutable size and digest receipts
+are recorded below. Linux AArch64 remains unproven because no native
+certification host is currently configured, so `fm-vsq` stays open rather than
+substituting cross-compilation or emulation for native evidence.
 
 ## Namespace ownership
 
