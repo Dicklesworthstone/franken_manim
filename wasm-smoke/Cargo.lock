@@ -471,7 +471,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fmn-cache"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-core",
  "fmn-hash",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-codec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-core",
  "fmn-frame",
@@ -489,18 +489,18 @@ dependencies = [
 
 [[package]]
 name = "fmn-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-dmath",
 ]
 
 [[package]]
 name = "fmn-dmath"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "fmn-frame"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-geom"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -516,14 +516,14 @@ dependencies = [
 
 [[package]]
 name = "fmn-hash"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-core",
 ]
 
 [[package]]
 name = "fmn-mobject"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asupersync",
  "fmn-core",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "fmn-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fmn-cache",
  "fmn-codec",
