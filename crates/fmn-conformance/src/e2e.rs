@@ -19,8 +19,9 @@
 //! [`Surface::RustApi`] and [`Surface::CliInProcess`] are live: the former
 //! drives the public `fmn-scene`/`fmn-render` lifecycle directly, the
 //! latter drives `fmn_cli`'s in-process runner (never a subprocess).
-//! [`Surface::PythonPending`] remains declared and skipped until its real
-//! front door lands. [`Surface::StudioInProcess`] drives the production
+//! [`Surface::PythonInProcess`] drives the feature-gated PyO3 portal adapter;
+//! [`Surface::PythonPending`] remains only for unlanded Python surface rows.
+//! [`Surface::StudioInProcess`] drives the production
 //! Studio composition root; the CLI crate separately proves subprocess
 //! isolation and loopback publication.
 //!
@@ -235,6 +236,8 @@ pub enum Surface {
     CliInProcess,
     /// The Python binding: declared, landing with its bead, never stubbed.
     PythonPending,
+    /// The Python binding through its embedded-CPython Gauntlet adapter.
+    PythonInProcess,
     /// Studio's production composition root in-process.
     StudioInProcess,
 }
@@ -247,6 +250,7 @@ impl Surface {
             Self::RustApi => "rust_api",
             Self::CliInProcess => "cli_in_process",
             Self::PythonPending => "python",
+            Self::PythonInProcess => "python_in_process",
             Self::StudioInProcess => "studio_in_process",
         }
     }
@@ -261,7 +265,9 @@ impl Surface {
     #[must_use]
     pub const fn pending_reason(self) -> Option<&'static str> {
         match self {
-            Self::RustApi | Self::CliInProcess | Self::StudioInProcess => None,
+            Self::RustApi | Self::CliInProcess | Self::PythonInProcess | Self::StudioInProcess => {
+                None
+            }
             Self::PythonPending => {
                 Some("surface pending: the Python binding lands with its bead (never stubbed)")
             }

@@ -1,12 +1,13 @@
-"""Permanent source fixture for the installed ``fmn-python`` console."""
+"""README-style installed-artifact fixture for the ``fmn-python`` console."""
 
-from manimlib import Mobject, Scene
+from manimlib import DOWN, UP, YELLOW, FadeIn, Scene, Tex, Text, Write
 
 
-class ConsoleScene(Scene):
+class Hello(Scene):
     def construct(self):
-        mob = Mobject()
-        mob.resize(1)
-        mob.set_field("point", 0, [1.0, 2.0, 0.0])
-        self.add(mob)
-        self.wait(1 / 30)
+        title = Text("FrankenManim", font_size=72)
+        formula = Tex(r"e^{i\pi} + 1 = 0")
+        formula.next_to(title, DOWN)
+        self.play(Write(title), FadeIn(formula, shift=UP))
+        self.play(formula.animate.set_color_by_tex("i", YELLOW))
+        self.wait()

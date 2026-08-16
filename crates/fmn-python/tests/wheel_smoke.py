@@ -133,29 +133,61 @@ def verify_installed_distribution(schema_path, scene_path):
 
     scenes = run_console(console, "--robot", "--list-scenes", scene_path)
     scenes_payload = json.loads(scenes.stdout)
-    require(scenes_payload["scenes"] == ["ConsoleScene"], scenes.stdout)
+    require(scenes_payload["scenes"] == ["Hello"], scenes.stdout)
 
     constructed = run_console(
         console,
         "--robot",
         "--construct-only",
         scene_path,
-        "ConsoleScene",
+        "Hello",
     )
     constructed_payload = json.loads(constructed.stdout)
     rendered = constructed_payload["rendered"]
     require(isinstance(rendered, bool) and not rendered, constructed.stdout)
-    require(constructed_payload["scene_time"] == 1 / 30, constructed.stdout)
+    require(constructed_payload["scene_time"] == 3.0, constructed.stdout)
+
+    output_root = pathlib.Path(tempfile.mkdtemp(prefix="fmn-wheel-render-"))
+    destination = output_root / "frames"
+    rendered = run_console(
+        console,
+        "--robot",
+        scene_path,
+        "Hello",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "30",
+        "--threads",
+        "1",
+        "--video_dir",
+        destination,
+    )
+    render_payload = json.loads(rendered.stdout)
+    require(render_payload["kind"] == "render", rendered.stdout)
+    require(render_payload["rendered"] is True, rendered.stdout)
+    require(render_payload["frame_count"] == 90, rendered.stdout)
+    require(render_payload["bytes"] > 0, rendered.stdout)
+    require(len(render_payload["digest"]) == 64, rendered.stdout)
+    frames = sorted(destination.glob("frame_*.png"))
+    require(len(frames) == render_payload["frame_count"], rendered.stdout)
+    require(
+        all(frame.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for frame in frames),
+        "render output contains a non-PNG frame",
+    )
 
     refused = run_console(
         console,
         "--robot",
-        scene_path,
-        "ConsoleScene",
+        "--reproducible",
+        "missing-source.py",
+        "MissingScene",
         expected=4,
     )
     refusal_payload = json.loads(refused.stdout)
-    require(refusal_payload["kind"] == "composition-unavailable", refused.stdout)
+    require(refusal_payload["kind"] == "render-capability-unavailable", refused.stdout)
     return console, pathlib.Path(manimlib.__file__).resolve().parent.parent
 
 

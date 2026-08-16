@@ -324,12 +324,16 @@ fmn-python --version                   # portal entry point; distinct from stand
 
 > **Current pre-1.0 status:** the repository now builds a CPython 3.13
 > `franken-manim` wheel, and a clean virtual environment proves the exact
-> 663-name `manimlib` import surface, scene discovery, and an explicitly
-> labeled `--construct-only` lifecycle diagnostic. The Python portal is not
-> yet connected to the production Lumen/Reel frame sink: ordinary render and
-> Studio requests fail closed with capability exit 4 and do not claim pixels.
-> See the [wheel/namespace policy](docs/dist/python_wheel.md). The render
-> commands below remain the 1.0 target contract until that seam and the native
+> 663-name `manimlib` import surface, scene discovery, and real standard-mode
+> PNG sequences through retained Lumen and Reel. The live rendering form is
+> `fmn-python scene.py Scene --format png_sequence`; `--resolution`, `--fps`,
+> `--threads`, and `--video_dir` are supported. `--construct-only` remains an
+> explicitly non-rendering lifecycle diagnostic. Certified output
+> (`--reproducible`), video containers, opener/write-all flags, and the Python
+> Studio route still fail closed with capability exit 4: their complete input
+> closure, provenance, output, or worker contracts have not landed. See the
+> [wheel/namespace policy](docs/dist/python_wheel.md). The broader commands
+> below remain the 1.0 target contract until those seams and the native
 > platform wheel matrix are proven.
 
 ## Quick start

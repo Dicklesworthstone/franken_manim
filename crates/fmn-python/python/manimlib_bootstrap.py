@@ -7482,13 +7482,15 @@ def _portal_cli_help():
     return """usage: fmn-python [--robot] --version
        fmn-python [--robot] --list-scenes SOURCE.py
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-       fmn-python SOURCE.py [SCENE] [render flags]
+       fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence]
+                  [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
+                  [--video_dir DIRECTORY]
        fmn-python studio SOURCE.py [SCENE]
 
-The wheel currently proves import, discovery, and explicit construct-only
-lifecycle execution. Render and Studio requests fail with exit 4 until the
-portal frame sink is connected; they never report lifecycle-only work as a
-render."""
+The wheel renders standard-mode PNG sequences through the same retained Lumen
+CPU renderer and ordered Reel sink as the native front door. Certified output,
+video containers, opener flags, write-all, and Studio remain precise capability
+refusals until their complete contracts are connected."""
 
 
 def _portal_cli_scene_types(source):
@@ -7516,13 +7518,78 @@ def _portal_cli_scene_types(source):
     return scenes
 
 
+def _portal_cli_render_arguments(arguments):
+    """Parse the deliberately narrow, actually shipped portal render surface."""
+
+    import os as _os
+
+    values = {
+        "format": "png_sequence",
+        "resolution": "1920x1080",
+        "fps": "60",
+        "threads": str(max(1, min(_os.cpu_count() or 1, 96))),
+        "video_dir": None,
+    }
+    positionals = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--reproducible":
+            raise RuntimeError(
+                "CAPABILITY: certified portal rendering awaits the complete "
+                "content-hashed input closure and provenance sidecar"
+            )
+        if argument in ("-o", "-so", "--write_all", "--autoreload"):
+            raise RuntimeError(
+                f"CAPABILITY: {argument} is not connected in the Python portal"
+            )
+        if argument in ("--format", "--resolution", "--fps", "--threads", "--video_dir"):
+            if index + 1 >= len(arguments):
+                raise ValueError(f"{argument} requires a value")
+            values[argument[2:]] = arguments[index + 1]
+            index += 2
+            continue
+        if argument.startswith("--") and "=" in argument:
+            name, value = argument.split("=", 1)
+            if name in ("--format", "--resolution", "--fps", "--threads", "--video_dir"):
+                if not value:
+                    raise ValueError(f"{name} requires a value")
+                values[name[2:]] = value
+                index += 1
+                continue
+        if argument.startswith("-"):
+            raise ValueError(f"unsupported portal render flag: {argument}")
+        positionals.append(argument)
+        index += 1
+
+    if values["format"] != "png_sequence":
+        raise RuntimeError(
+            f"CAPABILITY: portal output format {values['format']!r} is not connected; "
+            "use --format png_sequence"
+        )
+    if len(positionals) not in (1, 2):
+        raise ValueError("render requires SOURCE.py and accepts one optional SCENE")
+    try:
+        width_text, height_text = values["resolution"].lower().split("x", 1)
+        width = int(width_text)
+        height = int(height_text)
+        fps = int(values["fps"])
+        threads = int(values["threads"])
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "--resolution must be WIDTHxHEIGHT and --fps/--threads must be integers"
+        ) from error
+    if width <= 0 or height <= 0 or fps <= 0 or threads <= 0:
+        raise ValueError("resolution, fps, and threads must all be positive")
+    return positionals, values, width, height, fps, threads
+
+
 def _console_main():
     """The wheel's `fmn-python` entry point.
 
-    This first W11 tranche deliberately exposes only operations the portal
-    actually completes.  Ordinary render/Studio syntax is recognized and
-    refused before source execution until Python frames flow through the
-    production Lumen/Reel composition seam.
+    The standard PNG-sequence route is production composition: Scene captures
+    cross into Lumen and are published through Reel. Other output surfaces
+    remain precise refusals instead of lifecycle-only fake success.
     """
 
     import platform as _platform
@@ -7574,6 +7641,15 @@ def _console_main():
             numpy_version=numpy_version,
         )
 
+    if arguments[0] == "studio":
+        return _portal_cli_emit(
+            4,
+            "capability",
+            "studio-unavailable",
+            "the Python portal Studio supervisor/worker route is not yet connected",
+            robot,
+        )
+
     construct_only = "--construct-only" in arguments
     list_scenes = "--list-scenes" in arguments
     if construct_only and list_scenes:
@@ -7585,14 +7661,141 @@ def _console_main():
             robot,
         )
     if not construct_only and not list_scenes:
+        try:
+            positionals, render_values, width, height, fps, threads = (
+                _portal_cli_render_arguments(arguments)
+            )
+        except RuntimeError as error:
+            message = str(error)
+            if message.startswith("CAPABILITY: "):
+                message = message[len("CAPABILITY: ") :]
+            return _portal_cli_emit(
+                4, "capability", "render-capability-unavailable", message, robot
+            )
+        except (TypeError, ValueError) as error:
+            return _portal_cli_emit(
+                2, "usage", "usage-error", str(error), robot
+            )
+
+        source = positionals[0]
+        selected = positionals[1] if len(positionals) == 2 else None
+        try:
+            scenes = _portal_cli_scene_types(source)
+            names = sorted(scenes)
+            if selected is None:
+                if len(names) != 1:
+                    raise ValueError(
+                        "select one scene explicitly; discovered: "
+                        + (", ".join(names) if names else "none")
+                    )
+                selected = names[0]
+            scene_type = scenes.get(selected)
+            if scene_type is None:
+                raise ValueError(
+                    f"scene {selected!r} was not declared by {source}; discovered: "
+                    + (", ".join(names) if names else "none")
+                )
+            scene = scene_type()
+        except Exception as error:
+            return _portal_cli_emit(
+                5,
+                "scene",
+                "scene-load-failed",
+                f"{type(error).__name__}: {error}",
+                robot,
+                source=source,
+            )
+
+        import pathlib as _pathlib
+
+        destination = render_values["video_dir"]
+        if destination is None:
+            destination = str(
+                _pathlib.Path("media")
+                / "videos"
+                / _pathlib.Path(source).stem
+                / selected
+                / "frames"
+            )
+        try:
+            scene._begin_png_sequence(
+                destination,
+                width,
+                height,
+                fps,
+                threads,
+                int(scene.random_seed or 0),
+            )
+        except Exception as error:
+            return _portal_cli_emit(
+                6,
+                "render",
+                "render-start-failed",
+                f"{type(error).__name__}: {error}",
+                robot,
+                source=source,
+                scene=selected,
+                destination=destination,
+            )
+        try:
+            scene.run()
+        except Exception as error:
+            try:
+                scene._abort_render()
+            except Exception:
+                pass
+            message = f"{type(error).__name__}: {error}"
+            output_error = any(
+                marker in str(error)
+                for marker in ("lumen:", "reel:", "portal-render:")
+            )
+            return _portal_cli_emit(
+                6 if output_error else 5,
+                "render" if output_error else "scene",
+                "render-failed" if output_error else "scene-execution-failed",
+                message,
+                robot,
+                source=source,
+                scene=selected,
+                destination=destination,
+            )
+        try:
+            path, frame_count, byte_count, digest, engine, used_threads = (
+                scene._finish_render()
+            )
+        except Exception as error:
+            try:
+                scene._abort_render()
+            except Exception:
+                pass
+            return _portal_cli_emit(
+                6,
+                "render",
+                "render-finish-failed",
+                f"{type(error).__name__}: {error}",
+                robot,
+                source=source,
+                scene=selected,
+                destination=destination,
+            )
         return _portal_cli_emit(
-            4,
-            "capability",
-            "composition-unavailable",
-            "the fmn-python wheel is installed, but Python frame capture is not yet "
-            "connected to the production Lumen/Reel render or Studio sink; use "
-            "--construct-only only when lifecycle-without-pixels is explicitly intended",
+            0,
+            "success",
+            "render",
+            f"rendered {frame_count} PNG frames to {path}",
             robot,
+            source=source,
+            scene=selected,
+            format="png_sequence",
+            resolution=[width, height],
+            fps=fps,
+            destination=path,
+            frame_count=int(frame_count),
+            bytes=int(byte_count),
+            digest=digest,
+            engine=engine,
+            threads=int(used_threads),
+            rendered=True,
         )
 
     control = "--construct-only" if construct_only else "--list-scenes"

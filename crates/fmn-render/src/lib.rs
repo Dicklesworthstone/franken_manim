@@ -36,6 +36,7 @@ pub mod hint;
 #[cfg(feature = "metal")]
 pub mod metal;
 pub mod plan;
+pub mod retained;
 pub mod revision;
 pub mod snapshot;
 pub mod stroke;
@@ -69,6 +70,9 @@ pub use hint::Hint;
 pub use plan::{
     CompactionReason, CompactionStats, RenderPlan, RenderPlanEpoch, RenderPlanLimits, SyncError,
     SyncStats,
+};
+pub use retained::{
+    RetainedFrameRenderer, RetainedFrameRendererConfig, RetainedFrameRendererError,
 };
 pub use revision::{Axis, Dependency, Revisions};
 pub use stroke::{JoinWedge, MITER_LIMIT};

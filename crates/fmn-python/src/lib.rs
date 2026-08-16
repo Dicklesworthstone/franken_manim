@@ -23,17 +23,28 @@ mod report;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_int, c_void};
+use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossing::CrossingClass;
 
+use fmn_frame::convert::rgba16f_to_rgba8;
+use fmn_frame::{FrameLayout, PixelFormat};
 use fmn_mobject::{
     JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Stage,
     StageError, Tracker, TrackerKind, Uniforms,
+};
+use fmn_output::{
+    EmitterConfig, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
+    SinkLimits, SinkReceipt,
+};
+use fmn_render::{
+    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
+    Tiling, Viewport,
 };
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::create_exception;
@@ -74,6 +85,215 @@ type Engine = Rc<EngineState>;
 type ProxyPairs = Vec<(Py<PyAny>, Py<PyAny>)>;
 type SoundRequestFact = (String, i64, u32, f64, Option<f64>, Option<f64>);
 type BoundingBoxRows = ([f64; 3], [f64; 3], [f64; 3]);
+
+const PORTAL_MAX_RENDER_FRAMES: u64 = 1_000_000;
+
+/// One fmn-python render generation, retained across every `play` and `wait`.
+///
+/// Lumen owns the renderer state; Reel owns bounded ordered publication. This
+/// portal adapter owns only their lifetime and the Python-facing report.
+struct PortalRenderSession {
+    renderer: RetainedFrameRenderer,
+    emitter: Option<OrderedEmitter>,
+    receipt: SinkReceipt<NativeArtifactReport>,
+    next_sequence: u64,
+}
+
+impl PortalRenderSession {
+    fn new(
+        destination: PathBuf,
+        width: u32,
+        height: u32,
+        fps: u32,
+        max_threads: usize,
+    ) -> PyResult<(Self, RuntimeConfig)> {
+        if width == 0 || height == 0 {
+            return Err(PyValueError::new_err(
+                "render resolution dimensions must be nonzero",
+            ));
+        }
+        if fps == 0 {
+            return Err(PyValueError::new_err("render fps must be nonzero"));
+        }
+        if max_threads == 0 {
+            return Err(PyValueError::new_err("render thread limit must be nonzero"));
+        }
+
+        let mut config = fmn_config::Config::resolve(&[], None)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .config;
+        config.camera.resolution = (width, height);
+        config.camera.fps = fps;
+        config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
+
+        let request = fmn_runtime::PlanRequest::standard(
+            fmn_runtime::RenderIntent::Offline,
+            fmn_runtime::SurfaceSpec::lumen(width, height),
+            fmn_runtime::OutputPixelFormat::Rgba8,
+        )
+        .with_max_cpu_threads(max_threads);
+        let plan = fmn_runtime::ExecutionPlan::derive(
+            request,
+            &fmn_platform::topology::HardwareTopology::current(),
+            None,
+        )
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let engine = match plan.engine {
+            fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
+            fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
+            fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
+                return Err(CapabilityError::new_err(
+                    "fmn-python render currently accepts only CPU execution plans",
+                ));
+            }
+        };
+        let background = fmn_core::color::Srgb::from_hex(&config.camera.background_color)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .to_linear(config.camera.background_opacity);
+        let frame_config = FrameConfig::new(
+            Viewport { width, height },
+            ScreenMap {
+                scale: f64::from(height) / config.sizes.frame_height,
+                origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+            },
+            background,
+        )
+        .with_aa_policy(config.render.aa);
+        let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame: frame_config,
+            tiling: Tiling {
+                macro_tile: plan.macro_tile,
+                fine_tile: plan.fine_tile,
+            },
+            engine,
+            threads: plan
+                .render_teams
+                .first()
+                .map_or(1, fmn_runtime::TeamPlan::threads),
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+        let output_layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let frame_bytes = u64::try_from(output_layout.total_bytes())
+            .map_err(|_| PyOverflowError::new_err("render frame size exceeds u64"))?;
+        let max_stream_bytes = frame_bytes
+            .checked_mul(PORTAL_MAX_RENDER_FRAMES)
+            .ok_or_else(|| PyOverflowError::new_err("render stream budget exceeds u64"))?;
+        let max_resident_bytes = frame_bytes
+            .checked_mul(3)
+            .and_then(|bytes| bytes.checked_add(4 * 1024 * 1024))
+            .ok_or_else(|| PyOverflowError::new_err("render resident budget exceeds u64"))?;
+        let max_artifact_bytes = max_stream_bytes
+            .checked_mul(2)
+            .ok_or_else(|| PyOverflowError::new_err("render artifact budget exceeds u64"))?;
+        let limits = SinkLimits::new(
+            PORTAL_MAX_RENDER_FRAMES,
+            max_resident_bytes,
+            max_stream_bytes,
+            max_artifact_bytes,
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let fs: Arc<dyn fmn_platform::fs::FileSystem> = Arc::new(fmn_platform::fs::StdFs);
+        let (binding, receipt) = PngSink::new(
+            fs,
+            PngSinkConfig {
+                target: PngTarget::Sequence {
+                    directory: destination,
+                    stem: "frame".to_owned(),
+                    digits: 6,
+                },
+                width,
+                height,
+                first_sequence: 0,
+                compression: fmn_codec::CompressionLevel::Default,
+                threads: plan.output_team.threads().max(1),
+                limits,
+                profile: None,
+            },
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?
+        .into_binding("python-png-sequence");
+        let emitter = OrderedEmitter::new(
+            EmitterConfig::new(output_layout, plan.frames_in_flight, 0)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+            vec![binding],
+        )
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok((
+            Self {
+                renderer,
+                emitter: Some(emitter),
+                receipt,
+                next_sequence: 0,
+            },
+            RuntimeConfig::from_config(&config),
+        ))
+    }
+
+    fn capture(
+        &mut self,
+        packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        let stage = packet.materialize_stage();
+        self.renderer
+            .render(&stage, 0)
+            .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+        let mut reservation = self
+            .emitter
+            .as_ref()
+            .ok_or_else(|| {
+                fmn_scene::IntegrationError::new("reel", "render generation is already closed")
+            })?
+            .reserve(self.next_sequence)
+            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        rgba16f_to_rgba8(self.renderer.frame(), reservation.frame_mut())
+            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        reservation
+            .publish()
+            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| fmn_scene::IntegrationError::new("reel", "frame sequence exhausted"))?;
+        Ok(())
+    }
+
+    const fn frame_count(&self) -> u64 {
+        self.next_sequence
+    }
+
+    fn abort(mut self) {
+        self.cancel_and_join();
+    }
+
+    fn finish(mut self) -> PyResult<(NativeArtifactReport, String, usize)> {
+        let renderer = self.renderer.config();
+        self.emitter
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("portal render generation is already closed"))?
+            .finish()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let report = self
+            .receipt
+            .take()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok((report, renderer.engine.closure_string(), renderer.threads))
+    }
+
+    fn cancel_and_join(&mut self) {
+        if let Some(emitter) = self.emitter.take() {
+            emitter.cancel();
+            let _ = emitter.finish();
+        }
+    }
+}
+
+impl Drop for PortalRenderSession {
+    fn drop(&mut self) {
+        self.cancel_and_join();
+    }
+}
 
 /// One scene worker's runtime plus pin releases deferred by proxy destruction.
 ///
@@ -179,6 +399,8 @@ struct PyScene {
     engine: Engine,
     /// Handle → weakref(proxy), preserving one Python identity per live entry.
     proxies: RefCell<HashMap<Mob, Py<PyAny>>>,
+    /// Optional production output session shared by every play/wait sink.
+    render: Arc<Mutex<Option<PortalRenderSession>>>,
 }
 
 /// Owns one pinned RecordBuffer generation while a NumPy array exports it.
@@ -3594,7 +3816,118 @@ impl PyScene {
         Ok(Self {
             engine: Rc::new(EngineState::new(runtime)),
             proxies: RefCell::new(HashMap::new()),
+            render: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Start one no-clobber native PNG-sequence generation before lifecycle
+    /// execution. Configuration is accepted only while the Scene is pristine,
+    /// so changing fps/seed cannot reinterpret already-created engine state.
+    #[pyo3(signature = (destination, width, height, fps, threads, seed))]
+    fn _begin_png_sequence(
+        slf: &Bound<'_, Self>,
+        destination: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        threads: usize,
+        seed: u64,
+    ) -> PyResult<()> {
+        if destination.is_empty() {
+            return Err(PyValueError::new_err(
+                "render destination must not be empty",
+            ));
+        }
+        let render_slot = {
+            let scene = slf.borrow();
+            if !scene.proxies.borrow().is_empty()
+                || !scene.engine.borrow().stage().roots().is_empty()
+                || scene.engine.borrow().stage().time() != 0.0
+            {
+                return Err(PyRuntimeError::new_err(
+                    "render configuration must be installed before Scene construction mutates engine state",
+                ));
+            }
+            Arc::clone(&scene.render)
+        };
+        let (session, runtime_config) =
+            PortalRenderSession::new(PathBuf::from(destination), width, height, fps, threads)?;
+        let replacement = match Scene::new(runtime_config, seed) {
+            Ok(scene) => Rc::new(EngineState::new(scene)),
+            Err(error) => {
+                session.abort();
+                return Err(PyRuntimeError::new_err(error.to_string()));
+            }
+        };
+        let mut render = match render_slot.lock() {
+            Ok(render) => render,
+            Err(_) => {
+                session.abort();
+                return Err(PyRuntimeError::new_err(
+                    "portal render session lock was poisoned",
+                ));
+            }
+        };
+        if render.is_some() {
+            session.abort();
+            return Err(PyRuntimeError::new_err(
+                "a portal render generation is already active",
+            ));
+        }
+        slf.borrow_mut().engine = replacement;
+        *render = Some(session);
+        Ok(())
+    }
+
+    /// Cancel an active generation and join its ordered output worker.
+    fn _abort_render(slf: &Bound<'_, Self>) -> PyResult<()> {
+        let render = Arc::clone(&slf.borrow().render);
+        let session = render
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+            .take();
+        if let Some(session) = session {
+            session.abort();
+        }
+        Ok(())
+    }
+
+    /// Finalize the active native generation and return its exact artifact
+    /// receipt: path, frames, bytes, digest, renderer identity, threads.
+    fn _finish_render(
+        slf: &Bound<'_, Self>,
+    ) -> PyResult<(String, u64, u64, String, String, usize)> {
+        let engine = Rc::clone(&slf.borrow().engine);
+        let render = Arc::clone(&slf.borrow().render);
+        let needs_final_capture = render
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+            .as_ref()
+            .is_some_and(|session| session.frame_count() == 0);
+        if needs_final_capture {
+            let mut sink = PortalSceneSink {
+                render: Arc::clone(&render),
+                ..PortalSceneSink::default()
+            };
+            engine
+                .borrow_mut()
+                .show(&mut sink)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let session = render
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?;
+        let (report, engine, threads) = session.finish()?;
+        Ok((
+            report.path.to_string_lossy().into_owned(),
+            report.frame_count,
+            report.bytes,
+            report.digest.to_hex(),
+            engine,
+            threads,
+        ))
     }
 
     #[pyo3(signature = (*mobjects))]
@@ -3934,9 +4267,10 @@ impl PyScene {
             rate_func: play_rate,
             lag_ratio,
         };
-        let mut sink = AlphaProbeSink {
+        let mut sink = PortalSceneSink {
             camera: camera_lerp,
-            ..AlphaProbeSink::default()
+            render: Arc::clone(&slf.borrow().render),
+            ..PortalSceneSink::default()
         };
         let map_play_error = |error: fmn_scene::SceneError| {
             let text = error.to_string();
@@ -4036,10 +4370,11 @@ impl PyScene {
                 .map(|_| ())
                 .map_err(&map_play_error)?;
         }
-        let AlphaProbeSink {
+        let PortalSceneSink {
             alphas,
             camera,
             camera_error,
+            render: _,
         } = sink;
         if let Some(error) = camera_error {
             return Err(error);
@@ -4132,15 +4467,20 @@ impl PyScene {
         Ok(PyFieldProbe { values })
     }
 
-    /// `Scene.wait(duration)` over the native wait segment (NullSceneSink;
-    /// rendering is a later tranche).
+    /// `Scene.wait(duration)` over the native wait segment. An active portal
+    /// render generation captures every immutable frame through Lumen + Reel;
+    /// ordinary lifecycle probes keep the same sink with output disabled.
     #[pyo3(signature = (duration = None))]
     fn _wait(slf: &Bound<'_, Self>, duration: Option<f64>) -> PyResult<()> {
         let engine = Rc::clone(&slf.borrow().engine);
         if !has_python_updaters(slf)? {
+            let mut sink = PortalSceneSink {
+                render: Arc::clone(&slf.borrow().render),
+                ..PortalSceneSink::default()
+            };
             return engine
                 .borrow_mut()
-                .wait(duration, &mut fmn_scene::NullSceneSink)
+                .wait(duration, &mut sink)
                 .map(|_| ())
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()));
         }
@@ -4149,7 +4489,10 @@ impl PyScene {
         // before planning wait frames. Run the Python half while unborrowed;
         // begin_stepped_wait immediately follows with the native half.
         run_python_updaters(slf, 0.0)?;
-        let mut sink = fmn_scene::NullSceneSink;
+        let mut sink = PortalSceneSink {
+            render: Arc::clone(&slf.borrow().render),
+            ..PortalSceneSink::default()
+        };
         let mut wait = engine
             .borrow_mut()
             .begin_stepped_wait(duration, &mut sink)
@@ -4638,18 +4981,18 @@ impl CameraLerp {
     }
 }
 
-/// The portal's play sink: validates the capture boundary contract,
-/// records each captured frame's alpha (rendering is a later tranche),
-/// and — when a camera lerp rides the segment — writes the interpolated
-/// camera state at every capture boundary.
+/// The portal's lifecycle sink: validates and records capture alphas, applies
+/// camera interpolation, and forwards immutable packets into an optional
+/// production Lumen/Reel generation.
 #[derive(Default)]
-struct AlphaProbeSink {
+struct PortalSceneSink {
     alphas: Vec<f64>,
     camera: Option<CameraLerp>,
     camera_error: Option<PyErr>,
+    render: Arc<Mutex<Option<PortalRenderSession>>>,
 }
 
-impl fmn_scene::SceneSink for AlphaProbeSink {
+impl fmn_scene::SceneSink for PortalSceneSink {
     fn capture(
         &mut self,
         _reason: fmn_scene::CaptureReason,
@@ -4672,6 +5015,12 @@ impl fmn_scene::SceneSink for AlphaProbeSink {
                     self.camera_error = Some(error);
                 }
             });
+        }
+        let mut render = self.render.lock().map_err(|_| {
+            fmn_scene::IntegrationError::new("portal-render", "render session lock was poisoned")
+        })?;
+        if let Some(session) = render.as_mut() {
+            session.capture(packet)?;
         }
         Ok(())
     }
@@ -5433,11 +5782,11 @@ pub(crate) fn python_embedding_lock() -> std::sync::MutexGuard<'static, ()> {
 /// module cycles in `sys.modules`. Keep the lock through module removal and
 /// cyclic GC, capture every unraisable destructor error, and require the
 /// temporary root module to become unreachable before releasing the lock.
-#[cfg(test)]
-pub(crate) fn with_python_test_module(
+#[cfg(any(test, feature = "gauntlet"))]
+pub(crate) fn with_python_test_module<T>(
     suite: &'static str,
-    body: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>, &Bound<'py, PyDict>),
-) {
+    body: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>, &Bound<'py, PyDict>) -> T,
+) -> T {
     let _lock = python_embedding_lock();
     Python::initialize();
     Python::attach(|py| {
@@ -5501,7 +5850,7 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             manimlib(py, &module).expect("initialize manimlib");
-            body(py, &module, &suite_globals);
+            body(py, &module, &suite_globals)
         }));
         // Python callbacks retain their globals, while suite globals retain
         // PyO3 instances and their callbacks. Some of those extension types
@@ -5587,10 +5936,95 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
             "{suite}: embedded Python suite left a manimlib module installed"
         );
 
-        if let Err(payload) = outcome {
-            std::panic::resume_unwind(payload);
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
         }
-    });
+    })
+}
+
+/// Structured result from the feature-gated in-process Gauntlet portal row.
+#[cfg(feature = "gauntlet")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalGauntletReport {
+    /// Published PNG-sequence directory.
+    pub path: PathBuf,
+    /// Number of lifecycle captures published.
+    pub frame_count: u64,
+    /// Total PNG bytes in the generation.
+    pub bytes: u64,
+    /// Canonical ordered PNG-tree digest.
+    pub digest: String,
+    /// Journal-ready Lumen engine identity.
+    pub engine: String,
+    /// Fixed render team width.
+    pub threads: usize,
+}
+
+/// Drive one real Python `Scene` through its production Lumen/Reel route.
+///
+/// This adapter exists only for the Gauntlet feature used by
+/// `fmn-conformance`; the installed wheel exposes the same route through the
+/// `fmn-python` console rather than a Rust test hook.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_png_sequence(
+    destination: &std::path::Path,
+    seed: u64,
+) -> Result<PortalGauntletReport, String> {
+    let destination = destination
+        .to_str()
+        .ok_or_else(|| "Gauntlet portal destination is not UTF-8".to_owned())?
+        .to_owned();
+    with_python_test_module("portal Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_destination", &destination)
+            .map_err(|error| error.to_string())?;
+        globals
+            .set_item("_fmn_seed", seed)
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(
+            r#"from manimlib import Circle, Scene
+
+class _GauntletPortalScene(Scene):
+    # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
+    # Keep the Gauntlet's full u64 for the native Scene/RngRoot below while
+    # deriving the source-scene seed explicitly at this Python-only boundary.
+    random_seed = _fmn_seed & 0xFFFF_FFFF
+
+    def construct(self):
+        self.add(Circle(radius=0.9))
+        self.wait(1 / 30)
+
+_fmn_scene = _GauntletPortalScene()
+_fmn_scene._begin_png_sequence(
+    _fmn_destination, 96, 54, 30, 1, _fmn_seed
+)
+try:
+    _fmn_scene.run()
+    _fmn_report = _fmn_scene._finish_render()
+except Exception:
+    _fmn_scene._abort_render()
+    raise
+"#,
+        )
+        .expect("Gauntlet source contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        let report = globals
+            .get_item("_fmn_report")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Gauntlet portal script returned no report".to_owned())?
+            .extract::<(String, u64, u64, String, String, usize)>()
+            .map_err(|error| error.to_string())?;
+        Ok(PortalGauntletReport {
+            path: PathBuf::from(report.0),
+            frame_count: report.1,
+            bytes: report.2,
+            digest: report.3,
+            engine: report.4,
+            threads: report.5,
+        })
+    })
 }
 
 #[cfg(test)]

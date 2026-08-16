@@ -73,19 +73,28 @@ operations:
 fmn-python [--robot] --version
 fmn-python [--robot] --list-scenes SOURCE.py
 fmn-python [--robot] --construct-only SOURCE.py [SCENE]
+fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence]
+           [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
+           [--video_dir DIRECTORY]
 ```
 
 `--construct-only` is an explicit engine-lifecycle diagnostic and reports
-`rendered=false`; it does not claim pixels or output files. Ordinary render
-syntax and `studio` syntax currently fail before source execution with exit 4,
-identity `capability`, kind `composition-unavailable`. This fail-closed result
-remains in place until the Python scene path is connected to the production
-Lumen/Reel frame sink and Studio worker. A successful import or construct-only
-run is not render evidence.
+`rendered=false`; it does not claim pixels or output files. The standard
+PNG-sequence route captures immutable Python-scene lifecycle frames, renders
+them through the shared retained Lumen CPU renderer, and publishes one atomic,
+no-clobber generation through Reel. Its success record reports
+`rendered=true`, frame and byte counts, the canonical ordered-tree digest,
+engine identity, and render-team width.
+
+Certified output (`--reproducible`), non-PNG formats, opener/write-all flags,
+and `studio` remain fail-closed capability errors. In particular, the portal
+does not expose a partial certified path before the Python input closure and
+provenance sidecar are complete, and it does not label lifecycle-only work as
+a render. Python scenes execute with the host interpreter's full user
+authority; the portal is not a sandbox.
 
 `--robot` emits one compact, deterministic JSON record using schema
-`fmn-python.cli`, version 1. Python scenes execute with the host interpreter's
-full user authority; the portal is not a sandbox.
+`fmn-python.cli`, version 1.
 
 ## Pinned build and smoke ritual
 
@@ -117,7 +126,7 @@ files.
 
 The permanent release matrix must additionally verify the wheel tag, exact
 663-name wildcard surface, license inventory, clean-venv scene discovery,
-production pixel render once that sink lands, and the exclusive-namespace
+production pixel render, certified-mode refusal, and the exclusive-namespace
 states above. Current measured size evidence lives in
 [`PYTHON_WHEEL_SIZE.tsv`](PYTHON_WHEEL_SIZE.tsv).
 

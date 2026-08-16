@@ -49,8 +49,10 @@
 //! Each feature bead registers at least one e2e scenario when it lands
 //! user-visible behavior; the fast tier runs per-commit and the full
 //! matrix is env-gated (`FMN_E2E_FULL=1`) for the nightly budget. The
-//! The Python surface remains **Pending**. Studio is live through the
-//! production CLI composition root and has a registered frame scenario;
+//! The Python standard PNG surface is live through its feature-gated embedded
+//! CPython adapter. Studio is live through the production CLI composition root;
+//! both have registered frame scenarios, while unsupported Python modes remain
+//! precise capability refusals;
 //! the CLI crate separately proves the subprocess supervisor boundary.
 //! Every seeded class carries one deliberately-injected
 //! regression drill (`RegressionKind`): the runner drives the scenario
@@ -1147,6 +1149,98 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("studio_preview_frames", 1)
         .with_counter("studio_png_dimensions", 1)
         .with_counter("studio_backend_journaled", 1))
+}
+
+/// The PyO3 portal's first production-output Gauntlet row: a real Python
+/// subclass constructs a Circle, lifecycle capture crosses the native bridge,
+/// retained Lumen rasterizes it, and Reel publishes an atomic PNG generation.
+fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_png")?;
+    let destination = root.join("frames");
+    let report = manimlib::run_portal_gauntlet_png_sequence(&destination, ctx.seed)
+        .map_err(|error| fail(format!("run Python portal PNG scenario: {error}")))?;
+    let mut png_paths: Vec<PathBuf> = std::fs::read_dir(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| fail(format!("read Python portal directory entry: {error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    png_paths.retain(|path| path.extension().is_some_and(|extension| extension == "png"));
+    png_paths.sort();
+    let pngs: Vec<Vec<u8>> = png_paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|error| fail(format!("read {}: {error}", path.display())))
+        })
+        .collect::<Result<_, _>>()?;
+    let byte_count = pngs.iter().try_fold(0_u64, |total, bytes| {
+        total
+            .checked_add(
+                u64::try_from(bytes.len()).map_err(|_| fail("PNG byte count exceeds u64"))?,
+            )
+            .ok_or_else(|| fail("Python portal byte count overflow"))
+    })?;
+    let first = pngs
+        .first()
+        .ok_or_else(|| fail("Python portal published no PNG frames"))?;
+    let signature = first.starts_with(b"\x89PNG\r\n\x1a\n");
+    let decoded = fmn_codec::decode_png(
+        first,
+        &fmn_codec::PngLimits {
+            max_pixels: 96 * 54,
+            ..fmn_codec::PngLimits::default()
+        },
+    )
+    .map_err(|error| fail(format!("decode Python portal PNG: {error}")))?;
+    let dimensions_match = decoded.width == 96 && decoded.height == 54;
+    let engine_journaled = {
+        let fields: Vec<_> = report.engine.split(':').collect();
+        fields.len() == 3 && fields[0] == "fast-cpu" && fields[2].parse::<u32>().is_ok()
+    };
+    let complete = report.path == destination
+        && report.frame_count == u64::try_from(pngs.len()).unwrap_or(u64::MAX)
+        && report.bytes == byte_count
+        && report.digest.len() == 64
+        && report.threads == 1
+        && signature
+        && dimensions_match
+        && engine_journaled;
+    ctx.event(
+        LogEvent::new("e2e.python.render")
+            .field("scene", "_GauntletPortalScene")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("dimensions_match", truth(dimensions_match))
+            .field("engine_journaled", truth(engine_journaled)),
+    );
+    ctx.counter("python_render_frames", report.frame_count);
+    ctx.counter("python_png_signature", u64::from(signature));
+    ctx.counter("python_engine_journaled", u64::from(engine_journaled));
+    if !complete {
+        return Err(fail(format!(
+            "Python portal render drifted: path={} frames={} files={} bytes={} tree_bytes={} \
+             digest_len={} engine={:?} threads={} signature={} dimensions={}x{}",
+            report.path.display(),
+            report.frame_count,
+            pngs.len(),
+            report.bytes,
+            byte_count,
+            report.digest.len(),
+            report.engine,
+            report.threads,
+            signature,
+            decoded.width,
+            decoded.height,
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("python_portal_frame.png", first.clone())
+        .with_counter("python_render_frames", report.frame_count)
+        .with_counter("python_png_signature", 1)
+        .with_counter("python_engine_journaled", 1))
 }
 
 /// The shipped CLI's first positive native-registration path: one program
@@ -2425,6 +2519,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_portal_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_frame.png".to_owned()]),
+            counter_ge("python_render_frames", 1),
+            counter_eq("python_png_signature", 1),
+            counter_eq("python_engine_journaled", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.render",
+            vec![
+                FieldPred::str_eq("scene", "_GauntletPortalScene"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+                FieldPred::str_eq("engine_journaled", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.cli_prerun_subdivide_y4m.v1",
         ScenarioClass::RenderMatrix,
         Surface::CliInProcess,
@@ -2884,6 +3002,18 @@ pub fn catalog() -> Vec<ScenarioSpec> {
 // Test entry points
 // ---------------------------------------------------------------------------
 
+/// Focused acceptance for the Python production-composition seam. The same
+/// spec also remains in the per-commit fast-tier catalog.
+#[test]
+fn python_portal_png_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_png_sequence.v1")
+        .expect("Python portal scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 /// The fast tier: every non-drill `Tier::Fast` scenario runs green
 /// per-commit.
 #[test]
@@ -3070,5 +3200,11 @@ fn catalog_invariants_hold() {
             .iter()
             .any(|scenario| scenario.surface == Surface::StudioInProcess),
         "Studio lost its production composition scenario"
+    );
+    assert!(
+        scenarios
+            .iter()
+            .any(|scenario| scenario.surface == Surface::PythonInProcess),
+        "Python lost its production composition scenario"
     );
 }

@@ -23,7 +23,7 @@ fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-library.workspace = true
 fmn-scene.workspace = true
-fmn-output.workspace = true
+fmn-output = { workspace = true, features = ["exact-process"] }
 fmn-runtime.workspace = true
 fmn-cache.workspace = true
 fmn-platform.workspace = true
@@ -54,7 +54,7 @@ fmn-studio.workspace = true
 fmn-config.workspace = true
 # PG-8 (fm-zoi): the binding-tax producer drives the real bridge. pyo3 stays
 # out of the shipped closure (D3) — this is a Gauntlet-only test edge.
-fmn-python.workspace = true
+fmn-python = { workspace = true, features = ["gauntlet"] }
 
 [lints]
 workspace = true

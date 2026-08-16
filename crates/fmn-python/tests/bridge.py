@@ -10,6 +10,7 @@ import contextlib
 import copy
 import enum
 import gc
+import hmac
 import importlib
 import inspect
 import io
@@ -19,6 +20,7 @@ import pickle
 import pathlib
 import re
 import sys
+import tempfile
 import threading
 import types
 import weakref
@@ -3846,11 +3848,10 @@ assert gil_observed > 0, "no Python progress during the detached native kernel"
 assert gil_probe.observed() >= gil_observed
 
 
-# W11 PORTAL CONSOLE — the installed entry point exposes real package/version
-# identity, stable robot records, source discovery, and an explicitly named
-# construct-only diagnostic.  Render/Studio syntax fails before source access
-# until the production frame sink exists; lifecycle-only success is never
-# mislabeled as a render.
+# W11 PORTAL CONSOLE — package/version identity, stable robot records, source
+# discovery, explicit construct-only diagnostics, and a real standard-mode PNG
+# sequence through Lumen + Reel. Unsupported certified/Studio contracts still
+# refuse before source access; lifecycle-only success is never called render.
 def run_portal_console(*arguments):
     previous = sys.argv
     stdout = io.StringIO()
@@ -3887,15 +3888,15 @@ assert console_version["abi_policy"] == "cpython-3.13-full-abi"
 assert console_version["exit"] == {"code": 0, "identity": "success"}
 assert console_err == ""
 
-# Refusal precedes even source-file access: the default syntax means render,
-# not a quiet lifecycle probe.
+# Certified refusal precedes even source-file access: partial certified pixels
+# without the content closure and provenance sidecar are not certification.
 console_code, console_out, console_err = run_portal_console(
-    "missing-source.py", "MissingScene"
+    "--reproducible", "missing-source.py", "MissingScene"
 )
 assert console_code == 4
 assert console_out == ""
-assert "composition-unavailable" in console_err
-assert "not yet connected" in console_err
+assert "render-capability-unavailable" in console_err
+assert "input closure" in console_err
 
 def verify_portal_console_scene():
     source = pathlib.Path(__file__).with_name("console_scene.py")
@@ -3905,21 +3906,125 @@ def verify_portal_console_scene():
     assert console_code == 0
     scene_list = json.loads(console_out)
     assert scene_list["kind"] == "scene-list"
-    assert scene_list["scenes"] == ["ConsoleScene"]
+    assert scene_list["scenes"] == ["Hello"]
     assert console_err == ""
 
     console_code, console_out, console_err = run_portal_console(
-        "--robot", "--construct-only", str(source), "ConsoleScene"
+        "--robot", "--construct-only", str(source), "Hello"
     )
     assert console_code == 0
     constructed = json.loads(console_out)
     assert constructed["kind"] == "construct-only"
-    assert constructed["scene"] == "ConsoleScene"
-    assert constructed["root_count"] == 1
-    assert constructed["family_count"] == 1
-    assert constructed["scene_time"] == 1 / 30
+    assert constructed["scene"] == "Hello"
+    assert constructed["root_count"] == 2
+    assert constructed["family_count"] > constructed["root_count"]
+    assert constructed["scene_time"] == 3.0
     assert constructed["rendered"] is False
     assert constructed["exit"] == {"code": 0, "identity": "success"}
+    assert console_err == ""
+
+    output_root = pathlib.Path(tempfile.mkdtemp(prefix="fmn-portal-render-"))
+    destination = output_root / "frames"
+    console_code, console_out, console_err = run_portal_console(
+        "--robot",
+        str(source),
+        "Hello",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "30",
+        "--threads",
+        "1",
+        "--video_dir",
+        str(destination),
+    )
+    assert console_code == 0, console_err
+    rendered = json.loads(console_out)
+    assert rendered["kind"] == "render"
+    assert rendered["scene"] == "Hello"
+    assert rendered["format"] == "png_sequence"
+    assert rendered["resolution"] == [96, 54]
+    assert rendered["fps"] == 30
+    assert rendered["rendered"] is True
+    assert rendered["frame_count"] == 90
+    assert rendered["bytes"] > 0
+    assert len(rendered["digest"]) == 64
+    engine_parts = rendered["engine"].split(":")
+    assert len(engine_parts) == 3
+    assert engine_parts[0] == "fast-cpu"
+    assert engine_parts[2].isdigit()
+    assert rendered["threads"] == 1
+    assert pathlib.Path(rendered["destination"]) == destination
+    frames = sorted(destination.glob("frame_*.png"))
+    assert len(frames) == rendered["frame_count"]
+    assert sum(frame.stat().st_size for frame in frames) == rendered["bytes"]
+    for frame in frames:
+        assert frame.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert console_err == ""
+
+    # Same build, policy, seed, and thread count reproduce the exact ordered
+    # PNG-tree digest through an independently published generation.
+    repeated_destination = output_root / "repeated"
+    console_code, console_out, console_err = run_portal_console(
+        "--robot",
+        str(source),
+        "Hello",
+        "--resolution=96x54",
+        "--fps=30",
+        "--threads=1",
+        f"--video_dir={repeated_destination}",
+    )
+    assert console_code == 0, console_err
+    repeated = json.loads(console_out)
+    assert hmac.compare_digest(repeated["digest"], rendered["digest"])
+    assert repeated["bytes"] == rendered["bytes"]
+    assert repeated["frame_count"] == rendered["frame_count"]
+
+    # Reel's atomic-directory publication is no-clobber. A second generation
+    # targeting an already published root fails as render/output, and the
+    # first generation remains byte-for-byte intact.
+    original_frames = {frame.name: frame.read_bytes() for frame in frames}
+    console_code, console_out, console_err = run_portal_console(
+        "--robot",
+        str(source),
+        "Hello",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "30",
+        "--threads",
+        "1",
+        "--video_dir",
+        str(destination),
+    )
+    assert console_code == 6
+    clobber_error = json.loads(console_out)
+    assert clobber_error["exit"] == {"code": 6, "identity": "render"}
+    assert clobber_error["kind"] in ("render-failed", "render-finish-failed")
+    assert {frame.name: frame.read_bytes() for frame in frames} == original_frames
+    assert console_err == ""
+
+    # The native composition method has no certified-mode parameter at all;
+    # an extra mode argument cannot bypass the console's fail-closed boundary.
+    direct_certified = manimlib.Scene()
+    try:
+        direct_certified._begin_png_sequence(
+            str(output_root / "forbidden-certified"), 96, 54, 30, 1, True, 0
+        )
+    except TypeError as error:
+        assert "positional arguments" in str(error)
+    else:
+        raise AssertionError("direct certified portal rendering did not refuse")
+
+    console_code, console_out, console_err = run_portal_console(
+        "--robot", "studio", "missing-source.py", "MissingScene"
+    )
+    assert console_code == 4
+    studio_error = json.loads(console_out)
+    assert studio_error["kind"] == "studio-unavailable"
+    assert studio_error["exit"] == {"code": 4, "identity": "capability"}
     assert console_err == ""
 
     console_code, console_out, console_err = run_portal_console(

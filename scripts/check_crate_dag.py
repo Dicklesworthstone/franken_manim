@@ -130,7 +130,24 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-tex",
         "fmn",
     },
-    "fmn-python": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-anim", "fmn-library", "fmn-scene"},
+    # The optional CPython portal is its own composition root. It consumes the
+    # same retained Lumen renderer and native Reel sinks as the standalone CLI,
+    # but fmn-output enters with exact-process disabled so the wheel cannot gain
+    # a subprocess runtime (fm-gqk6, ADR-0017).
+    "fmn-python": {
+        "fmn-core",
+        "fmn-config",
+        "fmn-platform",
+        "fmn-frame",
+        "fmn-codec",
+        "fmn-mobject",
+        "fmn-anim",
+        "fmn-render",
+        "fmn-library",
+        "fmn-scene",
+        "fmn-output",
+        "fmn-runtime",
+    },
     # W5 tier-1 wasm surface (fm-l97, §10.7): the browser leaf. dmath is a
     # direct dependency because scene construction evaluates parametric
     # transcendentals and ADR-0014 forbids routing around the sovereign

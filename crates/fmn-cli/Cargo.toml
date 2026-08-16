@@ -27,7 +27,7 @@ fmn-runtime.workspace = true
 fmn-render.workspace = true
 fmn-scene.workspace = true
 fmn-studio.workspace = true
-fmn-output.workspace = true
+fmn-output = { workspace = true, features = ["exact-process"] }
 fmn-library.workspace = true
 fmn.workspace = true
 asupersync = { workspace = true, optional = true }

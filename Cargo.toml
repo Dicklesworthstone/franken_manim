@@ -63,7 +63,7 @@ fmn-tex = { path = "crates/fmn-tex" }
 fmn-library = { path = "crates/fmn-library" }
 fmn-scene = { path = "crates/fmn-scene" }
 fmn-studio = { path = "crates/fmn-studio" }
-fmn-output = { path = "crates/fmn-output" }
+fmn-output = { path = "crates/fmn-output", default-features = false }
 fmn-runtime = { path = "crates/fmn-runtime" }
 fmn = { path = "crates/fmn" }
 fmn-cli = { path = "crates/fmn-cli" }

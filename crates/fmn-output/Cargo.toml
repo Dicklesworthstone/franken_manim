@@ -7,7 +7,9 @@ repository.workspace = true
 description = "Sink orchestration, the negotiated ffmpeg boundary, and sound (§14)."
 
 [features]
-ffmpeg-test-fixture = []
+default = ["exact-process"]
+exact-process = ["fmn-platform/exact-process"]
+ffmpeg-test-fixture = ["exact-process"]
 
 [[bin]]
 name = "fmn-ffmpeg-test-fixture"
@@ -21,7 +23,7 @@ doc = false
 fmn-core.workspace = true
 fmn-dmath.workspace = true
 fmn-hash.workspace = true
-fmn-platform = { workspace = true, features = ["exact-process"] }
+fmn-platform.workspace = true
 fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-cache.workspace = true

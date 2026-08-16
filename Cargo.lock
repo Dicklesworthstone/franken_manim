@@ -766,10 +766,16 @@ name = "fmn-python"
 version = "0.1.0"
 dependencies = [
  "fmn-anim",
+ "fmn-codec",
  "fmn-config",
  "fmn-core",
+ "fmn-frame",
  "fmn-library",
  "fmn-mobject",
+ "fmn-output",
+ "fmn-platform",
+ "fmn-render",
+ "fmn-runtime",
  "fmn-scene",
  "pyo3",
 ]
