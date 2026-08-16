@@ -210,8 +210,9 @@ Observed proof for the resulting Linux x86-64 artifact:
   robot records, completed a one-frame construct-only lifecycle probe, and
   refused ordinary render syntax with capability exit 4 because no production
   frame sink is wired yet.
-- The compressed artifact measured 3,255,555 bytes against the recorded
-  10 MiB per-wheel budget; its SHA-256 is recorded in
+- The repeated commit-`5cdc8cb` build was byte-identical and measured
+  3,255,554 bytes against the recorded 10 MiB per-wheel budget; its SHA-256
+  is recorded in
   `docs/dist/PYTHON_WHEEL_SIZE.tsv`.
 - The 2,942,065-byte sdist includes both API schema files and rebuilt into a
   wheel successfully. The rebuilt wheel is not byte-identical to the direct
