@@ -57,6 +57,7 @@
 //!   whole family, because the value is per-object data and a child may be
 //!   promoted to a root later.
 
+use crate::mobject::RenderPrimitive;
 use crate::stage::{Mob, Stage};
 use crate::uniforms::Uniforms;
 
@@ -73,6 +74,20 @@ pub enum ProgramKind {
     /// Filled and stroked quadratic paths — every `VMobject`.
     #[default]
     Vector,
+    /// Fixed-grid or explicitly indexed surface triangles.
+    Surface,
+    /// Camera-facing radial point sprites.
+    DotCloud,
+}
+
+impl RenderPrimitive {
+    const fn program_kind(self) -> ProgramKind {
+        match self {
+            Self::Vector => ProgramKind::Vector,
+            Self::SurfaceGrid { .. } | Self::TriangleMesh => ProgramKind::Surface,
+            Self::DotCloud => ProgramKind::DotCloud,
+        }
+    }
 }
 
 /// What makes two adjacent drawn objects shareable in one draw call.
@@ -89,7 +104,7 @@ impl BatchKey {
     #[must_use]
     pub fn of(stage: &Stage, mob: Mob) -> Option<Self> {
         stage.get(mob).map(|entry| Self {
-            program: ProgramKind::Vector,
+            program: entry.render_primitive().program_kind(),
             uniforms: *entry.uniforms(),
         })
     }
@@ -243,7 +258,7 @@ impl Stage {
                         continue; // family_members_with_points
                     }
                     let key = BatchKey {
-                        program: ProgramKind::Vector,
+                        program: entry.render_primitive().program_kind(),
                         uniforms: *entry.uniforms(),
                     };
                     if open != Some(key) {

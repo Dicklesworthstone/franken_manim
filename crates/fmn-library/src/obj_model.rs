@@ -38,9 +38,9 @@
 use fmn_core::color::Srgb;
 use fmn_core::constants::GREY;
 use fmn_core::types::Vec3;
-use fmn_mobject::Mobject;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::uniforms::Uniforms;
+use fmn_mobject::{Mobject, RenderPrimitive};
 
 /// The Reference's default `height` for `ThreeDModel` (scene units).
 pub const DEFAULT_MODEL_HEIGHT: f64 = 3.0;
@@ -687,6 +687,7 @@ impl From<ThreeDModel> for Mobject {
         };
         Mobject::from_buffer(buffer)
             .with_uniforms(uniforms)
+            .with_render_primitive(RenderPrimitive::TriangleMesh)
             .with_z_index(model.z_index)
     }
 }

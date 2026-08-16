@@ -3925,6 +3925,8 @@ def verify_portal_console_scene():
 
     output_root = pathlib.Path(tempfile.mkdtemp(prefix="fmn-portal-render-"))
     destination = output_root / "frames"
+    blocked_still_destination = output_root / "blocked.png"
+    blocked_still_destination.mkdir()
     console_code, console_out, console_err = run_portal_console(
         "--robot",
         str(source),
@@ -3981,6 +3983,78 @@ def verify_portal_console_scene():
     assert hmac.compare_digest(repeated["digest"], rendered["digest"])
     assert repeated["bytes"] == rendered["bytes"]
     assert repeated["frame_count"] == rendered["frame_count"]
+
+    # Final-state PNG uses the same production composition root but skips
+    # intermediate raster captures. It must publish exactly one atomic file.
+    still_destination = output_root / "final.png"
+    console_code, console_out, console_err = run_portal_console(
+        "--robot",
+        str(source),
+        "Hello",
+        "--format",
+        "png",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "30",
+        "--threads",
+        "1",
+        "--video_dir",
+        str(still_destination),
+    )
+    assert console_code == 0, console_err
+    still = json.loads(console_out)
+    assert still["kind"] == "render"
+    assert still["format"] == "png"
+    assert still["frame_count"] == 1
+    assert still["bytes"] == still_destination.stat().st_size
+    assert len(still["digest"]) == 64
+    assert still["engine"].split(":")[0] == "fast-cpu"
+    assert still["threads"] == 1
+    assert pathlib.Path(still["destination"]) == still_destination
+    still_bytes = still_destination.read_bytes()
+    assert still_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert console_err == ""
+
+    repeated_still_destination = output_root / "repeated-final.png"
+    console_code, console_out, console_err = run_portal_console(
+        "--robot",
+        str(source),
+        "Hello",
+        "--format=png",
+        "--resolution=96x54",
+        "--fps=30",
+        "--threads=1",
+        f"--video_dir={repeated_still_destination}",
+    )
+    assert console_code == 0, console_err
+    repeated_still = json.loads(console_out)
+    assert repeated_still["frame_count"] == 1
+    assert hmac.compare_digest(repeated_still["digest"], still["digest"])
+    assert repeated_still_destination.read_bytes() == still_bytes
+
+    console_code, console_out, console_err = run_portal_console(
+        "--robot",
+        str(source),
+        "Hello",
+        "--format",
+        "png",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "30",
+        "--threads",
+        "1",
+        "--video_dir",
+        str(blocked_still_destination),
+    )
+    assert console_code == 6
+    blocked_still = json.loads(console_out)
+    assert blocked_still["exit"] == {"code": 6, "identity": "render"}
+    assert blocked_still["kind"] in ("render-failed", "render-finish-failed")
+    assert blocked_still_destination.is_dir()
+    assert still_destination.read_bytes() == still_bytes
+    assert console_err == ""
 
     # Reel's atomic-directory publication is no-clobber. A second generation
     # targeting an already published root fails as render/output, and the

@@ -44,9 +44,9 @@
 use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{GREY_C, WHITE, YELLOW};
 use fmn_core::types::Vec3;
-use fmn_mobject::Mobject;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::uniforms::Uniforms;
+use fmn_mobject::{Mobject, RenderPrimitive};
 
 /// `dot_cloud.py`'s `DEFAULT_DOT_RADIUS` (0.05) — distinct from the
 /// vectorized `Dot`'s 0.08 (`geometry.py`), which lives in [`crate::arc`].
@@ -828,6 +828,7 @@ impl From<DotCloud> for Mobject {
         };
         let mut mob = Mobject::from_buffer(buffer)
             .with_uniforms(uniforms)
+            .with_render_primitive(RenderPrimitive::DotCloud)
             .with_z_index(z_index);
         mob.submobjects
             .extend(children.into_iter().map(Mobject::from));
@@ -1147,6 +1148,7 @@ mod tests {
         assert_eq!(mob.buffer.read(1, "glow_factor").expect("field"), vec![2.0]);
         // The DotCloud AA band lands in the uniform inventory.
         assert_eq!(mob.uniforms.anti_alias_width, DOT_CLOUD_AA_WIDTH);
+        assert_eq!(mob.render_primitive, RenderPrimitive::DotCloud);
     }
 
     #[test]

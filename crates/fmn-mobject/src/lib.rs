@@ -44,7 +44,7 @@ pub use align::MAX_ALIGNED_SUBMOBJECTS;
 pub use animate::{AnimBuilder, AnimateArgs, AnimateError, BuiltAnimate, IntoAnimate};
 pub use bbox::BoundingBox;
 pub use dynamics::{Tracker, TrackerKind};
-pub use mobject::Mobject;
+pub use mobject::{Mobject, RenderPrimitive};
 pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{
     DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,

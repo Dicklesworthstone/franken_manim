@@ -91,7 +91,7 @@ use fmn_core::constants::{BLUE, BLUE_D, BLUE_E, GREY, GREY_A, IN, ORIGIN, OUT, P
 use fmn_core::types::Vec3;
 use fmn_geom::{QuadPath, space_ops};
 use fmn_mobject::uniforms::{JointType, Uniforms};
-use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag};
+use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag};
 
 use crate::poly::{Polygon, Rectangle};
 use crate::style::Style;
@@ -710,6 +710,9 @@ impl From<Surface> for Mobject {
             buffer,
             uniforms: s.uniforms,
             shape: ShapeTag::General,
+            render_primitive: RenderPrimitive::SurfaceGrid {
+                resolution: s.resolution,
+            },
             z_index: s.z_index,
             submobjects: Vec::new(),
         }
@@ -1363,6 +1366,7 @@ impl From<SGroup> for Mobject {
                 .expect("an empty surface buffer cannot overflow"),
             uniforms: g.uniforms,
             shape: ShapeTag::General,
+            render_primitive: RenderPrimitive::Vector,
             z_index: g.z_index,
             submobjects: g.children.into_iter().map(Mobject::from).collect(),
         }
@@ -2360,6 +2364,9 @@ impl From<TexturedSurface> for Mobject {
             buffer,
             uniforms: t.uniforms,
             shape: ShapeTag::General,
+            render_primitive: RenderPrimitive::SurfaceGrid {
+                resolution: t.resolution,
+            },
             z_index: t.z_index,
             submobjects: Vec::new(),
         }
@@ -2574,6 +2581,7 @@ impl From<TexturedGeometry> for Mobject {
             buffer,
             uniforms: t.uniforms,
             shape: ShapeTag::General,
+            render_primitive: RenderPrimitive::TriangleMesh,
             z_index: t.z_index,
             submobjects: Vec::new(),
         }
@@ -2625,6 +2633,10 @@ mod tests {
         for (p, e) in surface.points().iter().zip(expected) {
             assert_close(*p, e);
         }
+        assert_eq!(
+            Mobject::from(surface).render_primitive,
+            RenderPrimitive::SurfaceGrid { resolution: (3, 2) }
+        );
     }
 
     #[test]

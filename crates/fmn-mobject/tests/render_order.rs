@@ -7,7 +7,7 @@
 //! reasons that have nothing to do with order.
 
 use fmn_mobject::order::{PassOrder, ProgramKind};
-use fmn_mobject::{JointType, Mob, Mobject, Stage, Uniforms};
+use fmn_mobject::{JointType, Mob, Mobject, RenderPrimitive, Stage, Uniforms};
 
 /// A pointful mobject (one record) — only pointful family members draw.
 fn dot(stage: &mut Stage) -> Mob {
@@ -495,10 +495,30 @@ fn stroke_behind_is_reported_per_item_as_the_pass_order() {
 #[test]
 fn the_program_kind_is_part_of_the_key() {
     let mut stage = Stage::new();
-    let mob = dot(&mut stage);
-    stage.add_to_scene(mob).expect("root");
+    let vector = dot(&mut stage);
+    let surface = stage.add(
+        Mobject::from_points(&[[0.0, 0.0, 0.0]])
+            .with_render_primitive(RenderPrimitive::SurfaceGrid { resolution: (1, 1) }),
+    );
+    let dots = stage.add(
+        Mobject::from_points(&[[0.0, 0.0, 0.0]]).with_render_primitive(RenderPrimitive::DotCloud),
+    );
+    for mob in [vector, surface, dots] {
+        stage.add_to_scene(mob).expect("root");
+    }
     let plan = stage.draw_plan();
-    assert_eq!(plan.items()[0].key.program, ProgramKind::Vector);
+    assert_eq!(
+        plan.items()
+            .iter()
+            .map(|item| item.key.program)
+            .collect::<Vec<_>>(),
+        [
+            ProgramKind::Vector,
+            ProgramKind::Surface,
+            ProgramKind::DotCloud
+        ]
+    );
+    assert_eq!(plan.batch_trace(), [0, 1, 2]);
 }
 
 // ------------------------------------------------------------- properties

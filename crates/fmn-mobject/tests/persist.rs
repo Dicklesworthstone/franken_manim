@@ -12,8 +12,8 @@ use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{Limits, SerialError, Writer, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{
-    JointType, Mob, Mobject, PersistError, SNAPSHOT_SCHEMA, SceneState, Snapshot, SnapshotLimits,
-    Stage, StageError, UpdaterFn, UpdaterKindTag, UpdaterManifest,
+    JointType, Mob, Mobject, PersistError, RenderPrimitive, SNAPSHOT_SCHEMA, SceneState, Snapshot,
+    SnapshotLimits, Stage, StageError, UpdaterFn, UpdaterKindTag, UpdaterManifest,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
@@ -127,6 +127,89 @@ fn durable_round_trip_preserves_affine_placement_without_baking_points() {
     assert!(stage.placement(mob).unwrap().same_bits(placement));
     assert_eq!(stage.get_object_points(mob).unwrap(), object_points);
     assert_eq!(stage.get_points(mob).unwrap(), world_points);
+}
+
+#[test]
+fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
+    let mut stage = Stage::new();
+    let vector = stage.add(Mobject::new());
+    let surface = stage.add(
+        Mobject::new().with_render_primitive(RenderPrimitive::SurfaceGrid {
+            resolution: (17, 9),
+        }),
+    );
+    let triangle = stage.add(Mobject::new().with_render_primitive(RenderPrimitive::TriangleMesh));
+    let dots = stage.add(Mobject::new().with_render_primitive(RenderPrimitive::DotCloud));
+
+    let identities = [
+        (
+            surface,
+            RenderPrimitive::SurfaceGrid {
+                resolution: (17, 9),
+            },
+        ),
+        (triangle, RenderPrimitive::TriangleMesh),
+        (dots, RenderPrimitive::DotCloud),
+    ];
+    for &(source, expected) in &identities {
+        assert_eq!(stage.get(source).unwrap().render_primitive(), expected);
+        let copied = stage.copy_family(source).unwrap();
+        assert_eq!(stage.get(copied).unwrap().render_primitive(), expected);
+    }
+
+    stage.become_mobject(vector, surface, false).unwrap();
+    assert_eq!(
+        stage.get(vector).unwrap().render_primitive(),
+        RenderPrimitive::SurfaceGrid {
+            resolution: (17, 9)
+        }
+    );
+
+    let memory_snapshot = stage.snapshot();
+    let plain = stage.add(Mobject::new());
+    stage.become_mobject(vector, plain, false).unwrap();
+    stage.restore(&memory_snapshot);
+    assert_eq!(
+        stage.get(vector).unwrap().render_primitive(),
+        RenderPrimitive::SurfaceGrid {
+            resolution: (17, 9)
+        }
+    );
+    for &(source, expected) in &identities {
+        assert_eq!(stage.get(source).unwrap().render_primitive(), expected);
+    }
+
+    let bytes = stage.snapshot_bytes().unwrap();
+    let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+    let plain = stage.add(Mobject::new());
+    stage.become_mobject(vector, plain, false).unwrap();
+    stage.restore(&decoded.snapshot);
+    assert_eq!(
+        stage.get(vector).unwrap().render_primitive(),
+        RenderPrimitive::SurfaceGrid {
+            resolution: (17, 9)
+        }
+    );
+    for &(source, expected) in &identities {
+        assert_eq!(stage.get(source).unwrap().render_primitive(), expected);
+    }
+}
+
+#[test]
+fn unknown_durable_render_primitive_is_a_typed_corruption_refusal() {
+    let mut stage = Stage::new();
+    stage.add(Mobject::new());
+    let mut bytes = stage.snapshot_bytes().unwrap();
+    let body_len = bytes.len() - 32;
+    assert_eq!(bytes[body_len - 1], 0, "one vector primitive tag");
+    bytes[body_len - 1] = u8::MAX;
+    let digest = sha256(&bytes[..body_len]);
+    bytes[body_len..].copy_from_slice(digest.as_bytes());
+
+    assert!(matches!(
+        Snapshot::from_bytes(&bytes, &stage),
+        Err(PersistError::Malformed("unknown render primitive"))
+    ));
 }
 
 #[test]

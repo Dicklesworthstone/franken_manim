@@ -35,16 +35,16 @@ use crossing::CrossingClass;
 use fmn_frame::convert::rgba16f_to_rgba8;
 use fmn_frame::{FrameLayout, PixelFormat};
 use fmn_mobject::{
-    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Stage,
-    StageError, Tracker, TrackerKind, Uniforms,
+    JointType, Mob, Mobject, ProgramKind, RecordBuffer, RecordError, RecordSchema, RecordView,
+    Stage, StageError, Tracker, TrackerKind, Uniforms,
 };
 use fmn_output::{
     EmitterConfig, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
     SinkLimits, SinkReceipt,
 };
 use fmn_render::{
-    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
-    Tiling, Viewport,
+    Camera, CameraConfig, EngineIdentity, FrameConfig, RetainedFrameRenderer,
+    RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
 };
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::create_exception;
@@ -94,6 +94,10 @@ const PORTAL_MAX_RENDER_FRAMES: u64 = 1_000_000;
 /// portal adapter owns only their lifetime and the Python-facing report.
 struct PortalRenderSession {
     renderer: RetainedFrameRenderer,
+    camera: Camera,
+    affine_camera_frame: fmn_scene::studio_bridge::CameraFrame,
+    camera_bound: bool,
+    camera_is_affine_default: bool,
     emitter: Option<OrderedEmitter>,
     receipt: SinkReceipt<NativeArtifactReport>,
     next_sequence: u64,
@@ -106,6 +110,7 @@ impl PortalRenderSession {
         height: u32,
         fps: u32,
         max_threads: usize,
+        single_frame: bool,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err(
@@ -172,13 +177,26 @@ impl PortalRenderSession {
                 .map_or(1, fmn_runtime::TeamPlan::threads),
         })
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let camera = Camera::new(CameraConfig {
+            resolution: (width, height),
+            fps,
+            background,
+            ..CameraConfig::default()
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let affine_camera_frame = camera.frame().clone();
 
         let output_layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let frame_bytes = u64::try_from(output_layout.total_bytes())
             .map_err(|_| PyOverflowError::new_err("render frame size exceeds u64"))?;
+        let max_frames = if single_frame {
+            1
+        } else {
+            PORTAL_MAX_RENDER_FRAMES
+        };
         let max_stream_bytes = frame_bytes
-            .checked_mul(PORTAL_MAX_RENDER_FRAMES)
+            .checked_mul(max_frames)
             .ok_or_else(|| PyOverflowError::new_err("render stream budget exceeds u64"))?;
         let max_resident_bytes = frame_bytes
             .checked_mul(3)
@@ -188,21 +206,26 @@ impl PortalRenderSession {
             .checked_mul(2)
             .ok_or_else(|| PyOverflowError::new_err("render artifact budget exceeds u64"))?;
         let limits = SinkLimits::new(
-            PORTAL_MAX_RENDER_FRAMES,
+            max_frames,
             max_resident_bytes,
             max_stream_bytes,
             max_artifact_bytes,
         )
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let fs: Arc<dyn fmn_platform::fs::FileSystem> = Arc::new(fmn_platform::fs::StdFs);
+        let target = if single_frame {
+            PngTarget::Single(destination)
+        } else {
+            PngTarget::Sequence {
+                directory: destination,
+                stem: "frame".to_owned(),
+                digits: 6,
+            }
+        };
         let (binding, receipt) = PngSink::new(
             fs,
             PngSinkConfig {
-                target: PngTarget::Sequence {
-                    directory: destination,
-                    stem: "frame".to_owned(),
-                    digits: 6,
-                },
+                target,
                 width,
                 height,
                 first_sequence: 0,
@@ -213,21 +236,37 @@ impl PortalRenderSession {
             },
         )
         .map_err(|error| PyValueError::new_err(error.to_string()))?
-        .into_binding("python-png-sequence");
+        .into_binding(if single_frame {
+            "python-png"
+        } else {
+            "python-png-sequence"
+        });
         let emitter = OrderedEmitter::new(
             EmitterConfig::new(output_layout, plan.frames_in_flight, 0)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
             vec![binding],
         )
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let mut runtime_config = RuntimeConfig::from_config(&config);
+        if single_frame {
+            // Match the native front door's final-state PNG semantics: run
+            // every segment to its semantic endpoint without ordinary frame
+            // capture, then `_finish_render` publishes one explicit `show`.
+            runtime_config.skip_animations = true;
+            runtime_config.preview_while_skipping = false;
+        }
         Ok((
             Self {
                 renderer,
+                camera,
+                affine_camera_frame,
+                camera_bound: false,
+                camera_is_affine_default: false,
                 emitter: Some(emitter),
                 receipt,
                 next_sequence: 0,
             },
-            RuntimeConfig::from_config(&config),
+            runtime_config,
         ))
     }
 
@@ -236,9 +275,20 @@ impl PortalRenderSession {
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
         let stage = packet.materialize_stage();
-        self.renderer
-            .render(&stage, 0)
-            .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+        let has_camera_bound_primitive = stage
+            .draw_plan()
+            .items()
+            .iter()
+            .any(|item| item.key.program != ProgramKind::Vector);
+        if self.camera_bound && (!self.camera_is_affine_default || has_camera_bound_primitive) {
+            self.renderer
+                .render_with_camera(&stage, &self.camera)
+                .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+        } else {
+            self.renderer
+                .render(&stage, 0)
+                .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+        }
         let mut reservation = self
             .emitter
             .as_ref()
@@ -256,6 +306,22 @@ impl PortalRenderSession {
             .next_sequence
             .checked_add(1)
             .ok_or_else(|| fmn_scene::IntegrationError::new("reel", "frame sequence exhausted"))?;
+        Ok(())
+    }
+
+    fn bind_camera(
+        &mut self,
+        frame: fmn_scene::studio_bridge::CameraFrame,
+        light_position: [f64; 3],
+    ) -> PyResult<()> {
+        self.camera_is_affine_default =
+            camera_frames_match_for_projection(&frame, &self.affine_camera_frame)
+                && light_position == CameraConfig::default().light_source_position;
+        *self.camera.frame_mut() = frame;
+        self.camera
+            .set_light_source_position(light_position)
+            .map_err(camera_error)?;
+        self.camera_bound = true;
         Ok(())
     }
 
@@ -287,6 +353,16 @@ impl PortalRenderSession {
             let _ = emitter.finish();
         }
     }
+}
+
+fn camera_frames_match_for_projection(
+    left: &fmn_scene::studio_bridge::CameraFrame,
+    right: &fmn_scene::studio_bridge::CameraFrame,
+) -> bool {
+    left.center() == right.center()
+        && left.shape() == right.shape()
+        && left.field_of_view() == right.field_of_view()
+        && left.orientation() == right.orientation()
 }
 
 impl Drop for PortalRenderSession {
@@ -3806,6 +3882,78 @@ fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     Ok(false)
 }
 
+struct PortalPngRequest {
+    destination: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    threads: usize,
+    seed: u64,
+    single_frame: bool,
+}
+
+fn begin_portal_png(slf: &Bound<'_, PyScene>, request: PortalPngRequest) -> PyResult<()> {
+    let PortalPngRequest {
+        destination,
+        width,
+        height,
+        fps,
+        threads,
+        seed,
+        single_frame,
+    } = request;
+    if destination.is_empty() {
+        return Err(PyValueError::new_err(
+            "render destination must not be empty",
+        ));
+    }
+    let render_slot = {
+        let scene = slf.borrow();
+        if !scene.proxies.borrow().is_empty()
+            || !scene.engine.borrow().stage().roots().is_empty()
+            || scene.engine.borrow().stage().time() != 0.0
+        {
+            return Err(PyRuntimeError::new_err(
+                "render configuration must be installed before Scene construction mutates engine state",
+            ));
+        }
+        Arc::clone(&scene.render)
+    };
+    let (session, runtime_config) = PortalRenderSession::new(
+        PathBuf::from(destination),
+        width,
+        height,
+        fps,
+        threads,
+        single_frame,
+    )?;
+    let replacement = match Scene::new(runtime_config, seed) {
+        Ok(scene) => Rc::new(EngineState::new(scene)),
+        Err(error) => {
+            session.abort();
+            return Err(PyRuntimeError::new_err(error.to_string()));
+        }
+    };
+    let mut render = match render_slot.lock() {
+        Ok(render) => render,
+        Err(_) => {
+            session.abort();
+            return Err(PyRuntimeError::new_err(
+                "portal render session lock was poisoned",
+            ));
+        }
+    };
+    if render.is_some() {
+        session.abort();
+        return Err(PyRuntimeError::new_err(
+            "a portal render generation is already active",
+        ));
+    }
+    slf.borrow_mut().engine = replacement;
+    *render = Some(session);
+    Ok(())
+}
+
 #[pymethods]
 impl PyScene {
     #[new]
@@ -3833,50 +3981,45 @@ impl PyScene {
         threads: usize,
         seed: u64,
     ) -> PyResult<()> {
-        if destination.is_empty() {
-            return Err(PyValueError::new_err(
-                "render destination must not be empty",
-            ));
-        }
-        let render_slot = {
-            let scene = slf.borrow();
-            if !scene.proxies.borrow().is_empty()
-                || !scene.engine.borrow().stage().roots().is_empty()
-                || scene.engine.borrow().stage().time() != 0.0
-            {
-                return Err(PyRuntimeError::new_err(
-                    "render configuration must be installed before Scene construction mutates engine state",
-                ));
-            }
-            Arc::clone(&scene.render)
-        };
-        let (session, runtime_config) =
-            PortalRenderSession::new(PathBuf::from(destination), width, height, fps, threads)?;
-        let replacement = match Scene::new(runtime_config, seed) {
-            Ok(scene) => Rc::new(EngineState::new(scene)),
-            Err(error) => {
-                session.abort();
-                return Err(PyRuntimeError::new_err(error.to_string()));
-            }
-        };
-        let mut render = match render_slot.lock() {
-            Ok(render) => render,
-            Err(_) => {
-                session.abort();
-                return Err(PyRuntimeError::new_err(
-                    "portal render session lock was poisoned",
-                ));
-            }
-        };
-        if render.is_some() {
-            session.abort();
-            return Err(PyRuntimeError::new_err(
-                "a portal render generation is already active",
-            ));
-        }
-        slf.borrow_mut().engine = replacement;
-        *render = Some(session);
-        Ok(())
+        begin_portal_png(
+            slf,
+            PortalPngRequest {
+                destination,
+                width,
+                height,
+                fps,
+                threads,
+                seed,
+                single_frame: false,
+            },
+        )
+    }
+
+    /// Start one atomic final-state PNG generation. The scene advances every
+    /// segment to its semantic endpoint without intermediate raster work;
+    /// `_finish_render` captures and publishes exactly one frame.
+    #[pyo3(signature = (destination, width, height, fps, threads, seed))]
+    fn _begin_png(
+        slf: &Bound<'_, Self>,
+        destination: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        threads: usize,
+        seed: u64,
+    ) -> PyResult<()> {
+        begin_portal_png(
+            slf,
+            PortalPngRequest {
+                destination,
+                width,
+                height,
+                fps,
+                threads,
+                seed,
+                single_frame: true,
+            },
+        )
     }
 
     /// Cancel an active generation and join its ordered output worker.
@@ -3894,11 +4037,28 @@ impl PyScene {
 
     /// Finalize the active native generation and return its exact artifact
     /// receipt: path, frames, bytes, digest, renderer identity, threads.
+    #[pyo3(signature = (camera=None, light_position=None))]
     fn _finish_render(
         slf: &Bound<'_, Self>,
+        camera: Option<PyRef<'_, PyCameraFrameCore>>,
+        light_position: Option<[f64; 3]>,
     ) -> PyResult<(String, u64, u64, String, String, usize)> {
         let engine = Rc::clone(&slf.borrow().engine);
         let render = Arc::clone(&slf.borrow().render);
+        match (camera, light_position) {
+            (Some(camera), Some(light_position)) => render
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?
+                .bind_camera(camera.frame.clone(), light_position)?,
+            (None, None) => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "camera frame and light position must be supplied together",
+                ));
+            }
+        }
         let needs_final_capture = render
             .lock()
             .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
@@ -5530,8 +5690,9 @@ fn install_native_tree<'py>(
 /// The bootstrap's `CameraFrame(Mobject)` owns one of these as its
 /// authoritative state; every camera method delegates here, so orientation,
 /// center, shape, and field of view round-trip exactly (D5, state-real).
-/// This value is also the future renderer-binding seam: a render tranche
-/// hands the same `fmn_scene::studio_bridge::CameraFrame` to Lumen's `Camera` unchanged.
+/// This value is also the renderer-binding seam: final native PNG capture
+/// hands the same `fmn_scene::studio_bridge::CameraFrame` to Lumen's `Camera`
+/// unchanged.
 #[pyclass(unsendable, name = "_CameraFrameCore")]
 struct PyCameraFrameCore {
     frame: fmn_scene::studio_bridge::CameraFrame,
@@ -5971,6 +6132,24 @@ pub fn run_portal_gauntlet_png_sequence(
     destination: &std::path::Path,
     seed: u64,
 ) -> Result<PortalGauntletReport, String> {
+    run_portal_gauntlet_png(destination, seed, false)
+}
+
+/// Drive one real Python `Scene` to a single final-state PNG through Lumen/Reel.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_png_still(
+    destination: &std::path::Path,
+    seed: u64,
+) -> Result<PortalGauntletReport, String> {
+    run_portal_gauntlet_png(destination, seed, true)
+}
+
+#[cfg(feature = "gauntlet")]
+fn run_portal_gauntlet_png(
+    destination: &std::path::Path,
+    seed: u64,
+    single_frame: bool,
+) -> Result<PortalGauntletReport, String> {
     let destination = destination
         .to_str()
         .ok_or_else(|| "Gauntlet portal destination is not UTF-8".to_owned())?
@@ -5981,6 +6160,9 @@ pub fn run_portal_gauntlet_png_sequence(
             .map_err(|error| error.to_string())?;
         globals
             .set_item("_fmn_seed", seed)
+            .map_err(|error| error.to_string())?;
+        globals
+            .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
             r#"from manimlib import Circle, Scene
@@ -5996,12 +6178,18 @@ class _GauntletPortalScene(Scene):
         self.wait(1 / 30)
 
 _fmn_scene = _GauntletPortalScene()
-_fmn_scene._begin_png_sequence(
-    _fmn_destination, 96, 54, 30, 1, _fmn_seed
+_fmn_begin = (
+    _fmn_scene._begin_png
+    if _fmn_single_frame
+    else _fmn_scene._begin_png_sequence
 )
+_fmn_begin(_fmn_destination, 96, 54, 30, 1, _fmn_seed)
 try:
     _fmn_scene.run()
-    _fmn_report = _fmn_scene._finish_render()
+    _fmn_report = _fmn_scene._finish_render(
+        _fmn_scene.frame._core,
+        _fmn_scene.camera.light_source.get_center(),
+    )
 except Exception:
     _fmn_scene._abort_render()
     raise

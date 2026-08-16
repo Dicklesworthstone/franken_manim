@@ -1243,6 +1243,87 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         .with_counter("python_engine_journaled", 1))
 }
 
+/// The portal's final-state still route: semantic construction completes with
+/// intermediate raster work skipped, then the same Lumen/Reel composition root
+/// atomically publishes exactly one canonical PNG.
+fn python_portal_png_still_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_png_still")?;
+    let destination = root.join("final.png");
+    let report = manimlib::run_portal_gauntlet_png_still(&destination, ctx.seed)
+        .map_err(|error| fail(format!("run Python portal PNG still scenario: {error}")))?;
+    let bytes = std::fs::read(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?;
+    let signature = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+    let decoded = fmn_codec::decode_png(
+        &bytes,
+        &fmn_codec::PngLimits {
+            max_pixels: 96 * 54,
+            ..fmn_codec::PngLimits::default()
+        },
+    )
+    .map_err(|error| fail(format!("decode Python portal still PNG: {error}")))?;
+    let dimensions_match = decoded.width == 96 && decoded.height == 54;
+    let engine_journaled = {
+        let fields: Vec<_> = report.engine.split(':').collect();
+        fields.len() == 3 && fields[0] == "fast-cpu" && fields[2].parse::<u32>().is_ok()
+    };
+
+    // Planted negative: a directory at the requested file path is the wrong
+    // node kind and must survive a precise publication refusal.
+    let blocked_destination = root.join("blocked.png");
+    std::fs::create_dir(&blocked_destination).map_err(|error| {
+        fail(format!(
+            "create planted PNG destination directory {}: {error}",
+            blocked_destination.display()
+        ))
+    })?;
+    let blocked = manimlib::run_portal_gauntlet_png_still(&blocked_destination, ctx.seed);
+    let wrong_node_kind_refused = blocked.is_err() && blocked_destination.is_dir();
+    let complete = report.path == destination
+        && report.frame_count == 1
+        && report.bytes == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        && report.digest.len() == 64
+        && report.threads == 1
+        && signature
+        && dimensions_match
+        && engine_journaled
+        && wrong_node_kind_refused;
+    ctx.event(
+        LogEvent::new("e2e.python.render")
+            .field("scene", "_GauntletPortalScene")
+            .field("format", "png")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("dimensions_match", truth(dimensions_match))
+            .field("engine_journaled", truth(engine_journaled))
+            .field("wrong_node_kind_refused", truth(wrong_node_kind_refused)),
+    );
+    if !complete {
+        return Err(fail(format!(
+            "Python portal still drifted: path={} frames={} bytes={} file_bytes={} \
+             digest_len={} engine={:?} threads={} signature={} dimensions={}x{} \
+             wrong_node_kind_refused={}",
+            report.path.display(),
+            report.frame_count,
+            report.bytes,
+            bytes.len(),
+            report.digest.len(),
+            report.engine,
+            report.threads,
+            signature,
+            decoded.width,
+            decoded.height,
+            wrong_node_kind_refused,
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("python_portal_still.png", bytes)
+        .with_counter("python_still_frames", 1)
+        .with_counter("python_still_png_signature", 1)
+        .with_counter("python_still_engine_journaled", 1)
+        .with_counter("python_still_wrong_node_kind_refused", 1))
+}
+
 /// The shipped CLI's first positive native-registration path: one program
 /// selected from `@builtin`, rendered by Lumen, converted by fmn-frame, and
 /// atomically published by Reel's ordered PNG-sequence sink.
@@ -2543,6 +2624,32 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_portal_png_still.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_png_still_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_still.png".to_owned()]),
+            counter_eq("python_still_frames", 1),
+            counter_eq("python_still_png_signature", 1),
+            counter_eq("python_still_engine_journaled", 1),
+            counter_eq("python_still_wrong_node_kind_refused", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.render",
+            vec![
+                FieldPred::str_eq("scene", "_GauntletPortalScene"),
+                FieldPred::str_eq("format", "png"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+                FieldPred::str_eq("engine_journaled", "true"),
+                FieldPred::str_eq("wrong_node_kind_refused", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.cli_prerun_subdivide_y4m.v1",
         ScenarioClass::RenderMatrix,
         Surface::CliInProcess,
@@ -3010,6 +3117,18 @@ fn python_portal_png_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_png_sequence.v1")
         .expect("Python portal scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Focused acceptance for the portal's one-frame final-state route, including
+/// the no-clobber planted negative.
+#[test]
+fn python_portal_png_still_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_png_still.v1")
+        .expect("Python portal still scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

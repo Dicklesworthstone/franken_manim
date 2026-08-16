@@ -19,6 +19,29 @@ use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::ShapeTag;
 use crate::uniforms::Uniforms;
 
+/// The renderer program and constructor metadata an arena entry requires.
+///
+/// This is distinct from [`ShapeTag`]. A shape tag is an optional vector
+/// coverage hint whose geometric payload may become stale after a point
+/// write; a render primitive is durable semantic identity. A sampled surface
+/// remains a surface after its points are animated, and its UV resolution is
+/// required to reconstruct the fixed triangle topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderPrimitive {
+    /// Filled/stroked quadratic-vector records.
+    #[default]
+    Vector,
+    /// A fixed UV-grid surface. The product must equal the record count.
+    SurfaceGrid {
+        /// Sampled points along the u and v axes.
+        resolution: (usize, usize),
+    },
+    /// Explicit triangle soup: every three records form one triangle.
+    TriangleMesh,
+    /// Camera-facing dots, one per record.
+    DotCloud,
+}
+
 /// A detached mobject: record data, per-object uniforms, the semantic
 /// shape tag, and detached children.
 pub struct Mobject {
@@ -30,6 +53,8 @@ pub struct Mobject {
     /// The semantic shape (§10.8) the constructor built, stamped against
     /// these points when the mobject enters the arena.
     pub shape: ShapeTag,
+    /// Durable renderer identity and topology metadata.
+    pub render_primitive: RenderPrimitive,
     /// The Reference's `z_index` (§8.5): the scene list's sort key. Zero is
     /// the Reference's default; a builder that means to sit above or below
     /// its siblings sets it here rather than after `add`.
@@ -62,6 +87,7 @@ impl Mobject {
             buffer,
             uniforms: Uniforms::default(),
             shape: ShapeTag::General,
+            render_primitive: RenderPrimitive::Vector,
             z_index: 0,
             submobjects: Vec::new(),
         }
@@ -93,6 +119,13 @@ impl Mobject {
     #[must_use]
     pub fn with_shape(mut self, shape: ShapeTag) -> Self {
         self.shape = shape;
+        self
+    }
+
+    /// Attach durable renderer identity/topology metadata.
+    #[must_use]
+    pub fn with_render_primitive(mut self, render_primitive: RenderPrimitive) -> Self {
+        self.render_primitive = render_primitive;
         self
     }
 

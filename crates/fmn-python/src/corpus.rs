@@ -64,6 +64,16 @@ enum Outcome {
     Refused(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderFacts {
+    path: String,
+    frame_count: u64,
+    bytes: u64,
+    digest: String,
+    engine: String,
+    threads: usize,
+}
+
 /// Phase 2: instantiate the locked scene class and drive the manim
 /// lifecycle (`setup -> construct -> tear_down`). The frontier report —
 /// which named symbol each scene first misses — is fm-d3gt's structural
@@ -87,6 +97,119 @@ fn run_outcome<'py>(
     match outcome {
         Ok(instance) => (Outcome::Imported, Some(instance)),
         Err(error) => (Outcome::Refused(render_refusal(py, &error)), None),
+    }
+}
+
+/// Run one locked scene source-unedited through the portal's production
+/// final-state PNG route. Unlike the structural pass, this selects the native
+/// `-s` semantics: segments reach their semantic endpoints without ordinary
+/// raster captures, then Lumen/Reel publishes one explicit final `show`.
+fn render_still_outcome<'py>(
+    py: Python<'py>,
+    module_path: &str,
+    scene: &str,
+    destination: &Path,
+) -> (Outcome, Option<(Bound<'py, PyAny>, RenderFacts)>) {
+    let module_name = module_path.trim_end_matches(".py").replace('/', ".");
+    let importlib = py.import("importlib").expect("importlib");
+    let module = importlib
+        .call_method1("import_module", (module_name.as_str(),))
+        .expect("render pass runs only after a clean import");
+    let class = module.getattr(scene).expect("locked scene class present");
+    let instance = match class.call0() {
+        Ok(instance) => instance,
+        Err(error) => return (Outcome::Refused(render_refusal(py, &error)), None),
+    };
+    let destination = destination
+        .to_str()
+        .expect("the test artifact path is UTF-8");
+    let result = instance
+        .call_method1(
+            "_begin_png",
+            (destination, 32_u32, 18_u32, 1_u32, 1_usize, 0_u64),
+        )
+        .and_then(|_| instance.call_method0("run"))
+        .and_then(|_| {
+            let frame = instance.getattr("frame")?.getattr("_core")?;
+            let light = instance
+                .getattr("camera")?
+                .getattr("light_source")?
+                .call_method0("get_center")?;
+            instance.call_method1("_finish_render", (frame, light))
+        })
+        .and_then(|report| {
+            report
+                .extract::<(String, u64, u64, String, String, usize)>()
+                .map(|report| RenderFacts {
+                    path: report.0,
+                    frame_count: report.1,
+                    bytes: report.2,
+                    digest: report.3,
+                    engine: report.4,
+                    threads: report.5,
+                })
+        });
+    match result {
+        Ok(facts) => (Outcome::Imported, Some((instance, facts))),
+        Err(error) => {
+            let diagnostics = renderability_diagnostics(py, &instance);
+            let _ = instance.call_method0("_abort_render");
+            (
+                Outcome::Refused(format!(
+                    "{}; renderability={diagnostics}",
+                    render_refusal(py, &error)
+                )),
+                None,
+            )
+        }
+    }
+}
+
+fn renderability_diagnostics(py: Python<'_>, instance: &Bound<'_, PyAny>) -> String {
+    let Ok(scene) = instance.cast::<crate::PyScene>() else {
+        return "scene-core-unavailable".to_owned();
+    };
+    let engine = std::rc::Rc::clone(&scene.borrow().engine);
+    let runtime = engine.borrow();
+    let stage = runtime.stage();
+    let mut rows = Vec::new();
+    for &root in stage.roots() {
+        let root_proxy = crate::live_proxy(py, scene, root)
+            .and_then(|proxy| {
+                proxy
+                    .get_type()
+                    .name()
+                    .ok()
+                    .and_then(|name| name.extract::<String>().ok())
+            })
+            .unwrap_or_else(|| "<no-live-proxy>".to_owned());
+        for mob in stage.family(root) {
+            let Some(points) = stage.get_object_points(mob) else {
+                continue;
+            };
+            if points.is_empty() || points.len() % 2 == 1 {
+                continue;
+            }
+            let proxy = crate::live_proxy(py, scene, mob)
+                .and_then(|proxy| {
+                    proxy
+                        .get_type()
+                        .name()
+                        .ok()
+                        .and_then(|name| name.extract::<String>().ok())
+                })
+                .unwrap_or_else(|| "<no-live-proxy>".to_owned());
+            rows.push(format!(
+                "root={root:?}/root_class={root_proxy}/{mob:?}/class={proxy}/points={}/shape={}",
+                points.len(),
+                stage.shape(mob).name()
+            ));
+        }
+    }
+    if rows.is_empty() {
+        "no-even-point-runs".to_owned()
+    } else {
+        rows.join(",")
     }
 }
 
@@ -342,6 +465,116 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    /// Every locked scene also reaches real pixels through the shipped portal
+    /// composition root. The test deliberately uses final-state stills: the
+    /// structural harness already exercises full nominal sampling, while this
+    /// row proves source-unedited Stage state can cross Lumen and Reel without
+    /// multiplying the private corpus by hundreds of intermediate artifacts.
+    #[test]
+    fn seed_scenes_publish_deterministic_final_state_pngs() {
+        let videos_ref = repo_root().join("scripts/videos_ref");
+        if !videos_ref.join(".git").exists() {
+            eprintln!(
+                "SKIP: scripts/videos_ref checkout absent (G0-4 convention); \
+                 run scripts/video_corpus.py verify for the clone commands"
+            );
+            return;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the test host clock is after the Unix epoch")
+            .as_nanos();
+        let output_root =
+            std::env::temp_dir().join(format!("fmn-corpus-stills-{}-{nonce}", std::process::id()));
+
+        crate::with_python_test_module("source-unedited corpus PNG", move |py, _, _| {
+            put_videos_ref_on_sys_path(py, &videos_ref);
+            let mut first_pass = std::collections::BTreeMap::new();
+            for pass in 0..2_u8 {
+                for (scene, module_path) in locked_seed() {
+                    let destination = output_root
+                        .join(format!("pass-{pass}"))
+                        .join(format!("{scene}.png"));
+                    std::fs::create_dir_all(
+                        destination
+                            .parent()
+                            .expect("the PNG destination has a parent"),
+                    )
+                    .expect("create the corpus PNG artifact directory");
+                    let (outcome, rendered) =
+                        render_still_outcome(py, &module_path, &scene, &destination);
+                    let (instance, facts) = match (outcome, rendered) {
+                        (Outcome::Imported, Some(rendered)) => rendered,
+                        (Outcome::Refused(reason), _) => {
+                            panic!("{scene} refused production PNG output: {reason}")
+                        }
+                        (Outcome::Imported, None) => {
+                            panic!("{scene} reported success without a PNG receipt")
+                        }
+                    };
+                    assert_eq!(Path::new(&facts.path), destination);
+                    assert_eq!(facts.frame_count, 1, "{scene} must publish one still");
+                    assert_eq!(facts.threads, 1, "{scene} must use the requested team");
+                    assert_eq!(facts.digest.len(), 64, "{scene} digest is SHA-256 hex");
+                    let engine: Vec<_> = facts.engine.split(':').collect();
+                    assert_eq!(engine.len(), 3, "{scene} journals its engine identity");
+                    assert_eq!(engine[0], "fast-cpu", "{scene} uses the standard CPU route");
+                    assert!(
+                        engine[2].parse::<u32>().is_ok(),
+                        "{scene} journals a numeric renderer revision"
+                    );
+                    let png = std::fs::read(&destination).expect("read the published PNG");
+                    assert_eq!(
+                        u64::try_from(png.len()).expect("PNG length fits u64"),
+                        facts.bytes,
+                        "{scene} receipt byte count"
+                    );
+                    let decoded = fmn_codec::decode_png(
+                        &png,
+                        &fmn_codec::PngLimits {
+                            max_pixels: 32 * 18,
+                            ..fmn_codec::PngLimits::default()
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("decode {scene} final PNG: {error}"));
+                    assert_eq!((decoded.width, decoded.height), (32, 18));
+                    let (pixels, remainder) = decoded.rgba.as_chunks::<4>();
+                    assert!(
+                        remainder.is_empty(),
+                        "{scene} decoder returned partial RGBA"
+                    );
+                    let background = pixels.first().expect("nonzero PNG dimensions");
+                    assert!(
+                        pixels.iter().any(|pixel| pixel != background),
+                        "{scene} final PNG is a uniform background despite a non-empty Stage"
+                    );
+                    let structural = scene_facts(py, &instance)
+                        .expect("rendered scene retains its structural facts");
+                    assert!(
+                        !structural.starts_with("0\t"),
+                        "{scene} render succeeded from an empty Stage"
+                    );
+                    if pass == 0 {
+                        first_pass.insert(scene.clone(), (facts.digest.clone(), facts.bytes));
+                    } else {
+                        assert_eq!(
+                            first_pass
+                                .get(&scene)
+                                .map(|(digest, bytes)| (digest.as_str(), *bytes)),
+                            Some((facts.digest.as_str(), facts.bytes)),
+                            "{scene} final-state PNG drifted across same-process runs"
+                        );
+                    }
+                    println!(
+                        "corpus-png pass={pass} scene={scene} bytes={} digest={}",
+                        facts.bytes, facts.digest
+                    );
+                }
+            }
+            assert_eq!(first_pass.len(), locked_seed().len());
         });
     }
 

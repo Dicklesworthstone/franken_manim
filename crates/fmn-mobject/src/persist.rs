@@ -5,7 +5,7 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.4,
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.5,
 //!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
@@ -45,20 +45,21 @@ use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Write
 
 use fmn_core::types::Vec3;
 
-use crate::Placement;
 use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::{ShapeSlot, ShapeTag};
 use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
+use crate::{Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.4.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.5.
 ///
 /// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
 /// stream decodes with no tag, which is exactly what `General` means. Minor
 /// 1.2 appended `z_index`; minor 1.3 preserves the monotonic updater-id
 /// cursor, including identities removed before the snapshot. Minor 1.4 appends
-/// the object→world placement table from fm-7if.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 4);
+/// the object→world placement table from fm-7if. Minor 1.5 appends durable
+/// renderer primitive/topology identity.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 5);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
 ///
@@ -363,6 +364,43 @@ fn count_u64(value: usize) -> Result<u64, SerialError> {
         limit: usize::try_from(u64::MAX).unwrap_or(usize::MAX),
         needed: value,
     })
+}
+
+fn put_render_primitive(w: &mut Writer, primitive: RenderPrimitive) -> Result<(), SerialError> {
+    match primitive {
+        RenderPrimitive::Vector => {
+            w.put_u8(0);
+        }
+        RenderPrimitive::SurfaceGrid { resolution } => {
+            w.put_u8(1)
+                .put_u64(count_u64(resolution.0)?)
+                .put_u64(count_u64(resolution.1)?);
+        }
+        RenderPrimitive::TriangleMesh => {
+            w.put_u8(2);
+        }
+        RenderPrimitive::DotCloud => {
+            w.put_u8(3);
+        }
+    }
+    Ok(())
+}
+
+fn get_render_primitive(r: &mut Reader<'_>) -> Result<RenderPrimitive, PersistError> {
+    match r.get_u8()? {
+        0 => Ok(RenderPrimitive::Vector),
+        1 => Ok(RenderPrimitive::SurfaceGrid {
+            resolution: (
+                usize::try_from(r.get_u64()?)
+                    .map_err(|_| PersistError::Malformed("surface u resolution overflows"))?,
+                usize::try_from(r.get_u64()?)
+                    .map_err(|_| PersistError::Malformed("surface v resolution overflows"))?,
+            ),
+        }),
+        2 => Ok(RenderPrimitive::TriangleMesh),
+        3 => Ok(RenderPrimitive::DotCloud),
+        _ => Err(PersistError::Malformed("unknown render primitive")),
+    }
 }
 
 fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) -> Result<(), SerialError> {
@@ -854,6 +892,20 @@ impl Snapshot {
                 }
             }
         }
+        // Minor 1.5: renderer program/topology identity is semantic state,
+        // not a cache hint. Keep it in a liveness-parallel table so the 1.4
+        // payload remains an exact prefix.
+        for (_, entry) in &self.slots {
+            match entry {
+                Some(entry) => {
+                    w.put_bool(true);
+                    put_render_primitive(&mut w, entry.render_primitive)?;
+                }
+                None => {
+                    w.put_bool(false);
+                }
+            }
+        }
         w.finish()
     }
 
@@ -1135,6 +1187,7 @@ impl Snapshot {
                     uniforms,
                     z_index,
                     shape,
+                    render_primitive: RenderPrimitive::Vector,
                 })
             } else {
                 None
@@ -1224,6 +1277,22 @@ impl Snapshot {
                     _ => {
                         return Err(PersistError::Malformed(
                             "placement table does not match arena liveness",
+                        ));
+                    }
+                }
+            }
+        }
+        if r.version().1 >= 5 {
+            for entry in &mut slots {
+                let present = r.get_bool()?;
+                match (present, &mut entry.1) {
+                    (false, None) => {}
+                    (true, Some(entry)) => {
+                        entry.render_primitive = get_render_primitive(&mut r)?;
+                    }
+                    _ => {
+                        return Err(PersistError::Malformed(
+                            "render-primitive table does not match arena liveness",
                         ));
                     }
                 }

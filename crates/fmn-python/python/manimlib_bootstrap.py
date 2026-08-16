@@ -5058,8 +5058,8 @@ class CameraFrame(Mobject):
     are overridden to read and write that same state, so every inherited
     Mobject method (`move_to`, `set_x`, `set_height`, `center`, ...)
     operates on the camera frame exactly as the Reference's point-backed
-    implementation does. `self._core` is the renderer-binding seam: a later
-    render tranche hands this same engine value to Lumen's `Camera`.
+    implementation does. `self._core` is the renderer-binding seam: final
+    native PNG capture hands this same engine value to Lumen's `Camera`.
 
     Divergence note: without a SciPy dependency, `set_orientation` accepts
     a scipy-order `(x, y, z, w)` quaternion sequence (or any object with an
@@ -7481,15 +7481,16 @@ def _portal_cli_help():
     return """usage: fmn-python [--robot] --version
        fmn-python [--robot] --list-scenes SOURCE.py
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-       fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence]
+       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence]
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
                   [--video_dir DIRECTORY]
        fmn-python studio SOURCE.py [SCENE]
 
-The wheel renders standard-mode PNG sequences through the same retained Lumen
-CPU renderer and ordered Reel sink as the native front door. Certified output,
-video containers, opener flags, write-all, and Studio remain precise capability
-refusals until their complete contracts are connected."""
+The wheel renders standard-mode final-state PNGs and PNG sequences through the
+same retained Lumen CPU renderer and ordered Reel sink as the native front
+door. Certified output, video containers, opener flags, write-all, and Studio
+remain precise capability refusals until their complete contracts are
+connected."""
 
 
 def _portal_cli_scene_types(source):
@@ -7561,10 +7562,10 @@ def _portal_cli_render_arguments(arguments):
         positionals.append(argument)
         index += 1
 
-    if values["format"] != "png_sequence":
+    if values["format"] not in ("png", "png_sequence"):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "
-            "use --format png_sequence"
+            "use --format png or --format png_sequence"
         )
     if len(positionals) not in (1, 2):
         raise ValueError("render requires SOURCE.py and accepts one optional SCENE")
@@ -7586,9 +7587,9 @@ def _portal_cli_render_arguments(arguments):
 def _console_main():
     """The wheel's `fmn-python` entry point.
 
-    The standard PNG-sequence route is production composition: Scene captures
-    cross into Lumen and are published through Reel. Other output surfaces
-    remain precise refusals instead of lifecycle-only fake success.
+    The standard PNG routes are production composition: Scene captures cross
+    into Lumen and are published through Reel. Other output surfaces remain
+    precise refusals instead of lifecycle-only fake success.
     """
 
     import platform as _platform
@@ -7709,15 +7710,20 @@ def _console_main():
 
         destination = render_values["video_dir"]
         if destination is None:
-            destination = str(
-                _pathlib.Path("media")
-                / "videos"
-                / _pathlib.Path(source).stem
-                / selected
-                / "frames"
+            output_root = (
+                _pathlib.Path("media") / "videos" / _pathlib.Path(source).stem
             )
+            if render_values["format"] == "png":
+                destination = str(output_root / f"{selected}.png")
+            else:
+                destination = str(output_root / selected / "frames")
         try:
-            scene._begin_png_sequence(
+            begin_render = (
+                scene._begin_png
+                if render_values["format"] == "png"
+                else scene._begin_png_sequence
+            )
+            begin_render(
                 destination,
                 width,
                 height,
@@ -7760,7 +7766,10 @@ def _console_main():
             )
         try:
             path, frame_count, byte_count, digest, engine, used_threads = (
-                scene._finish_render()
+                scene._finish_render(
+                    scene.frame._core,
+                    _vec3(scene.camera.light_source.get_center()),
+                )
             )
         except Exception as error:
             try:
@@ -7785,7 +7794,7 @@ def _console_main():
             robot,
             source=source,
             scene=selected,
-            format="png_sequence",
+            format=render_values["format"],
             resolution=[width, height],
             fps=fps,
             destination=path,

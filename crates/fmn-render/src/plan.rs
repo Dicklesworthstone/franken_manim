@@ -34,7 +34,7 @@ use crate::table::{
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, quadpath::QuadPath};
 use fmn_hash::{Digest, Sha256};
-use fmn_mobject::{Mob, Placement, RecordBuffer, Stage};
+use fmn_mobject::{Mob, Placement, ProgramKind, RecordBuffer, Stage};
 use std::collections::{HashMap, HashSet};
 
 /// The axes a compiled outline depends on.
@@ -676,7 +676,12 @@ impl RenderPlan {
         limits: RenderPlanLimits,
     ) -> Result<SyncStats, SyncError> {
         let plan = stage.draw_plan();
-        let draw_items = count_u64(plan.items().len());
+        let vector_items = plan
+            .items()
+            .iter()
+            .filter(|item| item.key.program == ProgramKind::Vector)
+            .count();
+        let draw_items = count_u64(vector_items);
         check_limit("instances", draw_items, limits.max_instances)?;
         check_row_count("instance rows", plan.items().len())?;
         check_limit(
@@ -700,6 +705,9 @@ impl RenderPlan {
         // renderable cannot make earlier valid outlines pay compilation work
         // before the atomic refusal.
         for item in plan.items() {
+            if item.key.program != ProgramKind::Vector {
+                continue;
+            }
             let mob = item.mob;
             let Some(entry) = stage.get(mob) else {
                 continue;
@@ -718,10 +726,10 @@ impl RenderPlan {
 
         let mut instances = std::mem::take(&mut self.scratch_instances);
         instances.clear();
-        try_reserve_exact(&mut instances, "prepared instances", plan.items().len())?;
+        try_reserve_exact(&mut instances, "prepared instances", vector_items)?;
         let mut seen = std::mem::take(&mut self.scratch_seen);
         seen.clear();
-        seen.try_reserve(plan.items().len())
+        seen.try_reserve(vector_items)
             .map_err(|_| SyncError::AllocationFailed {
                 resource: "live mobjects",
                 requested: draw_items,
@@ -729,7 +737,7 @@ impl RenderPlan {
         let mut next_retained = std::mem::take(&mut self.scratch_retained);
         next_retained.clear();
         next_retained
-            .try_reserve(plan.items().len())
+            .try_reserve(vector_items)
             .map_err(|_| SyncError::AllocationFailed {
                 resource: "retained entries",
                 requested: draw_items,
@@ -744,6 +752,9 @@ impl RenderPlan {
         let mut stats = SyncStats::default();
 
         for (order, item) in plan.items().iter().enumerate() {
+            if item.key.program != ProgramKind::Vector {
+                continue;
+            }
             let mob = item.mob;
             let Some(now) = Revisions::read(stage, mob).map(|r| r.with_camera(camera)) else {
                 continue;

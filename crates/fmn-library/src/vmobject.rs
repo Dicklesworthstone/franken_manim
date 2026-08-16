@@ -18,7 +18,7 @@ use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, QuadPath, space_ops};
 use fmn_mobject::stage::{Mob, Stage};
 use fmn_mobject::uniforms::{JointType, Uniforms};
-use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, ShapeTag};
+use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag};
 
 use crate::style::Style;
 
@@ -780,6 +780,7 @@ impl From<VMobject> for Mobject {
             buffer,
             uniforms,
             shape,
+            render_primitive: RenderPrimitive::Vector,
             z_index,
             submobjects: submobjects.into_iter().map(Mobject::from).collect(),
         }

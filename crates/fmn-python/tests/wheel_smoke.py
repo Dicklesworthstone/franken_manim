@@ -178,6 +178,35 @@ def verify_installed_distribution(schema_path, scene_path):
         "render output contains a non-PNG frame",
     )
 
+    still_destination = output_root / "final.png"
+    still = run_console(
+        console,
+        "--robot",
+        scene_path,
+        "Hello",
+        "--format",
+        "png",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "30",
+        "--threads",
+        "1",
+        "--video_dir",
+        still_destination,
+    )
+    still_payload = json.loads(still.stdout)
+    require(still_payload["kind"] == "render", still.stdout)
+    require(still_payload["format"] == "png", still.stdout)
+    require(still_payload["rendered"] is True, still.stdout)
+    require(still_payload["frame_count"] == 1, still.stdout)
+    require(still_payload["bytes"] == still_destination.stat().st_size, still.stdout)
+    require(len(still_payload["digest"]) == 64, still.stdout)
+    require(
+        still_destination.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"),
+        "final-state output is not a PNG",
+    )
+
     refused = run_console(
         console,
         "--robot",

@@ -7,13 +7,16 @@
 
 use std::fmt;
 
+use fmn_core::color::LinearRgba;
+use fmn_core::types::Vec3;
 use fmn_frame::{FrameBuffer, FrameError};
-use fmn_mobject::Stage;
+use fmn_mobject::{Mob, Placement, ProgramKind, RenderPrimitive, Stage};
 
 use crate::{
-    Binning, BinningError, CachedRenderError, CachedRenderStats, EngineIdentity, FrameArena,
-    FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError, PixelTileCache, RenderPlan,
-    SyncError, Tiling,
+    Binning, BinningError, CachedRenderError, CachedRenderStats, Camera, EngineIdentity,
+    FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError, PixelTileCache,
+    RenderPlan, SurfaceDraw, SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError,
+    ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
 };
 
 /// Immutable policy for one retained CPU renderer.
@@ -46,6 +49,31 @@ pub enum RetainedFrameRendererError {
     Prepare(FrameJobError),
     /// Rasterization or retained-cache publication failed.
     Render(CachedRenderError),
+    /// An affine-only capture encountered camera-bound content.
+    CameraRequired {
+        /// First renderer program requiring the camera route.
+        program: ProgramKind,
+    },
+    /// Arena record data did not match its durable renderer metadata.
+    InvalidPrimitive {
+        /// Offending arena handle.
+        mob: Mob,
+        /// Stable refusal reason.
+        reason: &'static str,
+    },
+    /// Camera-route staging storage could not be reserved atomically.
+    AllocationFailed {
+        /// Named staging table.
+        resource: &'static str,
+        /// Exact row count requested.
+        requested: usize,
+    },
+    /// The mixed painter sequence disagreed with the retained vector table.
+    VectorPlanMismatch,
+    /// Camera-bound preparation rejected a surface/vector/dot command.
+    ThreeD(ThreeDError),
+    /// Camera-bound rasterization rejected the destination or worker team.
+    ThreeDFrame(FrameError),
 }
 
 impl fmt::Display for RetainedFrameRendererError {
@@ -60,6 +88,25 @@ impl fmt::Display for RetainedFrameRendererError {
             Self::Binning(error) => error.fmt(f),
             Self::Prepare(error) => error.fmt(f),
             Self::Render(error) => error.fmt(f),
+            Self::CameraRequired { program } => write!(
+                f,
+                "{program:?} content requires RetainedFrameRenderer::render_with_camera"
+            ),
+            Self::InvalidPrimitive { mob, reason } => {
+                write!(f, "invalid retained primitive for {mob:?}: {reason}")
+            }
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "retained camera route could not reserve {requested} {resource} rows"
+            ),
+            Self::VectorPlanMismatch => {
+                f.write_str("mixed painter sequence does not match retained vector instances")
+            }
+            Self::ThreeD(error) => error.fmt(f),
+            Self::ThreeDFrame(error) => error.fmt(f),
         }
     }
 }
@@ -74,6 +121,12 @@ impl std::error::Error for RetainedFrameRendererError {
             Self::Binning(error) => Some(error),
             Self::Prepare(error) => Some(error),
             Self::Render(error) => Some(error),
+            Self::CameraRequired { .. }
+            | Self::InvalidPrimitive { .. }
+            | Self::AllocationFailed { .. }
+            | Self::VectorPlanMismatch => None,
+            Self::ThreeD(error) => Some(error),
+            Self::ThreeDFrame(error) => Some(error),
         }
     }
 }
@@ -159,6 +212,16 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera_revision: u64,
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
+        if let Some(item) = stage
+            .draw_plan()
+            .items()
+            .iter()
+            .find(|item| item.key.program != ProgramKind::Vector)
+        {
+            return Err(RetainedFrameRendererError::CameraRequired {
+                program: item.key.program,
+            });
+        }
         self.plan.sync(stage, camera_revision)?;
         let mono = MonoTable::build(&self.plan, self.config.frame.map)?;
         let mut binning = Binning::build(
@@ -182,6 +245,150 @@ impl RetainedFrameRenderer {
             camera_revision,
             &mut self.cache,
         )?)
+    }
+
+    /// Synchronize vector records, rebuild camera-bound surface/dot commands,
+    /// and rasterize their one shared painter sequence through [`ThreeDJob`].
+    ///
+    /// Surface topology comes only from [`RenderPrimitive`]; record counts are
+    /// never factorized or guessed. The 2D retained plan remains the sole owner
+    /// of vector geometry, so this route does not create a second path
+    /// compiler.
+    pub fn render_with_camera(
+        &mut self,
+        stage: &Stage,
+        camera: &Camera,
+    ) -> Result<(), RetainedFrameRendererError> {
+        self.plan.sync(stage, camera.revision())?;
+        let draw_plan = stage.draw_plan();
+        let mut meshes = Vec::new();
+        let mut commands = Vec::new();
+        let mut command_count = 0usize;
+        let mut mesh_count = 0usize;
+        for item in draw_plan.items() {
+            let entry =
+                stage
+                    .get(item.mob)
+                    .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                        mob: item.mob,
+                        reason: "draw-plan handle is stale",
+                    })?;
+            let added_commands = match entry.render_primitive() {
+                RenderPrimitive::DotCloud => entry.buffer.len(),
+                _ => 1,
+            };
+            command_count = command_count.checked_add(added_commands).ok_or(
+                RetainedFrameRendererError::InvalidPrimitive {
+                    mob: item.mob,
+                    reason: "camera draw count overflows usize",
+                },
+            )?;
+            if matches!(
+                entry.render_primitive(),
+                RenderPrimitive::SurfaceGrid { .. } | RenderPrimitive::TriangleMesh
+            ) {
+                mesh_count = mesh_count.checked_add(1).ok_or(
+                    RetainedFrameRendererError::InvalidPrimitive {
+                        mob: item.mob,
+                        reason: "surface mesh count overflows usize",
+                    },
+                )?;
+            }
+        }
+        meshes.try_reserve_exact(mesh_count).map_err(|_| {
+            RetainedFrameRendererError::AllocationFailed {
+                resource: "surface-mesh",
+                requested: mesh_count,
+            }
+        })?;
+        commands.try_reserve_exact(command_count).map_err(|_| {
+            RetainedFrameRendererError::AllocationFailed {
+                resource: "prepared-command",
+                requested: command_count,
+            }
+        })?;
+        let mut vector_instance = 0u32;
+
+        for item in draw_plan.items() {
+            let entry =
+                stage
+                    .get(item.mob)
+                    .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                        mob: item.mob,
+                        reason: "draw-plan handle is stale",
+                    })?;
+            match entry.render_primitive() {
+                RenderPrimitive::Vector => {
+                    commands.push(PreparedCommand::Vector(vector_instance));
+                    vector_instance = vector_instance.checked_add(1).ok_or(
+                        RetainedFrameRendererError::InvalidPrimitive {
+                            mob: item.mob,
+                            reason: "vector instance index exceeds u32",
+                        },
+                    )?;
+                }
+                RenderPrimitive::SurfaceGrid { resolution } => {
+                    let mesh = surface_mesh(stage, item.mob, Some(resolution))?;
+                    let mesh_index = meshes.len();
+                    meshes.push(mesh);
+                    commands.push(PreparedCommand::Surface {
+                        mesh: mesh_index,
+                        uniforms: *entry.uniforms(),
+                    });
+                }
+                RenderPrimitive::TriangleMesh => {
+                    let mesh = surface_mesh(stage, item.mob, None)?;
+                    let mesh_index = meshes.len();
+                    meshes.push(mesh);
+                    commands.push(PreparedCommand::Surface {
+                        mesh: mesh_index,
+                        uniforms: *entry.uniforms(),
+                    });
+                }
+                RenderPrimitive::DotCloud => {
+                    commands.extend(
+                        dot_draws(stage, item.mob)?
+                            .into_iter()
+                            .map(PreparedCommand::Dot),
+                    );
+                }
+            }
+        }
+
+        if usize::try_from(vector_instance).ok() != Some(self.plan.shapes().instances().len()) {
+            return Err(RetainedFrameRendererError::VectorPlanMismatch);
+        }
+
+        let mut draws = Vec::new();
+        draws.try_reserve_exact(commands.len()).map_err(|_| {
+            RetainedFrameRendererError::AllocationFailed {
+                resource: "draw-reference",
+                requested: commands.len(),
+            }
+        })?;
+        for command in &commands {
+            draws.push(match *command {
+                PreparedCommand::Vector(instance) => {
+                    ThreeDDraw::Vector(VectorDraw::new(&self.plan, instance))
+                }
+                PreparedCommand::Surface { mesh, uniforms } => {
+                    let mesh = meshes
+                        .get(mesh)
+                        .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+                    let mut draw = SurfaceDraw::new(mesh);
+                    draw.shading = uniforms.shading;
+                    draw.is_fixed_in_frame = uniforms.is_fixed_in_frame;
+                    draw.clip_planes = uniforms.clip_planes;
+                    draw.depth_test = uniforms.depth_test;
+                    ThreeDDraw::Surface(draw)
+                }
+                PreparedCommand::Dot(dot) => ThreeDDraw::TrueDot(dot),
+            });
+        }
+        ThreeDJob::new(camera, &draws, self.config.tiling)
+            .map_err(RetainedFrameRendererError::ThreeD)?
+            .render_into(self.config.threads, &mut self.frame)
+            .map_err(RetainedFrameRendererError::ThreeDFrame)
     }
 
     /// Current raw linear-light RGBA16F frame.
@@ -209,12 +416,222 @@ impl RetainedFrameRenderer {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PreparedCommand {
+    Vector(u32),
+    Surface {
+        mesh: usize,
+        uniforms: fmn_mobject::Uniforms,
+    },
+    Dot(TrueDotDraw),
+}
+
+fn record_vec3(
+    stage: &Stage,
+    mob: Mob,
+    record: usize,
+    field: &'static str,
+) -> Result<Vec3, RetainedFrameRendererError> {
+    let value = stage
+        .get(mob)
+        .and_then(|entry| entry.buffer.read(record, field))
+        .and_then(|value| <[f32; 3]>::try_from(value.as_slice()).ok())
+        .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "required vec3 record field is absent",
+        })?;
+    Ok(value.map(f64::from))
+}
+
+fn record_rgba(
+    stage: &Stage,
+    mob: Mob,
+    record: usize,
+) -> Result<LinearRgba, RetainedFrameRendererError> {
+    let value = stage
+        .get(mob)
+        .and_then(|entry| entry.buffer.read(record, "rgba"))
+        .and_then(|value| <[f32; 4]>::try_from(value.as_slice()).ok())
+        .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "required rgba record field is absent",
+        })?;
+    Ok(LinearRgba {
+        r: fmn_frame::transfer::srgb_decode(f64::from(value[0])),
+        g: fmn_frame::transfer::srgb_decode(f64::from(value[1])),
+        b: fmn_frame::transfer::srgb_decode(f64::from(value[2])),
+        a: f64::from(value[3]),
+    })
+}
+
+fn normalized_or_zero(value: Vec3) -> Vec3 {
+    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if length > 0.0 && length.is_finite() {
+        [value[0] / length, value[1] / length, value[2] / length]
+    } else {
+        [0.0; 3]
+    }
+}
+
+fn surface_mesh(
+    stage: &Stage,
+    mob: Mob,
+    resolution: Option<(usize, usize)>,
+) -> Result<SurfaceMesh, RetainedFrameRendererError> {
+    let entry = stage
+        .get(mob)
+        .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "surface handle is stale",
+        })?;
+    let records = entry.buffer.len();
+    let placement = entry.placement();
+    let mut vertices = Vec::new();
+    vertices.try_reserve_exact(records).map_err(|_| {
+        RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "surface vertex allocation failed",
+        }
+    })?;
+    for record in 0..records {
+        let point = record_vec3(stage, mob, record, "point")?;
+        let d_normal = record_vec3(stage, mob, record, "d_normal_point")?;
+        let normal = normalized_or_zero(placement.apply_vector([
+            d_normal[0] - point[0],
+            d_normal[1] - point[1],
+            d_normal[2] - point[2],
+        ]));
+        vertices.push(SurfaceVertex::colored(
+            placement.apply_point(point),
+            normal,
+            record_rgba(stage, mob, record)?,
+        ));
+    }
+    match resolution {
+        Some((nu, nv)) => {
+            if nu.checked_mul(nv) != Some(records) {
+                return Err(RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "surface resolution does not match record count",
+                });
+            }
+            let nu =
+                u32::try_from(nu).map_err(|_| RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "surface u resolution exceeds u32",
+                })?;
+            let nv =
+                u32::try_from(nv).map_err(|_| RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "surface v resolution exceeds u32",
+                })?;
+            SurfaceMesh::from_uv_grid(vertices, (nu, nv))
+                .map_err(RetainedFrameRendererError::ThreeD)
+        }
+        None => {
+            if !records.is_multiple_of(3) {
+                return Err(RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "triangle mesh record count is not divisible by three",
+                });
+            }
+            let count = u32::try_from(records).map_err(|_| {
+                RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "triangle mesh vertex count exceeds u32",
+                }
+            })?;
+            SurfaceMesh::new(vertices, (0..count).collect())
+                .map_err(RetainedFrameRendererError::ThreeD)
+        }
+    }
+}
+
+fn uniform_scale(placement: Placement, mob: Mob) -> Result<f64, RetainedFrameRendererError> {
+    let axes = [
+        placement.apply_vector([1.0, 0.0, 0.0]),
+        placement.apply_vector([0.0, 1.0, 0.0]),
+        placement.apply_vector([0.0, 0.0, 1.0]),
+    ];
+    let lengths =
+        axes.map(|axis| (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt());
+    let scale = lengths[0];
+    let tolerance = scale.abs().max(1.0) * 1e-12;
+    let dot =
+        |left: Vec3, right: Vec3| left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
+    if lengths
+        .iter()
+        .any(|length| (*length - scale).abs() > tolerance)
+        || dot(axes[0], axes[1]).abs() > tolerance
+        || dot(axes[0], axes[2]).abs() > tolerance
+        || dot(axes[1], axes[2]).abs() > tolerance
+    {
+        return Err(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "dot cloud placement is not a uniform orthogonal scale",
+        });
+    }
+    Ok(scale)
+}
+
+fn dot_draws(stage: &Stage, mob: Mob) -> Result<Vec<TrueDotDraw>, RetainedFrameRendererError> {
+    let entry = stage
+        .get(mob)
+        .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "dot-cloud handle is stale",
+        })?;
+    let placement = entry.placement();
+    let scale = uniform_scale(placement, mob)?;
+    let mut draws = Vec::new();
+    draws.try_reserve_exact(entry.buffer.len()).map_err(|_| {
+        RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "dot-cloud draw allocation failed",
+        }
+    })?;
+    for record in 0..entry.buffer.len() {
+        let radius = entry
+            .buffer
+            .read(record, "radius")
+            .and_then(|value| value.first().copied())
+            .map(f64::from)
+            .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                mob,
+                reason: "dot-cloud radius field is absent",
+            })?;
+        let glow_factor = entry
+            .buffer
+            .read(record, "glow_factor")
+            .and_then(|value| value.first().copied())
+            .map(f64::from)
+            .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                mob,
+                reason: "dot-cloud glow_factor field is absent",
+            })?;
+        let mut draw = TrueDotDraw::new(
+            placement.apply_point(record_vec3(stage, mob, record, "point")?),
+            radius * scale,
+            record_rgba(stage, mob, record)?,
+        );
+        draw.glow_factor = glow_factor;
+        draw.anti_alias_width = entry.uniforms().anti_alias_width;
+        draw.shading = entry.uniforms().shading;
+        draw.is_fixed_in_frame = entry.uniforms().is_fixed_in_frame;
+        draw.clip_planes = entry.uniforms().clip_planes;
+        draw.depth_test = entry.uniforms().depth_test;
+        draws.push(draw);
+    }
+    Ok(draws)
+}
+
 #[cfg(test)]
 mod tests {
     use fmn_core::color::LinearRgba;
+    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive};
 
     use super::*;
-    use crate::{ScreenMap, Viewport};
+    use crate::{CameraConfig, ScreenMap, Viewport};
 
     fn config(threads: usize) -> RetainedFrameRendererConfig {
         RetainedFrameRendererConfig {
@@ -243,6 +660,90 @@ mod tests {
         }
     }
 
+    fn camera() -> Camera {
+        Camera::new(CameraConfig {
+            resolution: (32, 18),
+            background: config(1).frame.background,
+            ..CameraConfig::default()
+        })
+        .expect("valid test camera")
+    }
+
+    fn vector() -> Mobject {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).expect("small vector");
+        buffer.write_range(
+            "point",
+            0,
+            &[-1.5, -1.0, 0.0, 0.0, 1.25, 0.0, 1.5, -1.0, 0.0],
+        );
+        buffer.write_range("fill_rgba", 0, &[0.1, 0.3, 1.0, 0.8].repeat(3));
+        Mobject::from_buffer(buffer)
+    }
+
+    fn surface(resolution: (usize, usize)) -> Mobject {
+        let schema = RecordSchema::new(
+            &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+            &["point"],
+            &["point", "d_normal_point"],
+        )
+        .expect("surface schema");
+        let mut buffer = RecordBuffer::new(schema, 4).expect("small surface");
+        buffer.write_range(
+            "point",
+            0,
+            &[
+                -2.5, -1.5, 0.2, -2.5, 0.5, 0.2, -0.5, -1.5, 0.2, -0.5, 0.5, 0.2,
+            ],
+        );
+        buffer.write_range(
+            "d_normal_point",
+            0,
+            &[
+                -2.5, -1.5, 1.2, -2.5, 0.5, 1.2, -0.5, -1.5, 1.2, -0.5, 0.5, 1.2,
+            ],
+        );
+        buffer.write_range("rgba", 0, &[1.0, 0.2, 0.1, 0.9].repeat(4));
+        Mobject::from_buffer(buffer)
+            .with_render_primitive(RenderPrimitive::SurfaceGrid { resolution })
+    }
+
+    fn dot_cloud() -> Mobject {
+        let schema = RecordSchema::new(
+            &[("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 1)],
+            &["point"],
+            &["point"],
+        )
+        .expect("dot schema");
+        let mut buffer = RecordBuffer::new(schema, 1).expect("one dot");
+        buffer.write(0, "point", &[2.0, 0.5, 0.5]);
+        buffer.write(0, "radius", &[0.45]);
+        buffer.write(0, "rgba", &[0.2, 1.0, 0.2, 1.0]);
+        buffer.write(0, "glow_factor", &[0.0]);
+        Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::DotCloud)
+    }
+
+    fn triangle_mesh() -> Mobject {
+        let schema = RecordSchema::new(
+            &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+            &["point"],
+            &["point", "d_normal_point"],
+        )
+        .expect("triangle schema");
+        let mut buffer = RecordBuffer::new(schema, 3).expect("one triangle");
+        buffer.write_range(
+            "point",
+            0,
+            &[0.5, -1.5, 0.4, 1.5, 0.25, 0.4, 2.5, -1.5, 0.4],
+        );
+        buffer.write_range(
+            "d_normal_point",
+            0,
+            &[0.5, -1.5, 1.4, 1.5, 0.25, 1.4, 2.5, -1.5, 1.4],
+        );
+        buffer.write_range("rgba", 0, &[0.9, 0.8, 0.1, 0.9].repeat(3));
+        Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::TriangleMesh)
+    }
+
     #[test]
     fn zero_threads_fail_before_frame_allocation() {
         assert!(matches!(
@@ -260,5 +761,71 @@ mod tests {
         let second = renderer.render(&stage, 0).expect("retained frame");
         assert_eq!(renderer.frame().as_bytes(), first);
         assert!(second.cache.hits > 0 || second.cache.misses == 0);
+    }
+
+    #[test]
+    fn camera_bound_vector_projection_is_not_silently_substituted_for_affine_output() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).expect("live root");
+
+        let mut affine = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        affine
+            .render(&stage, camera.revision())
+            .expect("affine vector frame");
+        let mut camera_bound = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        camera_bound
+            .render_with_camera(&stage, &camera)
+            .expect("camera-bound vector frame");
+        assert_ne!(affine.frame().as_bytes(), camera_bound.frame().as_bytes());
+    }
+
+    #[test]
+    fn camera_route_renders_one_mixed_vector_surface_dot_painter_sequence() {
+        let camera = camera();
+        let mut empty_renderer = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        empty_renderer
+            .render_with_camera(&Stage::new(), &camera)
+            .expect("empty background");
+        let background = empty_renderer.frame().as_bytes().to_vec();
+
+        let mut stage = Stage::new();
+        for mobject in [vector(), surface((2, 2)), dot_cloud(), triangle_mesh()] {
+            let mob = stage.add(mobject);
+            stage.add_to_scene(mob).expect("live root");
+        }
+        let mut one = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        assert!(matches!(
+            one.render(&stage, camera.revision()),
+            Err(RetainedFrameRendererError::CameraRequired { .. })
+        ));
+        one.render_with_camera(&stage, &camera)
+            .expect("mixed camera-bound frame");
+        assert_ne!(one.frame().as_bytes(), background);
+
+        let mut four = RetainedFrameRenderer::new(config(4)).expect("valid renderer");
+        four.render_with_camera(&stage, &camera)
+            .expect("same mixed frame at four threads");
+        assert_eq!(one.frame().as_bytes(), four.frame().as_bytes());
+    }
+
+    #[test]
+    fn malformed_surface_resolution_refuses_before_publishing_a_frame() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(surface((3, 2)));
+        stage.add_to_scene(mob).expect("live root");
+        let mut renderer = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        let before = renderer.frame().as_bytes().to_vec();
+
+        assert!(matches!(
+            renderer.render_with_camera(&stage, &camera),
+            Err(RetainedFrameRendererError::InvalidPrimitive {
+                reason: "surface resolution does not match record count",
+                ..
+            })
+        ));
+        assert_eq!(renderer.frame().as_bytes(), before);
     }
 }

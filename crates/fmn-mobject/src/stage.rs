@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::StageError;
 use crate::bbox::BboxCache;
-use crate::mobject::Mobject;
+use crate::mobject::{Mobject, RenderPrimitive};
 use crate::persist::{UpdaterIdentity, UpdaterKindTag};
 use crate::placement::Placement;
 use crate::record::RecordBuffer;
@@ -167,6 +167,8 @@ pub struct Entry {
     /// The semantic shape a constructor built, with the point revision at
     /// which its geometry was true (§10.8, [`crate::shape`]).
     shape: ShapeSlot,
+    /// Durable renderer program/topology identity.
+    render_primitive: RenderPrimitive,
     /// Cached family flattening (§1.1 API surface), invalidated on any
     /// structural change in the subtree.
     family_cache: RefCell<Option<Vec<Mob>>>,
@@ -195,6 +197,7 @@ impl Entry {
             uniforms: Uniforms::default(),
             z_index: 0,
             shape: ShapeSlot::default(),
+            render_primitive: RenderPrimitive::Vector,
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
         }
@@ -235,6 +238,7 @@ impl Entry {
             uniforms: self.uniforms,
             z_index: self.z_index,
             shape,
+            render_primitive: self.render_primitive,
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
         }
@@ -279,6 +283,12 @@ impl Entry {
 
     pub(crate) fn set_shape(&mut self, slot: ShapeSlot) {
         self.shape = slot;
+    }
+
+    /// Durable renderer identity/topology metadata.
+    #[must_use]
+    pub const fn render_primitive(&self) -> RenderPrimitive {
+        self.render_primitive
     }
 
     pub(crate) fn bbox_cell(&self) -> &RefCell<BboxCache> {
@@ -361,6 +371,7 @@ pub(crate) struct SnapshotEntry {
     pub(crate) uniforms: Uniforms,
     pub(crate) z_index: i32,
     pub(crate) shape: ShapeSlot,
+    pub(crate) render_primitive: RenderPrimitive,
 }
 
 /// The stable old-handle → new-handle map a family copy produces — the
@@ -558,6 +569,7 @@ impl Stage {
             uniforms,
             z_index,
             shape,
+            render_primitive,
             submobjects,
         } = mobject.into();
         let mut entry = Entry::from_data(buffer);
@@ -569,6 +581,7 @@ impl Stage {
             tag: shape,
             point_revision: entry.buffer.field_revision("point"),
         };
+        entry.render_primitive = render_primitive;
         let mob = self.alloc(entry);
         for child in submobjects {
             let child_mob = self.add(child);
@@ -1162,7 +1175,7 @@ impl Stage {
             if a == b {
                 continue;
             }
-            let (src, placement, uniforms, z_index, tracker) = {
+            let (src, placement, uniforms, z_index, tracker, render_primitive) = {
                 let e2 = self.get(b).expect("prechecked");
                 (
                     e2.buffer.snapshot_clone(),
@@ -1170,6 +1183,7 @@ impl Stage {
                     e2.uniforms,
                     e2.z_index,
                     e2.tracker,
+                    e2.render_primitive,
                 )
             };
             let e1 = self.get_mut(a).expect("prechecked");
@@ -1180,6 +1194,7 @@ impl Stage {
             e1.uniforms = uniforms;
             e1.z_index = z_index;
             e1.tracker = tracker;
+            e1.render_primitive = render_primitive;
         }
         if match_updaters {
             self.match_updaters(mob, other)?;
@@ -1686,6 +1701,7 @@ impl Stage {
                                 pending_delete: entry.pending_delete,
                                 uniforms: entry.uniforms,
                                 z_index: entry.z_index,
+                                render_primitive: entry.render_primitive,
                             }
                         }),
                     )
@@ -1728,6 +1744,7 @@ impl Stage {
                     uniforms: e.uniforms,
                     z_index: e.z_index,
                     shape: e.shape,
+                    render_primitive: e.render_primitive,
                     family_cache: RefCell::new(None),
                     bbox: RefCell::new(BboxCache::default()),
                 }),

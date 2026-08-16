@@ -325,9 +325,12 @@ fmn-python --version                   # portal entry point; distinct from stand
 > **Current pre-1.0 status:** the repository now builds a CPython 3.13
 > `franken-manim` wheel, and a clean virtual environment proves the exact
 > 663-name `manimlib` import surface, scene discovery, and real standard-mode
-> PNG sequences through retained Lumen and Reel. The live rendering form is
-> `fmn-python scene.py Scene --format png_sequence`; `--resolution`, `--fps`,
-> `--threads`, and `--video_dir` are supported. `--construct-only` remains an
+> PNG sequences plus atomic final-state PNGs through retained Lumen and Reel.
+> The locked eight-scene source-unedited corpus now reaches decodable,
+> non-uniform final PNGs and reproduces their bytes across same-process runs.
+> The live rendering forms are `fmn-python scene.py Scene --format
+> png_sequence` and `--format png`; `--resolution`, `--fps`, `--threads`, and
+> `--video_dir` are supported. `--construct-only` remains an
 > explicitly non-rendering lifecycle diagnostic. Certified output
 > (`--reproducible`), video containers, opener/write-all flags, and the Python
 > Studio route still fail closed with capability exit 4: their complete input
