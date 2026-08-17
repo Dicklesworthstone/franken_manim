@@ -1,49 +1,85 @@
-# WASM-target audit of the governed closure (fm-g2c, R15)
+# WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** current as of SUITE.lock's pins (2026-07-22). Re-run at every
-suite pin bump and whenever a `pending` allowlist row is consumed.
-Method labels: **VERIFIED** = compiled or mechanically checked here;
-**ASSESSED** = judged from the crate's own dependency posture, to be
-verified when the wasm CI lane (fm-sol) stands up `wasm32-unknown-unknown`
-in the matrix (the pinned local toolchain does not install that target;
-adding it is part of fm-sol's CI work, deliberately not a side effect of
-this audit).
+**Status:** re-derived 2026-08-17 against the exact lock identities below.
+The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
+either authority changes, forcing this audit to be re-run instead of leaving a
+plausible but stale “current pins” claim behind.
 
-## Workspace crates (the current entire closure)
+- `SUITE.lock` SHA-256: `6b2ec65cb5e85a1b41a64866ee15593750e1a9584325b295a691658566a9f856`
+- `Cargo.lock` SHA-256: `e048aad06e13ff7fda041f28bbc92190870d7057c0b618fe0f2283c13ed6478d`
 
-| member | tier | verdict | notes |
-|---|---|---|---|
-| fmn-core, fmn-dmath, fmn-hash, fmn-geom, fmn-mobject, fmn-anim, fmn-frame, fmn-codec, fmn-cache, fmn-render, fmn-text, fmn-tex, fmn-library, fmn-scene, fmn-output, fmn-runtime, fmn-conformance, fmn-config | wasm tier 1 eligible | **VERIFIED (mechanical)** | std-only, `#![forbid(unsafe_code)]`, zero external deps (governed-closure check proves the closure is exactly the workspace); no `std::fs`/`std::process`/network use outside tests — checked by grep over `src/` |
-| fmn-platform | wasm tier 1 with shims | **ASSESSED** | this crate *is* the shim point: capability traits (fs/clock/process/AssetFetcher) get wasm implementations here (R15); nothing else in the workspace touches the OS directly |
-| fmn-studio, fmn-cli | not wasm targets | by design | supervisor/subprocess and CLI surfaces; the browser Studio is a separate W11 artifact |
-| fmn-python | not a wasm target | by design | PyO3 bridge; CPython is out of scope for wasm tiers |
-| fmn-spike-object-model | n/a | spike | publish = false, not shipped |
+Method labels are deliberately narrow:
 
-## Pre-authorized, not yet consumed
+- **VERIFIED (build):** compiled for `wasm32-unknown-unknown` by a named gate.
+- **VERIFIED (execution):** instantiated and exercised in a named JavaScript or
+  browser runtime.
+- **VERIFIED (mechanical):** derived from the committed manifests, locks, and
+  governed-closure checker without claiming runtime behavior.
+- **ASSESSED:** a future path whose design posture is known but whose artifact
+  is not part of the current compiled graph.
 
-| package | wasm posture |
+## Shipped single-threaded graph
+
+`cargo tree -p fmn-wasm --target wasm32-unknown-unknown --edges normal
+--locked` resolves the current package to these workspace crates:
+
+| workspace packages | verdict | executable evidence |
+|---|---|---|
+| `fmn-wasm`, `fmn-anim`, `fmn-cache`, `fmn-codec`, `fmn-config`, `fmn-core`, `fmn-dmath`, `fmn-frame`, `fmn-geom`, `fmn-hash`, `fmn-mobject`, `fmn-platform`, `fmn-render`, `fmn-scene` | **VERIFIED (build)** | `scripts/check_wasm_package.sh` runs wasm-pack 0.15.0 over the actual `fmn-wasm` cdylib; `scripts/check.sh` also compiles the render-axis crates directly for `wasm32-unknown-unknown` |
+
+The only external packages in that wasm tree are `wasm-bindgen` 0.2.127,
+`wasm-bindgen-macro` 0.2.127, `wasm-bindgen-macro-support` 0.2.127,
+`wasm-bindgen-shared` 0.2.127, `bumpalo` 3.20.3, `cfg-if` 1.0.4,
+`once_cell` 1.21.4, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119,
+and `unicode-ident` 1.0.24. The exact versions, checksums, features, licenses,
+proc-macro/build-script posture, and unsafe reviews are admitted by
+`SUITE_ALLOWLIST.tsv`; `workspace_closure_is_exactly_the_governed_universe`
+checks the primary and auxiliary locks on every `cargo test` run.
+
+The pinned nightly has `wasm32-unknown-unknown` installed on the release host.
+This is exercised rather than inferred: `scripts/check.sh` target-compiles the
+render axis and `wasm-smoke/run.sh` builds a fresh release probe, instantiates it
+under Node, checks deterministic render bytes, reads the browser clock shim,
+and verifies that process access fails closed. The 2026-08-17 full gate emitted
+the locked smoke digest `1f248a71347b82aa`.
+
+## Product surfaces
+
+| surface | verdict | current boundary |
+|---|---|---|
+| Tier 1: `FmnScene` fixed-scene renderer | **VERIFIED (execution)** | The packaged ESM/TypeScript surface enumerates `circle_shift`, `parametric_wave`, and `orbit_duet`, renders RGBA8 into caller-reused buffers, and precisely refuses a wrong destination length. wasm-bindgen copies the mutable JS view into Wasm memory; this is buffer reuse, not a zero-copy claim. |
+| Tier 2: `FmnPlayer` FMTL/1 player | **VERIFIED (execution)** | The packaged player parses the governed timeline bundle, refuses engine-major mismatches, exposes labels/seek state, and renders RGBA8 through the same semantic Lumen path. |
+| npm bundler artifact | **VERIFIED (execution)** | `scripts/check_wasm_package.sh` builds the self-contained package, checks its exact file/license inventory and recorded size budgets, runs `npm pack` plus `npm publish --dry-run`, installs the tarball into a fresh consumer, bundles it with webpack 5.109.2, and exercises both tiers through Canvas write/readback in headless Chrome. The clean `cbd174e4b85ef5b9da13ab239b721c93dfe370e9` receipt passed with `source_dirty=false`. |
+| threads artifact | **ASSESSED, not shipped** | A distinct atomics/shared-memory build and COOP/COEP deployment contract remain open under fm-zsu. The current package reports single-thread semantics and must not be described as the threads variant. |
+
+The browser/package evidence proves compilation, packaging, deterministic
+same-build execution, and the tested failure paths. It does **not** prove
+browser performance, cross-browser behavior, the certified platform matrix,
+cross-platform bit identity, registry publication, or service-worker/CDN
+deployment. WASM remains standard-mode only.
+
+## Intentionally absent from the current wasm graph
+
+| packages or capability | posture |
 |---|---|
-| pyo3 | never on the wasm path (fmn-python excluded above) |
-| clap | `cli` feature only; wasm builds are `--no-default-features` |
-| wasm-bindgen | wasm-only by definition; enters the closure with the `wasm` feature axis (fm-l97) |
-
-## FrankenSuite repos (consumed later; assessed at their pinned commits)
-
-| repo | tier assignment | verdict | basis |
-|---|---|---|---|
-| franken_numpy | tier 1 candidate | **ASSESSED** | fnp is the array/RNG substrate the wasm frame renderer needs; audit its crates' std-surface at consumption (fm-ai1/fm-n1b) |
-| frankenscipy | tier 1 candidate (subset) | **ASSESSED** | only the solve/quadrature crates fmn-geom consumes need wasm; audit at fm-go7 |
-| franken_markdown | tier 1 candidate | **ASSESSED** | engine documents zero third-party deps and an explicit `--no-default-features` wasm build; fmd-font/fmd-math inherit that posture when fm-ydw lands |
-| franken_networkx / frankenpandas | tier 2, never blocking | **ASSESSED** | enhanced-tier mobjects; wasm support is nice-to-have by doctrine |
-| frankentorch | excluded from wasm | by design | the Accelerator Annex is native GPU only (§10.7) |
-| asupersync | excluded from wasm tier 1 | by design | batch farms are host-side; never in the frame loop |
+| `fmn-studio`, `fmn-cli` | host front doors: supervisor/subprocess, terminal, filesystem, and CLI behavior; the browser package is a separate W11 artifact |
+| `fmn-python`, PyO3, NumPy | supported host-CPython portal only; never part of a standalone browser artifact |
+| `asupersync` | host-side multi-scene batch farms and scheduler laboratory; never in the frame loop |
+| `frankentorch`, `ft-kernel-metal`, CUDA/Metal annexes | native standard-mode accelerator annexes; no GPU annex enters this wasm package |
+| `fmn-output`, ffmpeg | host publication and optional external-tool boundary; browser frames are returned to the consumer instead |
+| `fmn-text`, `fmn-tex`, `fmn-library`, `fmd-font`, `fmd-math`, the complete bundled font set | not reached by the current three-scene Tier-1 package or FMTL demo graph; future browser text/font consumption must be built, size-measured, and re-audited before it is called verified |
+| `franken_numpy`, `frankenscipy`, `franken_networkx`, `frankenpandas` | not consumed by the current wasm graph; any future subset requires its own target build and governed-closure update |
 
 ## Standing rules
 
-1. A crate enters wasm tier 1 only if it is in the governed closure AND
-   this audit marks it eligible; feature-gate or shim at fmn-platform
-   otherwise (R15).
-2. Every `pending` → consumed transition in SUITE_ALLOWLIST.tsv re-runs
-   this audit and upgrades ASSESSED rows to VERIFIED in the wasm CI lane.
-3. Threads in wasm stay behind atomics + cross-origin isolation (§10.7);
-   nothing in tier 1 may assume them.
+1. A crate enters the shipped wasm graph only after an actual
+   `wasm32-unknown-unknown` build and the governed closure both pass.
+2. Any `SUITE.lock` or `Cargo.lock` change invalidates this audit mechanically.
+   Update the recorded digests only after re-running the tree, target build,
+   Node smoke, and every affected browser/package check.
+3. An absent host-only package is not evidence that it is wasm-compatible.
+   Future text, fonts, suite libraries, or threads stay **ASSESSED** until their
+   real artifact is compiled and exercised.
+4. Threads remain a separate artifact behind atomics, shared memory, and
+   cross-origin isolation. Certified mode and native accelerator annexes remain
+   explicit refusals in the browser package.
