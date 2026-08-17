@@ -12,7 +12,9 @@ use fmn_conformance::perf_frontdoor::{
     FRONTDOOR_DEFINITION_SCHEMA, FrontdoorDefinition, FrontdoorScenario, Pg1Reference,
     frontdoor_fixture, measure_frontdoor, probe_fmn_artifact,
 };
-use fmn_conformance::perf_host::{HostProfile, HostQualification, attest_current_host};
+use fmn_conformance::perf_host::{
+    HostMonitor, HostProfile, HostQualification, attest_current_host,
+};
 use fmn_conformance::perf_pg2::{
     PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
     Pg2Scenario, measure_pg2,
@@ -618,6 +620,7 @@ fn measure_pg2_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     let artifacts = measure_pg2(
         &baseline,
@@ -626,7 +629,7 @@ fn measure_pg2_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -729,6 +732,7 @@ fn measure_frontdoor_command(
         Some((path, text))
     };
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
     let reference_borrow = reference
         .as_ref()
         .map(|(path, text)| (path.as_str(), text.as_bytes()));
@@ -742,7 +746,7 @@ fn measure_frontdoor_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -814,6 +818,7 @@ fn measure_pg5_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     let artifacts = measure_pg5(
         &baseline,
@@ -822,7 +827,7 @@ fn measure_pg5_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -942,6 +947,7 @@ fn measure_pg7_command(
     refuse_existing(raw_path, "raw output")?;
     require_release_perf_front_door()?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     let store = if scenario == Pg7Scenario::FormulaCached {
         validate_cache_root(cache_root)?;
@@ -966,7 +972,7 @@ fn measure_pg7_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -1045,6 +1051,7 @@ fn measure_pg6_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     let artifacts = measure_pg6(
         &baseline,
@@ -1053,7 +1060,7 @@ fn measure_pg6_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -1128,6 +1135,7 @@ fn measure_pg6_peak_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     let probe =
         || fmn_platform::topology::current_rss_bytes(&StdFs).map_err(|error| error.to_string());
@@ -1139,7 +1147,7 @@ fn measure_pg6_peak_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -1230,6 +1238,7 @@ fn measure_pg6_soak_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     // The one production residency capability: fmn-platform over the host
     // filesystem. Unsupported hosts flow through as retained-invalid samples.
@@ -1244,7 +1253,7 @@ fn measure_pg6_soak_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -1330,11 +1339,30 @@ impl PreparedQualification {
         self.token.as_ref()
     }
 
-    fn revalidate_postflight(&self) -> Result<(), CliError> {
-        if let Some(token) = &self.token {
-            token
-                .revalidate_current_host()
-                .map_err(|error| CliError::data(format!("postflight {error}")))?;
+    fn start_monitor(&self) -> Result<Option<HostMonitor>, CliError> {
+        self.token
+            .as_ref()
+            .map(HostQualification::start_live_monitor)
+            .transpose()
+            .map_err(|error| CliError::data(error.to_string()))
+    }
+
+    fn revalidate_postflight(&self, monitor: Option<HostMonitor>) -> Result<(), CliError> {
+        match (&self.token, monitor) {
+            (Some(token), Some(monitor)) => {
+                monitor
+                    .stop_and_validate()
+                    .map_err(|error| CliError::data(format!("continuous {error}")))?;
+                token
+                    .revalidate_current_host()
+                    .map_err(|error| CliError::data(format!("postflight {error}")))?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(CliError::data(
+                    "host qualification monitor lifecycle mismatch",
+                ));
+            }
         }
         Ok(())
     }

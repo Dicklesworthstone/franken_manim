@@ -17,11 +17,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 /// Stable exact-host profile schema.
 pub const HOST_PROFILE_SCHEMA: &str = "fmn-perf-host-profile/1";
 /// Stable content-addressed live-attestation schema.
-pub const HOST_ATTESTATION_SCHEMA: &str = "fmn-perf-host-attestation/1";
+pub const HOST_ATTESTATION_SCHEMA: &str = "fmn-perf-host-attestation/2";
+
+/// Fixed continuous-monitor policy recorded in every qualified attestation.
+pub const HOST_MONITOR_POLICY: &str = "linux-live-state-250ms-plus-full-postflight-v1";
+/// Sampling interval for volatile live host state during a qualified run.
+pub const HOST_MONITOR_INTERVAL_MILLIS: u64 = 250;
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_PROFILE_LINES: usize = 64;
@@ -301,6 +309,95 @@ pub struct HostQualification {
     process_id: u32,
 }
 
+/// Running continuous live-state monitor for one qualified measurement.
+///
+/// The monitor samples the volatile Linux qualification surface at a fixed
+/// interval and always performs one final sample when
+/// [`Self::stop_and_validate`] is called. Dropping it also stops and joins the
+/// thread, but only `stop_and_validate` reports a policy excursion; successful
+/// producers must call it before publishing evidence.
+#[must_use = "a qualified host monitor must be finished before evidence publication"]
+#[derive(Debug)]
+pub struct HostMonitor {
+    stop: Option<mpsc::Sender<()>>,
+    outcome: mpsc::Receiver<Result<u64, HostError>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl HostMonitor {
+    fn start_with_probe(
+        interval: Duration,
+        mut probe: impl FnMut() -> Result<(), HostError> + Send + 'static,
+    ) -> Result<Self, HostError> {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("fmn-host-monitor".to_owned())
+            .spawn(move || {
+                let mut samples = 0_u64;
+                loop {
+                    match stop_rx.recv_timeout(interval) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            samples = samples.saturating_add(1);
+                            let result = probe().map(|()| samples);
+                            let _ = outcome_tx.send(result);
+                            return;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            samples = samples.saturating_add(1);
+                            if let Err(error) = probe() {
+                                let _ = outcome_tx.send(Err(HostError::Mismatch(format!(
+                                    "continuous live-state sample {samples} failed: {error}"
+                                ))));
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|error| HostError::Probe(format!("cannot start host monitor: {error}")))?;
+        Ok(Self {
+            stop: Some(stop_tx),
+            outcome: outcome_rx,
+            thread: Some(thread),
+        })
+    }
+
+    /// Stop the monitor, perform its mandatory final live-state sample, and
+    /// return the number of completed samples.
+    ///
+    /// # Errors
+    /// Returns the first policy excursion, probe failure, thread panic, or
+    /// monitor-channel failure.
+    pub fn stop_and_validate(mut self) -> Result<u64, HostError> {
+        self.finish_inner()
+    }
+
+    fn finish_inner(&mut self) -> Result<u64, HostError> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let thread = self
+            .thread
+            .take()
+            .ok_or_else(|| HostError::Probe("host monitor was already finished".to_owned()))?;
+        if thread.join().is_err() {
+            return Err(HostError::Probe("host monitor thread panicked".to_owned()));
+        }
+        self.outcome
+            .recv()
+            .map_err(|_| HostError::Probe("host monitor produced no outcome".to_owned()))?
+    }
+}
+
+impl Drop for HostMonitor {
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            let _ = self.finish_inner();
+        }
+    }
+}
+
 impl HostQualification {
     /// Exact live-attestation artifact bytes the caller must publish before
     /// the raw sample bundle.
@@ -313,6 +410,46 @@ impl HostQualification {
     #[must_use]
     pub fn evidence(&self) -> &EvidenceRef {
         &self.evidence
+    }
+
+    /// Start the fixed-policy continuous monitor for this qualified run.
+    /// Calibration runs have no [`HostQualification`] and therefore cannot
+    /// create a monitor accidentally.
+    ///
+    /// # Errors
+    /// Returns a precise unsupported-platform or thread-start failure.
+    pub fn start_live_monitor(&self) -> Result<HostMonitor, HostError> {
+        match self.profile.platform {
+            HostPlatform::LinuxX86_64 => {
+                if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                    return Err(HostError::Unsupported(format!(
+                        "profile {} requires linux-x86_64",
+                        self.profile.profile_id
+                    )));
+                }
+                self.start_live_monitor_with_fs(
+                    Arc::new(StdFs),
+                    Duration::from_millis(HOST_MONITOR_INTERVAL_MILLIS),
+                )
+            }
+            HostPlatform::MacosAarch64 => Err(HostError::Unsupported(
+                "macos-aarch64 lacks a safe native topology/power/isolation probe; fallback topology cannot qualify a pinned host"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    fn start_live_monitor_with_fs(
+        &self,
+        fs: Arc<dyn FileSystem>,
+        interval: Duration,
+    ) -> Result<HostMonitor, HostError> {
+        let profile = self.profile.clone();
+        let artifact_path = self.artifact_path.clone();
+        let pid = self.process_id;
+        HostMonitor::start_with_probe(interval, move || {
+            validate_linux_live_state(&profile, fs.as_ref(), &artifact_path, pid).map(|_| ())
+        })
     }
 
     /// Re-run the complete live authority after the workload. A qualified
@@ -553,6 +690,91 @@ fn attest_linux_host(
     )?;
     require_eight_distinct_cores(profile, &topology)?;
 
+    let live = validate_linux_live_state(profile, fs, artifact_path, pid)?;
+
+    let host_fingerprint = profile.digest();
+    let toolchain_fingerprint = compiled_toolchain_fingerprint();
+    let suite_lock_digest = compiled_suite_lock_digest();
+    let mut attestation = String::new();
+    writeln!(&mut attestation, "{HOST_ATTESTATION_SCHEMA}").expect("string write");
+    for (name, value) in [
+        ("profile_id", profile.profile_id.clone()),
+        ("profile_digest", host_fingerprint.to_string()),
+        ("platform", profile.platform.name().to_owned()),
+        ("os_release_digest", profile.os_release_digest.to_string()),
+        ("kernel_release", profile.kernel_release.clone()),
+        (
+            "cpu_identity_digest",
+            profile.cpu_identity_digest.to_string(),
+        ),
+        (
+            "dmi_identity_digest",
+            profile.dmi_identity_digest.to_string(),
+        ),
+        ("topology_digest", profile.topology_digest.to_string()),
+        ("benchmark_cpus", format_cpu_list(&profile.benchmark_cpus)),
+        ("cgroup_path", profile.cgroup_path.clone()),
+        ("governor", profile.governor.clone()),
+        ("boost_value", profile.boost_value.clone()),
+        (
+            "temperature_millicelsius",
+            live.temperature_millicelsius.to_string(),
+        ),
+        ("load_milli", live.load_milli.to_string()),
+        (
+            "storage_mount",
+            live.mount.mount_point.display().to_string(),
+        ),
+        ("storage_fs", live.mount.fs_type),
+        (
+            "storage_source_digest",
+            profile.storage_source_digest.to_string(),
+        ),
+        ("toolchain_fingerprint", toolchain_fingerprint.to_string()),
+        ("suite_lock_digest", suite_lock_digest.to_string()),
+        ("monitor_policy", HOST_MONITOR_POLICY.to_owned()),
+        (
+            "monitor_interval_millis",
+            HOST_MONITOR_INTERVAL_MILLIS.to_string(),
+        ),
+        ("process_id", pid.to_string()),
+        ("bare_metal", "true".to_owned()),
+        ("isolated", "true".to_owned()),
+    ] {
+        writeln!(&mut attestation, "{name}\t{value}").expect("string write");
+    }
+    let evidence = EvidenceRef::from_bytes(
+        EvidenceKind::HostAttestation,
+        evidence_path,
+        attestation.as_bytes(),
+    )
+    .map_err(|error| HostError::Profile(error.to_string()))?;
+    Ok(HostQualification {
+        profile_id: profile.profile_id.clone(),
+        host_fingerprint,
+        toolchain_fingerprint,
+        suite_lock_digest,
+        evidence,
+        attestation_tsv: attestation,
+        profile: profile.clone(),
+        artifact_path: artifact_path.to_path_buf(),
+        process_id: pid,
+    })
+}
+
+#[derive(Debug)]
+struct LinuxLiveState {
+    temperature_millicelsius: u64,
+    load_milli: u64,
+    mount: MountRecord,
+}
+
+fn validate_linux_live_state(
+    profile: &HostProfile,
+    fs: &dyn FileSystem,
+    artifact_path: &Path,
+    pid: u32,
+) -> Result<LinuxLiveState, HostError> {
     let status = read_required(fs, Path::new("/proc/self/status"), MAX_HOST_FILE_BYTES)?;
     let allowed = parse_status_cpu_list(&status, "Cpus_allowed_list")?;
     require_cpu_list("Cpus_allowed_list", &profile.benchmark_cpus, &allowed)?;
@@ -603,24 +825,24 @@ fn attest_linux_host(
     }
     let boost = read_required(fs, &profile.boost_path, MAX_KERNEL_BYTES)?;
     require_text("boost_value", &profile.boost_value, boost.trim())?;
-    let temperature = parse_trimmed_u64(
+    let temperature_millicelsius = parse_trimmed_u64(
         &read_required(fs, &profile.thermal_path, MAX_KERNEL_BYTES)?,
         "temperature",
     )?;
-    if temperature > profile.max_temperature_millicelsius {
+    if temperature_millicelsius > profile.max_temperature_millicelsius {
         return Err(HostError::Mismatch(format!(
-            "temperature {temperature} mC exceeds profile ceiling {} mC",
+            "temperature {temperature_millicelsius} mC exceeds profile ceiling {} mC",
             profile.max_temperature_millicelsius
         )));
     }
-    let load = parse_load_milli(&read_required(
+    let load_milli = parse_load_milli(&read_required(
         fs,
         Path::new("/proc/loadavg"),
         MAX_KERNEL_BYTES,
     )?)?;
-    if load > profile.max_load_milli {
+    if load_milli > profile.max_load_milli {
         return Err(HostError::Mismatch(format!(
-            "one-minute load {load} milli exceeds profile ceiling {}",
+            "one-minute load {load_milli} milli exceeds profile ceiling {}",
             profile.max_load_milli
         )));
     }
@@ -642,62 +864,10 @@ fn attest_linux_host(
         sha256(mount.source.as_bytes()),
     )?;
 
-    let host_fingerprint = profile.digest();
-    let toolchain_fingerprint = compiled_toolchain_fingerprint();
-    let suite_lock_digest = compiled_suite_lock_digest();
-    let mut attestation = String::new();
-    writeln!(&mut attestation, "{HOST_ATTESTATION_SCHEMA}").expect("string write");
-    for (name, value) in [
-        ("profile_id", profile.profile_id.clone()),
-        ("profile_digest", host_fingerprint.to_string()),
-        ("platform", profile.platform.name().to_owned()),
-        ("os_release_digest", profile.os_release_digest.to_string()),
-        ("kernel_release", profile.kernel_release.clone()),
-        (
-            "cpu_identity_digest",
-            profile.cpu_identity_digest.to_string(),
-        ),
-        (
-            "dmi_identity_digest",
-            profile.dmi_identity_digest.to_string(),
-        ),
-        ("topology_digest", profile.topology_digest.to_string()),
-        ("benchmark_cpus", format_cpu_list(&profile.benchmark_cpus)),
-        ("cgroup_path", profile.cgroup_path.clone()),
-        ("governor", profile.governor.clone()),
-        ("boost_value", profile.boost_value.clone()),
-        ("temperature_millicelsius", temperature.to_string()),
-        ("load_milli", load.to_string()),
-        ("storage_mount", mount.mount_point.display().to_string()),
-        ("storage_fs", mount.fs_type),
-        (
-            "storage_source_digest",
-            profile.storage_source_digest.to_string(),
-        ),
-        ("toolchain_fingerprint", toolchain_fingerprint.to_string()),
-        ("suite_lock_digest", suite_lock_digest.to_string()),
-        ("process_id", pid.to_string()),
-        ("bare_metal", "true".to_owned()),
-        ("isolated", "true".to_owned()),
-    ] {
-        writeln!(&mut attestation, "{name}\t{value}").expect("string write");
-    }
-    let evidence = EvidenceRef::from_bytes(
-        EvidenceKind::HostAttestation,
-        evidence_path,
-        attestation.as_bytes(),
-    )
-    .map_err(|error| HostError::Profile(error.to_string()))?;
-    Ok(HostQualification {
-        profile_id: profile.profile_id.clone(),
-        host_fingerprint,
-        toolchain_fingerprint,
-        suite_lock_digest,
-        evidence,
-        attestation_tsv: attestation,
-        profile: profile.clone(),
-        artifact_path: artifact_path.to_path_buf(),
-        process_id: pid,
+    Ok(LinuxLiveState {
+        temperature_millicelsius,
+        load_milli,
+        mount,
     })
 }
 
@@ -1114,6 +1284,7 @@ fn hash_field(hash: &mut Sha256, bytes: &[u8]) {
 mod tests {
     use super::*;
     use fmn_platform::fs::VirtualFs;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn digest(value: &str) -> Digest {
         sha256(value.as_bytes())
@@ -1344,6 +1515,14 @@ mod tests {
         )
         .expect("qualified synthetic host");
         assert!(qualification.attestation_tsv().contains("bare_metal\ttrue"));
+        assert!(
+            qualification
+                .attestation_tsv()
+                .contains(&format!("monitor_policy\t{HOST_MONITOR_POLICY}"))
+        );
+        assert!(qualification.attestation_tsv().contains(&format!(
+            "monitor_interval_millis\t{HOST_MONITOR_INTERVAL_MILLIS}"
+        )));
         assert_eq!(qualification.evidence().kind, EvidenceKind::HostAttestation);
 
         let mut key = BenchmarkKey {
@@ -1442,6 +1621,56 @@ mod tests {
             .revalidate_linux_with_fs(&fs)
             .expect_err("load drift must invalidate the run");
         assert!(error.to_string().contains("exceeds profile ceiling"));
+    }
+
+    #[test]
+    fn live_monitor_final_sample_catches_drift_before_publication() {
+        let pid = 71;
+        let fs = Arc::new(synthetic_linux_fs(pid));
+        let profile = synthetic_profile(fs.as_ref());
+        let qualification = attest_linux_host(
+            &profile,
+            fs.as_ref(),
+            Path::new("/data/artifacts/raw.tsv"),
+            "tests/artifacts/perf/run/host.tsv".to_owned(),
+            pid,
+        )
+        .expect("preflight");
+        let monitor = qualification
+            .start_live_monitor_with_fs(fs.clone(), Duration::from_secs(60))
+            .expect("monitor");
+        fs.insert("/sys/class/thermal/thermal_zone0/temp", b"70001\n".to_vec());
+        let error = monitor
+            .stop_and_validate()
+            .expect_err("final sample must reject drift");
+        assert!(error.to_string().contains("exceeds profile ceiling"));
+    }
+
+    #[test]
+    fn live_monitor_retains_a_transient_failure_after_recovery() {
+        let failing = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&failing);
+        let (seen_tx, seen_rx) = mpsc::sync_channel(1);
+        let monitor = HostMonitor::start_with_probe(Duration::from_millis(1), move || {
+            if observed.load(Ordering::SeqCst) {
+                let _ = seen_tx.try_send(());
+                Err(HostError::Mismatch("synthetic transient".to_owned()))
+            } else {
+                Ok(())
+            }
+        })
+        .expect("monitor");
+
+        failing.store(true, Ordering::SeqCst);
+        seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("monitor observed transient state");
+        failing.store(false, Ordering::SeqCst);
+
+        let error = monitor
+            .stop_and_validate()
+            .expect_err("a recovered transient must still invalidate the run");
+        assert!(error.to_string().contains("synthetic transient"));
     }
 
     #[test]

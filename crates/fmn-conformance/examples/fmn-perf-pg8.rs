@@ -11,7 +11,9 @@ use fmn_conformance::perf::{
     BASELINE_SCHEMA, EvidenceKind, EvidenceRef, SAMPLES_SCHEMA, require_compiled_cargo_profile,
     validate_producer_commit,
 };
-use fmn_conformance::perf_host::{HostProfile, HostQualification, attest_current_host};
+use fmn_conformance::perf_host::{
+    HostMonitor, HostProfile, HostQualification, attest_current_host,
+};
 use fmn_conformance::perf_pg8::{
     PG8_FRAMES_PER_REPETITION, PG8_MOBJECTS, PG8_SAMPLE_COUNT, PG8_WARMUP_ITERATIONS, Pg8Error,
     Pg8Measurement, Pg8Observation, Pg8Scenario, measure_pg8,
@@ -118,6 +120,7 @@ fn measure_pg8_command(
     refuse_existing(trace_path, "trace output")?;
     refuse_existing(raw_path, "raw output")?;
     let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let monitor = qualification.start_monitor()?;
 
     let artifacts = measure_pg8(
         &baseline,
@@ -127,7 +130,7 @@ fn measure_pg8_command(
         qualification.token(),
     )
     .map_err(|error| CliError::data(error.to_string()))?;
-    qualification.revalidate_postflight()?;
+    qualification.revalidate_postflight(monitor)?;
     let raw = artifacts
         .batch
         .to_tsv()
@@ -220,11 +223,30 @@ impl PreparedQualification {
         self.token.as_ref()
     }
 
-    fn revalidate_postflight(&self) -> Result<(), CliError> {
-        if let Some(token) = &self.token {
-            token
-                .revalidate_current_host()
-                .map_err(|error| CliError::data(format!("postflight {error}")))?;
+    fn start_monitor(&self) -> Result<Option<HostMonitor>, CliError> {
+        self.token
+            .as_ref()
+            .map(HostQualification::start_live_monitor)
+            .transpose()
+            .map_err(|error| CliError::data(error.to_string()))
+    }
+
+    fn revalidate_postflight(&self, monitor: Option<HostMonitor>) -> Result<(), CliError> {
+        match (&self.token, monitor) {
+            (Some(token), Some(monitor)) => {
+                monitor
+                    .stop_and_validate()
+                    .map_err(|error| CliError::data(format!("continuous {error}")))?;
+                token
+                    .revalidate_current_host()
+                    .map_err(|error| CliError::data(format!("postflight {error}")))?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(CliError::data(
+                    "host qualification monitor lifecycle mismatch",
+                ));
+            }
         }
         Ok(())
     }

@@ -213,7 +213,7 @@ observed baseline and replayed raw source before it can pass.
 ## Pinned-host profile and live-attestation authority
 
 `fmn_conformance::perf_host` owns two bounded schemas:
-`fmn-perf-host-profile/1` and `fmn-perf-host-attestation/1`. A profile is an
+`fmn-perf-host-profile/1` and `fmn-perf-host-attestation/2`. A profile is an
 exact key/value TSV manifest for one machine generation. It names the profile
 and platform and pins hashes of `/etc/os-release`, stable CPU identity rows,
 non-serial DMI identity, the complete `HardwareTopology` snapshot, and the
@@ -241,15 +241,20 @@ host capabilities and additionally requires all of the following:
 The package build embeds `rustc --version --verbose` from Cargo's actual
 compiler, the exact `rust-toolchain.toml`, and the exact `SUITE.lock` bytes.
 Those compiled identities—not caller text—must match the baseline. The live
-authority repeats the complete identity, affinity, isolation, power, thermal,
-load, cgroup, and storage checks after the producer returns. Only then is the
-preflight attestation published as content-addressed `host-attestation`
-evidence, followed by the phase trace and raw bundle. Publication is
-create-new/no-clobber throughout; a later race can leave an obviously partial
-evidence set, and the tool never deletes it. These start/end observations do
-not claim continuous detection of a transient excursion that fully recovers
-inside a long measurement window; continuous monitoring remains open under
-fm-inr.1.
+authority starts a fixed 250 ms monitor around every qualified canonical
+producer. Each sample rechecks process affinity and PID namespace, isolated /
+nohz-full / RCU CPU sets, exclusive cgroup membership, governor and boost,
+thermal and load ceilings, and artifact-mount identity. The monitor retains
+the first failure even if the host later recovers and performs a mandatory
+final sample. The attestation records the exact monitor policy and interval.
+After the monitor finishes, the authority repeats the complete static
+machine, topology, compiler, suite-lock, affinity, isolation, power, thermal,
+load, cgroup, and storage checks. Only then is the preflight attestation
+published as content-addressed `host-attestation` evidence, followed by the
+phase trace and raw bundle. Publication is create-new/no-clobber throughout;
+a later race can leave an obviously partial evidence set, and the tool never
+deletes it. Sub-250 ms excursions wholly between samples remain outside this
+bounded monitor's observation model; they are not claimed as detected.
 
 For a qualified run, change to `crates/fmn-conformance/` and run the already
 built `release-perf` binary directly inside the dedicated cgroup. Store the
