@@ -41,7 +41,7 @@ const SEGMENT_ARC_VALUES: usize = SEGMENT_ARC_INTERVALS + 1;
 const SEGMENT_STRIDE: usize = 8 + SEGMENT_ARC_VALUES + 1;
 const PIECE_STRIDE: usize = 6;
 const JOIN_STRIDE: usize = 13;
-const STATION_STRIDE: usize = 3;
+const STATION_STRIDE: usize = 5;
 const DRAW_U32_STRIDE: usize = 10;
 const DRAW_F32_STRIDE: usize = 8;
 const STYLE_STRIDE: usize = 20;
@@ -59,6 +59,7 @@ const DRAW_FILL: u32 = 1 << 0;
 const DRAW_STROKE: u32 = 1 << 1;
 const STROKE_BEHIND: u32 = 1 << 2;
 const FLAT_FILL: u32 = 1 << 3;
+const MULTI_CONTOUR_GRADIENT: u32 = 1 << 4;
 const THREE_D_SHADER_GOURAUD: u32 = 1;
 const THREE_D_SHADER_DOT: u32 = 2;
 
@@ -1682,16 +1683,49 @@ impl FlatFrame {
             .ok_or(MetalError::Layout("join range reversed"))?;
 
         let first_station = scalar_row(&self.stations, STATION_STRIDE, "station index")?;
+        let mut multi_contour_gradient = false;
         if let Some(field) = job.field_of(draw) {
-            let (points, params) = field.stations();
+            let (points, params, next, edge_params) = field.stations();
             if points.len() != params.len() {
                 return Err(MetalError::Layout("gradient stations are not parallel"));
             }
-            for (point, &param) in points.iter().zip(params) {
+            multi_contour_gradient = field.has_explicit_contours();
+            if multi_contour_gradient
+                && (points.len() != next.len() || points.len() != edge_params.len())
+            {
+                return Err(MetalError::Layout(
+                    "gradient contour edges are not parallel",
+                ));
+            }
+            for (offset, (point, &param)) in points.iter().zip(params).enumerate() {
+                let local_next = if multi_contour_gradient {
+                    next[offset]
+                } else if offset + 1 < points.len() {
+                    offset + 1
+                } else {
+                    0
+                };
+                if local_next >= points.len() {
+                    return Err(MetalError::Layout("gradient contour edge escapes draw"));
+                }
+                let local_next = u32::try_from(local_next)
+                    .map_err(|_| MetalError::SizeOverflow("gradient next station"))?;
+                let global_next = first_station
+                    .checked_add(local_next)
+                    .ok_or(MetalError::SizeOverflow("gradient next station"))?;
+                let edge_param = if multi_contour_gradient {
+                    edge_params[offset]
+                } else if offset + 1 < params.len() {
+                    params[offset + 1]
+                } else {
+                    1.0
+                };
                 self.stations.extend_from_slice(&[
                     (point[0] + draw.translate[0]) as f32,
                     (point[1] + draw.translate[1]) as f32,
                     param as f32,
+                    f32::from_bits(global_next),
+                    edge_param as f32,
                 ]);
             }
         }
@@ -1711,6 +1745,9 @@ impl FlatFrame {
         }
         if draw.flat_fill.is_some() {
             flags |= FLAT_FILL;
+        }
+        if multi_contour_gradient {
+            flags |= MULTI_CONTOUR_GRADIENT;
         }
         let joint = match draw.style.joint_type {
             JointType::Auto | JointType::NoJoint => 0,

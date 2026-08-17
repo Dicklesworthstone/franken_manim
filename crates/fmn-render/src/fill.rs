@@ -2186,16 +2186,19 @@ pub const GRADIENT_STATIONS: usize = 64;
 ///   viewing angle from the query point — which is the subdivision-invariant
 ///   object the discrete form approximates.
 ///
-/// ## The honest limit
+/// ## Multiple contours
 ///
-/// Mean value coordinates are defined for one closed polygon. For a shape whose
-/// path has several subpaths the stations run over the whole path in order, so
-/// the station polygon connects one subpath's end to the next one's start; that
-/// is a specified, deterministic, subdivision-invariant field, and it coincides
-/// with the region boundary exactly when there is one subpath — which is every
-/// gradient fill in the corpus so far. A glyph counter or an annulus wants the
-/// per-loop generalization, and that is a design step rather than a parameter,
-/// so it is filed rather than guessed at.
+/// Hormann--Floater's generalized coordinates apply the same local weight
+/// formula to a set of cyclic polygons and normalize the sum over all of them.
+/// Nested contours alternate orientation, exactly as the nonzero fill rule
+/// already requires for a counter-wound glyph hole or annulus. The retained
+/// subpath table therefore defines explicit station edges for every contour;
+/// no synthetic edge ever joins an outer boundary to a hole. The semantic
+/// 64-station budget is divided by global arc length with a three-station
+/// minimum per contour, growing only to `3 * contours` when that minimum does
+/// not fit. Boundary data remains the normalized arc length of the whole path,
+/// so each contour closes at its own global parameter and then has its own ramp
+/// seam back to its first station.
 /// The interior colour field for a non-flat fill, as a *view* over
 /// caller-owned station storage.
 ///
@@ -2210,6 +2213,18 @@ pub struct GradientField<'a> {
     points: &'a [[f64; 2]],
     /// Each station's normalized arc length along the path.
     params: &'a [f64],
+    /// Next station on the same contour, index-local to this field.
+    ///
+    /// Empty is the compact single-contour representation and deliberately
+    /// selects the original evaluator byte-for-byte. Multi-contour fields keep
+    /// one explicit edge per station so no phantom edge can join two subpaths.
+    next: &'a [usize],
+    /// Boundary parameter at the far end of each explicit edge.
+    ///
+    /// Usually this is `params[next[i]]`. On a contour's closing edge it is the
+    /// contour's global arc-length end, preserving the declared ramp seam before
+    /// it jumps back to the first station on that contour.
+    edge_params: &'a [f64],
 }
 
 impl<'a> GradientField<'a> {
@@ -2223,7 +2238,31 @@ impl<'a> GradientField<'a> {
     /// The view over caller-owned station storage.
     pub(crate) fn from_parts(points: &'a [[f64; 2]], params: &'a [f64]) -> GradientField<'a> {
         debug_assert_eq!(points.len(), params.len());
-        GradientField { points, params }
+        GradientField {
+            points,
+            params,
+            next: &[],
+            edge_params: &[],
+        }
+    }
+
+    /// The view over a station set with explicit per-contour edges.
+    pub(crate) fn from_contours(
+        points: &'a [[f64; 2]],
+        params: &'a [f64],
+        next: &'a [usize],
+        edge_params: &'a [f64],
+    ) -> GradientField<'a> {
+        debug_assert_eq!(points.len(), params.len());
+        debug_assert_eq!(points.len(), next.len());
+        debug_assert_eq!(points.len(), edge_params.len());
+        debug_assert!(next.iter().all(|&index| index < points.len()));
+        GradientField {
+            points,
+            params,
+            next,
+            edge_params,
+        }
     }
 
     /// Derive the field for one compiled shape into caller-owned storage.
@@ -2238,6 +2277,109 @@ impl<'a> GradientField<'a> {
         map: ScreenMap,
     ) {
         Self::build_with_into(GRADIENT_STATIONS, points, params, segments, map);
+    }
+
+    /// Derive the field for every retained subpath without connecting contours.
+    ///
+    /// One contour delegates to [`GradientField::build_into`] and writes no
+    /// edge metadata, preserving the existing station sequence and evaluator
+    /// exactly. For multiple contours, the fixed 64-station semantic budget is
+    /// shared in proportion to global arc length with at least three stations
+    /// per contour. If a shape has more than 21 contours the budget grows only
+    /// enough to keep that mathematical minimum, so storage stays linear in the
+    /// already-retained contour count.
+    pub(crate) fn build_contours_into(
+        points: &mut impl crate::arena::Sink<[f64; 2]>,
+        params: &mut impl crate::arena::Sink<f64>,
+        next: &mut impl crate::arena::Sink<usize>,
+        edge_params: &mut impl crate::arena::Sink<f64>,
+        segments: &[crate::table::Segment],
+        subpath_starts: &[u32],
+        map: ScreenMap,
+    ) {
+        if subpath_starts.len() <= 1 {
+            Self::build_into(points, params, segments, map);
+            return;
+        }
+        if segments.is_empty() {
+            return;
+        }
+
+        const MIN_CONTOUR_STATIONS: usize = 3;
+        let contour_count = subpath_starts.len();
+        let minimum = contour_count.saturating_mul(MIN_CONTOUR_STATIONS);
+        let station_count = GRADIENT_STATIONS.max(minimum);
+        let distributable = station_count.saturating_sub(minimum);
+        let field_start = points.len();
+        let mut distributed = 0usize;
+
+        for (contour, &raw_start) in subpath_starts.iter().enumerate() {
+            let start = (raw_start as usize).min(segments.len());
+            let end = subpath_starts
+                .get(contour + 1)
+                .map_or(segments.len(), |&index| {
+                    (index as usize).min(segments.len())
+                });
+            if start >= end {
+                continue;
+            }
+            let own = &segments[start..end];
+            let s0 = own.first().map_or(0.0, |segment| segment.s0);
+            let s1 = own.last().map_or(s0, |segment| segment.s1);
+            let span = (s1 - s0).max(0.0);
+            let target = if contour + 1 == contour_count {
+                distributable
+            } else {
+                ((s1.clamp(0.0, 1.0) * distributable as f64).floor() as usize).min(distributable)
+            };
+            let extra = target.saturating_sub(distributed);
+            distributed = target;
+            let own_station_count = MIN_CONTOUR_STATIONS.saturating_add(extra);
+            let station_start = points.len().saturating_sub(field_start);
+
+            for station in 0..own_station_count {
+                let fraction = (station as f64 + 0.5) / own_station_count as f64;
+                let s = s0 + fraction * span;
+                let index = own
+                    .partition_point(|segment| segment.s1 <= s)
+                    .min(own.len() - 1);
+                let segment = &own[index];
+                let segment_span = segment.s1 - segment.s0;
+                let segment_fraction = if segment_span > 0.0 {
+                    ((s - segment.s0) / segment_span).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let t = fmn_geom::arclength::t_at_arc_fraction(
+                    segment.p0,
+                    segment.p1,
+                    segment.p2,
+                    segment_fraction,
+                );
+                let point =
+                    fmn_geom::bezier::quadratic_point(segment.p0, segment.p1, segment.p2, t);
+                points.put([
+                    map.origin[0] + point[0] * map.scale,
+                    map.origin[1] + point[1] * map.scale,
+                ]);
+                params.put(s);
+                next.put(if station + 1 < own_station_count {
+                    station_start + station + 1
+                } else {
+                    station_start
+                });
+                edge_params.put(if station + 1 < own_station_count {
+                    s0 + (station as f64 + 1.5) / own_station_count as f64 * span
+                } else {
+                    s1
+                });
+            }
+        }
+    }
+
+    /// Maximum stations produced for a retained contour count.
+    pub(crate) fn station_capacity(contours: usize) -> usize {
+        GRADIENT_STATIONS.max(contours.saturating_mul(3))
     }
 
     /// [`GradientField::build_into`] at an explicit station count.
@@ -2304,8 +2446,14 @@ impl<'a> GradientField<'a> {
     /// values into their own flat device representation rather than inventing a
     /// second station-placement rule.
     #[cfg(feature = "metal")]
-    pub(crate) fn stations(&self) -> (&'a [[f64; 2]], &'a [f64]) {
-        (self.points, self.params)
+    pub(crate) fn stations(&self) -> (&'a [[f64; 2]], &'a [f64], &'a [usize], &'a [f64]) {
+        (self.points, self.params, self.next, self.edge_params)
+    }
+
+    /// Does this field carry more than one explicitly closed contour?
+    #[cfg(feature = "metal")]
+    pub(crate) fn has_explicit_contours(&self) -> bool {
+        !self.next.is_empty()
     }
 
     /// The field's value at a screen point: mean value coordinates over the
@@ -2316,6 +2464,15 @@ impl<'a> GradientField<'a> {
     /// once and reused at both ends of the loop.
     #[must_use]
     pub fn param_at(&self, p: [f64; 2], translate: [f64; 2]) -> f64 {
+        if !self.next.is_empty() {
+            return self.param_at_contours(p, translate);
+        }
+        self.param_at_single_contour(p, translate)
+    }
+
+    /// Original one-polygon evaluator, kept as a distinct branch so the
+    /// single-contour field remains bit-identical.
+    fn param_at_single_contour(&self, p: [f64; 2], translate: [f64; 2]) -> f64 {
         let n = self.points.len();
         if n == 0 {
             return 0.0;
@@ -2404,6 +2561,86 @@ impl<'a> GradientField<'a> {
             return self.nearest_param(p, translate);
         }
         (num / den).clamp(0.0, 1.0)
+    }
+
+    /// Hormann--Floater mean value interpolation over a set of cyclic planar
+    /// polygons. Counter-wound nested contours contribute signed weights, so a
+    /// hole participates without any synthetic bridge to its outer boundary.
+    fn param_at_contours(&self, p: [f64; 2], translate: [f64; 2]) -> f64 {
+        let n = self.points.len();
+        debug_assert_eq!(n, self.params.len());
+        debug_assert_eq!(n, self.next.len());
+        debug_assert_eq!(n, self.edge_params.len());
+        if n == 0 {
+            return 0.0;
+        }
+        let d = |i: usize| -> [f64; 2] {
+            [
+                self.points[i][0] + translate[0] - p[0],
+                self.points[i][1] + translate[1] - p[1],
+            ]
+        };
+        let tan_half = |i: usize, j: usize| -> Option<f64> {
+            let (di, dj) = (d(i), d(j));
+            let ri = (di[0] * di[0] + di[1] * di[1]).sqrt();
+            let rj = (dj[0] * dj[0] + dj[1] * dj[1]).sqrt();
+            let dot = di[0] * dj[0] + di[1] * dj[1];
+            let cross = di[0] * dj[1] - di[1] * dj[0];
+            if cross.abs() <= 1e-14 * ri * rj {
+                return if dot < 0.0 { None } else { Some(0.0) };
+            }
+            Some((ri * rj - dot) / cross)
+        };
+
+        for i in 0..n {
+            let di = d(i);
+            if di[0] * di[0] + di[1] * di[1] <= Self::TOUCH_SQ {
+                return self.params[i];
+            }
+        }
+        for i in 0..n {
+            let j = self.next[i];
+            debug_assert!(j < n);
+            if j >= n {
+                return self.nearest_param(p, translate);
+            }
+            if tan_half(i, j).is_none() {
+                let (di, dj) = (d(i), d(j));
+                let ri = (di[0] * di[0] + di[1] * di[1]).sqrt();
+                let rj = (dj[0] * dj[0] + dj[1] * dj[1]).sqrt();
+                let fraction = if ri + rj > 0.0 { ri / (ri + rj) } else { 0.0 };
+                return self.params[i] + (self.edge_params[i] - self.params[i]) * fraction;
+            }
+        }
+
+        // Equation (11), accumulated per edge. Each edge's half-angle tangent
+        // contributes to both endpoint weights, which is algebraically the same
+        // `(t_prev + t_next) / radius` sum without needing a previous-index
+        // table for every contour.
+        let mut numerator = 0.0;
+        let mut denominator = 0.0;
+        for i in 0..n {
+            let j = self.next[i];
+            let tangent = tan_half(i, j).unwrap_or(0.0);
+            let di = d(i);
+            let dj = d(j);
+            let ri = (di[0] * di[0] + di[1] * di[1]).sqrt();
+            let rj = (dj[0] * dj[0] + dj[1] * dj[1]).sqrt();
+            if ri > 0.0 {
+                let weight = tangent / ri;
+                numerator += weight * self.params[i];
+                denominator += weight;
+            }
+            if rj > 0.0 {
+                let weight = tangent / rj;
+                numerator += weight * self.params[j];
+                denominator += weight;
+            }
+        }
+        if denominator == 0.0 || !denominator.is_finite() || !numerator.is_finite() {
+            return self.nearest_param(p, translate);
+        }
+        (numerator / denominator).clamp(0.0, 1.0)
     }
 
     /// The parameter of the station nearest a point — the degenerate fallback.
@@ -4142,6 +4379,181 @@ mod tests {
         let mut params = Vec::new();
         GradientField::build_with_into(stations, &mut points, &mut params, segs, map);
         (points, params)
+    }
+
+    /// Own the backing for a field that retains compiled subpath boundaries.
+    #[allow(clippy::type_complexity)]
+    fn contour_field_of(
+        path: &QuadPath,
+        map: ScreenMap,
+    ) -> (Vec<[f64; 2]>, Vec<f64>, Vec<usize>, Vec<f64>) {
+        let (shape, segments) = shaped(path, Hint::General);
+        let mut points = Vec::new();
+        let mut params = Vec::new();
+        let mut next = Vec::new();
+        let mut edge_params = Vec::new();
+        GradientField::build_contours_into(
+            &mut points,
+            &mut params,
+            &mut next,
+            &mut edge_params,
+            &segments,
+            &shape.subpath_starts,
+            map,
+        );
+        (points, params, next, edge_params)
+    }
+
+    fn annulus_path(cx: f64, cy: f64, outer_radius: f64, inner_radius: f64) -> QuadPath {
+        let outer = circle_path(cx, cy, outer_radius, 16);
+        let mut inner = circle_path(cx, cy, inner_radius, 16);
+        inner.reverse_points();
+        let mut ring = QuadPath::default();
+        ring.add_subpath(outer.points()).expect("outer contour");
+        ring.add_subpath(inner.points()).expect("inner contour");
+        ring
+    }
+
+    fn subdivide_every_curve(path: &QuadPath) -> QuadPath {
+        let mut split = QuadPath::default();
+        for subpath in path.subpaths() {
+            let contour = QuadPath::from_points(subpath.to_vec()).expect("valid contour");
+            let mut refined = QuadPath::default();
+            for curve in 0..contour.num_curves() {
+                let [p0, p1, p2] = contour.nth_curve_points(curve).expect("curve");
+                let mid = |a: Vec3, b: Vec3| {
+                    [
+                        (a[0] + b[0]) / 2.0,
+                        (a[1] + b[1]) / 2.0,
+                        (a[2] + b[2]) / 2.0,
+                    ]
+                };
+                let q0 = mid(p0, p1);
+                let q1 = mid(p1, p2);
+                let r = mid(q0, q1);
+                if curve == 0 {
+                    refined.start_new_path(p0);
+                }
+                refined
+                    .add_quadratic_bezier_curve_to(q0, r, false)
+                    .expect("first half");
+                refined
+                    .add_quadratic_bezier_curve_to(q1, p2, false)
+                    .expect("second half");
+            }
+            split
+                .add_subpath(refined.points())
+                .expect("refined contour");
+        }
+        split
+    }
+
+    #[test]
+    fn one_contour_keeps_the_original_station_and_evaluation_bits() {
+        let path = circle_path(24.3, 23.7, 15.1, 16);
+        let (old_points, old_params) = field_of(&path, unit());
+        let (points, params, next, edge_params) = contour_field_of(&path, unit());
+        assert_eq!(points, old_points);
+        assert_eq!(params, old_params);
+        assert!(next.is_empty());
+        assert!(edge_params.is_empty());
+
+        let old = GradientField::from_parts(&old_points, &old_params);
+        let current = GradientField::from_parts(&points, &params);
+        for y in 0..48 {
+            for x in 0..48 {
+                let point = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                assert_eq!(
+                    current.param_at(point, [0.0; 2]).to_bits(),
+                    old.param_at(point, [0.0; 2]).to_bits(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_contours_close_their_own_edges_and_interpolate_the_hole_boundary() {
+        let ring = annulus_path(24.0, 24.0, 16.0, 7.0);
+        let (points, params, next, edge_params) = contour_field_of(&ring, unit());
+        assert_eq!(points.len(), GRADIENT_STATIONS);
+        assert_eq!(next.len(), points.len());
+        assert_eq!(edge_params.len(), points.len());
+
+        let closures: Vec<(usize, usize)> = next
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(index, successor)| successor <= index)
+            .collect();
+        assert_eq!(closures.len(), 2, "one closing edge per contour");
+        assert_eq!(closures[0].1, 0, "outer contour closes to itself");
+        let inner_start = closures[0].0 + 1;
+        assert_eq!(closures[1].1, inner_start, "hole closes to itself");
+        assert!(
+            next[..inner_start].iter().all(|&index| index < inner_start),
+            "an outer station crossed into the hole contour"
+        );
+        assert!(
+            next[inner_start..]
+                .iter()
+                .all(|&index| index >= inner_start),
+            "a hole station crossed into the outer contour"
+        );
+
+        let field = GradientField::from_contours(&points, &params, &next, &edge_params);
+        let i = inner_start;
+        let j = next[i];
+        let midpoint = [
+            (points[i][0] + points[j][0]) / 2.0,
+            (points[i][1] + points[j][1]) / 2.0,
+        ];
+        let expected = (params[i] + params[j]) / 2.0;
+        let actual = field.param_at(midpoint, [0.0; 2]);
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "inner boundary midpoint {actual} vs {expected}"
+        );
+    }
+
+    #[test]
+    fn subdividing_each_annulus_contour_does_not_change_the_gradient() {
+        let ring = annulus_path(24.3, 23.7, 15.1, 6.4);
+        let refined = subdivide_every_curve(&ring);
+        let (a_points, a_params, a_next, a_edge_params) = contour_field_of(&ring, unit());
+        let (b_points, b_params, b_next, b_edge_params) = contour_field_of(&refined, unit());
+        assert_eq!(a_next, b_next);
+        assert_eq!(a_points.len(), b_points.len());
+        assert_eq!(a_params.len(), b_params.len());
+        assert_eq!(a_edge_params.len(), b_edge_params.len());
+        for (a, b) in a_points.iter().zip(&b_points) {
+            assert!((a[0] - b[0]).abs() < 1e-9);
+            assert!((a[1] - b[1]).abs() < 1e-9);
+        }
+        for (a, b) in a_params.iter().zip(&b_params) {
+            assert!((a - b).abs() < 1e-12);
+        }
+        for (a, b) in a_edge_params.iter().zip(&b_edge_params) {
+            assert!((a - b).abs() < 1e-12);
+        }
+
+        let a = GradientField::from_contours(&a_points, &a_params, &a_next, &a_edge_params);
+        let b = GradientField::from_contours(&b_points, &b_params, &b_next, &b_edge_params);
+        let mut worst = 0.0f64;
+        for y in 8..40 {
+            for x in 8..40 {
+                let point = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                let radius = ((point[0] - 24.3).powi(2) + (point[1] - 23.7).powi(2)).sqrt();
+                if !(6.4..=15.1).contains(&radius) {
+                    continue;
+                }
+                worst =
+                    worst.max((a.param_at(point, [0.0; 2]) - b.param_at(point, [0.0; 2])).abs());
+            }
+        }
+        assert!(
+            worst < 1e-9,
+            "field drift under contour subdivision {worst}"
+        );
     }
 
     #[test]

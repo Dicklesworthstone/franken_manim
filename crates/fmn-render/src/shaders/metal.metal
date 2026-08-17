@@ -13,7 +13,7 @@ using namespace metal;
 #define SEGMENT_LINEAR 25u
 #define PIECE_STRIDE 6
 #define JOIN_STRIDE 13
-#define STATION_STRIDE 3
+#define STATION_STRIDE 5
 #define DRAW_U32_STRIDE 10
 #define DRAW_F32_STRIDE 8
 #define STYLE_STRIDE 20
@@ -27,6 +27,7 @@ using namespace metal;
 #define DRAW_STROKE 2u
 #define STROKE_BEHIND 4u
 #define FLAT_FILL 8u
+#define MULTI_CONTOUR_GRADIENT 16u
 #define THREE_D_SHADER_GOURAUD 1u
 #define THREE_D_SHADER_DOT 2u
 #define CLASS_INTERIOR 1u
@@ -560,6 +561,73 @@ static float fill_parameter(
     return clamp(numerator / denominator, 0.0f, 1.0f);
 }
 
+static uint station_next(device const float *stations, uint index) {
+    return as_type<uint>(stations[index * STATION_STRIDE + 3u]);
+}
+
+// Hormann--Floater mean value interpolation over a set of cyclic polygons.
+// The host supplies one explicit edge per station, so separate contours never
+// acquire a synthetic bridge. Counter-wound hole contours contribute the
+// signed half-angle weights required by the generalized coordinate formula.
+static float fill_parameter_contours(
+    device const float *stations,
+    uint first,
+    uint count,
+    float2 point
+) {
+    if (count == 0u) return 0.0f;
+
+    for (uint offset = 0u; offset < count; offset++) {
+        uint index = first + offset;
+        float2 delta = station_delta(stations, index, point);
+        if (dot(delta, delta) <= 1e-10f) {
+            return stations[index * STATION_STRIDE + 2u];
+        }
+    }
+    for (uint offset = 0u; offset < count; offset++) {
+        uint a = first + offset;
+        uint b = station_next(stations, a);
+        float ignored = 0.0f;
+        if (!station_tan_half(stations, a, b, point, &ignored)) {
+            float ra = length(station_delta(stations, a, point));
+            float rb = length(station_delta(stations, b, point));
+            float fraction = (ra + rb > 0.0f) ? ra / (ra + rb) : 0.0f;
+            float pa = stations[a * STATION_STRIDE + 2u];
+            float pb = stations[a * STATION_STRIDE + 4u];
+            return mix(pa, pb, fraction);
+        }
+    }
+
+    float numerator = 0.0f;
+    float denominator = 0.0f;
+    for (uint offset = 0u; offset < count; offset++) {
+        uint a = first + offset;
+        uint b = station_next(stations, a);
+        float tangent = 0.0f;
+        station_tan_half(stations, a, b, point, &tangent);
+        float ra = length(station_delta(stations, a, point));
+        float rb = length(station_delta(stations, b, point));
+        if (ra > 0.0f) {
+            float weight = tangent / ra;
+            numerator += weight * stations[a * STATION_STRIDE + 2u];
+            denominator += weight;
+        }
+        if (rb > 0.0f) {
+            float weight = tangent / rb;
+            numerator += weight * stations[b * STATION_STRIDE + 2u];
+            denominator += weight;
+        }
+    }
+    if (
+        denominator == 0.0f
+        || !isfinite(denominator)
+        || !isfinite(numerator)
+    ) {
+        return nearest_station_parameter(stations, first, count, point);
+    }
+    return clamp(numerator / denominator, 0.0f, 1.0f);
+}
+
 static float aa_coverage(float excess, float aa_width) {
     float width = max(aa_width, MIN_AA_WIDTH);
     float t = clamp(0.5f - excess / width, 0.0f, 1.0f);
@@ -649,8 +717,9 @@ static float4 fill_colour(
 
     uint first_station = draw_u32[du + 6u];
     uint station_count = draw_u32[du + 7u];
-    float parameter =
-        fill_parameter(stations, first_station, station_count, point);
+    float parameter = ((flags & MULTI_CONTOUR_GRADIENT) != 0u)
+        ? fill_parameter_contours(stations, first_station, station_count, point)
+        : fill_parameter(stations, first_station, station_count, point);
     float4 interior = fill_ramp(styles, style, parameter);
     float border_width = styles[style + 18u];
     if (border_width <= 0.0f) return interior;

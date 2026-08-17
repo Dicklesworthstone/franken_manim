@@ -278,7 +278,7 @@ pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
 /// every pixel. It is deliberately not the crate version: a refactor that cannot
 /// move a bit must not invalidate a manifest, and a one-line change to the AA
 /// profile must.
-pub const RENDERER_VERSION: u32 = 5;
+pub const RENDERER_VERSION: u32 = 6;
 
 /// Boundary-sheet count at which an adaptive cell escalates to 2×2 samples.
 ///
@@ -1101,6 +1101,10 @@ pub(crate) struct FieldRef {
     pub(crate) points: PoolRange,
     /// Range into the arena's station-parameter pool, index-aligned.
     pub(crate) params: PoolRange,
+    /// Range into the arena's explicit next-station pool.
+    pub(crate) next: PoolRange,
+    /// Range into the arena's explicit boundary-edge parameter pool.
+    pub(crate) edge_params: PoolRange,
 }
 
 /// A frame was assembled from derived artifacts that do not share one input
@@ -1645,10 +1649,15 @@ impl<'a> FrameJob<'a> {
             let field = if draws_fill && !flat {
                 let points_start = arena.gradient_points.len();
                 let params_start = arena.gradient_params.len();
-                GradientField::build_into(
+                let next_start = arena.gradient_next.len();
+                let edge_params_start = arena.gradient_edge_params.len();
+                GradientField::build_contours_into(
                     &mut arena.gradient_points,
                     &mut arena.gradient_params,
+                    &mut arena.gradient_next,
+                    &mut arena.gradient_edge_params,
                     effective_segments,
+                    &shape.subpath_starts,
                     map,
                 );
                 Some(FieldRef {
@@ -1658,6 +1667,12 @@ impl<'a> FrameJob<'a> {
                     params: arena
                         .gradient_params
                         .range_from("gradient parameter rows", params_start)?,
+                    next: arena
+                        .gradient_next
+                        .range_from("gradient next-station rows", next_start)?,
+                    edge_params: arena
+                        .gradient_edge_params
+                        .range_from("gradient edge-parameter rows", edge_params_start)?,
                 })
             } else {
                 None
@@ -1763,10 +1778,18 @@ impl<'a> FrameJob<'a> {
     /// One draw's gradient field, reconstituted as the borrowed view.
     pub(crate) fn field_of(&self, rec: &Draw) -> Option<GradientField<'_>> {
         rec.field.map(|field| {
-            GradientField::from_parts(
-                self.arena().gradient_points.slice(field.points),
-                self.arena().gradient_params.slice(field.params),
-            )
+            let points = self.arena().gradient_points.slice(field.points);
+            let params = self.arena().gradient_params.slice(field.params);
+            if field.next.len == 0 {
+                GradientField::from_parts(points, params)
+            } else {
+                GradientField::from_contours(
+                    points,
+                    params,
+                    self.arena().gradient_next.slice(field.next),
+                    self.arena().gradient_edge_params.slice(field.edge_params),
+                )
+            }
         })
     }
 

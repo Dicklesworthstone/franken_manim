@@ -1112,6 +1112,10 @@ struct PlanarGradientField {
     points: Vec<[f64; 2]>,
     /// Station parameters, index-aligned with `points`.
     params: Vec<f64>,
+    /// Explicit next-station edges for multiple contours.
+    next: Vec<usize>,
+    /// Boundary parameter at the far end of each explicit contour edge.
+    edge_params: Vec<f64>,
     origin: Vec3,
     u: Vec3,
     v: Vec3,
@@ -1765,7 +1769,9 @@ fn compile_vector<'a>(
     }
     let field = if draws_fill && !fill::fill_is_flat(&style) {
         match fill_plane {
-            Some(plane) => PlanarGradientField::build(&world_segments, plane, budget)?,
+            Some(plane) => {
+                PlanarGradientField::build(&world_segments, &shape.subpath_starts, plane, budget)?
+            }
             None => None,
         }
     } else {
@@ -2015,6 +2021,7 @@ fn vector_is_planar(segments: &[Segment], normal: Vec3) -> bool {
 impl PlanarGradientField {
     fn build(
         segments: &[Segment],
+        subpath_starts: &[u32],
         plane: [f64; 4],
         budget: &mut PreparationBudget,
     ) -> Result<Option<Self>, ThreeDError> {
@@ -2056,22 +2063,33 @@ impl PlanarGradientField {
         }
         let mut points = Vec::new();
         let mut params = Vec::new();
+        let mut next = Vec::new();
+        let mut edge_params = Vec::new();
         let stations = if planar_segments.is_empty() {
             0
         } else {
-            fill::GRADIENT_STATIONS
+            GradientField::station_capacity(subpath_starts.len())
         };
         budget.reserve_retained(&mut points, "gradient station points", stations)?;
         budget.reserve_retained(&mut params, "gradient station parameters", stations)?;
-        GradientField::build_into(
+        if subpath_starts.len() > 1 {
+            budget.reserve_retained(&mut next, "gradient station edges", stations)?;
+            budget.reserve_retained(&mut edge_params, "gradient edge parameters", stations)?;
+        }
+        GradientField::build_contours_into(
             &mut points,
             &mut params,
+            &mut next,
+            &mut edge_params,
             &planar_segments,
+            subpath_starts,
             unit_screen_map(),
         );
         Ok(Some(Self {
             points,
             params,
+            next,
+            edge_params,
             origin,
             u,
             v,
@@ -2080,8 +2098,13 @@ impl PlanarGradientField {
 
     fn param_at(&self, world: Vec3) -> f64 {
         let relative = sub(world, self.origin);
-        GradientField::from_parts(&self.points, &self.params)
-            .param_at([dot(relative, self.u), dot(relative, self.v)], [0.0; 2])
+        let point = [dot(relative, self.u), dot(relative, self.v)];
+        if self.next.is_empty() {
+            GradientField::from_parts(&self.points, &self.params).param_at(point, [0.0; 2])
+        } else {
+            GradientField::from_contours(&self.points, &self.params, &self.next, &self.edge_params)
+                .param_at(point, [0.0; 2])
+        }
     }
 }
 

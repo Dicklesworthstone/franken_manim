@@ -348,6 +348,10 @@ pub struct FrameArena {
     pub(crate) gradient_points: Pool<[f64; 2]>,
     /// Gradient station parameters.
     pub(crate) gradient_params: Pool<f64>,
+    /// Per-station next indices for multi-contour gradient fields.
+    pub(crate) gradient_next: Pool<usize>,
+    /// Boundary parameter at the far end of each multi-contour station edge.
+    pub(crate) gradient_edge_params: Pool<f64>,
     /// The draw list itself, index-aligned with the instance list.
     pub(crate) draws: Pool<Option<Draw>>,
     /// Construction scratch for `join_wedges_into`'s corner index pairs.
@@ -370,6 +374,8 @@ impl Default for FrameArena {
             stroke_segments: Pool::default(),
             gradient_points: Pool::default(),
             gradient_params: Pool::default(),
+            gradient_next: Pool::default(),
+            gradient_edge_params: Pool::default(),
             draws: Pool::default(),
             join_pairs: Pool::default(),
             piece_curves: Pool::default(),
@@ -394,6 +400,8 @@ impl FrameArena {
         self.stroke_segments.begin_frame();
         self.gradient_points.begin_frame();
         self.gradient_params.begin_frame();
+        self.gradient_next.begin_frame();
+        self.gradient_edge_params.begin_frame();
         self.draws.begin_frame();
         self.join_pairs.begin_frame();
         self.piece_curves.begin_frame();
@@ -409,6 +417,8 @@ impl FrameArena {
             + self.stroke_segments.allocs()
             + self.gradient_points.allocs()
             + self.gradient_params.allocs()
+            + self.gradient_next.allocs()
+            + self.gradient_edge_params.allocs()
             + self.draws.allocs()
             + self.join_pairs.allocs()
             + self.piece_curves.allocs();
@@ -420,6 +430,8 @@ impl FrameArena {
                 + self.stroke_segments.buffer_bytes()
                 + self.gradient_points.buffer_bytes()
                 + self.gradient_params.buffer_bytes()
+                + self.gradient_next.buffer_bytes()
+                + self.gradient_edge_params.buffer_bytes()
                 + self.draws.buffer_bytes()
                 + self.join_pairs.buffer_bytes()
                 + self.piece_curves.buffer_bytes(),
