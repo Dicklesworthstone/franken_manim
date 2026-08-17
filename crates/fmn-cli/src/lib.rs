@@ -1728,6 +1728,15 @@ fn locate_and_probe_ffmpeg(
     runner: &dyn fmn_platform::process::ProcessRunner,
     configured: &Path,
 ) -> FfmpegReport {
+    locate_and_probe_ffmpeg_in(locator, runner, configured, &std::env::temp_dir())
+}
+
+fn locate_and_probe_ffmpeg_in(
+    locator: &dyn fmn_platform::process::FfmpegLocator,
+    runner: &dyn fmn_platform::process::ProcessRunner,
+    configured: &Path,
+    workdir_parent: &Path,
+) -> FfmpegReport {
     let executable = match locator.locate_ffmpeg(configured) {
         Ok(executable) => executable,
         Err(error) => {
@@ -1738,7 +1747,7 @@ fn locate_and_probe_ffmpeg(
             };
         }
     };
-    match probe_ffmpeg(runner, executable) {
+    match probe_ffmpeg_in(runner, executable, workdir_parent) {
         available @ FfmpegReport::Available { .. } => available,
         FfmpegReport::Unavailable {
             reason,
@@ -1790,12 +1799,13 @@ fn planning_output_format(pixel_format: &str) -> fmn_runtime::OutputPixelFormat 
     }
 }
 
-fn probe_ffmpeg(
+fn probe_ffmpeg_in(
     runner: &dyn fmn_platform::process::ProcessRunner,
     executable: fmn_platform::process::FfmpegExecutable,
+    workdir_parent: &Path,
 ) -> FfmpegReport {
     let path = executable.canonical_path().to_path_buf();
-    let tool = match fmn_output::FfmpegTool::resolve(executable, runner, &std::env::temp_dir()) {
+    let tool = match fmn_output::FfmpegTool::resolve(executable, runner, workdir_parent) {
         Ok(tool) => tool,
         Err(error) => {
             return FfmpegReport::Unavailable {
@@ -5833,12 +5843,15 @@ where
             format!(
                 "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"version\",\
                  \"program\":\"fmn\",\"program_version\":{},\
-                 \"build_id\":{},\"target_triple\":{},\"cargo_profile\":{}}}\n",
+                 \"build_id\":{},\"target_triple\":{},\"cargo_profile\":{},\
+                 \"compiled_tier\":{},\"suite_lock_digest\":{}}}\n",
                 ROBOT_SCHEMA_VERSION,
                 json_string(env!("CARGO_PKG_VERSION")),
                 json_string(BUILD_ID),
                 json_string(TARGET_TRIPLE),
                 json_string(CARGO_PROFILE),
+                json_string(fmn_render::Tier::COMPILED.name()),
+                json_string(&fmn_studio::protocol_digest(SUITE_LOCK_BYTES).to_string()),
             )
         } else {
             format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
@@ -7610,19 +7623,23 @@ mod tests {
         let executable = fmn_platform::process::StdFfmpegLocator::default()
             .locate_ffmpeg(&source)
             .expect("locate native probe fixture");
-        let report = probe_ffmpeg(
+        let report = probe_ffmpeg_in(
             &IdentityChangingProbeRunner {
                 source: source.clone(),
             },
             executable,
+            Path::new("/tmp"),
         );
 
-        assert!(!report.is_available());
-        assert!(matches!(
-            report,
-            FfmpegReport::Unavailable { ref reason, .. }
-                if reason.contains("executable image")
-        ));
+        assert!(!report.is_available(), "unexpected report: {report:?}");
+        assert!(
+            matches!(
+                report,
+                FfmpegReport::Unavailable { ref reason, .. }
+                    if reason.contains("executable image")
+            ),
+            "unexpected report: {report:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -7639,14 +7656,17 @@ mod tests {
         let executable = fmn_platform::process::StdFfmpegLocator::default()
             .locate_ffmpeg(&source)
             .expect("locate native probe fixture");
-        let report = probe_ffmpeg(&WorkdirReplacingProbeRunner, executable);
+        let report = probe_ffmpeg_in(&WorkdirReplacingProbeRunner, executable, Path::new("/tmp"));
 
-        assert!(!report.is_available());
-        assert!(matches!(
-            report,
-            FfmpegReport::Unavailable { ref reason, .. }
-                if reason.contains("claimed directory identity changed")
-        ));
+        assert!(!report.is_available(), "unexpected report: {report:?}");
+        assert!(
+            matches!(
+                report,
+                FfmpegReport::Unavailable { ref reason, .. }
+                    if reason.contains("claimed directory identity changed")
+            ),
+            "unexpected report: {report:?}"
+        );
     }
 
     #[test]
@@ -7721,31 +7741,25 @@ mod tests {
         let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(Some(search_path));
         let canonical = std::fs::canonicalize(&source).expect("canonical source");
         let canonical = canonical.to_str().expect("fixture path is UTF-8");
-        let fs = Arc::new(VirtualFs::new());
-
-        let output = run_with_capabilities(
-            ["doctor", "--robot", "--cache-dir", "/cache"],
-            fs_capability(&fs),
-            Arc::new(SuccessfulFfmpegProbeRunner),
+        let ffmpeg = locate_and_probe_ffmpeg_in(
             &locator,
+            &SuccessfulFfmpegProbeRunner,
+            Path::new("ffmpeg"),
+            Path::new("/tmp"),
         );
 
-        assert_eq!(output.code, 0);
-        assert!(output.stderr.is_empty());
-        assert!(output.stdout.contains(&format!(
-            "\"kind\":\"ffmpeg\",\"available\":true,\"path\":{}",
-            json_string(canonical)
-        )));
-        assert!(
-            output
-                .stdout
-                .contains("\"ffmpeg_version\":\"ffmpeg version cli-locator-fixture\"")
-        );
-        assert!(
-            output
-                .stdout
-                .contains("\"hardware_encoders\":[\"h264_nvenc\"]")
-        );
+        let FfmpegReport::Available {
+            path,
+            version,
+            hardware_encoders,
+            ..
+        } = ffmpeg
+        else {
+            panic!("unexpected report: {ffmpeg:?}");
+        };
+        assert_eq!(path.to_str(), Some(canonical));
+        assert_eq!(version, "ffmpeg version cli-locator-fixture");
+        assert_eq!(hardware_encoders, ["h264_nvenc"]);
     }
 
     #[test]
@@ -8243,9 +8257,16 @@ mod tests {
             format!(
                 concat!(
                     "{{\"schema\":\"fmn.cli\",\"version\":1,\"kind\":\"version\",",
-                    "\"program\":\"fmn\",\"program_version\":\"{}\"}}\n"
+                    "\"program\":\"fmn\",\"program_version\":{},",
+                    "\"build_id\":{},\"target_triple\":{},\"cargo_profile\":{},",
+                    "\"compiled_tier\":{},\"suite_lock_digest\":{}}}\n"
                 ),
-                env!("CARGO_PKG_VERSION")
+                json_string(env!("CARGO_PKG_VERSION")),
+                json_string(BUILD_ID),
+                json_string(TARGET_TRIPLE),
+                json_string(CARGO_PROFILE),
+                json_string(fmn_render::Tier::COMPILED.name()),
+                json_string(&fmn_studio::protocol_digest(SUITE_LOCK_BYTES).to_string()),
             )
         );
 

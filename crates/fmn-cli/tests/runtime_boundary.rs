@@ -103,6 +103,8 @@ fn robot_version_reports_compile_provenance_for_perf_identity() {
     assert!(stdout.contains("\"build_id\":"), "{stdout}");
     assert!(stdout.contains("\"target_triple\":"), "{stdout}");
     assert!(stdout.contains("\"cargo_profile\":"), "{stdout}");
+    assert!(stdout.contains("\"compiled_tier\":"), "{stdout}");
+    assert!(stdout.contains("\"suite_lock_digest\":"), "{stdout}");
 }
 
 #[test]

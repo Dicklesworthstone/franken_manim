@@ -2,7 +2,32 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn selected_profile(out_dir: &Path) -> Result<&str, String> {
+    let directory = out_dir
+        .ancestors()
+        .nth(3)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("cannot derive Cargo profile from OUT_DIR {out_dir:?}"))?;
+    let profile = if directory == "debug" {
+        "dev"
+    } else {
+        directory
+    };
+    if profile.is_empty()
+        || !profile.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(format!(
+            "Cargo selected a non-portable profile directory {directory:?}"
+        ));
+    }
+    Ok(profile)
+}
+
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=FMN_BUILD_ID");
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest dir"));
@@ -26,9 +51,12 @@ fn main() {
         "cargo:rustc-env=FMN_TARGET_TRIPLE={}",
         env::var("TARGET").expect("Cargo target triple")
     );
+    let out_dir = env::var_os("OUT_DIR")
+        .map(PathBuf::from)
+        .expect("Cargo OUT_DIR");
     println!(
         "cargo:rustc-env=FMN_CARGO_PROFILE={}",
-        env::var("PROFILE").expect("Cargo profile")
+        selected_profile(&out_dir).expect("portable Cargo profile directory")
     );
 }
 
