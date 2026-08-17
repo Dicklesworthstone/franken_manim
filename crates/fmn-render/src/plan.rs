@@ -1270,10 +1270,11 @@ fn hash_hint(hash: &mut IdentityHasher, hint: Hint) {
 /// first binding property is that fmn-dmath owns every transcendental on the
 /// certified path. It is decoded **once per interned style row**, not per pixel.
 fn decode_rgba(rgba: [f32; 4]) -> [f32; 4] {
+    let linearize_srgb = fmn_frame::transfer::srgb_decode;
     [
-        fmn_frame::transfer::srgb_decode(f64::from(rgba[0])) as f32,
-        fmn_frame::transfer::srgb_decode(f64::from(rgba[1])) as f32,
-        fmn_frame::transfer::srgb_decode(f64::from(rgba[2])) as f32,
+        linearize_srgb(f64::from(rgba[0])) as f32,
+        linearize_srgb(f64::from(rgba[1])) as f32,
+        linearize_srgb(f64::from(rgba[2])) as f32,
         rgba[3],
     ]
 }

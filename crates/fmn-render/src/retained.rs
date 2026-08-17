@@ -504,10 +504,11 @@ fn record_rgba(
             mob,
             reason: "required rgba record field is absent",
         })?;
+    let linearize_srgb = fmn_frame::transfer::srgb_decode;
     Ok(LinearRgba {
-        r: fmn_frame::transfer::srgb_decode(f64::from(value[0])),
-        g: fmn_frame::transfer::srgb_decode(f64::from(value[1])),
-        b: fmn_frame::transfer::srgb_decode(f64::from(value[2])),
+        r: linearize_srgb(f64::from(value[0])),
+        g: linearize_srgb(f64::from(value[1])),
+        b: linearize_srgb(f64::from(value[2])),
         a: f64::from(value[3]),
     })
 }
