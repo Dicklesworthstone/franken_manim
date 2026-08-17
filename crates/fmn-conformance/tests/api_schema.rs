@@ -266,12 +266,45 @@ fn the_wildcard_surface_is_enumerated_not_assumed() {
         .expect("[meta] wildcard_exports")
         .parse()
         .expect("a count");
+    let exported = schema.exported();
     let names: std::collections::BTreeSet<&str> =
-        schema.exported().iter().map(|s| s.name.as_str()).collect();
+        exported.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names.len(),
         declared,
         "the exported rows and [meta] wildcard_exports disagree"
+    );
+    assert_eq!(declared, 663, "the installed-wheel contract drifted");
+    assert_eq!(
+        exported.len(),
+        665,
+        "the wildcard-exported schema-row inventory drifted"
+    );
+
+    let mut name_counts = std::collections::BTreeMap::new();
+    for symbol in exported {
+        *name_counts.entry(symbol.name.as_str()).or_insert(0_usize) += 1;
+    }
+    let duplicates: Vec<(&str, usize)> = name_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .collect();
+    assert_eq!(
+        duplicates,
+        vec![("DEFAULT_DOT_RADIUS", 2), ("EPSILON", 2)],
+        "duplicate wildcard rows changed; update the generated explanation"
+    );
+
+    let docs = generate_docs_md(&schema);
+    assert!(
+        docs.contains(
+            "`from manimlib import *` binds 663 unique names from 665 wildcard-exported schema rows."
+        ),
+        "generated docs must distinguish unique bindings from schema rows"
+    );
+    assert!(
+        docs.contains("The 2 duplicate rows are `DEFAULT_DOT_RADIUS`, `EPSILON`."),
+        "generated docs must identify the duplicate names"
     );
 
     // The closure genuinely leaks third-party names — that is the finding, not

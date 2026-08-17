@@ -3026,13 +3026,32 @@ pub fn generate_docs_md(schema: &Schema) -> String {
         let _ = writeln!(out, "| {} | {} | {} |", kind.as_str(), all.len(), exported);
     }
 
+    let exported = schema.exported();
+    let mut exported_name_counts = BTreeMap::new();
+    for symbol in &exported {
+        *exported_name_counts
+            .entry(symbol.name.as_str())
+            .or_insert(0_usize) += 1;
+    }
+    let duplicate_names: Vec<&str> = exported_name_counts
+        .iter()
+        .filter_map(|(name, count)| (*count > 1).then_some(*name))
+        .collect();
+    let duplicate_list = duplicate_names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let _ = writeln!(
         out,
-        "\n`from manimlib import *` binds {} names. The Reference declares no \
-         `__all__` (§1.6), so that number is the *computed* wildcard closure, \
-         leaked third-party imports included — enumerating it is the only way to \
-         know what the surface actually is.\n",
-        schema.exported().len()
+        "\n`from manimlib import *` binds {} unique names from {} wildcard-exported \
+         schema rows. The {} duplicate rows are {duplicate_list}. The Reference \
+         declares no `__all__` (§1.6), so the unique-name count is the *computed* \
+         wildcard closure, leaked third-party imports included — enumerating it is \
+         the only way to know what the surface actually is.\n",
+        exported_name_counts.len(),
+        exported.len(),
+        exported.len() - exported_name_counts.len()
     );
 
     let _ = writeln!(

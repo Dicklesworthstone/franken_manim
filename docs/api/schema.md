@@ -25,7 +25,7 @@ Generated from `API_SCHEMA.tsv` (extracted from the pinned Reference) and `API_O
 | constant | 166 | 161 |
 | leaked_import | 73 | 73 |
 
-`from manimlib import *` binds 665 names. The Reference declares no `__all__` (§1.6), so that number is the *computed* wildcard closure, leaked third-party imports included — enumerating it is the only way to know what the surface actually is.
+`from manimlib import *` binds 663 unique names from 665 wildcard-exported schema rows. The 2 duplicate rows are `DEFAULT_DOT_RADIUS`, `EPSILON`. The Reference declares no `__all__` (§1.6), so the unique-name count is the *computed* wildcard closure, leaked third-party imports included — enumerating it is the only way to know what the surface actually is.
 
 ## Parity Ledger coverage
 
