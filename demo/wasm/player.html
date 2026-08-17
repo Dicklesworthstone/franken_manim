@@ -50,7 +50,7 @@
   const labels = document.getElementById("labels");
 
   let player = null;
-  let scratch = null;   // reused across renders: the render_into zero-copy path
+  let scratch = null;   // reused JS destination; wasm-bindgen still marshals it
   let playing = false;
   let rafId = 0;
 

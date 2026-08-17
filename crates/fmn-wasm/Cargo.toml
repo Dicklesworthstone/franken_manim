@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "W5 tier-1 wasm32 browser surface (fm-l97, §10.7): scene construction + frame rendering to canvas RGBA"
+description = "FrankenManim's single-threaded browser renderer and FMTL timeline player"
+readme = "README.md"
 
 [lib]
 # cdylib is the wasm32 deliverable; rlib keeps host-side tests and clippy on

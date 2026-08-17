@@ -42,7 +42,9 @@ python3 -m http.server 8080 --directory demo/wasm
 ```
 
 The page constructs a scene, then scrubs/plays captured frames through the
-zero-copy `render_into` path into `ImageData`.
+caller-buffer-reusing `render_into` path into `ImageData`. wasm-bindgen still
+marshals the mutable slice through WebAssembly memory; this avoids a fresh
+returned JS array per frame but is not a zero-copy JS/WASM transfer.
 
 ## Tier 2: the FMTL/1 timeline player (fm-oee)
 
@@ -64,6 +66,32 @@ python3 -m http.server 8080 --directory demo/wasm
 
 The bundle's size is recorded with headroom in `SIZE_BUDGET.tsv`
 (`demo-timeline-bundle` row), enforced by a host test.
+
+## npm package and real-browser release gate
+
+The publishable artifact uses wasm-pack's `bundler` target, carries its README,
+the engine/font manifest, and all license texts, and records the exact source
+commit in `package.json`. The release gate builds that package from scratch,
+checks workspace/npm/runtime version lockstep, enforces raw and gzip size
+budgets, verifies the exact `npm pack` and `npm publish --dry-run` inventories,
+installs the tarball into a fresh consumer, bundles that consumer with webpack,
+and renders both a primitive scene and `bundle.fmtl` in real headless Chromium:
+
+```sh
+scripts/check_wasm_package.sh
+```
+
+The verified tool versions are wasm-pack 0.15.0, webpack 5.109.2, and
+webpack-cli 7.2.2. The script never publishes and never deletes its task
+directory; its final line names the preserved evidence root. Set
+`FMN_WASM_PACKAGE_ROOT` to choose a new, nonexistent evidence directory.
+If those exact webpack packages live in a task-local `node_modules`, set
+`FMN_WEBPACK` to its `.bin/webpack`, `FMN_NODE_PATH` to that `node_modules`,
+and `FMN_NODE` to the real Node executable (not Bun's partial `node` shim).
+
+Only the single-threaded npm artifact exists today. A future threads artifact
+must be separate and served with cross-origin isolation headers; the current
+package does not imply or advertise that capability.
 
 ## Artifact size (R19)
 

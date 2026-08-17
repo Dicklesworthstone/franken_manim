@@ -34,7 +34,7 @@
 //! const pixels = scene.render_frame(0);        // Uint8Array, w*h*4
 //! const image = new ImageData(new Uint8ClampedArray(pixels), scene.width, scene.height);
 //! ctx.putImageData(image, 0, 0);
-//! // zero-copy variant: reuse a caller buffer across frames
+//! // caller-storage variant: reuse one JS buffer across frames
 //! const scratch = new Uint8Array(scene.width * scene.height * 4);
 //! scene.render_into(1, scratch);
 //! ```
@@ -92,6 +92,16 @@ const FRAME_HEIGHT_UNITS: f64 = 8.0;
 /// Pixel-dimension ceiling: enough headroom for a 4K canvas, small enough
 /// that a hostile or mistaken dimension cannot allocate absurd buffers.
 const MAX_DIMENSION: u32 = 4096;
+
+/// The engine/package version compiled into this module.
+///
+/// Release packaging verifies this value against both the workspace version
+/// and the generated npm `package.json`, so a stale JS/WASM artifact cannot
+/// masquerade as the current engine.
+#[wasm_bindgen]
+pub fn engine_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -602,9 +612,11 @@ impl FmnScene {
         Ok(render_packet_rgba8(&self.build, index as usize)?)
     }
 
-    /// The zero-copy variant: render `index` into a caller-owned buffer of
-    /// exactly `width * height * 4` bytes, so scrubbing never allocates a
-    /// fresh frame per step.
+    /// Render `index` into caller-owned JS storage of exactly
+    /// `width * height * 4` bytes, so the caller can reuse one destination
+    /// rather than receive a fresh `Uint8Array` per frame. wasm-bindgen still
+    /// marshals the mutable slice through WebAssembly memory; this is storage
+    /// reuse, not a zero-copy JS/WASM transfer.
     ///
     /// # Errors
     /// `JsError` for a wrong-length destination, out-of-range index, or a
@@ -617,6 +629,11 @@ impl FmnScene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exported_engine_version_tracks_the_workspace_package() {
+        assert_eq!(engine_version(), env!("CARGO_PKG_VERSION"));
+    }
 
     #[test]
     fn every_kind_constructs_and_renders_a_nonempty_frame() {
@@ -794,23 +811,20 @@ mod tests {
         }
     }
 
-    /// The browser smoke test: there is no wasm test runner in the governed
-    /// closure (wasm-bindgen is the only sanctioned new dependency, and
-    /// `wasm-bindgen-test` would be a second one), so this is a manual
-    /// procedure, kept honest by asserting the demo assets exist. Run it:
-    ///
-    /// ```text
-    /// cargo build --target wasm32-unknown-unknown --release -p fmn-wasm
-    /// wasm-bindgen --target web --out-dir demo/wasm/pkg \
-    ///     target/wasm32-unknown-unknown/release/fmn_wasm.wasm
-    /// python3 -m http.server 8080 --directory demo/wasm
-    /// # open http://localhost:8080/ — a canvas shows the scrubbed scene
-    /// ```
+    /// Keep the tier-1 half of the executable package/browser harness in the
+    /// source closure. `scripts/check_wasm_package.sh` is the behavioral gate:
+    /// it installs the packed tarball, bundles this fixture, and requires its
+    /// success marker from real headless Chromium.
     #[test]
-    #[ignore = "manual browser procedure; see the doc comment for the exact commands"]
-    fn browser_smoke_manual() {
-        let demo =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/wasm/index.html");
-        assert!(demo.exists(), "demo/wasm/index.html is missing");
+    fn tier1_package_browser_harness_assets_exist() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            "demo/wasm/smoke.html",
+            "demo/wasm/smoke.mjs",
+            "demo/wasm/webpack.config.cjs",
+            "scripts/check_wasm_package.sh",
+        ] {
+            assert!(root.join(relative).is_file(), "{relative} is missing");
+        }
     }
 }

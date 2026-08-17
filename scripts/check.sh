@@ -86,4 +86,15 @@ else
     echo "==> wasm32 headless smoke SKIPPED: no node on PATH (wasm-smoke/run.sh needs node or bun)"
 fi
 
+# W11 npm/WASM packaging is a release gate because it deliberately requires
+# wasm-pack, npm, webpack, and Chromium in addition to the governed Rust
+# closure. Opt in on release hosts; the script itself fails closed on tool
+# versions, artifact freshness, package inventory, size, and browser behavior.
+if [[ "${FMN_WASM_PACKAGE_GATE:-0}" == "1" ]]; then
+    echo "==> npm/WASM package + real-browser release gate"
+    scripts/check_wasm_package.sh
+else
+    echo "==> npm/WASM package release gate SKIPPED: set FMN_WASM_PACKAGE_GATE=1"
+fi
+
 echo "OK: all gates green"

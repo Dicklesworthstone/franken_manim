@@ -274,7 +274,16 @@ python3 -m http.server 8080 --directory demo/wasm   # open http://localhost:8080
 ```
 
 See `demo/wasm/README.md` for the `cargo` + `wasm-bindgen` CLI fallback and
-the R19 artifact-size budget (`crates/fmn-wasm/SIZE_BUDGET.tsv`).
+the R19 artifact-size budget (`crates/fmn-wasm/SIZE_BUDGET.tsv`). The shipped
+npm artifact has a separate release gate:
+
+```bash
+scripts/check_wasm_package.sh   # pack + publish dry-run + webpack + Chromium
+```
+
+That gate consumes the actual tarball in a fresh npm project, renders both a
+primitive scene and the FMTL player in Chromium, and verifies version lockstep,
+the exact package inventory, bundled license texts, and raw/gzip size ceilings.
 
 ## The timeline player (W5 wasm tier 2)
 

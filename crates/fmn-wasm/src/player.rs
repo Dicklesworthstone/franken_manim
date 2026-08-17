@@ -275,7 +275,7 @@ impl PlayerCore {
 /// const player = FmnPlayer.from_bundle(await (await fetch("bundle.fmtl")).arrayBuffer());
 /// player.set_viewport(canvas.width, canvas.height);
 /// const pixels = player.render_frame(0);            // Uint8Array, w*h*4
-/// player.render_into(1, scratch);                   // zero-copy scrubbing
+/// player.render_into(1, scratch);                   // caller-buffer reuse
 /// ```
 #[wasm_bindgen]
 pub struct FmnPlayer {
@@ -400,9 +400,11 @@ impl FmnPlayer {
         Ok(self.core.render_index(index)?)
     }
 
-    /// The zero-copy variant: render `index` into a caller-owned buffer of
-    /// exactly `width * height * 4` bytes, so scrubbing never allocates a
-    /// fresh frame per step.
+    /// Render `index` into caller-owned JS storage of exactly
+    /// `width * height * 4` bytes, so the caller can reuse one destination
+    /// rather than receive a fresh `Uint8Array` per frame. wasm-bindgen still
+    /// marshals the mutable slice through WebAssembly memory; this is storage
+    /// reuse, not a zero-copy JS/WASM transfer.
     ///
     /// # Errors
     /// `JsError` for a wrong-length destination, unset viewport,
@@ -767,23 +769,11 @@ mod tests {
         );
     }
 
-    /// The tier-2 browser smoke: like tier 1's, a manual procedure (no
-    /// wasm test runner is sanctioned), kept honest by asserting the demo
-    /// assets exist. Run it:
-    ///
-    /// ```text
-    /// wasm-pack build --target web --out-dir ../../demo/wasm/pkg crates/fmn-wasm
-    /// cargo run -p fmn-wasm --example export_bundle
-    /// python3 -m http.server 8080 --directory demo/wasm
-    /// # open http://localhost:8080/player.html — a canvas shows the
-    /// # bundle scrubbed; the label buttons jump to segment boundaries
-    /// ```
+    /// Keep the tier-2 input to the executable package/browser harness in the
+    /// source closure. `scripts/check_wasm_package.sh` proves the bundled npm
+    /// consumer loads and renders this exact FMTL/1 artifact in Chromium.
     #[test]
-    #[ignore = "manual browser procedure; see the doc comment for the exact commands"]
-    fn player_browser_smoke_manual() {
-        let demo =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/wasm/player.html");
-        assert!(demo.exists(), "demo/wasm/player.html is missing");
+    fn tier2_package_browser_harness_carries_the_current_bundle() {
         let bundle =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/wasm/bundle.fmtl");
         assert!(
