@@ -92,6 +92,20 @@ fn standalone_binary_starts_without_a_python_runtime_on_path() {
 }
 
 #[test]
+fn robot_version_reports_compile_provenance_for_perf_identity() {
+    let output = run_clean(&["--robot", "--version"]);
+    let stdout = String::from_utf8(output.stdout).expect("version output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("\"kind\":\"version\""), "{stdout}");
+    assert!(stdout.contains("\"build_id\":"), "{stdout}");
+    assert!(stdout.contains("\"target_triple\":"), "{stdout}");
+    assert!(stdout.contains("\"cargo_profile\":"), "{stdout}");
+}
+
+#[test]
 fn python_source_is_refused_before_file_or_process_access() {
     for args in [
         &["--robot", "missing-scene.py", "Demo"][..],

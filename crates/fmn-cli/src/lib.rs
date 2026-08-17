@@ -5832,9 +5832,13 @@ where
         Invocation::Version { robot } => RunOutput::success(if robot {
             format!(
                 "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"version\",\
-                 \"program\":\"fmn\",\"program_version\":{}}}\n",
+                 \"program\":\"fmn\",\"program_version\":{},\
+                 \"build_id\":{},\"target_triple\":{},\"cargo_profile\":{}}}\n",
                 ROBOT_SCHEMA_VERSION,
-                json_string(env!("CARGO_PKG_VERSION"))
+                json_string(env!("CARGO_PKG_VERSION")),
+                json_string(BUILD_ID),
+                json_string(TARGET_TRIPLE),
+                json_string(CARGO_PROFILE),
             )
         } else {
             format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
