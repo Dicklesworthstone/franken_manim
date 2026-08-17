@@ -146,10 +146,12 @@ impl FrontdoorScenario {
     /// Fixed sample count from the policy catalog.
     #[must_use]
     pub const fn sample_count(self) -> usize {
-        match self.gate() {
-            GateId::Pg1 => PG1_SAMPLE_COUNT,
-            GateId::Pg3 | GateId::Pg4 => FRONTDOOR_SAMPLE_COUNT,
-            _ => unreachable!(),
+        match self {
+            Self::OpeningClassG2 | Self::OpeningClassG4 => PG1_SAMPLE_COUNT,
+            Self::Export4k2d
+            | Self::Preview1080p
+            | Self::ColdCliFirstFrame
+            | Self::TrailingEditToFrame => FRONTDOOR_SAMPLE_COUNT,
         }
     }
 
@@ -259,24 +261,31 @@ impl Pg1Reference {
                 "Reference evidence fields do not match the version-1 schema".to_owned(),
             ));
         }
-        let reference_commit = fields["reference_commit"].to_owned();
+        let field = |name| {
+            fields.get(name).copied().ok_or_else(|| {
+                FrontdoorError::Identity(format!(
+                    "Reference evidence omitted required field {name:?}"
+                ))
+            })
+        };
+        let reference_commit = field("reference_commit")?.to_owned();
         if reference_commit != REFERENCE_COMMIT {
             return Err(FrontdoorError::Identity(format!(
                 "Reference commit {reference_commit:?} is not the pinned {REFERENCE_COMMIT}"
             )));
         }
-        let host_fingerprint = parse_digest(fields["host_fingerprint"], "host_fingerprint")?;
+        let host_fingerprint = parse_digest(field("host_fingerprint")?, "host_fingerprint")?;
         let benchmark_definition =
-            parse_digest(fields["benchmark_definition"], "benchmark_definition")?;
-        let output_mode = fields["output_mode"].to_owned();
+            parse_digest(field("benchmark_definition")?, "benchmark_definition")?;
+        let output_mode = field("output_mode")?.to_owned();
         if output_mode != "ffmpeg-video" {
             return Err(FrontdoorError::Identity(format!(
                 "Reference output mode {output_mode:?} is not ffmpeg-video"
             )));
         }
-        let median_ns = parse_u64(fields["median_ns"], "median_ns")?;
-        let valid_samples = parse_usize(fields["valid_samples"], "valid_samples")?;
-        let invalid_samples = parse_usize(fields["invalid_samples"], "invalid_samples")?;
+        let median_ns = parse_u64(field("median_ns")?, "median_ns")?;
+        let valid_samples = parse_usize(field("valid_samples")?, "valid_samples")?;
+        let invalid_samples = parse_usize(field("invalid_samples")?, "invalid_samples")?;
         if median_ns == 0 || valid_samples < 9 || invalid_samples > 2 {
             return Err(FrontdoorError::Identity(
                 "Reference evidence is not a qualified 9-valid/2-invalid observation".to_owned(),
@@ -857,6 +866,21 @@ fn measure_render_samples(
     expected_external_tool: Option<Digest>,
     observations: &mut Vec<ProbeObservation>,
 ) -> Result<Vec<Sample>, FrontdoorError> {
+    let reference_median_ns = if definition.scenario.gate() == GateId::Pg1 {
+        Some(
+            definition
+                .reference
+                .as_ref()
+                .ok_or_else(|| {
+                    FrontdoorError::Identity(
+                        "PG-1 definition omitted required Reference evidence".to_owned(),
+                    )
+                })?
+                .median_ns,
+        )
+    } else {
+        None
+    };
     let mut samples = Vec::with_capacity(sample_count);
     for index in 0..sample_count {
         let output_root = work_root.join(format!("sample-{index:02}"));
@@ -870,12 +894,7 @@ fn measure_render_samples(
             expected_external_tool,
             index,
         )?;
-        if definition.scenario.gate() == GateId::Pg1 {
-            let expected = definition
-                .reference
-                .as_ref()
-                .expect("PG-1 definition has Reference evidence")
-                .median_ns;
+        if let Some(expected) = reference_median_ns {
             samples.push(ratio_sample(observation.elapsed_ns, expected));
         } else {
             samples.push(fps_milli_sample(observation.frames, observation.elapsed_ns));
@@ -962,7 +981,9 @@ fn measure_preview_samples(
     let mut studio = StudioSession::start(definition, source_path, &cache_root)?;
     let mut samples = Vec::with_capacity(sample_count);
     for index in 0..sample_count {
-        let frame = u64::try_from(index % 30).expect("bounded frame index");
+        let frame = u64::try_from(index % 30).map_err(|_| {
+            FrontdoorError::Identity("preview frame index does not fit u64".to_owned())
+        })?;
         let started = Instant::now();
         let response = studio.post_scrub(frame, false)?;
         let elapsed_ns = started.elapsed().as_nanos();
