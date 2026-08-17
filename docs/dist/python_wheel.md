@@ -25,6 +25,8 @@ CPython-free.
 Native Linux x86-64, macOS AArch64, and Windows x86-64 wheels have been built
 and smoke-tested from exact source commits; immutable size and digest receipts
 are recorded below, including the published `v0.2.0` release-tag artifacts.
+The published `v0.3.0` receipts additionally cover the atomic final-state PNG
+route and all eight locked source-unedited corpus scenes.
 Linux AArch64 remains unproven because no native
 certification host is currently configured, so `fm-vsq` stays open rather than
 substituting cross-compilation or emulation for native evidence.
@@ -75,7 +77,7 @@ operations:
 fmn-python [--robot] --version
 fmn-python [--robot] --list-scenes SOURCE.py
 fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence]
+fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence|png]
            [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
            [--video_dir DIRECTORY]
 ```
@@ -84,7 +86,9 @@ fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence]
 `rendered=false`; it does not claim pixels or output files. The standard
 PNG-sequence route captures immutable Python-scene lifecycle frames, renders
 them through the shared retained Lumen CPU renderer, and publishes one atomic,
-no-clobber generation through Reel. Its success record reports
+no-clobber generation through Reel. The `png` route uses the same production
+path and atomically publishes the final captured frame as one still. Their
+success records report
 `rendered=true`, frame and byte counts, the canonical ordered-tree digest,
 engine identity, and render-team width.
 
