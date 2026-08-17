@@ -6,6 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+echo "==> native installer smoke"
+bash scripts/test_install.sh
+
 echo "==> cargo fmt --check"
 cargo fmt --check
 

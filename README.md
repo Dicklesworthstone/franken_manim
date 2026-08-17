@@ -292,7 +292,7 @@ python3 -m http.server 8080 --directory demo/wasm   # open http://localhost:8080
 
 ## Installation
 
-**1. Install script (recommended).** Detects your platform, fetches the signed release binary (with the right SIMD build tier), and installs `fmn`:
+**1. Install script (recommended).** Detects your platform, fetches and SHA-256 verifies the published native release archive, and installs `fmn`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_manim/main/scripts/install.sh | bash
