@@ -26,12 +26,18 @@ use fmn_conformance::font_bundle::{
 };
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const EXIT_USAGE: u8 = 64;
 const EXIT_DATA: u8 = 65;
 const EXIT_IO: u8 = 74;
+const MAX_SUITE_LOCK_BYTES: u64 = 1024 * 1024;
+const MAX_LICENSE_BYTES: u64 = 256 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CHECKOUT_CANDIDATES: usize = 64;
+const MAX_DIAGNOSTIC_VALUE_BYTES: usize = 512;
 
 struct Cli {
     check: bool,
@@ -39,6 +45,7 @@ struct Cli {
     fmd_font: Option<PathBuf>,
 }
 
+#[derive(Debug)]
 enum CliError {
     Usage(String),
     Data(String),
@@ -106,8 +113,7 @@ fn parse_args(args: &[String]) -> Result<Cli, CliError> {
 
 /// Reads SUITE.lock's `franken_markdown` pin.
 fn suite_pin(repo: &Path) -> Result<String, CliError> {
-    let text = fs::read_to_string(repo.join("SUITE.lock"))
-        .map_err(|e| CliError::Io(format!("reading SUITE.lock: {e}")))?;
+    let text = read_utf8_bounded(&repo.join("SUITE.lock"), "SUITE.lock", MAX_SUITE_LOCK_BYTES)?;
     suite_lock_pin(&text, "franken_markdown")
         .ok_or_else(|| CliError::Data("SUITE.lock pins no franken_markdown row".to_owned()))
 }
@@ -126,20 +132,44 @@ fn discover_fmd_font(rev: &str) -> Result<PathBuf, CliError> {
     let entries = fs::read_dir(&checkouts)
         .map_err(|e| CliError::Io(format!("reading {}: {e}", checkouts.display())))?;
     let mut candidates = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CliError::Io(format!(
+                "reading checkout entry under {}: {error}",
+                bounded_diagnostic(&checkouts.to_string_lossy())
+            ))
+        })?;
         let name = entry.file_name();
         if !name.to_string_lossy().starts_with("franken_markdown-") {
             continue;
         }
-        let Ok(revs) = fs::read_dir(entry.path()) else {
-            continue;
-        };
-        for rev_dir in revs.flatten() {
+        let checkout = entry.path();
+        let revs = fs::read_dir(&checkout).map_err(|error| {
+            CliError::Io(format!(
+                "reading franken_markdown checkout {}: {error}",
+                bounded_diagnostic(&checkout.to_string_lossy())
+            ))
+        })?;
+        for rev_dir in revs {
+            let rev_dir = rev_dir.map_err(|error| {
+                CliError::Io(format!(
+                    "reading revision entry under {}: {error}",
+                    bounded_diagnostic(&checkout.to_string_lossy())
+                ))
+            })?;
             let short = rev_dir.file_name().to_string_lossy().into_owned();
             if short.len() >= 7 && rev.starts_with(&short) {
                 let candidate = rev_dir.path().join("fmd-font");
                 if candidate.is_dir() {
                     candidates.push(candidate);
+                    if candidates.len() > MAX_CHECKOUT_CANDIDATES {
+                        return Err(CliError::Data(format!(
+                            "more than {MAX_CHECKOUT_CANDIDATES} fmd-font checkouts match rev {} \
+                             under {}; pass --fmd-font",
+                            bounded_diagnostic(rev),
+                            bounded_diagnostic(&checkouts.to_string_lossy())
+                        )));
+                    }
                 }
             }
         }
@@ -150,21 +180,78 @@ fn discover_fmd_font(rev: &str) -> Result<PathBuf, CliError> {
             .next()
             .ok_or_else(|| CliError::Data("no fmd-font candidate".to_owned())),
         0 => Err(CliError::Data(format!(
-            "no fmd-font checkout for franken_markdown rev {rev} under {}; run `cargo fetch` or \
+            "no fmd-font checkout for franken_markdown rev {} under {}; run `cargo fetch` or \
              pass --fmd-font",
-            checkouts.display()
+            bounded_diagnostic(rev),
+            bounded_diagnostic(&checkouts.to_string_lossy())
         ))),
         _ => Err(CliError::Data(format!(
-            "ambiguous fmd-font checkouts for rev {rev}: {candidates:?}; pass --fmd-font"
+            "ambiguous fmd-font checkouts for rev {}: {} candidates under {}; pass --fmd-font",
+            bounded_diagnostic(rev),
+            candidates.len(),
+            bounded_diagnostic(&checkouts.to_string_lossy())
         ))),
     }
 }
 
-fn read(path: &Path, what: &str) -> Result<Vec<u8>, CliError> {
-    fs::read(path).map_err(|e| CliError::Io(format!("reading {what} ({}): {e}", path.display())))
+fn bounded_diagnostic(value: &str) -> String {
+    if value.len() <= MAX_DIAGNOSTIC_VALUE_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_DIAGNOSTIC_VALUE_BYTES.saturating_sub(3);
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}...", &value[..end])
 }
 
-fn write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+fn read_bytes_bounded(reader: impl Read, what: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| CliError::Data(format!("invalid byte limit for {what}")))?;
+    let mut bytes = Vec::new();
+    reader
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CliError::Io(format!("reading {what}: {error}")))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(CliError::Data(format!(
+            "{what} exceeds the {max_bytes}-byte input limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+fn read_bounded(path: &Path, what: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
+    let file = fs::File::open(path)
+        .map_err(|error| CliError::Io(format!("opening {what} ({}): {error}", path.display())))?;
+    read_bytes_bounded(file, what, max_bytes)
+}
+
+fn read_utf8_bounded(path: &Path, what: &str, max_bytes: u64) -> Result<String, CliError> {
+    decode_utf8(read_bounded(path, what, max_bytes)?, what)
+}
+
+fn decode_utf8(bytes: Vec<u8>, what: &str) -> Result<String, CliError> {
+    String::from_utf8(bytes).map_err(|error| {
+        CliError::Data(format!(
+            "{what} is not UTF-8 at byte {}",
+            error.utf8_error().valid_up_to()
+        ))
+    })
+}
+
+fn validate_output(bytes: &[u8], what: &str, max_bytes: u64) -> Result<(), CliError> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(CliError::Data(format!(
+            "{what} exceeds the {max_bytes}-byte output limit"
+        )));
+    }
+    Ok(())
+}
+
+fn write_bounded(path: &Path, bytes: &[u8], what: &str, max_bytes: u64) -> Result<(), CliError> {
+    validate_output(bytes, what, max_bytes)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| CliError::Io(format!("creating {}: {e}", parent.display())))?;
@@ -179,7 +266,7 @@ fn gather_upstream_ofl(fmd_font: &Path) -> Result<Vec<(&'static str, Vec<u8>)>, 
         .iter()
         .map(|slug| {
             let path = fmd_font.join("fonts").join(slug).join("OFL.txt");
-            read(&path, "upstream OFL text").map(|bytes| (*slug, bytes))
+            read_bounded(&path, "upstream OFL text", MAX_LICENSE_BYTES).map(|bytes| (*slug, bytes))
         })
         .collect()
 }
@@ -191,40 +278,27 @@ fn run(cli: &Cli) -> Result<String, CliError> {
         None => discover_fmd_font(&rev)?,
     };
     let upstream_ofl = gather_upstream_ofl(&fmd_font)?;
-    let engine_license = read(&cli.repo.join("LICENSE"), "the engine LICENSE")?;
+    let engine_license = read_bounded(
+        &cli.repo.join("LICENSE"),
+        "the engine LICENSE",
+        MAX_LICENSE_BYTES,
+    )?;
     let dist = cli.repo.join("dist");
 
-    let mut summary = String::new();
-    if !cli.check {
-        // Ship the license inventory: upstream OFL texts + the engine's
-        // own license, byte-identical to their sources.
-        for (slug, bytes) in &upstream_ofl {
-            let dest = dist.join(ofl_path(slug));
-            write(&dest, bytes)?;
-            let _ = writeln!(
-                summary,
-                "shipped {} ({} bytes)",
-                dest.display(),
-                bytes.len()
-            );
-        }
-        let dest = dist.join(ENGINE_LICENSE_PATH);
-        write(&dest, &engine_license)?;
-        let _ = writeln!(
-            summary,
-            "shipped {} ({} bytes)",
-            dest.display(),
-            engine_license.len()
-        );
-    }
-
-    // The manifest is built from what actually ships: the OFL texts just
-    // written (or, under --check, the committed ones — which must equal
-    // the upstream copies, verified below) and the engine LICENSE.
+    // The manifest is built from what will ship in generation mode or from
+    // the committed copies in check mode. Check mode verifies those copies
+    // against the pinned upstream bytes below.
     let committed_ofl: Vec<(&'static str, Vec<u8>)> = if cli.check {
         LICENSE_SLUGS
             .iter()
-            .map(|slug| read(&dist.join(ofl_path(slug)), "shipped OFL text").map(|b| (*slug, b)))
+            .map(|slug| {
+                read_bounded(
+                    &dist.join(ofl_path(slug)),
+                    "shipped OFL text",
+                    MAX_LICENSE_BYTES,
+                )
+                .map(|bytes| (*slug, bytes))
+            })
             .collect::<Result<_, _>>()?
     } else {
         Vec::new()
@@ -255,7 +329,11 @@ fn run(cli: &Cli) -> Result<String, CliError> {
     };
 
     if cli.check {
-        let shipped_engine = read(&dist.join(ENGINE_LICENSE_PATH), "shipped engine LICENSE")?;
+        let shipped_engine = read_bounded(
+            &dist.join(ENGINE_LICENSE_PATH),
+            "shipped engine LICENSE",
+            MAX_LICENSE_BYTES,
+        )?;
         if shipped_engine != engine_license {
             return Err(CliError::Data(format!(
                 "shipped {ENGINE_LICENSE_PATH} != repository LICENSE; regenerate"
@@ -267,9 +345,19 @@ fn run(cli: &Cli) -> Result<String, CliError> {
     let manifest = build_manifest(&rev, &faces, &ofl_refs, &engine_license)
         .map_err(|e: FontBundleError| CliError::Data(e.to_string()))?;
     let rendered = render_manifest(&manifest);
+    validate_output(
+        rendered.as_bytes(),
+        "rendered font bundle manifest",
+        MAX_MANIFEST_BYTES,
+    )?;
 
+    let mut summary = String::new();
     if cli.check {
-        let committed = read(&cli.repo.join(MANIFEST_PATH), "the committed manifest")?;
+        let committed = read_bounded(
+            &cli.repo.join(MANIFEST_PATH),
+            "the committed manifest",
+            MAX_MANIFEST_BYTES,
+        )?;
         if committed != rendered.as_bytes() {
             return Err(CliError::Data(format!(
                 "{MANIFEST_PATH} drifted from the bundled faces at SUITE.lock rev {rev}; \
@@ -283,8 +371,38 @@ fn run(cli: &Cli) -> Result<String, CliError> {
             manifest.licenses.len()
         );
     } else {
+        // Validate the complete generated document before the first filesystem
+        // mutation, then ship byte-identical license sources and the manifest.
+        for (slug, bytes) in &upstream_ofl {
+            let dest = dist.join(ofl_path(slug));
+            write_bounded(&dest, bytes, "shipped OFL text", MAX_LICENSE_BYTES)?;
+            let _ = writeln!(
+                summary,
+                "shipped {} ({} bytes)",
+                dest.display(),
+                bytes.len()
+            );
+        }
+        let engine_dest = dist.join(ENGINE_LICENSE_PATH);
+        write_bounded(
+            &engine_dest,
+            &engine_license,
+            "shipped engine LICENSE",
+            MAX_LICENSE_BYTES,
+        )?;
+        let _ = writeln!(
+            summary,
+            "shipped {} ({} bytes)",
+            engine_dest.display(),
+            engine_license.len()
+        );
         let dest = cli.repo.join(MANIFEST_PATH);
-        write(&dest, rendered.as_bytes())?;
+        write_bounded(
+            &dest,
+            rendered.as_bytes(),
+            "rendered font bundle manifest",
+            MAX_MANIFEST_BYTES,
+        )?;
         let _ = writeln!(
             summary,
             "wrote {} ({} faces, {} license texts, rev {rev})",
@@ -307,5 +425,69 @@ fn main() -> ExitCode {
             eprintln!("gen_font_manifest: {error}");
             ExitCode::from(error.exit_code())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Error, ErrorKind};
+
+    struct RefusingReader;
+
+    impl Read for RefusingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(Error::new(ErrorKind::PermissionDenied, "refused"))
+        }
+    }
+
+    #[test]
+    fn bounded_reader_accepts_the_limit_and_refuses_limit_plus_one() {
+        let exact = read_bytes_bounded(Cursor::new([b'x'; 8]), "fixture", 8)
+            .expect("exact boundary is valid");
+        assert_eq!(exact, [b'x'; 8]);
+
+        let error = read_bytes_bounded(Cursor::new([b'x'; 9]), "fixture", 8)
+            .expect_err("limit-plus-one must be refused");
+        assert!(matches!(error, CliError::Data(_)));
+        assert_eq!(error.to_string(), "fixture exceeds the 8-byte input limit");
+    }
+
+    #[test]
+    fn bounded_reader_keeps_io_failures_distinct_from_data_refusals() {
+        let error = read_bytes_bounded(RefusingReader, "fixture", 8)
+            .expect_err("reader failure must be preserved");
+        assert!(matches!(error, CliError::Io(_)));
+        assert_eq!(error.exit_code(), EXIT_IO);
+    }
+
+    #[test]
+    fn invalid_utf8_is_a_data_refusal_with_a_stable_offset() {
+        let error = decode_utf8(vec![b'a', 0xff, b'b'], "SUITE.lock")
+            .expect_err("invalid UTF-8 must be refused as data");
+        assert!(matches!(error, CliError::Data(_)));
+        assert_eq!(error.exit_code(), EXIT_DATA);
+        assert_eq!(error.to_string(), "SUITE.lock is not UTF-8 at byte 1");
+    }
+
+    #[test]
+    fn rendered_output_is_bounded_before_any_writer_is_called() {
+        validate_output(&[b'x'; 8], "manifest", 8).expect("exact boundary is valid");
+        let error =
+            validate_output(&[b'x'; 9], "manifest", 8).expect_err("limit-plus-one must be refused");
+        assert!(matches!(error, CliError::Data(_)));
+        assert_eq!(error.exit_code(), EXIT_DATA);
+        assert_eq!(
+            error.to_string(),
+            "manifest exceeds the 8-byte output limit"
+        );
+    }
+
+    #[test]
+    fn ambiguity_diagnostics_have_a_fixed_text_envelope() {
+        let diagnostic = bounded_diagnostic(&"é".repeat(MAX_DIAGNOSTIC_VALUE_BYTES));
+        assert!(diagnostic.len() <= MAX_DIAGNOSTIC_VALUE_BYTES);
+        assert!(diagnostic.ends_with("..."));
+        assert!(diagnostic.is_char_boundary(diagnostic.len()));
     }
 }
