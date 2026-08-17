@@ -17,21 +17,16 @@
 //! no geometric resampling anywhere in the pipeline; scene-space size
 //! comes from `height` and the pixel aspect ratio.
 //!
-//! # Carriage deviation (documented, not silent)
-//!
 //! The detached record dtype is the Reference's exactly — `(point,
-//! im_coords, opacity)`, six points, two triangles — but the pixel data
-//! itself stays on the library value: the detached
-//! [`fmn_mobject::Mobject`] has no texture channel yet (the same seam
-//! `TexturedSurface` lands against), so GPU upload is the render wiring's
-//! job. [`ImageMobject::pixels`] keeps the decoded raster available for
-//! CPU-side sampling and for that wiring.
+//! im_coords, opacity)`, six points, two triangles — and conversion carries
+//! the decoded pixels into Marionette's durable, content-addressed image
+//! resource. Lumen interns repeated resources and consumes these same UVs.
 
 use fmn_codec::{JpegError, JpegLimits, PngError, PngLimits, decode_jpeg, decode_png};
 use fmn_core::constants::{DL, DR, UL, UR};
 use fmn_core::types::Vec3;
-use fmn_mobject::Mobject;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
+use fmn_mobject::{ImageColorSpace, ImageResource, ImageResourceError, ImageSampler, Mobject};
 
 /// The Reference's default `height` for `ImageMobject` (scene units).
 pub const DEFAULT_IMAGE_HEIGHT: f64 = 4.0;
@@ -45,6 +40,8 @@ pub enum ImageError {
     Png(PngError),
     /// The JPEG decoder refused the input.
     Jpeg(JpegError),
+    /// An already-decoded raster violated the durable RGBA8 layout.
+    Resource(ImageResourceError),
 }
 
 impl std::fmt::Display for ImageError {
@@ -57,11 +54,21 @@ impl std::fmt::Display for ImageError {
             ),
             Self::Png(e) => write!(f, "PNG decode refused the input: {e}"),
             Self::Jpeg(e) => write!(f, "JPEG decode refused the input: {e}"),
+            Self::Resource(e) => write!(f, "decoded image layout is invalid: {e}"),
         }
     }
 }
 
-impl std::error::Error for ImageError {}
+impl std::error::Error for ImageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Png(error) => Some(error),
+            Self::Jpeg(error) => Some(error),
+            Self::Resource(error) => Some(error),
+            Self::UnknownFormat => None,
+        }
+    }
+}
 
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_MAGIC: &[u8] = b"\xff\xd8\xff";
@@ -70,10 +77,7 @@ const JPEG_MAGIC: &[u8] = b"\xff\xd8\xff";
 /// (`types/image_mobject.py`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageMobject {
-    width_px: u32,
-    height_px: u32,
-    /// `width_px × height_px × 4` bytes, RGBA8, row 0 the top row (D-23).
-    rgba: Vec<u8>,
+    resource: ImageResource,
     height: f64,
     opacity: f64,
     z_index: i32,
@@ -105,38 +109,34 @@ impl ImageMobject {
     /// Decode PNG bytes under explicit budgets (the untrusted-input path).
     pub fn from_png_with_limits(bytes: &[u8], limits: &PngLimits) -> Result<Self, ImageError> {
         let decoded = decode_png(bytes, limits).map_err(ImageError::Png)?;
-        Ok(Self::from_rgba8(
-            decoded.width,
-            decoded.height,
-            decoded.rgba,
-        ))
+        Self::from_rgba8(decoded.width, decoded.height, decoded.rgba)
     }
 
     /// Decode JPEG bytes under explicit budgets (the untrusted-input path).
     pub fn from_jpeg_with_limits(bytes: &[u8], limits: &JpegLimits) -> Result<Self, ImageError> {
         let decoded = decode_jpeg(bytes, limits).map_err(ImageError::Jpeg)?;
-        Ok(Self::from_rgba8(
-            decoded.width,
-            decoded.height,
-            decoded.rgba,
-        ))
+        Self::from_rgba8(decoded.width, decoded.height, decoded.rgba)
     }
 
     /// Wrap an already-decoded RGBA8 raster (row 0 the top row). A buffer
     /// that is not exactly `width × height × 4` bytes is a programming
-    /// error in the caller, so this constructor is deliberately not the
-    /// untrusted-input path: decoders above guarantee the length.
-    #[must_use]
-    pub fn from_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Self {
-        debug_assert_eq!(rgba.len(), width as usize * height as usize * 4);
-        Self {
-            width_px: width,
-            height_px: height,
+    /// error in the caller. It is still validated here so invalid state can
+    /// never enter a snapshot or a retained table.
+    pub fn from_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, ImageError> {
+        let resource = ImageResource::rgba8(
+            width,
+            height,
             rgba,
+            ImageColorSpace::Srgb,
+            ImageSampler::default(),
+        )
+        .map_err(ImageError::Resource)?;
+        Ok(Self {
+            resource,
             height: DEFAULT_IMAGE_HEIGHT,
             opacity: 1.0,
             z_index: 0,
-        }
+        })
     }
 
     /// The scene-space height (`height=`; default 4.0).
@@ -163,19 +163,19 @@ impl ImageMobject {
     /// Raster width in pixels.
     #[must_use]
     pub fn pixel_width(&self) -> u32 {
-        self.width_px
+        self.resource.width()
     }
 
     /// Raster height in pixels.
     #[must_use]
     pub fn pixel_height(&self) -> u32 {
-        self.height_px
+        self.resource.height()
     }
 
     /// The decoded raster: RGBA8, `width × height × 4` bytes, row 0 top.
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
-        &self.rgba
+        self.resource.pixels()
     }
 
     /// The scene-space height.
@@ -189,11 +189,7 @@ impl ImageMobject {
     /// A zero-height raster (a decoder cannot produce one) would give 0.
     #[must_use]
     pub fn scene_width(&self) -> f64 {
-        if self.height_px == 0 {
-            return 0.0;
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let aspect = f64::from(self.width_px) / f64::from(self.height_px);
+        let aspect = f64::from(self.resource.width()) / f64::from(self.resource.height());
         self.height * aspect
     }
 
@@ -238,15 +234,15 @@ impl ImageMobject {
             clippy::cast_sign_loss,
             clippy::cast_precision_loss
         )]
-        let px = ((self.width_px - 1) as f64 * x_alpha) as usize;
+        let px = (f64::from(self.resource.width() - 1) * x_alpha) as usize;
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             clippy::cast_precision_loss
         )]
-        let py = ((self.height_px - 1) as f64 * (1.0 - y_alpha)) as usize;
-        let offset = (py * self.width_px as usize + px) * 4;
-        let pixel = self.rgba.get(offset..offset + 3)?;
+        let py = (f64::from(self.resource.height() - 1) * (1.0 - y_alpha)) as usize;
+        let offset = (py * self.resource.width() as usize + px) * 4;
+        let pixel = self.resource.pixels().get(offset..offset + 3)?;
         Some([
             f64::from(pixel[0]) / 255.0,
             f64::from(pixel[1]) / 255.0,
@@ -280,7 +276,9 @@ impl From<ImageMobject> for Mobject {
         #[allow(clippy::cast_possible_truncation)]
         let opacity: Vec<f32> = vec![image.opacity as f32; 6];
         buffer.write_range("opacity", 0, &opacity);
-        Mobject::from_buffer(buffer).with_z_index(image.z_index)
+        Mobject::from_buffer(buffer)
+            .with_z_index(image.z_index)
+            .with_image_resource(image.resource)
     }
 }
 
@@ -374,11 +372,20 @@ mod tests {
             ImageMobject::from_bytes(b"\xff\xd8\xff"),
             Err(ImageError::Jpeg(_))
         ));
+        assert!(matches!(
+            ImageMobject::from_rgba8(2, 2, vec![0; 4]),
+            Err(ImageError::Resource(
+                ImageResourceError::InvalidByteLength {
+                    expected: 16,
+                    actual: 4
+                }
+            ))
+        ));
     }
 
     #[test]
     fn records_carry_the_reference_dtype() {
-        let (png, _) = synthetic_png();
+        let (png, rgba) = synthetic_png();
         let mob = Mobject::from(
             ImageMobject::from_png(&png)
                 .expect("decodes")
@@ -402,5 +409,16 @@ mod tests {
             vec![1.0, 1.0]
         );
         assert_eq!(mob.buffer.read(5, "opacity").expect("field"), vec![0.5]);
+        assert_eq!(
+            mob.render_primitive,
+            fmn_mobject::RenderPrimitive::ImageQuad
+        );
+        let resource = mob
+            .image
+            .as_ref()
+            .expect("decoded pixels travel with mobject");
+        assert_eq!(resource.width(), 4);
+        assert_eq!(resource.height(), 3);
+        assert_eq!(resource.pixels(), rgba.as_slice());
     }
 }

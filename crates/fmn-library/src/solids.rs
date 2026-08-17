@@ -713,6 +713,7 @@ impl From<Surface> for Mobject {
             render_primitive: RenderPrimitive::SurfaceGrid {
                 resolution: s.resolution,
             },
+            image: None,
             z_index: s.z_index,
             submobjects: Vec::new(),
         }
@@ -1367,6 +1368,7 @@ impl From<SGroup> for Mobject {
             uniforms: g.uniforms,
             shape: ShapeTag::General,
             render_primitive: RenderPrimitive::Vector,
+            image: None,
             z_index: g.z_index,
             submobjects: g.children.into_iter().map(Mobject::from).collect(),
         }
@@ -2367,6 +2369,7 @@ impl From<TexturedSurface> for Mobject {
             render_primitive: RenderPrimitive::SurfaceGrid {
                 resolution: t.resolution,
             },
+            image: None,
             z_index: t.z_index,
             submobjects: Vec::new(),
         }
@@ -2582,6 +2585,7 @@ impl From<TexturedGeometry> for Mobject {
             uniforms: t.uniforms,
             shape: ShapeTag::General,
             render_primitive: RenderPrimitive::TriangleMesh,
+            image: None,
             z_index: t.z_index,
             submobjects: Vec::new(),
         }

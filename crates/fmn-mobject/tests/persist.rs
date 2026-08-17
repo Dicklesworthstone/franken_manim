@@ -12,8 +12,9 @@ use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{Limits, SerialError, Writer, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{
-    JointType, Mob, Mobject, PersistError, RenderPrimitive, SNAPSHOT_SCHEMA, SceneState, Snapshot,
-    SnapshotLimits, Stage, StageError, UpdaterFn, UpdaterKindTag, UpdaterManifest,
+    ImageColorSpace, ImageResource, ImageSampler, JointType, Mob, Mobject, PersistError,
+    RenderPrimitive, SNAPSHOT_SCHEMA, SceneState, Snapshot, SnapshotLimits, Stage, StageError,
+    UpdaterFn, UpdaterKindTag, UpdaterManifest,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
@@ -140,6 +141,15 @@ fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
     );
     let triangle = stage.add(Mobject::new().with_render_primitive(RenderPrimitive::TriangleMesh));
     let dots = stage.add(Mobject::new().with_render_primitive(RenderPrimitive::DotCloud));
+    let image_resource = ImageResource::rgba8(
+        2,
+        1,
+        vec![255, 0, 0, 255, 0, 255, 0, 128],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let image = stage.add(Mobject::new().with_image_resource(image_resource.clone()));
 
     let identities = [
         (
@@ -150,6 +160,7 @@ fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
         ),
         (triangle, RenderPrimitive::TriangleMesh),
         (dots, RenderPrimitive::DotCloud),
+        (image, RenderPrimitive::ImageQuad),
     ];
     for &(source, expected) in &identities {
         assert_eq!(stage.get(source).unwrap().render_primitive(), expected);
@@ -178,6 +189,10 @@ fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
     for &(source, expected) in &identities {
         assert_eq!(stage.get(source).unwrap().render_primitive(), expected);
     }
+    assert_eq!(
+        stage.get(image).unwrap().image_resource(),
+        Some(&image_resource)
+    );
 
     let bytes = stage.snapshot_bytes().unwrap();
     let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
@@ -193,6 +208,73 @@ fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
     for &(source, expected) in &identities {
         assert_eq!(stage.get(source).unwrap().render_primitive(), expected);
     }
+    assert_eq!(
+        stage.get(image).unwrap().image_resource(),
+        Some(&image_resource)
+    );
+}
+
+#[test]
+fn image_replacement_advances_only_on_semantic_change() {
+    let first = ImageResource::rgba8(
+        1,
+        1,
+        vec![1, 2, 3, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let second = ImageResource::rgba8(
+        1,
+        1,
+        vec![9, 8, 7, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new().with_image_resource(first.clone()));
+    let initial = stage.get(mob).unwrap().image_revision();
+
+    assert!(!stage.set_image_resource(mob, Some(first)).unwrap());
+    assert_eq!(stage.get(mob).unwrap().image_revision(), initial);
+    assert!(stage.set_image_resource(mob, Some(second.clone())).unwrap());
+    assert_eq!(
+        stage.get(mob).unwrap().image_revision(),
+        initial.wrapping_add(1)
+    );
+    assert_eq!(stage.get(mob).unwrap().image_resource(), Some(&second));
+}
+
+#[test]
+fn image_content_digest_mismatch_is_a_typed_corruption_refusal() {
+    let resource = ImageResource::rgba8(
+        2,
+        1,
+        vec![3, 5, 7, 255, 11, 13, 17, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let digest = resource.content_digest();
+    let mut stage = Stage::new();
+    stage.add(Mobject::new().with_image_resource(resource));
+    let mut bytes = stage.snapshot_bytes().unwrap();
+    let body_len = bytes.len() - 32;
+    let positions: Vec<usize> = bytes[..body_len]
+        .windows(digest.as_bytes().len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == digest.as_bytes()).then_some(index))
+        .collect();
+    assert_eq!(positions.len(), 1, "descriptor carries one content digest");
+    bytes[positions[0]] ^= 1;
+    let outer = sha256(&bytes[..body_len]);
+    bytes[body_len..].copy_from_slice(outer.as_bytes());
+
+    assert!(matches!(
+        Snapshot::from_bytes(&bytes, &stage),
+        Err(PersistError::Malformed("image content digest mismatch"))
+    ));
 }
 
 #[test]
@@ -201,8 +283,10 @@ fn unknown_durable_render_primitive_is_a_typed_corruption_refusal() {
     stage.add(Mobject::new());
     let mut bytes = stage.snapshot_bytes().unwrap();
     let body_len = bytes.len() - 32;
-    assert_eq!(bytes[body_len - 1], 0, "one vector primitive tag");
-    bytes[body_len - 1] = u8::MAX;
+    // The v1.6 image table trails the primitive table with one liveness bit
+    // and one absent-resource bit for this entry.
+    assert_eq!(&bytes[body_len - 3..body_len], &[0, 1, 0]);
+    bytes[body_len - 3] = u8::MAX;
     let digest = sha256(&bytes[..body_len]);
     bytes[body_len..].copy_from_slice(digest.as_bytes());
 

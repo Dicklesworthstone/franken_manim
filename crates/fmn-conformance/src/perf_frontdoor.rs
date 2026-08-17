@@ -1731,7 +1731,7 @@ mod tests {
         assert_eq!(opening_a, opening_b);
         assert_eq!(
             sha256(&opening_a).to_string(),
-            "84f07e34260168ee46d486eef81c87e94b608f8711ce9fdae4b425887e5abcf6"
+            "4679efb8e38432db69da0e6bf03acdb713f2fcb91e16d7249fb69da0efd334a4"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);

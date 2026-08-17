@@ -5,7 +5,7 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.5,
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.6,
 //!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
@@ -49,17 +49,18 @@ use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::{ShapeSlot, ShapeTag};
 use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
-use crate::{Placement, RenderPrimitive};
+use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.5.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.6.
 ///
 /// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
 /// stream decodes with no tag, which is exactly what `General` means. Minor
 /// 1.2 appended `z_index`; minor 1.3 preserves the monotonic updater-id
 /// cursor, including identities removed before the snapshot. Minor 1.4 appends
 /// the object→world placement table from fm-7if. Minor 1.5 appends durable
-/// renderer primitive/topology identity.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 5);
+/// renderer primitive/topology identity. Minor 1.6 appends immutable image
+/// descriptors and RGBA8 bytes.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 6);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
 ///
@@ -382,6 +383,9 @@ fn put_render_primitive(w: &mut Writer, primitive: RenderPrimitive) -> Result<()
         RenderPrimitive::DotCloud => {
             w.put_u8(3);
         }
+        RenderPrimitive::ImageQuad => {
+            w.put_u8(4);
+        }
     }
     Ok(())
 }
@@ -399,8 +403,73 @@ fn get_render_primitive(r: &mut Reader<'_>) -> Result<RenderPrimitive, PersistEr
         }),
         2 => Ok(RenderPrimitive::TriangleMesh),
         3 => Ok(RenderPrimitive::DotCloud),
+        4 => Ok(RenderPrimitive::ImageQuad),
         _ => Err(PersistError::Malformed("unknown render primitive")),
     }
+}
+
+fn put_image_resource(w: &mut Writer, image: &ImageResource) {
+    w.put_u32(image.width()).put_u32(image.height());
+    match image.color_space() {
+        ImageColorSpace::Srgb => {
+            w.put_u8(0);
+        }
+        ImageColorSpace::Linear => {
+            w.put_u8(1);
+        }
+        ImageColorSpace::Gamma(gamma) => {
+            w.put_u8(2).put_u32(gamma);
+        }
+    }
+    let put_wrap = |w: &mut Writer, wrap: ImageWrap| {
+        w.put_u8(match wrap {
+            ImageWrap::Repeat => 0,
+            ImageWrap::ClampToEdge => 1,
+            ImageWrap::MirroredRepeat => 2,
+        });
+    };
+    put_wrap(w, image.sampler().wrap_u);
+    put_wrap(w, image.sampler().wrap_v);
+    w.put_digest(&image.content_digest())
+        .put_bytes(image.pixels());
+}
+
+fn get_image_resource(
+    r: &mut Reader<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<ImageResource, PersistError> {
+    let width = r.get_u32()?;
+    let height = r.get_u32()?;
+    let color_space = match r.get_u8()? {
+        0 => ImageColorSpace::Srgb,
+        1 => ImageColorSpace::Linear,
+        2 => ImageColorSpace::Gamma(r.get_u32()?),
+        _ => return Err(PersistError::Malformed("unknown image color space")),
+    };
+    let get_wrap = |r: &mut Reader<'_>| -> Result<ImageWrap, PersistError> {
+        match r.get_u8()? {
+            0 => Ok(ImageWrap::Repeat),
+            1 => Ok(ImageWrap::ClampToEdge),
+            2 => Ok(ImageWrap::MirroredRepeat),
+            _ => Err(PersistError::Malformed("unknown image wrap policy")),
+        }
+    };
+    let sampler = ImageSampler {
+        wrap_u: get_wrap(r)?,
+        wrap_v: get_wrap(r)?,
+    };
+    let claimed_digest = r.get_digest()?;
+    let encoded = r.get_bytes()?;
+    budget.charge(encoded.len().saturating_mul(2), "image pixel resource")?;
+    let mut pixels = Vec::new();
+    budget.reserve(&mut pixels, encoded.len(), "image pixel resource")?;
+    pixels.extend_from_slice(encoded);
+    let image = ImageResource::rgba8(width, height, pixels, color_space, sampler)
+        .map_err(|_| PersistError::Malformed("invalid image resource layout"))?;
+    if image.content_digest() != claimed_digest {
+        return Err(PersistError::Malformed("image content digest mismatch"));
+    }
+    Ok(image)
 }
 
 fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) -> Result<(), SerialError> {
@@ -906,6 +975,28 @@ impl Snapshot {
                 }
             }
         }
+        // Minor 1.6: immutable image resources are semantic state. Their
+        // descriptor and content digest precede the bytes so corruption and
+        // descriptor drift are refused during decode.
+        for (_, entry) in &self.slots {
+            match entry {
+                Some(entry) => {
+                    w.put_bool(true);
+                    match &entry.image {
+                        Some(image) => {
+                            w.put_bool(true);
+                            put_image_resource(&mut w, image);
+                        }
+                        None => {
+                            w.put_bool(false);
+                        }
+                    }
+                }
+                None => {
+                    w.put_bool(false);
+                }
+            }
+        }
         w.finish()
     }
 
@@ -1188,6 +1279,8 @@ impl Snapshot {
                     z_index,
                     shape,
                     render_primitive: RenderPrimitive::Vector,
+                    image: None,
+                    image_revision: 0,
                 })
             } else {
                 None
@@ -1293,6 +1386,25 @@ impl Snapshot {
                     _ => {
                         return Err(PersistError::Malformed(
                             "render-primitive table does not match arena liveness",
+                        ));
+                    }
+                }
+            }
+        }
+        if r.version().1 >= 6 {
+            for entry in &mut slots {
+                let present = r.get_bool()?;
+                match (present, &mut entry.1) {
+                    (false, None) => {}
+                    (true, Some(entry)) => {
+                        if r.get_bool()? {
+                            entry.image = Some(get_image_resource(&mut r, &mut budget)?);
+                            entry.image_revision = 1;
+                        }
+                    }
+                    _ => {
+                        return Err(PersistError::Malformed(
+                            "image-resource table does not match arena liveness",
                         ));
                     }
                 }

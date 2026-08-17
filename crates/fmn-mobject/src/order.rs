@@ -65,10 +65,9 @@ use crate::uniforms::Uniforms;
 /// `str(type(m))` component of the batch key, reduced to what actually
 /// changes the pipeline.
 ///
-/// One variant today, because every library class is a vector path
-/// (§12.1). Images, surfaces, and point clouds add variants as they land;
-/// the mechanism is here so they partition correctly by construction
-/// rather than by remembering to.
+/// Vector paths, images, surfaces, and point clouds partition correctly by
+/// construction rather than relying on each renderer adapter to remember the
+/// concrete library class that produced them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProgramKind {
     /// Filled and stroked quadratic paths — every `VMobject`.
@@ -78,6 +77,8 @@ pub enum ProgramKind {
     Surface,
     /// Camera-facing radial point sprites.
     DotCloud,
+    /// Textured image quads.
+    Image,
 }
 
 impl RenderPrimitive {
@@ -86,6 +87,7 @@ impl RenderPrimitive {
             Self::Vector => ProgramKind::Vector,
             Self::SurfaceGrid { .. } | Self::TriangleMesh => ProgramKind::Surface,
             Self::DotCloud => ProgramKind::DotCloud,
+            Self::ImageQuad => ProgramKind::Image,
         }
     }
 }

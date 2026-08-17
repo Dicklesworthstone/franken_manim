@@ -781,6 +781,7 @@ impl From<VMobject> for Mobject {
             uniforms,
             shape,
             render_primitive: RenderPrimitive::Vector,
+            image: None,
             z_index,
             submobjects: submobjects.into_iter().map(Mobject::from).collect(),
         }

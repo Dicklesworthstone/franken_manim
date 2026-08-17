@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::StageError;
 use crate::bbox::BboxCache;
-use crate::mobject::{Mobject, RenderPrimitive};
+use crate::mobject::{ImageResource, Mobject, RenderPrimitive};
 use crate::persist::{UpdaterIdentity, UpdaterKindTag};
 use crate::placement::Placement;
 use crate::record::RecordBuffer;
@@ -169,6 +169,10 @@ pub struct Entry {
     shape: ShapeSlot,
     /// Durable renderer program/topology identity.
     render_primitive: RenderPrimitive,
+    /// Immutable raster bytes for an image primitive.
+    image: Option<ImageResource>,
+    /// Monotone replacement counter for the retained image axis.
+    image_revision: u64,
     /// Cached family flattening (§1.1 API surface), invalidated on any
     /// structural change in the subtree.
     family_cache: RefCell<Option<Vec<Mob>>>,
@@ -198,6 +202,8 @@ impl Entry {
             z_index: 0,
             shape: ShapeSlot::default(),
             render_primitive: RenderPrimitive::Vector,
+            image: None,
+            image_revision: 0,
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
         }
@@ -239,6 +245,8 @@ impl Entry {
             z_index: self.z_index,
             shape,
             render_primitive: self.render_primitive,
+            image: self.image.clone(),
+            image_revision: 0,
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
         }
@@ -289,6 +297,27 @@ impl Entry {
     #[must_use]
     pub const fn render_primitive(&self) -> RenderPrimitive {
         self.render_primitive
+    }
+
+    /// Immutable image bytes, when this is an image primitive.
+    #[must_use]
+    pub fn image_resource(&self) -> Option<&ImageResource> {
+        self.image.as_ref()
+    }
+
+    /// Monotone revision of the immutable image resource.
+    #[must_use]
+    pub const fn image_revision(&self) -> u64 {
+        self.image_revision
+    }
+
+    fn replace_image_resource(&mut self, image: Option<ImageResource>) -> bool {
+        if self.image == image {
+            return false;
+        }
+        self.image = image;
+        self.image_revision = self.image_revision.wrapping_add(1);
+        true
     }
 
     pub(crate) fn bbox_cell(&self) -> &RefCell<BboxCache> {
@@ -372,6 +401,8 @@ pub(crate) struct SnapshotEntry {
     pub(crate) z_index: i32,
     pub(crate) shape: ShapeSlot,
     pub(crate) render_primitive: RenderPrimitive,
+    pub(crate) image: Option<ImageResource>,
+    pub(crate) image_revision: u64,
 }
 
 /// The stable old-handle → new-handle map a family copy produces — the
@@ -570,6 +601,7 @@ impl Stage {
             z_index,
             shape,
             render_primitive,
+            image,
             submobjects,
         } = mobject.into();
         let mut entry = Entry::from_data(buffer);
@@ -582,6 +614,8 @@ impl Stage {
             point_revision: entry.buffer.field_revision("point"),
         };
         entry.render_primitive = render_primitive;
+        entry.image_revision = u64::from(image.is_some());
+        entry.image = image;
         let mob = self.alloc(entry);
         for child in submobjects {
             let child_mob = self.add(child);
@@ -780,6 +814,21 @@ impl Stage {
                 entry.z_index = z_index;
             }
         }
+    }
+
+    /// Replace one immutable image resource and advance only its revision axis.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead or foreign handle.
+    pub fn set_image_resource(
+        &mut self,
+        mob: Mob,
+        image: Option<ImageResource>,
+    ) -> Result<bool, StageError> {
+        Ok(self
+            .get_mut(mob)
+            .ok_or(StageError::StaleHandle)?
+            .replace_image_resource(image))
     }
 
     /// The scene draw list, in insertion order.
@@ -1175,7 +1224,7 @@ impl Stage {
             if a == b {
                 continue;
             }
-            let (src, placement, uniforms, z_index, tracker, render_primitive) = {
+            let (src, placement, uniforms, z_index, tracker, render_primitive, image) = {
                 let e2 = self.get(b).expect("prechecked");
                 (
                     e2.buffer.snapshot_clone(),
@@ -1184,6 +1233,7 @@ impl Stage {
                     e2.z_index,
                     e2.tracker,
                     e2.render_primitive,
+                    e2.image.clone(),
                 )
             };
             let e1 = self.get_mut(a).expect("prechecked");
@@ -1195,6 +1245,7 @@ impl Stage {
             e1.z_index = z_index;
             e1.tracker = tracker;
             e1.render_primitive = render_primitive;
+            e1.replace_image_resource(image);
         }
         if match_updaters {
             self.match_updaters(mob, other)?;
@@ -1702,6 +1753,8 @@ impl Stage {
                                 uniforms: entry.uniforms,
                                 z_index: entry.z_index,
                                 render_primitive: entry.render_primitive,
+                                image: entry.image.clone(),
+                                image_revision: entry.image_revision,
                             }
                         }),
                     )
@@ -1745,6 +1798,8 @@ impl Stage {
                     z_index: e.z_index,
                     shape: e.shape,
                     render_primitive: e.render_primitive,
+                    image: e.image.clone(),
+                    image_revision: e.image_revision,
                     family_cache: RefCell::new(None),
                     bbox: RefCell::new(BboxCache::default()),
                 }),

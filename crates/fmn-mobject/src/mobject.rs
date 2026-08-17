@@ -14,6 +14,8 @@
 //! `add` and one after.
 
 use fmn_core::types::Vec3;
+use fmn_hash::{Digest, sha256};
+use std::sync::Arc;
 
 use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::ShapeTag;
@@ -40,6 +42,176 @@ pub enum RenderPrimitive {
     TriangleMesh,
     /// Camera-facing dots, one per record.
     DotCloud,
+    /// A six-record textured quad backed by an [`ImageResource`].
+    ImageQuad,
+}
+
+/// The storage layout of one durable image resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImagePixelFormat {
+    /// Four tightly packed bytes per texel, in red-green-blue-alpha order.
+    Rgba8,
+}
+
+/// Transfer function applied before Lumen filters an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageColorSpace {
+    /// IEC 61966-2-1 sRGB.
+    Srgb,
+    /// Already linear-light samples.
+    Linear,
+    /// PNG-style gamma, stored as gamma multiplied by 100,000.
+    Gamma(u32),
+}
+
+/// How an image coordinate outside `[0, 1]` addresses texels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageWrap {
+    /// Repeat every integer interval.
+    Repeat,
+    /// Pin to the outer texel.
+    ClampToEdge,
+    /// Repeat while reflecting every other interval.
+    MirroredRepeat,
+}
+
+/// Durable per-axis image sampling policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageSampler {
+    /// Horizontal addressing.
+    pub wrap_u: ImageWrap,
+    /// Vertical addressing.
+    pub wrap_v: ImageWrap,
+}
+
+impl Default for ImageSampler {
+    fn default() -> Self {
+        Self {
+            wrap_u: ImageWrap::Repeat,
+            wrap_v: ImageWrap::Repeat,
+        }
+    }
+}
+
+/// Why decoded image bytes could not satisfy the durable resource contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageResourceError {
+    /// Width and height must both be non-zero and their RGBA8 product must fit.
+    InvalidDimensions,
+    /// The byte count was not exactly `width * height * 4`.
+    InvalidByteLength {
+        /// Exact byte count implied by the dimensions.
+        expected: usize,
+        /// Byte count supplied by the caller.
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for ImageResourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::InvalidDimensions => {
+                f.write_str("image dimensions must be non-zero and fit the RGBA8 layout")
+            }
+            Self::InvalidByteLength { expected, actual } => write!(
+                f,
+                "RGBA8 image needs exactly {expected} bytes, received {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ImageResourceError {}
+
+/// Immutable, content-addressed raster bytes carried by Marionette state.
+///
+/// Pixel storage is shared by copies and snapshots. Mutating an image means
+/// replacing this value through `Stage`, which advances the image revision
+/// axis without exposing a writable byte channel that could bypass the
+/// retained renderer's revision discipline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageResource {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+    color_space: ImageColorSpace,
+    sampler: ImageSampler,
+    content_digest: Digest,
+}
+
+impl ImageResource {
+    /// Validate and take ownership of tightly packed, top-row-first RGBA8.
+    pub fn rgba8(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        color_space: ImageColorSpace,
+        sampler: ImageSampler,
+    ) -> Result<Self, ImageResourceError> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|count| count.checked_mul(4))
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|_| width != 0 && height != 0)
+            .ok_or(ImageResourceError::InvalidDimensions)?;
+        if pixels.len() != expected {
+            return Err(ImageResourceError::InvalidByteLength {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        let content_digest = sha256(&pixels);
+        Ok(Self {
+            width,
+            height,
+            pixels: Arc::from(pixels),
+            color_space,
+            sampler,
+            content_digest,
+        })
+    }
+
+    /// Width in texels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in texels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Fixed storage format.
+    #[must_use]
+    pub const fn pixel_format(&self) -> ImagePixelFormat {
+        ImagePixelFormat::Rgba8
+    }
+
+    /// Transfer function applied before filtering.
+    #[must_use]
+    pub const fn color_space(&self) -> ImageColorSpace {
+        self.color_space
+    }
+
+    /// Addressing policy on both axes.
+    #[must_use]
+    pub const fn sampler(&self) -> ImageSampler {
+        self.sampler
+    }
+
+    /// Raw RGBA8 bytes, row zero first.
+    #[must_use]
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// SHA-256 of the raw pixel bytes, suitable for `fmn-cache` addressing.
+    #[must_use]
+    pub const fn content_digest(&self) -> Digest {
+        self.content_digest
+    }
 }
 
 /// A detached mobject: record data, per-object uniforms, the semantic
@@ -55,6 +227,8 @@ pub struct Mobject {
     pub shape: ShapeTag,
     /// Durable renderer identity and topology metadata.
     pub render_primitive: RenderPrimitive,
+    /// Optional immutable raster resource for [`RenderPrimitive::ImageQuad`].
+    pub image: Option<ImageResource>,
     /// The Reference's `z_index` (§8.5): the scene list's sort key. Zero is
     /// the Reference's default; a builder that means to sit above or below
     /// its siblings sets it here rather than after `add`.
@@ -88,6 +262,7 @@ impl Mobject {
             uniforms: Uniforms::default(),
             shape: ShapeTag::General,
             render_primitive: RenderPrimitive::Vector,
+            image: None,
             z_index: 0,
             submobjects: Vec::new(),
         }
@@ -126,6 +301,14 @@ impl Mobject {
     #[must_use]
     pub fn with_render_primitive(mut self, render_primitive: RenderPrimitive) -> Self {
         self.render_primitive = render_primitive;
+        self
+    }
+
+    /// Attach immutable image bytes and select the textured-quad renderer.
+    #[must_use]
+    pub fn with_image_resource(mut self, image: ImageResource) -> Self {
+        self.image = Some(image);
+        self.render_primitive = RenderPrimitive::ImageQuad;
         self
     }
 
