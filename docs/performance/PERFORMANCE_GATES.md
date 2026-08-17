@@ -116,6 +116,13 @@ concurrently retargeted by their owner.
   configuration, fixture-input, and result-self-golden digests for all four
   Python binding classes. This introspection remains in the shipped,
   PyO3-free `fmn-perf` binary.
+- `frontdoor-definitions <fmn-executable> <reference.tsv>` probes an absolute
+  `release-perf` `fmn` executable, hashes its bytes, and reports the six exact
+  PG-1/PG-3/PG-4 process-level definitions. The artifact itself must report its
+  build ID, target triple, actual Cargo profile, compiled SIMD tier, and
+  embedded `SUITE.lock` digest. The Reference TSV is strict
+  `fmn-perf-pg1-reference/1` evidence for the pinned Reference commit and the
+  same Opening-class fixture; it is used only by the two PG-1 rows.
 - `measure-pg2 <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv>` checks
   that the supplied baseline identity names that exact compiled producer, runs
   it, and exclusively creates a content-addressed phase trace followed by the
@@ -150,6 +157,14 @@ concurrently retargeted by their owner.
   below `tests/artifacts/perf/`; the other scenarios require `-`. The producer
   leaves the owned cache root intact as evidence-supporting state and never
   cleans it up or reuses it.
+- `measure-frontdoor <baseline.tsv> <producer-commit> <fmn-executable>
+  <work-root> <reference.tsv-or-dash> <trace.tsv> <raw.tsv>` drives the actual
+  render or Studio process selected by the baseline. The exact `fmn` artifact
+  must be `release-perf` and report `git:<producer-commit>`; the benchmark key
+  binds its bytes and all compile provenance. `work-root`, trace, and raw paths
+  must be distinct nonexistent paths below `tests/artifacts/perf/`. The source,
+  edit variant, caches, and product artifacts remain there for inspection.
+  PG-1 requires the Reference TSV; PG-3/4 require `-`.
 
 PG-8's real sampler necessarily links the optional `fmn-python` portal and
 therefore cannot enter the shipped `fmn-perf` dependency graph. Its stable
@@ -265,6 +280,34 @@ open under fm-inr.1.
    alert/block, then update the scheduled host lane. Until both declared Linux
    and macOS profiles have real replayable observations for applicable keys,
    fm-inr.1 and whole-gate claims remain open.
+
+## Canonical PG-1/PG-3/PG-4 front-door workloads
+
+These six producers deliberately time shipped process boundaries rather than
+Lumen microbenchmarks. Build both binaries with `--profile release-perf`; bind
+the `fmn` artifact to the source commit by setting
+`FMN_BUILD_ID=git:<40-hex-commit>` while building it. A generic release build
+identity is valid for distribution but is refused as performance evidence.
+The `fmn --robot --version` record is the authority for the custom profile —
+the build does not trust Cargo's inherited `PROFILE=release` value.
+
+| Scenario | Production path | Fixed sample plan | Measurement |
+|---|---|---:|---|
+| `opening-class-g2`, `opening-class-g4` | fresh `fmn --format video` process, 1920×1080, 30 fps, eight threads, pinned ffmpeg | 11 each | integer wall-time ratio in ppm against content-addressed Reference evidence on the identical host fingerprint |
+| `export-4k-2d` | fresh `fmn --format video` process, 3840×2160, 30 fps, eight threads, pinned ffmpeg | 24 | emitted frames per second |
+| `preview-1080p` | one warm Studio supervisor/worker and real HTTP scrub-to-PNG responses | 24 | one completed preview frame per request |
+| `cold-cli-first-frame` | 24 fresh Studio supervisor/worker processes with distinct empty cache roots | 24 | process spawn through the `studio_ready` record, which follows frame zero |
+| `trailing-edit-to-frame` | one warm Studio over a 30-second FMTL scene; alternate source bytes, restart, and retain frame 899 | 24 | source write through the restarted retained-frame response |
+
+The Opening-class fixture is one second of native `Text` plus `NumberPlane`:
+concurrent `FadeIn`/`ShowCreation`, followed by concurrent matrix and title
+transforms. Its exact FMTL digest is self-golden. Preview/cold uses a one-second
+Circle transform; the trailing case has a 29-second wait plus one-second
+transform and binds both source variants. Every child has a fixed timeout and
+bounded robot/HTTP output. Phase traces retain each elapsed interval, source
+identity, closure digest where available, ffmpeg identity where applicable,
+and declared cache state. Injected blocking regressions still require a
+content-addressed flamegraph or CPU profile through the common evaluator.
 
 ## Canonical PG-2 workloads
 

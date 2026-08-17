@@ -8,6 +8,10 @@ use fmn_conformance::perf::{
     SAMPLES_SCHEMA, parse_policy_catalog, render_policy_catalog, require_compiled_cargo_profile,
     validate_producer_commit,
 };
+use fmn_conformance::perf_frontdoor::{
+    FRONTDOOR_DEFINITION_SCHEMA, FrontdoorDefinition, FrontdoorScenario, Pg1Reference,
+    frontdoor_fixture, measure_frontdoor, probe_fmn_artifact,
+};
 use fmn_conformance::perf_host::{HostProfile, HostQualification, attest_current_host};
 use fmn_conformance::perf_pg2::{
     PG2_DEFINITION_SCHEMA, PG2_SAMPLE_COUNT, PG2_THREADS, PG2_WARMUP_ITERATIONS, Pg2Definition,
@@ -55,6 +59,7 @@ const MAX_POLICY_BYTES: u64 = 1024 * 1024;
 const MAX_BASELINE_BYTES: u64 = 64 * 1024;
 const MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_HOST_PROFILE_BYTES: u64 = 64 * 1024;
+const MAX_REFERENCE_BYTES: u64 = 256 * 1024;
 const MAX_CLI_DIAGNOSTIC_VALUE_BYTES: usize = 160;
 const MAX_CLI_ERROR_DETAIL_BYTES: usize = 1024;
 const MAX_CLI_ERROR_RECORD_BYTES: usize = 8 * 1024;
@@ -78,7 +83,8 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
             "expected catalog, verify-baseline, pg2-definitions, measure-pg2, \
              pg5-definitions, measure-pg5, pg6-definitions, measure-pg6, measure-pg6-peak, \
              measure-pg6-soak, \
-             pg7-definitions, measure-pg7, or pg8-definitions",
+             pg7-definitions, measure-pg7, pg8-definitions, frontdoor-definitions, \
+             or measure-frontdoor",
         ));
     };
     match command {
@@ -97,6 +103,14 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "pg6-definitions" if arguments.len() == 1 => Ok(pg6_definitions()),
         "pg7-definitions" if arguments.len() == 1 => pg7_definitions(),
         "pg8-definitions" if arguments.len() == 1 => Ok(pg8_definitions()),
+        "frontdoor-definitions" if arguments.len() == 3 => frontdoor_definitions(
+            arguments
+                .get(1)
+                .ok_or_else(|| CliError::usage("missing fmn executable"))?,
+            arguments
+                .get(2)
+                .ok_or_else(|| CliError::usage("missing Reference evidence"))?,
+        ),
         "measure-pg2" if matches!(arguments.len(), 5 | 7) => measure_pg2_command(
             arguments
                 .get(1)
@@ -193,6 +207,30 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
                 .ok_or_else(|| CliError::usage("missing raw output path"))?,
             optional_qualification(arguments, 6)?,
         ),
+        "measure-frontdoor" if matches!(arguments.len(), 8 | 10) => measure_frontdoor_command(
+            arguments
+                .get(1)
+                .ok_or_else(|| CliError::usage("missing baseline path"))?,
+            arguments
+                .get(2)
+                .ok_or_else(|| CliError::usage("missing producer commit"))?,
+            arguments
+                .get(3)
+                .ok_or_else(|| CliError::usage("missing fmn executable"))?,
+            arguments
+                .get(4)
+                .ok_or_else(|| CliError::usage("missing work root"))?,
+            arguments
+                .get(5)
+                .ok_or_else(|| CliError::usage("missing Reference evidence or dash"))?,
+            arguments
+                .get(6)
+                .ok_or_else(|| CliError::usage("missing trace output path"))?,
+            arguments
+                .get(7)
+                .ok_or_else(|| CliError::usage("missing raw output path"))?,
+            optional_qualification(arguments, 8)?,
+        ),
         "catalog" | "verify-baseline" => Err(CliError::usage(format!(
             "{command} requires exactly one path argument"
         ))),
@@ -201,6 +239,9 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "pg6-definitions" => Err(CliError::usage("pg6-definitions does not accept arguments")),
         "pg7-definitions" => Err(CliError::usage("pg7-definitions does not accept arguments")),
         "pg8-definitions" => Err(CliError::usage("pg8-definitions does not accept arguments")),
+        "frontdoor-definitions" => Err(CliError::usage(
+            "frontdoor-definitions requires <fmn-executable> <reference.tsv>",
+        )),
         "measure-pg2" => Err(CliError::usage(
             "measure-pg2 requires <baseline.tsv> <producer-commit> <trace.tsv> <raw.tsv> [<host-profile.tsv> <host-attestation.tsv>]",
         )),
@@ -219,6 +260,11 @@ fn dispatch(arguments: &[std::ffi::OsString]) -> Result<String, CliError> {
         "measure-pg7" => Err(CliError::usage(
             "measure-pg7 requires <baseline.tsv> <producer-commit> \
              <cache-root-or-dash> <trace.tsv> <raw.tsv> \
+             [<host-profile.tsv> <host-attestation.tsv>]",
+        )),
+        "measure-frontdoor" => Err(CliError::usage(
+            "measure-frontdoor requires <baseline.tsv> <producer-commit> <fmn-executable> \
+             <work-root> <reference.tsv-or-dash> <trace.tsv> <raw.tsv> \
              [<host-profile.tsv> <host-attestation.tsv>]",
         )),
         _ => Err(CliError::usage(format!(
@@ -412,6 +458,68 @@ fn pg8_definitions() -> String {
     output
 }
 
+fn frontdoor_definitions(executable: &OsStr, reference_path: &OsStr) -> Result<String, CliError> {
+    let executable = Path::new(executable);
+    let artifact = probe_fmn_artifact(executable, "release-perf")
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let reference_path_text = utf8_argument(reference_path, "Reference evidence path")?;
+    let reference_text = read_utf8(reference_path, "Reference evidence", MAX_REFERENCE_BYTES)?;
+    let reference = Pg1Reference::from_tsv(reference_path_text, reference_text.as_bytes())
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let mut output = String::new();
+    for scenario in FrontdoorScenario::ALL {
+        let fixture =
+            frontdoor_fixture(scenario).map_err(|error| CliError::data(error.to_string()))?;
+        let definition = FrontdoorDefinition::new(
+            scenario,
+            artifact.clone(),
+            sha256(&fixture),
+            (scenario.gate() == fmn_conformance::perf::GateId::Pg1).then(|| reference.clone()),
+        )
+        .map_err(|error| CliError::data(error.to_string()))?;
+        let (width, height) = scenario.dimensions();
+        let _ = writeln!(
+            output,
+            "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"frontdoor-definition\",\
+             \"definition_schema\":\"{FRONTDOOR_DEFINITION_SCHEMA}\",\
+             \"gate\":\"{}\",\"scenario\":\"{}\",\"unit\":\"{}\",\
+             \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
+             \"fixture_digest\":\"{}\",\"edit_fixture_digest\":{},\
+             \"executable_digest\":\"{}\",\
+             \"build_id\":\"{}\",\"target_triple\":\"{}\",\
+             \"cargo_profile\":\"{}\",\"compiled_tier\":\"{}\",\
+             \"resolution\":\"{}x{}\",\"fps\":30,\
+             \"thread_profile\":\"fixed-8\",\"sample_count\":{},\
+             \"cache_state\":\"{}\",\"output_mode\":\"{}\",\
+             \"reference_digest\":{}}}",
+            scenario.gate(),
+            scenario.name(),
+            scenario.unit().name(),
+            definition.digest(),
+            definition.config_digest(),
+            definition.fixture_digest,
+            definition
+                .edit_fixture_digest
+                .map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""),),
+            definition.artifact.executable_digest,
+            escape_json(&definition.artifact.build_id),
+            escape_json(&definition.artifact.target_triple),
+            escape_json(&definition.artifact.cargo_profile),
+            escape_json(&definition.artifact.compiled_tier),
+            width,
+            height,
+            scenario.sample_count(),
+            scenario.cache_state(),
+            scenario.output_mode(),
+            definition.reference.as_ref().map_or_else(
+                || "null".to_owned(),
+                |value| format!("\"{}\"", value.evidence.digest),
+            ),
+        );
+    }
+    Ok(output)
+}
+
 fn pg5_definitions() -> Result<String, CliError> {
     let definition = Pg5Definition::new().map_err(|error| CliError::data(error.to_string()))?;
     Ok(format!(
@@ -565,6 +673,117 @@ fn measure_pg2_command(
         trace_digest,
         escape_json(raw_path_text),
         raw_digest,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_frontdoor_command(
+    baseline_path: &OsStr,
+    producer_commit: &OsStr,
+    fmn_executable: &OsStr,
+    work_root: &OsStr,
+    reference_path: &OsStr,
+    trace_path: &OsStr,
+    raw_path: &OsStr,
+    qualification_arguments: Option<(&OsStr, &OsStr)>,
+) -> Result<String, CliError> {
+    let baseline_text = read_utf8(baseline_path, "baseline", MAX_BASELINE_BYTES)?;
+    let baseline =
+        Baseline::from_tsv(&baseline_text).map_err(|error| CliError::data(error.to_string()))?;
+    let producer_commit = producer_commit_argument(producer_commit)?;
+    let trace_path_text = utf8_argument(trace_path, "trace output path")?;
+    let raw_path_text = utf8_argument(raw_path, "raw output path")?;
+    let work_root_text = utf8_argument(work_root, "work root")?;
+    if trace_path_text == raw_path_text
+        || trace_path_text == work_root_text
+        || raw_path_text == work_root_text
+    {
+        return Err(CliError::data(
+            "work root, trace, and raw output paths must be distinct",
+        ));
+    }
+    EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    EvidenceRef::from_bytes(EvidenceKind::RawSamples, raw_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let fixture_path = Path::new(work_root).join("frontdoor-scene.fmtl");
+    let fixture_path_text = fixture_path
+        .to_str()
+        .ok_or_else(|| CliError::data("work-root fixture path is not UTF-8"))?;
+    EvidenceRef::from_bytes(EvidenceKind::Golden, fixture_path_text, &[])
+        .map_err(|error| CliError::data(error.to_string()))?;
+    validate_output_parent(trace_path, "trace output")?;
+    validate_output_parent(raw_path, "raw output")?;
+    validate_output_parent(work_root, "work root")?;
+    refuse_existing(trace_path, "trace output")?;
+    refuse_existing(raw_path, "raw output")?;
+    refuse_existing(work_root, "work root")?;
+    preflight_regular_input(fmn_executable, "fmn executable")?;
+
+    let reference = if reference_path == OsStr::new("-") {
+        None
+    } else {
+        preflight_regular_input(reference_path, "Reference evidence")?;
+        let path = utf8_argument(reference_path, "Reference evidence path")?.to_owned();
+        let text = read_utf8(reference_path, "Reference evidence", MAX_REFERENCE_BYTES)?;
+        Some((path, text))
+    };
+    let qualification = prepare_host_qualification(qualification_arguments, trace_path, raw_path)?;
+    let reference_borrow = reference
+        .as_ref()
+        .map(|(path, text)| (path.as_str(), text.as_bytes()));
+    let artifacts = measure_frontdoor(
+        &baseline,
+        producer_commit,
+        Path::new(fmn_executable),
+        Path::new(work_root),
+        trace_path_text,
+        reference_borrow,
+        qualification.token(),
+    )
+    .map_err(|error| CliError::data(error.to_string()))?;
+    qualification.revalidate_postflight()?;
+    let raw = artifacts
+        .batch
+        .to_tsv()
+        .map_err(|error| CliError::data(error.to_string()))?;
+    let raw_digest = sha256(raw.as_bytes());
+    let trace_digest = sha256(artifacts.trace_tsv.as_bytes());
+    let valid_samples = artifacts
+        .batch
+        .samples
+        .iter()
+        .filter(|sample| sample.invalid_reason.is_none())
+        .count();
+    let invalid_samples = artifacts.batch.samples.len() - valid_samples;
+    qualification.publish_then_trace(trace_path, artifacts.trace_tsv.as_bytes())?;
+    if let Err(error) = write_new(raw_path, raw.as_bytes(), "raw output") {
+        return Err(CliError::io(format!(
+            "{}; work root and trace were already published and were not deleted",
+            error.detail
+        )));
+    }
+    let attestation = qualification.json_fragment();
+    Ok(format!(
+        "{{\"schema\":\"{CLI_SCHEMA}\",\"kind\":\"frontdoor-measurement\",\
+         \"sample_schema\":\"{SAMPLES_SCHEMA}\",\"gate\":\"{}\",\
+         \"scenario\":\"{}\",\"producer_commit\":\"{}\",\
+         \"work_root\":\"{}\",\"fixture_digest\":\"{}\",\
+         \"trace_path\":\"{}\",\"trace_digest\":\"{}\",\
+         \"raw_path\":\"{}\",\"raw_digest\":\"{}\",\
+         \"valid_samples\":{},\"invalid_samples\":{}{} }}\n",
+        artifacts.batch.key.gate,
+        escape_json(&artifacts.batch.key.scenario),
+        artifacts.batch.producer_commit,
+        escape_json(work_root_text),
+        artifacts.fixture_digest,
+        escape_json(trace_path_text),
+        trace_digest,
+        escape_json(raw_path_text),
+        raw_digest,
+        valid_samples,
+        invalid_samples,
+        attestation,
     ))
 }
 
@@ -1668,6 +1887,30 @@ mod tests {
         let error = dispatch(&arguments).unwrap_err();
         assert_eq!(error.exit_code, EXIT_USAGE);
         assert!(error.detail.contains("<cache-root-or-dash>"));
+    }
+
+    #[test]
+    fn frontdoor_commands_refuse_ambiguous_argument_counts_before_io() {
+        let definitions = vec![std::ffi::OsString::from("frontdoor-definitions")];
+        let error = dispatch(&definitions).unwrap_err();
+        assert_eq!(error.exit_code, EXIT_USAGE);
+        assert!(error.detail.contains("<fmn-executable>"));
+        assert!(error.detail.contains("<reference.tsv>"));
+
+        let measurement = vec![
+            "measure-frontdoor".into(),
+            "baseline.tsv".into(),
+            "0123456789abcdef0123456789abcdef01234567".into(),
+            "fmn".into(),
+            "tests/artifacts/perf/frontdoor/work".into(),
+            "-".into(),
+            "tests/artifacts/perf/frontdoor/trace.tsv".into(),
+            "tests/artifacts/perf/frontdoor/raw.tsv".into(),
+            "profile-without-attestation.tsv".into(),
+        ];
+        let error = dispatch(&measurement).unwrap_err();
+        assert_eq!(error.exit_code, EXIT_USAGE);
+        assert!(error.detail.contains("host-attestation.tsv"));
     }
 
     #[test]
