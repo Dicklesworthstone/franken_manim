@@ -9,12 +9,15 @@ description = "The `fmn` binary"
 [[bin]]
 name = "fmn"
 path = "src/main.rs"
-required-features = ["cli"]
+# The standalone product is one binary containing both the interactive CLI
+# and the Asupersync-backed batch front door.  Keep the axes default-off for
+# library builds, but never emit a partially featured shipping executable.
+required-features = ["cli", "batch"]
 
 [[test]]
 name = "runtime_boundary"
 path = "tests/runtime_boundary.rs"
-required-features = ["cli"]
+required-features = ["cli", "batch"]
 
 [dependencies]
 fmn-core.workspace = true

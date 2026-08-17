@@ -303,7 +303,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_manim/mai
 ```bash
 git clone https://github.com/Dicklesworthstone/franken_manim
 cd franken_manim
-cargo build --release -p fmn-cli --features cli  # produces target/release/fmn
+cargo build --release -p fmn-cli --features cli,batch  # produces target/release/fmn
 ```
 
 **3. Embedded, as a Rust library:**

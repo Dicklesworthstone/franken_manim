@@ -154,7 +154,7 @@ Linux arm64 and macOS x86-64 have no published native artifact yet. Build from
 the exact source tag instead:
   git clone --branch v<VERSION> --depth 1 https://github.com/Dicklesworthstone/franken_manim
   cd franken_manim
-  cargo build --release -p fmn-cli --features cli
+  cargo build --release -p fmn-cli --features cli,batch
 
 Uninstall:
   rm "<install-dir>/fmn"   # use fmn.exe on Windows

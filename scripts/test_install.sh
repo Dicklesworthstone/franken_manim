@@ -49,6 +49,8 @@ bash -n scripts/install.sh
 bash scripts/install.sh --help >"$TEST_ROOT/help.txt"
 grep -q -- '--offline ARCHIVE' "$TEST_ROOT/help.txt" || fail "help omits offline mode"
 grep -q -- '--checksum HASH|FILE' "$TEST_ROOT/help.txt" || fail "help omits checksum mode"
+grep -q -- '--features cli,batch' "$TEST_ROOT/help.txt" \
+    || fail "source-build guidance can emit a batch-disabled fmn"
 
 fixture="$TEST_ROOT/fixture"
 mkdir -p "$fixture"

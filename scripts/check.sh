@@ -15,6 +15,19 @@ cargo fmt --check
 echo "==> cargo check --all-targets"
 cargo check --all-targets
 
+echo "==> shipped fmn refuses a cli-only feature selection"
+if cli_only_output=$(cargo check -p fmn-cli --no-default-features --features cli --bin fmn 2>&1); then
+    echo "ERROR: the shipped fmn binary built without the batch product axis" >&2
+    exit 1
+fi
+if [[ "$cli_only_output" != *"requires the features:"* \
+    || "$cli_only_output" != *"batch"* \
+    || "$cli_only_output" != *"cli"* ]]; then
+    printf 'ERROR: cli-only negative control failed for an unexpected reason:\n%s\n' \
+        "$cli_only_output" >&2
+    exit 1
+fi
+
 echo "==> cargo check -p fmn-cli --features batch --all-targets"
 cargo check -p fmn-cli --features batch --all-targets
 
