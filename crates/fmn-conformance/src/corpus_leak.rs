@@ -23,9 +23,10 @@
 //! 3. **Content tooth** — the committed `denominator.tsv` carries
 //!    `sha256(mode + NUL + string)` for every corpus string (the public
 //!    artifact of the private harvest). Every text file on the shippable
-//!    surface is scanned line-wise under the same hash convention — via
-//!    fmn-hash's owned SHA-256, the same bytes the harvest recorded — so a
-//!    copied corpus string is caught *without the corpus present in CI*.
+//!    surface is scanned in bounded chunks, with bounded line buffering,
+//!    under the same hash convention — via fmn-hash's owned SHA-256, the
+//!    same bytes the harvest recorded — so a copied corpus string is caught
+//!    *without the corpus present in CI*.
 //!    Where the private fixtures exist on disk (a developer machine),
 //!    their whole-file digests are also collected and any byte-identical
 //!    file on the surface is flagged (this catches copied Reference
@@ -40,10 +41,14 @@
 //! the path and whole-file teeth cover the artifact-level forms.
 //!
 //! The pure kernels (`path_violations`, `content_leaks`, …) take their
-//! inputs as values so the negative tests need no filesystem fixtures;
-//! [`run`] is the release-CI orchestration over a repository checkout and
-//! fails with a named error if `git` is unavailable — this gate only makes
-//! sense against the real tree, and a silent skip would be a hole.
+//! inputs as values so the negative tests need no filesystem fixtures.
+//! [`run`] is the release-CI orchestration over a repository checkout. It
+//! refuses non-UTF-8/control/escaping paths, staging symlinks, special
+//! entries, read or traversal errors beneath a present root, files that
+//! change while scanned, and named resource-budget overruns. Private-tree
+//! symlinks are never followed and are outside the byte-identity tooth;
+//! missing optional roots remain allowed. A silent skip would be a release
+//! hole.
 
 use fmn_hash::{Digest, Sha256};
 use std::collections::HashSet;
@@ -367,6 +372,17 @@ struct ScanBudget {
     max_files: usize,
 }
 
+#[derive(Clone, Copy)]
+enum SymlinkPolicy {
+    /// Private trees are inputs to the optional byte-identity tooth, not
+    /// release artifacts. Links there are never followed; skipping them
+    /// keeps virtualenv and checkout links outside the scan authority.
+    Skip,
+    /// Staging trees are distributable artifacts, so a link is an
+    /// ambiguous/out-of-root release input and must fail the gate.
+    Refuse,
+}
+
 impl ScanBudget {
     fn new(label: &'static str, max_files: usize) -> Self {
         Self {
@@ -386,9 +402,12 @@ impl ScanBudget {
                 ),
             });
         }
-        let files = self.files.checked_add(1).ok_or_else(|| LeakError::Resource {
-            what: format!("{} file counter overflow", self.label),
-        })?;
+        let files = self
+            .files
+            .checked_add(1)
+            .ok_or_else(|| LeakError::Resource {
+                what: format!("{} file counter overflow", self.label),
+            })?;
         if files > self.max_files {
             return Err(LeakError::Resource {
                 what: format!(
@@ -438,6 +457,12 @@ fn validate_relative_path(path: &str) -> Result<(), LeakError> {
             what: "control characters are not accepted in release-surface paths".to_owned(),
         });
     }
+    if path.contains('\\') {
+        return Err(LeakError::Policy {
+            path: path.to_owned(),
+            what: "git paths must use forward slashes".to_owned(),
+        });
+    }
     for component in Path::new(path).components() {
         if !matches!(component, std::path::Component::Normal(_)) {
             return Err(LeakError::Policy {
@@ -463,9 +488,90 @@ fn relative_utf8(root: &Path, path: &Path) -> Result<String, LeakError> {
     Ok(normalized)
 }
 
+fn admit_traversal_entry(visited: &mut usize) -> Result<(), LeakError> {
+    *visited = visited.checked_add(1).ok_or_else(|| LeakError::Resource {
+        what: "traversal entry counter overflow".to_owned(),
+    })?;
+    if *visited > MAX_TRAVERSAL_ENTRIES {
+        return Err(LeakError::Resource {
+            what: format!(
+                "optional-root traversal visited {visited} entries, above limit {MAX_TRAVERSAL_ENTRIES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_git_output_len(len: usize) -> Result<(), LeakError> {
+    if len > MAX_GIT_PATH_OUTPUT_BYTES {
+        return Err(LeakError::Resource {
+            what: format!(
+                "git ls-files emitted {len} bytes, above limit {MAX_GIT_PATH_OUTPUT_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_canonical_containment(root: &Path, path: &Path, label: &str) -> Result<(), LeakError> {
+    let canonical_root = root.canonicalize().map_err(|error| LeakError::Io {
+        path: root.display().to_string(),
+        what: format!("canonicalizing repository root: {error}"),
+    })?;
+    let canonical_path = path.canonicalize().map_err(|error| LeakError::Io {
+        path: label.to_owned(),
+        what: format!("canonicalizing scan path: {error}"),
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(LeakError::Policy {
+            path: label.to_owned(),
+            what: format!(
+                "canonical path {} escapes repository root {}",
+                canonical_path.display(),
+                canonical_root.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validated_regular_path(root: &Path, label: &str) -> Result<PathBuf, LeakError> {
+    validate_relative_path(label)?;
+    let mut path = root.to_path_buf();
+    let mut components = Path::new(label).components().peekable();
+    while let Some(component) = components.next() {
+        path.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| LeakError::Io {
+            path: label.to_owned(),
+            what: format!("validating path ancestry: {error}"),
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(LeakError::Policy {
+                path: label.to_owned(),
+                what: format!(
+                    "path component {} is a symlink",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ),
+            });
+        }
+        if components.peek().is_some() && !metadata.file_type().is_dir() {
+            return Err(LeakError::Policy {
+                path: label.to_owned(),
+                what: format!(
+                    "intermediate component {} is not a directory",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ),
+            });
+        }
+    }
+    ensure_canonical_containment(root, &path, label)?;
+    Ok(path)
+}
+
 fn walk_optional_roots<F>(
     root: &Path,
     relative_roots: &[&str],
+    symlink_policy: SymlinkPolicy,
     mut visit_file: F,
 ) -> Result<(), LeakError>
 where
@@ -484,31 +590,36 @@ where
                 });
             }
         };
+        if root_metadata.file_type().is_symlink() && matches!(symlink_policy, SymlinkPolicy::Skip) {
+            continue;
+        }
         if !root_metadata.file_type().is_dir() {
             return Err(LeakError::Policy {
                 path: relative_root.to_string(),
-                what: "present optional root must be a real directory, not a symlink or special entry"
-                    .to_owned(),
+                what:
+                    "present optional root must be a real directory, not a symlink or special entry"
+                        .to_owned(),
             });
         }
 
         let mut stack = vec![root_path];
         while let Some(directory) = stack.pop() {
             let label = relative_utf8(root, &directory)?;
-            let metadata = std::fs::symlink_metadata(&directory).map_err(|error| {
-                LeakError::Io {
+            let metadata =
+                std::fs::symlink_metadata(&directory).map_err(|error| LeakError::Io {
                     path: label.clone(),
                     what: format!("revalidating traversed directory: {error}"),
-                }
-            })?;
+                })?;
             if !metadata.file_type().is_dir() {
                 return Err(LeakError::Policy {
                     path: label,
                     what: "traversed directory changed type or became a symlink".to_owned(),
                 });
             }
+            let directory_snapshot = FileSnapshot::from_metadata(&metadata, &label)?;
+            ensure_canonical_containment(root, &directory, &label)?;
             let entries = std::fs::read_dir(&directory).map_err(|error| LeakError::Io {
-                path: label,
+                path: label.clone(),
                 what: format!("reading present directory: {error}"),
             })?;
             for entry in entries {
@@ -516,18 +627,7 @@ where
                     path: directory.display().to_string(),
                     what: format!("reading directory entry: {error}"),
                 })?;
-                visited = visited
-                    .checked_add(1)
-                    .ok_or_else(|| LeakError::Resource {
-                        what: "traversal entry counter overflow".to_owned(),
-                    })?;
-                if visited > MAX_TRAVERSAL_ENTRIES {
-                    return Err(LeakError::Resource {
-                        what: format!(
-                            "optional-root traversal visited {visited} entries, above limit {MAX_TRAVERSAL_ENTRIES}"
-                        ),
-                    });
-                }
+                admit_traversal_entry(&mut visited)?;
                 let path = entry.path();
                 let relative = relative_utf8(root, &path)?;
                 let file_type = entry.file_type().map_err(|error| LeakError::Io {
@@ -535,11 +635,15 @@ where
                     what: format!("reading directory-entry type: {error}"),
                 })?;
                 if file_type.is_symlink() {
-                    return Err(LeakError::Policy {
-                        path: relative,
-                        what: "symlinks are refused on private and staging scan surfaces"
-                            .to_owned(),
-                    });
+                    match symlink_policy {
+                        SymlinkPolicy::Skip => continue,
+                        SymlinkPolicy::Refuse => {
+                            return Err(LeakError::Policy {
+                                path: relative,
+                                what: "symlinks are refused on release staging surfaces".to_owned(),
+                            });
+                        }
+                    }
                 }
                 if file_type.is_dir() {
                     stack.push(path);
@@ -552,16 +656,38 @@ where
                     });
                 }
             }
+            let metadata_after =
+                std::fs::symlink_metadata(&directory).map_err(|error| LeakError::Io {
+                    path: label.clone(),
+                    what: format!("postflight directory revalidation: {error}"),
+                })?;
+            if !metadata_after.file_type().is_dir()
+                || FileSnapshot::from_metadata(&metadata_after, &label)? != directory_snapshot
+            {
+                return Err(LeakError::Policy {
+                    path: label.clone(),
+                    what: "directory changed while it was being traversed".to_owned(),
+                });
+            }
+            ensure_canonical_containment(root, &directory, &label)?;
         }
     }
     Ok(())
 }
 
 fn open_regular_file(
+    root: &Path,
     path: &Path,
     label: &str,
     budget: &mut ScanBudget,
 ) -> Result<(File, FileSnapshot), LeakError> {
+    let validated_path = validated_regular_path(root, label)?;
+    if validated_path != path {
+        return Err(LeakError::Policy {
+            path: label.to_owned(),
+            what: "enumerated path does not match its validated repository path".to_owned(),
+        });
+    }
     let path_metadata = std::fs::symlink_metadata(path).map_err(|error| LeakError::Io {
         path: label.to_owned(),
         what: format!("opening enumerated file: {error}"),
@@ -595,10 +721,12 @@ fn open_regular_file(
             what: "file identity changed between enumeration and open".to_owned(),
         });
     }
+    ensure_canonical_containment(root, path, label)?;
     Ok((file, handle_snapshot))
 }
 
 fn validate_regular_file_postflight(
+    root: &Path,
     path: &Path,
     label: &str,
     file: &File,
@@ -642,6 +770,7 @@ fn validate_regular_file_postflight(
             what: "scanned path was replaced during the gate".to_owned(),
         });
     }
+    ensure_canonical_containment(root, path, label)?;
     Ok(())
 }
 
@@ -801,9 +930,9 @@ fn scan_surface_file(
 ) -> Result<Vec<Leak>, LeakError> {
     validate_relative_path(rel_path)?;
     let path = root.join(rel_path);
-    let (mut file, snapshot) = open_regular_file(&path, rel_path, budget)?;
+    let (mut file, snapshot) = open_regular_file(root, &path, rel_path, budget)?;
     let (digest, bytes_read, line_findings) = stream_surface(&mut file, rel_path, corpus)?;
-    validate_regular_file_postflight(&path, rel_path, &file, &snapshot, bytes_read)?;
+    validate_regular_file_postflight(root, &path, rel_path, &file, &snapshot, bytes_read)?;
 
     let mut findings = Vec::new();
     if bytes_read != 0 && private_files.contains(&digest) {
@@ -828,38 +957,39 @@ fn scan_surface_file(
 pub fn collect_private_file_digests(root: &Path) -> Result<HashSet<Digest>, LeakError> {
     let mut digests = HashSet::new();
     let mut budget = ScanBudget::new("private fixture", MAX_TRAVERSAL_ENTRIES);
-    walk_optional_roots(root, PRIVATE_FIXTURE_DIRS, |path, relative| {
-        let (mut file, snapshot) = open_regular_file(path, relative, &mut budget)?;
-        let (digest, bytes_read) = stream_digest(&mut file, relative)?;
-        validate_regular_file_postflight(path, relative, &file, &snapshot, bytes_read)?;
-        if bytes_read != 0 {
-            digests.insert(digest);
-        }
-        Ok(())
-    })?;
+    walk_optional_roots(
+        root,
+        PRIVATE_FIXTURE_DIRS,
+        SymlinkPolicy::Skip,
+        |path, relative| {
+            let (mut file, snapshot) = open_regular_file(root, path, relative, &mut budget)?;
+            let (digest, bytes_read) = stream_digest(&mut file, relative)?;
+            validate_regular_file_postflight(root, path, relative, &file, &snapshot, bytes_read)?;
+            if bytes_read != 0 {
+                digests.insert(digest);
+            }
+            Ok(())
+        },
+    )?;
     Ok(digests)
 }
 
 fn parse_git_paths(bytes: &[u8]) -> Result<Vec<String>, LeakError> {
-    if bytes.len() > MAX_GIT_PATH_OUTPUT_BYTES {
-        return Err(LeakError::Resource {
-            what: format!(
-                "git ls-files emitted {} bytes, above limit {MAX_GIT_PATH_OUTPUT_BYTES}",
-                bytes.len()
-            ),
-        });
-    }
+    validate_git_output_len(bytes.len())?;
     if !bytes.is_empty() && !bytes.ends_with(&[0]) {
         return Err(LeakError::Git {
             what: "git ls-files -z output lacks its final NUL terminator".to_owned(),
         });
     }
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut paths = Vec::new();
-    for (index, raw) in bytes.split(|byte| *byte == 0).enumerate() {
+    for (index, raw) in bytes[..bytes.len() - 1]
+        .split(|byte| *byte == 0)
+        .enumerate()
+    {
         if raw.is_empty() {
-            if index + 1 == bytes.split(|byte| *byte == 0).count() {
-                continue;
-            }
             return Err(LeakError::Git {
                 what: format!("git ls-files emitted an empty path at index {index}"),
             });
@@ -898,10 +1028,15 @@ pub fn git_tracked_files(root: &Path) -> Result<Vec<String>, LeakError> {
         what: "git ls-files did not provide its requested stdout pipe".to_owned(),
     })?;
     let mut bytes = Vec::new();
-    let read_result = stdout
-        .by_ref()
-        .take(u64::try_from(MAX_GIT_PATH_OUTPUT_BYTES).unwrap_or(u64::MAX) + 1)
-        .read_to_end(&mut bytes);
+    let output_limit = u64::try_from(MAX_GIT_PATH_OUTPUT_BYTES)
+        .map_err(|error| LeakError::Resource {
+            what: format!("git-output limit conversion failed: {error}"),
+        })?
+        .checked_add(1)
+        .ok_or_else(|| LeakError::Resource {
+            what: "git-output limit overflow".to_owned(),
+        })?;
+    let read_result = stdout.by_ref().take(output_limit).read_to_end(&mut bytes);
     drop(stdout);
     if let Err(error) = read_result {
         let _ = child.kill();
@@ -914,9 +1049,7 @@ pub fn git_tracked_files(root: &Path) -> Result<Vec<String>, LeakError> {
         let _ = child.kill();
         let _ = child.wait();
         return Err(LeakError::Resource {
-            what: format!(
-                "git ls-files output exceeds {MAX_GIT_PATH_OUTPUT_BYTES} bytes"
-            ),
+            what: format!("git ls-files output exceeds {MAX_GIT_PATH_OUTPUT_BYTES} bytes"),
         });
     }
     let status = child.wait().map_err(|error| LeakError::Git {
@@ -948,80 +1081,178 @@ pub fn gitignore_violations(root: &Path) -> Result<Vec<Leak>, LeakError> {
             .map_err(|e| LeakError::Git {
                 what: format!("spawning git check-ignore: {e}"),
             })?;
-        if !status.success() {
-            leaks.push(Leak {
+        match status.code() {
+            Some(0) => {}
+            Some(1) => leaks.push(Leak {
                 kind: LeakKind::PrivateDirNotIgnored,
                 path: dir.to_string(),
                 detail: "git check-ignore does not exclude it — a private fixture could be \
                          committed (§15.3)"
                     .to_string(),
-            });
+            }),
+            code => {
+                return Err(LeakError::Git {
+                    what: format!("git check-ignore for {dir} exited with {code:?}"),
+                });
+            }
         }
     }
     Ok(leaks)
 }
 
-/// Lists the files under a staging tree, repository-relative. A missing
-/// tree yields an empty list.
-fn staging_files(root: &Path, staging: &str) -> Vec<String> {
+/// Lists regular files beneath every staging tree. Missing trees are
+/// optional; traversal or type errors beneath a present tree fail closed.
+fn staging_files(root: &Path) -> Result<Vec<String>, LeakError> {
     let mut files = Vec::new();
-    let mut stack = vec![root.join(staging)];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                stack.push(path);
-            } else if kind.is_file()
-                && let Ok(rel) = path.strip_prefix(root)
-            {
-                files.push(rel.to_string_lossy().replace('\\', "/"));
+    walk_optional_roots(
+        root,
+        STAGING_DIRS,
+        SymlinkPolicy::Refuse,
+        |_path, relative| {
+            files.push(relative.to_owned());
+            if files.len() > MAX_SURFACE_FILES {
+                return Err(LeakError::Resource {
+                    what: format!(
+                        "staging-file count exceeds release-surface limit {MAX_SURFACE_FILES}"
+                    ),
+                });
             }
-        }
+            Ok(())
+        },
+    )?;
+    Ok(files)
+}
+
+fn release_surface(root: &Path) -> Result<Vec<String>, LeakError> {
+    let mut surface = git_tracked_files(root)?;
+    surface.extend(staging_files(root)?);
+    surface.sort();
+    surface.dedup();
+    if surface.len() > MAX_SURFACE_FILES {
+        return Err(LeakError::Resource {
+            what: format!(
+                "distinct release-surface file count {} exceeds limit {MAX_SURFACE_FILES}",
+                surface.len()
+            ),
+        });
     }
-    files
+    for path in &surface {
+        validate_relative_path(path)?;
+    }
+    Ok(surface)
+}
+
+fn initial_findings(root: &Path, surface: &[String]) -> Result<Vec<Leak>, LeakError> {
+    let mut findings = Vec::new();
+    extend_findings(&mut findings, gitignore_violations(root)?)?;
+    for path in surface {
+        extend_findings(&mut findings, path_violations(std::slice::from_ref(path)))?;
+    }
+    Ok(findings)
+}
+
+fn denominator_set(root: &Path) -> Result<HashSet<Digest>, LeakError> {
+    let denominator_text =
+        std::fs::read_to_string(root.join(DENOMINATOR_PATH)).map_err(|error| LeakError::Io {
+            path: DENOMINATOR_PATH.to_owned(),
+            what: error.to_string(),
+        })?;
+    Ok(parse_denominator(&denominator_text)?.into_iter().collect())
+}
+
+fn scan_release_surface(
+    root: &Path,
+    surface: &[String],
+    corpus: &HashSet<Digest>,
+    private_files: &HashSet<Digest>,
+    findings: &mut Vec<Leak>,
+) -> Result<(), LeakError> {
+    let mut budget = ScanBudget::new("release surface", MAX_SURFACE_FILES);
+    for relative in surface {
+        extend_findings(
+            findings,
+            scan_surface_file(root, relative, corpus, private_files, &mut budget)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_root(root: &Path) -> Result<(), LeakError> {
+    let metadata = std::fs::symlink_metadata(root).map_err(|error| LeakError::Io {
+        path: root.display().to_string(),
+        what: format!("inspecting repository root: {error}"),
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(LeakError::Policy {
+            path: root.display().to_string(),
+            what: "repository root must be a real directory, not a symlink or special entry"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn run_inner(root: &Path) -> Result<Vec<Leak>, LeakError> {
+    let corpus = denominator_set(root)?;
+    let private_files = collect_private_file_digests(root)?;
+    let surface = release_surface(root)?;
+    let mut findings = initial_findings(root, &surface)?;
+    scan_release_surface(root, &surface, &corpus, &private_files, &mut findings)?;
+    Ok(findings)
 }
 
 /// The full release-CI gate over a repository checkout. Returns every
 /// finding across all teeth; an empty vector is a pass. Gate-level
-/// failures (no git, unreadable denominator) are [`LeakError`]s — the gate
-/// never degrades silently.
+/// failures are [`LeakError`]s and never degrade into a silent skip.
 pub fn run(root: &Path) -> Result<Vec<Leak>, LeakError> {
-    let denominator_text =
-        std::fs::read_to_string(root.join(DENOMINATOR_PATH)).map_err(|e| LeakError::Io {
-            path: DENOMINATOR_PATH.to_owned(),
-            what: e.to_string(),
-        })?;
-    let corpus: HashSet<Digest> = parse_denominator(&denominator_text)?.into_iter().collect();
-    let private_files = collect_private_file_digests(root);
-
-    let mut surface: Vec<String> = git_tracked_files(root)?;
-    for staging in STAGING_DIRS {
-        surface.extend(staging_files(root, staging));
-    }
-    surface.sort();
-    surface.dedup();
-
-    let mut leaks = gitignore_violations(root)?;
-    leaks.extend(path_violations(&surface));
-    for rel in &surface {
-        let path: PathBuf = root.join(rel);
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        leaks.extend(content_leaks(rel, &bytes, &corpus, &private_files));
-    }
-    Ok(leaks)
+    validate_root(root)?;
+    run_inner(root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ShortReader<'a> {
+        remaining: &'a [u8],
+        max_chunk: usize,
+    }
+
+    impl Read for ShortReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let count = output.len().min(self.max_chunk).min(self.remaining.len());
+            output[..count].copy_from_slice(&self.remaining[..count]);
+            self.remaining = &self.remaining[count..];
+            Ok(count)
+        }
+    }
+
+    struct FailingReader {
+        first_read: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if self.first_read {
+                self.first_read = false;
+                output[..3].copy_from_slice(b"abc");
+                Ok(3)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected read failure",
+                ))
+            }
+        }
+    }
+
+    fn example_finding() -> Leak {
+        Leak {
+            kind: LeakKind::CorpusStringShipped,
+            path: "dist/example.txt".to_owned(),
+            detail: "test finding".to_owned(),
+        }
+    }
 
     #[test]
     fn corpus_hash_matches_the_documented_convention() {
@@ -1107,5 +1338,136 @@ mod tests {
             Ok(digests) => assert_eq!(digests.len(), 1),
             Err(e) => std::panic::panic_any(format!("a well-formed row must parse: {e}")),
         }
+    }
+
+    #[test]
+    fn streaming_scan_handles_short_reads_and_hashes_the_complete_file() {
+        let copied = br"\int_0^1 x^2\,dx";
+        let bytes = b"header\n\\int_0^1 x^2\\,dx\nfooter\n";
+        let corpus = [corpus_hash("math", copied)].into_iter().collect();
+        let mut reader = ShortReader {
+            remaining: bytes,
+            max_chunk: 3,
+        };
+
+        let (digest, count, findings) = stream_surface(&mut reader, "dist/example.txt", &corpus)
+            .expect("short reads must not truncate a scan");
+
+        assert_eq!(digest, fmn_hash::sha256(bytes));
+        assert_eq!(count, bytes.len() as u64);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, LeakKind::CorpusStringShipped);
+    }
+
+    #[test]
+    fn streaming_read_errors_are_named_gate_errors() {
+        let error = stream_digest(
+            &mut FailingReader { first_read: true },
+            "dist/unreadable.bin",
+        )
+        .expect_err("an I/O failure after a short read must fail closed");
+        assert!(matches!(
+            error,
+            LeakError::Io { path, what }
+                if path == "dist/unreadable.bin" && what.contains("injected read failure")
+        ));
+    }
+
+    #[test]
+    fn git_path_parser_is_lossless_and_rejects_ambiguous_paths() {
+        assert_eq!(
+            parse_git_paths(b"src/lib.rs\0docs/read me.md\0").expect("valid paths"),
+            ["src/lib.rs", "docs/read me.md"]
+        );
+        assert!(parse_git_paths(b"src/lib.rs").is_err());
+        assert!(parse_git_paths(b"src/lib.rs\0\0").is_err());
+        assert!(parse_git_paths(b"src/\xff.rs\0").is_err());
+        assert!(parse_git_paths(b"../escaped.rs\0").is_err());
+        assert!(parse_git_paths(b"windows\\separator.rs\0").is_err());
+        let mut overlong_path = vec![b'a'; MAX_PATH_BYTES + 1];
+        overlong_path.push(0);
+        assert!(matches!(
+            parse_git_paths(&overlong_path),
+            Err(LeakError::Resource { .. })
+        ));
+        assert!(matches!(
+            validate_git_output_len(MAX_GIT_PATH_OUTPUT_BYTES + 1),
+            Err(LeakError::Resource { .. })
+        ));
+    }
+
+    #[test]
+    fn scan_budgets_refuse_oversized_files_and_unbounded_findings() {
+        let mut budget = ScanBudget::new("test", 1);
+        assert!(matches!(
+            budget.admit("huge.bin", MAX_SCANNED_FILE_BYTES + 1),
+            Err(LeakError::Resource { .. })
+        ));
+        budget.admit("first.bin", 0).expect("the first file fits");
+        assert!(matches!(
+            budget.admit("second.bin", 0),
+            Err(LeakError::Resource { .. })
+        ));
+
+        let mut aggregate_budget = ScanBudget {
+            label: "test",
+            files: 0,
+            bytes: MAX_TOTAL_SCAN_BYTES,
+            max_files: 1,
+        };
+        assert!(matches!(
+            aggregate_budget.admit("one-more-byte.bin", 1),
+            Err(LeakError::Resource { .. })
+        ));
+
+        let mut visited = MAX_TRAVERSAL_ENTRIES;
+        assert!(matches!(
+            admit_traversal_entry(&mut visited),
+            Err(LeakError::Resource { .. })
+        ));
+
+        let mut findings = vec![example_finding(); MAX_FINDINGS];
+        assert!(matches!(
+            push_finding(&mut findings, example_finding()),
+            Err(LeakError::Resource { .. })
+        ));
+    }
+
+    #[test]
+    fn overlong_lines_are_bounded_without_hiding_later_lines() {
+        let copied = br"\int_0^1 x^2\,dx";
+        let corpus = [corpus_hash("math", copied)].into_iter().collect();
+        let mut bytes = vec![b'x'; MAX_LINE_BYTES + 1];
+        bytes.extend_from_slice(b"\n\\int_0^1 x^2\\,dx\n");
+
+        let (_, count, findings) =
+            stream_surface(&mut std::io::Cursor::new(&bytes), "dist/long.txt", &corpus)
+                .expect("an overlong line is skipped without unbounding memory");
+
+        assert_eq!(count, bytes.len() as u64);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].detail.contains("line 2"));
+    }
+
+    #[test]
+    fn missing_enumerated_surface_file_is_not_a_pass() {
+        let mut budget = ScanBudget::new("test", 1);
+        let error = scan_surface_file(
+            Path::new("/definitely-not-a-franken-manim-checkout"),
+            "dist/missing.bin",
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut budget,
+        )
+        .expect_err("a file disappearing after enumeration must fail closed");
+        assert!(matches!(error, LeakError::Io { .. }));
+    }
+
+    #[test]
+    fn absent_private_roots_are_optional() {
+        let digests =
+            collect_private_file_digests(Path::new("/definitely-not-a-franken-manim-checkout"))
+                .expect("missing private roots are allowed");
+        assert!(digests.is_empty());
     }
 }
