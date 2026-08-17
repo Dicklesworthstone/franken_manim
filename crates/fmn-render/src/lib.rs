@@ -76,7 +76,10 @@ pub use retained::{
 };
 pub use revision::{Axis, Dependency, Revisions};
 pub use stroke::{JoinWedge, MITER_LIMIT};
-pub use table::{Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError};
+pub use table::{
+    Image, ImageDescriptor, ImageTable, Instance, Segment, Shape, ShapeTable, Style, StyleTable,
+    TableError,
+};
 pub use texture::{
     SamplerPolicy, TEXTURE_ORIENTATION, Texture, TextureEncoding, TextureError, TextureLimits,
     TextureOrientation, TextureSource, TextureWrap,

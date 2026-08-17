@@ -37,12 +37,18 @@
 //! repeated graph nodes and copied decorations.
 
 use crate::hint::Hint;
+use crate::texture::{SamplerPolicy, Texture, TextureEncoding, TextureWrap};
+use fmn_cache::CacheKey;
 use fmn_core::types::{Vec3, canonicalize_f64};
 use fmn_geom::arclength::{ArcLengthTable, quadratic_arc_length};
 use fmn_geom::quadpath::QuadPath;
 use fmn_hash::{Digest, Schema, Sha256};
-use fmn_mobject::{BoundingBox, JointType, Mob, Placement, Uniforms};
+use fmn_mobject::{
+    BoundingBox, ImageColorSpace, ImagePixelFormat, ImageResource, ImageSampler, ImageWrap,
+    JointType, Mob, Placement, Uniforms,
+};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A retained IR table could not preserve its `u32` index contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +74,8 @@ pub enum TableError {
         /// Total rows requested after the reservation.
         requested: u64,
     },
+    /// A validated Marionette image could not become a Lumen texture.
+    ImageTextureInvalid,
 }
 
 impl std::fmt::Display for TableError {
@@ -91,6 +99,9 @@ impl std::fmt::Display for TableError {
                 f,
                 "could not reserve {requested} rows for retained {resource}"
             ),
+            Self::ImageTextureInvalid => {
+                f.write_str("validated image resource could not become a Lumen texture")
+            }
         }
     }
 }
@@ -460,6 +471,187 @@ impl StyleTable {
     pub fn clear(&mut self) {
         self.rows.clear();
         self.index.clear();
+    }
+}
+
+/// Complete semantic identity of one retained image row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageDescriptor {
+    /// Width in texels.
+    pub width: u32,
+    /// Height in texels.
+    pub height: u32,
+    /// Byte layout.
+    pub format: ImagePixelFormat,
+    /// Transfer function applied before filtering.
+    pub color_space: ImageColorSpace,
+    /// Per-axis addressing policy.
+    pub sampler: ImageSampler,
+    /// Raw-pixel content address, represented by the governed cache key type.
+    pub content: CacheKey,
+}
+
+/// One decoded, linearized row in the retained `ImageTable`.
+#[derive(Debug, Clone)]
+pub struct Image {
+    descriptor: ImageDescriptor,
+    texture: Arc<Texture>,
+    sampler: SamplerPolicy,
+}
+
+impl Image {
+    /// Semantic descriptor used for exact interning.
+    #[must_use]
+    pub const fn descriptor(&self) -> ImageDescriptor {
+        self.descriptor
+    }
+
+    /// Premultiplied-linear texture consumed by the rasterizer.
+    #[must_use]
+    pub fn texture(&self) -> &Texture {
+        self.texture.as_ref()
+    }
+
+    /// Lumen's executable form of the durable sampler policy.
+    #[must_use]
+    pub const fn sampler(&self) -> SamplerPolicy {
+        self.sampler
+    }
+}
+
+/// Exact-descriptor interning for immutable image resources.
+#[derive(Debug, Clone, Default)]
+pub struct ImageTable {
+    rows: Vec<Image>,
+    index: HashMap<ImageDescriptor, u32>,
+    textures: HashMap<ImageDescriptor, Arc<Texture>>,
+}
+
+impl ImageTable {
+    /// Intern a Marionette resource, decoding transfer exactly once per unique
+    /// descriptor and raw-pixel content address.
+    ///
+    /// # Errors
+    /// Returns a typed table refusal without publishing a partial row.
+    pub fn intern(&mut self, resource: &ImageResource) -> Result<u32, TableError> {
+        let descriptor = ImageDescriptor {
+            width: resource.width(),
+            height: resource.height(),
+            format: resource.pixel_format(),
+            color_space: resource.color_space(),
+            sampler: resource.sampler(),
+            content: CacheKey::from_digest(resource.content_digest()),
+        };
+        if let Some(&index) = self.index.get(&descriptor) {
+            return Ok(index);
+        }
+        let (index, _) = rows_after_push("image rows", self.rows.len())?;
+        self.rows
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("image rows", self.rows.len(), 1))?;
+        self.index
+            .try_reserve(1)
+            .map_err(|_| allocation_failed("image index", self.index.len(), 1))?;
+
+        let encoding = match resource.color_space() {
+            ImageColorSpace::Srgb => TextureEncoding::Srgb,
+            ImageColorSpace::Linear => TextureEncoding::Linear,
+            ImageColorSpace::Gamma(gamma) => TextureEncoding::Gamma(gamma),
+        };
+        let texture = if let Some(texture) = self.textures.get(&descriptor) {
+            Arc::clone(texture)
+        } else {
+            self.textures
+                .try_reserve(1)
+                .map_err(|_| allocation_failed("image texture index", self.textures.len(), 1))?;
+            let texture = Arc::new(
+                Texture::from_rgba8(
+                    resource.width(),
+                    resource.height(),
+                    resource.pixels(),
+                    encoding,
+                )
+                .map_err(|error| match error {
+                    crate::texture::TextureError::AllocationFailed { pixels } => {
+                        TableError::AllocationFailed {
+                            resource: "image texels",
+                            requested: pixels,
+                        }
+                    }
+                    _ => TableError::ImageTextureInvalid,
+                })?,
+            );
+            self.textures.insert(descriptor, Arc::clone(&texture));
+            texture
+        };
+        let convert_wrap = |wrap| match wrap {
+            ImageWrap::Repeat => TextureWrap::Repeat,
+            ImageWrap::ClampToEdge => TextureWrap::ClampToEdge,
+            ImageWrap::MirroredRepeat => TextureWrap::MirroredRepeat,
+        };
+        let sampler = SamplerPolicy {
+            wrap_u: convert_wrap(resource.sampler().wrap_u),
+            wrap_v: convert_wrap(resource.sampler().wrap_v),
+        };
+        self.rows.push(Image {
+            descriptor,
+            texture,
+            sampler,
+        });
+        self.index.insert(descriptor, index);
+        Ok(index)
+    }
+
+    /// All rows in stable insertion order.
+    #[must_use]
+    pub fn rows(&self) -> &[Image] {
+        &self.rows
+    }
+
+    /// One interned image row.
+    #[must_use]
+    pub fn get(&self, index: u32) -> Option<&Image> {
+        self.rows.get(usize::try_from(index).ok()?)
+    }
+
+    /// Number of unique image descriptors and payloads.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether no image has been interned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Prepare a transactional frame view while retaining decoded textures.
+    ///
+    /// # Errors
+    /// Returns a typed refusal when the bounded texture index cannot be cloned
+    /// without allocation failure. The published table remains unchanged.
+    pub(crate) fn prepare_frame(&self) -> Result<Self, TableError> {
+        let mut textures = HashMap::new();
+        textures
+            .try_reserve(self.textures.len())
+            .map_err(|_| allocation_failed("image texture index", 0, self.textures.len()))?;
+        textures.extend(
+            self.textures
+                .iter()
+                .map(|(&descriptor, texture)| (descriptor, Arc::clone(texture))),
+        );
+        Ok(Self {
+            rows: Vec::new(),
+            index: HashMap::new(),
+            textures,
+        })
+    }
+
+    /// Drop decoded textures not referenced by this prepared frame.
+    pub(crate) fn retain_current(&mut self) {
+        self.textures
+            .retain(|descriptor, _| self.index.contains_key(descriptor));
     }
 }
 
@@ -919,6 +1111,52 @@ mod tests {
             }
         }
         sha256(&writer.finish().expect("small shape identity document"))
+    }
+
+    #[test]
+    fn image_table_deduplicates_complete_descriptors_not_pixels_alone() {
+        let pixels = vec![10, 20, 30, 255];
+        let srgb = ImageResource::rgba8(
+            1,
+            1,
+            pixels.clone(),
+            ImageColorSpace::Srgb,
+            ImageSampler::default(),
+        )
+        .unwrap();
+        let linear = ImageResource::rgba8(
+            1,
+            1,
+            pixels.clone(),
+            ImageColorSpace::Linear,
+            ImageSampler::default(),
+        )
+        .unwrap();
+        let clamped = ImageResource::rgba8(
+            1,
+            1,
+            pixels,
+            ImageColorSpace::Srgb,
+            ImageSampler {
+                wrap_u: ImageWrap::ClampToEdge,
+                wrap_v: ImageWrap::Repeat,
+            },
+        )
+        .unwrap();
+
+        let mut table = ImageTable::default();
+        let first = table.intern(&srgb).unwrap();
+        assert_eq!(table.intern(&srgb).unwrap(), first);
+        let linear_index = table.intern(&linear).unwrap();
+        let clamped_index = table.intern(&clamped).unwrap();
+        assert_ne!(first, linear_index, "transfer function is semantic");
+        assert_ne!(first, clamped_index, "sampler policy is semantic");
+        assert_eq!(table.len(), 3);
+        assert_eq!(
+            table.get(first).unwrap().descriptor().content,
+            table.get(linear_index).unwrap().descriptor().content,
+            "the raw payload keeps one fmn-cache content address"
+        );
     }
 
     #[test]

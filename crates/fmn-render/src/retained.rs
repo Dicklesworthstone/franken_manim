@@ -15,8 +15,8 @@ use fmn_mobject::{Mob, Placement, ProgramKind, RenderPrimitive, Stage};
 use crate::{
     Binning, BinningError, CachedRenderError, CachedRenderStats, Camera, EngineIdentity,
     FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError, PixelTileCache,
-    RenderPlan, SurfaceDraw, SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError,
-    ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
+    RenderPlan, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw,
+    ThreeDError, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
 };
 
 /// Immutable policy for one retained CPU renderer.
@@ -261,6 +261,7 @@ impl RetainedFrameRenderer {
     ) -> Result<(), RetainedFrameRendererError> {
         self.plan.sync(stage, camera.revision())?;
         let draw_plan = stage.draw_plan();
+        let mut image_frame = self.plan.prepare_image_frame()?;
         let mut meshes = Vec::new();
         let mut commands = Vec::new();
         let mut command_count = 0usize;
@@ -285,7 +286,9 @@ impl RetainedFrameRenderer {
             )?;
             if matches!(
                 entry.render_primitive(),
-                RenderPrimitive::SurfaceGrid { .. } | RenderPrimitive::TriangleMesh
+                RenderPrimitive::SurfaceGrid { .. }
+                    | RenderPrimitive::TriangleMesh
+                    | RenderPrimitive::ImageQuad
             ) {
                 mesh_count = mesh_count.checked_add(1).ok_or(
                     RetainedFrameRendererError::InvalidPrimitive {
@@ -352,6 +355,23 @@ impl RetainedFrameRenderer {
                             .map(PreparedCommand::Dot),
                     );
                 }
+                RenderPrimitive::ImageQuad => {
+                    let resource = entry.image_resource().ok_or(
+                        RetainedFrameRendererError::InvalidPrimitive {
+                            mob: item.mob,
+                            reason: "image primitive has no image resource",
+                        },
+                    )?;
+                    let image = image_frame.intern(resource).map_err(SyncError::from)?;
+                    let mesh = image_mesh(stage, item.mob)?;
+                    let mesh_index = meshes.len();
+                    meshes.push(mesh);
+                    commands.push(PreparedCommand::Image {
+                        mesh: mesh_index,
+                        image,
+                        uniforms: *entry.uniforms(),
+                    });
+                }
             }
         }
 
@@ -383,12 +403,35 @@ impl RetainedFrameRenderer {
                     ThreeDDraw::Surface(draw)
                 }
                 PreparedCommand::Dot(dot) => ThreeDDraw::TrueDot(dot),
+                PreparedCommand::Image {
+                    mesh,
+                    image,
+                    uniforms,
+                } => {
+                    let mesh = meshes
+                        .get(mesh)
+                        .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+                    let image = image_frame
+                        .get(image)
+                        .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+                    let mut draw = SurfaceDraw::image(mesh, image.texture());
+                    if let SurfaceMaterial::Texture(material) = &mut draw.material {
+                        material.sampler = image.sampler();
+                    }
+                    draw.is_fixed_in_frame = uniforms.is_fixed_in_frame;
+                    draw.clip_planes = uniforms.clip_planes;
+                    draw.depth_test = uniforms.depth_test;
+                    ThreeDDraw::Surface(draw)
+                }
             });
         }
         ThreeDJob::new(camera, &draws, self.config.tiling)
             .map_err(RetainedFrameRendererError::ThreeD)?
             .render_into(self.config.threads, &mut self.frame)
-            .map_err(RetainedFrameRendererError::ThreeDFrame)
+            .map_err(RetainedFrameRendererError::ThreeDFrame)?;
+        drop(draws);
+        self.plan.commit_image_frame(image_frame);
+        Ok(())
     }
 
     /// Current raw linear-light RGBA16F frame.
@@ -424,6 +467,11 @@ enum PreparedCommand {
         uniforms: fmn_mobject::Uniforms,
     },
     Dot(TrueDotDraw),
+    Image {
+        mesh: usize,
+        image: u32,
+        uniforms: fmn_mobject::Uniforms,
+    },
 }
 
 fn record_vec3(
@@ -547,6 +595,56 @@ fn surface_mesh(
     }
 }
 
+fn image_mesh(stage: &Stage, mob: Mob) -> Result<SurfaceMesh, RetainedFrameRendererError> {
+    let entry = stage
+        .get(mob)
+        .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "image handle is stale",
+        })?;
+    if entry.buffer.len() != 6 {
+        return Err(RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "image quad must contain exactly six records",
+        });
+    }
+    let placement = entry.placement();
+    let mut vertices = Vec::new();
+    vertices
+        .try_reserve_exact(6)
+        .map_err(|_| RetainedFrameRendererError::AllocationFailed {
+            resource: "image-mesh vertex",
+            requested: 6,
+        })?;
+    for record in 0..6 {
+        let point = placement.apply_point(record_vec3(stage, mob, record, "point")?);
+        let uv = entry
+            .buffer
+            .read(record, "im_coords")
+            .and_then(|value| <[f32; 2]>::try_from(value.as_slice()).ok())
+            .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                mob,
+                reason: "image im_coords field is absent",
+            })?;
+        let opacity = entry
+            .buffer
+            .read(record, "opacity")
+            .and_then(|value| value.first().copied())
+            .map(f64::from)
+            .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                mob,
+                reason: "image opacity field is absent",
+            })?;
+        vertices.push(SurfaceVertex::textured(
+            point,
+            [0.0, 0.0, 1.0],
+            uv.map(f64::from),
+            opacity,
+        ));
+    }
+    SurfaceMesh::new(vertices, (0..6).collect()).map_err(RetainedFrameRendererError::ThreeD)
+}
+
 fn uniform_scale(placement: Placement, mob: Mob) -> Result<f64, RetainedFrameRendererError> {
     let axes = [
         placement.apply_vector([1.0, 0.0, 0.0]),
@@ -628,7 +726,10 @@ fn dot_draws(stage: &Stage, mob: Mob) -> Result<Vec<TrueDotDraw>, RetainedFrameR
 #[cfg(test)]
 mod tests {
     use fmn_core::color::LinearRgba;
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive};
+    use fmn_mobject::{
+        ImageColorSpace, ImageResource, ImageSampler, Mobject, RecordBuffer, RecordSchema,
+        RenderPrimitive,
+    };
 
     use super::*;
     use crate::{CameraConfig, ScreenMap, Viewport};
@@ -744,6 +845,69 @@ mod tests {
         Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::TriangleMesh)
     }
 
+    fn image_quad(camera: &Camera, pixels: Vec<u8>) -> Mobject {
+        let schema = RecordSchema::new(
+            &[("point", 3), ("im_coords", 2), ("opacity", 1)],
+            &["point"],
+            &["point"],
+        )
+        .expect("image schema");
+        let mut buffer = RecordBuffer::new(schema, 6).expect("image records");
+        let scale = camera.frame().scale();
+        let half_width = fmn_core::constants::FRAME_WIDTH * scale / 2.0;
+        let half_height = fmn_core::constants::FRAME_HEIGHT * scale / 2.0;
+        #[allow(clippy::cast_possible_truncation)]
+        buffer.write_range(
+            "point",
+            0,
+            &[
+                -half_width as f32,
+                half_height as f32,
+                0.0,
+                -half_width as f32,
+                -half_height as f32,
+                0.0,
+                half_width as f32,
+                half_height as f32,
+                0.0,
+                half_width as f32,
+                -half_height as f32,
+                0.0,
+                half_width as f32,
+                half_height as f32,
+                0.0,
+                -half_width as f32,
+                -half_height as f32,
+                0.0,
+            ],
+        );
+        buffer.write_range(
+            "im_coords",
+            0,
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+        );
+        buffer.write_range("opacity", 0, &[1.0; 6]);
+        let resource = ImageResource::rgba8(
+            2,
+            2,
+            pixels,
+            ImageColorSpace::Linear,
+            ImageSampler::default(),
+        )
+        .expect("valid test image");
+        Mobject::from_buffer(buffer).with_image_resource(resource)
+    }
+
+    fn pixel(frame: &FrameBuffer, x: usize, y: usize) -> [f64; 4] {
+        let stride = frame.layout().stride(0);
+        let offset = y * stride + x * 8;
+        let bytes = &frame.plane(0)[offset..offset + 8];
+        std::array::from_fn(|component| {
+            let at = component * 2;
+            fmn_frame::half::f16_to_f64(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
+        })
+    }
+
     #[test]
     fn zero_threads_fail_before_frame_allocation() {
         assert!(matches!(
@@ -808,6 +972,68 @@ mod tests {
         four.render_with_camera(&stage, &camera)
             .expect("same mixed frame at four threads");
         assert_eq!(one.frame().as_bytes(), four.frame().as_bytes());
+    }
+
+    #[test]
+    fn camera_route_renders_image_pixels_and_interns_repeated_resources() {
+        let camera = camera();
+        let pixels = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let mut stage = Stage::new();
+        let first = stage.add(image_quad(&camera, pixels.clone()));
+        stage.add_to_scene(first).expect("first image root");
+        let second = stage.add(image_quad(&camera, pixels));
+        stage.add_to_scene(second).expect("second image root");
+
+        let mut renderer = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        renderer
+            .render_with_camera(&stage, &camera)
+            .expect("production image frame");
+        assert_eq!(
+            renderer.plan().images().len(),
+            1,
+            "identical descriptors and bytes share one retained texture"
+        );
+
+        let red = pixel(renderer.frame(), 8, 4);
+        let green = pixel(renderer.frame(), 24, 4);
+        let blue = pixel(renderer.frame(), 8, 13);
+        let white = pixel(renderer.frame(), 24, 13);
+        assert!(red[0] > 0.8 && red[1] < 0.1 && red[2] < 0.1);
+        assert!(green[0] < 0.1 && green[1] > 0.8 && green[2] < 0.1);
+        assert!(blue[0] < 0.1 && blue[1] < 0.1 && blue[2] > 0.8);
+        assert!(white[0] > 0.8 && white[1] > 0.8 && white[2] > 0.8);
+
+        let changed = ImageResource::rgba8(
+            2,
+            2,
+            [255, 255, 0, 255].repeat(4),
+            ImageColorSpace::Linear,
+            ImageSampler::default(),
+        )
+        .expect("replacement image");
+        assert!(
+            stage
+                .set_image_resource(second, Some(changed.clone()))
+                .unwrap()
+        );
+        renderer
+            .render_with_camera(&stage, &camera)
+            .expect("replacement image frame");
+        assert_eq!(renderer.plan().images().len(), 2);
+        let yellow = pixel(renderer.frame(), 16, 9);
+        assert!(yellow[0] > 0.8 && yellow[1] > 0.8 && yellow[2] < 0.1);
+
+        assert!(stage.set_image_resource(first, Some(changed)).unwrap());
+        renderer
+            .render_with_camera(&stage, &camera)
+            .expect("deduplicated replacement image frame");
+        assert_eq!(
+            renderer.plan().images().len(),
+            1,
+            "textures absent from the current frame are not retained indefinitely"
+        );
     }
 
     #[test]

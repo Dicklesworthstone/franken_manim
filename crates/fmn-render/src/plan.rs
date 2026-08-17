@@ -28,8 +28,8 @@
 use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
 use crate::table::{
-    Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError, check_row_count,
-    compile_shape, shape_digest,
+    ImageTable, Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError,
+    check_row_count, compile_shape, shape_digest,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, quadpath::QuadPath};
@@ -327,6 +327,7 @@ impl Reachability {
             | SyncError::Table(TableError::IndexCapacityExceeded { resource, .. })
             | SyncError::Table(TableError::AllocationFailed { resource, .. }) => *resource,
             SyncError::Table(TableError::ShapeIdentityMismatch { .. })
+            | SyncError::Table(TableError::ImageTextureInvalid)
             | SyncError::InvalidGeometry { .. }
             | SyncError::EpochExhausted => return false,
         };
@@ -397,6 +398,7 @@ pub struct RenderPlan {
     segments: Vec<Segment>,
     styles: StyleTable,
     shapes: ShapeTable,
+    images: ImageTable,
     retained: HashMap<Mob, Retained>,
     scratch_instances: Vec<Instance>,
     scratch_retained: HashMap<Mob, Retained>,
@@ -444,6 +446,7 @@ impl Default for RenderPlan {
             segments: Vec::new(),
             styles: StyleTable::default(),
             shapes: ShapeTable::default(),
+            images: ImageTable::default(),
             retained: HashMap::new(),
             scratch_instances: Vec::new(),
             scratch_retained: HashMap::new(),
@@ -521,6 +524,21 @@ impl RenderPlan {
     #[must_use]
     pub fn epoch(&self) -> RenderPlanEpoch {
         self.epoch
+    }
+
+    /// Content-addressed image rows retained across camera renders.
+    #[must_use]
+    pub const fn images(&self) -> &ImageTable {
+        &self.images
+    }
+
+    pub(crate) fn prepare_image_frame(&self) -> Result<ImageTable, SyncError> {
+        self.images.prepare_frame().map_err(SyncError::from)
+    }
+
+    pub(crate) fn commit_image_frame(&mut self, mut images: ImageTable) {
+        images.retain_current();
+        self.images = images;
     }
 
     fn reachability(&mut self) -> Result<Reachability, SyncError> {

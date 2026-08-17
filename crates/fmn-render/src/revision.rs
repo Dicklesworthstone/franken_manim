@@ -20,12 +20,10 @@
 //!
 //! Marionette carries per-field revision counters on the `RecordBuffer`
 //! (`record.rs`) plus fm-7if's independent affine placement revision on every
-//! entry. Five of the seven axes read directly off that machinery plus the
-//! family and uniforms. Two are produced elsewhere:
+//! entry. Six of the seven axes read from that machinery plus the family,
+//! uniforms, and immutable image-resource replacement counter. One is produced
+//! elsewhere:
 //!
-//! - **`Image` has no Marionette producer yet** — there are no image mobjects,
-//!   so its revision remains an explicit input supplied by §12's
-//!   `ImageMobject`.
 //! - **`Camera` is produced by Lumen, not Marionette.** A [`Stage`] does not own
 //!   the camera, so [`Revisions::read`] deliberately leaves that axis at zero.
 //!   The capture boundary composes it with
@@ -41,7 +39,7 @@
 //! generation can legitimately restart. [`Revisions`] folds the storage identity
 //! into the axes for exactly that reason.
 
-use fmn_mobject::{Mob, Stage, Uniforms};
+use fmn_mobject::{Entry, ImageColorSpace, ImageWrap, Mob, Stage, Uniforms};
 
 /// One of §10.8's seven revision axes.
 ///
@@ -155,11 +153,10 @@ impl Revisions {
             .collect()
     }
 
-    /// Read the five axes a `Stage` can answer for one mobject.
+    /// Read the six axes a `Stage` can answer for one mobject.
     ///
-    /// [`Axis::Image`] and [`Axis::CameraProjection`] are left at their current
-    /// values because neither is owned by Marionette. The capture boundary
-    /// composes them with [`Revisions::with_image`] and
+    /// [`Axis::CameraProjection`] is left at its current value because the
+    /// camera is not owned by Marionette. The capture boundary composes it with
     /// `with_camera(camera.revision())`.
     /// Returns `None` for a stale or foreign handle, which is not an error: a
     /// deleted mobject has no revisions, and the plan drops it.
@@ -223,7 +220,7 @@ impl Revisions {
             transform,
             style,
             order,
-            image: 0,
+            image: image_key(entry),
             camera: 0,
         })
     }
@@ -244,13 +241,6 @@ impl Revisions {
             self.image,
             self.camera,
         ])
-    }
-
-    /// With [`Axis::Image`] set.
-    #[must_use]
-    pub fn with_image(mut self, revision: u64) -> Revisions {
-        self.image = revision;
-        self
     }
 
     /// With [`Axis::CameraProjection`] set.
@@ -407,10 +397,46 @@ fn uniform_key(u: &Uniforms) -> u64 {
     mixer.finish()
 }
 
+/// Revision plus immutable descriptor identity for the image axis.
+///
+/// The content address keeps a durable snapshot restore visible even when its
+/// edit counter legitimately restarts at the same value as the state it
+/// replaces. Pixel bytes themselves are never reread here.
+fn image_key(entry: &Entry) -> u64 {
+    let Some(image) = entry.image_resource() else {
+        return entry.image_revision();
+    };
+    let mut mixer = Mixer::new();
+    mixer.write_u64(entry.image_revision());
+    mixer.write_u64(u64::from(image.width()));
+    mixer.write_u64(u64::from(image.height()));
+    match image.color_space() {
+        ImageColorSpace::Srgb => mixer.write_u64(0),
+        ImageColorSpace::Linear => mixer.write_u64(1),
+        ImageColorSpace::Gamma(gamma) => {
+            mixer.write_u64(2);
+            mixer.write_u64(u64::from(gamma));
+        }
+    }
+    let wrap = |wrap| match wrap {
+        ImageWrap::Repeat => 0,
+        ImageWrap::ClampToEdge => 1,
+        ImageWrap::MirroredRepeat => 2,
+    };
+    mixer.write_u64(wrap(image.sampler().wrap_u));
+    mixer.write_u64(wrap(image.sampler().wrap_v));
+    for chunk in image.content_digest().as_bytes().as_chunks::<8>().0 {
+        mixer.write_u64(u64::from_le_bytes(*chunk));
+    }
+    mixer.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
+    use fmn_mobject::{
+        ImageColorSpace, ImageResource, ImageSampler, Mobject, RecordBuffer, RecordSchema, Stage,
+    };
 
     /// A stage with one VMobject-shaped mobject holding a triangle.
     fn vmobject(points: &[[f64; 3]]) -> Mobject {
@@ -618,6 +644,32 @@ mod tests {
     }
 
     #[test]
+    fn replacing_image_bytes_touches_image_alone() {
+        let first = ImageResource::rgba8(
+            1,
+            1,
+            vec![1, 2, 3, 255],
+            ImageColorSpace::Srgb,
+            ImageSampler::default(),
+        )
+        .unwrap();
+        let second = ImageResource::rgba8(
+            1,
+            1,
+            vec![4, 5, 6, 255],
+            ImageColorSpace::Srgb,
+            ImageSampler::default(),
+        )
+        .unwrap();
+        let mut stage = Stage::new();
+        let mob = stage.add(vmobject(&[[0.0, 0.0, 0.0]]).with_image_resource(first));
+        let before = read(&stage, mob);
+        assert!(stage.set_image_resource(mob, Some(second)).unwrap());
+        let after = read(&stage, mob);
+        assert_eq!(after.diff(&before), vec![Axis::Image]);
+    }
+
+    #[test]
     fn a_resize_invalidates_every_axis_and_that_is_correct() {
         // The one mutation that legitimately moves everything, and it is worth
         // stating rather than discovering. `RecordBuffer::swap_in` — every
@@ -643,10 +695,10 @@ mod tests {
                 Axis::Style,
                 Axis::Order
             ],
-            "a resize must stale every axis a Stage derives"
+            "a resize must stale every buffer-derived axis"
         );
-        // The two axes Marionette does not produce stay exactly where the caller
-        // left them — a resize is not a camera move.
+        // Immutable image bytes are independent of record storage, and a resize
+        // is not a camera move.
         assert_eq!(after.image, before.image);
         assert_eq!(after.camera, before.camera);
     }
@@ -715,21 +767,18 @@ mod tests {
     }
 
     #[test]
-    fn image_is_external_and_camera_uses_the_lumen_revision() {
+    fn camera_uses_the_lumen_revision() {
         use crate::Camera;
 
-        // Neither producer belongs to Marionette. A plausible zero would be a
+        // The camera does not belong to Marionette. A plausible zero would be a
         // lie — a camera move that never bumps the axis is a stale frame.
         let (stage, mob) = one_mobject();
         let base = read(&stage, mob);
         assert_eq!(base.image, 0);
         assert_eq!(base.camera, 0);
         let mut camera = Camera::default();
-        let composed = base.with_image(7).with_camera(camera.revision());
-        assert_eq!(
-            composed.diff(&base),
-            vec![Axis::Image, Axis::CameraProjection]
-        );
+        let composed = base.with_camera(camera.revision());
+        assert_eq!(composed.diff(&base), vec![Axis::CameraProjection]);
         // And composing them leaves the derived axes exactly alone.
         assert_eq!(composed.geometry, base.geometry);
         assert_eq!(composed.style, base.style);
@@ -738,7 +787,7 @@ mod tests {
             .frame_mut()
             .set_center([1.0, 0.0, 0.0])
             .expect("finite camera center");
-        let moved = base.with_image(7).with_camera(camera.revision());
+        let moved = base.with_camera(camera.revision());
         assert_eq!(moved.diff(&composed), vec![Axis::CameraProjection]);
     }
 
