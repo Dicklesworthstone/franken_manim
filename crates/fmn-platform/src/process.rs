@@ -170,9 +170,9 @@ pub enum NativeExecutableArchitecture {
 /// Structural evidence for the exact opened executable image.
 ///
 /// This records acceptance by a bounded, versioned parser. It is deliberately
-/// not an assertion that the host loader must accept the image; `fm-x4pp`
-/// requires a no-interpreter spawn capability so a later loader refusal cannot
-/// become a shell fallback.
+/// not an assertion that the host loader must accept the image. The paired
+/// exact-image process capability guarantees that a later loader refusal stays
+/// a spawn error rather than becoming an interpreter fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeImageAttestation {
     /// Native container family.

@@ -5,9 +5,10 @@ D-23). It requires ffmpeg to be the only external subprocess the engine
 invokes — encode, mux, transcode — and this document defines the protocol every
 conforming invocation obeys. Implementation: `fmn-output::negotiate` (pure
 argv construction) and `fmn-output::ffmpeg` (sandboxed execution) over
-`fmn-platform::process` (the argv-only interface). Section 2.1 records the one
-remaining mechanism blocker rather than presenting the incomplete boundary as
-closed.
+`fmn-platform::process` (the argv-only interface). Section 2.1 records the
+supported exact-image mechanisms, the separate filesystem capability boundary,
+and the residual threat model that the implemented protocol does not claim to
+close.
 
 ## 1. Negotiation, not a fixed pipe
 
@@ -167,16 +168,28 @@ between the last check and the OS spawn/removal operation. Supporting that
 stronger threat model requires an opaque host executable/filesystem capability;
 it is not papered over by a weaker or unsafe platform path.
 
-There is a second, separate safe-standard-library limitation. On supported
-Unix configurations the pinned `Command` implementation prefers
-`posix_spawnp`, whose native-image failure is returned to the caller. When its
-target or runtime preconditions are unavailable, however, it falls back to
-`fork` plus libc `execvp`; `execvp` is permitted to invoke `/bin/sh` after
-`ENOEXEC`. The boundary's native-image parser rejects known scripts and
-malformed containers, but a parser is not an OS-loader equivalence proof.
-Therefore the exact-copy tranche does **not** yet make the global D2 no-shell
-claim. `fm-x4pp` blocks `fm-2sxz` until an audited safe no-interpreter spawn
-capability can refuse unsupported configurations before issuing a process.
+The process mechanism no longer rides `std::process::Command`'s potential
+`fork`/`execvp` fallback. `StdProcessRunner` delegates to the audited
+asupersync exact-image capability and requires an absolute `ProcessSpec`
+program. Linux and macOS use `posix_spawn` with that absolute image into a new
+process group—never `posix_spawnp`, `execvp`, or an `ENOEXEC` shell fallback.
+Windows uses an explicit `CreateProcessW` application and assigns it atomically
+to a kill-on-close Job Object. Other targets select `exact_image.unavailable`
+and refuse before issuing a process. The stable mechanism identity
+(`posix_spawn.absolute_path.new_process_group` or
+`create_process_w.explicit_application.atomic_job_list`) and its policy version
+enter C9 provenance for every successful invocation.
+
+This exact-image capability makes a loader rejection a typed spawn failure,
+not an opportunity to try an interpreter. It does not recast the versioned
+native-container parser as proof of complete loader equivalence, and it does
+not widen the trusted-ancestry filesystem bound above. The paired tranches
+`fm-x4pp` and `fm-2sxz` are completed provenance: their native functional suite
+proved the no-interpreter mechanism on linux-x86-64 glibc,
+linux-aarch64 musl, macos-aarch64, and windows-x86-64 MSVC. That Windows result
+proves the process substrate; the full ffmpeg boundary still refuses earlier at
+private-workdir establishment on non-Unix, whose ACL and
+application-directory loader policy remain open under `fm-8foa`.
 
 ## 3. Optionality
 
@@ -220,7 +233,8 @@ ffmpeg's fingerprint and its recognized hardware encoders.
 
 ## 6. CI: the fake ffmpeg
 
-The protocol is CI-verified without real encoders, at two layers:
+The protocol is CI-verified without real encoders at three complementary
+layers:
 
 - **Contract suite** (`ScriptedRunner`): every negotiation dimension,
   the env allowlist, both mux stages, and the failure modes (timeout,
@@ -236,5 +250,12 @@ The protocol is CI-verified without real encoders, at two layers:
   replacement after binding cannot change the executable that runs.
   Interpreter-script bytes remain only as hostile replacements whose
   rejection is asserted; no positive boundary fixture executes a shell.
+- **Native exact-image capability suite** (`fmn-platform`): executable text
+  remains a spawn error without an interpreter, argv/environment/stdio are
+  preserved, mechanism identity is locked, and complete-tree timeout and
+  cancellation are exercised natively on linux-x86-64 glibc,
+  linux-aarch64 musl, macos-aarch64, and windows-x86-64 MSVC. The Windows leg
+  is process-substrate evidence, not a claim that the separate non-Unix
+  private-workdir capability has landed.
 - **Real-ffmpeg smoke test**, behind `FMN_REAL_FFMPEG=1`, encodes a
   short NV12 clip through the installed tool.
