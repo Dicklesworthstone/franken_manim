@@ -1731,7 +1731,9 @@ mod tests {
         assert_eq!(opening_a, opening_b);
         assert_eq!(
             sha256(&opening_a).to_string(),
-            "4679efb8e38432db69da0e6bf03acdb713f2fcb91e16d7249fb69da0efd334a4"
+            // Canonical snapshots include each detached family's transformed
+            // primitive tag, not only its point records.
+            "362c3672e7d31a931832c88badb3512cd8b495cad244091610c0f521730d22e6"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);

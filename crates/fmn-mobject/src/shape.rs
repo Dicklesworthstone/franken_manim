@@ -198,6 +198,25 @@ mod tests {
     use super::*;
     use crate::mobject::Mobject;
 
+    type PlacementCase = (&'static str, fn(&mut Stage, Mob));
+
+    fn assert_placement_preserves_hint(operation: &str, apply: impl FnOnce(&mut Stage, Mob)) {
+        let tag = ShapeTag::Circle {
+            center: [0.0; 3],
+            radius: 1.0,
+        };
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_points(&square_points()));
+        stage.set_shape(mob, tag);
+        apply(&mut stage, mob);
+        assert_eq!(
+            stage.primitive_hint(mob),
+            Some(tag),
+            "{operation} rewrote object-space geometry"
+        );
+        assert_eq!(stage.shape(mob), tag, "{operation} lost class identity");
+    }
+
     fn square_points() -> Vec<Vec3> {
         vec![
             [1.0, 1.0, 0.0],
@@ -280,6 +299,72 @@ mod tests {
         view.write(0, "point", &[3.0, 3.0, 3.0]);
         drop(view);
         assert_eq!(stage.primitive_hint(mob), None);
+    }
+
+    #[test]
+    fn every_affine_positional_route_keeps_the_object_space_hint() {
+        let cases: [PlacementCase; 11] = [
+            ("shift", |stage, mob| {
+                stage.shift(mob, [1.0, 2.0, 0.0]);
+            }),
+            ("scale", |stage, mob| {
+                stage.scale(mob, 1.5);
+            }),
+            ("scale_about", |stage, mob| {
+                stage.scale_about(mob, 1.5, Some([0.5, 0.5, 0.0]), None);
+            }),
+            ("stretch", |stage, mob| {
+                stage.stretch(mob, 0.5, 0);
+            }),
+            ("rotate", |stage, mob| {
+                stage.rotate(mob, 0.7, [0.0, 0.0, 1.0], Some([0.0; 3]), None);
+            }),
+            ("center", |stage, mob| {
+                stage.center(mob);
+            }),
+            ("next_to", |stage, mob| {
+                stage.next_to(mob, [3.0, 2.0, 0.0], [1.0, 0.0, 0.0], 0.2, [0.0; 3]);
+            }),
+            ("move_to", |stage, mob| {
+                stage.move_to(mob, [3.0, 2.0, 0.0], [0.0; 3]);
+            }),
+            ("align_to", |stage, mob| {
+                stage.align_to(mob, [3.0, 2.0, 0.0], [1.0, 1.0, 0.0]);
+            }),
+            ("to_edge", |stage, mob| {
+                stage.to_edge(mob, [1.0, 0.0, 0.0], 0.5);
+            }),
+            ("to_corner", |stage, mob| {
+                stage.to_corner(mob, [1.0, 1.0, 0.0], 0.5);
+            }),
+        ];
+        for (operation, apply) in cases {
+            assert_placement_preserves_hint(operation, apply);
+        }
+    }
+
+    #[test]
+    fn non_affine_point_routes_still_demote_the_hint() {
+        let tag = ShapeTag::Circle {
+            center: [0.0; 3],
+            radius: 1.0,
+        };
+
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_points(&square_points()));
+        stage.set_shape(mob, tag);
+        stage.apply_points_function(mob, |p| [p[0], 0.5 * p[1], p[2]], None, None);
+        assert_eq!(stage.primitive_hint(mob), None);
+
+        let source = stage.add(Mobject::from_points(&[
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ]));
+        let target = stage.add(Mobject::from_points(&square_points()));
+        stage.set_shape(target, tag);
+        stage.match_points(target, source);
+        assert_eq!(stage.primitive_hint(target), None);
     }
 
     #[test]

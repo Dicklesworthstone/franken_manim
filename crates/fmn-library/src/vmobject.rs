@@ -348,16 +348,30 @@ impl VMobject {
     /// longer building the shape the tag names. A class that *knows* the
     /// map preserves its shape re-tags afterwards.
     #[must_use]
-    pub fn map_points(mut self, f: impl Fn(Vec3) -> Vec3 + Copy) -> Self {
+    pub fn map_points(self, f: impl Fn(Vec3) -> Vec3 + Copy) -> Self {
+        self.map_points_and_shapes(f, |_| ShapeTag::General)
+    }
+
+    /// Apply one point map while deriving every detached family member's
+    /// semantic tag through the same transform.
+    ///
+    /// This is intentionally private: only the affine operations below can
+    /// prove how all of a tag's geometric payload moves. Arbitrary public
+    /// point maps continue to route through [`Self::map_points`] and demote.
+    fn map_points_and_shapes(
+        mut self,
+        point_map: impl Fn(Vec3) -> Vec3 + Copy,
+        shape_map: impl Fn(ShapeTag) -> ShapeTag + Copy,
+    ) -> Self {
         for p in &mut self.points {
-            *p = f(*p);
+            *p = point_map(*p);
         }
         self.submobjects = self
             .submobjects
             .into_iter()
-            .map(|child| child.map_points(f))
+            .map(|child| child.map_points_and_shapes(point_map, shape_map))
             .collect();
-        self.shape = ShapeTag::General;
+        self.shape = shape_map(self.shape);
         self
     }
 
@@ -377,9 +391,10 @@ impl VMobject {
     /// Shift every point (including children's).
     #[must_use]
     pub fn shifted(self, offset: Vec3) -> Self {
-        let shape = self.shape;
-        self.map_points(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]])
-            .with_shape(shifted_tag(shape, offset))
+        self.map_points_and_shapes(
+            |p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]],
+            |shape| shifted_tag(shape, offset),
+        )
     }
 
     /// The `(min, max)` corners of the family's points, or `None` when
@@ -430,13 +445,10 @@ impl VMobject {
     /// Scale about a pivot (Reference `scale(factor, about_point=…)`).
     #[must_use]
     pub fn scaled_about(self, factor: f64, about: Vec3) -> Self {
-        self.map_points(move |p| {
-            [
-                about[0] + (p[0] - about[0]) * factor,
-                about[1] + (p[1] - about[1]) * factor,
-                about[2] + (p[2] - about[2]) * factor,
-            ]
-        })
+        self.map_points_and_shapes(
+            move |p| scale_point_about(p, factor, about),
+            move |shape| scaled_tag(shape, factor, about),
+        )
     }
 
     /// Stretch one axis about a pivot (Reference `stretch`).
@@ -482,14 +494,10 @@ impl VMobject {
     #[must_use]
     pub fn rotated_about(self, angle: f64, axis: Vec3, about: Vec3) -> Self {
         let m = fmn_geom::rotation_matrix(angle, axis);
-        self.map_points(move |p| {
-            let v = [p[0] - about[0], p[1] - about[1], p[2] - about[2]];
-            [
-                about[0] + m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-                about[1] + m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-                about[2] + m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-            ]
-        })
+        self.map_points_and_shapes(
+            move |p| rotate_point_about(p, m, about),
+            move |shape| rotated_tag(shape, angle, axis, about, m),
+        )
     }
 
     /// Move the family's centre to `point` (Reference `move_to`).
@@ -676,10 +684,11 @@ fn sub(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-/// Translate a tag's geometric payload — the one transform a detached
-/// builder performs often enough (`arc_center`, `Dot(point)`) to be worth
-/// keeping the hint through.
+/// Translate a tag's geometric payload.
 fn shifted_tag(tag: ShapeTag, offset: Vec3) -> ShapeTag {
+    if !finite_vec3(offset) {
+        return ShapeTag::General;
+    }
     let moved = |p: Vec3| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]];
     match tag {
         ShapeTag::General | ShapeTag::Polyline { .. } => tag,
@@ -734,6 +743,159 @@ fn shifted_tag(tag: ShapeTag, offset: Vec3) -> ShapeTag {
             corner_radius,
         },
     }
+}
+
+fn scaled_tag(tag: ShapeTag, factor: f64, about: Vec3) -> ShapeTag {
+    if !factor.is_finite() || !finite_vec3(about) {
+        return ShapeTag::General;
+    }
+    let scaled = |point| scale_point_about(point, factor, about);
+    let magnitude = factor.abs();
+    match tag {
+        ShapeTag::General => ShapeTag::General,
+        ShapeTag::Line {
+            start,
+            end,
+            path_arc,
+            buff,
+        } => ShapeTag::Line {
+            start: scaled(start),
+            end: scaled(end),
+            path_arc,
+            buff: buff * magnitude,
+        },
+        ShapeTag::Polyline { .. } => tag,
+        ShapeTag::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        } => ShapeTag::Arc {
+            center: scaled(center),
+            radius: radius * magnitude,
+            start_angle: start_angle
+                + if factor < 0.0 {
+                    std::f64::consts::PI
+                } else {
+                    0.0
+                },
+            angle,
+        },
+        ShapeTag::Circle { center, radius } => ShapeTag::Circle {
+            center: scaled(center),
+            radius: radius * magnitude,
+        },
+        ShapeTag::Dot { center, radius } => ShapeTag::Dot {
+            center: scaled(center),
+            radius: radius * magnitude,
+        },
+        ShapeTag::Rect {
+            center,
+            width,
+            height,
+        } => ShapeTag::Rect {
+            center: scaled(center),
+            width: width * magnitude,
+            height: height * magnitude,
+        },
+        ShapeTag::RoundedRect {
+            center,
+            width,
+            height,
+            corner_radius,
+        } => ShapeTag::RoundedRect {
+            center: scaled(center),
+            width: width * magnitude,
+            height: height * magnitude,
+            corner_radius: corner_radius * magnitude,
+        },
+    }
+}
+
+fn rotated_tag(
+    tag: ShapeTag,
+    angle: f64,
+    axis: Vec3,
+    about: Vec3,
+    matrix: [[f64; 3]; 3],
+) -> ShapeTag {
+    if !angle.is_finite() || !finite_vec3(axis) || !finite_vec3(about) {
+        return ShapeTag::General;
+    }
+    if axis == [0.0; 3] || angle == 0.0 {
+        return tag;
+    }
+    if axis[0] != 0.0 || axis[1] != 0.0 || axis[2] == 0.0 {
+        return ShapeTag::General;
+    }
+
+    let rotated = |point| rotate_point_about(point, matrix, about);
+    let signed_angle = if axis[2].is_sign_negative() {
+        -angle
+    } else {
+        angle
+    };
+    match tag {
+        ShapeTag::General => ShapeTag::General,
+        ShapeTag::Line {
+            start,
+            end,
+            path_arc,
+            buff,
+        } => ShapeTag::Line {
+            start: rotated(start),
+            end: rotated(end),
+            path_arc,
+            buff,
+        },
+        ShapeTag::Polyline { .. } => tag,
+        ShapeTag::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        } => ShapeTag::Arc {
+            center: rotated(center),
+            radius,
+            start_angle: start_angle + signed_angle,
+            angle,
+        },
+        ShapeTag::Circle { center, radius } => ShapeTag::Circle {
+            center: rotated(center),
+            radius,
+        },
+        ShapeTag::Dot { center, radius } => ShapeTag::Dot {
+            center: rotated(center),
+            radius,
+        },
+        // These tags encode axis alignment and carry no orientation field.
+        ShapeTag::Rect { .. } | ShapeTag::RoundedRect { .. } => ShapeTag::General,
+    }
+}
+
+fn scale_point_about(point: Vec3, factor: f64, about: Vec3) -> Vec3 {
+    [
+        about[0] + (point[0] - about[0]) * factor,
+        about[1] + (point[1] - about[1]) * factor,
+        about[2] + (point[2] - about[2]) * factor,
+    ]
+}
+
+fn rotate_point_about(point: Vec3, matrix: [[f64; 3]; 3], about: Vec3) -> Vec3 {
+    let v = [
+        point[0] - about[0],
+        point[1] - about[1],
+        point[2] - about[2],
+    ];
+    [
+        about[0] + matrix[0][0] * v[0] + matrix[0][1] * v[1] + matrix[0][2] * v[2],
+        about[1] + matrix[1][0] * v[0] + matrix[1][1] * v[1] + matrix[1][2] * v[2],
+        about[2] + matrix[2][0] * v[0] + matrix[2][1] * v[1] + matrix[2][2] * v[2],
+    ]
+}
+
+fn finite_vec3(value: Vec3) -> bool {
+    value.into_iter().all(f64::is_finite)
 }
 
 impl From<VMobject> for Mobject {
@@ -984,9 +1146,25 @@ fn resize_with_interpolation(values: &[f64], length: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arc::Circle;
+    use crate::arc::{Arc, Circle};
+    use crate::line::Line;
+    use crate::poly::Rectangle;
     use crate::style::VStyle;
     use fmn_core::constants::{RED, TAU};
+
+    fn assert_points_close(actual: &[Vec3], expected: &[Vec3], context: &str) {
+        assert_eq!(actual.len(), expected.len(), "{context}: point count");
+        for (point_index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            for axis in 0..3 {
+                assert!(
+                    (actual[axis] - expected[axis]).abs() <= 2.0e-6,
+                    "{context}: point {point_index} axis {axis}: {} != {}",
+                    actual[axis],
+                    expected[axis]
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_built_vmobject_carries_points_style_uniforms_and_shape() {
@@ -1206,17 +1384,234 @@ mod tests {
     }
 
     #[test]
-    fn map_points_drops_the_tag_but_shifted_keeps_it() {
-        let circle = Circle::new().radius(2.0).build();
-        assert!(matches!(circle.shape(), ShapeTag::Circle { .. }));
-        let squashed = circle.clone().map_points(|p| [p[0], p[1] * 0.5, p[2]]);
-        assert_eq!(squashed.shape(), ShapeTag::General);
-        let moved = circle.shifted([1.0, 0.0, 0.0]);
+    fn detached_positional_operations_preserve_or_demote_hints_by_contract() {
+        let circle = Circle::new()
+            .radius(2.0)
+            .arc_center([0.5, -0.25, 0.0])
+            .build();
+        let target = Circle::new()
+            .radius(0.5)
+            .arc_center([4.0, 1.0, 0.0])
+            .build();
+
+        let preserved = [
+            ("shift", circle.clone().shifted([1.0, 2.0, 0.0])),
+            (
+                "uniform scale",
+                circle.clone().scaled_about(1.5, [1.0, 0.0, 0.0]),
+            ),
+            (
+                "z rotation",
+                circle.clone().rotated_about(0.7, [0.0, 0.0, 2.0], [0.0; 3]),
+            ),
+            ("move_to", circle.clone().moved_to([3.0, -2.0, 0.0])),
+            (
+                "aligned move_to",
+                circle
+                    .clone()
+                    .moved_to_aligned([3.0, -2.0, 0.0], [1.0, 1.0, 0.0]),
+            ),
+            (
+                "next_to point",
+                circle
+                    .clone()
+                    .next_to_point([3.0, 2.0, 0.0], [1.0, 0.0, 0.0], 0.2, [0.0; 3]),
+            ),
+            (
+                "next_to mobject",
+                circle
+                    .clone()
+                    .next_to(&target, [1.0, 0.0, 0.0], 0.2, [0.0; 3]),
+            ),
+            (
+                "align_to",
+                circle.clone().aligned_to(&target, [1.0, 0.0, 0.0]),
+            ),
+            (
+                "rescale_to_fit",
+                circle.clone().rescaled_to_fit(5.0, 0, false),
+            ),
+            ("set_width", circle.clone().with_width(5.0, false)),
+            ("set_height", circle.clone().with_height(5.0, false)),
+        ];
+        for (operation, result) in preserved {
+            assert!(
+                matches!(result.shape(), ShapeTag::Circle { .. }),
+                "{operation} unexpectedly demoted {:?}",
+                result.shape()
+            );
+        }
+
+        let demoted = [
+            (
+                "arbitrary point map",
+                circle.clone().map_points(|p| [p[0], p[1] * 0.5, p[2]]),
+            ),
+            ("stretch", circle.clone().stretched_about(0.5, 1, [0.0; 3])),
+            (
+                "stretch rescale_to_fit",
+                circle.clone().rescaled_to_fit(5.0, 0, true),
+            ),
+            ("stretch set_width", circle.clone().with_width(5.0, true)),
+            ("stretch set_height", circle.clone().with_height(5.0, true)),
+            (
+                "out-of-plane rotation",
+                circle.clone().rotated_about(0.7, [1.0, 0.0, 0.0], [0.0; 3]),
+            ),
+            (
+                "non-finite shift",
+                circle.clone().shifted([f64::NAN, 0.0, 0.0]),
+            ),
+        ];
+        for (operation, result) in demoted {
+            assert_eq!(
+                result.shape(),
+                ShapeTag::General,
+                "{operation} retained a false primitive hint"
+            );
+        }
+
+        let rectangle = Rectangle::new().build().expect("rectangle");
+        assert_eq!(
+            rectangle
+                .rotated_about(0.5, [0.0, 0.0, 1.0], [0.0; 3])
+                .shape(),
+            ShapeTag::General,
+            "an axis-aligned rectangle tag cannot encode orientation"
+        );
+    }
+
+    #[test]
+    fn shape_preserving_maps_update_every_detached_family_member() {
+        let family = VMobject::new().with_child(
+            Circle::new()
+                .radius(1.0)
+                .arc_center([1.0, 0.0, 0.0])
+                .build(),
+        );
+        let transformed = family
+            .scaled_about(2.0, [0.0; 3])
+            .rotated_about(TAU / 4.0, [0.0, 0.0, 1.0], [0.0; 3])
+            .shifted([3.0, 1.0, 0.0]);
+
+        assert!(matches!(transformed.shape(), ShapeTag::General));
         assert!(
-            matches!(moved.shape(), ShapeTag::Circle { center, radius }
-                if (center[0] - 1.0).abs() < 1e-12 && (radius - 2.0).abs() < 1e-12),
-            "shift lost the circle: {:?}",
-            moved.shape()
+            matches!(
+                transformed.children()[0].shape(),
+                ShapeTag::Circle { center, radius }
+                    if (center[0] - 3.0).abs() < 1.0e-12
+                        && (center[1] - 3.0).abs() < 1.0e-12
+                        && center[2].abs() < 1.0e-12
+                        && (radius - 2.0).abs() < 1.0e-12
+            ),
+            "child hint did not follow its points: {:?}",
+            transformed.children()[0].shape()
+        );
+    }
+
+    #[test]
+    fn preserved_payload_tags_rebuild_the_transformed_points() {
+        let transformed_arc = Arc::new()
+            .start_angle(0.3)
+            .angle(1.2)
+            .radius(1.7)
+            .arc_center([0.2, -0.4, 0.0])
+            .build()
+            .expect("arc")
+            .shifted([0.8, -0.3, 0.0])
+            .scaled_about(-1.5, [0.5, 0.2, 0.0])
+            .rotated_about(0.6, [0.0, 0.0, -2.0], [-0.2, 0.1, 0.0]);
+
+        let arc_tag = transformed_arc.shape();
+        assert!(
+            matches!(arc_tag, ShapeTag::Arc { .. }),
+            "shape-preserving transforms demoted the arc: {arc_tag:?}"
+        );
+        let ShapeTag::Arc {
+            center,
+            radius,
+            start_angle,
+            angle,
+        } = arc_tag
+        else {
+            return;
+        };
+        let rebuilt_arc = Arc::new()
+            .start_angle(start_angle)
+            .angle(angle)
+            .radius(radius)
+            .arc_center(center)
+            .build()
+            .expect("rebuilt arc");
+        assert_points_close(
+            transformed_arc.points(),
+            rebuilt_arc.points(),
+            "rebuilt arc",
+        );
+
+        let transformed_line = Line::new([-2.0, -0.5, 0.0], [1.5, 1.0, 0.0])
+            .path_arc(0.8)
+            .buff(0.15)
+            .build()
+            .expect("line")
+            .scaled_about(1.75, [0.2, -0.1, 0.0])
+            .rotated_about(0.4, [0.0, 0.0, 1.0], [0.3, 0.7, 0.0])
+            .shifted([-0.6, 0.9, 0.0]);
+        let line_tag = transformed_line.shape();
+        assert!(
+            matches!(line_tag, ShapeTag::Line { .. }),
+            "shape-preserving transforms demoted the line: {line_tag:?}"
+        );
+        let ShapeTag::Line {
+            start,
+            end,
+            path_arc,
+            buff,
+        } = line_tag
+        else {
+            return;
+        };
+        let rebuilt_line = Line::new(start, end)
+            .path_arc(path_arc)
+            .buff(buff)
+            .build()
+            .expect("rebuilt line");
+        assert_points_close(
+            transformed_line.points(),
+            rebuilt_line.points(),
+            "rebuilt line",
+        );
+
+        let transformed_rect = Rectangle::new()
+            .width(3.0)
+            .height(1.5)
+            .build()
+            .expect("rectangle")
+            .scaled_about(1.25, [0.4, -0.2, 0.0])
+            .shifted([0.7, 1.1, 0.0]);
+        let rect_tag = transformed_rect.shape();
+        assert!(
+            matches!(rect_tag, ShapeTag::Rect { .. }),
+            "shape-preserving transforms demoted the rectangle: {rect_tag:?}"
+        );
+        let ShapeTag::Rect {
+            center,
+            width,
+            height,
+        } = rect_tag
+        else {
+            return;
+        };
+        let rebuilt_rect = Rectangle::new()
+            .width(width)
+            .height(height)
+            .build()
+            .expect("rebuilt rectangle")
+            .shifted(center);
+        assert_points_close(
+            transformed_rect.points(),
+            rebuilt_rect.points(),
+            "rebuilt rectangle",
         );
     }
 }
