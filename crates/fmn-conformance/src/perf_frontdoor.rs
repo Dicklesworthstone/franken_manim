@@ -1733,7 +1733,7 @@ mod tests {
             sha256(&opening_a).to_string(),
             // Canonical snapshots include each detached family's transformed
             // primitive tag, not only its point records.
-            "362c3672e7d31a931832c88badb3512cd8b495cad244091610c0f521730d22e6"
+            "f1e38d8a6a7234ee3c2c3eb6b2e6fc44d4e6d587bf5836f9204ce4ec4ea6a5d3"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);

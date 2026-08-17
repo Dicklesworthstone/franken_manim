@@ -2227,6 +2227,10 @@ pub struct GradientField<'a> {
     edge_params: &'a [f64],
 }
 
+/// Backend-facing slices of one retained gradient field.
+#[cfg(feature = "metal")]
+pub(crate) type GradientStationSlices<'a> = (&'a [[f64; 2]], &'a [f64], &'a [usize], &'a [f64]);
+
 impl<'a> GradientField<'a> {
     /// Squared distance below which the query point *is* a station.
     ///
@@ -2446,7 +2450,7 @@ impl<'a> GradientField<'a> {
     /// values into their own flat device representation rather than inventing a
     /// second station-placement rule.
     #[cfg(feature = "metal")]
-    pub(crate) fn stations(&self) -> (&'a [[f64; 2]], &'a [f64], &'a [usize], &'a [f64]) {
+    pub(crate) fn stations(&self) -> GradientStationSlices<'a> {
         (self.points, self.params, self.next, self.edge_params)
     }
 

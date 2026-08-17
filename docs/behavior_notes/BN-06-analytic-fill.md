@@ -82,10 +82,18 @@ and the gradient moves.
 
 FrankenManim's interior colour is a **specified field**: the boundary ramp is
 parameterized by true arc length, and the interior is its mean value interpolant
-over 64 boundary stations placed at fixed arc-length fractions. Two properties
-follow, both tested:
+over 64 boundary stations placed at fixed arc-length fractions. A shape with
+multiple contours is evaluated as a set of separately closed cyclic polygons:
+the same signed mean-value weights are accumulated across every contour, so a
+counter-wound inner contour contributes as a hole instead of acquiring a
+fictional edge to the outer boundary. The 64-station budget is shared in
+proportion to global arc length with a minimum of three stations per contour;
+only shapes with more than 21 contours grow the budget to `3 * contours`.
+Three properties follow, all tested:
 
 - **Subdividing a path does not change its gradient.** Same curve, same colours.
+- **Every contour closes to itself.** A hole never samples a bridge to another
+  subpath, and its boundary ramp is interpolated exactly on that boundary.
 - **The field is a function of geometry alone**, so restyling never rebuilds it.
 
 `fill_border_width`'s remaining job lives here. Inside the band the colour comes
@@ -114,7 +122,8 @@ Two things worth stating because they *look* like candidates:
 
 - `crates/fmn-render/src/fill.rs` — the fill, its oracles, and the measurements
   quoted above (exact enclosed area by Green's theorem; subdivision invariance of
-  geometry and of the gradient; exact native/subcell area agreement; boundary
+  geometry and of single- and multi-contour gradients; exact native/subcell area
+  agreement; per-contour closure and hole-boundary interpolation; boundary
   crossing classification; the 0.500 seam disagreement; the flat-fill no-op).
 - `crates/fmn-render/src/engine.rs` — adaptive thresholds, tile/cell
   instrumentation, the G0-2 two-AA-band stroke eligibility rule, fused resolve,
