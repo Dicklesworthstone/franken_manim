@@ -9,13 +9,27 @@ use std::path::Path;
 
 use fmn_cache::{DEFAULT_CACHE_LEAF, resolve_host_cache_root};
 
-/// The distribution document this test pins to the code.
-fn conventions_doc() -> String {
+/// The packaged copy keeps this test runnable from a published crate and on
+/// source-transfer systems that intentionally omit repository distribution
+/// outputs. A full workspace additionally proves that its distribution copy
+/// is byte-identical below.
+fn conventions_doc() -> &'static str {
+    include_str!("../docs/cache_config_conventions.md")
+}
+
+#[test]
+fn packaged_contract_matches_workspace_distribution_copy_when_present() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("docs/dist/cache_config_conventions.md");
-    std::fs::read_to_string(&path)
-        .expect("docs/dist/cache_config_conventions.md is readable from the crate")
+    let Ok(distribution_doc) = std::fs::read_to_string(path) else {
+        return;
+    };
+    assert_eq!(
+        conventions_doc(),
+        distribution_doc,
+        "the packaged and workspace cache/config contracts drifted"
+    );
 }
 
 #[test]
