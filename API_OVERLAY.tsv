@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	b92c8a1ee0c8596673348cefa146b22070b5bd681015b16c9f28f108ff98c70c
+ledger_reviewed_digest	870d524359192b4183fd70329012a6226d7a7e9edea54cc0766292497fed0243
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -486,6 +486,7 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --threads	store	-	-	usize	global	threads	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound render-team CPU threads
 --ffmpeg	store	-	-	path	global	ffmpeg	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Absolute path to the optional ffmpeg executable
 --cache-dir	store	-	-	path	global	cache_dir	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Explicit FrankenManim content-store root
+--engine	store	-	-	engine	render	engine	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
 --format	store	-	auto	output_format	render	format	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, or video output
 --math-pack	store	-	default	pack	render	math_pack	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select an fmd-math preamble pack
 --budget-ms	store	-	-	u64	batch	budget_ms	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Wall-clock budget for the batch

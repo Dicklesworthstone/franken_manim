@@ -573,6 +573,18 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         help: "Explicit FrankenManim content-store root",
     },
     FlagSpec {
+        options: &["--engine"],
+        binding: "engine",
+        command: CommandScope::Render,
+        action: FlagAction::Store,
+        arity: FlagArity::One,
+        default: None,
+        value_type: Some("engine"),
+        status: FlagStatus::Improved,
+        source: FlagSource::Native,
+        help: "Select the CPU engine or a standard-only accelerator annex",
+    },
+    FlagSpec {
         options: &["--format"],
         binding: "format",
         command: CommandScope::Render,

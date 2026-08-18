@@ -27,7 +27,8 @@
 //!   precise named `TexError::Math` refusal; a corrupted cache entry is
 //!   evicted and recomputed, never fatal; an invalid CLI flag combination
 //!   (`-l -m`) exits 2 with the `quality-exclusive` rule identity through
-//!   `fmn_cli`'s in-process runner.
+//!   `fmn_cli`'s in-process runner; certified Metal selection exits 3 before
+//!   creating its requested output path.
 //! - **LIFECYCLE DRILL** — construct → snapshot → transform → snapshot
 //!   with geometry assertions (the `scene_goldens` lifecycle form), plus
 //!   a journal round-trip: bytes out, bytes in, identical content hash,
@@ -1035,6 +1036,61 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .exit_code(2)
         .with_counter("cli_rule_named", 1))
+}
+
+/// The certified contract permanently refuses accelerator work before
+/// output publication, even when the binary was compiled with an annex.
+fn failure_cli_certified_metal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_certified_metal_refusal")?;
+    let destination = dir.join("must-not-exist");
+    let destination_text = destination
+        .to_str()
+        .ok_or_else(|| fail("certified Metal refusal path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--reproducible",
+        "--engine",
+        "metal",
+        "--format",
+        "png_sequence",
+        "--video_dir",
+        destination_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let single_line = output.stdout.lines().count() == 1 && !output.stdout.is_empty();
+    let names_exit = output.stdout.contains("\"exit_name\":\"config\"");
+    let names_contract = output.stdout.contains("requires render.engine=cpu");
+    let clean_stderr = output.stderr.is_empty();
+    let no_output = !destination.exists();
+    let refused = output.code == 3
+        && single_line
+        && names_exit
+        && names_contract
+        && clean_stderr
+        && no_output;
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("contract", "certified-cpu-only")
+            .field("exit_named", truth(names_exit))
+            .field("contract_named", truth(names_contract))
+            .field("ndjson_single_line", truth(single_line))
+            .field("stderr_empty", truth(clean_stderr))
+            .field("output_absent", truth(no_output)),
+    );
+    ctx.counter("cli_certified_metal_refused", u64::from(refused));
+    if !refused {
+        return Err(fail(format!(
+            "certified Metal refusal drifted: code={} stdout={:?} stderr={:?} output_exists={}",
+            output.code,
+            output.stdout,
+            output.stderr,
+            destination.exists(),
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .exit_code(3)
+        .with_counter("cli_certified_metal_refused", 1))
 }
 
 /// fm-inr.1: caller-authored baseline qualification bits are not authority.
@@ -2822,6 +2878,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("rule", "quality-exclusive"),
                 FieldPred::str_eq("rule_named", "true"),
                 FieldPred::str_eq("stderr_empty", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_certified_metal_prepublication_refusal.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_certified_metal_run),
+        vec![
+            Assertion::ExitCode(3),
+            counter_eq("cli_certified_metal_refused", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("contract", "certified-cpu-only"),
+                FieldPred::str_eq("contract_named", "true"),
+                FieldPred::str_eq("stderr_empty", "true"),
+                FieldPred::str_eq("output_absent", "true"),
             ],
         )],
     ));

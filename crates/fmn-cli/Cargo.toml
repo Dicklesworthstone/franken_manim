@@ -38,7 +38,7 @@ asupersync = { workspace = true, optional = true }
 [features]
 batch = ["cli", "dep:asupersync"]
 cli = []
-metal = ["cli", "fmn-studio/metal"]
+metal = ["cli", "fmn-render/metal", "fmn-studio/metal"]
 
 [lints]
 workspace = true

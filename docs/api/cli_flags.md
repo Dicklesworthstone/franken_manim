@@ -62,6 +62,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--threads` | global | `threads` | improved | BN-15 | store | — | Bound render-team CPU threads |
 | `--ffmpeg` | global | `ffmpeg` | improved | BN-15 | store | — | Absolute path to the optional ffmpeg executable |
 | `--cache-dir` | global | `cache_dir` | improved | BN-15 | store | — | Explicit FrankenManim content-store root |
+| `--engine` | render | `engine` | improved | BN-15 | store | — | Select the CPU engine or a standard-only accelerator annex |
 | `--format` | render | `format` | improved | BN-15 | store | auto | Select auto, png, png_sequence, gif, y4m, wav, or video output |
 | `--math-pack` | render | `math_pack` | improved | BN-15 | store | default | Select an fmd-math preamble pack |
 | `--budget-ms` | batch | `budget_ms` | improved | BN-15 | store | — | Wall-clock budget for the batch |

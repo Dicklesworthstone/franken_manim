@@ -1759,6 +1759,7 @@ impl Schema {
                         | "u16"
                         | "ip"
                         | "output_format"
+                        | "engine"
                         | "preview_codec"
                         | "path"
                         | "pack"

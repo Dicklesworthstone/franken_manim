@@ -57,6 +57,18 @@ fn json_string_field<'a>(record: &'a str, field: &str) -> Option<&'a str> {
         .map(|(value, _)| value)
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn json_u128_field(record: &str, field: &str) -> Option<u128> {
+    let prefix = format!("\"{field}\":");
+    let tail = record.split_once(&prefix)?.1;
+    let digits = tail
+        .as_bytes()
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (digits != 0).then(|| tail[..digits].parse().ok()).flatten()
+}
+
 #[cfg(unix)]
 fn studio_post(authority: &str, target: &str, body: &[u8]) -> String {
     let mut stream = std::net::TcpStream::connect(authority).expect("connect to Studio API");
@@ -371,6 +383,150 @@ fn certified_studio_metal_refuses_before_launching_a_worker() {
     assert!(stdout.contains("\"exit_name\":\"config\""), "{stdout}");
     assert!(stdout.contains("requires render.engine=cpu"), "{stdout}");
     assert!(!stdout.contains("studio_ready"), "{stdout}");
+}
+
+#[test]
+fn certified_offline_metal_refuses_before_output_side_effects() {
+    let root = output_root("offline-certified-metal-refusal");
+    let destination = root.join("must-not-exist");
+    let output = run_clean(&[
+        "--robot",
+        "--reproducible",
+        "--engine",
+        "metal",
+        "--format",
+        "png_sequence",
+        "--video_dir",
+        destination.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(3), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("\"exit_name\":\"config\""), "{stdout}");
+    assert!(stdout.contains("requires render.engine=cpu"), "{stdout}");
+    assert!(
+        !destination.exists(),
+        "certified refusal created output state"
+    );
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+#[test]
+fn offline_metal_unavailability_is_explicit_and_precedes_output_publication() {
+    let root = output_root("offline-metal-unavailable");
+    let destination = root.join("must-not-exist");
+    let output = run_clean(&[
+        "--robot",
+        "--engine",
+        "metal",
+        "--format",
+        "png_sequence",
+        "--video_dir",
+        destination.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+
+    assert_eq!(output.status.code(), Some(4), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("\"exit_name\":\"capability\""), "{stdout}");
+    assert!(stdout.contains("Metal annex"), "{stdout}");
+    assert!(
+        !destination.exists(),
+        "unavailable annex created output state"
+    );
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn offline_metal_renders_ordered_native_outputs_with_actual_backend_evidence() {
+    let sequence_root = output_root("offline-metal-sequence");
+    let sequence = run_clean(&[
+        "--robot",
+        "--engine",
+        "metal",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        sequence_root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(sequence.stdout).expect("robot output is UTF-8");
+    let record = stdout.lines().next().expect("one render record");
+
+    assert_eq!(sequence.status.code(), Some(0), "{stdout}");
+    assert!(sequence.stderr.is_empty());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(record.contains("\"engine\":\"metal"), "{record}");
+    assert!(record.contains("\"route\":\"metal-annex\""), "{record}");
+    assert_eq!(json_u128_field(record, "frames"), Some(3));
+    assert_eq!(json_u128_field(record, "readback_bytes"), Some(62_208));
+    assert!(json_u128_field(record, "upload_bytes").is_some_and(|value| value > 0));
+    assert!(json_u128_field(record, "elapsed_ns").is_some_and(|value| value > 0));
+
+    let generation = sequence_root.join("circle_shift.v1");
+    assert!(generation.join("FMN_COMPLETE").is_file());
+    for index in 0..3 {
+        let frame = generation.join(format!("frame_{index:06}.png"));
+        let bytes = std::fs::read(frame).expect("read ordered Metal PNG");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+    let manifest = ProvenanceManifest::from_bytes(
+        &std::fs::read(
+            sequence_root
+                .join("circle_shift.v1.manifest")
+                .join("manifest.fmnp"),
+        )
+        .expect("read Metal FMNP"),
+    )
+    .expect("verify Metal FMNP");
+    assert_eq!(manifest.mode, ManifestMode::Standard);
+    assert!(manifest.identity.engine.starts_with("metal"));
+    assert!(manifest.items.iter().any(|item| {
+        item.item_id == 7 && item.detail == "semantic renderer and execution backend"
+    }));
+
+    let still_root = output_root("offline-metal-still");
+    let still = run_clean(&[
+        "--robot",
+        "--engine",
+        "metal",
+        "--format",
+        "png",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        still_root.to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let still_stdout = String::from_utf8(still.stdout).expect("robot output is UTF-8");
+    let still_record = still_stdout.lines().next().expect("still render record");
+    assert_eq!(still.status.code(), Some(0), "{still_stdout}");
+    assert!(still.stderr.is_empty());
+    assert_eq!(json_u128_field(still_record, "frames"), Some(1));
+    assert_eq!(
+        json_u128_field(still_record, "readback_bytes"),
+        Some(20_736)
+    );
+    assert!(still_root.join("circle_shift.png").is_file());
 }
 
 #[cfg(unix)]

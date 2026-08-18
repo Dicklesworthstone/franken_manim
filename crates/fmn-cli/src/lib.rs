@@ -41,6 +41,8 @@ use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob, journal as render_engine_journal};
 use fmn_render::fill::MonoTable;
+#[cfg(feature = "metal")]
+use fmn_render::metal::{MetalRenderer, MetalReport};
 use fmn_render::plan::RenderPlan;
 use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig};
 use fmn_scene::studio_bridge::SceneState;
@@ -211,6 +213,36 @@ pub struct CommonOptions {
     pub log_level: Option<String>,
 }
 
+/// User-facing execution-engine selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineChoice {
+    /// The certified or fast CPU engine selected by the determinism mode.
+    Cpu,
+    /// The standard-only Metal annex.
+    Metal,
+    /// The standard-only CUDA annex.
+    Cuda,
+}
+
+impl EngineChoice {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Metal => "metal",
+            Self::Cuda => "cuda",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "cpu" => Self::Cpu,
+            "metal" => Self::Metal,
+            "cuda" => Self::Cuda,
+            _ => return None,
+        })
+    }
+}
+
 /// Semantic render request after parsing and interaction application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneSourceKind {
@@ -269,6 +301,8 @@ pub struct RenderCommand {
     pub format: OutputFormat,
     /// Explicit fmd-math preamble pack; absent preserves user configuration.
     pub math_pack: Option<String>,
+    /// Explicit execution engine; absent preserves user configuration.
+    pub engine: Option<EngineChoice>,
     /// Open the completed artifact through a host capability.
     pub open: bool,
     /// Reveal the completed artifact through a host capability.
@@ -644,6 +678,7 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "file"
         | "scene_names"
         | "format"
+        | "engine"
         | "math_pack" => CommandScope::Render,
         "require_ffmpeg" => CommandScope::Doctor,
         "budget_ms" | "max_scenes" | "fail_fast" | "manifest_dir" => CommandScope::Batch,
@@ -663,6 +698,7 @@ fn value_type_supported(value_type: &str) -> bool {
             | "u16"
             | "ip"
             | "output_format"
+            | "engine"
             | "preview_codec"
             | "path"
             | "pack"
@@ -975,6 +1011,7 @@ fn validate_value_types(collected: &Collected) -> Result<(), CliError> {
                 "u16" => value.parse::<u16>().is_ok(),
                 "ip" => value.parse::<std::net::IpAddr>().is_ok(),
                 "output_format" => OutputFormat::parse(value).is_some(),
+                "engine" => EngineChoice::parse(value).is_some(),
                 "preview_codec" => matches!(value.as_str(), "png" | "mjpeg"),
                 "path" | "pack" => !value.is_empty(),
                 _ => {
@@ -1119,6 +1156,13 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         pix_fmt: values.explicit_value("pix_fmt").map(str::to_owned),
         format,
         math_pack: values.explicit_value("math_pack").map(str::to_owned),
+        engine: values
+            .explicit_value("engine")
+            .map(|value| {
+                EngineChoice::parse(value)
+                    .ok_or_else(|| usage("--engine must be `cpu`, `metal`, or `cuda`"))
+            })
+            .transpose()?,
         open: values.bool("open"),
         finder: values.bool("finder"),
         show_animation_progress: values.bool("show_animation_progress"),
@@ -1347,6 +1391,12 @@ pub fn resolve_render_config(
     if let Some(math_pack) = &command.math_pack {
         pairs.push(("tex.template", fmn_config::Value::Str(math_pack.clone())));
     }
+    if let Some(engine) = command.engine {
+        pairs.push((
+            "render.engine",
+            fmn_config::Value::Str(engine.name().to_owned()),
+        ));
+    }
 
     let resolved = fmn_config::Config::resolve(&layers, Some(fmn_config::config::overlay(pairs)))
         .map_err(|error| CliError::new("config", error.to_string()))?;
@@ -1526,7 +1576,7 @@ fn derive_execution_plan(
     ),
     CliError,
 > {
-    derive_execution_plan_with_annex(fs, config, intent, output_format, false)
+    derive_execution_plan_with_annex(fs, config, intent, output_format, MetalSelection::Offline)
 }
 
 fn derive_studio_execution_plan(
@@ -1546,8 +1596,37 @@ fn derive_studio_execution_plan(
         config,
         fmn_runtime::RenderIntent::Preview,
         output_format,
-        cfg!(feature = "metal"),
+        MetalSelection::Studio,
     )
+}
+
+#[derive(Clone, Copy)]
+enum MetalSelection {
+    Offline,
+    Studio,
+}
+
+fn select_metal_engine(
+    selection: MetalSelection,
+) -> Result<fmn_runtime::ExecutionEngine, CliError> {
+    #[cfg(feature = "metal")]
+    {
+        if matches!(selection, MetalSelection::Studio) || MetalRenderer::is_available() {
+            return Ok(fmn_runtime::ExecutionEngine::Metal);
+        }
+        Err(CliError::new(
+            "capability",
+            "render.engine=metal is unavailable: the compiled Metal annex cannot open a device on this host",
+        ))
+    }
+    #[cfg(not(feature = "metal"))]
+    {
+        let _ = selection;
+        Err(CliError::new(
+            "capability",
+            "render.engine=metal is unavailable: this fmn binary was built without the Metal annex",
+        ))
+    }
 }
 
 fn derive_execution_plan_with_annex(
@@ -1555,7 +1634,7 @@ fn derive_execution_plan_with_annex(
     config: &fmn_config::Config,
     intent: fmn_runtime::RenderIntent,
     output_format: fmn_runtime::OutputPixelFormat,
-    studio_metal: bool,
+    metal_selection: MetalSelection,
 ) -> Result<
     (
         fmn_runtime::ExecutionPlan,
@@ -1591,16 +1670,8 @@ fn derive_execution_plan_with_annex(
         (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Cpu) => {
             fmn_runtime::ExecutionEngine::FastCpu
         }
-        (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Metal)
-            if studio_metal =>
-        {
-            fmn_runtime::ExecutionEngine::Metal
-        }
         (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Metal) => {
-            return Err(CliError::new(
-                "capability",
-                "render.engine=metal is unavailable: this CLI has no verified compiled Metal backend",
-            ));
+            select_metal_engine(metal_selection)?
         }
         (fmn_config::config::DeterminismMode::Standard, fmn_config::config::Engine::Cuda) => {
             return Err(CliError::new(
@@ -2367,6 +2438,7 @@ struct CompletedRender {
     scene: String,
     artifact: RenderArtifactReport,
     engine: String,
+    backend: RenderBackendReport,
     render_threads: usize,
     subdivision: Option<u64>,
     prerun: Option<PreRunSummary>,
@@ -3237,9 +3309,163 @@ fn studio_service_error(message: impl Into<String>) -> fmn_studio::ServiceError 
     fmn_studio::ServiceError::new(fmn_studio::WorkerErrorCode::ExecutionFailed, message)
 }
 
+enum OfflineFrameRenderer {
+    Cpu(Box<RetainedFrameRenderer>),
+    #[cfg(feature = "metal")]
+    Metal {
+        renderer: Box<MetalRenderer>,
+        plan: Box<RenderPlan>,
+        frame: FrameConfig,
+        tiling: Tiling,
+    },
+}
+
+struct BackendAccumulator {
+    route: &'static str,
+    identity: Option<String>,
+    journal: Option<Vec<u8>>,
+    frames: u64,
+    upload_bytes: Option<u64>,
+    readback_bytes: Option<u64>,
+    elapsed_ns: Option<u128>,
+}
+
+impl BackendAccumulator {
+    fn cpu(identity: EngineIdentity, frame: &FrameConfig, tiling: Tiling) -> Self {
+        Self {
+            route: "retained-cpu",
+            identity: Some(identity.closure_string()),
+            journal: Some(render_engine_journal(identity, frame, tiling)),
+            frames: 0,
+            upload_bytes: None,
+            readback_bytes: None,
+            elapsed_ns: None,
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal() -> Self {
+        Self {
+            route: "metal-annex",
+            identity: None,
+            journal: None,
+            frames: 0,
+            upload_bytes: Some(0),
+            readback_bytes: Some(0),
+            elapsed_ns: Some(0),
+        }
+    }
+
+    fn record_cpu_frame(&mut self) -> Result<(), IntegrationError> {
+        self.frames = self
+            .frames
+            .checked_add(1)
+            .ok_or_else(|| IntegrationError::new("lumen", "backend frame count exhausted"))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    fn record_metal_frame(&mut self, report: &MetalReport) -> Result<(), IntegrationError> {
+        let identity = report.identity.closure_string();
+        let journal = report.backend_journal();
+        if let Some(previous) = self.identity.as_deref() {
+            if previous != identity {
+                return Err(IntegrationError::new(
+                    "lumen",
+                    "Metal engine identity changed within one output generation",
+                ));
+            }
+        } else {
+            self.identity = Some(identity);
+        }
+        if let Some(previous) = self.journal.as_deref() {
+            if previous != journal {
+                return Err(IntegrationError::new(
+                    "lumen",
+                    "Metal backend journal changed within one output generation",
+                ));
+            }
+        } else {
+            self.journal = Some(journal);
+        }
+        self.frames = self
+            .frames
+            .checked_add(1)
+            .ok_or_else(|| IntegrationError::new("lumen", "backend frame count exhausted"))?;
+        let upload = u64::try_from(report.upload_bytes)
+            .map_err(|_| IntegrationError::new("lumen", "Metal upload count exceeds u64"))?;
+        let readback = u64::try_from(report.readback_bytes)
+            .map_err(|_| IntegrationError::new("lumen", "Metal readback count exceeds u64"))?;
+        self.upload_bytes = Some(
+            self.upload_bytes
+                .unwrap_or(0)
+                .checked_add(upload)
+                .ok_or_else(|| IntegrationError::new("lumen", "Metal upload count exhausted"))?,
+        );
+        self.readback_bytes = Some(
+            self.readback_bytes
+                .unwrap_or(0)
+                .checked_add(readback)
+                .ok_or_else(|| IntegrationError::new("lumen", "Metal readback count exhausted"))?,
+        );
+        self.elapsed_ns = Some(
+            self.elapsed_ns
+                .unwrap_or(0)
+                .checked_add(report.elapsed.as_nanos())
+                .ok_or_else(|| IntegrationError::new("lumen", "Metal timing count exhausted"))?,
+        );
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<RenderBackendReport, CliError> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| CliError::new("render", "renderer produced no backend identity"))?;
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or_else(|| CliError::new("render", "renderer produced no backend journal"))?;
+        if self.frames == 0 {
+            return Err(CliError::new(
+                "render",
+                "renderer produced no frames for the output generation",
+            ));
+        }
+        Ok(RenderBackendReport {
+            route: self.route,
+            identity: identity.clone(),
+            journal: journal.clone(),
+            frames: self.frames,
+            upload_bytes: self.upload_bytes,
+            readback_bytes: self.readback_bytes,
+            elapsed_ns: self.elapsed_ns,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RenderBackendReport {
+    route: &'static str,
+    identity: String,
+    journal: Vec<u8>,
+    frames: u64,
+    upload_bytes: Option<u64>,
+    readback_bytes: Option<u64>,
+    elapsed_ns: Option<u128>,
+}
+
+struct FinishedRender {
+    artifact: RenderArtifactReport,
+    backend: RenderBackendReport,
+}
+
 struct RenderSink {
-    renderer: RetainedFrameRenderer,
+    renderer: OfflineFrameRenderer,
+    backend: BackendAccumulator,
     format: PixelFormat,
+    #[cfg(feature = "metal")]
+    output_layout: FrameLayout,
     emitter: Option<OrderedEmitter>,
     receipt: RenderReceipt,
     rgba8_scratch: Option<FrameBuffer>,
@@ -3279,6 +3505,75 @@ impl RenderSink {
         let output_layout = FrameLayout::tight(format, width, height)
             .map_err(|error| CliError::new("config", error.to_string()))?;
         let limits = render_sink_limits(&output_layout)?;
+        let frame_config = resolved_frame_config(config)?;
+        let tiling = Tiling {
+            macro_tile: plan.macro_tile,
+            fine_tile: plan.fine_tile,
+        };
+        let threads = plan
+            .render_teams
+            .first()
+            .map_or(1, fmn_runtime::TeamPlan::threads);
+        let (renderer, backend, rgba8_scratch) = match plan.engine {
+            fmn_runtime::ExecutionEngine::CertifiedCpu | fmn_runtime::ExecutionEngine::FastCpu => {
+                let identity = if plan.engine == fmn_runtime::ExecutionEngine::CertifiedCpu {
+                    EngineIdentity::certified()
+                } else {
+                    EngineIdentity::fast()
+                };
+                let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                    frame: frame_config,
+                    tiling,
+                    engine: identity,
+                    threads,
+                })
+                .map_err(|error| CliError::new("render", error.to_string()))?;
+                let scratch = (format != PixelFormat::Rgba8)
+                    .then(|| FrameLayout::tight(PixelFormat::Rgba8, width, height))
+                    .transpose()
+                    .map_err(|error| CliError::new("config", error.to_string()))?
+                    .map(FrameBuffer::new);
+                (
+                    OfflineFrameRenderer::Cpu(Box::new(renderer)),
+                    BackendAccumulator::cpu(identity, &frame_config, tiling),
+                    scratch,
+                )
+            }
+            fmn_runtime::ExecutionEngine::Metal => {
+                #[cfg(feature = "metal")]
+                {
+                    let renderer = MetalRenderer::new().map_err(|error| {
+                        CliError::new(
+                            "capability",
+                            format!("could not initialize the selected Metal annex: {error}"),
+                        )
+                    })?;
+                    (
+                        OfflineFrameRenderer::Metal {
+                            renderer: Box::new(renderer),
+                            plan: Box::new(RenderPlan::new()),
+                            frame: frame_config,
+                            tiling,
+                        },
+                        BackendAccumulator::metal(),
+                        None,
+                    )
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    return Err(CliError::new(
+                        "capability",
+                        "render.engine=metal is unavailable: this fmn binary was built without the Metal annex",
+                    ));
+                }
+            }
+            fmn_runtime::ExecutionEngine::Cuda => {
+                return Err(CliError::new(
+                    "capability",
+                    "render.engine=cuda is unavailable: this fmn binary has no production CUDA renderer",
+                ));
+            }
+        };
         let (binding, receipt) = match target {
             RenderTarget::Native(NativeFrameFormat::Png | NativeFrameFormat::PngSequence) => {
                 let single = matches!(target, RenderTarget::Native(NativeFrameFormat::Png));
@@ -3371,42 +3666,16 @@ impl RenderSink {
                 (binding, RenderReceipt::Video(receipt))
             }
         };
-        let emitter_config = EmitterConfig::new(output_layout, plan.frames_in_flight, 0)
+        let emitter_config = EmitterConfig::new(output_layout.clone(), plan.frames_in_flight, 0)
             .map_err(|error| CliError::new("render", error.to_string()))?;
         let emitter = OrderedEmitter::new(emitter_config, vec![binding])
             .map_err(|error| CliError::new("render", error.to_string()))?;
-        let frame_config = resolved_frame_config(config)?;
-        let engine = match plan.engine {
-            fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
-            fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
-            fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
-                return Err(CliError::new(
-                    "capability",
-                    "the selected annex engine has no production CLI renderer",
-                ));
-            }
-        };
-        let rgba8_scratch = (format != PixelFormat::Rgba8)
-            .then(|| FrameLayout::tight(PixelFormat::Rgba8, width, height))
-            .transpose()
-            .map_err(|error| CliError::new("config", error.to_string()))?
-            .map(FrameBuffer::new);
-        let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
-            frame: frame_config,
-            tiling: Tiling {
-                macro_tile: plan.macro_tile,
-                fine_tile: plan.fine_tile,
-            },
-            engine,
-            threads: plan
-                .render_teams
-                .first()
-                .map_or(1, fmn_runtime::TeamPlan::threads),
-        })
-        .map_err(|error| CliError::new("render", error.to_string()))?;
         Ok(Self {
             renderer,
+            backend,
             format,
+            #[cfg(feature = "metal")]
+            output_layout,
             emitter: Some(emitter),
             receipt,
             rgba8_scratch,
@@ -3422,70 +3691,148 @@ impl RenderSink {
         // This front door has one fixed 2D camera. Object revisions live in
         // RenderPlan; camera revision zero therefore remains stable across
         // frames and lets unchanged tiles hit.
-        self.renderer
-            .render(stage, 0)
-            .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
-        let render_frame = self.renderer.frame();
-
-        let emitter = self
-            .emitter
-            .as_ref()
-            .ok_or_else(|| IntegrationError::new("reel", "emitter was already finalized"))?;
-        let mut reservation = emitter
-            .reserve(self.next_sequence)
-            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-        match self.format {
-            PixelFormat::Rgba8 => {
-                rgba16f_to_rgba8(render_frame, reservation.frame_mut())
-                    .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-            }
-            PixelFormat::Bgra8 => {
-                let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
-                    IntegrationError::new("reel", "BGRA conversion scratch is unavailable")
+        match &mut self.renderer {
+            OfflineFrameRenderer::Cpu(renderer) => {
+                renderer
+                    .render(stage, 0)
+                    .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+                let render_frame = renderer.frame();
+                let emitter = self.emitter.as_ref().ok_or_else(|| {
+                    IntegrationError::new("reel", "emitter was already finalized")
                 })?;
-                rgba16f_to_rgba8(render_frame, rgba8)
+                let mut reservation = emitter
+                    .reserve(self.next_sequence)
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-                swap_rb8(rgba8, reservation.frame_mut())
+                match self.format {
+                    PixelFormat::Rgba8 => {
+                        rgba16f_to_rgba8(render_frame, reservation.frame_mut())
+                            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                    }
+                    PixelFormat::Bgra8 => {
+                        let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
+                            IntegrationError::new("reel", "BGRA conversion scratch is unavailable")
+                        })?;
+                        rgba16f_to_rgba8(render_frame, rgba8)
+                            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                        swap_rb8(rgba8, reservation.frame_mut())
+                            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                    }
+                    PixelFormat::Nv12 => {
+                        let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
+                            IntegrationError::new("reel", "NV12 conversion scratch is unavailable")
+                        })?;
+                        rgba16f_to_rgba8(render_frame, rgba8)
+                            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                        rgba_to_nv12(
+                            rgba8,
+                            reservation.frame_mut(),
+                            ColorRange::Limited,
+                            ChromaSiting::Left,
+                        )
+                        .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                    }
+                    PixelFormat::P010 => {
+                        let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
+                            IntegrationError::new("reel", "P010 conversion scratch is unavailable")
+                        })?;
+                        rgba16f_to_rgba8(render_frame, rgba8)
+                            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                        rgba_to_p010(
+                            rgba8,
+                            reservation.frame_mut(),
+                            ColorRange::Limited,
+                            ChromaSiting::Left,
+                        )
+                        .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                    }
+                    PixelFormat::Rgba16F => {
+                        return Err(IntegrationError::new(
+                            "reel",
+                            "RGBA16F is a renderer intermediate, not a CLI sink format",
+                        ));
+                    }
+                }
+                self.backend.record_cpu_frame()?;
+                reservation
+                    .publish()
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
             }
-            PixelFormat::Nv12 => {
-                let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
-                    IntegrationError::new("reel", "NV12 conversion scratch is unavailable")
+            #[cfg(feature = "metal")]
+            OfflineFrameRenderer::Metal {
+                renderer,
+                plan,
+                frame,
+                tiling,
+            } => {
+                plan.sync(stage, 0)
+                    .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+                let mono = MonoTable::build(plan, frame.map)
+                    .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+                let mut binning = Binning::build(plan, frame.viewport, *tiling, frame.map)
+                    .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+                binning
+                    .prune_occluded(plan)
+                    .map_err(|error| IntegrationError::new("lumen", error.to_string()))?;
+                let (rendered, report) = match self.format {
+                    PixelFormat::Rgba8 | PixelFormat::Bgra8 => renderer
+                        .render_rgba8(plan, &mono, &binning, *frame)
+                        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?,
+                    PixelFormat::Nv12 => renderer
+                        .render_nv12(
+                            plan,
+                            &mono,
+                            &binning,
+                            *frame,
+                            self.output_layout.clone(),
+                            ColorRange::Limited,
+                            ChromaSiting::Left,
+                        )
+                        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?,
+                    PixelFormat::P010 => renderer
+                        .render_p010(
+                            plan,
+                            &mono,
+                            &binning,
+                            *frame,
+                            self.output_layout.clone(),
+                            ColorRange::Limited,
+                            ChromaSiting::Left,
+                        )
+                        .map_err(|error| IntegrationError::new("lumen", error.to_string()))?,
+                    PixelFormat::Rgba16F => {
+                        return Err(IntegrationError::new(
+                            "reel",
+                            "RGBA16F is a renderer intermediate, not a CLI sink format",
+                        ));
+                    }
+                };
+                let emitter = self.emitter.as_ref().ok_or_else(|| {
+                    IntegrationError::new("reel", "emitter was already finalized")
                 })?;
-                rgba16f_to_rgba8(render_frame, rgba8)
+                let mut reservation = emitter
+                    .reserve(self.next_sequence)
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-                rgba_to_nv12(
-                    rgba8,
-                    reservation.frame_mut(),
-                    ColorRange::Limited,
-                    ChromaSiting::Left,
-                )
-                .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-            }
-            PixelFormat::P010 => {
-                let rgba8 = self.rgba8_scratch.as_mut().ok_or_else(|| {
-                    IntegrationError::new("reel", "P010 conversion scratch is unavailable")
-                })?;
-                rgba16f_to_rgba8(render_frame, rgba8)
+                if self.format == PixelFormat::Bgra8 {
+                    swap_rb8(&rendered, reservation.frame_mut())
+                        .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
+                } else {
+                    let destination = reservation.frame_mut();
+                    if rendered.layout() != destination.layout() {
+                        return Err(IntegrationError::new(
+                            "reel",
+                            "Metal output layout disagreed with the negotiated Reel layout",
+                        ));
+                    }
+                    destination
+                        .as_bytes_mut()
+                        .copy_from_slice(rendered.as_bytes());
+                }
+                self.backend.record_metal_frame(&report)?;
+                reservation
+                    .publish()
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-                rgba_to_p010(
-                    rgba8,
-                    reservation.frame_mut(),
-                    ColorRange::Limited,
-                    ChromaSiting::Left,
-                )
-                .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
-            }
-            PixelFormat::Rgba16F => {
-                return Err(IntegrationError::new(
-                    "reel",
-                    "RGBA16F is a renderer intermediate, not a CLI sink format",
-                ));
             }
         }
-        reservation
-            .publish()
-            .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
@@ -3493,7 +3840,8 @@ impl RenderSink {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<RenderArtifactReport, CliError> {
+    fn finish(mut self) -> Result<FinishedRender, CliError> {
+        let backend = self.backend.finish()?;
         let emitter = self
             .emitter
             .take()
@@ -3501,11 +3849,11 @@ impl RenderSink {
         emitter
             .finish()
             .map_err(|error| CliError::new("render", error.to_string()))?;
-        match self.receipt {
+        let artifact = match self.receipt {
             RenderReceipt::Native(receipt) => receipt
                 .take()
                 .map(RenderArtifactReport::Native)
-                .map_err(|error| CliError::new("render", error.to_string())),
+                .map_err(|error| CliError::new("render", error.to_string()))?,
             RenderReceipt::Video(receipt) => {
                 let report = receipt
                     .take()
@@ -3516,7 +3864,7 @@ impl RenderSink {
                         "ffmpeg publication omitted invocation provenance",
                     )
                 })?;
-                Ok(RenderArtifactReport::Video(VideoArtifactReport {
+                RenderArtifactReport::Video(VideoArtifactReport {
                     path: report.boundary.destination.clone(),
                     frame_count: report.frame_count,
                     input_bytes: report.input_bytes,
@@ -3537,9 +3885,10 @@ impl RenderSink {
                     process_mechanism: invocation.provenance.process_mechanism.clone(),
                     process_policy_version: invocation.provenance.process_policy_version,
                     argv: invocation.provenance.argv.clone(),
-                }))
+                })
             }
-        }
+        };
+        Ok(FinishedRender { artifact, backend })
     }
 }
 
@@ -3632,7 +3981,7 @@ struct SubdividedRenderSink<'a> {
     single_frame: bool,
     current: Option<ActiveSubdivision>,
     final_packet: Option<fmn_scene::studio_bridge::FramePacket>,
-    artifacts: Vec<(u64, RenderArtifactReport)>,
+    artifacts: Vec<(u64, FinishedRender)>,
 }
 
 impl<'a> SubdividedRenderSink<'a> {
@@ -3709,15 +4058,15 @@ impl<'a> SubdividedRenderSink<'a> {
             })?;
             active.sink.capture(CaptureReason::Segment, packet)?;
         }
-        let artifact = active
+        let render = active
             .sink
             .finish()
             .map_err(subdivision_integration_error)?;
-        self.artifacts.push((play_index, artifact));
+        self.artifacts.push((play_index, render));
         Ok(())
     }
 
-    fn into_artifacts(self) -> Result<Vec<(u64, RenderArtifactReport)>, CliError> {
+    fn into_artifacts(self) -> Result<Vec<(u64, FinishedRender)>, CliError> {
         if self.current.is_some() {
             return Err(CliError::new(
                 "internal",
@@ -4001,7 +4350,7 @@ struct ManifestContext<'a> {
     command: &'a RenderCommand,
     config: &'a fmn_config::Config,
     plan: &'a fmn_runtime::ExecutionPlan,
-    engine: EngineIdentity,
+    backend: &'a RenderBackendReport,
 }
 
 fn render_manifest(
@@ -4015,7 +4364,7 @@ fn render_manifest(
         command,
         config,
         plan,
-        engine,
+        backend,
     } = context;
     if fs.identity() == "opaque.file_system/v1" {
         return Err(CliError::new(
@@ -4030,12 +4379,7 @@ fn render_manifest(
     let config_bytes = config
         .canonical_bytes()
         .map_err(|error| internal(format!("canonical resolved config: {error}")))?;
-    let frame_config = resolved_frame_config(config)?;
-    let tiling = Tiling {
-        macro_tile: plan.macro_tile,
-        fine_tile: plan.fine_tile,
-    };
-    let renderer_document = fmn_render::engine::journal(engine, &frame_config, tiling);
+    let renderer_document = &backend.journal;
     let runtime = command.runtime_config(config);
 
     let build_item = ClosureItem::byte_input(
@@ -4092,13 +4436,14 @@ fn render_manifest(
         ],
     )
     .map_err(|error| internal(error.to_string()))?;
-    let engine_identity = engine.closure_string();
+    let engine_identity = backend.identity.clone();
     let c7 = ClosureItem::structural(
         7,
         "semantic renderer and execution backend",
         &[
             StructuralField::Text(&engine_identity),
-            StructuralField::Bytes(&renderer_document),
+            StructuralField::Text(backend.route),
+            StructuralField::Bytes(renderer_document),
         ],
     )
     .map_err(|error| internal(error.to_string()))?;
@@ -4170,7 +4515,8 @@ fn render_manifest(
                 .end_at_play
                 .map_or(StructuralField::Absent("end_at_play"), StructuralField::U64),
             StructuralField::Bool(runtime.presenter_mode),
-            StructuralField::Bytes(&renderer_document),
+            StructuralField::Text(backend.route),
+            StructuralField::Bytes(renderer_document),
         ],
     )
     .map_err(|error| internal(error.to_string()))?;
@@ -4638,16 +4984,6 @@ fn execute_native_render_with_cancellation(
         end_at_play: command.animation_range.and_then(|range| range.end),
         open_on_completion: false,
     };
-    let engine = match plan.engine {
-        fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
-        fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
-        fmn_runtime::ExecutionEngine::Metal | fmn_runtime::ExecutionEngine::Cuda => {
-            return Err(CliError::new(
-                "capability",
-                "the selected annex engine has no production CLI renderer",
-            ));
-        }
-    };
     let render_threads = plan
         .render_teams
         .first()
@@ -4662,10 +4998,11 @@ fn execute_native_render_with_cancellation(
     let complete = |source,
                     source_item,
                     scene,
-                    artifact,
+                    render: FinishedRender,
                     subdivision,
                     prerun|
      -> Result<CompletedRender, CliError> {
+        let FinishedRender { artifact, backend } = render;
         let manifest = render_manifest(
             ManifestContext {
                 fs: fs.as_ref(),
@@ -4673,7 +5010,7 @@ fn execute_native_render_with_cancellation(
                 command,
                 config: &config,
                 plan: &plan,
-                engine,
+                backend: &backend,
             },
             source_item,
             &artifact,
@@ -4682,7 +5019,8 @@ fn execute_native_render_with_cancellation(
             source,
             scene,
             artifact,
-            engine: engine.closure_string(),
+            engine: backend.identity.clone(),
+            backend,
             render_threads,
             subdivision,
             prerun,
@@ -5055,6 +5393,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         scene,
         artifact,
         engine,
+        backend,
         render_threads,
         subdivision,
         prerun,
@@ -5109,6 +5448,31 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         let human_manifest = manifest_path
             .as_ref()
             .map_or_else(String::new, |path| format!("; manifest {}", path.display()));
+        let backend_json = format!(
+            ",\"backend\":{{\"route\":{},\"frames\":{},\"upload_bytes\":{},\"readback_bytes\":{},\"elapsed_ns\":{}}}",
+            json_string(backend.route),
+            backend.frames,
+            backend
+                .upload_bytes
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+            backend
+                .readback_bytes
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+            backend
+                .elapsed_ns
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        );
+        let human_backend = match (
+            backend.upload_bytes,
+            backend.readback_bytes,
+            backend.elapsed_ns,
+        ) {
+            (Some(upload), Some(readback), Some(elapsed)) => format!(
+                "; {}: {upload} upload bytes, {readback} readback bytes, {elapsed} ns",
+                backend.route
+            ),
+            _ => format!("; {}", backend.route),
+        };
         match artifact {
             RenderArtifactReport::Native(report) => {
                 if command.common.robot {
@@ -5133,12 +5497,13 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         render_threads,
                         json_string(&report.digest.to_hex()),
                     );
+                    stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
                     stdout.push_str("}\n");
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_manifest})",
+                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_backend}{human_manifest})",
                         match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -5180,12 +5545,13 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         report.process_policy_version,
                         json_array(&report.argv),
                     );
+                    stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
                     stdout.push_str("}\n");
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_manifest})",
+                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_backend}{human_manifest})",
                         report.path.display(),
                         report.frame_count,
                         report.input_bytes,
@@ -7042,6 +7408,7 @@ mod tests {
             "vcodec" => "libx264",
             "pix_fmt" => "rgba",
             "format" => "png",
+            "engine" => "cpu",
             "preview_codec" => "png",
             "bind" => "127.0.0.1",
             "port" => "0",
@@ -7404,6 +7771,45 @@ mod tests {
         assert_eq!(config.render.engine, Engine::Cpu);
         assert_eq!(config.render.threads, ThreadPolicy::Fixed(3));
         assert_eq!(config.tex.template, "basic");
+    }
+
+    #[test]
+    fn engine_flag_is_typed_and_wins_the_config_file() {
+        let fs = VirtualFs::new();
+        fs.insert("/cfg/fmn.yml", b"render:\n  engine: cpu\n".to_vec());
+        let command = render(
+            parse_args(["--config_file", "/cfg/fmn.yml", "--engine", "metal"])
+                .expect("known engine parses"),
+        );
+        assert_eq!(command.engine, Some(EngineChoice::Metal));
+        let config = resolve_render_config(&fs, &command).expect("engine overlay resolves");
+        assert_eq!(config.render.engine, Engine::Metal);
+
+        let error = parse_args(["--engine", "vulkan"]).expect_err("unknown engine is refused");
+        assert_eq!(error.exit_name(), "usage");
+        assert!(error.message().contains("invalid engine value \"vulkan\""));
+        assert!(error.message().contains("`--engine`"));
+    }
+
+    #[test]
+    fn reproducible_with_explicit_metal_preserves_the_certified_refusal() {
+        let fs = VirtualFs::new();
+        let command = render(
+            parse_args(["--reproducible", "--engine", "metal"])
+                .expect("the semantic conflict is resolved after config layering"),
+        );
+        let config = resolve_render_config(&fs, &command).expect("typed config resolves");
+        assert_eq!(config.determinism.mode, DeterminismMode::Certified);
+        assert_eq!(config.render.engine, Engine::Metal);
+        let error = derive_execution_plan(
+            &fs,
+            &config,
+            fmn_runtime::RenderIntent::Offline,
+            fmn_runtime::OutputPixelFormat::Rgba8,
+        )
+        .expect_err("certified GPU work is permanently refused");
+        assert_eq!(error.exit_name(), "config");
+        assert!(error.message().contains("requires render.engine=cpu"));
     }
 
     #[test]
@@ -8008,7 +8414,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_refuses_unverified_annexes_and_rejects_certified_annexes() {
+    fn doctor_reports_the_host_annex_and_rejects_certified_annexes() {
         let fs = Arc::new(VirtualFs::new());
         let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
         fs.insert("/cfg/metal.yml", b"render:\n  engine: metal\n".to_vec());
@@ -8018,10 +8424,16 @@ mod tests {
             Arc::clone(&runner) as Arc<dyn fmn_platform::process::ProcessRunner>,
             &no_ffmpeg_locator(),
         );
-        assert_eq!(output.code, 4);
         assert!(output.stderr.is_empty());
-        assert!(output.stdout.contains("\"exit_name\":\"capability\""));
-        assert!(output.stdout.contains("no verified compiled Metal backend"));
+        if select_metal_engine(MetalSelection::Offline).is_ok() {
+            assert_eq!(output.code, 0);
+            assert!(output.stdout.contains("\"kind\":\"execution_plan\""));
+            assert!(output.stdout.contains("\"engine\":\"metal\""));
+        } else {
+            assert_eq!(output.code, 4);
+            assert!(output.stdout.contains("\"exit_name\":\"capability\""));
+            assert!(output.stdout.contains("Metal annex"));
+        }
 
         fs.insert(
             "/cfg/invalid.yml",
@@ -8043,7 +8455,7 @@ mod tests {
 
     #[cfg(feature = "metal")]
     #[test]
-    fn studio_plan_accepts_the_compiled_metal_annex_without_relaxing_offline_render() {
+    fn studio_plan_accepts_the_compiled_metal_annex_and_offline_requires_a_device() {
         let fs = VirtualFs::new();
         fs.insert("/cfg/metal.yml", b"render:\n  engine: metal\n".to_vec());
         let command =
@@ -8060,14 +8472,17 @@ mod tests {
             &config,
             fmn_runtime::RenderIntent::Offline,
             fmn_runtime::OutputPixelFormat::Rgba8,
-        )
-        .expect_err("offline Metal remains owned by fm-sq8.3");
-        assert_eq!(offline.exit_name(), "capability");
-        assert!(
-            offline
-                .to_string()
-                .contains("no verified compiled Metal backend")
         );
+        if MetalRenderer::is_available() {
+            assert_eq!(
+                offline.expect("available offline Metal plan").0.engine,
+                fmn_runtime::ExecutionEngine::Metal
+            );
+        } else {
+            let error = offline.expect_err("unavailable host must refuse offline Metal");
+            assert_eq!(error.exit_name(), "capability");
+            assert!(error.to_string().contains("Metal annex"));
+        }
     }
 
     #[test]

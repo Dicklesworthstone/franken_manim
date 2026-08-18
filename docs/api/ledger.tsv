@@ -29,6 +29,7 @@ fmn.cli.global	-h,--help	help	cli_flag	0	action=store_true;nargs=-;type=-;defaul
 fmn.cli.global	-q,--quiet	quiet	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	suppress human decoration only
 fmn.cli.global	-v,--version	version	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	stable version report
 fmn.cli.render	--autoreload	autoreload	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-AUTORELOAD	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
+fmn.cli.render	--engine	engine	cli_flag	0	action=store;nargs=-;type=engine;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
 fmn.cli.render	--file_name	file_name	cli_flag	0	action=store;nargs=-;type=-;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	explicit output stem
 fmn.cli.render	--finder	finder	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	portable reveal-in-file-manager action
 fmn.cli.render	--format	format	cli_flag	0	action=store;nargs=-;type=output_format;default=auto	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, or video output
