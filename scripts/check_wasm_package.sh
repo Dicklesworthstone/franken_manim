@@ -71,10 +71,13 @@ PY
 )
 source_commit=$(git rev-parse HEAD)
 source_dirty=false
-if ! git diff --quiet || ! git diff --cached --quiet; then
+# An untracked Rust module can affect the artifact just as much as a tracked
+# edit. Git-ignored compiler/package outputs remain outside this source check.
+source_changes=$(git status --porcelain=v1 --untracked-files=all)
+if [[ -n "$source_changes" ]]; then
     source_dirty=true
     if [[ "${FMN_WASM_PACKAGE_ALLOW_DIRTY:-0}" != "1" ]]; then
-        echo "ERROR: tracked source is dirty; commit it or use FMN_WASM_PACKAGE_ALLOW_DIRTY=1 for a non-release diagnostic" >&2
+        echo "ERROR: source tree is dirty; commit all inputs or use FMN_WASM_PACKAGE_ALLOW_DIRTY=1 for a non-release diagnostic" >&2
         exit 1
     fi
 fi
