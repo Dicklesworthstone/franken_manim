@@ -94,28 +94,30 @@ optimization, never an oracle — `--clear-cache` can never change a render.
 
 ## Config file locations
 
-**Today:** the CLI reads `custom_config.yml` from the current working
-directory (Reference-exact behavior) plus any file named by `--config_file`,
-layered in that order after the built-in defaults. Both are optional;
-an explicitly named file that exists but cannot be parsed is an error, while
-a missing one is an empty layer.
+The CLI first looks for one optional per-user config, using the native platform
+convention:
 
-**Divergence, recorded honestly:** there is no *per-user* config location
-today — nothing yet fills appdirs' config-dir role. The target is a
-user-level config at the platform convention
-(`$XDG_CONFIG_HOME/franken-manim/config.yml` on Unix,
-`~/Library/Application Support/franken-manim/config.yml` on macOS,
-`%APPDATA%\franken-manim\config.yml` on Windows), layered between the
-built-in defaults and `custom_config.yml`, resolved with the same
-byte-preserving, no-guessing discipline as the cache root. The code change is
-tracked as **fm-xdg-config-discovery-dqo6**; this paragraph is removed when
-it lands.
+| Platform | User config path |
+|---|---|
+| Linux and other Unix | `$XDG_CONFIG_HOME/franken-manim/config.yml` when `XDG_CONFIG_HOME` is set and absolute; otherwise `$HOME/.config/franken-manim/config.yml` |
+| macOS | `$HOME/Library/Application Support/franken-manim/config.yml` |
+| Windows | `%APPDATA%\franken-manim\config.yml` |
+
+Environment paths remain native platform bytes rather than being lossy
+Unicode-converted. A relative environment base is not trusted. When no
+trustworthy absolute base exists, the user layer is simply absent: config
+discovery never guesses a current-directory or temporary fallback.
+
+The CLI then reads `custom_config.yml` from the current working directory
+(Reference-exact behavior) and any file named by `--config_file`. All three
+files are optional. A missing file is an empty layer; a file that exists but
+cannot be read or parsed is a config error naming that exact layer.
 
 ## Precedence, end to end
 
 ```
 built-in defaults
-  → (target: per-user platform config — fm-xdg-config-discovery-dqo6)
+  → per-user platform config
   → ./custom_config.yml
   → --config_file <path>
   → CLI overlay (--cache-dir, --threads, --reproducible, …)

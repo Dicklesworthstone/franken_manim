@@ -1433,13 +1433,20 @@ struct ConfigDocument {
 
 #[derive(Debug, Default)]
 struct ConfigDocuments {
+    user: Option<ConfigDocument>,
     custom: Option<ConfigDocument>,
     explicit: Option<ConfigDocument>,
 }
 
 impl ConfigDocuments {
     fn layers(&self) -> Vec<fmn_config::config::Layer<'_>> {
-        let mut layers = Vec::with_capacity(2);
+        let mut layers = Vec::with_capacity(3);
+        if let Some(document) = self.user.as_ref() {
+            layers.push(fmn_config::config::Layer {
+                name: &document.source,
+                text: &document.text,
+            });
+        }
         if let Some(document) = self.custom.as_ref() {
             layers.push(fmn_config::config::Layer {
                 name: &document.source,
@@ -1460,7 +1467,22 @@ fn read_config_documents(
     fs: &dyn FileSystem,
     explicit_path: Option<&Path>,
 ) -> Result<ConfigDocuments, CliError> {
+    let user_path = host_user_config_path();
+    read_config_documents_at(fs, explicit_path, user_path.as_deref())
+}
+
+fn read_config_documents_at(
+    fs: &dyn FileSystem,
+    explicit_path: Option<&Path>,
+    user_path: Option<&Path>,
+) -> Result<ConfigDocuments, CliError> {
     Ok(ConfigDocuments {
+        user: user_path
+            .map(|path| {
+                read_optional_config(fs, path, format!("user config {:?}", path.as_os_str()))
+            })
+            .transpose()?
+            .flatten(),
         custom: read_optional_config(fs, Path::new("custom_config.yml"), "custom_config.yml")?,
         explicit: explicit_path
             .map(|path| {
@@ -1469,6 +1491,68 @@ fn read_config_documents(
             .transpose()?
             .flatten(),
     })
+}
+
+const USER_CONFIG_LEAF: &str = "franken-manim";
+const USER_CONFIG_FILE: &str = "config.yml";
+
+#[derive(Debug)]
+struct UserConfigEnvironment {
+    platform: UserConfigPlatform,
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+    app_data: Option<OsString>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserConfigPlatform {
+    Unix,
+    MacOs,
+    Windows,
+    Unsupported,
+}
+
+impl UserConfigEnvironment {
+    fn host() -> Self {
+        Self {
+            platform: if cfg!(windows) {
+                UserConfigPlatform::Windows
+            } else if cfg!(target_os = "macos") {
+                UserConfigPlatform::MacOs
+            } else if cfg!(unix) {
+                UserConfigPlatform::Unix
+            } else {
+                UserConfigPlatform::Unsupported
+            },
+            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+            home: std::env::var_os("HOME"),
+            app_data: std::env::var_os("APPDATA"),
+        }
+    }
+}
+
+fn host_user_config_path() -> Option<PathBuf> {
+    user_config_path(&UserConfigEnvironment::host())
+}
+
+fn user_config_path(environment: &UserConfigEnvironment) -> Option<PathBuf> {
+    let base = match environment.platform {
+        UserConfigPlatform::Windows => absolute_environment_path(environment.app_data.as_ref()),
+        UserConfigPlatform::MacOs => absolute_environment_path(environment.home.as_ref())
+            .map(|home| home.join("Library").join("Application Support")),
+        UserConfigPlatform::Unix => absolute_environment_path(environment.xdg_config_home.as_ref())
+            .or_else(|| {
+                absolute_environment_path(environment.home.as_ref())
+                    .map(|home| home.join(".config"))
+            }),
+        UserConfigPlatform::Unsupported => None,
+    }?;
+    Some(base.join(USER_CONFIG_LEAF).join(USER_CONFIG_FILE))
+}
+
+fn absolute_environment_path(value: Option<&OsString>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    path.is_absolute().then_some(path)
 }
 
 fn read_optional_config(
@@ -7072,6 +7156,17 @@ mod tests {
         Arc::clone(fs) as Arc<dyn FileSystem>
     }
 
+    fn test_absolute(name: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(r"C:\{name}"))
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(format!("/{name}"))
+        }
+    }
+
     #[test]
     fn studio_terminal_protocol_prefers_kitty_and_falls_back_to_sixel() {
         assert_eq!(
@@ -7844,6 +7939,159 @@ mod tests {
         assert_eq!(
             config.directories.cache, "/cli-cache",
             "cache CLI overlay wins"
+        );
+    }
+
+    #[test]
+    fn user_config_paths_follow_platform_conventions_without_guessing() {
+        let xdg = test_absolute("xdg").join("config");
+        let home = test_absolute("home").join("example");
+        let unix = UserConfigEnvironment {
+            platform: UserConfigPlatform::Unix,
+            xdg_config_home: Some(xdg.clone().into_os_string()),
+            home: Some(home.clone().into_os_string()),
+            app_data: None,
+        };
+        assert_eq!(
+            user_config_path(&unix),
+            Some(xdg.join("franken-manim").join("config.yml"))
+        );
+
+        let unix_home_fallback = UserConfigEnvironment {
+            xdg_config_home: Some(OsString::from("relative/config")),
+            ..unix
+        };
+        assert_eq!(
+            user_config_path(&unix_home_fallback),
+            Some(
+                home.join(".config")
+                    .join("franken-manim")
+                    .join("config.yml")
+            )
+        );
+
+        let mac_home = test_absolute("Users").join("example");
+        let macos = UserConfigEnvironment {
+            platform: UserConfigPlatform::MacOs,
+            xdg_config_home: None,
+            home: Some(mac_home.clone().into_os_string()),
+            app_data: None,
+        };
+        assert_eq!(
+            user_config_path(&macos),
+            Some(
+                mac_home
+                    .join("Library")
+                    .join("Application Support")
+                    .join("franken-manim")
+                    .join("config.yml")
+            )
+        );
+
+        let app_data = test_absolute("AppData").join("Roaming");
+        let windows = UserConfigEnvironment {
+            platform: UserConfigPlatform::Windows,
+            xdg_config_home: None,
+            home: None,
+            app_data: Some(app_data.clone().into_os_string()),
+        };
+        assert_eq!(
+            user_config_path(&windows),
+            Some(app_data.join("franken-manim").join("config.yml"))
+        );
+
+        for unavailable in [
+            UserConfigEnvironment {
+                platform: UserConfigPlatform::Unix,
+                xdg_config_home: Some(OsString::from("relative/config")),
+                home: Some(OsString::from("relative/home")),
+                app_data: None,
+            },
+            UserConfigEnvironment {
+                platform: UserConfigPlatform::MacOs,
+                xdg_config_home: None,
+                home: None,
+                app_data: None,
+            },
+            UserConfigEnvironment {
+                platform: UserConfigPlatform::Windows,
+                xdg_config_home: None,
+                home: None,
+                app_data: Some(OsString::from("relative/appdata")),
+            },
+            UserConfigEnvironment {
+                platform: UserConfigPlatform::Unsupported,
+                xdg_config_home: Some(test_absolute("config").into_os_string()),
+                home: Some(test_absolute("home").into_os_string()),
+                app_data: Some(test_absolute("appdata").into_os_string()),
+            },
+        ] {
+            assert_eq!(user_config_path(&unavailable), None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_config_path_preserves_non_utf8_environment_bytes() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let base = OsString::from_vec(b"/tmp/fmn-config-\xff".to_vec());
+        let environment = UserConfigEnvironment {
+            platform: UserConfigPlatform::Unix,
+            xdg_config_home: Some(base.clone()),
+            home: None,
+            app_data: None,
+        };
+        let resolved = user_config_path(&environment).expect("absolute native path resolves");
+        assert_eq!(
+            resolved
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::as_os_str),
+            Some(base.as_os_str())
+        );
+    }
+
+    #[test]
+    fn config_precedence_includes_the_optional_user_layer() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/user/config.yml",
+            b"camera:\n  fps: 12\n  background_color: \"#111111\"\n  background_opacity: 0.25\ndirectories:\n  cache: /user-cache\n"
+                .to_vec(),
+        );
+        fs.insert(
+            "custom_config.yml",
+            b"camera:\n  background_color: \"#222222\"\n".to_vec(),
+        );
+        fs.insert("/cfg/explicit.yml", b"camera:\n  fps: 48\n".to_vec());
+
+        let documents = read_config_documents_at(
+            &fs,
+            Some(Path::new("/cfg/explicit.yml")),
+            Some(Path::new("/user/config.yml")),
+        )
+        .expect("all optional layers are readable");
+        let layers = documents.layers();
+        let resolved = fmn_config::Config::resolve(
+            &layers,
+            Some(fmn_config::config::overlay([(
+                "directories.cache",
+                fmn_config::Value::Str("/cli-cache".to_owned()),
+            )])),
+        )
+        .expect("the five-layer configuration resolves")
+        .config;
+
+        assert_eq!(resolved.camera.background_opacity, 0.25, "user-only value");
+        assert_eq!(
+            resolved.camera.background_color, "#222222",
+            "cwd layer wins over user config"
+        );
+        assert_eq!(resolved.camera.fps, 48, "explicit file wins over cwd");
+        assert_eq!(
+            resolved.directories.cache, "/cli-cache",
+            "CLI overlay wins over every file"
         );
     }
 

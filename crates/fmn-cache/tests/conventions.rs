@@ -72,17 +72,24 @@ fn documented_store_layout_names_the_real_markers() {
 fn documented_config_convention_names_the_real_surfaces() {
     let doc = conventions_doc();
     for surface in [
+        "$XDG_CONFIG_HOME/franken-manim/config.yml",
+        "$HOME/.config/franken-manim/config.yml",
+        "$HOME/Library/Application Support/franken-manim/config.yml",
+        "%APPDATA%\\franken-manim\\config.yml",
         "custom_config.yml",
         "--config_file",
         "--cache-dir",
         "directories.cache",
-        "fm-xdg-config-discovery-dqo6",
     ] {
         assert!(
             doc.contains(surface),
             "doc is missing config surface {surface}"
         );
     }
+    assert!(
+        !doc.contains("fm-xdg-config-discovery-dqo6"),
+        "the landed convention must not retain its implementation tracker"
+    );
 }
 
 /// On the Linux host (the CI platform), the actual resolver must produce the
