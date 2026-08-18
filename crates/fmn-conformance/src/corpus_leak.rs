@@ -50,6 +50,7 @@
 //! missing optional roots remain allowed. A silent skip would be a release
 //! hole.
 
+use crate::ratchet::Baseline;
 use fmn_hash::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
@@ -77,6 +78,16 @@ pub const STAGING_DIRS: &[&str] = &["dist", "crates/fmn-python/dist", "wasm-smok
 /// The committed public artifact of the private harvest: per-string
 /// content hashes, never the strings (§15.3).
 pub const DENOMINATOR_PATH: &str = "docs/g0/g0-4-corpus/denominator.tsv";
+
+/// The shared identity authority consumed by both the public coverage
+/// ratchet and this release gate. The denominator is recomputed and must
+/// agree with these fields before any release-surface scan begins.
+pub const CORPUS_BASELINE_PATH: &str = "docs/ratchet/baseline.tsv";
+
+/// The only accepted denominator header. The generator emits this exact
+/// byte sequence; accepting variants would make the public authority less
+/// specific than the private-corpus reproduction ritual.
+pub const DENOMINATOR_HEADER: &str = "# sha256(mode + NUL + string)\tmode\toccurrences  — G0-4 ratchet denominator (fm-or4); strings are private fixtures per §15.3";
 
 /// The harvest modes the denominator hashes under.
 pub const CORPUS_MODES: &[&str] = &["math", "text"];
@@ -110,6 +121,15 @@ pub const MAX_TOTAL_SCAN_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub const MAX_FINDINGS: usize = 4_096;
 /// Maximum text-line size eligible for corpus-preimage matching.
 pub const MAX_LINE_BYTES: usize = 4_096;
+
+/// Maximum bytes accepted from the public denominator authority.
+pub const MAX_DENOMINATOR_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum data rows accepted from the public denominator authority.
+pub const MAX_DENOMINATOR_ROWS: usize = 16_384;
+/// Maximum bytes accepted from one denominator line, including the header.
+pub const MAX_DENOMINATOR_LINE_BYTES: usize = 256;
+/// Maximum bytes read from the shared coverage-baseline authority.
+const MAX_CORPUS_BASELINE_BYTES: usize = 16 * 1024;
 
 const IO_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -189,22 +209,169 @@ pub fn corpus_hash(mode: &str, string: &[u8]) -> Digest {
     hasher.finalize()
 }
 
-/// Parses the denominator's first (hash) column into digests. Comment
-/// (`#`) and blank lines are skipped; a malformed row is a named error —
-/// the oracle must be whole.
-pub fn parse_denominator(text: &str) -> Result<Vec<Digest>, LeakError> {
-    let mut digests = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let hex = line.split('\t').next().unwrap_or("");
-        digests.push(Digest::from_hex(hex).map_err(|e| LeakError::Io {
-            path: DENOMINATOR_PATH.to_owned(),
-            what: format!("row {index}: malformed hash '{hex}': {e}"),
-        })?);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CorpusIdentity {
+    digest: Digest,
+    rows: u64,
+    occurrences: u64,
+}
+
+#[derive(Debug)]
+struct ParsedDenominator {
+    digests: Vec<Digest>,
+    identity: CorpusIdentity,
+}
+
+fn denominator_error(what: impl Into<String>) -> LeakError {
+    LeakError::Io {
+        path: DENOMINATOR_PATH.to_owned(),
+        what: what.into(),
     }
-    Ok(digests)
+}
+
+fn canonical_positive_u64(value: &str, row: usize) -> Result<u64, LeakError> {
+    if value.is_empty()
+        || value.starts_with('0')
+        || value.len() > 20
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(denominator_error(format!(
+            "row {row}: occurrence count must be canonical positive decimal"
+        )));
+    }
+    value.parse::<u64>().map_err(|error| {
+        denominator_error(format!(
+            "row {row}: occurrence count is out of range: {error}"
+        ))
+    })
+}
+
+fn parse_denominator_document(text: &str) -> Result<ParsedDenominator, LeakError> {
+    if text.len() > MAX_DENOMINATOR_BYTES {
+        return Err(LeakError::Resource {
+            what: format!(
+                "{DENOMINATOR_PATH} has {} bytes, above limit {MAX_DENOMINATOR_BYTES}",
+                text.len()
+            ),
+        });
+    }
+    if text.as_bytes().contains(&b'\r') {
+        return Err(denominator_error("CR line endings are not canonical"));
+    }
+    if !text.ends_with('\n') {
+        return Err(denominator_error("missing canonical final LF"));
+    }
+
+    let mut lines = text[..text.len() - 1].split('\n');
+    let header = lines
+        .next()
+        .ok_or_else(|| denominator_error("missing canonical header"))?;
+    if header != DENOMINATOR_HEADER {
+        return Err(denominator_error(
+            "header disagrees with the G0-4 authority",
+        ));
+    }
+
+    let mut digests = Vec::new();
+    let mut seen = HashSet::new();
+    let mut identity_hasher = Sha256::new();
+    let mut occurrences = 0_u64;
+    let mut rows = 0_usize;
+    for (line_index, line) in lines.enumerate() {
+        let row = line_index + 1;
+        if line.is_empty() || line.starts_with('#') {
+            return Err(denominator_error(format!(
+                "row {row}: blank and additional comment lines are not canonical"
+            )));
+        }
+        if line.len() > MAX_DENOMINATOR_LINE_BYTES {
+            return Err(LeakError::Resource {
+                what: format!(
+                    "{DENOMINATOR_PATH} row {row} has {} bytes, above line limit {MAX_DENOMINATOR_LINE_BYTES}",
+                    line.len()
+                ),
+            });
+        }
+        rows = rows.checked_add(1).ok_or_else(|| LeakError::Resource {
+            what: "denominator row counter overflow".to_owned(),
+        })?;
+        if rows > MAX_DENOMINATOR_ROWS {
+            return Err(LeakError::Resource {
+                what: format!("{DENOMINATOR_PATH} has more than {MAX_DENOMINATOR_ROWS} data rows"),
+            });
+        }
+
+        let mut fields = line.split('\t');
+        let hex = fields.next().unwrap_or_default();
+        let mode = fields.next().ok_or_else(|| {
+            denominator_error(format!(
+                "row {row}: expected exactly three tab-separated fields"
+            ))
+        })?;
+        let count = fields.next().ok_or_else(|| {
+            denominator_error(format!(
+                "row {row}: expected exactly three tab-separated fields"
+            ))
+        })?;
+        if fields.next().is_some() {
+            return Err(denominator_error(format!(
+                "row {row}: expected exactly three tab-separated fields"
+            )));
+        }
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(denominator_error(format!(
+                "row {row}: hash must be exactly 64 lowercase hexadecimal digits"
+            )));
+        }
+        if !CORPUS_MODES.contains(&mode) {
+            return Err(denominator_error(format!(
+                "row {row}: unknown harvest mode '{mode}'"
+            )));
+        }
+        let digest = Digest::from_hex(hex).map_err(|error| {
+            denominator_error(format!("row {row}: malformed hash '{hex}': {error}"))
+        })?;
+        if !seen.insert(digest) {
+            return Err(denominator_error(format!(
+                "row {row}: duplicate corpus digest '{hex}'"
+            )));
+        }
+        let count = canonical_positive_u64(count, row)?;
+        occurrences = occurrences
+            .checked_add(count)
+            .ok_or_else(|| denominator_error("occurrence total overflows u64"))?;
+
+        if rows > 1 {
+            identity_hasher.update(b"\n");
+        }
+        identity_hasher.update(line.as_bytes());
+        digests.push(digest);
+    }
+    if rows == 0 {
+        return Err(denominator_error("denominator carries no data rows"));
+    }
+    let rows = u64::try_from(rows).map_err(|error| LeakError::Resource {
+        what: format!("denominator row count cannot be represented: {error}"),
+    })?;
+    Ok(ParsedDenominator {
+        digests,
+        identity: CorpusIdentity {
+            digest: identity_hasher.finalize(),
+            rows,
+            occurrences,
+        },
+    })
+}
+
+/// Parse the exact canonical denominator document into its distinct digest
+/// rows. Header, newline, schema, field, vocabulary, count, uniqueness, and
+/// resource-limit drift are all named gate failures.
+pub fn parse_denominator(text: &str) -> Result<Vec<Digest>, LeakError> {
+    Ok(parse_denominator_document(text)?.digests)
 }
 
 /// Tooth 1: every repository-relative path that falls under a
@@ -1151,13 +1318,91 @@ fn initial_findings(root: &Path, surface: &[String]) -> Result<Vec<Leak>, LeakEr
     Ok(findings)
 }
 
-fn denominator_set(root: &Path) -> Result<HashSet<Digest>, LeakError> {
-    let denominator_text =
-        std::fs::read_to_string(root.join(DENOMINATOR_PATH)).map_err(|error| LeakError::Io {
-            path: DENOMINATOR_PATH.to_owned(),
-            what: error.to_string(),
+fn read_authority_utf8(root: &Path, relative: &str, max_bytes: usize) -> Result<String, LeakError> {
+    let path = root.join(relative);
+    let mut budget = ScanBudget::new("release authority", 1);
+    let (mut file, snapshot) = open_regular_file(root, &path, relative, &mut budget)?;
+    let max_bytes_u64 = u64::try_from(max_bytes).map_err(|error| LeakError::Resource {
+        what: format!("authority limit conversion failed: {error}"),
+    })?;
+    if snapshot.len > max_bytes_u64 {
+        return Err(LeakError::Resource {
+            what: format!(
+                "{relative} declares {} bytes, above authority limit {max_bytes}",
+                snapshot.len
+            ),
+        });
+    }
+    let limit = max_bytes_u64
+        .checked_add(1)
+        .ok_or_else(|| LeakError::Resource {
+            what: format!("authority limit overflow for {relative}"),
         })?;
-    Ok(parse_denominator(&denominator_text)?.into_iter().collect())
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| LeakError::Io {
+            path: relative.to_owned(),
+            what: format!("streaming authority: {error}"),
+        })?;
+    if bytes.len() > max_bytes {
+        return Err(LeakError::Resource {
+            what: format!("{relative} exceeds authority limit {max_bytes}"),
+        });
+    }
+    let bytes_read = u64::try_from(bytes.len()).map_err(|error| LeakError::Resource {
+        what: format!("authority read count cannot be represented: {error}"),
+    })?;
+    validate_regular_file_postflight(root, &path, relative, &file, &snapshot, bytes_read)?;
+    String::from_utf8(bytes).map_err(|error| LeakError::Io {
+        path: relative.to_owned(),
+        what: format!("authority is not UTF-8: {error}"),
+    })
+}
+
+fn baseline_corpus_identity(text: &str) -> Result<CorpusIdentity, LeakError> {
+    let baseline = Baseline::from_tsv(text).map_err(|what| LeakError::Io {
+        path: CORPUS_BASELINE_PATH.to_owned(),
+        what,
+    })?;
+    let digest = Digest::from_hex(&baseline.corpus_hash).map_err(|error| LeakError::Io {
+        path: CORPUS_BASELINE_PATH.to_owned(),
+        what: format!("corpus_hash is not a digest: {error}"),
+    })?;
+    Ok(CorpusIdentity {
+        digest,
+        rows: baseline.unique_total,
+        occurrences: baseline.occurrence_total,
+    })
+}
+
+fn validate_denominator_identity(
+    found: &CorpusIdentity,
+    expected: &CorpusIdentity,
+) -> Result<(), LeakError> {
+    if found == expected {
+        return Ok(());
+    }
+    Err(denominator_error(format!(
+        "recomputed identity disagrees with {CORPUS_BASELINE_PATH}: \
+         digest {} vs {}, rows {} vs {}, occurrences {} vs {}",
+        found.digest,
+        expected.digest,
+        found.rows,
+        expected.rows,
+        found.occurrences,
+        expected.occurrences
+    )))
+}
+
+fn denominator_set(root: &Path) -> Result<HashSet<Digest>, LeakError> {
+    let denominator_text = read_authority_utf8(root, DENOMINATOR_PATH, MAX_DENOMINATOR_BYTES)?;
+    let denominator = parse_denominator_document(&denominator_text)?;
+    let baseline_text = read_authority_utf8(root, CORPUS_BASELINE_PATH, MAX_CORPUS_BASELINE_BYTES)?;
+    let expected = baseline_corpus_identity(&baseline_text)?;
+    validate_denominator_identity(&denominator.identity, &expected)?;
+    Ok(denominator.digests.into_iter().collect())
 }
 
 fn scan_release_surface(
@@ -1330,14 +1575,127 @@ mod tests {
         assert_eq!(leaks[0].kind, LeakKind::PrivateFileBytesShipped);
     }
 
+    fn denominator_document(rows: &[String]) -> String {
+        format!("{DENOMINATOR_HEADER}\n{}\n", rows.join("\n"))
+    }
+
     #[test]
-    fn denominator_parsing_rejects_a_malformed_row() {
-        assert!(parse_denominator("not-hex\tmath\t1\n").is_err());
-        let good = format!("{}\tmath\t3\n", "ab".repeat(32));
-        match parse_denominator(&good) {
-            Ok(digests) => assert_eq!(digests.len(), 1),
-            Err(e) => std::panic::panic_any(format!("a well-formed row must parse: {e}")),
+    fn denominator_parser_recomputes_the_complete_canonical_identity() {
+        let row = format!("{}\tmath\t3", "ab".repeat(32));
+        let document = denominator_document(std::slice::from_ref(&row));
+        let parsed = parse_denominator_document(&document).expect("canonical denominator parses");
+        assert_eq!(parsed.digests.len(), 1);
+        assert_eq!(parsed.identity.digest, fmn_hash::sha256(row.as_bytes()));
+        assert_eq!(parsed.identity.rows, 1);
+        assert_eq!(parsed.identity.occurrences, 3);
+    }
+
+    #[test]
+    fn denominator_parser_rejects_noncanonical_envelopes_and_rows() {
+        let lower = "ab".repeat(32);
+        let other = "cd".repeat(32);
+        let good_row = format!("{lower}\tmath\t1");
+        let good = denominator_document(std::slice::from_ref(&good_row));
+        assert!(parse_denominator(&good).is_ok());
+
+        let invalid = [
+            format!("wrong header\n{good_row}\n"),
+            good.replace('\n', "\r\n"),
+            good.trim_end_matches('\n').to_owned(),
+            format!("{DENOMINATOR_HEADER}\n\n{good_row}\n"),
+            format!("{DENOMINATOR_HEADER}\n# extra comment\n{good_row}\n"),
+            format!("{DENOMINATOR_HEADER}\n"),
+            denominator_document(&[format!("{lower}\tmath")]),
+            denominator_document(&[format!("{lower}\tmath\t1\textra")]),
+            denominator_document(&[format!("{}\tmath\t1", "AB".repeat(32))]),
+            denominator_document(&[format!("{lower}\tMath\t1")]),
+            denominator_document(&[format!("{lower}\tmath\t0")]),
+            denominator_document(&[format!("{lower}\tmath\t01")]),
+            denominator_document(&[format!("{lower}\tmath\t+1")]),
+            denominator_document(&[good_row.clone(), good_row]),
+            denominator_document(&[
+                format!("{lower}\tmath\t{}", u64::MAX),
+                format!("{other}\ttext\t1"),
+            ]),
+        ];
+        for document in invalid {
+            assert!(
+                parse_denominator(&document).is_err(),
+                "noncanonical denominator unexpectedly parsed: {document:?}"
+            );
         }
+    }
+
+    #[test]
+    fn denominator_parser_checks_document_line_and_row_limits() {
+        let oversized = "x".repeat(MAX_DENOMINATOR_BYTES + 1);
+        assert!(matches!(
+            parse_denominator(&oversized),
+            Err(LeakError::Resource { .. })
+        ));
+
+        let overlong_line = denominator_document(&["x".repeat(MAX_DENOMINATOR_LINE_BYTES + 1)]);
+        assert!(matches!(
+            parse_denominator(&overlong_line),
+            Err(LeakError::Resource { .. })
+        ));
+
+        use std::fmt::Write as _;
+        let mut too_many_rows = String::from(DENOMINATOR_HEADER);
+        too_many_rows.push('\n');
+        for row in 0..=MAX_DENOMINATOR_ROWS {
+            writeln!(&mut too_many_rows, "{row:064x}\tmath\t1")
+                .expect("writing to String cannot fail");
+        }
+        assert!(
+            too_many_rows.len() <= MAX_DENOMINATOR_BYTES,
+            "row-limit fixture must reach the row check before the document check"
+        );
+        assert!(matches!(
+            parse_denominator(&too_many_rows),
+            Err(LeakError::Resource { .. })
+        ));
+    }
+
+    #[test]
+    fn denominator_identity_is_bound_to_the_shared_ratchet_authority() {
+        let digest = fmn_hash::sha256(b"one canonical row");
+        let expected = CorpusIdentity {
+            digest,
+            rows: 7,
+            occurrences: 11,
+        };
+        assert!(validate_denominator_identity(&expected, &expected).is_ok());
+        for found in [
+            CorpusIdentity {
+                digest: fmn_hash::sha256(b"different rows"),
+                ..expected.clone()
+            },
+            CorpusIdentity {
+                rows: expected.rows + 1,
+                ..expected.clone()
+            },
+            CorpusIdentity {
+                occurrences: expected.occurrences + 1,
+                ..expected.clone()
+            },
+        ] {
+            assert!(validate_denominator_identity(&found, &expected).is_err());
+        }
+    }
+
+    #[test]
+    fn committed_denominator_matches_the_shared_ratchet_identity() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let corpus = denominator_set(&root).expect("committed corpus authorities agree");
+        let baseline_text =
+            read_authority_utf8(&root, CORPUS_BASELINE_PATH, MAX_CORPUS_BASELINE_BYTES)
+                .expect("committed baseline reads");
+        let expected = baseline_corpus_identity(&baseline_text).expect("baseline identity parses");
+        assert_eq!(
+            u64::try_from(corpus.len()).expect("bounded corpus length fits u64"),
+            expected.rows
+        );
     }
 
     #[test]
