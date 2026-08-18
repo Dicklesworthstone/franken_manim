@@ -1998,8 +1998,11 @@ mod tests {
             .expect("reopen the native test harness");
         let sha256_hex = sha256_open_file(&mut source, &canonical_path, native_image.file_bytes)
             .expect("hash the native test harness");
-        let session =
-            ToolSession::create(&std::env::temp_dir()).expect("claim a private test session");
+        // RCH and other build harnesses may point TMPDIR into a transferred
+        // checkout whose shared ancestor is intentionally group-writable. The
+        // production boundary must reject that tree, so exercise the private
+        // copy invariant under Unix's sticky temporary root instead.
+        let session = ToolSession::create(Path::new("/tmp")).expect("claim a private test session");
         let tool = FfmpegTool {
             executable,
             path: canonical_path,
