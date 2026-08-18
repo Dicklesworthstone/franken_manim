@@ -21,9 +21,10 @@
 //! the same scene kind, dimensions, and seed produce byte-identical RGBA8
 //! output on the same build, because every transcendental on the path comes
 //! from `fmn-dmath` (ADR-0014's sovereign funnel — `std` trig is never
-//! consulted) and the render executes single-threaded (`threads = 1`).
-//! Multi-threaded wasm (atomics + cross-origin isolation) is the documented
-//! tier-2 question, deliberately out of scope here.
+//! consulted). Each render instance executes single-threaded (`threads = 1`).
+//! The separately built `fmn-wasm/threads` npm subpath runs independent frame
+//! renders concurrently in module workers over one instantiated shared Wasm
+//! memory; it does not change this per-frame semantic renderer.
 //!
 //! # JS usage
 //!
@@ -77,8 +78,8 @@ const FPS: u32 = 30;
 /// wait so the terminal state is scrubbable too.
 const RUN_TIME_SECONDS: f64 = 1.0;
 const WAIT_SECONDS: f64 = 0.5;
-/// Single-threaded by construction (tier 1); tier 2's threaded wasm is a
-/// separate, documented question.
+/// One semantic renderer remains single-threaded by construction. The npm
+/// threads subpath parallelizes independent frames across Wasm instances.
 const RENDER_THREADS: usize = 1;
 /// The conformance corpus tiling, reused so the wasm path bins exactly like
 /// the certified test path.
@@ -823,6 +824,9 @@ mod tests {
             "demo/wasm/smoke.mjs",
             "demo/wasm/webpack.config.cjs",
             "scripts/check_wasm_package.sh",
+            "crates/fmn-wasm/js/threads.js",
+            "crates/fmn-wasm/js/threads_worker.js",
+            "crates/fmn-wasm/js/threads.d.ts",
         ] {
             assert!(root.join(relative).is_file(), "{relative} is missing");
         }

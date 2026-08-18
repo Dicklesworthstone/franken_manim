@@ -265,8 +265,10 @@ fmn doctor
 ## The browser demo (W5 wasm tier 1)
 
 The frame renderer compiles to `wasm32-unknown-unknown` and draws to a
-`<canvas>` (single-threaded; not in the certified matrix, but standard-mode
-determinism holds):
+`<canvas>`. The default import is single-threaded; a distinct
+`fmn-wasm/threads` subpath distributes independent frames across module
+workers over an actually shared Wasm memory. Wasm is not in the certified
+matrix, but standard-mode determinism holds:
 
 ```bash
 wasm-pack build --target web --out-dir ../../demo/wasm/pkg crates/fmn-wasm
@@ -282,7 +284,10 @@ scripts/check_wasm_package.sh   # pack + publish dry-run + webpack + Chromium
 ```
 
 That gate consumes the actual tarball in a fresh npm project, renders both a
-primitive scene and the FMTL player in Chromium, and verifies version lockstep,
+primitive scene and the FMTL player in Chromium, exercises a two-worker
+shared-memory frame batch under COOP/COEP, proves serial/threaded pixel
+equivalence, verifies non-isolated startup refuses instead of falling back,
+and checks version lockstep,
 the exact package inventory, bundled license texts, and raw/gzip size ceilings.
 
 ## The timeline player (W5 wasm tier 2)

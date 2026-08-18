@@ -1,4 +1,8 @@
 import { FmnPlayer, FmnScene, engine_version } from "fmn-wasm";
+import {
+  ThreadedWasmUnavailableError,
+  createThreadedScene,
+} from "fmn-wasm/threads";
 
 const result = document.getElementById("result");
 if (result === null) {
@@ -36,9 +40,38 @@ function drawAndReadBack(canvas, bytes, width, height) {
 }
 
 async function main() {
-  const expectedVersion = new URL(window.location.href).searchParams.get("version");
+  const parameters = new URL(window.location.href).searchParams;
+  const expectedVersion = parameters.get("version");
   check(expectedVersion !== null, "missing expected package version");
   check(engine_version() === expectedVersion, "compiled engine/package version mismatch");
+
+  if (parameters.get("nonisolated") === "1") {
+    check(crossOriginIsolated === false, "negative-control document unexpectedly became isolated");
+    let refusal;
+    try {
+      await createThreadedScene("circle_shift", 96, 54, { threads: 2 });
+    } catch (error) {
+      refusal = error;
+    }
+    check(
+      refusal instanceof ThreadedWasmUnavailableError,
+      `non-isolated threads request returned the wrong error: ${refusal}`,
+    );
+    check(
+      refusal.code === "FMN_WASM_CROSS_ORIGIN_ISOLATION_REQUIRED",
+      `non-isolated threads request returned the wrong code: ${refusal.code}`,
+    );
+    result.dataset.status = "success";
+    result.textContent = JSON.stringify({
+      status: "success",
+      mode: "nonisolated-refusal",
+      code: refusal.code,
+      version: engine_version(),
+    });
+    return;
+  }
+
+  check(crossOriginIsolated === true, "threaded browser smoke lacks cross-origin isolation");
 
   const kinds = FmnScene.scene_kinds();
   check(
@@ -47,6 +80,7 @@ async function main() {
   );
 
   const scene = new FmnScene("circle_shift", 96, 54);
+  let threaded;
   try {
     check(scene.frame_count > 1, "primitive scene did not capture multiple frames");
     const scenePixels = new Uint8Array(scene.width * scene.height * 4);
@@ -69,6 +103,42 @@ async function main() {
       scene.height,
     );
     equalBytes(scenePixels, sceneReadback, "primitive canvas readback");
+
+    threaded = await createThreadedScene("circle_shift", 96, 54, {
+      threads: 2,
+      timeoutMs: 30_000,
+    });
+    check(threaded.threadCount === 2, "threaded scene did not arm two workers");
+    check(
+      threaded.memory.buffer instanceof SharedArrayBuffer,
+      "threaded scene did not expose an instantiated shared memory",
+    );
+    check(threaded.width === scene.width, "threaded scene width differs from serial");
+    check(threaded.height === scene.height, "threaded scene height differs from serial");
+    check(threaded.frameCount === scene.frame_count, "threaded scene frame count differs from serial");
+    check(threaded.engineVersion === engine_version(), "threaded engine version differs from serial");
+
+    const middleIndex = Math.floor(scene.frame_count / 2);
+    const threadedIndices = [0, middleIndex, scene.frame_count - 1, 0];
+    const threadedFrames = await threaded.renderFrames(threadedIndices);
+    for (let index = 0; index < threadedIndices.length; index += 1) {
+      const serialPixels = new Uint8Array(scenePixels.length);
+      scene.render_into(threadedIndices[index], serialPixels);
+      equalBytes(
+        threadedFrames[index],
+        serialPixels,
+        `threaded/serial frame ${threadedIndices[index]}`,
+      );
+    }
+    equalBytes(threadedFrames[0], threadedFrames[3], "threaded repeated frame");
+
+    let badThreadedFrameRefused = false;
+    try {
+      await threaded.renderFrame(scene.frame_count);
+    } catch (error) {
+      badThreadedFrameRefused = String(error).includes("frame index");
+    }
+    check(badThreadedFrameRefused, "threaded out-of-range frame did not refuse precisely");
 
     const response = await fetch("./bundle.fmtl", {
       signal: AbortSignal.timeout(10_000),
@@ -104,11 +174,16 @@ async function main() {
         playerDigest: fnv1a(playerPixels),
         playerFrames: player.frame_count,
         playerEngine: player.engine_version,
+        threadedDigest: fnv1a(threadedFrames[2]),
+        threadedFrames: threadedFrames.length,
+        threadedWorkers: threaded.threadCount,
+        threadedSharedMemory: threaded.memory.buffer instanceof SharedArrayBuffer,
       });
     } finally {
       player.free();
     }
   } finally {
+    if (threaded !== undefined) await threaded.close();
     scene.free();
   }
 }

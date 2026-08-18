@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "FrankenManim's single-threaded browser renderer and FMTL timeline player"
+description = "FrankenManim's browser renderer, threaded frame pool, and FMTL timeline player"
 readme = "README.md"
 
 [lib]

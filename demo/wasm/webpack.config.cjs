@@ -15,7 +15,7 @@ module.exports = {
   },
   performance: {
     hints: "error",
-    maxAssetSize: 501440,
+    maxAssetSize: 514521,
     maxEntrypointSize: 525000,
   },
   stats: "errors-warnings",

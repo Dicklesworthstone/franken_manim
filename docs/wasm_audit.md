@@ -18,7 +18,7 @@ Method labels are deliberately narrow:
 - **ASSESSED:** a future path whose design posture is known but whose artifact
   is not part of the current compiled graph.
 
-## Shipped single-threaded graph
+## Shipped serial and shared-memory graphs
 
 `cargo tree -p fmn-wasm --target wasm32-unknown-unknown --edges normal
 --locked` resolves the current package to these workspace crates:
@@ -50,7 +50,7 @@ the locked smoke digest `1f248a71347b82aa`.
 | Tier 1: `FmnScene` fixed-scene renderer | **VERIFIED (execution)** | The packaged ESM/TypeScript surface enumerates `circle_shift`, `parametric_wave`, and `orbit_duet`, renders RGBA8 into caller-reused buffers, and precisely refuses a wrong destination length. wasm-bindgen copies the mutable JS view into Wasm memory; this is buffer reuse, not a zero-copy claim. |
 | Tier 2: `FmnPlayer` FMTL/1 player | **VERIFIED (execution)** | The packaged player parses the governed timeline bundle, refuses engine-major mismatches, exposes labels/seek state, and renders RGBA8 through the same semantic Lumen path. |
 | npm bundler artifact | **VERIFIED (execution)** | `scripts/check_wasm_package.sh` builds the self-contained package, checks its exact file/license inventory and recorded size budgets, runs `npm pack` plus `npm publish --dry-run`, installs the tarball into a fresh consumer, bundles it with webpack 5.109.2, and exercises both tiers through Canvas write/readback in headless Chrome. The clean `cbd174e4b85ef5b9da13ab239b721c93dfe370e9` receipt passed with `source_dirty=false`. |
-| threads artifact | **ASSESSED, not shipped** | A distinct atomics/shared-memory build and COOP/COEP deployment contract remain open under fm-zsu. The current package reports single-thread semantics and must not be described as the threads variant. |
+| threads artifact | **VERIFIED (execution)** | The separate `fmn-wasm/threads` export is built with atomics and imported shared memory. Its coordinator compiles the module once, verifies the instantiated buffer is a `SharedArrayBuffer`, passes the same module and memory to two module workers, and renders independent whole frames concurrently. The Chromium gate byte-compares serial and threaded results, checks repeatability, and proves a document without COOP/COEP receives `FMN_WASM_CROSS_ORIGIN_ISOLATION_REQUIRED` before worker startup. This is frame-batch parallelism, not intra-frame parallelism. |
 
 The browser/package evidence proves compilation, packaging, deterministic
 same-build execution, and the tested failure paths. It does **not** prove
@@ -78,8 +78,9 @@ deployment. WASM remains standard-mode only.
    Update the recorded digests only after re-running the tree, target build,
    Node smoke, and every affected browser/package check.
 3. An absent host-only package is not evidence that it is wasm-compatible.
-   Future text, fonts, suite libraries, or threads stay **ASSESSED** until their
-   real artifact is compiled and exercised.
-4. Threads remain a separate artifact behind atomics, shared memory, and
-   cross-origin isolation. Certified mode and native accelerator annexes remain
-   explicit refusals in the browser package.
+   Future text, fonts, or suite libraries stay **ASSESSED** until their real
+   artifact is compiled and exercised.
+4. Threads remain a separate explicit subpath behind atomics, shared memory,
+   and cross-origin isolation. The default import stays serial and no fallback
+   is implicit. Certified mode and native accelerator annexes remain explicit
+   refusals in the browser package.

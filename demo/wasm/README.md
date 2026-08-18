@@ -1,11 +1,11 @@
 # W5 wasm tier-1 browser demo (fm-l97, §10.7)
 
-The `fmn-wasm` crate compiled to `wasm32-unknown-unknown`, rendering the
+The `fmn-wasm` crate compiles to `wasm32-unknown-unknown`, rendering the
 fixed primitive-corpus scenes (`circle_shift`, `parametric_wave`,
-`orbit_duet`) to a `<canvas>` via `ImageData`. Single-threaded; wasm is not
-in the certified matrix, but standard-mode determinism holds (same scene,
-same seed, same build ⇒ byte-identical RGBA8; every transcendental comes
-from `fmn-dmath`, ADR-0014).
+`orbit_duet`) to a `<canvas>` via `ImageData`. The default demo and npm import
+are single-threaded. Wasm is not in the certified matrix, but standard-mode
+determinism holds (same scene, same seed, same build ⇒ byte-identical RGBA8;
+every transcendental comes from `fmn-dmath`, ADR-0014).
 
 This directory is the demo's one home (`demo/wasm/`); there is no parallel
 `examples/wasm/`.
@@ -89,9 +89,29 @@ If those exact webpack packages live in a task-local `node_modules`, set
 `FMN_WEBPACK` to its `.bin/webpack`, `FMN_NODE_PATH` to that `node_modules`,
 and `FMN_NODE` to the real Node executable (not Bun's partial `node` shim).
 
-Only the single-threaded npm artifact exists today. A future threads artifact
-must be separate and served with cross-origin isolation headers; the current
-package does not imply or advertise that capability.
+The same package also carries a distinct `fmn-wasm/threads` export. It builds
+with atomics and imported shared memory, creates one scene instance per module
+worker, and distributes independent whole-frame renders across the pool while
+returning results in request order. Each document that imports it must serve:
+
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Startup checks both `crossOriginIsolated` and the instantiated
+`WebAssembly.Memory`; a wrong deployment receives the typed
+`FMN_WASM_CROSS_ORIGIN_ISOLATION_REQUIRED` refusal instead of a serial
+fallback. The root `fmn-wasm` import remains the explicit serial choice. The
+package gate exercises both the isolated two-worker success path and a
+non-isolated refusal in real Chromium. It does not claim single-frame
+parallelism, certified-mode output, cross-browser coverage, or a measured
+speedup.
+
+The threads build additionally requires the pinned nightly's `rust-src`, the
+exact wasm-bindgen CLI 0.2.127, and wasm-opt 117. The repository toolchain file
+installs `rust-src`; set `FMN_WASM_BINDGEN` and `FMN_WASM_OPT` when those exact
+tools are not on `PATH`.
 
 ## Artifact size (R19)
 
