@@ -1490,10 +1490,12 @@ mod ffmpeg_boundary {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        // macOS serves temp_dir from /var -> /private/var; resolve it so
-        // runner outcomes keyed by path match what the boundary
-        // canonicalizes to.
-        let tmp = std::env::temp_dir();
+        // Build harnesses may point TMPDIR into a transferred checkout whose
+        // shared ancestor is intentionally group-writable. The boundary must
+        // reject that tree, so create security fixtures under Unix's sticky
+        // temporary root. macOS serves /tmp through /private/tmp; resolve the
+        // root so runner outcomes match what the boundary canonicalizes to.
+        let tmp = PathBuf::from("/tmp");
         let tmp = tmp.canonicalize().unwrap_or(tmp);
         let path = tmp.join(format!(
             "fmn-sinks-test-{}-{}-{tag}",
