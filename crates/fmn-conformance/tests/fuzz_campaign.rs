@@ -33,16 +33,20 @@
 //! Modes:
 //! - CI (default): the reduced case counts; classes must be a subset of
 //!   the manifest's and the regenerated interesting-input corpus a subset
-//!   of the committed files. Any violation fails.
+//!   of the committed files. Every committed input, including historical
+//!   class representatives retained across capability promotions, is replayed
+//!   against the current target contract. Any violation fails.
 //! - `FMN_FUZZ_FULL=1` (the scheduled campaign): the full case counts;
-//!   classes must equal the manifest's exactly and the corpus must match
-//!   exactly.
+//!   classes must equal the manifest's exactly and every newly generated
+//!   representative must be committed. Historical inputs stay in the replay
+//!   corpus rather than being deleted when their old refusal becomes support.
 //! - `FMN_FUZZ_FULL=1 FMN_FUZZ_BLESS=1`: regenerate the manifest and
 //!   corpus for human review and commit (the rig never commits and never
 //!   deletes; stale files are reported).
 
 use std::fs::File;
 use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -85,6 +89,78 @@ fn read_manifest(path: &Path) -> String {
         .unwrap_or_else(|error| std::panic::panic_any(format!("opening {label}: {error}")));
     read_utf8_bounded(file, &label, MAX_MANIFEST_BYTES)
         .unwrap_or_else(|error| std::panic::panic_any(error))
+}
+
+fn replay_committed_corpus(target: &dyn Target) {
+    let root = corpus_root().join(target.name());
+    let mut entries = std::fs::read_dir(&root)
+        .unwrap_or_else(|error| {
+            std::panic::panic_any(format!("reading {}: {error}", root.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| {
+            std::panic::panic_any(format!("reading {} entry: {error}", root.display()))
+        });
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in entries {
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            std::panic::panic_any(format!("reading {} type: {error}", entry.path().display()))
+        });
+        assert!(
+            file_type.is_file(),
+            "{}: corpus entry is not a regular file",
+            entry.path().display()
+        );
+        let name = entry
+            .file_name()
+            .into_string()
+            .unwrap_or_else(|_| std::panic::panic_any("corpus file name is not UTF-8"));
+        let encoded_digest = name
+            .strip_suffix(".bin")
+            .and_then(|stem| stem.rsplit_once("__"))
+            .map(|(_, digest)| digest)
+            .filter(|digest| {
+                digest.len() == 12 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .unwrap_or_else(|| {
+                std::panic::panic_any(format!("{name}: noncanonical corpus file name"))
+            });
+        let path = entry.path();
+        let file = File::open(&path).unwrap_or_else(|error| {
+            std::panic::panic_any(format!("opening {}: {error}", path.display()))
+        });
+        let bytes = read_bytes_bounded(
+            file,
+            &path.display().to_string(),
+            target.budgets().max_input_bytes,
+        )
+        .unwrap_or_else(|error| std::panic::panic_any(error));
+        assert_eq!(
+            &fmn_hash::sha256(&bytes).to_hex()[..12],
+            encoded_digest,
+            "{name}: content address disagrees with corpus bytes"
+        );
+
+        match catch_unwind(AssertUnwindSafe(|| target.run(&bytes))) {
+            Ok(Verdict::Accepted { output_bytes }) => {
+                if let Some(max) = target.budgets().max_output_bytes {
+                    assert!(
+                        output_bytes <= max,
+                        "{name}: accepted output {output_bytes} exceeds {max} bytes"
+                    );
+                }
+            }
+            Ok(Verdict::Refused { message, .. }) => assert!(
+                target.refusal_is_precise(&message),
+                "{name}: imprecise refusal while replaying retained corpus: {message}"
+            ),
+            Ok(Verdict::Fault { message }) => {
+                panic!("{name}: target fault while replaying retained corpus: {message}")
+            }
+            Err(_) => panic!("{name}: target panicked while replaying retained corpus"),
+        }
+    }
 }
 
 /// Extract a stable outcome-class label from a typed error's `Debug`
@@ -1475,6 +1551,17 @@ fn campaign_is_deterministic() {
     }
 }
 
+/// Corpus persistence is monotonic: historical inputs remain live regression
+/// cases even when an upstream capability promotion changes their outcome
+/// class. Their boundedness, content address, and current target contract are
+/// checked on every ordinary gate run.
+#[test]
+fn committed_corpus_replays_against_current_targets() {
+    for (target, _) in registry() {
+        replay_committed_corpus(&*target);
+    }
+}
+
 /// The CI gate: reduced case counts, every violation fails, observed
 /// classes and corpus entries must be subsets of the committed full
 /// campaign's, and the manifest must agree with the registry.
@@ -1549,7 +1636,8 @@ fn ci_campaign_matches_manifest_and_corpus() {
 }
 
 /// The scheduled full campaign (`FMN_FUZZ_FULL=1`): the authority for the
-/// manifest's classes and the corpus — checked exactly. With
+/// manifest's classes and newly generated corpus representatives. Retained
+/// historical inputs are replayed by [`committed_corpus_replays_against_current_targets`]. With
 /// `FMN_FUZZ_BLESS=1` it rewrites both for human review and commit.
 #[test]
 fn full_campaign_is_the_campaign_authority() {
@@ -1577,7 +1665,7 @@ fn full_campaign_is_the_campaign_authority() {
                 fuzz::bless_corpus(&corpus_root().join(name), &fuzz::expected_corpus(report))
                     .expect("bless corpus");
             if !stale.is_empty() {
-                println!("{name}: stale corpus files to remove by hand: {stale:?}");
+                println!("{name}: retained historical corpus files: {stale:?}");
             }
         }
         std::fs::write(corpus_root().join("MANIFEST.tsv"), rendered_manifest)
@@ -1615,7 +1703,7 @@ fn full_campaign_is_the_campaign_authority() {
         let drift = fuzz::check_corpus(
             Path::new(&corpus_root()).join(name).as_path(),
             &fuzz::expected_corpus(report),
-            true,
+            false,
         )
         .expect("corpus readable");
         assert!(
