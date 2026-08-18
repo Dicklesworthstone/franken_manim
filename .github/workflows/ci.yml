@@ -61,6 +61,17 @@ jobs:
       - name: Run the mandatory gate
         run: bash scripts/check.sh
 
+      # The default gate runs the deterministic campaign at its reduced
+      # per-commit case counts.  The committed corpus and outcome-class
+      # manifest are authoritative only at the full case counts, so exercise
+      # that exact mode on the weekly schedule as well.  Blessing is never
+      # enabled in CI: any manifest or corpus drift remains a hard failure.
+      - name: Run the scheduled full deterministic fuzz campaign
+        if: github.event_name == 'schedule'
+        env:
+          FMN_FUZZ_FULL: "1"
+        run: cargo test --locked -p fmn-conformance --test fuzz_campaign full_campaign_is_the_campaign_authority
+
   x86-64-v3:
     name: check (x86-64-v3)
     runs-on: ubuntu-latest
