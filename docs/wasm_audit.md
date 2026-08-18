@@ -1,12 +1,12 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-08-17 against the exact lock identities below.
+**Status:** re-derived 2026-08-18 against the exact lock identities below.
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `6b2ec65cb5e85a1b41a64866ee15593750e1a9584325b295a691658566a9f856`
-- `Cargo.lock` SHA-256: `e048aad06e13ff7fda041f28bbc92190870d7057c0b618fe0f2283c13ed6478d`
+- `Cargo.lock` SHA-256: `dffca8fec068c1037ac66683b92f09abf6b17d941b6e960c0c5954cb52b0c566`
 
 Method labels are deliberately narrow:
 
@@ -40,7 +40,7 @@ The pinned nightly has `wasm32-unknown-unknown` installed on the release host.
 This is exercised rather than inferred: `scripts/check.sh` target-compiles the
 render axis and `wasm-smoke/run.sh` builds a fresh release probe, instantiates it
 under Node, checks deterministic render bytes, reads the browser clock shim,
-and verifies that process access fails closed. The 2026-08-17 full gate emitted
+and verifies that process access fails closed. The 2026-08-18 v0.4.0 re-derivation emitted
 the locked smoke digest `1f248a71347b82aa`.
 
 ## Product surfaces
@@ -49,7 +49,7 @@ the locked smoke digest `1f248a71347b82aa`.
 |---|---|---|
 | Tier 1: `FmnScene` fixed-scene renderer | **VERIFIED (execution)** | The packaged ESM/TypeScript surface enumerates `circle_shift`, `parametric_wave`, and `orbit_duet`, renders RGBA8 into caller-reused buffers, and precisely refuses a wrong destination length. wasm-bindgen copies the mutable JS view into Wasm memory; this is buffer reuse, not a zero-copy claim. |
 | Tier 2: `FmnPlayer` FMTL/1 player | **VERIFIED (execution)** | The packaged player parses the governed timeline bundle, refuses engine-major mismatches, exposes labels/seek state, and renders RGBA8 through the same semantic Lumen path. |
-| npm bundler artifact | **VERIFIED (execution)** | `scripts/check_wasm_package.sh` builds the self-contained package, checks its exact file/license inventory and recorded size budgets, runs `npm pack` plus `npm publish --dry-run`, installs the tarball into a fresh consumer, bundles it with webpack 5.109.2, and exercises both tiers through Canvas write/readback in headless Chrome. The clean `cbd174e4b85ef5b9da13ab239b721c93dfe370e9` receipt passed with `source_dirty=false`. |
+| npm bundler artifact | **VERIFIED (execution)** | `scripts/check_wasm_package.sh` builds the self-contained package, checks its exact file/license inventory and recorded size budgets, runs `npm pack` plus `npm publish --dry-run`, installs the tarball into a fresh consumer, bundles it with webpack 5.109.2, and exercises both tiers through Canvas write/readback in headless Chrome. The clean `cbd174e4b85ef5b9da13ab239b721c93dfe370e9` receipt passed with `source_dirty=false`; the 2026-08-18 v0.4.0 version-only re-derivation at `75f3a59ecb4c1de1bc62b8bf5d5c5e4498ea4bc2` passed with `source_dirty=true`, pending the release commit's clean recertification. |
 | threads artifact | **VERIFIED (execution)** | The separate `fmn-wasm/threads` export is built with atomics and imported shared memory. Its coordinator compiles the module once, verifies the instantiated buffer is a `SharedArrayBuffer`, passes the same module and memory to two module workers, and renders independent whole frames concurrently. The Chromium gate byte-compares serial and threaded results, checks repeatability, and proves a document without COOP/COEP receives `FMN_WASM_CROSS_ORIGIN_ISOLATION_REQUIRED` before worker startup. This is frame-batch parallelism, not intra-frame parallelism. |
 
 The browser/package evidence proves compilation, packaging, deterministic

@@ -12,7 +12,7 @@ shopt -s lastpipe 2>/dev/null || true
 umask 022
 
 REPOSITORY="Dicklesworthstone/franken_manim"
-FALLBACK_VERSION="0.3.0"
+FALLBACK_VERSION="0.4.0"
 QUIET=0
 NO_GUM=0
 FORCE=0
@@ -136,7 +136,7 @@ Install the standalone CPython-free `fmn` binary from a FrankenManim release.
 Every archive is SHA-256 verified before extraction.
 
 Options:
-  --version VERSION     Install an exact release (for example 0.3.0 or v0.3.0)
+  --version VERSION     Install an exact release (for example 0.4.0 or v0.4.0)
   --install-dir DIR     Destination directory (default: $HOME/.local/bin)
   --offline ARCHIVE     Install a local release archive without network access
   --checksum HASH|FILE  Required with --offline: 64-hex SHA-256 or checksum file
