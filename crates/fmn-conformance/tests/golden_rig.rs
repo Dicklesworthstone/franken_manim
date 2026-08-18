@@ -6,7 +6,9 @@
 //! Modes are passed explicitly (never via the environment) so the tests are
 //! parallel-safe.
 
-use fmn_conformance::golden::{GoldenError, GoldenStore, Mode, Scope, Verdict, platform_key};
+use fmn_conformance::golden::{
+    GoldenError, GoldenStore, LockEntry, Mode, Scope, Verdict, platform_key,
+};
 use std::path::PathBuf;
 
 fn scratch(name: &str) -> PathBuf {
@@ -15,6 +17,45 @@ fn scratch(name: &str) -> PathBuf {
     // overwritten by the rig itself (bless), so no cleanup pass is needed.
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+#[test]
+fn path_diagnostics_are_bounded_and_keep_the_artifact_leaf() {
+    let path = PathBuf::from(format!("/{}/bounded.certified.lock", "é".repeat(200)));
+    let entry = LockEntry {
+        len: 1,
+        sha256_hex: "00".repeat(32),
+    };
+    let errors = [
+        GoldenError::Io {
+            path: path.clone(),
+            err: std::io::Error::other("probe"),
+        },
+        GoldenError::Corrupt {
+            path: path.clone(),
+            line: 1,
+            detail: "probe".to_string(),
+        },
+        GoldenError::LockTooLarge {
+            path: path.clone(),
+            limit: 1024,
+        },
+        GoldenError::Drift {
+            name: "probe".to_string(),
+            expected: Some(entry.clone()),
+            actual: entry,
+            sidecar: path,
+        },
+    ];
+
+    for error in errors {
+        let diagnostic = error.to_string();
+        assert!(diagnostic.len() < 512, "unbounded diagnostic: {diagnostic}");
+        assert!(
+            diagnostic.contains("bounded.certified.lock"),
+            "diagnostic lost its useful leaf: {diagnostic}"
+        );
+    }
 }
 
 #[test]

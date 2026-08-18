@@ -52,6 +52,29 @@ const MAX_LOCK_FILE_BYTES: usize = 1024 * 1024;
 /// their derived lock, sidecar-directory, and `.actual` names portable.
 const MAX_NAME_BYTES: usize = 128;
 
+/// Paths are useful in a failure, but CI build roots can be arbitrarily long.
+/// Keep the tail so the lock or sidecar name survives in bounded diagnostics.
+const MAX_DIAGNOSTIC_PATH_BYTES: usize = 96;
+
+struct DiagnosticPath<'a>(&'a Path);
+
+impl fmt::Display for DiagnosticPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.0.to_string_lossy();
+        if path.len() <= MAX_DIAGNOSTIC_PATH_BYTES {
+            return f.write_str(&path);
+        }
+
+        let suffix_bytes = MAX_DIAGNOSTIC_PATH_BYTES - 3;
+        let mut start = path.len() - suffix_bytes;
+        while !path.is_char_boundary(start) {
+            start += 1;
+        }
+        f.write_str("...")?;
+        f.write_str(&path[start..])
+    }
+}
+
 /// Which machines a lock file speaks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
@@ -167,18 +190,20 @@ impl fmt::Display for GoldenError {
                      using only [a-z0-9._-] and not starting with '.'"
                 )
             }
-            Self::Io { path, err } => write!(f, "golden I/O failure at {}: {err}", path.display()),
+            Self::Io { path, err } => {
+                write!(f, "golden I/O failure at {}: {err}", DiagnosticPath(path))
+            }
             Self::Corrupt { path, line, detail } => {
                 write!(
                     f,
                     "corrupt lock file {} line {line}: {detail}",
-                    path.display()
+                    DiagnosticPath(path)
                 )
             }
             Self::LockTooLarge { path, limit } => write!(
                 f,
                 "golden lock file {} exceeds the {limit}-byte format limit",
-                path.display()
+                DiagnosticPath(path)
             ),
             Self::Drift {
                 name,
@@ -195,7 +220,7 @@ impl fmt::Display for GoldenError {
                     e.sha256_hex,
                     actual.len,
                     actual.sha256_hex,
-                    sidecar.display()
+                    DiagnosticPath(sidecar)
                 ),
                 None => write!(
                     f,
@@ -203,7 +228,7 @@ impl fmt::Display for GoldenError {
                      (actual bytes at {}; lock it with UPDATE_GOLDENS=1 and commit)",
                     actual.len,
                     actual.sha256_hex,
-                    sidecar.display()
+                    DiagnosticPath(sidecar)
                 ),
             },
         }
