@@ -4322,6 +4322,62 @@ def verify_portal_console_scene():
     assert elbow_receipt[5] == 1
     assert_white_stroke_witness(elbow_destination)
 
+    # LineBrace follows the Reference's two-stage transform: flatten the
+    # target around its own centre, build the brace, then restore both around
+    # that same centre.  Rotating the flattened anchor around the world origin
+    # instead sends translated annotations off-screen, as BeamSplitter's
+    # amplitude brace demonstrated.  Keep the translated, angled geometry and
+    # the adopted fixed-frame pixels in one production regression.
+    brace_destination = output_root / "fixed-line-brace.png"
+    brace_scene = InteractiveScene()
+    brace_scene._begin_png(str(brace_destination), 160, 90, 30, 1, 0)
+    brace_frame = brace_scene.frame
+    brace_frame.reorient(-55, 68, 0, [1.0, -1.0, 0.0], 6)
+    brace_start = np.array([-2.5, -0.5, 0.0])
+    brace_end = np.array([0.5, 1.0, 0.0])
+    brace_line = geometry.Line(brace_start, brace_end)
+    unit_tangent = (brace_end - brace_start) / np.linalg.norm(brace_end - brace_start)
+    unit_normal = np.array([-unit_tangent[1], unit_tangent[0], 0.0])
+    line_brace = manimlib.LineBrace(brace_line, buff=0.1).fix_in_frame()
+    brace_label = line_brace.get_tex("1").fix_in_frame()
+    relative_points = line_brace.get_points() - brace_line.get_center()
+    tangent_projections = relative_points @ unit_tangent
+    normal_projections = relative_points @ unit_normal
+    assert np.isclose(tangent_projections.min(), -brace_line.get_length() / 2)
+    assert np.isclose(tangent_projections.max(), brace_line.get_length() / 2)
+    assert np.isclose(normal_projections.min(), 0.1, rtol=0, atol=1e-6), (
+        normal_projections.min(),
+        normal_projections.max(),
+        line_brace.get_direction(),
+    )
+    assert np.dot(line_brace.get_direction(), unit_normal) > 1 - 1e-8
+    assert np.dot(brace_label.get_center() - line_brace.get_tip(), unit_normal) > 0
+    brace_scene.play(
+        manimlib.GrowFromCenter(line_brace),
+        manimlib.Write(brace_label),
+        brace_frame.animate.reorient(-25, 76, 0),
+        run_time=1 / 30,
+        rate_func=manimlib.linear,
+    )
+    brace_family = {
+        id(member)
+        for root in brace_scene.get_mobjects()
+        for member in root.get_family()
+    }
+    assert id(line_brace) in brace_family
+    assert id(brace_label) in brace_family
+    brace_receipt = brace_scene._finish_render(
+        brace_frame._core,
+        brace_scene.camera.light_source.get_center(),
+    )
+    assert pathlib.Path(brace_receipt[0]) == brace_destination
+    assert brace_receipt[1] == 1
+    assert brace_receipt[2] == brace_destination.stat().st_size
+    assert len(brace_receipt[3]) == 64
+    assert brace_receipt[4].split(":")[0] == "fast-cpu"
+    assert brace_receipt[5] == 1
+    assert_white_stroke_witness(brace_destination, minimum_pixels=20)
+
     console_code, console_out, console_err = run_portal_console(
         "--robot",
         str(source),

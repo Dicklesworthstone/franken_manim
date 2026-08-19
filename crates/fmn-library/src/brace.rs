@@ -68,6 +68,12 @@ pub struct Brace {
     /// Where the brace's upper-left corner goes, before rotation. `None` for
     /// a bare brace, which builds at the origin.
     anchor: Option<Vec3>,
+    /// `LineBrace` first constructs against a horizontal copy of its target,
+    /// then restores the result around the original line centre.  Keeping
+    /// that final affine step explicit prevents translated lines from being
+    /// spuriously rotated around the world origin.
+    post_rotation: f64,
+    post_rotation_about: Vec3,
     style: Style,
 }
 
@@ -87,6 +93,8 @@ impl Brace {
             buff: DEFAULT_BRACE_BUFF,
             em: DEFAULT_BRACE_EM,
             anchor: None,
+            post_rotation: 0.0,
+            post_rotation_about: ORIGIN,
             // A brace is a filled glyph in the Reference, so it is a filled
             // shape here: fill on, stroke off.
             style: Style::default()
@@ -190,7 +198,7 @@ impl Brace {
     #[must_use]
     pub fn tip_direction(&self) -> Vec3 {
         let n = get_norm(self.direction);
-        if n == 0.0 {
+        let direction = if n == 0.0 {
             DOWN
         } else {
             [
@@ -198,7 +206,8 @@ impl Brace {
                 self.direction[1] / n,
                 self.direction[2] / n,
             ]
-        }
+        };
+        rotate_z(direction, self.post_rotation)
     }
 
     /// Place `label` just past the tip, `buff` away (Reference
@@ -220,7 +229,11 @@ impl Brace {
             ],
             None => local,
         };
-        rotate_z(shifted, angle)
+        rotate_z_about(
+            rotate_z(shifted, angle),
+            self.post_rotation,
+            self.post_rotation_about,
+        )
     }
 
     /// Build the brace as a filled path.
@@ -252,6 +265,16 @@ fn brace_angle(direction: Vec3) -> f64 {
 fn rotate_z(p: Vec3, angle: f64) -> Vec3 {
     let (s, c) = (fmn_dmath::sin(angle), fmn_dmath::cos(angle));
     [p[0] * c - p[1] * s, p[0] * s + p[1] * c, p[2]]
+}
+
+fn rotate_z_about(p: Vec3, angle: f64, about: Vec3) -> Vec3 {
+    let shifted = [p[0] - about[0], p[1] - about[1], p[2] - about[2]];
+    let rotated = rotate_z(shifted, angle);
+    [
+        rotated[0] + about[0],
+        rotated[1] + about[1],
+        rotated[2] + about[2],
+    ]
 }
 
 /// The curl's dimensions at one width — the parametric family itself.
@@ -423,13 +446,13 @@ pub fn line_brace(start: Vec3, end: Vec3, direction: Vec3) -> Brace {
         0.5 * (start[2] + end[2]),
     ];
     let length = get_norm([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
-    let flat_left = [centre[0] - length / 2.0, centre[1], centre[2]];
-    Brace {
-        width: length,
-        direction: rotate_z(direction, angle),
-        anchor: Some(rotate_z(flat_left, angle)),
-        ..Brace::new()
-    }
+    let flat_start = [centre[0] - length / 2.0, centre[1], centre[2]];
+    let flat_end = [centre[0] + length / 2.0, centre[1], centre[2]];
+    let flat_target = VMobject::from_points(vec![flat_start, centre, flat_end]);
+    let mut brace = Brace::around(&flat_target, direction);
+    brace.post_rotation = angle;
+    brace.post_rotation_about = centre;
+    brace
 }
 
 #[cfg(test)]
@@ -634,10 +657,61 @@ mod tests {
             "the brace spans the line's length, got {}",
             brace.width
         );
+        let direction = brace.tip_direction();
         assert!(
-            brace.direction[0] < 0.0 && brace.direction[1] > 0.0,
+            direction[0] < 0.0 && direction[1] > 0.0,
             "UP against a 45-degree line points up-left, got {:?}",
-            brace.direction
+            direction
         );
+    }
+
+    #[test]
+    fn a_translated_line_brace_rotates_about_the_line_centre() {
+        let start = [3.0, -2.0, 0.0];
+        let end = [5.0, 0.0, 0.0];
+        let centre = [4.0, -1.0, 0.0];
+        let angle = fmn_dmath::atan2(end[1] - start[1], end[0] - start[0]);
+        let tangent = rotate_z([1.0, 0.0, 0.0], angle);
+        let normal = rotate_z(UP, angle);
+        let buff = 0.125;
+        let brace = line_brace(start, end, UP).buff(buff);
+        let length = get_norm([end[0] - start[0], end[1] - start[1], 0.0]);
+        let depth = brace.depth();
+        let built = brace.build();
+
+        let projection = |point: Vec3, axis: Vec3| {
+            (point[0] - centre[0]) * axis[0]
+                + (point[1] - centre[1]) * axis[1]
+                + (point[2] - centre[2]) * axis[2]
+        };
+        let tangent_min = built
+            .points()
+            .iter()
+            .map(|point| projection(*point, tangent))
+            .fold(f64::INFINITY, f64::min);
+        let tangent_max = built
+            .points()
+            .iter()
+            .map(|point| projection(*point, tangent))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let normal_min = built
+            .points()
+            .iter()
+            .map(|point| projection(*point, normal))
+            .fold(f64::INFINITY, f64::min);
+        let normal_max = built
+            .points()
+            .iter()
+            .map(|point| projection(*point, normal))
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        assert!((tangent_min + length / 2.0).abs() < 1e-9);
+        assert!((tangent_max - length / 2.0).abs() < 1e-9);
+        assert!((normal_min - buff).abs() < 1e-9);
+        assert!((normal_max - (buff + depth)).abs() < 1e-9);
+
+        let tip = brace.tip();
+        assert!(projection(tip, tangent).abs() < 1e-9);
+        assert!((projection(tip, normal) - (buff + depth)).abs() < 1e-9);
     }
 }
