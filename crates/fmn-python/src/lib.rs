@@ -54,7 +54,7 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyModule, PyTuple};
 
 create_exception!(
     manimlib,
@@ -2515,6 +2515,93 @@ impl BridgeMobject {
             );
         }
         install_native_tree(slf, factory, cloud)
+    }
+
+    /// `ImageMobject(path, height)`: Python owns local path resolution, then
+    /// Atlas/fmn-codec own format sniffing, bounded decode, quad geometry,
+    /// and the immutable renderer resource. No decoded pixel copy returns to
+    /// Python and no second image implementation exists in the portal.
+    fn _build_image<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        payload: &Bound<'py, PyBytes>,
+        height: f64,
+        opacity: f64,
+        z_index: i32,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let image = fmn_library::ImageMobject::from_bytes(payload.as_bytes())
+            .map_err(native_error)?
+            .with_height(height)
+            .with_opacity(opacity)
+            .with_z_index(z_index);
+        install_native_tree(slf, factory, image)
+    }
+
+    /// Sample the durable image attached to this entry using the Reference's
+    /// axis-aligned family-box convention. Placement is baked first, so the
+    /// result observes live shifts/scales exactly as ordinary point reads do.
+    fn _image_point_to_rgb(
+        slf: &Bound<'_, Self>,
+        point: [f64; 3],
+    ) -> PyResult<Option<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| -> PyResult<Option<[f64; 3]>> {
+            stage.bake_placement(mob).map_err(stage_error)?;
+            let entry = stage.get(mob).ok_or_else(|| {
+                StaleHandleError::new_err("image mobject handle no longer resolves")
+            })?;
+            let image = entry.image_resource().ok_or_else(|| {
+                PyRuntimeError::new_err("image mobject has no durable image resource")
+            })?;
+            let points = entry.buffer.read_column("point").ok_or_else(|| {
+                PyRuntimeError::new_err("image mobject has no point field")
+            })?;
+            let mut min_x = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for row in points.chunks_exact(3) {
+                min_x = min_x.min(f64::from(row[0]));
+                max_x = max_x.max(f64::from(row[0]));
+                min_y = min_y.min(f64::from(row[1]));
+                max_y = max_y.max(f64::from(row[1]));
+            }
+            let width = max_x - min_x;
+            let height = max_y - min_y;
+            if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+                return Ok(None);
+            }
+            let x_alpha = (point[0] - min_x) / width;
+            let y_alpha = (max_y - point[1]) / height;
+            if !(0.0..=1.0).contains(&x_alpha) || !(0.0..=1.0).contains(&y_alpha) {
+                return Ok(None);
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let pixel_x = (f64::from(image.width() - 1) * x_alpha) as usize;
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let pixel_y = (f64::from(image.height() - 1) * y_alpha) as usize;
+            let offset = pixel_y
+                .checked_mul(image.width() as usize)
+                .and_then(|row| row.checked_add(pixel_x))
+                .and_then(|pixel| pixel.checked_mul(4))
+                .ok_or_else(|| PyOverflowError::new_err("image sample offset overflows usize"))?;
+            let rgb = image.pixels().get(offset..offset + 3).ok_or_else(|| {
+                PyRuntimeError::new_err("image sample falls outside the durable resource")
+            })?;
+            Ok(Some([
+                f64::from(rgb[0]) / 255.0,
+                f64::from(rgb[1]) / 255.0,
+                f64::from(rgb[2]) / 255.0,
+            ]))
+        })?
     }
 
     /// `Prism(width, height, depth)` over the solids shelf: six sampled
