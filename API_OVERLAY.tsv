@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	103c39323f2b1756af3eff08b96916e8029385d5eb568b69c8945c19bae252d9
+ledger_reviewed_digest	380565eda8292cae512fa34bc86041d6760157f0a7c5523ab84ac90bb2fa82fe
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -394,7 +394,9 @@ manimlib.mobject.types.vectorized_mobject:VMobject.add_quadratic_bezier_curve_to
 manimlib.mobject.types.vectorized_mobject:VMobject.add_smooth_cubic_curve_to	improved	BN-13	crates/fmn-python/tests/bridge.py	reflects the live terminal handle then uses the one checked cubic-to-quadratic converter
 manimlib.mobject.types.vectorized_mobject:VMobject.add_smooth_curve_to	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	uses a line after a fresh subpath marker and otherwise reflects the live terminal quadratic handle
 manimlib.mobject.types.vectorized_mobject:VMobject.add_subpath	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	splices a validated shared-anchor run as a continuation or a new break-marked native subpath without partial mutation
+manimlib.mobject.types.vectorized_mobject:VMobject.align_points	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	routes same-Stage and cross-Stage pairs through Marionette's subpath alignment while honoring the receiver's live equality tolerance and preserving structured record lanes
 manimlib.mobject.types.vectorized_mobject:VMobject.append_points	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	enforces an even appended shared-anchor run and refreshes native joint metadata after the base record append
+manimlib.mobject.types.vectorized_mobject:VMobject.append_vectorized_mobject	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	splices the source path then copies every source RecordBuffer lane over the exact appended tail in Reference order
 manimlib.mobject.types.vectorized_mobject:VMobject.change_anchor_mode	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	rebuilds jagged approximate-smooth or true-smooth native handles across every live subpath and commits atomically
 manimlib.mobject.types.vectorized_mobject:VMobject.close_path	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	closes only the last native subpath by a straight or reflected-handle segment and is idempotent when already closed
 manimlib.mobject.types.vectorized_mobject:VMobject.consider_points_equal	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	compares every coordinate strictly against the live public point-equality tolerance
@@ -430,6 +432,7 @@ manimlib.mobject.types.vectorized_mobject:VMobject.set_anchors_and_handles	same	
 manimlib.mobject.types.vectorized_mobject:VMobject.set_points	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	enforces the empty-or-odd shared-anchor invariant and refreshes native joint metadata through Stage set_points
 manimlib.mobject.types.vectorized_mobject:VMobject.set_points_as_corners	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	uses native midpoint handles while retaining visible-stroke and transparent-fill defaults on the first point allocation
 manimlib.mobject.types.vectorized_mobject:VMobject.start_new_path	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	appends the exact handle-on-terminal-anchor break marker or seeds a point-free path from its structured style defaults
+manimlib.mobject.types.vectorized_mobject:VMobject.subdivide_sharp_curves	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	plans the requested family through Chisel's bounded angle subdivision before committing any RecordBuffer mutation
 manimlib.mobject.types.vectorized_mobject:VMobject.tolerance_for_point_equality	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact 1e-8 public tolerance consumed by curve insertion
 manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
 manimlib.mobject.svg.brace:Brace.get_tex	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	builds a native Tex label and positions it beyond the live brace tip along the brace direction

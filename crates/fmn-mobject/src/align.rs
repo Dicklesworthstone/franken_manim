@@ -254,8 +254,25 @@ impl Stage {
     /// [`StageError::StaleHandle`], [`StageError::SchemaMismatch`],
     /// [`StageError::Geometry`].
     pub fn align_points(&mut self, a: Mob, b: Mob) -> Result<(), StageError> {
+        self.align_points_with_tolerance(a, b, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY)
+    }
+
+    /// Reference `VMobject.align_points` under the receiver's live
+    /// `tolerance_for_point_equality`. The ordinary native animation path
+    /// uses [`Stage::align_points`] and its governed default; portals whose
+    /// public object can override the tolerance use this exact seam rather
+    /// than reimplementing subpath alignment outside Marionette.
+    ///
+    /// # Errors
+    /// As [`Stage::align_points`].
+    pub fn align_points_with_tolerance(
+        &mut self,
+        a: Mob,
+        b: Mob,
+        tolerance: f64,
+    ) -> Result<(), StageError> {
         match (is_vmobject_schema(self, a)?, is_vmobject_schema(self, b)?) {
-            (true, true) => self.align_points_vmobject(a, b),
+            (true, true) => self.align_points_vmobject(a, b, tolerance),
             (false, false) => {
                 let la = self.try_get(a)?.buffer.len();
                 let lb = self.try_get(b)?.buffer.len();
@@ -671,7 +688,7 @@ impl Stage {
     }
 
     /// vectorized_mobject.py:964, step for step.
-    fn align_points_vmobject(&mut self, a: Mob, b: Mob) -> Result<(), StageError> {
+    fn align_points_vmobject(&mut self, a: Mob, b: Mob, tolerance: f64) -> Result<(), StageError> {
         let mut pa = read_points(self, a)?;
         let mut pb = read_points(self, b)?;
         if pa.len() == pb.len() {
@@ -733,18 +750,10 @@ impl Stage {
             let sp2 = get_nth(&subpaths2, n);
             let diff1 = sp2.len().saturating_sub(sp1.len()) / 2;
             let diff2 = sp1.len().saturating_sub(sp2.len()) / 2;
-            let sp1 = QuadPath::insert_n_curves_to_point_list(
-                diff1,
-                &sp1,
-                DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
-            )
-            .map_err(StageError::Geometry)?;
-            let sp2 = QuadPath::insert_n_curves_to_point_list(
-                diff2,
-                &sp2,
-                DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
-            )
-            .map_err(StageError::Geometry)?;
+            let sp1 = QuadPath::insert_n_curves_to_point_list(diff1, &sp1, tolerance)
+                .map_err(StageError::Geometry)?;
+            let sp2 = QuadPath::insert_n_curves_to_point_list(diff2, &sp2, tolerance)
+                .map_err(StageError::Geometry)?;
             if n > 0 {
                 // Intermediate anchor marking the subpath break.
                 new_points1.push(*new_points1.last().expect("prior subpath emitted"));

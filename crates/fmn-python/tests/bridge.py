@@ -537,6 +537,9 @@ assert str(inspect.signature(VMobject.add_arc_to)) == (
 )
 assert str(inspect.signature(VMobject.add_points_as_corners)) == "(self, points)"
 assert str(inspect.signature(VMobject.add_subpath)) == "(self, points)"
+assert str(inspect.signature(VMobject.append_vectorized_mobject)) == (
+    "(self, vmobject)"
+)
 assert str(inspect.signature(VMobject.has_new_path_started)) == "(self)"
 assert str(inspect.signature(VMobject.get_last_point)) == "(self)"
 assert str(inspect.signature(VMobject.get_reflection_of_last_handle)) == "(self)"
@@ -563,6 +566,26 @@ assert str(inspect.signature(VMobject.insert_n_curves_to_point_list)) == (
     "(self, n, points)"
 )
 assert str(inspect.signature(VMobject.insert_n_curves)) == "(self, n, recurse=True)"
+assert str(inspect.signature(VMobject.align_points)) == "(self, vmobject)"
+assert list(inspect.signature(VMobject.subdivide_sharp_curves).parameters) == [
+    "self",
+    "angle_threshold",
+    "recurse",
+]
+assert math.isclose(
+    inspect.signature(VMobject.subdivide_sharp_curves)
+    .parameters["angle_threshold"]
+    .default,
+    30 * manimlib.DEG,
+    rel_tol=0.0,
+    abs_tol=0.0,
+)
+assert (
+    inspect.signature(VMobject.subdivide_sharp_curves)
+    .parameters["recurse"]
+    .default
+    is True
+)
 assert list(inspect.signature(VMobject.is_smooth).parameters) == ["self", "angle_tol"]
 assert math.isclose(
     inspect.signature(VMobject.is_smooth).parameters["angle_tol"].default,
@@ -4121,6 +4144,177 @@ except ValueError as error:
 else:
     raise AssertionError("an over-budget curve insertion mutated the portal")
 assert np.array_equal(insertion.get_points(), insertion_before_refusal)
+
+# Alignment, whole-record append, and sharp subdivision reuse the existing
+# Marionette/Chisel authorities rather than schema-generated placeholders.
+# Appending copies every source lane onto the exact appended topology tail.
+append_source = VMobject().set_points_as_corners(
+    [[2.0, 1.0, 0.0], [3.0, 2.0, 0.0]]
+)
+append_source.data["stroke_width"][:, 0] = [7.0, 8.0, 9.0]
+append_source.data["stroke_rgba"][:] = [0.2, 0.4, 0.6, 0.8]
+append_source.data["fill_rgba"][:] = [0.7, 0.5, 0.3, 0.1]
+append_target = VMobject().set_points_as_corners(
+    [[-2.0, -1.0, 0.0], [-1.0, -1.0, 0.0]]
+)
+append_old_view = append_target.get_points()
+assert append_target.append_vectorized_mobject(append_source) is append_target
+assert append_target.get_num_points() == 7
+assert np.array_equal(
+    append_target.data[-append_source.get_num_points() :], append_source.data
+)
+assert append_old_view.shape == (3, 3)
+append_old_view[0] = [99.0, 99.0, 99.0]
+assert not np.allclose(append_target.get_points()[0], append_old_view[0])
+
+# Detached alignment mutates both endpoints, preserves every non-geometry
+# lane by proportional record resize, and invalidates only resized views.
+align_small = VMobject().set_points(
+    [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+)
+align_large = VMobject().set_points_as_corners(
+    [[0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [2.0, 2.0, 0.0], [3.0, 2.0, 0.0]]
+)
+align_small.data["stroke_width"][:, 0] = [1.0, 2.0, 3.0]
+align_small_before = align_small.data.copy()
+align_small_old_view = align_small.get_points()
+assert align_small.align_points(align_large) is align_small
+assert align_small.get_num_points() == align_large.get_num_points() == 7
+assert np.allclose(align_small.get_points()[0], [0.0, 0.0, 0.0])
+assert np.allclose(align_small.get_points()[-1], [2.0, 0.0, 0.0])
+assert np.array_equal(
+    align_small.data["stroke_width"],
+    manimlib.resize_preserving_order(align_small_before, 7)["stroke_width"],
+)
+assert align_small_old_view.shape == (3, 3)
+assert np.isfinite(align_small.data["joint_angle"]).all()
+assert np.isfinite(align_large.data["joint_angle"]).all()
+
+# The receiver's public tolerance controls which near-null curve may receive
+# an inserted split. This is the parameterized native seam, not Python math.
+def aligned_with_tolerance(tolerance):
+    left = VMobject().set_points(
+        [
+            [0.0, 0.0, 0.0],
+            [0.01, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.5, 0.0, 0.0],
+            [11.0, 0.0, 0.0],
+        ]
+    )
+    right = VMobject().set_points_as_corners(
+        [[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [3.0, 1.0, 0.0]]
+    )
+    left.tolerance_for_point_equality = tolerance
+    left.align_points(right)
+    return left.get_points().copy()
+
+
+default_tolerance_alignment = aligned_with_tolerance(1e-8)
+wide_tolerance_alignment = aligned_with_tolerance(0.1)
+assert not np.array_equal(default_tolerance_alignment, wide_tolerance_alignment)
+assert np.allclose(
+    wide_tolerance_alignment[:3],
+    [[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [10.0, 0.0, 0.0]],
+)
+
+# Same-Scene alignment uses the shared Stage directly; cross-Scene alignment
+# uses native temporary entries and commits each proven point run back to its
+# own live Stage. Both retain the public operation's scene independence.
+bound_align_scene = Scene()
+bound_align_small = VMobject().set_points_as_corners(
+    [[0.0, 3.0, 0.0], [1.0, 3.0, 0.0]]
+)
+bound_align_large = VMobject().set_points_as_corners(
+    [[0.0, 4.0, 0.0], [1.0, 4.0, 0.0], [2.0, 4.0, 0.0]]
+)
+bound_align_scene.add(bound_align_small, bound_align_large)
+bound_align_small.align_points(bound_align_large)
+assert bound_align_small.get_num_points() == bound_align_large.get_num_points() == 5
+
+cross_align_left = VMobject().set_points_as_corners(
+    [[0.0, 5.0, 0.0], [1.0, 5.0, 0.0]]
+)
+cross_align_right = VMobject().set_points_as_corners(
+    [[0.0, 6.0, 0.0], [1.0, 6.0, 0.0], [2.0, 6.0, 0.0]]
+)
+cross_align_left_scene = Scene().add(cross_align_left)
+cross_align_right_scene = Scene().add(cross_align_right)
+cross_align_left.align_points(cross_align_right)
+assert cross_align_left.get_num_points() == cross_align_right.get_num_points() == 5
+assert cross_align_left in cross_align_left_scene.mobjects
+assert cross_align_right in cross_align_right_scene.mobjects
+
+align_refusal = VMobject().set_points_as_corners(
+    [[0.0, 7.0, 0.0], [1.0, 7.0, 0.0]]
+)
+align_refusal_before = align_refusal.data.copy()
+try:
+    align_refusal.align_points(Mobject().set_points([[0.0, 0.0, 0.0]]))
+except RuntimeError as error:
+    assert "schema" in str(error).lower()
+else:
+    raise AssertionError("VMobject alignment accepted a base-record peer")
+assert np.array_equal(align_refusal.data, align_refusal_before)
+
+sharp = VMobject().set_points(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
+)
+sharp.data["stroke_width"][:, 0] = [2.0, 4.0, 6.0]
+sharp_before = sharp.data.copy()
+sharp_old_view = sharp.get_points()
+sharp_length = sharp.get_arc_length()
+assert sharp.subdivide_sharp_curves(30 * manimlib.DEG, recurse=False) is sharp
+assert sharp.get_num_curves() == 4
+assert sharp_old_view.shape == (3, 3)
+assert np.allclose(sharp.get_points()[0], [0.0, 0.0, 0.0])
+assert np.allclose(sharp.get_points()[-1], [1.0, 1.0, 0.0])
+assert np.array_equal(
+    sharp.data["stroke_width"],
+    manimlib.resize_preserving_order(sharp_before, 9)["stroke_width"],
+)
+assert math.isclose(sharp.get_arc_length(), sharp_length, rel_tol=0.0, abs_tol=2e-7)
+
+sharp_parent = VMobject().set_points(
+    [[0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [1.0, 3.0, 0.0]]
+)
+sharp_child = VMobject().set_points(
+    [[2.0, 2.0, 0.0], [3.0, 2.0, 0.0], [3.0, 3.0, 0.0]]
+)
+sharp_parent.add(sharp_child)
+sharp_parent.subdivide_sharp_curves(recurse=False)
+assert sharp_parent.get_num_curves() == 4
+assert sharp_child.get_num_curves() == 1
+sharp_parent.subdivide_sharp_curves(recurse=True)
+assert sharp_child.get_num_curves() == 4
+
+# Plan-before-commit matters when a later descendant breaches the native
+# subdivision budget: an earlier valid family member must remain unchanged.
+atomic_parent = VMobject().set_points_as_corners(
+    [[0.0, 8.0, 0.0], [1.0, 8.0, 0.0]]
+)
+atomic_child = VMobject().set_points(
+    [[2.0, 8.0, 0.0], [3.0, 8.0, 0.0], [3.0, 9.0, 0.0]]
+)
+atomic_parent.add(atomic_child)
+atomic_parent_before = atomic_parent.data.copy()
+atomic_child_before = atomic_child.data.copy()
+try:
+    atomic_parent.subdivide_sharp_curves(float.fromhex("0x0.0000000000001p-1022"))
+except ValueError as error:
+    assert "65536" in str(error) or "subdivision" in str(error).lower()
+else:
+    raise AssertionError("sharp subdivision exceeded the native curve budget")
+assert np.array_equal(atomic_parent.data, atomic_parent_before)
+assert np.array_equal(atomic_child.data, atomic_child_before)
+
+bound_sharp_scene = Scene()
+bound_sharp = VMobject().set_points(
+    [[-1.0, 5.0, 0.0], [0.0, 5.0, 0.0], [0.0, 6.0, 0.0]]
+)
+bound_sharp_scene.add(bound_sharp)
+bound_sharp.subdivide_sharp_curves(recurse=False)
+assert bound_sharp.get_num_curves() == 4
 
 line.set_stroke(manimlib.BLACK, 3, background=True)
 assert line.uniforms["stroke_behind"] is True

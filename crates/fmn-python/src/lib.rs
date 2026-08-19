@@ -85,6 +85,8 @@ type Engine = Rc<EngineState>;
 type ProxyPairs = Vec<(Py<PyAny>, Py<PyAny>)>;
 type SoundRequestFact = (String, i64, u32, f64, Option<f64>, Option<f64>);
 type BoundingBoxRows = ([f64; 3], [f64; 3], [f64; 3]);
+type PointRun = Vec<[f64; 3]>;
+type AlignedPointRuns = (PointRun, PointRun);
 
 const PORTAL_MAX_RENDER_FRAMES: u64 = 1_000_000;
 const PORTAL_PICKLE_STATE_VERSION: u8 = 1;
@@ -2303,6 +2305,67 @@ impl BridgeMobject {
         crossing::record(CrossingClass::Other);
         fmn_library::QuadPath::insert_n_curves_to_point_list(n, &points, tolerance)
             .map_err(native_error)
+    }
+
+    /// Run Marionette's complete VMobject subpath-alignment algorithm. A
+    /// same-Scene pair can mutate its shared Stage directly. Detached,
+    /// mixed-state, and cross-Scene pairs are aligned as complete native
+    /// entry copies first; Python then commits the two proven point runs
+    /// through each receiver's ordinary RecordBuffer resize semantics.
+    fn _align_vmobject_points(
+        slf: &Bound<'_, Self>,
+        other: &Bound<'_, BridgeMobject>,
+        tolerance: f64,
+    ) -> PyResult<Option<AlignedPointRuns>> {
+        crossing::record(CrossingClass::FieldWrite);
+        let left_bound = {
+            let cell = slf.borrow();
+            cell.engine.as_ref().map(Rc::clone).zip(cell.mob)
+        };
+        let right_bound = {
+            let cell = other.borrow();
+            cell.engine.as_ref().map(Rc::clone).zip(cell.mob)
+        };
+        if let (Some((left_engine, left_mob)), Some((right_engine, right_mob))) =
+            (&left_bound, &right_bound)
+            && same_engine(left_engine, right_engine)
+        {
+            left_engine
+                .borrow_mut()
+                .stage_mut()
+                .align_points_with_tolerance(*left_mob, *right_mob, tolerance)
+                .map_err(stage_error)?;
+            return Ok(None);
+        }
+
+        let mut staging = Stage::new();
+        let left = copy_proxy_entry_into(slf, &mut staging)?;
+        let right = copy_proxy_entry_into(other, &mut staging)?;
+        staging
+            .align_points_with_tolerance(left, right, tolerance)
+            .map_err(stage_error)?;
+        let left_points = staging
+            .get_points(left)
+            .ok_or_else(|| StaleHandleError::new_err("aligned receiver no longer resolves"))?;
+        let right_points = staging
+            .get_points(right)
+            .ok_or_else(|| StaleHandleError::new_err("aligned peer no longer resolves"))?;
+        Ok(Some((left_points, right_points)))
+    }
+
+    /// Chisel's bounded sharp-curve subdivision over this entry's current
+    /// shared-anchor path. The caller plans a whole requested family before
+    /// committing any member, so a malformed threshold or budget refusal
+    /// cannot leave a partially subdivided Python family.
+    fn _subdivide_sharp_curve_points(
+        slf: &Bound<'_, Self>,
+        angle_threshold: f64,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        let mut path = configured_quad_path(slf)?;
+        path.subdivide_sharp_curves(angle_threshold)
+            .map_err(native_error)?;
+        Ok(path.points().to_vec())
     }
 
     /// Revalidate a Python-authored VMobject point run and refresh the native
@@ -6911,12 +6974,33 @@ class _GauntletPortalScene(Scene):
             (0.6, -1.6, 0.0),
         )).close_path()
         native_path.make_jagged(recurse=False)
+        portal_ops = VMobject(stroke_width=2.0).set_points((
+            (-1.8, 0.0, 0.0),
+            (-1.2, 0.0, 0.0),
+            (-1.2, 0.6, 0.0),
+        ))
+        portal_ops.append_vectorized_mobject(
+            VMobject(stroke_width=2.5).set_points_as_corners((
+                (-0.8, 0.0, 0.0),
+                (-0.2, 0.4, 0.0),
+            ))
+        )
+        alignment_peer = VMobject().set_points_as_corners((
+            (-1.8, 0.0, 0.0),
+            (-1.4, 0.2, 0.0),
+            (-1.0, 0.0, 0.0),
+            (-0.6, 0.2, 0.0),
+            (-0.2, 0.0, 0.0),
+        ))
+        portal_ops.align_points(alignment_peer)
+        portal_ops.subdivide_sharp_curves(1.0, recurse=False)
         self.add(
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
             AnnularSector(inner_radius=0.25, outer_radius=0.6).shift((0, 1, 0)),
             DashedVMobject(Circle(radius=0.45), num_dashes=6).shift((-1.25, 1, 0)),
             native_path,
+            portal_ops,
         )
         self.wait(1 / 30)
 

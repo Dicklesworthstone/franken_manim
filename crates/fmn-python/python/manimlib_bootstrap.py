@@ -2376,6 +2376,15 @@ class VMobject(Mobject):
                 self.append_points(new_points)
         return self
 
+    def append_vectorized_mobject(self, vmobject):
+        # Reference order is observable for aliases: splice the source's
+        # current path first, then ask for its current record count and copy
+        # every structured lane over the appended tail.
+        self.add_subpath(vmobject.get_points())
+        n_points = vmobject.get_num_points()
+        self.data[-n_points:] = vmobject.data
+        return self
+
     def has_new_path_started(self):
         return self._has_new_path_started()
 
@@ -2503,6 +2512,34 @@ class VMobject(Mobject):
                 mob.set_points(
                     mob.insert_n_curves_to_point_list(n, mob.get_points())
                 )
+        return self
+
+    def align_points(self, vmobject):
+        aligned = self._align_vmobject_points(
+            vmobject, float(self.tolerance_for_point_equality)
+        )
+        if aligned is not None:
+            self_points, other_points = aligned
+            self.set_points(self_points)
+            vmobject.set_points(other_points)
+        self.needs_new_unit_normal = True
+        vmobject.needs_new_unit_normal = True
+        return self
+
+    def subdivide_sharp_curves(
+        self, angle_threshold=30 * _DEG, recurse=True
+    ):
+        targets = _family_preorder(self) if recurse else [self]
+        # Plan the complete requested family before the first RecordBuffer
+        # write. Chisel's threshold/budget refusal is therefore atomic even
+        # when a later descendant is the malformed member.
+        planned = [
+            (mob, mob._subdivide_sharp_curve_points(float(angle_threshold)))
+            for mob in targets
+            if mob.has_points()
+        ]
+        for mob, points in planned:
+            mob.set_points(points)
         return self
 
     def quick_point_from_proportion(self, alpha):

@@ -227,6 +227,49 @@ fn vmobject_align_equalizes_point_counts_preserving_endpoints() {
 }
 
 #[test]
+fn vmobject_alignment_honors_caller_point_tolerance() {
+    let left_points = [
+        [0.0, 0.0, 0.0],
+        [0.01, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        [10.5, 0.0, 0.0],
+        [11.0, 0.0, 0.0],
+    ];
+    let right_points = [
+        [0.0, 1.0, 0.0],
+        [0.5, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.5, 1.0, 0.0],
+        [2.0, 1.0, 0.0],
+        [2.5, 1.0, 0.0],
+        [3.0, 1.0, 0.0],
+    ];
+
+    let mut default_stage = Stage::new();
+    let default_left = vmob(&mut default_stage, &left_points);
+    let default_right = vmob(&mut default_stage, &right_points);
+    default_stage
+        .align_points(default_left, default_right)
+        .unwrap();
+
+    let mut tolerant_stage = Stage::new();
+    let tolerant_left = vmob(&mut tolerant_stage, &left_points);
+    let tolerant_right = vmob(&mut tolerant_stage, &right_points);
+    tolerant_stage
+        .align_points_with_tolerance(tolerant_left, tolerant_right, 0.1)
+        .unwrap();
+
+    let default_points = points_of(&default_stage, default_left);
+    let tolerant_points = points_of(&tolerant_stage, tolerant_left);
+    assert_ne!(default_points, tolerant_points);
+    assert_eq!(
+        &tolerant_points[..9],
+        &[0.0_f32, 0.0, 0.0, 0.01, 0.0, 0.0, 10.0, 0.0, 0.0],
+        "the caller tolerance excludes the near-null first curve from insertion",
+    );
+}
+
+#[test]
 fn vmobject_align_folds_missing_subpath() {
     let mut stage = Stage::new();
     // a: two subpaths (3+3 points with a break marker anchor between:
