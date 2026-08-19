@@ -35,8 +35,8 @@ use crossing::CrossingClass;
 use fmn_frame::convert::rgba16f_to_rgba8;
 use fmn_frame::{FrameLayout, PixelFormat};
 use fmn_mobject::{
-    JointType, Mob, Mobject, ProgramKind, RecordBuffer, RecordError, RecordSchema, RecordView,
-    Stage, StageError, Tracker, TrackerKind, Uniforms,
+    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Stage,
+    StageError, Tracker, TrackerKind, Uniforms,
 };
 use fmn_output::{
     EmitterConfig, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
@@ -95,9 +95,6 @@ const PORTAL_MAX_RENDER_FRAMES: u64 = 1_000_000;
 struct PortalRenderSession {
     renderer: RetainedFrameRenderer,
     camera: Camera,
-    affine_camera_frame: fmn_scene::studio_bridge::CameraFrame,
-    camera_bound: bool,
-    camera_is_affine_default: bool,
     emitter: Option<OrderedEmitter>,
     receipt: SinkReceipt<NativeArtifactReport>,
     next_sequence: u64,
@@ -184,8 +181,6 @@ impl PortalRenderSession {
             ..CameraConfig::default()
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let affine_camera_frame = camera.frame().clone();
-
         let output_layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let frame_bytes = u64::try_from(output_layout.total_bytes())
@@ -259,9 +254,6 @@ impl PortalRenderSession {
             Self {
                 renderer,
                 camera,
-                affine_camera_frame,
-                camera_bound: false,
-                camera_is_affine_default: false,
                 emitter: Some(emitter),
                 receipt,
                 next_sequence: 0,
@@ -275,20 +267,15 @@ impl PortalRenderSession {
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
         let stage = packet.materialize_stage();
-        let has_camera_bound_primitive = stage
-            .draw_plan()
-            .items()
-            .iter()
-            .any(|item| item.key.program != ProgramKind::Vector);
-        if self.camera_bound && (!self.camera_is_affine_default || has_camera_bound_primitive) {
-            self.renderer
-                .render_with_camera(&stage, &self.camera)
-                .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
-        } else {
-            self.renderer
-                .render(&stage, 0)
-                .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
-        }
+        // Portal coordinates follow manim's +Y-up camera plane, while every
+        // FrameBuffer is already in top-row-first output orientation.  The
+        // camera route owns that projection (including the Y inversion) for
+        // vector content as well as 3D primitives.  Bypassing it for a
+        // default affine frame reflects the delivered image vertically and
+        // violates D-23's no-post-render-vflip contract.
+        self.renderer
+            .render_with_camera(&stage, &self.camera)
+            .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
         let mut reservation = self
             .emitter
             .as_ref()
@@ -314,14 +301,10 @@ impl PortalRenderSession {
         frame: fmn_scene::studio_bridge::CameraFrame,
         light_position: [f64; 3],
     ) -> PyResult<()> {
-        self.camera_is_affine_default =
-            camera_frames_match_for_projection(&frame, &self.affine_camera_frame)
-                && light_position == CameraConfig::default().light_source_position;
         *self.camera.frame_mut() = frame;
         self.camera
             .set_light_source_position(light_position)
             .map_err(camera_error)?;
-        self.camera_bound = true;
         Ok(())
     }
 
@@ -353,16 +336,6 @@ impl PortalRenderSession {
             let _ = emitter.finish();
         }
     }
-}
-
-fn camera_frames_match_for_projection(
-    left: &fmn_scene::studio_bridge::CameraFrame,
-    right: &fmn_scene::studio_bridge::CameraFrame,
-) -> bool {
-    left.center() == right.center()
-        && left.shape() == right.shape()
-        && left.field_of_view() == right.field_of_view()
-        && left.orientation() == right.orientation()
 }
 
 impl Drop for PortalRenderSession {

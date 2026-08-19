@@ -19,11 +19,13 @@ import math
 import pickle
 import pathlib
 import re
+import struct
 import sys
 import tempfile
 import threading
 import types
 import weakref
+import zlib
 
 import numpy as np
 
@@ -31,6 +33,81 @@ import manimlib
 from manimlib import Animation, InteractiveScene, Mobject, Scene, VMobject
 
 bridge_errors = importlib.import_module("manimlib.exceptions")
+
+
+def png_rgba8_rows(path):
+    """Decode the portal's non-interlaced RGBA8 PNGs with stdlib only."""
+    payload = pathlib.Path(path).read_bytes()
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+    offset = 8
+    width = height = None
+    compressed = bytearray()
+    while offset < len(payload):
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        kind = payload[offset + 4 : offset + 8]
+        data = payload[offset + 8 : offset + 8 + length]
+        offset += 12 + length
+        if kind == b"IHDR":
+            width, height, depth, color, compression, filtering, interlace = (
+                struct.unpack(">IIBBBBB", data)
+            )
+            assert (depth, color, compression, filtering, interlace) == (8, 6, 0, 0, 0)
+        elif kind == b"IDAT":
+            compressed.extend(data)
+        elif kind == b"IEND":
+            break
+    assert width is not None and height is not None
+    raw = zlib.decompress(compressed)
+    stride = width * 4
+    assert len(raw) == height * (stride + 1)
+    rows = []
+    previous = bytearray(stride)
+
+    def paeth(left, above, upper_left):
+        prediction = left + above - upper_left
+        distances = (
+            abs(prediction - left),
+            abs(prediction - above),
+            abs(prediction - upper_left),
+        )
+        return (left, above, upper_left)[distances.index(min(distances))]
+
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_kind = raw[start]
+        encoded = raw[start + 1 : start + 1 + stride]
+        row = bytearray(stride)
+        for index, value in enumerate(encoded):
+            left = row[index - 4] if index >= 4 else 0
+            above = previous[index]
+            upper_left = previous[index - 4] if index >= 4 else 0
+            predictor = {
+                0: 0,
+                1: left,
+                2: above,
+                3: (left + above) // 2,
+                4: paeth(left, above, upper_left),
+            }[filter_kind]
+            row[index] = (value + predictor) & 0xFF
+        rows.append(row)
+        previous = row
+    return width, height, rows
+
+
+def assert_red_orientation_witness_is_above_origin(path):
+    width, height, rows = png_rgba8_rows(path)
+    red_pixels = [
+        (x, y)
+        for y, row in enumerate(rows)
+        for x in range(width)
+        if row[4 * x] > 160
+        and row[4 * x + 1] < 100
+        and row[4 * x + 2] < 100
+        and row[4 * x + 3] > 160
+    ]
+    assert len(red_pixels) >= 4, f"missing red orientation witness in {path}"
+    centroid_y = sum(y for _x, y in red_pixels) / len(red_pixels)
+    assert centroid_y < height / 2, (path, centroid_y, height)
 
 # Schema constants use a deliberately closed AST grammar: ordinary literal
 # and arithmetic expressions resolve, while executable/private forms refuse.
@@ -3618,6 +3695,52 @@ assert issubclass(manimlib.Axes, manimlib.VGroup)
 assert issubclass(manimlib.EventType, enum.Enum)
 assert issubclass(manimlib.EndScene, Exception)
 assert manimlib.np is np
+
+# Installing the Reference's optional OpenGL/window packages beside the wheel
+# must not make the Rust portal initialize a second renderer or require an X11
+# display.  Their leaked names remain import-compatible, but calling one names
+# the exact unsupported semantic binding.
+for refused_module, refused_name in (
+    ("manimlib.camera.camera", "gl"),
+    ("manimlib.camera.camera", "moderngl"),
+    ("manimlib.mobject.interactive", "PygletWindowKeys"),
+    ("manimlib.window", "Timer"),
+    ("manimlib.window", "mglw"),
+    ("manimlib.window", "screeninfo"),
+):
+    refused_value = getattr(importlib.import_module(refused_module), refused_name)
+    try:
+        refused_value()
+    except NotImplementedError as error:
+        assert str(error) == (
+            f"{refused_module}.{refused_name} is present in the parity surface "
+            "but its semantic binding has not landed"
+        )
+    else:
+        raise AssertionError(
+            f"Reference renderer leak {refused_module}.{refused_name} became live"
+        )
+pyglet_window = importlib.import_module("manimlib.window").PygletWindow
+assert isinstance(pyglet_window, type)
+try:
+    pyglet_window()
+except bridge_errors.CapabilityError as error:
+    assert str(error) == (
+        "the Reference's PygletWindow gateway is unavailable; "
+        "FrankenManim Studio owns interactive windows"
+    )
+else:
+    raise AssertionError("the Reference PygletWindow gateway became live")
+assert not any(
+    name == root or name.startswith(root + ".")
+    for name in sys.modules
+    for root in ("OpenGL", "moderngl", "moderngl_window", "pyglet", "screeninfo")
+), sorted(
+    name
+    for name in sys.modules
+    if name.split(".", 1)[0]
+    in {"OpenGL", "moderngl", "moderngl_window", "pyglet", "screeninfo"}
+)
 assert hasattr(Mobject, "add_event_listner")
 assert Mobject.add_event_listener is Mobject.add_event_listner
 assert not hasattr(manimlib, "__all__"), repr(getattr(manimlib, "__all__", None))
@@ -3916,7 +4039,7 @@ def verify_portal_console_scene():
     constructed = json.loads(console_out)
     assert constructed["kind"] == "construct-only"
     assert constructed["scene"] == "Hello"
-    assert constructed["root_count"] == 2
+    assert constructed["root_count"] == 3
     assert constructed["family_count"] > constructed["root_count"]
     assert constructed["scene_time"] == 3.0
     assert constructed["rendered"] is False
@@ -3964,6 +4087,7 @@ def verify_portal_console_scene():
     assert sum(frame.stat().st_size for frame in frames) == rendered["bytes"]
     for frame in frames:
         assert frame.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert_red_orientation_witness_is_above_origin(frames[0])
     assert console_err == ""
 
     # Same build, policy, seed, and thread count reproduce the exact ordered
@@ -4014,6 +4138,7 @@ def verify_portal_console_scene():
     assert pathlib.Path(still["destination"]) == still_destination
     still_bytes = still_destination.read_bytes()
     assert still_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert_red_orientation_witness_is_above_origin(still_destination)
     assert console_err == ""
 
     repeated_still_destination = output_root / "repeated-final.png"

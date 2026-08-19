@@ -53,6 +53,16 @@ _SMALL_BUFF = 0.1
 # Scene.play maps rate_func callables into the engine's named catalog.
 _RATE_FUNC_NAMES = {}
 
+# The Reference leaks its OpenGL/window implementation modules into ordinary
+# Python namespaces.  Those names remain part of the compatibility surface,
+# but importing their host packages would initialize a second renderer (and
+# pyglet creates a shadow X11 window merely on import).  The sovereign portal
+# therefore keeps these names as precise unavailable callables regardless of
+# which incidental packages happen to be installed beside the wheel.
+_REFUSED_REFERENCE_RENDER_IMPORT_ROOTS = frozenset(
+    {"OpenGL", "moderngl", "moderngl_window", "pyglet", "screeninfo"}
+)
+
 
 def _vec3(value):
     """A sequence (list/tuple/numpy array) as the engine's (x, y, z) floats."""
@@ -6813,18 +6823,21 @@ def _install_schema_surface():
         elif kind == "leaked_import" and "." not in qualified:
             if hasattr(module, qualified):
                 continue
-            try:
-                origin = _importlib.import_module(_origin)
-                # A leaked module imported under its own basename (for
-                # example `import random`) is the module, not a same-named
-                # attribute such as `random.random`.
-                value = (
-                    origin
-                    if qualified == _origin.rsplit(".", 1)[-1]
-                    else getattr(origin, qualified, origin)
-                )
-            except (ImportError, ValueError):
+            if _origin.split(".", 1)[0] in _REFUSED_REFERENCE_RENDER_IMPORT_ROOTS:
                 value = _placeholder_function(module_name, qualified)
+            else:
+                try:
+                    origin = _importlib.import_module(_origin)
+                    # A leaked module imported under its own basename (for
+                    # example `import random`) is the module, not a same-named
+                    # attribute such as `random.random`.
+                    value = (
+                        origin
+                        if qualified == _origin.rsplit(".", 1)[-1]
+                        else getattr(origin, qualified, origin)
+                    )
+                except (ImportError, ValueError):
+                    value = _placeholder_function(module_name, qualified)
             setattr(module, qualified, value)
 
     in_canonical = False
