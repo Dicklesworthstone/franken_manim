@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	6692bd946a4fe1a7aca987bf1c8f81ce7385947929e0fe694ea215bde5731adf
+ledger_reviewed_digest	ba78858109dad1c9e75bf3b37f3193f871b4b2a9d596aa9c3904844e854649bd
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -211,6 +211,7 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 # symbol	status	evidence	tests	notes
 [status]
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
+manimlib.camera.camera_frame:CameraFrame.add_ambient_rotation	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	runs the frame updater before drawable-root updaters on play and wait samples including camera-only animation and zero-dt epilogues
 manimlib.mobject.coordinate_systems:CoordinateSystem.bind_graph_to_func	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	refreshes live graph points with vectorized functions, optional discontinuities, and declared smoothing
 manimlib.mobject.coordinate_systems:CoordinateSystem.c2p	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live coordinate transform
 manimlib.mobject.coordinate_systems:CoordinateSystem.get_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	indexes the concrete axes family without copying or retyping children
