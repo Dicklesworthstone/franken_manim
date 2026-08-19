@@ -5433,6 +5433,11 @@ class Scene(_SceneCore):
         if self.random_seed is not None:
             getattr(_FMN_ROOT, "random").seed(self.random_seed)
             _np.random.seed(self.random_seed)
+        # Reference Scene.__init__ constructs the camera and puts its frame
+        # first in the update list immediately.  The portal keeps that frame
+        # out of the drawable Stage, but it must still exist before the first
+        # update crossing so initialization never contaminates frame work.
+        self.frame = CameraFrame()
 
     @property
     def frame(self):

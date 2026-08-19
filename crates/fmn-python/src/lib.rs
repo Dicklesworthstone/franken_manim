@@ -3814,6 +3814,33 @@ fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
     targets
 }
 
+/// The Reference keeps the camera frame at the head of `Scene.mobjects`, so
+/// its host-language updaters run before every drawable-root updater.  The
+/// portal deliberately keeps CameraFrame out of Marionette's drawable Stage;
+/// recover that same update ordering through the real Python frame object.
+fn camera_frame<'py>(scene: &Bound<'py, PyScene>) -> PyResult<Bound<'py, PyAny>> {
+    scene.getattr("frame")
+}
+
+fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
+    let py = proxy.py();
+    crossing::record(CrossingClass::Other);
+    let updaters = proxy.getattr("updaters")?;
+    let snapshot: Vec<Py<PyAny>> = updaters
+        .try_iter()?
+        .map(|item| item.map(Bound::unbind))
+        .collect::<PyResult<_>>()?;
+    for updater in snapshot {
+        crossing::record(CrossingClass::UpdaterCall);
+        let args = PyTuple::new(
+            py,
+            [updater.bind(py).clone(), dt.into_pyobject(py)?.into_any()],
+        )?;
+        method_cache::call_cached1(proxy, "_dispatch_updater", &args)?;
+    }
+    Ok(())
+}
+
 /// Run the portal half of Scene.update_mobjects with no Scene/Stage borrow
 /// live. Choreo's stepped play releases exactly at this call site; ordinary
 /// `Scene.update(dt)` uses the same helper before its native updater pass.
@@ -3821,30 +3848,21 @@ fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
     let targets = update_targets(scene);
     let py = scene.py();
     let python_start = Instant::now();
+    run_proxy_updaters(&camera_frame(scene)?, dt)?;
     for target in targets {
         let Some(proxy) = live_proxy(py, scene, target) else {
             continue;
         };
-        crossing::record(CrossingClass::Other);
-        let updaters = proxy.getattr("updaters")?;
-        let snapshot: Vec<Py<PyAny>> = updaters
-            .try_iter()?
-            .map(|item| item.map(Bound::unbind))
-            .collect::<PyResult<_>>()?;
-        for updater in snapshot {
-            crossing::record(CrossingClass::UpdaterCall);
-            let args = PyTuple::new(
-                py,
-                [updater.bind(py).clone(), dt.into_pyobject(py)?.into_any()],
-            )?;
-            method_cache::call_cached1(&proxy, "_dispatch_updater", &args)?;
-        }
+        run_proxy_updaters(&proxy, dt)?;
     }
     Ok(u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX))
 }
 
 fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     let py = scene.py();
+    if camera_frame(scene)?.getattr("updaters")?.is_truthy()? {
+        return Ok(true);
+    }
     for target in update_targets(scene) {
         if let Some(proxy) = live_proxy(py, scene, target)
             && proxy.getattr("updaters")?.is_truthy()?
@@ -4237,7 +4255,8 @@ impl PyScene {
     fn update_batched(slf: &Bound<'_, Self>, dt: f64) -> PyResult<()> {
         let targets = update_targets(slf);
         let py = slf.py();
-        let mut batch = Vec::with_capacity(targets.len());
+        let mut batch = Vec::with_capacity(targets.len() + 1);
+        batch.push(camera_frame(slf)?);
         for target in targets {
             if let Some(proxy) = live_proxy(py, slf, target) {
                 batch.push(proxy);
@@ -4425,11 +4444,52 @@ impl PyScene {
             if sink.camera.is_none() {
                 return Ok(Vec::new());
             }
-            engine
-                .borrow_mut()
-                .wait(Some(effective_run_time), &mut sink)
-                .map(|_| ())
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            if release_for_python_updaters {
+                let mut wait = engine
+                    .borrow_mut()
+                    .begin_stepped_wait(Some(effective_run_time), &mut sink)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let drive_result: PyResult<()> = (|| {
+                    loop {
+                        let release = engine
+                            .borrow_mut()
+                            .prepare_stepped_wait_frame(&mut wait)
+                            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                        let Some(release) = release else {
+                            break;
+                        };
+                        sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
+                        let python_ns = run_python_updaters(slf, release.dt)?;
+                        let native_start = Instant::now();
+                        engine
+                            .borrow_mut()
+                            .complete_stepped_wait_frame(&mut wait, &mut sink)
+                            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                        let native_ns =
+                            u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        crossing::record_phase(python_ns, native_ns);
+                    }
+                    sink.finish_camera_before_updaters(slf.py())?;
+                    run_python_updaters(slf, 0.0)?;
+                    engine.borrow_mut().stage_mut().update(0.0);
+                    Ok(())
+                })();
+                if let Err(error) = drive_result {
+                    engine.borrow_mut().abort_stepped_wait(wait, &mut sink);
+                    return Err(error);
+                }
+                engine
+                    .borrow_mut()
+                    .finish_stepped_wait(wait, &mut sink)
+                    .map(|_| ())
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            } else {
+                engine
+                    .borrow_mut()
+                    .wait(Some(effective_run_time), &mut sink)
+                    .map(|_| ())
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            }
         } else if release_for_python_updaters || callback_count != 0 {
             // Choreo stops after interpolation + rational clock advance. The
             // Scene RefCell borrow is then genuinely gone while Python
@@ -4471,6 +4531,7 @@ impl PyScene {
                     let Some(release) = release else {
                         break;
                     };
+                    sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
                     let python_ns = run_python_updaters(slf, release.dt)?;
                     let native_start = Instant::now();
                     engine
@@ -4485,6 +4546,7 @@ impl PyScene {
                     crossing::record(CrossingClass::MethodDispatch);
                     callback.bind(slf.py()).call_method0("finish")?;
                 }
+                sink.finish_camera_before_updaters(slf.py())?;
                 // Reference Scene.finish_animations performs one final
                 // update_mobjects(0) after every Animation.finish().  The
                 // native half follows inside finish_stepped_play; run the
@@ -4515,11 +4577,15 @@ impl PyScene {
             camera,
             camera_error,
             render: _,
+            camera_preapplied: _,
+            camera_finished_before_updaters,
         } = sink;
         if let Some(error) = camera_error {
             return Err(error);
         }
-        if let Some(camera) = camera {
+        if let Some(camera) = camera
+            && !camera_finished_before_updaters
+        {
             camera.finish_exact(slf.py())?;
         }
         Ok(alphas)
@@ -5130,6 +5196,36 @@ struct PortalSceneSink {
     camera: Option<CameraLerp>,
     camera_error: Option<PyErr>,
     render: Arc<Mutex<Option<PortalRenderSession>>>,
+    camera_preapplied: bool,
+    camera_finished_before_updaters: bool,
+}
+
+impl PortalSceneSink {
+    fn apply_camera_at_time(&self, py: Python<'_>, time: f64) -> PyResult<()> {
+        let Some(camera) = &self.camera else {
+            return Ok(());
+        };
+        let raw = if camera.run_time > 0.0 {
+            (time - camera.start_time) / camera.run_time
+        } else {
+            1.0
+        };
+        camera.apply(py, raw)
+    }
+
+    fn apply_camera_before_updaters(&mut self, py: Python<'_>, time: f64) -> PyResult<()> {
+        self.apply_camera_at_time(py, time)?;
+        self.camera_preapplied = true;
+        Ok(())
+    }
+
+    fn finish_camera_before_updaters(&mut self, py: Python<'_>) -> PyResult<()> {
+        if let Some(camera) = &self.camera {
+            camera.finish_exact(py)?;
+            self.camera_finished_before_updaters = true;
+        }
+        Ok(())
+    }
 }
 
 impl fmn_scene::SceneSink for PortalSceneSink {
@@ -5139,19 +5235,12 @@ impl fmn_scene::SceneSink for PortalSceneSink {
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
         self.alphas.push(packet.alpha());
-        if let Some(camera) = &self.camera
-            && self.camera_error.is_none()
-        {
-            let raw = if camera.run_time > 0.0 {
-                (packet.time().to_f64() - camera.start_time) / camera.run_time
-            } else {
-                1.0
-            };
+        if self.camera.is_some() && self.camera_error.is_none() && !self.camera_preapplied {
             // The GIL is held by the pymethod driving this segment;
             // attach re-enters it. Only the camera core cell is borrowed
             // — never the Scene.
             Python::attach(|py| {
-                if let Err(error) = camera.apply(py, raw) {
+                if let Err(error) = self.apply_camera_at_time(py, packet.time().to_f64()) {
                     self.camera_error = Some(error);
                 }
             });

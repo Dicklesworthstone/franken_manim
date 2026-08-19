@@ -4033,16 +4033,19 @@ rung1 = manimlib._crossing_stats_snapshot()
 
 assert rung0["updater_call"] == N_MOBS * N_UPDATERS
 assert rung1["updater_call"] == 0
-assert rung1["method_dispatch"] == 1
+assert rung1["method_dispatch"] == 1, rung1
 assert rung1["dirty_propagation"] == 1
 # Field writes are inherent to the updaters and equal across rungs.
 assert rung0["field_write"] == rung1["field_write"] == N_MOBS * N_UPDATERS
 assert rung1["total"] < rung0["total"]
-# Exact deterministic counts: rung 0 pays 24 updater crossings + 6 updater
-# list snapshots on top of the 48 inherent field-I/O crossings; rung 1 pays
-# one batch dispatch + one batched dirty-propagation return.
-assert rung0["other"] == N_MOBS + N_MOBS * N_UPDATERS
-assert rung0["total"] == 2 * N_MOBS * N_UPDATERS + N_MOBS + N_MOBS * N_UPDATERS
+# Exact deterministic counts: rung 0 pays 24 updater crossings + 7 updater
+# list snapshots (the camera frame first, then 6 drawable roots) on top of
+# the 48 inherent field-I/O crossings; rung 1 pays one batch dispatch + one
+# batched dirty-propagation return.
+assert rung0["other"] == 1 + N_MOBS + N_MOBS * N_UPDATERS
+assert rung0["total"] == (
+    2 * N_MOBS * N_UPDATERS + 1 + N_MOBS + N_MOBS * N_UPDATERS
+)
 assert rung1["other"] == N_MOBS * N_UPDATERS
 assert rung1["total"] == 2 * N_MOBS * N_UPDATERS + 2
 assert rung0["python_callback_ns"] > 0
@@ -4309,6 +4312,12 @@ def verify_portal_console_scene():
     )
     elbow_frame.add_ambient_rotation(2 * manimlib.DEG)
     elbow_scene.wait(1 / 30)
+    assert np.isclose(
+        elbow_frame.get_theta(),
+        (6 + 2 / 30) * manimlib.DEG,
+        rtol=0.0,
+        atol=1e-12,
+    )
     assert np.allclose(elbow.data["stroke_rgba"][:, 3], 1.0)
     elbow_receipt = elbow_scene._finish_render(
         elbow_frame._core,
@@ -4321,6 +4330,94 @@ def verify_portal_console_scene():
     assert elbow_receipt[4].split(":")[0] == "fast-cpu"
     assert elbow_receipt[5] == 1
     assert_white_stroke_witness(elbow_destination)
+
+    # The camera frame is intentionally not a drawable Stage root, but the
+    # Reference places it first in Scene.mobjects for updater dispatch.  Both
+    # crossing rungs, wait, ordinary play, and camera-only play must preserve
+    # frame-before-root ordering.  The camera-only observation also proves
+    # frame interpolation lands before the updater phase rather than inside
+    # the later capture callback.
+    updater_scene = InteractiveScene()
+    updater_frame = updater_scene.frame
+    updater_root = manimlib.Dot()
+    updater_scene.add(updater_root)
+    updater_events = []
+
+    def record_frame_updater(mobject, dt):
+        del mobject
+        updater_events.append(("frame", dt))
+
+    def record_root_updater(mobject, dt):
+        del mobject
+        updater_events.append(("root", dt))
+
+    updater_frame.add_updater(record_frame_updater)
+    updater_root.add_updater(record_root_updater)
+    updater_events.clear()
+    updater_scene.update_batched(0.125)
+    assert updater_events == [("frame", 0.125), ("root", 0.125)]
+
+    updater_events.clear()
+    updater_scene.wait(1 / 30)
+    assert [kind for kind, _ in updater_events] == [
+        "frame",
+        "root",
+        "frame",
+        "root",
+    ]
+    assert np.allclose(
+        [dt for _, dt in updater_events],
+        [0.0, 0.0, 1 / 30, 1 / 30],
+        rtol=0.0,
+        atol=1e-15,
+    )
+
+    updater_events.clear()
+    updater_scene.play(
+        updater_root.animate.shift(manimlib.RIGHT),
+        run_time=1 / 30,
+        rate_func=manimlib.linear,
+    )
+    assert [kind for kind, _ in updater_events] == [
+        "frame",
+        "root",
+        "frame",
+        "root",
+    ]
+    assert np.allclose(
+        [dt for _, dt in updater_events],
+        [1 / 30, 1 / 30, 0.0, 0.0],
+        rtol=0.0,
+        atol=1e-15,
+    )
+
+    camera_only_scene = InteractiveScene()
+    camera_only_frame = camera_only_scene.frame
+    camera_observations = []
+
+    def observe_camera_updater(mobject, dt):
+        camera_observations.append((mobject.get_theta(), dt))
+
+    camera_only_frame.add_updater(observe_camera_updater)
+    camera_observations.clear()
+    camera_only_scene.play(
+        camera_only_frame.animate.reorient(30, 70, 0),
+        run_time=1 / 30,
+        rate_func=manimlib.linear,
+    )
+    assert len(camera_observations) == 2
+    assert np.allclose(
+        [theta for theta, _ in camera_observations],
+        [30 * manimlib.DEG, 30 * manimlib.DEG],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert np.allclose(
+        [dt for _, dt in camera_observations],
+        [1 / 30, 0.0],
+        rtol=0.0,
+        atol=1e-15,
+    )
 
     # LineBrace follows the Reference's two-stage transform: flatten the
     # target around its own centre, build the brace, then restore both around
