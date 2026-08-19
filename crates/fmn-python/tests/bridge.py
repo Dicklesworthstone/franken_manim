@@ -2841,6 +2841,27 @@ assert np.allclose(
 )
 assert np.min(np.linalg.norm(bound_arrow_points - [4.0, 2.0, 0.0], axis=1)) < 1e-6
 
+# A detached fixed-frame Arrow is rebuilt by the immediate updater call that
+# add_updater performs by default.  Rebuilding geometry must not replace the
+# engine-owned camera/depth uniforms with fresh Arrow defaults; BeamSplitter's
+# three overlay vectors all pass through this exact path before scene adoption.
+detached_fixed_arrow = manimlib.Vector(manimlib.RIGHT).fix_in_frame()
+detached_fixed_arrow.uniforms["depth_test"] = True
+detached_fixed_arrow.uniforms["anti_alias_width"] = 2.5
+detached_fixed_arrow.add_updater(
+    lambda arrow: arrow.put_start_and_end_on(
+        [-2.0, 3.0, 0.0],
+        [-3.0, 3.0, 0.0],
+    )
+)
+assert detached_fixed_arrow.is_fixed_in_frame() is True
+assert detached_fixed_arrow.uniforms["depth_test"] is True
+assert detached_fixed_arrow.uniforms["anti_alias_width"] == 2.5
+assert np.allclose(detached_fixed_arrow.start, [-2.0, 3.0, 0.0])
+assert np.allclose(detached_fixed_arrow.end, [-3.0, 3.0, 0.0])
+arrow_scene.add(detached_fixed_arrow)
+assert detached_fixed_arrow.is_fixed_in_frame() is True
+
 # Generic endpoint placement applies one affine transform to the complete
 # family in both proxy states. Detached families distribute the Reference
 # algorithm over their private nursery roots; bound families recurse through

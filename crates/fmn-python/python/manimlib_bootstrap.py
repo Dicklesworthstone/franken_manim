@@ -3132,10 +3132,16 @@ class Arrow(Line):
     def put_start_and_end_on(self, start, end):
         # An Arrow is ONE filled path whose tip proportions are functions
         # of its length; the generic family affine would stretch the tip.
-        # Rebuild natively at the new endpoints instead, carrying style.
+        # Rebuild natively at the new endpoints instead, carrying style and
+        # every engine uniform.  The detached builder replaces the nursery
+        # root with a fresh native Arrow, so without the uniform snapshot an
+        # updater's immediate call silently drops fix_in_frame/depth/camera
+        # state before the Arrow ever enters a Scene.  The bound rebuild only
+        # replaces points and already preserves these fields.
         # Reference Arrow.put_start_and_end_on explicitly rebuilds with
         # `buff=0`, independent of the constructor's initial trim.
         style = self.get_style()
+        uniforms = self.uniforms.copy()
         rebuild_params = (0.0, *self._arrow_params[1:])
         if self._is_bound():
             self._rebuild_arrow(
@@ -3152,6 +3158,7 @@ class Arrow(Line):
             )
             _hang_native_children(self, specs)
         self.set_style(**style, recurse=False)
+        self.uniforms.update(uniforms)
         self.start = _np.array(_vec3(start))
         self.end = _np.array(_vec3(end))
         return self
