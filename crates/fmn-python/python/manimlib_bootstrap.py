@@ -2145,8 +2145,15 @@ class Point(Mobject):
 
 
 class VMobject(Mobject):
+    pre_function_handle_to_anchor_scale_factor = 0.01
     make_smooth_after_applying_functions = False
     tolerance_for_point_equality = 1e-8
+    joint_type_map = {
+        "no_joint": 0,
+        "auto": 1,
+        "bevel": 2,
+        "miter": 3,
+    }
 
     data_dtype = [
         ("point", 3),
@@ -2157,6 +2164,75 @@ class VMobject(Mobject):
         ("base_normal", 3),
         ("fill_border_width", 1),
     ]
+
+    def __init__(
+        self,
+        color=None,
+        fill_color=None,
+        fill_opacity=0.0,
+        stroke_color=None,
+        stroke_opacity=1.0,
+        stroke_width=4.0,
+        stroke_behind=False,
+        background_image_file=None,
+        long_lines=False,
+        joint_type="auto",
+        flat_stroke=False,
+        scale_stroke_with_zoom=False,
+        use_simple_quadratic_approx=False,
+        anti_alias_width=1.5,
+        fill_border_width=0.0,
+        **kwargs,
+    ):
+        config = _pinned_manim_config().vmobject
+        self.fill_color = (
+            fill_color
+            if fill_color is not None
+            else color if color is not None else config.default_fill_color
+        )
+        self.fill_opacity = fill_opacity
+        self.stroke_color = (
+            stroke_color
+            if stroke_color is not None
+            else color if color is not None else config.default_stroke_color
+        )
+        self.stroke_opacity = stroke_opacity
+        self.stroke_width = stroke_width
+        self.stroke_behind = bool(stroke_behind)
+        self.background_image_file = background_image_file
+        self.long_lines = bool(long_lines)
+        self.joint_type = joint_type
+        self.flat_stroke = bool(flat_stroke)
+        self.scale_stroke_with_zoom = bool(scale_stroke_with_zoom)
+        self.use_simple_quadratic_approx = bool(use_simple_quadratic_approx)
+        self.anti_alias_width = float(anti_alias_width)
+        self.fill_border_width = fill_border_width
+        self.needs_new_joint_angles = True
+        self.needs_new_unit_normal = True
+        self.subpath_end_indices = None
+        self.outer_vert_indices = _np.zeros(0, dtype=int)
+        self.shader_program_type = None
+
+        super().__init__(**kwargs)
+        try:
+            joint_code = self.joint_type_map[joint_type]
+        except KeyError as error:
+            raise ValueError(f"unknown VMobject joint type: {joint_type}") from error
+        self.uniforms["anti_alias_width"] = self.anti_alias_width
+        self.uniforms["joint_type"] = joint_code
+        self.uniforms["flat_stroke"] = self.flat_stroke
+        self.uniforms["scale_stroke_with_zoom"] = self.scale_stroke_with_zoom
+        self.set_stroke(
+            color=self.stroke_color,
+            width=self.stroke_width,
+            opacity=self.stroke_opacity,
+            behind=self.stroke_behind,
+        )
+        self.set_fill(
+            color=self.fill_color,
+            opacity=self.fill_opacity,
+            border_width=self.fill_border_width,
+        )
 
     def get_group_class(self):
         return getattr(_FMN_ROOT, "VGroup", VMobject)
@@ -2179,7 +2255,24 @@ class VMobject(Mobject):
         return self
 
     def set_points_as_corners(self, points):
+        # Stage::set_points preserves existing records, but the first resize
+        # of an empty RecordBuffer is necessarily zero-filled.  The Reference
+        # seeds that first run from `_data_defaults`, whose VMobject defaults
+        # carry transparent fill and opaque stroke.  Retain those non-geometry
+        # lanes while Chisel remains the sole owner of corner-path geometry and
+        # joint-angle derivation.
+        defaults = self._style_data().copy() if self.get_num_points() == 0 else None
         self._set_points_as_corners([_vec3(point) for point in points])
+        if defaults is not None and self.get_num_points() > 0:
+            data = self.data
+            for field in (
+                "stroke_rgba",
+                "stroke_width",
+                "fill_rgba",
+                "base_normal",
+                "fill_border_width",
+            ):
+                data[field][:] = defaults[field]
         return self
 
     def get_num_curves(self):

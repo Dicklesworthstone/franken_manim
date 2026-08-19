@@ -610,6 +610,22 @@ assert np.array_equal(point_cloud.data, point_cloud_expected)
 vm_source = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
 )
+# A bare VMobject starts with the Reference's visible-stroke/transparent-fill
+# defaults, and the first Chisel corner-path allocation must retain them.
+# SquareOnASphere constructs its three elbow marks through exactly this path
+# and then changes only color/width; losing the default opacity leaves valid
+# scene objects that are nevertheless invisible to Lumen.
+assert np.allclose(vm_source.data["stroke_rgba"][:, :3], [0xDD / 255] * 3)
+assert np.allclose(vm_source.data["stroke_rgba"][:, 3], 1.0)
+assert np.allclose(vm_source.data["stroke_width"], 4.0)
+assert np.allclose(vm_source.data["fill_rgba"][:, :3], [0x88 / 255] * 3)
+assert np.allclose(vm_source.data["fill_rgba"][:, 3], 0.0)
+assert vm_source.uniforms["joint_type"] == 1.0
+assert vm_source.uniforms["anti_alias_width"] == 1.5
+assert vm_source.set_stroke(manimlib.WHITE, 2) is vm_source
+assert np.allclose(vm_source.data["stroke_rgba"][:, :3], 1.0)
+assert np.allclose(vm_source.data["stroke_rgba"][:, 3], 1.0)
+assert np.allclose(vm_source.data["stroke_width"], 2.0)
 vm_mutation = VMobject()
 assert vm_mutation.set_points(vm_source.get_points().copy()) is vm_mutation
 assert np.array_equal(
