@@ -511,6 +511,33 @@ assert str(inspect.signature(manimlib.PMobject.add_point)) == (
 assert str(inspect.signature(manimlib.PMobject.set_points)) == "(self, points)"
 assert str(inspect.signature(VMobject.set_points)) == "(self, points)"
 assert str(inspect.signature(VMobject.append_points)) == "(self, points)"
+assert str(inspect.signature(VMobject.set_anchors_and_handles)) == (
+    "(self, anchors, handles)"
+)
+assert str(inspect.signature(VMobject.set_points_as_corners)) == "(self, points)"
+assert str(inspect.signature(VMobject.start_new_path)) == "(self, point)"
+assert str(inspect.signature(VMobject.add_cubic_bezier_curve)) == (
+    "(self, anchor1, handle1, handle2, anchor2)"
+)
+assert str(inspect.signature(VMobject.add_cubic_bezier_curve_to)) == (
+    "(self, handle1, handle2, anchor)"
+)
+assert str(inspect.signature(VMobject.add_quadratic_bezier_curve_to)) == (
+    "(self, handle, anchor, allow_null_curve=True)"
+)
+assert str(inspect.signature(VMobject.add_line_to)) == (
+    "(self, point, allow_null_line=True)"
+)
+assert str(inspect.signature(VMobject.add_smooth_curve_to)) == "(self, point)"
+assert str(inspect.signature(VMobject.add_smooth_cubic_curve_to)) == (
+    "(self, handle, point)"
+)
+assert str(inspect.signature(VMobject.add_points_as_corners)) == "(self, points)"
+assert str(inspect.signature(VMobject.has_new_path_started)) == "(self)"
+assert str(inspect.signature(VMobject.get_last_point)) == "(self)"
+assert str(inspect.signature(VMobject.get_reflection_of_last_handle)) == "(self)"
+assert str(inspect.signature(VMobject.close_path)) == "(self, smooth=False)"
+assert str(inspect.signature(VMobject.is_closed)) == "(self)"
 assert str(inspect.signature(VMobject.get_anchors_and_handles)) == "(self)"
 assert str(inspect.signature(VMobject.get_start_anchors)) == "(self)"
 assert str(inspect.signature(VMobject.get_end_anchors)) == "(self)"
@@ -519,6 +546,8 @@ assert str(inspect.signature(VMobject.get_bezier_tuples_from_points)) == (
     "(self, points)"
 )
 assert str(inspect.signature(VMobject.get_bezier_tuples)) == "(self)"
+assert str(inspect.signature(VMobject.get_nth_curve_points)) == "(self, n)"
+assert str(inspect.signature(VMobject.get_nth_curve_function)) == "(self, n)"
 assert str(inspect.signature(VMobject.get_subpath_end_indices_from_points)) == (
     "(self, points)"
 )
@@ -529,6 +558,10 @@ assert str(inspect.signature(VMobject.insert_n_curves_to_point_list)) == (
     "(self, n, points)"
 )
 assert str(inspect.signature(VMobject.insert_n_curves)) == "(self, n, recurse=True)"
+assert str(inspect.signature(VMobject.get_area_vector)) == "(self)"
+assert str(inspect.signature(VMobject.get_unit_normal)) == "(self, refresh=False)"
+assert str(inspect.signature(VMobject.get_arc_length)) == "(self, n_sample_points=None)"
+assert str(inspect.signature(VMobject.point_from_proportion)) == "(self, alpha)"
 assert VMobject.tolerance_for_point_equality == 1e-8
 
 mutation = CustomDtype()
@@ -3429,6 +3462,13 @@ curved_line = geometry.Line(
 )
 assert curved_line.get_arc_length() > curved_line.get_length()
 assert curved_line.get_arc_length() == VMobject.get_arc_length(curved_line, 2)
+arclength_curve = VMobject().set_anchors_and_handles(
+    [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+    [[0.0, 1.0, 0.0]],
+)
+assert np.allclose(arclength_curve.point_from_proportion(0.0), [-1.0, 0.0, 0.0])
+assert np.allclose(arclength_curve.point_from_proportion(0.5), [0.0, 0.5, 0.0])
+assert np.allclose(arclength_curve.point_from_proportion(1.0), [1.0, 0.0, 0.0])
 rotated_line = line.copy().rotate(math.pi / 2.0)
 assert np.allclose(rotated_line.get_points()[0], rotated_line.get_start())
 rotated_line.get_points()[0] = [3.0, 4.0, 0.0]
@@ -3439,6 +3479,183 @@ corners = VMobject().set_points_as_corners(
 assert np.allclose(corners.get_points()[::2], [[0, 0, 0], [1, 1, 0], [2, 0, 0]])
 corners.reverse_points()
 assert np.allclose(corners.get_points()[::2], [[2, 0, 0], [1, 1, 0], [0, 0, 0]])
+
+# VMobject's construction surface now crosses one bounded Chisel seam. Native
+# QuadPath computes the complete result before Python commits any structured
+# record rows, so refusal is atomic and style lanes keep Reference resize rules.
+path = VMobject(
+    stroke_color=manimlib.RED,
+    stroke_width=7.0,
+    fill_color=manimlib.BLUE,
+    fill_opacity=0.25,
+)
+path_defaults = path._style_data().copy()
+assert path.start_new_path([0.0, 0.0, 0.0]) is path
+assert path.has_new_path_started()
+assert np.allclose(path.get_last_point(), [0.0, 0.0, 0.0])
+for field in (
+    "stroke_rgba",
+    "stroke_width",
+    "fill_rgba",
+    "base_normal",
+    "fill_border_width",
+):
+    assert np.array_equal(path.data[field], path_defaults[field])
+
+terminal_style = path.data.copy()[-1]
+assert path.add_line_to([2.0, 0.0, 0.0]) is path
+assert np.allclose(
+    path.get_points(),
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+)
+assert not path.has_new_path_started()
+assert np.allclose(path.get_reflection_of_last_handle(), [3.0, 0.0, 0.0])
+for field in ("stroke_rgba", "stroke_width", "fill_rgba", "base_normal"):
+    assert np.array_equal(path.data[field][1], terminal_style[field])
+    assert np.array_equal(path.data[field][2], terminal_style[field])
+
+nth_curve = path.get_nth_curve_points(0)
+assert np.shares_memory(nth_curve, path.get_points())
+curve_function = path.get_nth_curve_function(0)
+nth_curve[1] = [1.0, 1.0, 0.0]
+assert np.allclose(curve_function(0.5), [1.0, 0.5, 0.0])
+try:
+    path.get_nth_curve_points(path.get_num_curves())
+except AssertionError:
+    pass
+else:
+    raise AssertionError("get_nth_curve_points accepted an out-of-range curve")
+
+long_line = VMobject(long_lines=True).start_new_path([0.0, 0.0, 0.0])
+long_line.add_line_to([2.0, 0.0, 0.0])
+assert np.allclose(long_line.get_points()[:, 0], [0.0, 0.5, 1.0, 1.5, 2.0])
+
+null_path = VMobject().start_new_path([1.0, 2.0, 0.0])
+null_path.tolerance_for_point_equality = 1e-3
+null_before = null_path.data.copy()
+null_path.add_line_to([1.0005, 2.0, 0.0], allow_null_line=False)
+null_path.add_quadratic_bezier_curve_to(
+    [1.0, 2.0, 0.0],
+    [1.0005, 2.0, 0.0],
+    allow_null_curve=False,
+)
+assert np.array_equal(null_path.data, null_before)
+
+quadratic = VMobject().start_new_path([0.0, 0.0, 0.0])
+quadratic.add_quadratic_bezier_curve_to(
+    [0.0, 0.0, 0.0], [2.0, 0.0, 0.0]
+)
+assert np.allclose(quadratic.get_points()[1], [1.0, 0.0, 0.0])
+
+cubic = VMobject()
+assert (
+    cubic.add_cubic_bezier_curve(
+        [0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0, 0.0, 0.0],
+    )
+    is cubic
+)
+assert cubic.get_num_curves() >= 1
+assert np.allclose(cubic.get_last_point(), [2.0, 0.0, 0.0])
+cubic_before = cubic.data.copy()
+try:
+    cubic.add_cubic_bezier_curve_to(
+        [float("nan"), 0.0, 0.0],
+        [3.0, 1.0, 0.0],
+        [4.0, 0.0, 0.0],
+    )
+except ValueError as error:
+    assert "quadratics" in str(error).lower() and "cap" in str(error).lower()
+else:
+    raise AssertionError("cubic construction accepted non-finite geometry")
+assert np.array_equal(cubic.data, cubic_before)
+
+smooth = VMobject().start_new_path([0.0, 0.0, 0.0])
+assert smooth.add_smooth_curve_to([1.0, 0.0, 0.0]) is smooth
+assert smooth.add_smooth_cubic_curve_to([1.5, 1.0, 0.0], [2.0, 0.0, 0.0]) is smooth
+assert np.allclose(smooth.get_last_point(), [2.0, 0.0, 0.0])
+
+multi_path = VMobject().start_new_path([0.0, 0.0, 0.0])
+multi_path.add_points_as_corners([[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+multi_path.start_new_path([2.0, 0.0, 0.0]).add_line_to([3.0, 0.0, 0.0])
+first_subpath = multi_path.get_subpaths()[0].copy()
+assert not multi_path.is_closed()
+assert multi_path.close_path() is multi_path
+assert multi_path.is_closed()
+assert np.array_equal(multi_path.get_subpaths()[0], first_subpath)
+closed_before = multi_path.data.copy()
+multi_path.close_path()
+assert np.array_equal(multi_path.data, closed_before)
+
+smooth_closed = VMobject().start_new_path([0.0, 0.0, 0.0])
+smooth_closed.add_line_to([1.0, 0.0, 0.0]).add_line_to([1.0, 1.0, 0.0])
+smooth_closed.close_path(smooth=True)
+assert smooth_closed.is_closed()
+
+square_path = VMobject().start_new_path([0.0, 0.0, 0.0])
+square_path.add_points_as_corners(
+    [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+).close_path()
+assert np.allclose(square_path.get_area_vector(), [0.0, 0.0, 1.0])
+assert np.allclose(square_path.get_unit_normal(), [0.0, 0.0, 1.0])
+assert np.allclose(square_path.data["base_normal"][1::2], [0.0, 0.0, 1.0])
+square_path.get_points()[2] = [1.0, -1.0, 0.0]
+assert np.allclose(
+    square_path.get_unit_normal(refresh=True),
+    square_path._path_unit_normal(),
+)
+
+anchors_path = VMobject().set_points_as_corners(
+    [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+)
+anchors_before = anchors_path.data.copy()
+try:
+    anchors_path.set_anchors_and_handles(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        [],
+    )
+except ValueError as error:
+    assert "anchor" in str(error).lower() and "handle" in str(error).lower()
+else:
+    raise AssertionError("mismatched anchors and handles were accepted")
+assert np.array_equal(anchors_path.data, anchors_before)
+assert (
+    anchors_path.set_anchors_and_handles(
+        [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+        [[0.5, 1.0, 0.0], [1.5, 1.0, 0.0]],
+    )
+    is anchors_path
+)
+assert np.allclose(
+    anchors_path.get_points(),
+    [
+        [0.0, 0.0, 0.0],
+        [0.5, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.5, 1.0, 0.0],
+        [2.0, 0.0, 0.0],
+    ],
+)
+
+empty_path = VMobject()
+empty_before = empty_path.data.copy()
+try:
+    empty_path.add_line_to([1.0, 0.0, 0.0])
+except ValueError as error:
+    assert "path with at least one point" in str(error).lower()
+else:
+    raise AssertionError("line construction accepted an empty path")
+assert np.array_equal(empty_path.data, empty_before)
+
+bound_path_scene = Scene()
+bound_path = VMobject()
+bound_path_scene.add(bound_path)
+bound_path.start_new_path([-1.0, 0.0, 0.0]).add_line_to([1.0, 0.0, 0.0])
+bound_path.start_new_path([0.0, 1.0, 0.0]).add_line_to([0.0, 2.0, 0.0])
+assert bound_path.get_num_curves() == 3
+assert np.allclose(bound_path.get_last_point(), [0.0, 2.0, 0.0])
 
 # Marionette's production partial-reveal operation is the one portal
 # VMobjects use too. A subcurve remains a full-size, independent record copy:

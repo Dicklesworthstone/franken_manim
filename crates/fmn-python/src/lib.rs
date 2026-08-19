@@ -595,6 +595,41 @@ fn with_stage<T>(
     Ok(operation(&mut nursery.stage, root))
 }
 
+/// Reconstruct the current shared-anchor geometry under the VMobject's live
+/// path-building controls.  The Python object owns these public mutable
+/// attributes; Chisel owns every operation performed on the resulting path.
+fn configured_quad_path(proxy: &Bound<'_, BridgeMobject>) -> PyResult<fmn_library::QuadPath> {
+    let tolerance = proxy
+        .getattr("tolerance_for_point_equality")?
+        .extract::<f64>()?;
+    let long_lines = proxy.getattr("long_lines")?.extract::<bool>()?;
+    let points = with_stage(proxy, |stage, mob| {
+        stage.get_points(mob).unwrap_or_default()
+    })?;
+    let mut path = fmn_library::QuadPath::from_points(points).map_err(native_error)?;
+    path.set_tolerance_for_point_equality(tolerance);
+    path.set_long_lines(long_lines);
+    Ok(path)
+}
+
+/// Apply one native path-building operation without mutating the Stage and
+/// return only the appended rows.  Python commits those rows through its
+/// existing `append_points` surface so all non-geometry RecordBuffer lanes
+/// follow the Reference's resize/copy rules.  Computing first also makes
+/// every typed refusal atomic at the portal boundary.
+fn quad_path_tail(
+    proxy: &Bound<'_, BridgeMobject>,
+    operation: impl FnOnce(&mut fmn_library::QuadPath) -> PyResult<()>,
+) -> PyResult<Vec<[f64; 3]>> {
+    let mut path = configured_quad_path(proxy)?;
+    let old_len = path.num_points();
+    operation(&mut path)?;
+    path.points()
+        .get(old_len..)
+        .map(<[_]>::to_vec)
+        .ok_or_else(|| PyRuntimeError::new_err("native path operation removed existing points"))
+}
+
 /// Copy one proxy's root entry into an unrelated Stage without copying its
 /// descendants. Callers handle the same-Stage fast path before entering this
 /// helper, so borrowing a bound source here can never alias `target`.
@@ -2029,6 +2064,163 @@ impl BridgeMobject {
         let mut path = fmn_library::QuadPath::new();
         path.set_points_as_corners(&anchors).map_err(native_error)?;
         with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
+    }
+
+    /// Build a complete shared-anchor run from separate anchors and handles.
+    /// The caller commits the result through `VMobject.set_points`, retaining
+    /// Python's exact structured-record resize semantics.
+    fn _set_anchors_and_handles_points(
+        &self,
+        anchors: Vec<[f64; 3]>,
+        handles: Vec<[f64; 3]>,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        let mut path = fmn_library::QuadPath::new();
+        path.set_anchors_and_handles(&anchors, &handles)
+            .map_err(native_error)?;
+        Ok(path.points().to_vec())
+    }
+
+    /// Chisel `start_new_path`, returned as append-only geometry rows.
+    fn _start_new_path_points(slf: &Bound<'_, Self>, point: [f64; 3]) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.start_new_path(point);
+            Ok(())
+        })
+    }
+
+    /// Construct a complete cubic-start operation before committing any row.
+    /// BN-13's one error-bounded cubic-to-quadratic converter owns the emitted
+    /// topology; the Reference's fixed heuristic approximation is retired.
+    fn _add_cubic_bezier_curve_points(
+        slf: &Bound<'_, Self>,
+        anchor1: [f64; 3],
+        handle1: [f64; 3],
+        handle2: [f64; 3],
+        anchor2: [f64; 3],
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.start_new_path(anchor1);
+            path.add_cubic_bezier_curve_to(handle1, handle2, anchor2)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// BN-13 cubic reduction appended to the current shared-anchor path.
+    fn _add_cubic_bezier_curve_to_points(
+        slf: &Bound<'_, Self>,
+        handle1: [f64; 3],
+        handle2: [f64; 3],
+        anchor: [f64; 3],
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_cubic_bezier_curve_to(handle1, handle2, anchor)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// Append one native quadratic segment, including null-curve policy and
+    /// break-marker avoidance.
+    fn _add_quadratic_bezier_curve_to_points(
+        slf: &Bound<'_, Self>,
+        handle: [f64; 3],
+        anchor: [f64; 3],
+        allow_null_curve: bool,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_quadratic_bezier_curve_to(handle, anchor, allow_null_curve)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// Append one native line, honoring both `long_lines` and null-line
+    /// policy from the live Python VMobject.
+    fn _add_line_to_points(
+        slf: &Bound<'_, Self>,
+        point: [f64; 3],
+        allow_null_line: bool,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_line_to(point, allow_null_line)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// Continue the current native path with a reflected quadratic handle.
+    fn _add_smooth_curve_to_points(
+        slf: &Bound<'_, Self>,
+        point: [f64; 3],
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_smooth_curve_to(point)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// Continue the current native path with BN-13 cubic reduction.
+    fn _add_smooth_cubic_curve_to_points(
+        slf: &Bound<'_, Self>,
+        handle: [f64; 3],
+        point: [f64; 3],
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_smooth_cubic_curve_to(handle, point)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// Append a sequence of native straight quadratic segments atomically.
+    fn _add_points_as_corners_points(
+        slf: &Bound<'_, Self>,
+        points: Vec<[f64; 3]>,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_points_as_corners(&points)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
+    /// Close only the current native subpath and return its appended rows.
+    fn _close_path_points(slf: &Bound<'_, Self>, smooth: bool) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.close_path(smooth).map(|_| ()).map_err(native_error)
+        })
+    }
+
+    fn _has_new_path_started(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        crossing::record(CrossingClass::Other);
+        Ok(configured_quad_path(slf)?.has_new_path_started())
+    }
+
+    fn _is_path_closed(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        crossing::record(CrossingClass::Other);
+        Ok(configured_quad_path(slf)?.is_closed())
+    }
+
+    fn _path_area_vector(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        Ok(configured_quad_path(slf)?.area_vector())
+    }
+
+    fn _path_unit_normal(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        Ok(configured_quad_path(slf)?.unit_normal())
     }
 
     /// Chisel's bounded longest-curve insertion over an arbitrary valid
@@ -6634,7 +6826,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, DashedVMobject, Scene
+            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, DashedVMobject, Scene, VMobject
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -6643,11 +6835,23 @@ class _GauntletPortalScene(Scene):
     random_seed = _fmn_seed & 0xFFFF_FFFF
 
     def construct(self):
+        native_path = VMobject(stroke_width=3.0)
+        native_path.start_new_path((-2.0, -1.4, 0.0))
+        native_path.add_cubic_bezier_curve_to(
+            (-1.5, -0.6, 0.0),
+            (1.5, -0.6, 0.0),
+            (2.0, -1.4, 0.0),
+        )
+        native_path.start_new_path((-0.6, -1.6, 0.0))
+        native_path.add_points_as_corners(
+            ((0.0, -1.1, 0.0), (0.6, -1.6, 0.0))
+        ).close_path()
         self.add(
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
             AnnularSector(inner_radius=0.25, outer_radius=0.6).shift((0, 1, 0)),
             DashedVMobject(Circle(radius=0.45), num_dashes=6).shift((-1.25, 1, 0)),
+            native_path,
         )
         self.wait(1 / 30)
 

@@ -2246,6 +2246,7 @@ class VMobject(Mobject):
             raise AssertionError
         Mobject.set_points(self, points)
         self._refresh_vmobject_path_metadata()
+        self.needs_new_unit_normal = True
         return self
 
     def append_points(self, points):
@@ -2256,7 +2257,121 @@ class VMobject(Mobject):
             raise AssertionError
         Mobject.append_points(self, points)
         self._refresh_vmobject_path_metadata()
+        self.needs_new_unit_normal = True
         return self
+
+    def set_anchors_and_handles(self, anchors, handles):
+        points = self._set_anchors_and_handles_points(
+            [_vec3(anchor) for anchor in anchors],
+            [_vec3(handle) for handle in handles],
+        )
+        self.set_points(points)
+        return self
+
+    def start_new_path(self, point):
+        was_empty = self.get_num_points() == 0
+        points = self._start_new_path_points(_vec3(point))
+        if was_empty:
+            self.set_points(points)
+        else:
+            self.append_points(points)
+        return self
+
+    def add_cubic_bezier_curve(
+        self,
+        anchor1,
+        handle1,
+        handle2,
+        anchor2,
+    ):
+        was_empty = self.get_num_points() == 0
+        points = self._add_cubic_bezier_curve_points(
+            _vec3(anchor1),
+            _vec3(handle1),
+            _vec3(handle2),
+            _vec3(anchor2),
+        )
+        if was_empty:
+            self.set_points(points)
+        else:
+            self.append_points(points)
+        return self
+
+    def add_cubic_bezier_curve_to(self, handle1, handle2, anchor):
+        points = self._add_cubic_bezier_curve_to_points(
+            _vec3(handle1),
+            _vec3(handle2),
+            _vec3(anchor),
+        )
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
+    def add_quadratic_bezier_curve_to(
+        self,
+        handle,
+        anchor,
+        allow_null_curve=True,
+    ):
+        points = self._add_quadratic_bezier_curve_to_points(
+            _vec3(handle),
+            _vec3(anchor),
+            bool(allow_null_curve),
+        )
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
+    def add_line_to(self, point, allow_null_line=True):
+        points = self._add_line_to_points(
+            _vec3(point),
+            bool(allow_null_line),
+        )
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
+    def add_smooth_curve_to(self, point):
+        points = self._add_smooth_curve_to_points(_vec3(point))
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
+    def add_smooth_cubic_curve_to(self, handle, point):
+        points = self._add_smooth_cubic_curve_to_points(
+            _vec3(handle),
+            _vec3(point),
+        )
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
+    def add_points_as_corners(self, points):
+        new_points = self._add_points_as_corners_points(
+            [_vec3(point) for point in points]
+        )
+        if len(new_points) > 0:
+            self.append_points(new_points)
+        return self
+
+    def has_new_path_started(self):
+        return self._has_new_path_started()
+
+    def get_last_point(self):
+        return self.get_points()[-1]
+
+    def get_reflection_of_last_handle(self):
+        points = self.get_points()
+        return 2 * points[-1] - points[-2]
+
+    def close_path(self, smooth=False):
+        points = self._close_path_points(bool(smooth))
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
+    def is_closed(self):
+        return self._is_path_closed()
 
     def set_points_as_corners(self, points):
         # Stage::set_points preserves existing records, but the first resize
@@ -2301,6 +2416,22 @@ class VMobject(Mobject):
 
     def get_bezier_tuples(self):
         return self.get_bezier_tuples_from_points(self.get_points())
+
+    def get_nth_curve_points(self, n):
+        assert n < self.get_num_curves()
+        return self.get_points()[2 * n : 2 * n + 3]
+
+    def get_nth_curve_function(self, n):
+        points = self.get_nth_curve_points(n)
+
+        def curve(alpha):
+            return (
+                (1.0 - alpha) ** 2 * points[0]
+                + 2.0 * (1.0 - alpha) * alpha * points[1]
+                + alpha**2 * points[2]
+            )
+
+        return curve
 
     def get_subpath_end_indices_from_points(self, points):
         points = _np.asarray(points)
@@ -2395,6 +2526,19 @@ class VMobject(Mobject):
 
     def point_from_proportion(self, alpha):
         return _np.array(self._point_from_proportion(float(alpha)))
+
+    def get_area_vector(self):
+        return _np.array(self._path_area_vector())
+
+    def get_unit_normal(self, refresh=False):
+        if self.get_num_points() < 3:
+            return _np.array((0.0, 0.0, 1.0))
+        if not self.needs_new_unit_normal and not refresh:
+            return self.data["base_normal"][1, :]
+        normal = _np.array(self._path_unit_normal())
+        self.data["base_normal"][1::2] = normal
+        self.needs_new_unit_normal = False
+        return normal
 
     def pointwise_become_partial(self, vmobject, a, b):
         if not isinstance(vmobject, VMobject):
