@@ -3258,6 +3258,152 @@ assert np.allclose(
     atol=2e-3,
 )
 
+# The rest of Atlas's Arc lineage must be authored portal classes over the
+# existing native builders, not generated constructor refusals. Geometry
+# queries read current Stage points so transforms cannot leave stale answers.
+for name in (
+    "ArcBetweenPoints",
+    "CurvedArrow",
+    "CurvedDoubleArrow",
+    "Ellipse",
+    "AnnularSector",
+    "Sector",
+    "Annulus",
+):
+    assert getattr(manimlib, name) is getattr(geometry, name)
+assert issubclass(geometry.ArcBetweenPoints, geometry.Arc)
+assert issubclass(geometry.CurvedArrow, geometry.ArcBetweenPoints)
+assert issubclass(geometry.CurvedDoubleArrow, geometry.CurvedArrow)
+assert issubclass(geometry.Ellipse, geometry.Circle)
+assert issubclass(geometry.Sector, geometry.AnnularSector)
+assert list(inspect.signature(geometry.ArcBetweenPoints).parameters) == [
+    "start",
+    "end",
+    "angle",
+    "kwargs",
+]
+assert list(inspect.signature(geometry.CurvedArrow).parameters) == [
+    "start_point",
+    "end_point",
+    "kwargs",
+]
+assert list(inspect.signature(geometry.AnnularSector).parameters) == [
+    "angle",
+    "start_angle",
+    "inner_radius",
+    "outer_radius",
+    "arc_center",
+    "fill_color",
+    "fill_opacity",
+    "stroke_width",
+    "kwargs",
+]
+
+assert np.allclose(quarter_arc.get_arc_center(), [1.0, -1.0, 0.0], atol=1e-9)
+quarter_start = quarter_arc.get_start_angle()
+assert min(abs(quarter_start), abs(quarter_start - math.tau)) < 1e-6
+assert math.isclose(quarter_arc.get_stop_angle(), math.pi / 2.0, abs_tol=1e-6)
+quarter_arc.shift([2.0, 3.0, 0.0])
+assert np.allclose(quarter_arc.get_arc_center(), [3.0, 2.0, 0.0], atol=1e-9)
+quarter_arc.rotate(math.pi / 2.0, about_point=quarter_arc.get_arc_center())
+assert math.isclose(quarter_arc.get_start_angle(), math.pi / 2.0, abs_tol=1e-6)
+assert math.isclose(quarter_arc.get_stop_angle(), math.pi, abs_tol=1e-6)
+
+between = geometry.ArcBetweenPoints(
+    [-2.0, -0.5, 0.0],
+    [2.0, -0.5, 0.0],
+    angle=math.pi / 2.0,
+    n_components=5,
+    color=manimlib.BLUE,
+)
+assert between.get_num_curves() == 5
+assert np.allclose(between.get_start(), [-2.0, -0.5, 0.0], atol=1e-9)
+assert np.allclose(between.get_end(), [2.0, -0.5, 0.0], atol=1e-9)
+assert between.get_stroke_color() == manimlib.BLUE
+
+curved_arrow = geometry.CurvedArrow(
+    [-2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    angle=-math.pi / 2.0,
+    color=manimlib.BLUE,
+)
+assert curved_arrow.submobjects == [curved_arrow.tip]
+assert curved_arrow.tip.has_points()
+assert np.min(
+    np.linalg.norm(curved_arrow.tip.get_points() - [2.0, 0.0, 0.0], axis=1)
+) < 1e-9
+curved_double = geometry.CurvedDoubleArrow(
+    [-2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    angle=math.pi / 2.0,
+    color=manimlib.RED,
+)
+assert curved_double.submobjects == [curved_double.tip, curved_double.start_tip]
+assert all(tip.has_points() for tip in curved_double.submobjects)
+assert np.min(
+    np.linalg.norm(curved_double.tip.get_points() - [2.0, 0.0, 0.0], axis=1)
+) < 1e-9
+assert np.min(
+    np.linalg.norm(curved_double.start_tip.get_points() - [-2.0, 0.0, 0.0], axis=1)
+) < 1e-9
+
+circle_query = geometry.Circle(radius=2.0, arc_center=[1.0, -1.0, 0.0])
+assert math.isclose(circle_query.get_radius(), 2.0, abs_tol=1e-6)
+assert np.allclose(circle_query.point_at_angle(math.pi / 2.0), [1.0, 1.0, 0.0])
+circle_query.scale(1.5)
+assert math.isclose(circle_query.get_radius(), 3.0, abs_tol=1e-6)
+assert np.allclose(circle_query.point_at_angle(math.pi), [-2.0, -1.0, 0.0])
+
+ellipse = geometry.Ellipse(
+    width=4.0,
+    height=1.5,
+    arc_center=[0.5, -0.25, 0.0],
+    start_angle=math.pi / 2.0,
+    color=manimlib.BLUE,
+)
+assert np.allclose([ellipse.get_width(), ellipse.get_height()], [4.0, 1.5], atol=1e-6)
+assert np.allclose(ellipse.get_center(), [0.5, -0.25, 0.0], atol=1e-6)
+assert np.allclose(ellipse.get_points()[0], [0.5, 0.5, 0.0], atol=1e-6)
+
+annular_sector = geometry.AnnularSector(
+    angle=math.pi,
+    start_angle=math.pi / 2.0,
+    inner_radius=0.5,
+    outer_radius=1.5,
+    arc_center=[1.0, 0.0, 0.0],
+    fill_color=manimlib.RED,
+)
+assert annular_sector.has_points()
+assert annular_sector.get_fill_color() == manimlib.RED
+assert math.isclose(annular_sector.get_left()[0], -0.5, abs_tol=2e-3)
+assert math.isclose(annular_sector.get_right()[0], 1.0, abs_tol=2e-3)
+sector = geometry.Sector(angle=math.pi / 2.0, radius=2.0)
+assert sector.has_points()
+assert np.min(np.linalg.norm(sector.get_points(), axis=1)) < 1e-9
+annulus = geometry.Annulus(
+    inner_radius=0.75,
+    outer_radius=1.5,
+    center=[-0.5, 0.25, 0.0],
+    fill_color=manimlib.BLUE,
+)
+assert math.isclose(annulus.radius, 1.5)
+assert len(annulus.get_subpaths()) == 2
+assert annulus.get_fill_color() == manimlib.BLUE
+assert np.allclose(annulus.get_center(), [-0.5, 0.25, 0.0], atol=1e-6)
+
+try:
+    geometry.ArcBetweenPoints([0, 0, 0], [1, 0, 0], n_components=0)
+except ValueError as error:
+    assert "component" in str(error).lower()
+else:
+    raise AssertionError("ArcBetweenPoints accepted a zero component budget")
+try:
+    geometry.Annulus(unrecognized_style=True)
+except TypeError as error:
+    assert "unrecognized_style" in str(error)
+else:
+    raise AssertionError("Annulus silently ignored an unknown keyword")
+
 selector_tex = manimlib.Tex(r"\cos(\theta) + \sin(\theta)")
 selected_thetas = selector_tex[r"\theta"]
 assert len(selected_thetas) == 2

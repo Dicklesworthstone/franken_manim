@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	cd0b3d079afa5f41b9d3e5882e781f148ef841b6c179308f90ccd65815bd1982
+ledger_reviewed_digest	e88ae2709c6e0f96325dae6f5506ea3bb45c26cda03bb2c02c900d9c45ffbf73
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -335,6 +335,25 @@ manimlib.mobject.geometry:ArrowTip.get_length	improved	BN-03	crates/fmn-python/t
 manimlib.mobject.geometry:ArrowTip.get_tip_point	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the first live point record
 manimlib.mobject.geometry:ArrowTip.get_vector	improved	BN-03	crates/fmn-python/tests/bridge.py	returns the live tip point minus the true-length base vector
 manimlib.mobject.geometry:Arc	improved	BN-09	crates/fmn-library/tests/geometry_parity.rs	uses one output-scale arc-density rule that is never coarser
+manimlib.mobject.geometry:Arc.get_arc_center	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	intersects the first live transformed quadratic normals through the native geometry kernel
+manimlib.mobject.geometry:Arc.get_start_angle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live first-anchor polar angle about the derived arc center in the canonical full-turn range
+manimlib.mobject.geometry:Arc.get_stop_angle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live terminal-anchor polar angle about the derived arc center in the canonical full-turn range
+manimlib.mobject.geometry:ArcBetweenPoints	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored Arc subclass over the one checked native arc-density rule
+manimlib.mobject.geometry:ArcBetweenPoints.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	fits the native signed arc to exact endpoints honors explicit component counts and refuses invalid budgets before allocation
+manimlib.mobject.geometry:Circle.get_radius	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	measures the live transformed first anchor from the current bounding-box center
+manimlib.mobject.geometry:Circle.point_at_angle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	walks the current circle path from its live derived start angle
+manimlib.mobject.geometry:CurvedArrow	improved	BN-03	crates/fmn-python/tests/bridge.py	is an authored ArcBetweenPoints subclass with a real native tip child aligned to the true terminal tangent
+manimlib.mobject.geometry:CurvedArrow.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	builds one checked signed arc and trims it by true length to the native end-tip base
+manimlib.mobject.geometry:CurvedDoubleArrow	improved	BN-03	crates/fmn-python/tests/bridge.py	is an authored CurvedArrow subclass retaining identity-addressable native tips at both ends
+manimlib.mobject.geometry:CurvedDoubleArrow.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	attaches and true-length-trims both native tips while preserving the checked curved shaft
+manimlib.mobject.geometry:Ellipse	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored Circle subclass over the native stretched-circle geometry and one arc-density rule
+manimlib.mobject.geometry:Ellipse.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	preserves width height center inherited start angle and style through the native builder
+manimlib.mobject.geometry:AnnularSector	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass over checked concentric native arcs and one density rule
+manimlib.mobject.geometry:AnnularSector.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	builds the counter-oriented inner and outer boundaries with exact radii angles center fill and stroke defaults
+manimlib.mobject.geometry:Sector	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored AnnularSector specialization with a native zero-radius inner boundary
+manimlib.mobject.geometry:Sector.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	forwards angle radius and style through the native concentric-arc builder
+manimlib.mobject.geometry:Annulus	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored VMobject ring whose inner native contour is counter-wound under nonzero fill
+manimlib.mobject.geometry:Annulus.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	preserves inner and outer radii center fill and stroke defaults through the native full-turn builder
 manimlib.mobject.geometry:Polygon	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass backed by Atlas closed shared-anchor geometry rather than a schema-generated shell
 manimlib.mobject.geometry:Polygon.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves variadic vertices closed point topology exact empty-input refusal and VMobject styling
 manimlib.mobject.geometry:Polygon.get_vertices	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live start-anchor view without the repeated closing anchor

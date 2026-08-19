@@ -2115,6 +2115,58 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.point_from_proportion(mob, alpha))?.map_err(stage_error)
     }
 
+    /// `Arc.get_arc_center` over this entry's current world-space points.
+    fn _arc_center(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            fmn_library::arc::arc_center_of(&stage.get_points(mob).unwrap_or_default())
+        })?
+        .ok_or_else(|| {
+            PyValueError::new_err("an arc center requires at least one quadratic component")
+        })
+    }
+
+    /// `Arc.get_start_angle` over live transformed geometry.
+    fn _arc_start_angle(slf: &Bound<'_, Self>) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            fmn_library::arc::start_angle_of(&stage.get_points(mob).unwrap_or_default())
+        })?
+        .ok_or_else(|| {
+            PyValueError::new_err("an arc start angle requires at least one quadratic component")
+        })
+    }
+
+    /// `Arc.get_stop_angle` over live transformed geometry.
+    fn _arc_stop_angle(slf: &Bound<'_, Self>) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            fmn_library::arc::stop_angle_of(&stage.get_points(mob).unwrap_or_default())
+        })?
+        .ok_or_else(|| {
+            PyValueError::new_err("an arc stop angle requires at least one quadratic component")
+        })
+    }
+
+    /// `Circle.get_radius` over this entry's current world-space points.
+    fn _circle_radius(slf: &Bound<'_, Self>) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            let points = stage.get_points(mob).unwrap_or_default();
+            fmn_library::arc::radius_of(&fmn_library::VMobject::from_points(points))
+        })
+    }
+
+    /// `Circle.point_at_angle` over its current world-space path.
+    fn _circle_point_at_angle(slf: &Bound<'_, Self>, angle: f64) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            let points = stage.get_points(mob).unwrap_or_default();
+            fmn_library::arc::point_at_angle(&fmn_library::VMobject::from_points(points), angle)
+        })?
+        .ok_or_else(|| PyValueError::new_err("point_at_angle requires a nonempty circle path"))
+    }
+
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
     fn _put_start_and_end_on(
         slf: &Bound<'_, Self>,
@@ -2406,6 +2458,58 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// `ArcBetweenPoints(start, end, angle)` over the native true-arc shelf.
+    fn _build_arc_between_points<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        angle: f64,
+        n_components: Option<usize>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut arc = fmn_library::ArcBetweenPoints::new(start, end).angle(angle);
+        if let Some(n) = n_components {
+            arc = arc.n_components(n);
+        }
+        let built = arc.build().map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// The curved-arrow pair over Atlas's native tip-attachment algebra.
+    fn _build_curved_arrow<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        angle: f64,
+        n_components: Option<usize>,
+        double: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let style = fmn_library::Style::default();
+        let mut arc = fmn_library::ArcBetweenPoints::new(start, end)
+            .angle(angle)
+            .style(style);
+        if let Some(n) = n_components {
+            arc = arc.n_components(n);
+        }
+        let shaft = arc.build().map_err(native_error)?;
+        let built = fmn_library::tip::attach_tip(
+            shaft,
+            fmn_library::ArrowTip::new(),
+            fmn_library::TipEnd::End,
+        );
+        let built = if double {
+            fmn_library::tip::attach_tip(
+                built,
+                fmn_library::ArrowTip::new(),
+                fmn_library::TipEnd::Start,
+            )
+        } else {
+            built
+        };
+        install_native_tree(slf, factory, built)
+    }
+
     /// `Circle(start_angle, radius, arc_center)` — the native circle
     /// builder, keeping its semantic shape tag.
     fn _build_circle<'py>(
@@ -2419,6 +2523,65 @@ impl BridgeMobject {
             .start_angle(start_angle)
             .radius(radius)
             .arc_center(arc_center)
+            .build();
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `Ellipse(width, height, arc_center)` over the native stretched-circle
+    /// builder. The builder deliberately demotes the circle shape hint.
+    fn _build_ellipse<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        width: f64,
+        height: f64,
+        arc_center: [f64; 3],
+        start_angle: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Ellipse::new()
+            .width(width)
+            .height(height)
+            .arc_center(arc_center)
+            .start_angle(start_angle)
+            .build();
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `AnnularSector` and `Sector` share Atlas's one concentric-arc
+    /// implementation; `Sector` supplies `inner_radius = 0` in Python.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_annular_sector<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        angle: f64,
+        start_angle: f64,
+        inner_radius: f64,
+        outer_radius: f64,
+        arc_center: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::AnnularSector::new()
+            .angle(angle)
+            .start_angle(start_angle)
+            .inner_radius(inner_radius)
+            .outer_radius(outer_radius)
+            .arc_center(arc_center)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `Annulus(inner_radius, outer_radius, center)` with a counter-wound
+    /// inner contour for a real nonzero-winding hole.
+    fn _build_annulus<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        inner_radius: f64,
+        outer_radius: f64,
+        center: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Annulus::new()
+            .inner_radius(inner_radius)
+            .outer_radius(outer_radius)
+            .center(center)
             .build();
         install_native_tree(slf, factory, built)
     }
@@ -6321,7 +6484,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import Circle, Scene
+            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, Scene
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -6330,7 +6493,11 @@ class _GauntletPortalScene(Scene):
     random_seed = _fmn_seed & 0xFFFF_FFFF
 
     def construct(self):
-        self.add(Circle(radius=0.9))
+        self.add(
+            Circle(radius=0.9),
+            CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
+            AnnularSector(inner_radius=0.25, outer_radius=0.6).shift((0, 1, 0)),
+        )
         self.wait(1 / 30)
 
 _fmn_scene = _GauntletPortalScene()

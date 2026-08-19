@@ -456,6 +456,7 @@ pub struct Ellipse {
     width: f64,
     height: f64,
     center: Vec3,
+    start_angle: f64,
     style: Style,
 }
 
@@ -473,6 +474,7 @@ impl Ellipse {
             width: 2.0,
             height: 1.0,
             center: ORIGIN,
+            start_angle: 0.0,
             style: Style::default().stroke(RED, Style::default().stroke_width, 1.0),
         }
     }
@@ -495,6 +497,14 @@ impl Ellipse {
     #[must_use]
     pub fn arc_center(mut self, center: Vec3) -> Self {
         self.center = center;
+        self
+    }
+
+    /// Angle of the inherited circle's first anchor. It remains observable
+    /// after the axis stretch through path traversal and point queries.
+    #[must_use]
+    pub fn start_angle(mut self, angle: f64) -> Self {
+        self.start_angle = angle;
         self
     }
 
@@ -521,6 +531,7 @@ impl Ellipse {
     pub fn build(self) -> VMobject {
         Circle::new()
             .arc_center(self.center)
+            .start_angle(self.start_angle)
             .style(self.style)
             .build()
             .with_width(self.width, true)
@@ -930,9 +941,14 @@ mod tests {
 
     #[test]
     fn ellipse_has_its_own_extents_and_no_circle_tag() {
-        let ellipse = Ellipse::new().width(4.0).height(1.0).build();
+        let ellipse = Ellipse::new()
+            .width(4.0)
+            .height(1.0)
+            .start_angle(PI / 2.0)
+            .build();
         assert!(close(ellipse.length_over_dim(0), 4.0));
         assert!(close(ellipse.length_over_dim(1), 1.0));
+        assert!(close_vec(ellipse.points()[0], [0.0, 0.5, 0.0]));
         assert_eq!(
             ellipse.shape(),
             ShapeTag::General,

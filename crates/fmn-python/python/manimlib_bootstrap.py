@@ -2999,6 +2999,80 @@ class Arc(VMobject):
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
 
+    def get_arc_center(self):
+        return _np.array(self._arc_center())
+
+    def get_start_angle(self):
+        return self._arc_start_angle()
+
+    def get_stop_angle(self):
+        return self._arc_stop_angle()
+
+
+class ArcBetweenPoints(Arc):
+    def __init__(self, start, end, angle=_math.tau / 4, **kwargs):
+        n_components = kwargs.pop("n_components", None)
+        # The Reference builds a provisional Arc and then fits it to these
+        # endpoints, so these inherited knobs cancel exactly.
+        kwargs.pop("start_angle", 0)
+        kwargs.pop("radius", 1.0)
+        kwargs.pop("arc_center", _ORIGIN)
+        _install_live_state(self)
+        self.angle = float(angle)
+        specs = self._build_arc_between_points(
+            _native_shell_factory,
+            _vec3(start),
+            _vec3(end),
+            self.angle,
+            None if n_components is None else _operator.index(n_components),
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class CurvedArrow(ArcBetweenPoints):
+    def __init__(self, start_point, end_point, **kwargs):
+        angle = float(kwargs.pop("angle", _math.tau / 4))
+        n_components = kwargs.pop("n_components", None)
+        kwargs.pop("start_angle", 0)
+        kwargs.pop("radius", 1.0)
+        kwargs.pop("arc_center", _ORIGIN)
+        _install_live_state(self)
+        self.angle = angle
+        specs = self._build_curved_arrow(
+            _native_shell_factory,
+            _vec3(start_point),
+            _vec3(end_point),
+            angle,
+            None if n_components is None else _operator.index(n_components),
+            False,
+        )
+        _hang_native_children(self, specs)
+        self.tip = self.submobjects[-1]
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class CurvedDoubleArrow(CurvedArrow):
+    def __init__(self, start_point, end_point, **kwargs):
+        angle = float(kwargs.pop("angle", _math.tau / 4))
+        n_components = kwargs.pop("n_components", None)
+        kwargs.pop("start_angle", 0)
+        kwargs.pop("radius", 1.0)
+        kwargs.pop("arc_center", _ORIGIN)
+        _install_live_state(self)
+        self.angle = angle
+        specs = self._build_curved_arrow(
+            _native_shell_factory,
+            _vec3(start_point),
+            _vec3(end_point),
+            angle,
+            None if n_components is None else _operator.index(n_components),
+            True,
+        )
+        _hang_native_children(self, specs)
+        self.tip, self.start_tip = self.submobjects
+        _apply_vmobject_style_kwargs(self, kwargs)
+
 
 class Circle(Arc):
     def __init__(self, start_angle=0, stroke_color=None, **kwargs):
@@ -3019,6 +3093,12 @@ class Circle(Arc):
         if stroke_color is not None:
             kwargs.setdefault("stroke_color", stroke_color)
         _apply_vmobject_style_kwargs(self, kwargs)
+
+    def get_radius(self):
+        return self._circle_radius()
+
+    def point_at_angle(self, angle):
+        return _np.array(self._circle_point_at_angle(float(angle)))
 
 
 class Dot(VMobject):
@@ -3053,6 +3133,82 @@ class Dot(VMobject):
 class SmallDot(Dot):
     def __init__(self, point=_ORIGIN, radius=0.04, **kwargs):
         super().__init__(point, radius, **kwargs)
+
+
+class Ellipse(Circle):
+    def __init__(self, width=2.0, height=1.0, **kwargs):
+        arc_center = kwargs.pop("arc_center", _ORIGIN)
+        start_angle = float(kwargs.pop("start_angle", 0))
+        _install_live_state(self)
+        specs = self._build_ellipse(
+            _native_shell_factory,
+            float(width),
+            float(height),
+            _vec3(arc_center),
+            start_angle,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class AnnularSector(VMobject):
+    def __init__(
+        self,
+        angle=_math.tau / 4,
+        start_angle=0.0,
+        inner_radius=1.0,
+        outer_radius=2.0,
+        arc_center=_ORIGIN,
+        fill_color="#BBBBBB",
+        fill_opacity=1.0,
+        stroke_width=0.0,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        specs = self._build_annular_sector(
+            _native_shell_factory,
+            float(angle),
+            float(start_angle),
+            float(inner_radius),
+            float(outer_radius),
+            _vec3(arc_center),
+        )
+        _hang_native_children(self, specs)
+        kwargs.setdefault("fill_color", fill_color)
+        kwargs.setdefault("fill_opacity", fill_opacity)
+        kwargs.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Sector(AnnularSector):
+    def __init__(self, angle=_math.tau / 4, radius=1.0, **kwargs):
+        super().__init__(angle, inner_radius=0.0, outer_radius=radius, **kwargs)
+
+
+class Annulus(VMobject):
+    def __init__(
+        self,
+        inner_radius=1.0,
+        outer_radius=2.0,
+        fill_opacity=1.0,
+        stroke_width=0.0,
+        fill_color="#BBBBBB",
+        center=_ORIGIN,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        self.radius = float(outer_radius)
+        specs = self._build_annulus(
+            _native_shell_factory,
+            float(inner_radius),
+            self.radius,
+            _vec3(center),
+        )
+        _hang_native_children(self, specs)
+        kwargs.setdefault("fill_color", fill_color)
+        kwargs.setdefault("fill_opacity", fill_opacity)
+        kwargs.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 def _resolve_raster_image_path(filename):
@@ -6837,9 +6993,16 @@ def _install_schema_surface():
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         ("manimlib.mobject.geometry", "Arc"): Arc,
+        ("manimlib.mobject.geometry", "ArcBetweenPoints"): ArcBetweenPoints,
+        ("manimlib.mobject.geometry", "CurvedArrow"): CurvedArrow,
+        ("manimlib.mobject.geometry", "CurvedDoubleArrow"): CurvedDoubleArrow,
         ("manimlib.mobject.geometry", "Circle"): Circle,
         ("manimlib.mobject.geometry", "Dot"): Dot,
         ("manimlib.mobject.geometry", "SmallDot"): SmallDot,
+        ("manimlib.mobject.geometry", "Ellipse"): Ellipse,
+        ("manimlib.mobject.geometry", "AnnularSector"): AnnularSector,
+        ("manimlib.mobject.geometry", "Sector"): Sector,
+        ("manimlib.mobject.geometry", "Annulus"): Annulus,
         ("manimlib.mobject.types.point_cloud_mobject", "PMobject"): PMobject,
         ("manimlib.mobject.numbers", "DecimalNumber"): DecimalNumber,
         ("manimlib.mobject.numbers", "Integer"): Integer,
