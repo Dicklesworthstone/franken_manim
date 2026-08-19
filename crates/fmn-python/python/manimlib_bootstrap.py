@@ -3072,7 +3072,7 @@ def _resolve_raster_image_path(filename):
     supplied = _pathlib.Path(raw)
     directories = (_pathlib.Path(""), _pathlib.Path("raster_images"))
     suffixes = (".jpg", ".jpeg", ".png", "")
-    candidates = [supplied]
+    candidates = [supplied, *( _pathlib.Path(f"{raw}{suffix}") for suffix in suffixes)]
     if not supplied.is_absolute():
         candidates.extend(
             directory / f"{raw}{suffix}"

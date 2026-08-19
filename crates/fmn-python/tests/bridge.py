@@ -4217,6 +4217,95 @@ def verify_portal_console_scene():
     assert_red_orientation_witness_is_above_origin(frames[0])
     assert console_err == ""
 
+    # Atlas already owns PNG/JPEG decode and ImageQuad construction; the
+    # portal must preserve that resource across detached copy, Scene
+    # adoption, and the production Lumen/Reel render rather than exposing a
+    # schema shell or decoding a second Python-side raster.
+    source_width, source_height, source_rows = png_rgba8_rows(frames[0])
+    image = manimlib.ImageMobject(str(frames[0]), height=2.0)
+    assert image.data.dtype.names == ("point", "im_coords", "opacity")
+    assert image.get_num_points() == 6
+    assert math.isclose(image.get_height(), 2.0, rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(
+        image.get_width(),
+        2.0 * source_width / source_height,
+        rel_tol=0.0,
+        abs_tol=1e-6,
+    )
+    assert np.array_equal(
+        image.data["im_coords"],
+        np.array([(0, 0), (0, 1), (1, 0), (1, 1), (1, 0), (0, 1)]),
+    )
+    source_top_left = np.array(source_rows[0][:3], dtype=float) / 255.0
+    assert np.allclose(
+        image.point_to_rgb(image.get_corner(manimlib.UL)),
+        source_top_left,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    try:
+        image.point_to_rgb(image.get_right() + manimlib.RIGHT)
+    except ValueError as error:
+        assert "outside an image" in str(error)
+    else:
+        raise AssertionError("ImageMobject sampled outside its live quad")
+    before_color = image.data.copy()
+    assert image.set_color(manimlib.RED) is image
+    assert np.array_equal(image.data, before_color)
+    assert image.set_opacity([0.25, 0.75]) is image
+    assert math.isclose(image.data["opacity"][0, 0], 0.25)
+    assert math.isclose(image.data["opacity"][-1, 0], 0.75)
+
+    # Extension-less local lookup reaches the same native decoder. A URL is
+    # a named capability refusal and a non-image file fails in Atlas before a
+    # usable object can escape construction.
+    extensionless = manimlib.ImageMobject(
+        str(frames[0].with_suffix("")), height=1.0
+    )
+    assert (extensionless.pixel_width, extensionless.pixel_height) == (
+        source_width,
+        source_height,
+    )
+    try:
+        manimlib.ImageMobject("https://example.invalid/image.png")
+    except bridge_errors.CapabilityError as error:
+        assert "AssetFetcher" in str(error)
+    else:
+        raise AssertionError("ImageMobject silently accepted a network URL")
+    try:
+        manimlib.ImageMobject(str(source))
+    except ValueError as error:
+        assert "not a recognized image" in str(error)
+    else:
+        raise AssertionError("ImageMobject accepted non-image bytes")
+
+    image_destination = output_root / "image-mobject.png"
+    image_scene = InteractiveScene()
+    image_scene._begin_png(str(image_destination), 160, 90, 30, 1, 0)
+    # Fill the camera height so nearest-neighbour sampling cannot legitimately
+    # skip the source's deliberately small orientation witness.
+    rendered_image = image.copy().set_opacity(1.0).set_height(8.0)
+    assert rendered_image._image_dimensions() == (source_width, source_height)
+    image_scene.add(rendered_image)
+    image_receipt = image_scene._finish_render(
+        image_scene.frame._core,
+        image_scene.camera.light_source.get_center(),
+    )
+    assert pathlib.Path(image_receipt[0]) == image_destination
+    assert image_receipt[1] == 1
+    assert image_receipt[2] == image_destination.stat().st_size
+    assert len(image_receipt[3]) == 64
+    assert image_receipt[4].split(":")[0] == "fast-cpu"
+    rendered_width, rendered_height, rendered_rows = png_rgba8_rows(
+        image_destination
+    )
+    assert (rendered_width, rendered_height) == (160, 90)
+    assert sum(
+        tuple(row[offset : offset + 3]) != (51, 51, 51)
+        for row in rendered_rows
+        for offset in range(0, len(row), 4)
+    ) >= 8
+
     # Same build, policy, seed, and thread count reproduce the exact ordered
     # PNG-tree digest through an independently published generation.
     repeated_destination = output_root / "repeated"
