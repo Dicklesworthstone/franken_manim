@@ -1811,12 +1811,55 @@ pickled_parent.add(pickled_child)
 pickled_parent.label = pickled_child
 pickled_parent.resize(1)
 pickled_parent.set_field("point", 0, [3.0, 4.0, 5.0])
+pickled_parent.shift([2.0, 3.0, 0.0])
+pickle_source_scene = Scene()
+pickle_source_scene.add(pickled_parent)
 payload = pickle.dumps(pickled_parent, protocol=pickle.HIGHEST_PROTOCOL)
 restored = pickle.loads(payload)  # ubs:ignore -- trusted round-trip created immediately above
 assert restored.label is restored.submobjects[0]
-assert restored.get_field("point", 0) == [3.0, 4.0, 5.0]
-Scene().add(restored)
+assert restored.get_field("point", 0) == [5.0, 7.0, 5.0]
+assert restored.family_size() == 2
+pickle_destination_scene = Scene()
+pickle_destination_scene.add(restored)
+assert restored.family_size() == 2
 assert restored.is_alive()
+
+# Native pickle state is a versioned, checksummed FMNA document. Decode is
+# transactional: malformed bytes and unknown envelope versions cannot replace
+# even a detached destination's already-live state.
+pickle_state = restored._engine_state()
+assert pickle_state["version"] == 1
+assert pickle_state["snapshot"].startswith(b"FMNA")
+unchanged = Mobject()
+unchanged.resize(1)
+unchanged.set_field("point", 0, [9.0, 8.0, 7.0])
+malformed_state = dict(pickle_state)
+malformed_state["snapshot"] = pickle_state["snapshot"][:-1]
+try:
+    unchanged._restore_engine_state(malformed_state)
+except ValueError as error:
+    assert "snapshot container refused" in str(error)
+else:
+    raise AssertionError("truncated native pickle state was accepted")
+assert unchanged.get_field("point", 0) == [9.0, 8.0, 7.0]
+unknown_version = dict(pickle_state)
+unknown_version["version"] = 2
+try:
+    unchanged._restore_engine_state(unknown_version)
+except ValueError as error:
+    assert "unsupported Python portal pickle-state version 2" in str(error)
+else:
+    raise AssertionError("unknown native pickle-state version was accepted")
+assert unchanged.get_field("point", 0) == [9.0, 8.0, 7.0]
+mismatched_summary = dict(pickle_state)
+mismatched_summary["fields"] = [("fabricated", 1)]
+try:
+    unchanged._restore_engine_state(mismatched_summary)
+except ValueError as error:
+    assert "field summary does not match" in str(error)
+else:
+    raise AssertionError("pickle state with a fabricated field summary was accepted")
+assert unchanged.get_field("point", 0) == [9.0, 8.0, 7.0]
 
 
 # Weakrefs, identity round trips, and explicit worker-thread confinement.
@@ -4255,6 +4298,21 @@ def verify_portal_console_scene():
     assert image.set_opacity([0.25, 0.75]) is image
     assert math.isclose(image.data["opacity"][0, 0], 0.25)
     assert math.isclose(image.data["opacity"][-1, 0], 0.75)
+    image.shift([0.25, -0.5, 0.0])
+    pickled_image = pickle.loads(  # ubs:ignore -- trusted round-trip created immediately here
+        pickle.dumps(image, protocol=pickle.HIGHEST_PROTOCOL)
+    )
+    for image_clone in (image.copy(), copy.deepcopy(image), pickled_image):
+        assert type(image_clone) is type(image)
+        assert image_clone._image_dimensions() == (source_width, source_height)
+        assert np.array_equal(image_clone.data, image.data)
+        assert np.allclose(image_clone.get_center(), image.get_center())
+        assert np.allclose(
+            image_clone.point_to_rgb(image_clone.get_corner(manimlib.UL)),
+            image.point_to_rgb(image.get_corner(manimlib.UL)),
+            rtol=0.0,
+            atol=1e-12,
+        )
 
     # Extension-less local lookup reaches the same native decoder. A URL is
     # a named capability refusal and a non-image file fails in Atlas before a
@@ -4305,6 +4363,24 @@ def verify_portal_console_scene():
         for row in rendered_rows
         for offset in range(0, len(row), 4)
     ) >= 8
+
+    # The independently unpickled image carries the same ImageResource,
+    # ImageQuad primitive, placement, and opacity field into production
+    # composition. Canonical PNG equality is the end-to-end witness.
+    pickled_image_destination = output_root / "pickled-image-mobject.png"
+    pickled_image_scene = InteractiveScene()
+    pickled_image_scene._begin_png(
+        str(pickled_image_destination), 160, 90, 30, 1, 0
+    )
+    pickled_rendered_image = pickled_image.copy().set_opacity(1.0).set_height(8.0)
+    pickled_image_scene.add(pickled_rendered_image)
+    pickled_image_receipt = pickled_image_scene._finish_render(
+        pickled_image_scene.frame._core,
+        pickled_image_scene.camera.light_source.get_center(),
+    )
+    assert pathlib.Path(pickled_image_receipt[0]) == pickled_image_destination
+    assert pickled_image_receipt[1] == 1
+    assert pickled_image_destination.read_bytes() == image_destination.read_bytes()
 
     # Same build, policy, seed, and thread count reproduce the exact ordered
     # PNG-tree digest through an independently published generation.

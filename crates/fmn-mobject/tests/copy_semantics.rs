@@ -616,6 +616,53 @@ fn cross_stage_copy_handles_a_deep_family_iteratively() {
     );
 }
 
+#[test]
+fn cross_stage_entry_copy_preserves_payload_without_copying_family() {
+    let mut source = Stage::new();
+    let root = source.add(
+        Mobject::from_points(&[[1.0, 2.0, 3.0]])
+            .with_shape(ShapeTag::Dot {
+                center: [1.0, 2.0, 3.0],
+                radius: 0.5,
+            })
+            .with_z_index(23),
+    );
+    let child = source.add(Mobject::from_points(&[[4.0, 5.0, 6.0]]));
+    source.attach(root, child).expect("source family edge");
+    source.shift(root, [0.5, -1.0, 2.0]);
+    source
+        .get_mut(root)
+        .expect("source root")
+        .uniforms_mut()
+        .anti_alias_width = 1.75;
+    let updater = source
+        .add_updater(root, |_, _| {}, false)
+        .expect("source updater");
+
+    let expected_placement = source.placement(root).expect("source placement");
+    let expected_uniforms = *source.get(root).expect("source root").uniforms();
+    let mut target = Stage::new();
+    let copied = source
+        .copy_entry_into(root, &mut target)
+        .expect("single-entry cross-stage copy");
+
+    assert_eq!(target.family(copied), vec![copied]);
+    assert!(target.get(copied).unwrap().submobjects().is_empty());
+    assert!(target.get(copied).unwrap().parents().is_empty());
+    assert_eq!(target.placement(copied), Some(expected_placement));
+    assert_eq!(*target.get(copied).unwrap().uniforms(), expected_uniforms);
+    assert_eq!(target.z_index(copied), 23);
+    assert_eq!(
+        target.shape(copied),
+        ShapeTag::Dot {
+            center: [1.0, 2.0, 3.0],
+            radius: 0.5,
+        }
+    );
+    assert_eq!(target.updater_ids(copied), vec![updater]);
+    assert!(target.roots().is_empty());
+}
+
 /// Copies start with zero live views; a live view on the original stays
 /// attached to the original's storage and never observes the copy (§8.2/V2).
 #[test]

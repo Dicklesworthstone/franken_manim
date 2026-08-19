@@ -35,8 +35,8 @@ use crossing::CrossingClass;
 use fmn_frame::convert::rgba16f_to_rgba8;
 use fmn_frame::{FrameLayout, PixelFormat};
 use fmn_mobject::{
-    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Stage,
-    StageError, Tracker, TrackerKind, Uniforms,
+    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Snapshot, Stage,
+    StageError, Uniforms,
 };
 use fmn_output::{
     EmitterConfig, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
@@ -87,6 +87,7 @@ type SoundRequestFact = (String, i64, u32, f64, Option<f64>, Option<f64>);
 type BoundingBoxRows = ([f64; 3], [f64; 3], [f64; 3]);
 
 const PORTAL_MAX_RENDER_FRAMES: u64 = 1_000_000;
+const PORTAL_PICKLE_STATE_VERSION: u8 = 1;
 
 /// One fmn-python render generation, retained across every `play` and `wait`.
 ///
@@ -1115,190 +1116,135 @@ fn set_uniform(uniforms: &mut Uniforms, name: &str, value: &Bound<'_, PyAny>) ->
     Ok(())
 }
 
-fn record_state<'py>(
+fn isolated_native_state<'py>(
     py: Python<'py>,
-    proxy: &Bound<'py, BridgeMobject>,
+    stage: &Stage,
+    mob: Mob,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let state = PyDict::new(py);
-    let (fields, len, records) = with_buffer_ref(proxy, |buffer| {
-        let fields: Vec<(String, usize)> = buffer
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| (field.name.clone(), field.width))
-            .collect();
-        let mut records = Vec::with_capacity(buffer.len() * buffer.schema().stride());
-        for index in 0..buffer.len() {
-            for field in buffer.schema().fields() {
-                records.extend(
-                    buffer
-                        .read(index, &field.name)
-                        .expect("iterated schema field exists"),
-                );
-            }
-        }
-        (fields, buffer.len(), records)
-    })?;
-    state.set_item("fields", fields)?;
-    state.set_item("len", len)?;
-    state.set_item("records", records)?;
-    state.set_item("aligned_data_keys", proxy.getattr("aligned_data_keys")?)?;
-    state.set_item("pointlike_data_keys", proxy.getattr("pointlike_data_keys")?)?;
-    let uniforms = uniforms_snapshot(proxy)?;
-    let uniform_state = PyDict::new(py);
-    for &name in UNIFORM_NAMES {
-        uniform_state.set_item(name, uniform_value(py, uniforms, name)?)?;
+    if !stage.updater_ids(mob).is_empty() {
+        return Err(PyValueError::new_err(
+            "native updater callables cannot enter Python pickle state",
+        ));
     }
-    state.set_item("uniforms", uniform_state)?;
-    let z_index = {
-        let cell = proxy.borrow();
-        if let (Some(engine), Some(mob)) = (&cell.engine, cell.mob) {
-            engine.borrow().stage().z_index(mob)
-        } else {
-            cell.nursery
-                .as_ref()
-                .map_or(0, |nursery| nursery.stage.z_index(nursery.root))
-        }
-    };
-    state.set_item("z_index", z_index)?;
-    let tracker = {
-        let cell = proxy.borrow();
-        if let (Some(engine), Some(mob)) = (&cell.engine, cell.mob) {
-            engine.borrow().stage().tracker(mob)
-        } else {
-            cell.nursery
-                .as_ref()
-                .and_then(|nursery| nursery.stage.tracker(nursery.root))
-        }
-    };
-    let tracker_state = tracker.map(|tracker| {
-        let kind = match tracker.kind {
-            TrackerKind::Plain => 0_u8,
-            TrackerKind::Exponential => 1,
-            TrackerKind::Complex => 2,
-        };
-        (kind, tracker.lanes)
-    });
-    state.set_item("tracker", tracker_state)?;
+
+    // Python's pickle memo owns the proxy graph: every child is reduced once
+    // and aliases are rebuilt by pickle. Isolate this one native entry so a
+    // bound parent's arena family cannot be serialized again inside the
+    // parent's payload and then duplicated when Python reconnects children.
+    let mut isolated = Stage::new();
+    let root = stage
+        .copy_entry_into(mob, &mut isolated)
+        .map_err(stage_error)?;
+    isolated.add_to_scene(root).map_err(stage_error)?;
+
+    let entry = isolated
+        .get(root)
+        .ok_or_else(|| StaleHandleError::new_err("isolated pickle root no longer resolves"))?;
+    let fields: Vec<(String, usize)> = entry
+        .buffer
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| (field.name.clone(), field.width))
+        .collect();
+    let snapshot = isolated.snapshot_bytes().map_err(native_error)?;
+    let state = PyDict::new(py);
+    state.set_item("version", PORTAL_PICKLE_STATE_VERSION)?;
+    state.set_item("snapshot", PyBytes::new(py, &snapshot))?;
+    // Detached become/restore uses this cheap schema identity without
+    // decoding either operand. The authoritative state remains the FMNA
+    // snapshot above.
+    state.set_item("fields", fields)?;
     Ok(state)
 }
 
-fn restore_record_state(
+fn native_state<'py>(
+    py: Python<'py>,
+    proxy: &Bound<'py, BridgeMobject>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let cell = proxy.borrow();
+    if let (Some(engine), Some(mob)) = (&cell.engine, cell.mob) {
+        let runtime = engine.borrow();
+        return isolated_native_state(py, runtime.stage(), mob);
+    }
+    let nursery = cell
+        .nursery
+        .as_ref()
+        .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
+    isolated_native_state(py, &nursery.stage, nursery.root)
+}
+
+fn restore_native_state(
     proxy: &Bound<'_, BridgeMobject>,
     state: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    if proxy.borrow().engine.is_some() {
-        return Err(PyRuntimeError::new_err(
-            "cannot restore detached pickle state over a bound mobject",
-        ));
+    {
+        let cell = proxy.borrow();
+        if cell.engine.is_some() || cell.mob.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "cannot restore detached pickle state over a bound mobject",
+            ));
+        }
     }
-    let fields: Vec<(String, usize)> = state
+    let version: u8 = state
+        .get_item("version")?
+        .ok_or_else(|| PyKeyError::new_err("version"))?
+        .extract()?;
+    if version != PORTAL_PICKLE_STATE_VERSION {
+        return Err(PyValueError::new_err(format!(
+            "unsupported Python portal pickle-state version {version}"
+        )));
+    }
+    let declared_fields: Vec<(String, usize)> = state
         .get_item("fields")?
         .ok_or_else(|| PyKeyError::new_err("fields"))?
         .extract()?;
-    let len: usize = state
-        .get_item("len")?
-        .ok_or_else(|| PyKeyError::new_err("len"))?
-        .extract()?;
-    let records: Vec<f32> = state
-        .get_item("records")?
-        .ok_or_else(|| PyKeyError::new_err("records"))?
-        .extract()?;
-    let aligned: Vec<String> = state
-        .get_item("aligned_data_keys")?
-        .ok_or_else(|| PyKeyError::new_err("aligned_data_keys"))?
-        .extract()?;
-    let pointlike: Vec<String> = state
-        .get_item("pointlike_data_keys")?
-        .ok_or_else(|| PyKeyError::new_err("pointlike_data_keys"))?
-        .extract()?;
-    if fields.is_empty() {
+    let snapshot = state
+        .get_item("snapshot")?
+        .ok_or_else(|| PyKeyError::new_err("snapshot"))?;
+    let snapshot = snapshot
+        .cast::<PyBytes>()
+        .map_err(|_| PyTypeError::new_err("pickle-state snapshot must be bytes"))?;
+
+    // Durable decode validates container checksum/schema/version, arena
+    // invariants, the 256 MiB encoded cap, and the aggregate decoded-
+    // allocation budget before this proxy is touched. Decode and restore a
+    // private candidate nursery first so every refusal is atomic.
+    let mut stage = Stage::new();
+    let decoded = Snapshot::from_bytes(snapshot.as_bytes(), &stage).map_err(native_error)?;
+    if !decoded.updaters.entries.is_empty() {
         return Err(PyValueError::new_err(
-            "restored record state declares no fields",
+            "Python pickle state cannot restore native updater identities without callables",
         ));
     }
-    let mut names = HashSet::new();
-    let mut stride = 0usize;
-    for (name, width) in &fields {
-        if name.is_empty() || *width == 0 || !names.insert(name.as_str()) {
-            return Err(PyValueError::new_err(
-                "restored record fields require unique non-empty names and positive widths",
-            ));
-        }
-        stride = stride
-            .checked_add(*width)
-            .ok_or_else(|| PyOverflowError::new_err("restored record stride overflows usize"))?;
-    }
-    if aligned
-        .iter()
-        .chain(pointlike.iter())
-        .any(|name| !names.contains(name.as_str()))
-    {
+    stage.restore(&decoded.snapshot);
+    let [root] = stage.roots() else {
         return Err(PyValueError::new_err(
-            "restored aligned and pointlike keys must name record fields",
+            "Python pickle state must contain exactly one native root",
         ));
-    }
-    let field_refs: Vec<(&str, usize)> = fields
-        .iter()
-        .map(|(name, width)| (name.as_str(), *width))
-        .collect();
-    let aligned_refs: Vec<&str> = aligned.iter().map(String::as_str).collect();
-    let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
-    let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs)
-        .map_err(record_error_to_py)?;
-    let expected = len
-        .checked_mul(stride)
-        .ok_or_else(|| PyOverflowError::new_err("restored record shape overflows usize"))?;
-    if records.len() != expected {
-        return Err(PyValueError::new_err(format!(
-            "restored record state has {} lanes, expected {expected}",
-            records.len()
-        )));
-    }
-    let mut buffer = RecordBuffer::new(schema, len).map_err(record_error_to_py)?;
-    let mut cursor = 0usize;
-    for index in 0..len {
-        for (name, width) in &fields {
-            let end = cursor.checked_add(*width).ok_or_else(|| {
-                PyOverflowError::new_err("restored record cursor overflows usize")
-            })?;
-            let wrote = buffer.write(index, name, &records[cursor..end]);
-            debug_assert!(wrote, "schema was constructed from these fields");
-            cursor = end;
-        }
-    }
-    let mut uniforms = Uniforms::default();
-    let uniform_state = state
-        .get_item("uniforms")?
-        .ok_or_else(|| PyKeyError::new_err("uniforms"))?
-        .cast_into::<PyDict>()?;
-    for &name in UNIFORM_NAMES {
-        if let Some(value) = uniform_state.get_item(name)? {
-            set_uniform(&mut uniforms, name, &value)?;
-        }
-    }
-    let z_index: i32 = state
-        .get_item("z_index")?
-        .map_or(Ok(0), |value| value.extract())?;
-    let tracker_state: Option<(u8, [f64; 2])> = match state.get_item("tracker")? {
-        Some(value) => value.extract()?,
-        None => None,
     };
-    let mut detached = Mobject::from_buffer(buffer).with_uniforms(uniforms);
-    detached.z_index = z_index;
-    let mut nursery = Nursery::new(detached);
-    if let Some((kind, lanes)) = tracker_state {
-        let kind = match kind {
-            0 => TrackerKind::Plain,
-            1 => TrackerKind::Exponential,
-            2 => TrackerKind::Complex,
-            _ => return Err(PyValueError::new_err("restored tracker kind is invalid")),
-        };
-        nursery
-            .stage
-            .set_tracker_state(nursery.root, Some(Tracker { kind, lanes }))
-            .map_err(stage_error)?;
+    let root = *root;
+    if stage.family(root).len() != 1 {
+        return Err(PyValueError::new_err(
+            "Python pickle state native root must not contain a family graph",
+        ));
     }
+    let actual_fields: Vec<(String, usize)> = stage
+        .get(root)
+        .expect("validated snapshot root is live")
+        .buffer
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| (field.name.clone(), field.width))
+        .collect();
+    if declared_fields != actual_fields {
+        return Err(PyValueError::new_err(
+            "Python pickle-state field summary does not match its native snapshot",
+        ));
+    }
+    let nursery = Nursery { stage, root };
+
     let mut cell = proxy.borrow_mut();
     cell.nursery = Some(nursery);
     cell.mob = None;
@@ -3819,11 +3765,11 @@ impl BridgeMobject {
     }
 
     fn _engine_state<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
-        record_state(slf.py(), slf)
+        native_state(slf.py(), slf)
     }
 
     fn _restore_engine_state(slf: &Bound<'_, Self>, state: &Bound<'_, PyDict>) -> PyResult<()> {
-        restore_record_state(slf, state)
+        restore_native_state(slf, state)
     }
 
     fn is_alive(slf: &Bound<'_, Self>) -> bool {

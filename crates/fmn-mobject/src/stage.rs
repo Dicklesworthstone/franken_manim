@@ -1262,6 +1262,22 @@ impl Stage {
         Ok(Self::install_detached_family(target, entries).root())
     }
 
+    /// Cross-stage transfer of exactly one arena entry, without its family.
+    ///
+    /// Binding and serialization tiers whose object graph lives outside
+    /// Marionette use this to preserve the entry's complete native payload
+    /// while letting their own graph memo reconnect children. Internal
+    /// parent/child links are cleared by the same detached-family installer
+    /// as [`Stage::copy_into`]; renderer metadata, placement, uniforms,
+    /// tracker state, and updater identities follow the ordinary copy rules.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if `mob` is not live in this stage.
+    pub fn copy_entry_into(&self, mob: Mob, target: &mut Stage) -> Result<Mob, StageError> {
+        let entry = self.try_get(mob)?.detached_copy();
+        Ok(Self::install_detached_family(target, vec![(mob, entry)]).root())
+    }
+
     // ----------------------------------------------------------- updaters
     //
     // The §8.6 dynamic-behavior surface (fm-yra). Exact semantics, mirroring
