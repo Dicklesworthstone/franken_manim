@@ -8,10 +8,10 @@
 
 [![License: MIT + Rider](https://img.shields.io/badge/License-MIT_+_OpenAI/Anthropic_Rider-blue.svg)](./LICENSE)
 [![Rust Edition](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
-[![toolchain: pinned nightly](https://img.shields.io/badge/toolchain-pinned_nightly-purple.svg)](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
+[![toolchain: pinned nightly](https://img.shields.io/badge/toolchain-pinned_nightly-purple.svg)](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
 [![unsafe: forbidden*](https://img.shields.io/badge/unsafe-forbidden*-success.svg)](https://github.com/rust-secure-code/safety-dance/)
-[![external tools: ffmpeg, only](https://img.shields.io/badge/external_tools-ffmpeg,_only-black.svg)](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
-[![LaTeX: none, anywhere](https://img.shields.io/badge/LaTeX-none,_anywhere-teal.svg)](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
+[![external tools: ffmpeg, only](https://img.shields.io/badge/external_tools-ffmpeg,_only-black.svg)](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
+[![LaTeX: none, anywhere](https://img.shields.io/badge/LaTeX-none,_anywhere-teal.svg)](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)
 [![Parity Ledger coverage](./docs/api/parity_coverage.svg)](./docs/api/schema.md)
 
 **A sovereign, deterministic rewrite of manim (Grant Sanderson's mathematical-animation engine behind 3Blue1Brown) in pure Rust on the FrankenSuite. API- and semantics-compatible with `manimlib`, it typesets TeX mathematics natively (no LaTeX, no Pango, no system fonts), rasterizes Bézier geometry analytically instead of replaying GPU workarounds, and produces bit-identical certified renders on any machine at any thread count. The native Rust library, `fmn` CLI, and Studio install as one CPython-free binary that needs nothing but (optionally) ffmpeg; existing Python scenes use the separately installed, host-CPython `fmn-python` portal.**
@@ -22,7 +22,7 @@
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_manim/main/scripts/install.sh | bash
 ```
 
-> **A note on tense (read this first).** This README is written in the **present tense, as if the entire design in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md) is fully realized**: the 1.0 target state where every performance gate is green and every subsystem is live. This is a deliberate choice. It lets the document describe the *finished* system so it gets **trued-up in place as milestones land** (§20's gates G0→G5) rather than rewritten from scratch later. Where the plan itself tiers something out as genuinely future work (complex-script shaping, CFF fonts, arbitrary GLSL, all covered under [Limitations](#limitations)), the README says so plainly. Everything else below is the spec of the system this repository builds.
+> **A note on tense (read this first).** This README is written in the **present tense, as if the entire design in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md) is fully realized**: the 1.0 target state where every performance gate is green and every subsystem is live. This is a deliberate choice. It lets the document describe the *finished* system so it gets **trued-up in place as milestones land** (§20's gates G0→G5) rather than rewritten from scratch later. Where the plan itself tiers something out as genuinely future work (complex-script shaping, CFF fonts, arbitrary GLSL, all covered under [Limitations](#limitations)), the README says so plainly. Everything else below is the spec of the system this repository builds.
 
 ---
 
@@ -195,7 +195,7 @@ The constitutional constraints the whole system is built under. They read like r
 - **Reel (output):** native PNG (full color-type matrix) / JPEG decode / GIF / y4m / WAV codecs; PNG sequences encoded in parallel with fixed DEFLATE block boundaries so bytes are deterministic on any thread count; an ordered asynchronous emitter over preallocated frame rings; and the **negotiated ffmpeg boundary**, where pixel format (RGBA/NV12/P010), orientation, transfer, and encoder are negotiated per job, hardware encoders (VideoToolbox/NVENC) are available as a standard-mode knob, and everything is fingerprinted into provenance.
 - **Gauntlet (verification):** the symbol-granular Parity Ledger generated from one API schema shared by both front doors; correctness oracles against analytic ground truths and TeX's published rules; bit-locked self-goldens as the merge gate; the human-judged Look Gallery; an engine-equivalence suite holding fast-CPU and GPU engines to a versioned visual budget against certified frames; parser fuzzing with resource budgets; and eight CI-enforced performance gates.
 
-The full census lives in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md): the verified 257-class Reference census, the dependency displacement map, every subsystem contract, and the workstream/gate program.
+The full census lives in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md): the verified 257-class Reference census, the dependency displacement map, every subsystem contract, and the workstream/gate program.
 
 ## How it compares
 
@@ -452,7 +452,7 @@ A few honest boundaries:
 
 ## FAQ
 
-**Is this production-ready today?** The README describes the 1.0 target state (see the note at the top). Track the convergence gates in [§20 of the plan](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md): G0 "The Laws of the Machine", G1 "Core 2D", G2 "The Native Word", G3 "Depth & Motion", G4a "The Python Gallery" / G4b "Certified Reproducibility", G5 "Distribution & Leapfrogs".
+**Is this production-ready today?** The README describes the 1.0 target state (see the note at the top). Track the convergence gates in [§20 of the plan](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md): G0 "The Laws of the Machine", G1 "Core 2D", G2 "The Native Word", G3 "Depth & Motion", G4a "The Python Gallery" / G4b "Certified Reproducibility", G5 "Distribution & Leapfrogs".
 
 **Really, no LaTeX? How is the math typeset?** By **fmd-math**, a clean-room TeX-mathematics layout engine in the KaTeX/Typst class, built into `franken_markdown` and consumed here. It implements TeX's published layout rules (the eight atom classes, the spacing table, the Appendix-G placement parameters) over hand-calibrated metrics for bundled Computer Modern, with extensible delimiters assembled from CM's extension glyphs (drawn-path fallback, so no requested size can fail). The quality bar is *side-by-side indistinguishable at a glance from LaTeX*, judged on a real corpus; the spacing is verified against TeX's published parameters, not against pixels.
 
@@ -482,6 +482,6 @@ Bundled fonts (Computer Modern, IBM Plex Sans, CM Typewriter, Noto Sans Math) ar
 
 ## See also
 
-- [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md), the master plan (Revision 4): the anatomy of the Reference (the verified 257-class census and the dependency displacement map), the FrankenSuite foundation audit, the dependency & safety doctrine, the product contract, all ten subsystems, the two front doors, the Gauntlet, the performance model and CI gates, the crate map, the eleven workstreams and six convergence gates, the risk register, and the decision log.
+- [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](./docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md), the master plan (Revision 4): the anatomy of the Reference (the verified 257-class census and the dependency displacement map), the FrankenSuite foundation audit, the dependency & safety doctrine, the product contract, all ten subsystems, the two front doors, the Gauntlet, the performance model and CI gates, the crate map, the eleven workstreams and six convergence gates, the risk register, and the decision log.
 - [`AGENTS.md`](./AGENTS.md), conventions for human and AI agents working in this codebase, including the engineering doctrine and the determinism contract.
 - [`3b1b/manim`](https://github.com/3b1b/manim), the Reference: the source of the ideas, the API, and the aesthetic this program holds itself to.

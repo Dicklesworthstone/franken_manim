@@ -165,3 +165,8 @@ spikes/g0-5-python-ext/py/*.so
 # the corpus and Cargo.lock are committed and governed.
 /fuzz/target
 /fuzz/artifacts
+
+# Skill-loop / repo-janitor scratch
+.skill-loop-progress.md
+.skill-loop-progress-*.md
+

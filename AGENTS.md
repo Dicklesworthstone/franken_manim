@@ -50,7 +50,7 @@ The leapfrogs, in brief:
 - **Pinned bits, free scheduler.** One semantic renderer (Lumen) over multiple execution engines — certified CPU, fast CPU (SIMD tiers), and a standard-only Accelerator Annex (Metal/CUDA via frankentorch) — where every schedule reproduces certified bits exactly and everything that can't is quarantined to `standard` and labeled.
 - **Farm-class scaling from a single scene.** Pure-segment frame parallelism, pipelined frame stages, and topology-aware render teams saturate a 96-core workstation while certified output stays identical at any thread count.
 
-**The single source of truth for what we are building and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)** (Revision 4). Read it before writing any subsystem.
+**The single source of truth for what we are building and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md)** (Revision 4). Read it before writing any subsystem.
 
 ### What we stand on (the FrankenSuite substrate)
 
@@ -78,7 +78,7 @@ The project must be all four at once:
 ## Spec-First Workflow
 
 Implementation follows the plan, not ad-hoc invention. Read in this order:
-1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md) — the Reference anatomy (§1), the foundation audit (§2), the dependency & safety doctrine (§3), the product contract (§4), all ten subsystems (§6–§14), the two front doors (§15), the Gauntlet (§16), the performance model and CI gates (§17), the crate map (§19), the workstreams and gates (§20), the risk register (§21), and the decision log (§23).
+1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md) — the Reference anatomy (§1), the foundation audit (§2), the dependency & safety doctrine (§3), the product contract (§4), all ten subsystems (§6–§14), the two front doors (§15), the Gauntlet (§16), the performance model and CI gates (§17), the crate map (§19), the workstreams and gates (§20), the risk register (§21), and the decision log (§23).
 2. **The decision log (§23)** — D-01 … D-24 are binding unless amended there. The open questions (OQ-1 … OQ-12) each have an owner gate/workstream; do not silently resolve one in code.
 3. **Appendix A** (the 257-class census), **Appendix B** (kept look vs replaced mechanism), and **Appendix C** (the Reference-defect register and its rulings) — the normative contracts library work must honor.
 
