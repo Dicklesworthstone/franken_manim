@@ -2425,7 +2425,10 @@ delayed_apply_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(delayed_apply_samples, [[0.5, 1.0, 0.0], [1.0, 1.0, 0.0]])
+assert np.allclose(
+    delayed_apply_samples,
+    [[0.5, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
+)
 assert np.allclose(delayed_apply_source.get_center(), [1.0, 1.0, 0.0])
 assert delayed_apply.target_mobject is not None
 assert delayed_apply.target_mobject is not delayed_apply_source
@@ -2442,7 +2445,7 @@ apply_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(apply_tracker_samples, [3.0, 5.0])
+assert np.allclose(apply_tracker_samples, [3.0, 5.0, 5.0])
 assert apply_tracker.get_value() == 5.0
 
 try:
