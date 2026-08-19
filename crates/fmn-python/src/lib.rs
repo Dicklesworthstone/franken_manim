@@ -2558,7 +2558,7 @@ impl BridgeMobject {
             let mut max_x = f64::NEG_INFINITY;
             let mut min_y = f64::INFINITY;
             let mut max_y = f64::NEG_INFINITY;
-            for row in points.chunks_exact(3) {
+            for row in points.as_chunks::<3>().0 {
                 min_x = min_x.min(f64::from(row[0]));
                 max_x = max_x.max(f64::from(row[0]));
                 min_y = min_y.min(f64::from(row[1]));

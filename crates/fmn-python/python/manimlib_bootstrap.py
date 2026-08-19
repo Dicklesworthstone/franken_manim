@@ -3149,16 +3149,13 @@ class ImageMobject(Mobject):
             _np.array(_listify(opacity), dtype=float), self.get_num_points()
         )
         self.data["opacity"][:, 0] = values
-        self.opacity = opacity
         if recurse:
             for submob in self.submobjects:
                 submob.set_opacity(opacity, recurse=True)
         return self
 
     def set_color(self, color, opacity=None, recurse=None):
-        del color, recurse
-        if opacity is not None:
-            self.set_opacity(opacity)
+        del color, opacity, recurse
         return self
 
     def point_to_rgb(self, point):

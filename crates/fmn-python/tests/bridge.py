@@ -4250,7 +4250,7 @@ def verify_portal_console_scene():
     else:
         raise AssertionError("ImageMobject sampled outside its live quad")
     before_color = image.data.copy()
-    assert image.set_color(manimlib.RED) is image
+    assert image.set_color(manimlib.RED, opacity=0.1) is image
     assert np.array_equal(image.data, before_color)
     assert image.set_opacity([0.25, 0.75]) is image
     assert math.isclose(image.data["opacity"][0, 0], 0.25)
