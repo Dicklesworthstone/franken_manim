@@ -503,3 +503,55 @@ fn refresh_family_joint_angles_recomputes_from_points() {
         Some(vec![0.0; 5]),
     );
 }
+
+#[test]
+fn vmobject_reverse_separates_the_repair_scope_from_the_base_family_reversal() {
+    let mut stage = Stage::new();
+    let parent = vmob(
+        &mut stage,
+        &[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]],
+    );
+    let child = vmob(
+        &mut stage,
+        &[[2.0, 0.0, 0.0], [2.5, 0.0, 0.0], [3.0, 0.0, 0.0]],
+    );
+    stage.attach(parent, child).unwrap();
+    for mob in [parent, child] {
+        let buffer = &mut stage.get_mut(mob).unwrap().buffer;
+        buffer.write_range(
+            "base_normal",
+            0,
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        );
+        buffer.write_range("stroke_width", 0, &[1.0, 2.0, 3.0]);
+    }
+
+    stage
+        .reverse_family_points_with_scope(parent, false)
+        .unwrap();
+
+    assert_eq!(xs_of(&stage, parent), vec![1.0, 0.5, 0.0]);
+    assert_eq!(xs_of(&stage, child), vec![3.0, 2.5, 2.0]);
+    assert_eq!(
+        stage.get(parent).unwrap().buffer.read(1, "base_normal"),
+        Some(vec![0.0, 0.0, -1.0]),
+        "the selected VMobject receives the pre-reversal normal repair"
+    );
+    assert_eq!(
+        stage.get(child).unwrap().buffer.read(1, "base_normal"),
+        Some(vec![0.0, 0.0, 1.0]),
+        "recurse=false leaves descendant VMobject repair to the caller"
+    );
+    assert_eq!(
+        stage
+            .get(parent)
+            .unwrap()
+            .buffer
+            .read_column("stroke_width"),
+        Some(vec![3.0, 2.0, 1.0])
+    );
+    assert_eq!(
+        stage.get(child).unwrap().buffer.read_column("stroke_width"),
+        Some(vec![3.0, 2.0, 1.0])
+    );
+}

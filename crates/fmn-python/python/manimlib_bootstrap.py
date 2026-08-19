@@ -1652,7 +1652,7 @@ class Mobject(_BridgeMobject):
         return len(self.get_points())
 
     def reverse_points(self):
-        self._reverse_points()
+        self._reverse_points(True)
         return self
 
     def has_points(self):
@@ -2152,6 +2152,7 @@ class VMobject(Mobject):
     pre_function_handle_to_anchor_scale_factor = 0.01
     make_smooth_after_applying_functions = False
     tolerance_for_point_equality = 1e-8
+    long_lines = False
     joint_type_map = {
         "no_joint": 0,
         "auto": 1,
@@ -2346,12 +2347,33 @@ class VMobject(Mobject):
             self.append_points(points)
         return self
 
+    def add_arc_to(self, point, angle, n_components=None, threshold=1e-3):
+        points = self._add_arc_to_points(
+            _vec3(point),
+            float(angle),
+            n_components,
+            float(threshold),
+        )
+        if len(points) > 0:
+            self.append_points(points)
+        return self
+
     def add_points_as_corners(self, points):
         new_points = self._add_points_as_corners_points(
             [_vec3(point) for point in points]
         )
         if len(new_points) > 0:
             self.append_points(new_points)
+        return self
+
+    def add_subpath(self, points):
+        was_empty = self.get_num_points() == 0
+        new_points = self._add_subpath_points([_vec3(point) for point in points])
+        if len(new_points) > 0:
+            if was_empty:
+                self.set_points(new_points)
+            else:
+                self.append_points(new_points)
         return self
 
     def has_new_path_started(self):
@@ -2372,6 +2394,9 @@ class VMobject(Mobject):
 
     def is_closed(self):
         return self._is_path_closed()
+
+    def consider_points_equal(self, p0, p1):
+        return self._consider_path_points_equal(_vec3(p0), _vec3(p1))
 
     def set_points_as_corners(self, points):
         # Stage::set_points preserves existing records, but the first resize
@@ -2506,6 +2531,43 @@ class VMobject(Mobject):
     def make_smooth(self, approx=True, recurse=True):
         for submob in _family_preorder(self) if recurse else [self]:
             submob._make_smooth(bool(approx))
+        return self
+
+    def is_smooth(self, angle_tol=1 * _DEG):
+        return self._is_path_smooth(float(angle_tol))
+
+    def change_anchor_mode(self, mode):
+        self._change_anchor_mode(mode)
+        return self
+
+    def make_approximately_smooth(self, recurse=True):
+        return self.make_smooth(approx=True, recurse=recurse)
+
+    def make_jagged(self, recurse=True):
+        for submob in _family_preorder(self) if recurse else [self]:
+            submob._change_anchor_mode("jagged")
+        return self
+
+    def reverse_points(self, recurse=True):
+        recurse = bool(recurse)
+        if self._is_bound():
+            # One bound Stage owns the complete native family and preserves
+            # the Reference's separate repair and base-row reversal scopes.
+            self._reverse_points(recurse)
+            return self
+
+        # Detached proxies own one nursery apiece, so Python owns the family
+        # distribution just as it does for positional operations. These are
+        # the Reference's two exact phases over live RecordBuffer views.
+        family = _family_preorder(self)
+        for mob in family if recurse else [self]:
+            if not mob.has_points():
+                continue
+            inner_ends = mob.get_subpath_end_indices()[:-1]
+            mob.data["point"][inner_ends + 1] = mob.data["point"][inner_ends + 2]
+            mob.data["base_normal"][1::2] *= -1
+        for mob in family:
+            mob.data[:] = mob.data[::-1]
         return self
 
     def apply_function(self, function, make_smooth=False, **kwargs):

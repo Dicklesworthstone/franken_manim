@@ -426,6 +426,21 @@ impl QuadPath {
         angle: f64,
         n_components: Option<usize>,
     ) -> Result<&mut Self, GeomError> {
+        self.add_arc_to_with_threshold(point, angle, n_components, ARC_ANGLE_THRESHOLD)
+    }
+
+    /// `add_arc_to` with the caller's public straight-line cutoff.
+    ///
+    /// The Python surface exposes this as its `threshold` argument. Arc
+    /// density remains governed by BN-09; the threshold changes only whether
+    /// a sufficiently small angle takes the ordinary line path.
+    pub fn add_arc_to_with_threshold(
+        &mut self,
+        point: Vec3,
+        angle: f64,
+        n_components: Option<usize>,
+        threshold: f64,
+    ) -> Result<&mut Self, GeomError> {
         let last = self.last_point().ok_or(GeomError::EmptyPath)?;
         match n_components {
             Some(n) => {
@@ -434,7 +449,7 @@ impl QuadPath {
             None if !angle.is_finite() => return Err(GeomError::NonFiniteArcAngle),
             None => {}
         }
-        if angle.abs() < ARC_ANGLE_THRESHOLD {
+        if angle.abs() < threshold {
             return self.add_line_to(point, true);
         }
         let n = match n_components {
@@ -1433,6 +1448,34 @@ mod tests {
             Err(GeomError::NonFiniteArcAngle)
         ));
         assert_eq!(path, original, "a non-finite refusal must be atomic");
+    }
+
+    #[test]
+    fn add_arc_to_honors_the_callers_strict_line_threshold() {
+        let mut as_line = QuadPath::new();
+        as_line.start_new_path([0.0; 3]);
+        as_line
+            .add_arc_to_with_threshold([1.0, 0.0, 0.0], 5e-4, Some(1), 1e-3)
+            .unwrap();
+        assert_eq!(as_line.points()[1], [0.5, 0.0, 0.0]);
+
+        let mut as_arc = QuadPath::new();
+        as_arc.start_new_path([0.0; 3]);
+        as_arc
+            .add_arc_to_with_threshold([1.0, 0.0, 0.0], 5e-4, Some(1), 1e-4)
+            .unwrap();
+        assert_ne!(as_arc.points()[1], [0.5, 0.0, 0.0]);
+
+        let mut exact_boundary = QuadPath::new();
+        exact_boundary.start_new_path([0.0; 3]);
+        exact_boundary
+            .add_arc_to_with_threshold([1.0, 0.0, 0.0], 5e-4, Some(1), 5e-4)
+            .unwrap();
+        assert_eq!(
+            exact_boundary.points(),
+            as_arc.points(),
+            "the public threshold comparison is strict"
+        );
     }
 
     #[test]

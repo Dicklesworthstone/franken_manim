@@ -2182,6 +2182,28 @@ impl BridgeMobject {
         })
     }
 
+    /// Append a native endpoint arc under the public threshold and explicit
+    /// component policy. BN-09 owns the default density.
+    fn _add_arc_to_points(
+        slf: &Bound<'_, Self>,
+        point: [f64; 3],
+        angle: f64,
+        n_components: Option<usize>,
+        threshold: f64,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        if !threshold.is_finite() || threshold < 0.0 {
+            return Err(PyValueError::new_err(
+                "arc threshold must be a finite non-negative number",
+            ));
+        }
+        quad_path_tail(slf, |path| {
+            path.add_arc_to_with_threshold(point, angle, n_components, threshold)
+                .map(|_| ())
+                .map_err(native_error)
+        })
+    }
+
     /// Append a sequence of native straight quadratic segments atomically.
     fn _add_points_as_corners_points(
         slf: &Bound<'_, Self>,
@@ -2192,6 +2214,17 @@ impl BridgeMobject {
             path.add_points_as_corners(&points)
                 .map(|_| ())
                 .map_err(native_error)
+        })
+    }
+
+    /// Append a complete validated native subpath atomically.
+    fn _add_subpath_points(
+        slf: &Bound<'_, Self>,
+        points: Vec<[f64; 3]>,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        quad_path_tail(slf, |path| {
+            path.add_subpath(&points).map(|_| ()).map_err(native_error)
         })
     }
 
@@ -2221,6 +2254,39 @@ impl BridgeMobject {
     fn _path_unit_normal(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
         Ok(configured_quad_path(slf)?.unit_normal())
+    }
+
+    fn _consider_path_points_equal(
+        slf: &Bound<'_, Self>,
+        p0: [f64; 3],
+        p1: [f64; 3],
+    ) -> PyResult<bool> {
+        crossing::record(CrossingClass::Other);
+        Ok(configured_quad_path(slf)?.consider_points_equal(p0, p1))
+    }
+
+    fn _is_path_smooth(slf: &Bound<'_, Self>, angle_tol: f64) -> PyResult<bool> {
+        crossing::record(CrossingClass::Other);
+        Ok(configured_quad_path(slf)?.is_smooth(angle_tol))
+    }
+
+    /// Rebuild this VMobject's handles through Chisel's one anchor-mode
+    /// implementation, then commit through the Stage's RecordBuffer path.
+    fn _change_anchor_mode(slf: &Bound<'_, Self>, mode: &str) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        let mode = match mode {
+            "jagged" => fmn_library::AnchorMode::Jagged,
+            "approx_smooth" => fmn_library::AnchorMode::ApproxSmooth,
+            "true_smooth" => fmn_library::AnchorMode::TrueSmooth,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown VMobject anchor mode {other:?}; expected jagged, approx_smooth, or true_smooth"
+                )));
+            }
+        };
+        let mut path = configured_quad_path(slf)?;
+        path.change_anchor_mode(mode).map_err(native_error)?;
+        with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
     }
 
     /// Chisel's bounded longest-curve insertion over an arbitrary valid
@@ -2257,27 +2323,23 @@ impl BridgeMobject {
     /// remains exact without introducing a second Stage traversal contract.
     fn _make_smooth(slf: &Bound<'_, Self>, approx: bool) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
-        with_stage(slf, |stage, mob| {
-            let Some(points) = stage.get_points(mob) else {
-                return Err(StageError::StaleHandle);
-            };
-            if points.len() < 3 {
-                return Ok(());
-            }
-            let mut path =
-                fmn_library::QuadPath::from_points(points).map_err(StageError::Geometry)?;
-            path.make_smooth(approx).map_err(StageError::Geometry)?;
-            stage.set_points(mob, path.points())
-        })?
-        .map_err(stage_error)
+        let mut path = configured_quad_path(slf)?;
+        if path.num_points() < 3 {
+            return Ok(());
+        }
+        path.make_smooth(approx).map_err(native_error)?;
+        with_stage(slf, |stage, mob| stage.set_points(mob, path.points()))?.map_err(stage_error)
     }
 
     /// Reference `reverse_points` through Marionette's family operation,
     /// which reverses every record row with its point and repairs path
     /// break handles/base normals.
-    fn _reverse_points(slf: &Bound<'_, Self>) -> PyResult<()> {
+    fn _reverse_points(slf: &Bound<'_, Self>, repair_recurse: bool) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
-        with_stage(slf, |stage, mob| stage.reverse_family_points(mob))?.map_err(stage_error)
+        with_stage(slf, |stage, mob| {
+            stage.reverse_family_points_with_scope(mob, repair_recurse)
+        })?
+        .map_err(stage_error)
     }
 
     /// Whether this node's updater traversal is suspended. Ancestor pruning
@@ -6842,10 +6904,13 @@ class _GauntletPortalScene(Scene):
             (1.5, -0.6, 0.0),
             (2.0, -1.4, 0.0),
         )
-        native_path.start_new_path((-0.6, -1.6, 0.0))
-        native_path.add_points_as_corners(
-            ((0.0, -1.1, 0.0), (0.6, -1.6, 0.0))
-        ).close_path()
+        native_path.add_arc_to((2.5, -0.9, 0.0), 0.65)
+        native_path.add_subpath((
+            (-0.6, -1.6, 0.0),
+            (0.0, -1.1, 0.0),
+            (0.6, -1.6, 0.0),
+        )).close_path()
+        native_path.make_jagged(recurse=False)
         self.add(
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),

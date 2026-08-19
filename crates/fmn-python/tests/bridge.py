@@ -532,12 +532,17 @@ assert str(inspect.signature(VMobject.add_smooth_curve_to)) == "(self, point)"
 assert str(inspect.signature(VMobject.add_smooth_cubic_curve_to)) == (
     "(self, handle, point)"
 )
+assert str(inspect.signature(VMobject.add_arc_to)) == (
+    "(self, point, angle, n_components=None, threshold=0.001)"
+)
 assert str(inspect.signature(VMobject.add_points_as_corners)) == "(self, points)"
+assert str(inspect.signature(VMobject.add_subpath)) == "(self, points)"
 assert str(inspect.signature(VMobject.has_new_path_started)) == "(self)"
 assert str(inspect.signature(VMobject.get_last_point)) == "(self)"
 assert str(inspect.signature(VMobject.get_reflection_of_last_handle)) == "(self)"
 assert str(inspect.signature(VMobject.close_path)) == "(self, smooth=False)"
 assert str(inspect.signature(VMobject.is_closed)) == "(self)"
+assert str(inspect.signature(VMobject.consider_points_equal)) == "(self, p0, p1)"
 assert str(inspect.signature(VMobject.get_anchors_and_handles)) == "(self)"
 assert str(inspect.signature(VMobject.get_start_anchors)) == "(self)"
 assert str(inspect.signature(VMobject.get_end_anchors)) == "(self)"
@@ -558,6 +563,19 @@ assert str(inspect.signature(VMobject.insert_n_curves_to_point_list)) == (
     "(self, n, points)"
 )
 assert str(inspect.signature(VMobject.insert_n_curves)) == "(self, n, recurse=True)"
+assert list(inspect.signature(VMobject.is_smooth).parameters) == ["self", "angle_tol"]
+assert math.isclose(
+    inspect.signature(VMobject.is_smooth).parameters["angle_tol"].default,
+    manimlib.DEG,
+    rel_tol=0.0,
+    abs_tol=0.0,
+)
+assert str(inspect.signature(VMobject.change_anchor_mode)) == "(self, mode)"
+assert str(inspect.signature(VMobject.make_approximately_smooth)) == (
+    "(self, recurse=True)"
+)
+assert str(inspect.signature(VMobject.make_jagged)) == "(self, recurse=True)"
+assert str(inspect.signature(VMobject.reverse_points)) == "(self, recurse=True)"
 assert str(inspect.signature(VMobject.get_area_vector)) == "(self)"
 assert str(inspect.signature(VMobject.get_unit_normal)) == "(self, refresh=False)"
 assert str(inspect.signature(VMobject.get_arc_length)) == "(self, n_sample_points=None)"
@@ -3656,6 +3674,156 @@ bound_path.start_new_path([-1.0, 0.0, 0.0]).add_line_to([1.0, 0.0, 0.0])
 bound_path.start_new_path([0.0, 1.0, 0.0]).add_line_to([0.0, 2.0, 0.0])
 assert bound_path.get_num_curves() == 3
 assert np.allclose(bound_path.get_last_point(), [0.0, 2.0, 0.0])
+
+# The remaining topology operations also route through QuadPath. The public
+# threshold controls only the line-vs-arc decision; BN-09 controls density.
+equality_path = VMobject()
+equality_path.tolerance_for_point_equality = 1e-3
+assert equality_path.consider_points_equal([0, 0, 0], [0.0009, -0.0009, 0])
+assert not equality_path.consider_points_equal([0, 0, 0], [0.001, 0, 0])
+
+threshold_line = VMobject().start_new_path([0.0, 0.0, 0.0])
+assert (
+    threshold_line.add_arc_to(
+        [1.0, 0.0, 0.0], 5e-4, n_components=1, threshold=1e-3
+    )
+    is threshold_line
+)
+assert np.allclose(threshold_line.get_points()[1], [0.5, 0.0, 0.0])
+
+threshold_arc = VMobject().start_new_path([0.0, 0.0, 0.0])
+threshold_arc.add_arc_to(
+    [1.0, 0.0, 0.0], 5e-4, n_components=1, threshold=1e-4
+)
+assert not np.allclose(threshold_arc.get_points()[1], [0.5, 0.0, 0.0])
+
+dense_arc = VMobject().start_new_path([0.0, 0.0, 0.0])
+dense_arc.add_arc_to([1.0, 1.0, 0.0], math.pi / 2.0)
+assert dense_arc.get_num_curves() == 4
+explicit_arc = VMobject().start_new_path([0.0, 0.0, 0.0])
+explicit_arc.add_arc_to([1.0, 1.0, 0.0], math.pi / 2.0, n_components=2)
+assert explicit_arc.get_num_curves() == 2
+for bad_kwargs, message in (
+    ({"n_components": 0}, "component"),
+    ({"threshold": float("nan")}, "threshold"),
+    ({"threshold": -1.0}, "threshold"),
+):
+    refusal_arc = VMobject().start_new_path([0.0, 0.0, 0.0])
+    refusal_before = refusal_arc.data.copy()
+    try:
+        refusal_arc.add_arc_to([1.0, 0.0, 0.0], 5e-4, **bad_kwargs)
+    except ValueError as error:
+        assert message in str(error).lower()
+    else:
+        raise AssertionError(f"add_arc_to accepted {bad_kwargs}")
+    assert np.array_equal(refusal_arc.data, refusal_before)
+
+subpath = VMobject()
+first_run = np.array(
+    [[0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [1.0, 0.0, 0.0]]
+)
+assert subpath.add_subpath(first_run) is subpath
+assert np.allclose(subpath.get_points(), first_run)
+subpath.add_subpath(
+    [[1.0, 0.0, 0.0], [1.5, -0.5, 0.0], [2.0, 0.0, 0.0]]
+)
+assert len(subpath.get_subpaths()) == 1
+subpath.add_subpath(
+    [[3.0, 0.0, 0.0], [3.5, 0.5, 0.0], [4.0, 0.0, 0.0]]
+)
+assert len(subpath.get_subpaths()) == 2
+subpath_before = subpath.data.copy()
+assert subpath.add_subpath([]) is subpath
+assert np.array_equal(subpath.data, subpath_before)
+try:
+    subpath.add_subpath([[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
+except ValueError as error:
+    assert "odd length" in str(error).lower()
+else:
+    raise AssertionError("add_subpath accepted an even shared-anchor run")
+assert np.array_equal(subpath.data, subpath_before)
+
+anchor_modes = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+)
+anchor_modes.data["stroke_width"][:, 0] = [1.0, 2.0, 3.0, 4.0, 5.0]
+anchor_mode_widths = anchor_modes.data["stroke_width"].copy()
+assert not anchor_modes.is_smooth()
+assert anchor_modes.change_anchor_mode("approx_smooth") is anchor_modes
+assert anchor_modes.is_smooth()
+assert np.array_equal(anchor_modes.data["stroke_width"], anchor_mode_widths)
+assert anchor_modes.make_jagged(recurse=False) is anchor_modes
+assert not anchor_modes.is_smooth()
+assert anchor_modes.make_approximately_smooth(recurse=False) is anchor_modes
+assert anchor_modes.is_smooth()
+anchor_before = anchor_modes.data.copy()
+try:
+    anchor_modes.change_anchor_mode("mystery")
+except ValueError as error:
+    assert "anchor mode" in str(error).lower()
+else:
+    raise AssertionError("change_anchor_mode accepted an unknown mode")
+assert np.array_equal(anchor_modes.data, anchor_before)
+
+mode_parent = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+)
+mode_child = VMobject().set_points_as_corners(
+    [[0.0, 2.0, 0.0], [1.0, 3.0, 0.0], [2.0, 2.0, 0.0]]
+)
+mode_parent.add(mode_child)
+mode_child.make_approximately_smooth(recurse=False)
+child_smooth_points = mode_child.get_points().copy()
+mode_parent.make_jagged(recurse=False)
+assert np.array_equal(mode_child.get_points(), child_smooth_points)
+mode_parent.make_jagged(recurse=True)
+assert not np.array_equal(mode_child.get_points(), child_smooth_points)
+
+# VMobject's pre-pass honors recurse, while the Reference base reversal still
+# reverses every family row. The odd normal rows reveal the phase boundary.
+reverse_parent = VMobject().set_points_as_corners(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+)
+reverse_child = VMobject().set_points_as_corners(
+    [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]
+)
+reverse_parent.add(reverse_child)
+reverse_parent.data["base_normal"][:] = [0.0, 0.0, 1.0]
+reverse_child.data["base_normal"][:] = [0.0, 0.0, 1.0]
+reverse_parent.data["stroke_width"][:, 0] = [1.0, 2.0, 3.0]
+reverse_child.data["stroke_width"][:, 0] = [4.0, 5.0, 6.0]
+assert reverse_parent.reverse_points(recurse=False) is reverse_parent
+assert np.allclose(reverse_parent.get_points()[::2, 0], [1.0, 0.0])
+assert np.allclose(reverse_child.get_points()[::2, 0], [3.0, 2.0]), (
+    reverse_child.get_points()
+)
+assert np.allclose(reverse_parent.data["base_normal"][1], [0.0, 0.0, -1.0])
+assert np.allclose(reverse_child.data["base_normal"][1], [0.0, 0.0, 1.0])
+assert np.allclose(reverse_parent.data["stroke_width"][:, 0], [3.0, 2.0, 1.0])
+assert np.allclose(reverse_child.data["stroke_width"][:, 0], [6.0, 5.0, 4.0])
+
+# The scene-bound branch must expose the same two-phase semantics through one
+# shared native Stage, not merely through the detached Python fallback above.
+bound_reverse_scene = Scene()
+bound_reverse_parent = VMobject().set_points_as_corners(
+    [[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]]
+)
+bound_reverse_child = VMobject().set_points_as_corners(
+    [[2.0, 1.0, 0.0], [3.0, 1.0, 0.0]]
+)
+bound_reverse_parent.add(bound_reverse_child)
+bound_reverse_parent.data["base_normal"][:] = [0.0, 0.0, 1.0]
+bound_reverse_child.data["base_normal"][:] = [0.0, 0.0, 1.0]
+bound_reverse_scene.add(bound_reverse_parent)
+bound_reverse_parent.reverse_points(recurse=False)
+assert np.allclose(bound_reverse_parent.get_points()[::2, 0], [1.0, 0.0])
+assert np.allclose(bound_reverse_child.get_points()[::2, 0], [3.0, 2.0])
+assert np.allclose(
+    bound_reverse_parent.data["base_normal"][1], [0.0, 0.0, -1.0]
+)
+assert np.allclose(
+    bound_reverse_child.data["base_normal"][1], [0.0, 0.0, 1.0]
+)
 
 # Marionette's production partial-reveal operation is the one portal
 # VMobjects use too. A subcurve remains a full-size, independent record copy:

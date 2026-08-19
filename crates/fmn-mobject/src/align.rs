@@ -559,17 +559,37 @@ impl Stage {
         Ok(())
     }
 
-    /// Reference `reverse_points` (vectorized_mobject.py:1248 over
-    /// mobject.py:276): per family member with points, re-mark the
-    /// subpath-break handles (`point[e+1] = point[e+2]` at each inner
-    /// end), invert the odd `base_normal` rows, then reverse **every**
-    /// record row wholesale — colors, widths, and angles travel with
-    /// their points, exactly as `data[::-1]` does.
+    /// Reference `VMobject.reverse_points(recurse)` over
+    /// `Mobject.reverse_points`: re-mark subpath-break handles and invert odd
+    /// `base_normal` rows for the selected VMobject family, then reverse
+    /// **every** record row in the complete family wholesale. Colors, widths,
+    /// and angles travel with their points exactly as `data[::-1]` does.
+    ///
+    /// The split is intentional. The Reference's VMobject pre-pass honors
+    /// `recurse`, while its base-class reversal always traverses the complete
+    /// family. Keeping both phases explicit preserves even the observable
+    /// `recurse=false` edge rather than silently normalizing it.
     ///
     /// # Errors
     /// [`StageError::StaleHandle`], [`StageError::Geometry`].
     pub fn reverse_family_points(&mut self, mob: Mob) -> Result<(), StageError> {
-        for member in self.family(mob) {
+        self.reverse_family_points_with_scope(mob, true)
+    }
+
+    /// The same family-row reversal with an explicit VMobject pre-repair
+    /// scope, used by the Python `recurse` surface.
+    pub fn reverse_family_points_with_scope(
+        &mut self,
+        mob: Mob,
+        repair_recurse: bool,
+    ) -> Result<(), StageError> {
+        let family = self.family(mob);
+        let repair_members = if repair_recurse {
+            family.clone()
+        } else {
+            vec![mob]
+        };
+        for member in repair_members {
             let len = self.try_get(member)?.buffer.len();
             if len == 0 {
                 continue;
@@ -601,7 +621,13 @@ impl Stage {
                     entry.buffer.write_range("base_normal", 0, &normals);
                 }
             }
-            // data[::-1]: reverse rows of every field.
+        }
+        for member in family {
+            let len = self.try_get(member)?.buffer.len();
+            if len == 0 {
+                continue;
+            }
+            // Mobject.reverse_points: data[::-1] for every family member.
             let entry = self.get_mut(member).ok_or(StageError::StaleHandle)?;
             let fields: Vec<(String, usize)> = entry
                 .buffer
