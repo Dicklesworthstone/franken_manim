@@ -2202,7 +2202,7 @@ plain_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(plain_tracker_values, [3.0, 5.0])
+assert np.allclose(plain_tracker_values, [3.0, 5.0, 5.0])
 assert plain_tracker.get_value() == 5.0
 
 exponential_tracker_scene = Scene()
@@ -2217,7 +2217,7 @@ exponential_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(exponential_tracker_values, [8.0, 16.0])
+assert np.allclose(exponential_tracker_values, [8.0, 16.0, 16.0])
 assert math.isclose(
     exponential_tracker.get_value(), 16.0, rel_tol=0.0, abs_tol=1e-12
 )
@@ -2234,8 +2234,50 @@ complex_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(complex_tracker_values, [3.0 + 2.0j, 5.0 + 6.0j])
+assert np.allclose(
+    complex_tracker_values,
+    [3.0 + 2.0j, 5.0 + 6.0j, 5.0 + 6.0j],
+)
 assert complex_tracker.get_value() == 5.0 + 6.0j
+
+# Scene.finish_animations runs one final zero-dt updater traversal.  The
+# display root intentionally precedes the derived root, so the ordinary frame
+# leaves it one update behind after the source lands on its endpoint.  The
+# finish pass must close that dependency in Reference root order before play
+# returns (and before a final-state PNG is captured).
+finish_scene = Scene()
+finish_source = manimlib.ValueTracker(1.0)
+finish_derived = manimlib.ValueTracker(1.0)
+finish_display = manimlib.ValueTracker(-1.0)
+finish_order = []
+
+
+def update_finish_display(mob, dt):
+    finish_order.append(("display", dt, float(finish_derived.get_value())))
+    mob.set_value(finish_derived.get_value())
+
+
+def update_finish_derived(mob, dt):
+    finish_order.append(("derived", dt, float(finish_source.get_value())))
+    mob.set_value(finish_source.get_value())
+
+
+finish_display.add_updater(update_finish_display, call=False)
+finish_derived.add_updater(update_finish_derived, call=False)
+finish_scene.add(finish_display, finish_derived, finish_source)
+finish_scene.play(
+    finish_source.animate.set_value(7.0),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert finish_order == [
+    ("display", 1.0 / 30.0, 1.0),
+    ("derived", 1.0 / 30.0, 7.0),
+    ("display", 0.0, 7.0),
+    ("derived", 0.0, 7.0),
+]
+assert finish_display.get_value() == 7.0
+assert finish_derived.get_value() == 7.0
 
 # Engine-driven plays release the Scene RefCell after interpolation and the
 # rational clock advance, then invoke Python scene updaters before native
@@ -2255,8 +2297,9 @@ release_scene.play(
     run_time=1.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert len(release_observations) == 1
+assert len(release_observations) == 2
 assert np.allclose(release_observations[0], [1.0 / 30.0, 1.0 / 30.0, 1.0])
+assert np.allclose(release_observations[1], [0.0, 1.0 / 30.0, 1.0])
 release_observations.clear()
 release_scene.wait(1.0 / 30.0)
 assert len(release_observations) == 2

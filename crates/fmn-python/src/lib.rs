@@ -4485,6 +4485,13 @@ impl PyScene {
                     crossing::record(CrossingClass::MethodDispatch);
                     callback.bind(slf.py()).call_method0("finish")?;
                 }
+                // Reference Scene.finish_animations performs one final
+                // update_mobjects(0) after every Animation.finish().  The
+                // native half follows inside finish_stepped_play; run the
+                // portal half while the Scene borrow is released so a
+                // root-order dependency that changed on the last sample is
+                // settled before a final-state capture.
+                run_python_updaters(slf, 0.0)?;
                 Ok(())
             })();
             if let Err(error) = drive_result {
