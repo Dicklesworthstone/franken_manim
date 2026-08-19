@@ -536,7 +536,7 @@ def _copy_mobject_graph(root, deep, memo=None):
         pairs = []
         for old in _family_preorder(root):
             new = type(old).__new__(type(old))
-            new._restore_engine_state(old._engine_state())
+            old._copy_detached_state_to(new)
             pairs.append((old, new))
     else:
         pairs = list(bound_shells)

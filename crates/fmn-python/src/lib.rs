@@ -3777,6 +3777,47 @@ impl BridgeMobject {
         Ok(Some(pairs))
     }
 
+    /// Copy one detached nursery into another proxy through Marionette's
+    /// cross-stage transfer. Unlike the pickle-shaped record-state path,
+    /// this preserves renderer-owned entry metadata such as placements,
+    /// shape tags, render primitives, and durable image resources.
+    fn _copy_detached_state_to(
+        slf: &Bound<'_, Self>,
+        target: &Bound<'_, BridgeMobject>,
+    ) -> PyResult<()> {
+        if slf.is(target) {
+            return Err(PyValueError::new_err(
+                "detached copy target must be a distinct mobject",
+            ));
+        }
+        let nursery = {
+            let source = slf.borrow();
+            if source.engine.is_some() || source.mob.is_some() {
+                return Err(PyRuntimeError::new_err(
+                    "detached-state copy requires a detached source mobject",
+                ));
+            }
+            let source_nursery = source.nursery.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("detached source mobject has no native nursery")
+            })?;
+            let mut stage = Stage::new();
+            let root = source_nursery
+                .stage
+                .copy_into(source_nursery.root, &mut stage)
+                .map_err(stage_error)?;
+            Nursery { stage, root }
+        };
+        let mut destination = target.borrow_mut();
+        if destination.engine.is_some() || destination.mob.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "detached-state copy cannot overwrite a bound target mobject",
+            ));
+        }
+        destination.nursery = Some(nursery);
+        destination.initialized = true;
+        Ok(())
+    }
+
     fn _engine_state<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
         record_state(slf.py(), slf)
     }
