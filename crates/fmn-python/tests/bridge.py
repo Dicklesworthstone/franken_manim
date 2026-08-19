@@ -3440,6 +3440,196 @@ assert np.allclose(corners.get_points()[::2], [[0, 0, 0], [1, 1, 0], [2, 0, 0]])
 corners.reverse_points()
 assert np.allclose(corners.get_points()[::2], [[2, 0, 0], [1, 1, 0], [0, 0, 0]])
 
+# Marionette's production partial-reveal operation is the one portal
+# VMobjects use too. A subcurve remains a full-size, independent record copy:
+# only its point/joint-angle lanes change, while gradient/style data survives.
+partial_source = VMobject().set_points(
+    np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, -1.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+)
+partial_source.data["stroke_width"][:, 0] = np.linspace(1.0, 5.0, 5)
+partial_source.data["fill_rgba"][:] = np.linspace(
+    [1.0, 0.0, 0.0, 0.2], [0.0, 0.0, 1.0, 0.8], 5
+)
+partial_style = {
+    "stroke_width": partial_source.data["stroke_width"].copy(),
+    "fill_rgba": partial_source.data["fill_rgba"].copy(),
+}
+partial_start = partial_source.quick_point_from_proportion(0.25)
+partial_end = partial_source.quick_point_from_proportion(0.75)
+partial_copy = partial_source.get_subcurve(0.25, 0.75)
+assert partial_copy is not partial_source
+assert partial_copy.get_num_points() == partial_source.get_num_points()
+assert np.allclose(partial_copy.get_points()[0], partial_start)
+assert np.allclose(partial_copy.get_points()[-1], partial_end)
+assert np.array_equal(partial_copy.data["stroke_width"], partial_style["stroke_width"])
+assert np.array_equal(partial_copy.data["fill_rgba"], partial_style["fill_rgba"])
+partial_copy.get_points()[0] = [-9.0, -9.0, 0.0]
+assert not np.allclose(partial_source.get_points()[0], partial_copy.get_points()[0])
+
+full_partial = VMobject().set_points_as_corners(
+    [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+)
+assert full_partial.pointwise_become_partial(partial_source, 0.0, 1.0) is full_partial
+assert np.allclose(full_partial.get_points(), partial_source.get_points())
+same_partial = partial_source.copy()
+assert same_partial.pointwise_become_partial(same_partial, 0.1, 0.9) is same_partial
+try:
+    partial_source.pointwise_become_partial(Mobject(), 0.0, 1.0)
+except AssertionError as error:
+    assert "VMobject" in str(error)
+else:
+    raise AssertionError("partial slicing accepted a non-VMobject source")
+try:
+    partial_source.get_subcurve(float("nan"), 0.5)
+except ValueError as error:
+    assert "finite" in str(error)
+else:
+    raise AssertionError("partial slicing accepted a non-finite bound")
+
+partial_scene = Scene()
+bound_partial_source = partial_source.copy()
+bound_partial_target = partial_source.copy()
+partial_scene.add(bound_partial_source, bound_partial_target)
+bound_start = bound_partial_source.quick_point_from_proportion(0.125)
+bound_end = bound_partial_source.quick_point_from_proportion(0.625)
+assert (
+    bound_partial_target.pointwise_become_partial(
+        bound_partial_source, 0.125, 0.625
+    )
+    is bound_partial_target
+)
+assert np.allclose(bound_partial_target.get_points()[0], bound_start)
+assert np.allclose(bound_partial_target.get_points()[-1], bound_end)
+
+vectorized = importlib.import_module("manimlib.mobject.types.vectorized_mobject")
+assert vectorized.VectorizedPoint is manimlib.VectorizedPoint
+assert vectorized.CurvesAsSubmobjects is manimlib.CurvesAsSubmobjects
+assert vectorized.DashedVMobject is manimlib.DashedVMobject
+assert vectorized.VHighlight is manimlib.VHighlight
+assert vectorized.VectorizedPoint.__mro__[:4] == (
+    vectorized.VectorizedPoint,
+    manimlib.Point,
+    VMobject,
+    Mobject,
+)
+assert vectorized.CurvesAsSubmobjects.__mro__[:3] == (
+    vectorized.CurvesAsSubmobjects,
+    manimlib.VGroup,
+    VMobject,
+)
+assert list(inspect.signature(vectorized.VectorizedPoint).parameters) == [
+    "location",
+    "color",
+    "fill_opacity",
+    "stroke_width",
+    "kwargs",
+]
+assert list(inspect.signature(vectorized.CurvesAsSubmobjects).parameters) == [
+    "vmobject",
+    "kwargs",
+]
+assert list(inspect.signature(vectorized.DashedVMobject).parameters) == [
+    "vmobject",
+    "num_dashes",
+    "positive_space_ratio",
+    "kwargs",
+]
+assert list(inspect.signature(vectorized.VHighlight).parameters) == [
+    "vmobject",
+    "n_layers",
+    "color_bounds",
+    "max_stroke_addition",
+]
+assert list(inspect.signature(VMobject.get_subcurve).parameters) == ["self", "a", "b"]
+assert list(inspect.signature(VMobject.pointwise_become_partial).parameters) == [
+    "self",
+    "vmobject",
+    "a",
+    "b",
+]
+
+vectorized_point = vectorized.VectorizedPoint(
+    [1.5, -2.0, 0.25], color=manimlib.RED
+)
+assert vectorized_point.get_num_points() == 1
+assert np.allclose(vectorized_point.get_location(), [1.5, -2.0, 0.25])
+assert np.allclose(vectorized_point.get_start(), vectorized_point.get_end())
+assert vectorized_point.get_stroke_width() == 0.0
+assert vectorized_point.get_fill_opacity() == 0.0
+vectorized_point.shift([0.5, 1.0, -0.25])
+assert np.allclose(vectorized_point.get_location(), [2.0, -1.0, 0.0])
+
+curve_parts = vectorized.CurvesAsSubmobjects(partial_source)
+assert len(curve_parts) == partial_source.get_num_curves()
+assert all(type(part) is VMobject for part in curve_parts)
+assert all(part.get_num_points() == 3 for part in curve_parts)
+assert all(part.get_stroke_width() == partial_source.get_stroke_width() for part in curve_parts)
+
+# BN-03: four dashes on a path whose two curves have very different lengths
+# still measure equally. Each child is a full native partial copy, not a
+# Python-reconstructed path, and the root retains the source's own style.
+uneven_dash_source = VMobject(stroke_color=manimlib.BLUE, stroke_width=3.0).set_points(
+    np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [6.0, 0.0, 0.0],
+        ]
+    )
+)
+dashed = vectorized.DashedVMobject(
+    uneven_dash_source, num_dashes=4, positive_space_ratio=0.5
+)
+assert len(dashed) == 4
+dash_lengths = [dash.get_arc_length() for dash in dashed]
+assert np.allclose(dash_lengths, dash_lengths[0], rtol=0.0, atol=1e-6), dash_lengths
+assert dashed.get_stroke_color() == manimlib.BLUE
+assert all(dash.get_stroke_width() == 3.0 for dash in dashed)
+assert len(vectorized.DashedVMobject(uneven_dash_source, num_dashes=0)) == 0
+try:
+    vectorized.DashedVMobject(uneven_dash_source, num_dashes=4097)
+except ValueError as error:
+    assert "4096" in str(error)
+else:
+    raise AssertionError("DashedVMobject exceeded the native child budget")
+try:
+    vectorized.DashedVMobject(
+        uneven_dash_source, num_dashes=4, positive_space_ratio=0.0
+    )
+except ValueError as error:
+    assert "positive-space ratio" in str(error)
+else:
+    raise AssertionError("DashedVMobject accepted a zero drawn ratio")
+
+highlight_source = manimlib.VGroup(
+    manimlib.Circle(radius=0.4, stroke_width=2.0, fill_opacity=0.5),
+    manimlib.Square(side_length=0.5, stroke_width=3.0, fill_opacity=0.75),
+)
+highlight = vectorized.VHighlight(highlight_source, n_layers=5)
+assert len(highlight) == 5
+assert all(len(layer) == 2 for layer in highlight)
+assert all(
+    member.get_fill_opacity() == 0.0
+    for layer in highlight
+    for member in layer.family_members_with_points()
+)
+assert highlight[0][0].get_stroke_width() == 7.0
+assert highlight[-1][0].get_stroke_width() == 3.0
+assert highlight[0][0].get_stroke_color() == manimlib.GREY_E
+assert highlight[-1][0].get_stroke_color() == manimlib.GREY_C
+assert len(vectorized.VHighlight(highlight_source, n_layers=0)) == 0
+
 # VMobject topology is read directly from the writable shared-anchor record
 # view, while insertion delegates its distribution/subdivision work to
 # Chisel and commits through the ordinary RecordBuffer point-write seam.

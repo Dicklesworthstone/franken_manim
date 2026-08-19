@@ -595,6 +595,34 @@ fn with_stage<T>(
     Ok(operation(&mut nursery.stage, root))
 }
 
+/// Copy one proxy's root entry into an unrelated Stage without copying its
+/// descendants. Callers handle the same-Stage fast path before entering this
+/// helper, so borrowing a bound source here can never alias `target`.
+fn copy_proxy_entry_into(source: &Bound<'_, BridgeMobject>, target: &mut Stage) -> PyResult<Mob> {
+    let bound = {
+        let cell = source.borrow();
+        cell.engine
+            .as_ref()
+            .zip(cell.mob)
+            .map(|(engine, mob)| (Rc::clone(engine), mob))
+    };
+    if let Some((engine, mob)) = bound {
+        return engine
+            .borrow()
+            .stage()
+            .copy_entry_into(mob, target)
+            .map_err(stage_error);
+    }
+    let cell = source.borrow();
+    let nursery = cell.nursery.as_ref().ok_or_else(|| {
+        StaleHandleError::new_err("partial source has no detached or bound state")
+    })?;
+    nursery
+        .stage
+        .copy_entry_into(nursery.root, target)
+        .map_err(stage_error)
+}
+
 fn with_uniforms<T>(
     proxy: &Bound<'_, BridgeMobject>,
     operation: impl FnOnce(&mut Uniforms) -> PyResult<T>,
@@ -2115,6 +2143,96 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.point_from_proportion(mob, alpha))?.map_err(stage_error)
     }
 
+    /// Reference `VMobject.pointwise_become_partial`, routed to the same
+    /// Marionette operation Choreo's creation animations use. The source may
+    /// be detached or scene-bound; an unrelated Stage contributes a temporary
+    /// root-entry copy so record data never crosses an active arena borrow.
+    fn _pointwise_become_partial(
+        slf: &Bound<'_, Self>,
+        source: &Bound<'_, BridgeMobject>,
+        a: f64,
+        b: f64,
+    ) -> PyResult<()> {
+        if !a.is_finite() || !b.is_finite() {
+            return Err(PyValueError::new_err("partial-curve bounds must be finite"));
+        }
+        crossing::record(CrossingClass::FieldWrite);
+
+        let self_bound = {
+            let cell = slf.borrow();
+            cell.engine
+                .as_ref()
+                .zip(cell.mob)
+                .map(|(engine, mob)| (Rc::clone(engine), mob))
+        };
+        if let Some((engine, mob)) = self_bound {
+            let source_bound = {
+                let cell = source.borrow();
+                cell.engine
+                    .as_ref()
+                    .zip(cell.mob)
+                    .map(|(source_engine, source_mob)| (Rc::clone(source_engine), source_mob))
+            };
+            if let Some((source_engine, source_mob)) = source_bound
+                && same_engine(&engine, &source_engine)
+            {
+                return engine
+                    .borrow_mut()
+                    .stage_mut()
+                    .pointwise_become_partial(mob, source_mob, a, b)
+                    .map_err(stage_error);
+            }
+
+            let mut runtime = engine.borrow_mut();
+            let stage = runtime.stage_mut();
+            let temporary = copy_proxy_entry_into(source, stage)?;
+            let result = stage
+                .pointwise_become_partial(mob, temporary, a, b)
+                .map_err(stage_error);
+            let cleanup = stage.delete(temporary).map_err(stage_error);
+            result.and(cleanup)
+        } else {
+            let mut cell = slf.borrow_mut();
+            let nursery = cell.nursery.as_mut().ok_or_else(|| {
+                StaleHandleError::new_err("partial target has no detached or bound state")
+            })?;
+            if slf.is(source) {
+                return nursery
+                    .stage
+                    .pointwise_become_partial(nursery.root, nursery.root, a, b)
+                    .map_err(stage_error);
+            }
+            let temporary = copy_proxy_entry_into(source, &mut nursery.stage)?;
+            let result = nursery
+                .stage
+                .pointwise_become_partial(nursery.root, temporary, a, b)
+                .map_err(stage_error);
+            let cleanup = nursery.stage.delete(temporary).map_err(stage_error);
+            result.and(cleanup)
+        }
+    }
+
+    /// Atlas/Chisel's true-arclength dash placement expressed as the
+    /// curve-index windows consumed by `pointwise_become_partial`.
+    fn _dash_curve_intervals(
+        slf: &Bound<'_, Self>,
+        num_dashes: usize,
+        positive_space_ratio: f64,
+    ) -> PyResult<Vec<(f64, f64)>> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            let source =
+                fmn_library::VMobject::from_points(stage.get_points(mob).unwrap_or_default());
+            fmn_library::vmobject::dash_curve_intervals(
+                &source,
+                num_dashes,
+                positive_space_ratio,
+                0.0,
+            )
+        })?
+        .map_err(native_error)
+    }
+
     /// `Arc.get_arc_center` over this entry's current world-space points.
     fn _arc_center(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
@@ -2194,6 +2312,38 @@ impl BridgeMobject {
         vertices: Vec<[f64; 3]>,
     ) -> PyResult<Bound<'py, PyList>> {
         install_native_tree(slf, factory, fmn_library::Polygon::new(vertices).build())
+    }
+
+    /// `VectorizedPoint(location)` over Atlas's one-record native value.
+    fn _build_vectorized_point<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        location: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        install_native_tree(
+            slf,
+            factory,
+            fmn_library::vmobject::vectorized_point(location),
+        )
+    }
+
+    /// Split a source's live shared-anchor run with Atlas's
+    /// `CurvesAsSubmobjects` builder. Python reapplies the source style to
+    /// each returned child, matching the Reference's constructor body.
+    fn _build_curves_as_submobjects<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source: &Bound<'_, BridgeMobject>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let points = with_stage(source, |stage, mob| {
+            stage.get_points(mob).unwrap_or_default()
+        })?;
+        let source = fmn_library::VMobject::from_points(points);
+        install_native_tree(
+            slf,
+            factory,
+            fmn_library::vmobject::curves_as_submobjects(&source),
+        )
     }
 
     /// `RegularPolygon(n, radius, start_angle)`: the bounded native
@@ -6484,7 +6634,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, Scene
+            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, DashedVMobject, Scene
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -6497,6 +6647,7 @@ class _GauntletPortalScene(Scene):
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
             AnnularSector(inner_radius=0.25, outer_radius=0.6).shift((0, 1, 0)),
+            DashedVMobject(Circle(radius=0.45), num_dashes=6).shift((-1.25, 1, 0)),
         )
         self.wait(1 / 30)
 

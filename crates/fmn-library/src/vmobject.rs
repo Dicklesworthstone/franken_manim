@@ -12,7 +12,7 @@
 //! `Stage::add`; nothing in the library reaches into the arena to finish a
 //! half-constructed object.
 
-use fmn_core::color::Srgb;
+use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::OUT;
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, QuadPath, space_ops};
@@ -962,15 +962,12 @@ pub fn v_group(children: impl IntoIterator<Item = VMobject>) -> VMobject {
 
 /// `VectorizedPoint`: a single location that behaves like a mobject.
 ///
-/// The Reference gives it four copies of the same point so it survives
-/// path arithmetic (`VectorizedPoint.__init__` sets `[location] * 4`);
-/// ours keeps the shared-anchor invariant instead, which needs an odd
-/// count, so it is three — one null curve, the degenerate path §7.1
-/// specifies. The observable behaviour (a zero-extent mobject at
-/// `location`, with `get_start == get_end == location`) is identical.
+/// The pinned Reference stores exactly one point. One is also a valid
+/// shared-anchor run (an anchor with zero curves), so the native value keeps
+/// the same observable record topology rather than inventing a null curve.
 #[must_use]
 pub fn vectorized_point(location: Vec3) -> VMobject {
-    VMobject::from_points(vec![location; 3])
+    VMobject::from_points(vec![location])
         .map_style(|s| s.stroke(s.stroke_color, 0.0, 0.0).fill(s.fill_color, 0.0))
 }
 
@@ -1014,93 +1011,110 @@ pub fn dashed_vmobject(
     positive_space_ratio: f64,
     dash_offset: f64,
 ) -> Result<VMobject, DashError> {
-    validate_dash_count(num_dashes)?;
-    validate_positive_space_ratio(positive_space_ratio)?;
-    if !dash_offset.is_finite() {
-        return Err(DashError::InvalidDashOffset);
-    }
-
     let mut group = VMobject::new().with_style(source.style());
-    if num_dashes == 0 {
-        return Ok(group);
-    }
     let Ok(path) = source.path() else {
         return Ok(group);
     };
-    if !path.has_points() {
-        return Ok(group);
-    }
-
-    // The Reference's period arithmetic (vectorized_mobject.py), kept: the
-    // dashes tile [0, 1] with `positive_space_ratio` of each period drawn.
-    let n = num_dashes as f64;
-    let full_period = 1.0 / n;
-    let dash_len = full_period * positive_space_ratio;
-    let table = fmn_geom::ArcLengthTable::for_path(&path);
-    for i in 0..num_dashes {
-        let alpha = i as f64 * full_period + dash_offset * full_period;
-        let (a, b) = (alpha, alpha + dash_len);
-        if let Some(points) = subpath_by_length(&path, &table, a.rem_euclid(1.0), b) {
+    for (a, b) in dash_curve_intervals(source, num_dashes, positive_space_ratio, dash_offset)? {
+        if let Some((points, _, _)) = QuadPath::partial_points(path.points(), a, b) {
             group = group.with_child(VMobject::from_points(points).with_style(source.style()));
         }
     }
     Ok(group)
 }
 
-/// The true-length restriction of `path` to `[a, b]`, as a point run.
+/// Curve-index intervals for a true-arclength dash pattern.
 ///
-/// Both ends are converted from length proportion to the *curve-index*
-/// proportion `QuadPath::partial_points` speaks, so the cut lands where
-/// the arc length says it should.
-fn subpath_by_length(
-    path: &QuadPath,
-    table: &fmn_geom::ArcLengthTable,
-    a: f64,
-    b: f64,
-) -> Option<Vec<Vec3>> {
+/// The pinned Reference normalizes dash starts by
+/// `1 - full_period + dash_length`; that placement rule is kept. The only
+/// deliberate change is BN-03: those starts and ends are interpreted in true
+/// length space, then converted to the curve-index proportions consumed by
+/// [`QuadPath::partial_points`] and Marionette's partial-reveal operation.
+/// Returning the intervals separately lets bindings preserve the source's
+/// complete record data while the native geometry authority chooses the cut.
+///
+/// # Errors
+///
+/// Returns [`DashError`] for an excessive count, an invalid drawn ratio, or
+/// a non-finite offset. Non-positive counts are represented by the caller as
+/// an empty pattern; the Rust surface accepts zero directly.
+pub fn dash_curve_intervals(
+    source: &VMobject,
+    num_dashes: usize,
+    positive_space_ratio: f64,
+    dash_offset: f64,
+) -> Result<Vec<(f64, f64)>, DashError> {
+    validate_dash_count(num_dashes)?;
+    if !dash_offset.is_finite() {
+        return Err(DashError::InvalidDashOffset);
+    }
+    if num_dashes == 0 {
+        return Ok(Vec::new());
+    }
+    validate_positive_space_ratio(positive_space_ratio)?;
+
+    let Ok(path) = source.path() else {
+        return Ok(Vec::new());
+    };
     let n_curves = path.num_curves();
     if n_curves == 0 {
-        return None;
+        return Ok(Vec::new());
     }
+    let table = fmn_geom::ArcLengthTable::for_path(&path);
     let index_alpha = |alpha: f64| -> f64 {
         let clamped = alpha.clamp(0.0, 1.0);
-        match table.curve_and_t_at(path, clamped) {
+        match table.curve_and_t_at(&path, clamped) {
             Some((curve, t)) => (curve as f64 + t) / n_curves as f64,
             None => clamped,
         }
     };
-    let (ia, ib) = (index_alpha(a), index_alpha(b.min(1.0)));
-    if ib <= ia {
-        return None;
+
+    let n = num_dashes as f64;
+    let full_period = 1.0 / n;
+    let dash_length = full_period * positive_space_ratio;
+    let start_denominator = 1.0 - full_period + dash_length;
+    let mut intervals = Vec::with_capacity(num_dashes);
+    for i in 0..num_dashes {
+        let start = (i as f64 * full_period) / start_denominator + dash_offset * full_period;
+        let start = start.rem_euclid(1.0);
+        let end = (start + dash_length).min(1.0);
+        let (a, b) = (index_alpha(start), index_alpha(end));
+        if b > a {
+            intervals.push((a, b));
+        }
     }
-    QuadPath::partial_points(path.points(), ia, ib).map(|(points, _, _)| points)
+    Ok(intervals)
 }
 
-/// `VHighlight`: concentric copies of a source at decreasing opacity, the
-/// Reference's cheap glow.
+/// `VHighlight`: full-family copies of a source with gradient-colored,
+/// progressively wider strokes — the Reference's cheap outline glow.
 ///
-/// `n_layers` copies are scaled outward from the source's own centre; the
-/// outermost is the faintest. The Reference's defaults are 5 layers, a
-/// maximum outward stroke of 5, and opacities fading to zero.
+/// The returned order matches the pinned Reference: the first child has the
+/// largest addition and the final gradient color, while the last child has
+/// the smallest addition and first color. Fill opacity is cleared throughout
+/// every copied family; existing stroke opacity is preserved.
 #[must_use]
 pub fn v_highlight(
     source: &VMobject,
     n_layers: usize,
     max_stroke_addition: f64,
-    color: Srgb,
+    color_bounds: [Srgb; 2],
 ) -> VMobject {
     let mut group = VMobject::new();
     if n_layers == 0 {
         return group;
     }
-    for i in 0..n_layers {
-        let t = (i + 1) as f64 / n_layers as f64;
-        let width = max_stroke_addition * t;
-        let opacity = 1.0 - t;
-        group = group.with_child(
-            VMobject::from_points(source.points().to_vec())
-                .map_style(|s| s.stroke(color, width, opacity).fill(color, 0.0)),
-        );
+    let colors = color_gradient(&color_bounds, n_layers);
+    for child_index in 0..n_layers {
+        let reverse_index = n_layers - 1 - child_index;
+        let addition = max_stroke_addition * (reverse_index + 1) as f64 / n_layers as f64;
+        let color = colors[reverse_index];
+        let child = source.clone().map_style_deep(|style| {
+            style
+                .stroke(color, style.stroke_width + addition, style.stroke_opacity)
+                .fill(style.fill_color, 0.0)
+        });
+        group = group.with_child(child);
     }
     group
 }
@@ -1235,6 +1249,11 @@ mod tests {
     fn vectorized_point_is_a_degenerate_path_at_its_location() {
         let mut stage = Stage::new();
         let mob = stage.add(vectorized_point([1.0, 2.0, 3.0]));
+        assert_eq!(
+            stage.get(mob).expect("live point").buffer.len(),
+            1,
+            "the pinned Reference exposes one location record"
+        );
         assert_eq!(stage.get_start(mob), Some([1.0, 2.0, 3.0]));
         assert_eq!(stage.get_end(mob), Some([1.0, 2.0, 3.0]));
         let bbox = stage.get_bounding_box(mob);
@@ -1308,6 +1327,22 @@ mod tests {
     }
 
     #[test]
+    fn dash_intervals_keep_reference_start_normalization_in_length_space() {
+        let source = VMobject::from_points(vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+        let intervals = dash_curve_intervals(&source, 4, 0.5, 0.0).expect("valid dash intervals");
+        assert_eq!(intervals.len(), 4);
+        let starts: Vec<f64> = intervals.iter().map(|(start, _)| *start).collect();
+        let ends: Vec<f64> = intervals.iter().map(|(_, end)| *end).collect();
+        let expected_starts = [0.0, 2.0 / 7.0, 4.0 / 7.0, 6.0 / 7.0];
+        for (actual, expected) in starts.iter().zip(expected_starts) {
+            assert!((actual - expected).abs() < 1e-12, "{starts:?}");
+        }
+        for (start, end) in starts.iter().zip(ends) {
+            assert!((end - start - 0.125).abs() < 1e-12, "{intervals:?}");
+        }
+    }
+
+    #[test]
     fn zero_dashes_and_empty_sources_are_defined() {
         let circle = Circle::new().build();
         assert!(
@@ -1324,7 +1359,11 @@ mod tests {
                 .is_empty()
         );
         assert!(curves_as_submobjects(&empty).children().is_empty());
-        assert!(v_highlight(&empty, 0, 5.0, RED).children().is_empty());
+        assert!(
+            v_highlight(&empty, 0, 5.0, [RED, RED])
+                .children()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1365,22 +1404,47 @@ mod tests {
     }
 
     #[test]
-    fn highlight_layers_fade_outward() {
-        let circle = Circle::new().build();
-        let glow = v_highlight(&circle, 5, 5.0, RED);
+    fn highlight_layers_clone_the_family_and_add_gradient_strokes() {
+        let child = Circle::new()
+            .radius(0.25)
+            .build()
+            .map_style(|style| style.stroke_width(2.0));
+        let circle = Circle::new()
+            .build()
+            .map_style(|style| style.stroke(RED, 3.0, 0.4).fill(RED, 0.75))
+            .with_child(child);
+        let glow = v_highlight(&circle, 5, 5.0, [RED, fmn_core::constants::BLUE]);
         assert_eq!(glow.children().len(), 5);
         let widths: Vec<f64> = glow
             .children()
             .iter()
             .map(|c| c.style().stroke_width)
             .collect();
-        assert!(widths.windows(2).all(|w| w[0] < w[1]), "{widths:?}");
+        assert_eq!(widths, vec![8.0, 7.0, 6.0, 5.0, 4.0]);
         let opacities: Vec<f64> = glow
             .children()
             .iter()
             .map(|c| c.style().stroke_opacity)
             .collect();
-        assert!(opacities.windows(2).all(|o| o[0] > o[1]), "{opacities:?}");
+        assert_eq!(opacities, vec![0.4; 5]);
+        assert!(
+            glow.children().iter().all(|copy| {
+                copy.style().fill_opacity == 0.0
+                    && copy.children().len() == 1
+                    && copy.children()[0].style().fill_opacity == 0.0
+            }),
+            "every full-family copy clears fill opacity"
+        );
+        assert_eq!(
+            glow.children()[0].style().stroke_color,
+            fmn_core::constants::BLUE
+        );
+        assert_eq!(glow.children()[4].style().stroke_color, RED);
+        assert_eq!(
+            glow.children()[0].children()[0].style().stroke_width,
+            7.0,
+            "the same width addition reaches descendants"
+        );
     }
 
     #[test]

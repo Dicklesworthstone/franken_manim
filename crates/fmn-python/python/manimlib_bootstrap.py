@@ -49,6 +49,9 @@ _ONES = _np.array([1.0, 1.0, 1.0])
 _DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
 _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
 _SMALL_BUFF = 0.1
+_BLACK = "#000000"
+_GREY_C = "#888888"
+_GREY_E = "#222222"
 
 # Function object -> catalog name, filled by _install_rate_functions;
 # Scene.play maps rate_func callables into the engine's named catalog.
@@ -2393,6 +2396,17 @@ class VMobject(Mobject):
     def point_from_proportion(self, alpha):
         return _np.array(self._point_from_proportion(float(alpha)))
 
+    def pointwise_become_partial(self, vmobject, a, b):
+        if not isinstance(vmobject, VMobject):
+            raise AssertionError("pointwise_become_partial expects a VMobject")
+        self._pointwise_become_partial(vmobject, float(a), float(b))
+        return self
+
+    def get_subcurve(self, a, b):
+        vmobject = self.copy()
+        vmobject.pointwise_become_partial(self, a, b)
+        return vmobject
+
     # Style surface (fm-d3gt): Reference bodies (vectorized_mobject.py at
     # the pin) over the live engine record views (`stroke_rgba`,
     # `stroke_width`, `fill_rgba`, `fill_border_width`) and the typed
@@ -2703,6 +2717,100 @@ class VGroup(VMobject):
         ):
             raise Exception("Only VMobjects can be passed into VGroup")
         self._ingest_args(*vmobjects)
+
+
+class VectorizedPoint(Point, VMobject):
+    """The Reference's invisible one-record VMobject location marker."""
+
+    def __init__(
+        self,
+        location=_ORIGIN,
+        color=_BLACK,
+        fill_opacity=0.0,
+        stroke_width=0.0,
+        **kwargs,
+    ):
+        self.artificial_width = kwargs.pop("artificial_width", 1e-6)
+        self.artificial_height = kwargs.pop("artificial_height", 1e-6)
+        _install_live_state(self)
+        specs = self._build_vectorized_point(
+            _native_shell_factory, _vec3(location)
+        )
+        _hang_native_children(self, specs)
+        kwargs.setdefault("color", color)
+        kwargs.setdefault("fill_opacity", fill_opacity)
+        kwargs.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class CurvesAsSubmobjects(VGroup):
+    """One native shared-anchor child for each source quadratic curve."""
+
+    def __init__(self, vmobject, **kwargs):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError("CurvesAsSubmobjects expects a VMobject")
+        _install_live_state(self)
+        specs = self._build_curves_as_submobjects(
+            _native_shell_factory, vmobject
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+        for part in self.submobjects:
+            part.match_style(vmobject)
+
+
+class DashedVMobject(VMobject):
+    """Atlas's true-arclength dash placement over native partial slices."""
+
+    def __init__(
+        self,
+        vmobject,
+        num_dashes=15,
+        positive_space_ratio=0.5,
+        **kwargs,
+    ):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError("DashedVMobject expects a VMobject")
+        super().__init__(**kwargs)
+        num_dashes = _operator.index(num_dashes)
+        if num_dashes > 0:
+            intervals = vmobject._dash_curve_intervals(
+                num_dashes, float(positive_space_ratio)
+            )
+            self.add(
+                *(vmobject.get_subcurve(start, end) for start, end in intervals)
+            )
+        self.match_style(vmobject, recurse=False)
+
+
+class VHighlight(VGroup):
+    """Reference full-family outline copies over native portal state."""
+
+    def __init__(
+        self,
+        vmobject,
+        n_layers=5,
+        color_bounds=(_GREY_C, _GREY_E),
+        max_stroke_addition=5.0,
+    ):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError("VHighlight expects a VMobject")
+        n_layers = _operator.index(n_layers)
+        if n_layers < 0:
+            raise ValueError("n_layers must be non-negative")
+        outline = vmobject.replicate(n_layers)
+        outline.set_fill(opacity=0)
+        added_widths = _np.linspace(0, max_stroke_addition, n_layers + 1)[1:]
+        colors = _color_gradient(color_bounds, n_layers)
+        for part, added_width, color in zip(
+            reversed(outline), added_widths, colors
+        ):
+            for submob in part.family_members_with_points():
+                submob.set_stroke(
+                    width=submob.get_stroke_width() + added_width,
+                    color=color,
+                )
+        super().__init__(*outline)
 
 
 class ParametricCurve(VMobject):
@@ -6981,6 +7089,22 @@ def _install_schema_surface():
         ): StringMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
+        (
+            "manimlib.mobject.types.vectorized_mobject",
+            "VectorizedPoint",
+        ): VectorizedPoint,
+        (
+            "manimlib.mobject.types.vectorized_mobject",
+            "CurvesAsSubmobjects",
+        ): CurvesAsSubmobjects,
+        (
+            "manimlib.mobject.types.vectorized_mobject",
+            "DashedVMobject",
+        ): DashedVMobject,
+        (
+            "manimlib.mobject.types.vectorized_mobject",
+            "VHighlight",
+        ): VHighlight,
         ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,
         ("manimlib.mobject.geometry", "Polygon"): Polygon,
         ("manimlib.mobject.geometry", "RegularPolygon"): RegularPolygon,
