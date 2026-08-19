@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	ba78858109dad1c9e75bf3b37f3193f871b4b2a9d596aa9c3904844e854649bd
+ledger_reviewed_digest	cd0b3d079afa5f41b9d3e5882e781f148ef841b6c179308f90ccd65815bd1982
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -191,6 +191,7 @@ OOT-CLI-AUTORELOAD	--autoreload	tiered	Live reload is re-specified as supervised
 OOT-CLI-EMBED	-e,--embed	tiered	Embed points exist through fmn-python or a Studio breakpoint, not as a native interpreter inside the Rust front door	A G4a scene uses embed semantics that neither fmn-python nor the Studio breakpoint can carry source-unedited
 OOT-COMPLEX-SCRIPT	complex-script shaping, bidi, and mark positioning	tiered	Latin, Greek, Cyrillic, and mathematics are first-class; complex shaping needs a larger upstream text contract	A corpus or supported user workflow requires Arabic, Indic, or bidi layout and fmd-font has fixture-backed shaping support
 OOT-EXOTIC-MEDIA-MESH	exotic image, media, and mesh formats	tiered	Owned native codecs and the OBJ subset cover the governed core; other media routes through the one ffmpeg boundary where applicable	A corpus-ranked format cannot use the declared native set or ffmpeg capability and has an owned bounded-parser design
+OOT-IMAGE-ASSET-INPUT	ImageMobject input acquisition and decode	tiered	Local PNG and JPEG are native; implicit URL downloads are replaced by the host AssetFetcher boundary and other PIL formats have no silent substitute	A corpus-ranked input requires a host-wired AssetFetcher or an owned budgeted decoder with malformed-input Gauntlet evidence
 OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a documented no-op and analytic nonzero winding has no alternate earclip mode	Pinned-Reference evidence shows observable semantics beyond the accepted no-op
 OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
 
@@ -342,6 +343,16 @@ manimlib.mobject.geometry:RegularPolygon	same	scripts/manim_ref/manimlib/mobject
 manimlib.mobject.geometry:RegularPolygon.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves radius explicit orientation and odd-vertex default orientation with a typed resource refusal
 manimlib.mobject.geometry:Triangle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is the authored three-sided RegularPolygon subclass with caller configuration preserved
 manimlib.mobject.geometry:Triangle.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	forwards caller style and orientation while fixing the native vertex count to three
+manimlib.mobject.types.image_mobject:ImageMobject	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	is an authored Mobject subclass whose live six-row image quad owns a durable native texture resource
+manimlib.mobject.types.image_mobject:ImageMobject.__init__	tiered	OOT-IMAGE-ASSET-INPUT	crates/fmn-python/tests/bridge.py	resolves exact and extension-less local PNG or JPEG paths and refuses URLs exotic formats and malformed input without network or substitution
+manimlib.mobject.types.image_mobject:ImageMobject.data_dtype	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact point im_coords opacity packed float32 record schema
+manimlib.mobject.types.image_mobject:ImageMobject.init_data	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	installs the exact two-triangle corner UV and per-record opacity rows
+manimlib.mobject.types.image_mobject:ImageMobject.init_points	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	sizes the live quad to the requested height and decoded pixel aspect ratio
+manimlib.mobject.types.image_mobject:ImageMobject.point_to_rgb	improved	BN-17	crates/fmn-python/tests/bridge.py	samples the durable top-row-first resource and rejects points outside either image axis
+manimlib.mobject.types.image_mobject:ImageMobject.render_primitive	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	exposes the familiar triangle primitive identity while Lumen consumes the native ImageQuad tag
+manimlib.mobject.types.image_mobject:ImageMobject.set_color	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	is the exact unconditional no-op including the optional opacity and recurse arguments
+manimlib.mobject.types.image_mobject:ImageMobject.set_opacity	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	interpolates scalar or sequence opacity across the six live records and optionally recurses
+manimlib.mobject.types.image_mobject:ImageMobject.shader_folder	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact image shader-folder marker without admitting custom GLSL
 manimlib.mobject.types.dot_cloud:DotCloud.compute_bounding_box	same	scripts/manim_ref/manimlib/mobject/types/dot_cloud.py	crates/fmn-python/tests/bridge.py	expands the live point-family extent by the configured world-space radius on all axes
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_point	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	delegates one point and optional rgba color or opacity through the exact multi-point record append
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	uses the authoritative base append semantics then applies explicit rgba or color and opacity only to the appended tail

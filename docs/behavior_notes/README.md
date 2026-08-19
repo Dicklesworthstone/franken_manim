@@ -50,8 +50,9 @@ migration guidance users read:
 | BN-14 | Sound is sample-exact on the rational frame clock; pre-zero audio clips instead of raising | [BN-14-sample-exact-sound.md](BN-14-sample-exact-sound.md) | W8 | Draft |
 | BN-15 | The CLI is generated, validated, capability-aware, and machine-readable | [BN-15-cli-contract.md](BN-15-cli-contract.md) | W9/W10 | Draft |
 | BN-16 | Polygon default corner rounding measures the complete cyclic edge set | [BN-16-polygon-corner-radius.md](BN-16-polygon-corner-radius.md) | W10 | Draft |
+| BN-17 | Image sampling rejects every outside point; image acquisition is explicit and bounded | [BN-17-image-input-and-sampling.md](BN-17-image-input-and-sampling.md) | W10 | Draft |
 
-BN-10, BN-12, BN-13, BN-14, and BN-15 grew past §16.8's seed list, which is expected — the
+BN-10, BN-12, BN-13, BN-14, BN-15, BN-16, and BN-17 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds
 another deliberate divergence writes it a note rather than filing it nowhere.
 ADR-0009 trues §16.8 up to this table and fixes the numbering rules above so
