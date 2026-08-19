@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	870d524359192b4183fd70329012a6226d7a7e9edea54cc0766292497fed0243
+ledger_reviewed_digest	96fc986a255c128b2d99fca8128d803f4f79403a9d1068eba6fb4f114cdf30e7
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -345,6 +345,7 @@ manimlib.mobject.types.dot_cloud:DotCloud.compute_bounding_box	same	scripts/mani
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_point	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	delegates one point and optional rgba color or opacity through the exact multi-point record append
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	uses the authoritative base append semantics then applies explicit rgba or color and opacity only to the appended tail
 manimlib.mobject.types.point_cloud_mobject:PMobject.set_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	canonicalizes empty input and preserves the point-cloud record width across base point replacement
+manimlib.mobject.types.vectorized_mobject:VMobject.__init__	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	installs the exact visible-stroke transparent-fill record defaults and typed stroke uniforms before first geometry allocation
 manimlib.mobject.types.vectorized_mobject:VMobject.append_points	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	enforces an even appended shared-anchor run and refreshes native joint metadata after the base record append
 manimlib.mobject.types.vectorized_mobject:VMobject.get_anchors	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	returns the live even-index anchor view over the shared RecordBuffer point column
 manimlib.mobject.types.vectorized_mobject:VMobject.get_anchors_and_handles	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	returns the three live strided views whose aligned rows define every quadratic curve

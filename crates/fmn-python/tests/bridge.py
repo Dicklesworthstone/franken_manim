@@ -109,6 +109,17 @@ def assert_red_orientation_witness_is_above_origin(path):
     centroid_y = sum(y for _x, y in red_pixels) / len(red_pixels)
     assert centroid_y < height / 2, (path, centroid_y, height)
 
+
+def assert_white_stroke_witness(path, minimum_pixels=8):
+    _width, _height, rows = png_rgba8_rows(path)
+    white_pixels = sum(
+        1
+        for row in rows
+        for offset in range(0, len(row), 4)
+        if min(row[offset : offset + 3]) >= 180 and row[offset + 3] > 160
+    )
+    assert white_pixels >= minimum_pixels, (path, white_pixels, minimum_pixels)
+
 # Schema constants use a deliberately closed AST grammar: ordinary literal
 # and arithmetic expressions resolve, while executable/private forms refuse.
 assert manimlib._constant_expression("1 + 2 * 3", {}) == 7
@@ -4270,6 +4281,46 @@ def verify_portal_console_scene():
     assert repeated_still["frame_count"] == 1
     assert hmac.compare_digest(repeated_still["digest"], still["digest"])
     assert repeated_still_destination.read_bytes() == still_bytes
+
+    # A generic open VMobject remains visibly stroked after ShowCreation,
+    # subsequent camera animation, and an ambient-rotation wait.  This is the
+    # minimal production form of SquareOnASphere's three elbow marks: the
+    # object survives structurally either way, so only decoded pixels catch a
+    # zero-filled first-allocation opacity lane.
+    elbow_destination = output_root / "camera-elbow.png"
+    elbow_scene = InteractiveScene()
+    elbow_scene._begin_png(str(elbow_destination), 160, 90, 30, 1, 0)
+    elbow_frame = elbow_scene.frame
+    elbow_frame.reorient(12, 70, 0, manimlib.ORIGIN, 4)
+    elbow = VMobject().set_points_as_corners(
+        [[-1.0, -0.5, 0.0], [0.0, -0.5, 0.0], [0.0, 0.75, 0.0]]
+    )
+    elbow.set_stroke(manimlib.WHITE, 4)
+    elbow_scene.play(
+        manimlib.ShowCreation(elbow, time_span=(0, 1 / 30)),
+        elbow_frame.animate.reorient(20, 60, 0),
+        run_time=2 / 30,
+        rate_func=manimlib.linear,
+    )
+    elbow_scene.play(
+        elbow_frame.animate.reorient(6, 84, 0),
+        run_time=1 / 30,
+        rate_func=manimlib.linear,
+    )
+    elbow_frame.add_ambient_rotation(2 * manimlib.DEG)
+    elbow_scene.wait(1 / 30)
+    assert np.allclose(elbow.data["stroke_rgba"][:, 3], 1.0)
+    elbow_receipt = elbow_scene._finish_render(
+        elbow_frame._core,
+        elbow_scene.camera.light_source.get_center(),
+    )
+    assert pathlib.Path(elbow_receipt[0]) == elbow_destination
+    assert elbow_receipt[1] == 1
+    assert elbow_receipt[2] == elbow_destination.stat().st_size
+    assert len(elbow_receipt[3]) == 64
+    assert elbow_receipt[4].split(":")[0] == "fast-cpu"
+    assert elbow_receipt[5] == 1
+    assert_white_stroke_witness(elbow_destination)
 
     console_code, console_out, console_err = run_portal_console(
         "--robot",
