@@ -2540,10 +2540,7 @@ impl BridgeMobject {
     /// Sample the durable image attached to this entry using the Reference's
     /// axis-aligned family-box convention. Placement is baked first, so the
     /// result observes live shifts/scales exactly as ordinary point reads do.
-    fn _image_point_to_rgb(
-        slf: &Bound<'_, Self>,
-        point: [f64; 3],
-    ) -> PyResult<Option<[f64; 3]>> {
+    fn _image_point_to_rgb(slf: &Bound<'_, Self>, point: [f64; 3]) -> PyResult<Option<[f64; 3]>> {
         crossing::record(CrossingClass::Other);
         with_stage(slf, |stage, mob| -> PyResult<Option<[f64; 3]>> {
             stage.bake_placement(mob).map_err(stage_error)?;
@@ -2553,9 +2550,10 @@ impl BridgeMobject {
             let image = entry.image_resource().ok_or_else(|| {
                 PyRuntimeError::new_err("image mobject has no durable image resource")
             })?;
-            let points = entry.buffer.read_column("point").ok_or_else(|| {
-                PyRuntimeError::new_err("image mobject has no point field")
-            })?;
+            let points = entry
+                .buffer
+                .read_column("point")
+                .ok_or_else(|| PyRuntimeError::new_err("image mobject has no point field"))?;
             let mut min_x = f64::INFINITY;
             let mut max_x = f64::NEG_INFINITY;
             let mut min_y = f64::INFINITY;
@@ -2601,6 +2599,20 @@ impl BridgeMobject {
                 f64::from(rgb[1]) / 255.0,
                 f64::from(rgb[2]) / 255.0,
             ]))
+        })?
+    }
+
+    /// Pixel dimensions of the same durable resource consumed by Lumen.
+    fn _image_dimensions(slf: &Bound<'_, Self>) -> PyResult<(u32, u32)> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| -> PyResult<(u32, u32)> {
+            let entry = stage.get(mob).ok_or_else(|| {
+                StaleHandleError::new_err("image mobject handle no longer resolves")
+            })?;
+            let image = entry.image_resource().ok_or_else(|| {
+                PyRuntimeError::new_err("image mobject has no durable image resource")
+            })?;
+            Ok((image.width(), image.height()))
         })?
     }
 

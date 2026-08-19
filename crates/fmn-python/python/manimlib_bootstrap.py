@@ -18,6 +18,7 @@ import inspect as _inspect
 import itertools as _itertools
 import math as _math
 import operator as _operator
+import pathlib as _pathlib
 import re as _re
 import sys as _sys
 import types as _types
@@ -3052,6 +3053,119 @@ class Dot(VMobject):
 class SmallDot(Dot):
     def __init__(self, point=_ORIGIN, radius=0.04, **kwargs):
         super().__init__(point, radius, **kwargs)
+
+
+def _resolve_raster_image_path(filename):
+    """Resolve the Reference's local image search without its URL downloader.
+
+    Exact paths win. Extension-less names additionally search the current
+    working directory and its ``raster_images`` directory for the pinned
+    JPEG/PNG suffix catalog. Network input is a capability refusal: the
+    sovereign engine never downloads assets implicitly.
+    """
+    raw = str(filename)
+    if raw.lower().startswith(("http://", "https://")):
+        raise _CapabilityError(
+            "ImageMobject URL fetching is unavailable; provide a local file "
+            "or supply bytes through the host AssetFetcher boundary"
+        )
+    supplied = _pathlib.Path(raw)
+    directories = (_pathlib.Path(""), _pathlib.Path("raster_images"))
+    suffixes = (".jpg", ".jpeg", ".png", "")
+    candidates = [supplied]
+    if not supplied.is_absolute():
+        candidates.extend(
+            directory / f"{raw}{suffix}"
+            for directory in directories
+            for suffix in suffixes
+        )
+    for candidate in dict.fromkeys(candidates):
+        if candidate.is_file():
+            return candidate
+    raise OSError(f"{filename} not Found")
+
+
+class ImageMobject(Mobject):
+    """Atlas's decoded image resource on Marionette's live image-quad rows."""
+
+    shader_folder = "image"
+    data_dtype = [
+        ("point", _np.float32, (3,)),
+        ("im_coords", _np.float32, (2,)),
+        ("opacity", _np.float32, (1,)),
+    ]
+    render_primitive = 4  # moderngl.TRIANGLES, without importing a renderer
+    pointlike_data_keys = ["point"]
+
+    def __init__(self, filename, height=4.0, **kwargs):
+        opacity = float(kwargs.pop("opacity", 1.0))
+        z_index = int(kwargs.pop("z_index", 0))
+        fixed_in_frame = bool(kwargs.pop("is_fixed_in_frame", False))
+        depth_test = bool(kwargs.pop("depth_test", False))
+        color = kwargs.pop("color", None)
+        if kwargs:
+            raise TypeError(
+                "ImageMobject() got unexpected keyword arguments: "
+                + ", ".join(sorted(kwargs))
+            )
+        path = _resolve_raster_image_path(filename)
+        payload = path.read_bytes()
+        _install_live_state(self)
+        self.height = float(height)
+        self.opacity = opacity
+        self.image_path = str(path)
+        specs = self._build_image(
+            _native_shell_factory,
+            payload,
+            self.height,
+            self.opacity,
+            z_index,
+        )
+        _hang_native_children(self, specs)
+        self.pixel_width, self.pixel_height = self._image_dimensions()
+        if fixed_in_frame:
+            self.fix_in_frame()
+        if depth_test:
+            self.apply_depth_test()
+        if color is not None:
+            self.set_color(color)
+
+    def init_data(self):
+        self.data["point"][:] = [_UP + _LEFT, _DOWN + _LEFT, _UP + _RIGHT,
+                                 _DOWN + _RIGHT, _UP + _RIGHT, _DOWN + _LEFT]
+        self.data["im_coords"][:] = [
+            (0, 0), (0, 1), (1, 0), (1, 1), (1, 0), (0, 1)
+        ]
+        self.data["opacity"][:] = self.opacity
+        return self
+
+    def init_points(self):
+        self.set_width(2 * self.pixel_width / self.pixel_height, stretch=True)
+        self.set_height(self.height)
+        return self
+
+    def set_opacity(self, opacity, recurse=True):
+        values = _resize_with_interpolation(
+            _np.array(_listify(opacity), dtype=float), self.get_num_points()
+        )
+        self.data["opacity"][:, 0] = values
+        self.opacity = opacity
+        if recurse:
+            for submob in self.submobjects:
+                submob.set_opacity(opacity, recurse=True)
+        return self
+
+    def set_color(self, color, opacity=None, recurse=None):
+        del color, recurse
+        if opacity is not None:
+            self.set_opacity(opacity)
+        return self
+
+    def point_to_rgb(self, point):
+        result = self._image_point_to_rgb(_vec3(point))
+        if result is None:
+            raise ValueError("Cannot sample color from outside an image")
+        return _np.array(result)
 
 
 class Line(VMobject):
@@ -6736,6 +6850,10 @@ def _install_schema_surface():
         ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
         ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,
         ("manimlib.mobject.types.dot_cloud", "GlowDot"): GlowDot,
+        (
+            "manimlib.mobject.types.image_mobject",
+            "ImageMobject",
+        ): ImageMobject,
         ("manimlib.mobject.vector_field", "VectorField"): VectorField,
         (
             "manimlib.mobject.vector_field",
