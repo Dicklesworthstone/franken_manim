@@ -2027,26 +2027,28 @@ class Mobject(_BridgeMobject):
         return _FunctionalUpdaterBuilder(self)
 
     def _dispatch_updater(self, updater, dt):
+        # The Reference's updater protocol is name-based: only a callback
+        # whose code declares ``dt`` receives the frame delta.  Counting
+        # positional parameters is observably wrong for common helpers such
+        # as ``update(mob, vertical=False, horizontal=False)`` because the
+        # delta is then mistaken for the helper's first semantic option.
         try:
-            signature = _inspect.signature(updater)
-            positional = [
-                parameter
-                for parameter in signature.parameters.values()
-                if parameter.kind
-                in (
-                    parameter.POSITIONAL_ONLY,
-                    parameter.POSITIONAL_OR_KEYWORD,
+            accepts_dt = "dt" in updater.__code__.co_varnames
+        except AttributeError:
+            # Callable objects and extension callables have no ``__code__``.
+            # Use a named parameter when Python exposes one, and preserve the
+            # two-argument native rung for opaque/variadic PyO3 callables.
+            try:
+                signature = _inspect.signature(updater)
+            except (TypeError, ValueError):
+                accepts_dt = True
+            else:
+                accepts_dt = "dt" in signature.parameters or any(
+                    parameter.kind is parameter.VAR_POSITIONAL
+                    for parameter in signature.parameters.values()
                 )
-            ]
-            variadic = any(
-                parameter.kind is parameter.VAR_POSITIONAL
-                for parameter in signature.parameters.values()
-            )
-        except (TypeError, ValueError):
-            positional = [None, None]
-            variadic = True
-        if variadic or len(positional) >= 2:
-            return updater(self, dt)
+        if accepts_dt:
+            return updater(self, dt=dt)
         return updater(self)
 
     def copy(self, deep=False):

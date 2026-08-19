@@ -1818,6 +1818,36 @@ scene.update(0.5)
 assert updates == [0.5]
 assert parent.get_field("point", 0)[0] == 1.5
 
+# Updater delta dispatch follows the Reference's named-``dt`` protocol, not
+# callable arity.  Optional positional parameters are often semantic flags;
+# passing the frame delta into one silently changes scene meaning.
+semantic_default_calls = []
+named_dt_calls = []
+variadic_calls = []
+
+
+def semantic_default_updater(mobject, vertical=False, horizontal=False):
+    semantic_default_calls.append((mobject, vertical, horizontal))
+
+
+def named_dt_updater(mobject, dt=0.0):
+    named_dt_calls.append((mobject, dt))
+
+
+def variadic_updater(mobject, *options):
+    variadic_calls.append((mobject, options))
+
+
+dispatch_probe = Mobject()
+dispatch_scene = Scene().add(dispatch_probe)
+dispatch_probe.add_updater(semantic_default_updater, call=False)
+dispatch_probe.add_updater(named_dt_updater, call=False)
+dispatch_probe.add_updater(variadic_updater, call=False)
+dispatch_scene.update(0.25)
+assert semantic_default_calls == [(dispatch_probe, False, False)]
+assert named_dt_calls == [(dispatch_probe, 0.25)]
+assert variadic_calls == [(dispatch_probe, ())]
+
 
 # The Python updater surface shares Marionette's durable suspension flag.
 # Scene traversal is child-first, a suspended parent prunes its subtree, and
