@@ -4210,6 +4210,7 @@ impl PyScene {
             .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?;
+        // ubs:ignore — finalizes a frame-render session; no token, secret, or randomness exists.
         let (report, engine, threads) = session.finish()?;
         Ok((
             report.path.to_string_lossy().into_owned(),
