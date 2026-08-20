@@ -4,7 +4,7 @@
 //! parameterizations.
 
 use fmn_anim::animation::Animation;
-use fmn_anim::{AnimConfig, AnimError, PathFunc, RateFunc, Transform, classify_play};
+use fmn_anim::{AnimConfig, AnimError, PathFunc, RateFunc, StartPrep, Transform, classify_play};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -244,6 +244,53 @@ fn a_translation_transform_synchronizes_each_frame_into_a_live_view() {
     assert!(
         stage.placement(source).expect("live").is_identity(),
         "frames derive from frozen endpoints instead of accumulating"
+    );
+    transform.finish(&mut stage);
+}
+
+#[test]
+fn transform_recovers_after_an_intermediate_placement_is_baked() {
+    let mut stage = Stage::new();
+    let points = [[-1.0, 0.0, 0.0], [0.0; 3], [1.0, 0.0, 0.0]];
+    let source = vmob(&mut stage, &points, [1.0; 4]);
+    let target = vmob(&mut stage, &points, [1.0; 4]);
+    let target_points = stage.get_points(target).unwrap();
+    let mut transform = Transform::new(source, target)
+        .with_start_prep(StartPrep {
+            scale: Some(0.0),
+            move_to: Some([2.0, 0.0, 0.0]),
+            ..StartPrep::default()
+        })
+        .with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+    transform.begin(&mut stage).unwrap();
+
+    transform.interpolate(&mut stage, 0.5);
+    let midpoint = stage.get_points(source).unwrap();
+    for (actual, expected) in
+        midpoint
+            .iter()
+            .zip([[0.5, 0.0, 0.0], [1.0, 0.0, 0.0], [1.5, 0.0, 0.0]])
+    {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-7);
+        }
+    }
+    assert!(stage.bake_placement(source).unwrap());
+    for (actual, expected) in stage.get_points(source).unwrap().iter().zip(&midpoint) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-7);
+        }
+    }
+    assert!(stage.placement(source).unwrap().is_identity());
+
+    transform.interpolate(&mut stage, 1.0);
+    assert_eq!(
+        stage.get_points(source).unwrap(),
+        target_points,
+        "a transient record materialization must not freeze the midpoint geometry"
     );
     transform.finish(&mut stage);
 }

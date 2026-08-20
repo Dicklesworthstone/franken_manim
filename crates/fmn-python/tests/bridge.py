@@ -2812,6 +2812,174 @@ callback_scene.play(callback_animation)
 assert np.allclose(callback_alphas, [0.0, 1.0, 1.0])
 assert np.allclose(callback_mover.get_x(), 1.0)
 
+# The growing family is one authored Transform lineage over Choreo's native
+# start-prep mechanism.  Anchors are frozen by the Python constructors like
+# the pinned Reference, while the target is copied from the current source at
+# play begin; no per-frame Python interpolation participates.
+growing = importlib.import_module("manimlib.animation.growing")
+assert growing.GrowFromPoint.__bases__ == (manimlib.Transform,)
+assert growing.GrowFromCenter.__bases__ == (growing.GrowFromPoint,)
+assert growing.GrowFromEdge.__bases__ == (growing.GrowFromPoint,)
+assert growing.GrowArrow.__bases__ == (growing.GrowFromPoint,)
+growing_call_shapes = {
+    growing.GrowFromPoint: "(mobject, point, point_color=None, **kwargs)",
+    growing.GrowFromCenter: "(mobject, **kwargs)",
+    growing.GrowFromEdge: "(mobject, edge, **kwargs)",
+    growing.GrowArrow: "(arrow, **kwargs)",
+    growing.GrowFromPoint.__init__: (
+        "(self, mobject, point, point_color=None, **kwargs)"
+    ),
+    growing.GrowFromCenter.__init__: "(self, mobject, **kwargs)",
+    growing.GrowFromEdge.__init__: "(self, mobject, edge, **kwargs)",
+    growing.GrowArrow.__init__: "(self, arrow, **kwargs)",
+    growing.GrowFromPoint.create_target: "(self)",
+    growing.GrowFromPoint.create_starting_mobject: "(self)",
+}
+for growing_surface, declared_call_shape in growing_call_shapes.items():
+    actual_call_shape = str(inspect.signature(growing_surface))
+    assert actual_call_shape == declared_call_shape
+
+grow_point_source = geometry.Rectangle(width=2.0, height=1.0).set_color(
+    manimlib.BLUE
+)
+assert np.isclose(grow_point_source.get_width(), 2.0)
+grow_point = growing.GrowFromPoint(
+    grow_point_source,
+    2.0 * manimlib.LEFT,
+    point_color=manimlib.RED,
+    path_arc=math.pi / 6.0,
+)
+assert np.array_equal(grow_point.point, 2.0 * manimlib.LEFT)
+assert grow_point.point_color == manimlib.RED
+assert np.isclose(grow_point.path_arc, math.pi / 6.0)
+grow_point_target = grow_point.create_target()
+assert grow_point_target is not grow_point_source
+assert np.array_equal(grow_point_target.get_points(), grow_point_source.get_points())
+grow_point_start = grow_point.create_starting_mobject()
+assert grow_point_start is not grow_point_source
+assert np.allclose(grow_point_start.get_points(), 2.0 * manimlib.LEFT)
+assert grow_point_start.get_color() == manimlib.RED
+assert np.isclose(grow_point_source.get_width(), 2.0)
+
+# Use a straight path for exact intermediate-center observations.  Moving the
+# source after animation construction proves the fixed anchor and play-time
+# target are distinct lifecycle moments.
+grow_point.path_arc = 0.0
+grow_point_source.shift(2.0 * manimlib.RIGHT)
+grow_point_identity = id(grow_point_source)
+grow_point_samples = []
+grow_point_source.add_updater(
+    lambda mob: grow_point_samples.append(
+        (mob.get_center().copy(), mob.get_width(), mob.get_color())
+    ),
+    call=False,
+)
+grow_point_scene = Scene()
+grow_point_scene.play(
+    grow_point,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert id(grow_point_source) == grow_point_identity
+assert grow_point_scene.get_mobjects()[0] is grow_point_source
+assert len(grow_point_samples) == 3
+assert np.allclose(grow_point_samples[0][0], manimlib.ORIGIN)
+assert np.isclose(grow_point_samples[0][1], 1.0)
+assert grow_point_samples[0][2] not in (manimlib.RED, manimlib.BLUE)
+assert np.allclose(grow_point_samples[1][0], 2.0 * manimlib.RIGHT)
+assert np.isclose(grow_point_samples[1][1], 2.0), grow_point_samples
+assert grow_point_samples[1][2] == manimlib.BLUE
+assert np.allclose(grow_point_samples[2][0], 2.0 * manimlib.RIGHT)
+
+grow_center_source = geometry.Rectangle(width=1.0, height=0.5).shift(
+    manimlib.RIGHT
+)
+grow_center = growing.GrowFromCenter(grow_center_source)
+assert np.array_equal(grow_center.point, manimlib.RIGHT)
+grow_center_source.shift(2.0 * manimlib.RIGHT)
+grow_center_samples = []
+grow_center_source.add_updater(
+    lambda mob: grow_center_samples.append(mob.get_center().copy()),
+    call=False,
+)
+Scene().play(
+    grow_center,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(
+    grow_center_samples,
+    [2.0 * manimlib.RIGHT, 3.0 * manimlib.RIGHT, 3.0 * manimlib.RIGHT],
+)
+
+grow_edge_source = geometry.Rectangle(width=2.0, height=1.0)
+grow_edge = growing.GrowFromEdge(grow_edge_source, manimlib.RIGHT)
+assert np.array_equal(grow_edge.point, manimlib.RIGHT)
+grow_edge_source.shift(2.0 * manimlib.UP)
+grow_edge_samples = []
+grow_edge_source.add_updater(
+    lambda mob: grow_edge_samples.append(mob.get_center().copy()),
+    call=False,
+)
+Scene().play(
+    grow_edge,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(
+    grow_edge_samples,
+    [[0.5, 1.0, 0.0], [0.0, 2.0, 0.0], [0.0, 2.0, 0.0]],
+)
+
+grow_arrow_source = geometry.Arrow(
+    manimlib.LEFT,
+    manimlib.RIGHT,
+    buff=0.0,
+)
+grow_arrow = growing.GrowArrow(grow_arrow_source)
+assert np.allclose(grow_arrow.point, grow_arrow_source.get_start())
+grow_arrow_anchor = grow_arrow.point.copy()
+grow_arrow_source.shift(2.0 * manimlib.UP)
+grow_arrow_samples = []
+grow_arrow_source.add_updater(
+    lambda mob: grow_arrow_samples.append(mob.get_start().copy()),
+    call=False,
+)
+Scene().play(
+    grow_arrow,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(grow_arrow_samples[0], grow_arrow_anchor + manimlib.UP)
+assert np.allclose(grow_arrow_samples[1], grow_arrow_anchor + 2.0 * manimlib.UP)
+assert np.allclose(grow_arrow_samples[2], grow_arrow_samples[1])
+
+composition_scene = Scene()
+composition_point = geometry.Square().shift(manimlib.LEFT)
+composition_edge = geometry.Rectangle(width=1.5, height=0.5).shift(
+    manimlib.RIGHT
+)
+composition_scene.add(composition_point, composition_edge)
+composition_ids = (id(composition_point), id(composition_edge))
+composition_scene.play(
+    manimlib.AnimationGroup(
+        growing.GrowFromPoint(composition_point, manimlib.DOWN),
+        growing.GrowFromEdge(composition_edge, manimlib.RIGHT),
+    ),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert (id(composition_point), id(composition_edge)) == composition_ids
+assert np.allclose(composition_point.get_center(), manimlib.LEFT)
+assert np.allclose(composition_edge.get_center(), manimlib.RIGHT)
+
+try:
+    growing.GrowArrow(VMobject())
+except ValueError as error:
+    assert str(error) == "Cannot get points of Mobject with no points"
+else:
+    raise AssertionError("GrowArrow accepted a pointless mobject")
+
 # Restore is a Transform onto Marionette's saved-state copy, so its standard
 # path-arc parameters route through the same native path function.
 restore_scene = Scene()

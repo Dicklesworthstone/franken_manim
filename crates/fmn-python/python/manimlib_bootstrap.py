@@ -8638,14 +8638,6 @@ class Rotating(_NativeAnimation):
         return params
 
 
-class GrowFromCenter(_NativeAnimation):
-    _native_kind = "grow_from_center"
-
-
-class GrowArrow(_NativeAnimation):
-    _native_kind = "grow_arrow"
-
-
 class Restore(_NativeAnimation):
     _native_kind = "restore"
 
@@ -8699,6 +8691,70 @@ class Transform(_NativeAnimation):
         if self._allows_deferred_target():
             self.target_mobject = self.create_target()
         return self.target_mobject
+
+
+class GrowFromPoint(Transform):
+    """The Reference grow family over Choreo's native start-prep Transform.
+
+    The anchor is sampled when the animation object is constructed, while the
+    target remains the mobject's state when play begins.  This distinction is
+    observable when callers move a mobject between those two operations.
+    """
+
+    _native_kind = "grow_from_point"
+
+    def __init__(self, mobject, point, point_color=None, **kwargs):
+        self.point = _np.array(_vec3(point))
+        self.point_color = point_color
+        super().__init__(mobject, None, **kwargs)
+
+    def create_target(self):
+        return self.mobject.copy()
+
+    def create_starting_mobject(self):
+        start = self.mobject.copy()
+        start.scale(0)
+        start.move_to(self.point)
+        if self.point_color is not None:
+            start.set_color(self.point_color)
+        return start
+
+    def _allows_deferred_target(self):
+        return True
+
+    def _native_target(self):
+        # Choreo copies the current source at play begin.  Returning another
+        # Python target here would adopt a redundant family into the Stage and
+        # make the retained target lifetime depend on portal bookkeeping.
+        return None
+
+    def _native_params(self):
+        params = super()._native_params()
+        params["point"] = self.point
+        if self.point_color is not None:
+            params["point_color"] = tuple(_color_to_rgb(self.point_color))
+        return params
+
+
+class GrowFromCenter(GrowFromPoint):
+    _native_kind = "grow_from_center"
+
+    def __init__(self, mobject, **kwargs):
+        super().__init__(mobject, mobject.get_center(), **kwargs)
+
+
+class GrowFromEdge(GrowFromPoint):
+    _native_kind = "grow_from_edge"
+
+    def __init__(self, mobject, edge, **kwargs):
+        super().__init__(mobject, mobject.get_bounding_box_point(edge), **kwargs)
+
+
+class GrowArrow(GrowFromPoint):
+    _native_kind = "grow_arrow"
+
+    def __init__(self, arrow, **kwargs):
+        super().__init__(arrow, arrow.get_start(), **kwargs)
 
 
 class ApplyMethod(Transform):
@@ -9480,7 +9536,9 @@ def _install_schema_surface():
         ("manimlib.animation.composition", "Succession"): Succession,
         ("manimlib.animation.rotation", "Rotate"): Rotate,
         ("manimlib.animation.rotation", "Rotating"): Rotating,
+        ("manimlib.animation.growing", "GrowFromPoint"): GrowFromPoint,
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
+        ("manimlib.animation.growing", "GrowFromEdge"): GrowFromEdge,
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
         ("manimlib.animation.transform", "Transform"): Transform,
         ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,

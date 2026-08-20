@@ -455,6 +455,35 @@ impl RecordBuffer {
         Some(out)
     }
 
+    /// Compare one record-major field with another buffer without allocating
+    /// temporary columns. Missing fields, incompatible widths, or different
+    /// record counts are not equal. Values use the same `f32` equality as two
+    /// [`RecordBuffer::read_column`] results, including NaN behavior.
+    #[must_use]
+    pub fn column_eq(&self, other: &Self, field: &str) -> bool {
+        let (Some(off), Some(other_off), Some(width), Some(other_width)) = (
+            self.schema.offset(field),
+            other.schema.offset(field),
+            self.schema.field_width(field),
+            other.schema.field_width(field),
+        ) else {
+            return false;
+        };
+        if self.len != other.len || width != other_width {
+            return false;
+        }
+        if Arc::ptr_eq(&self.storage, &other.storage) {
+            return off == other_off && self.schema.stride() == other.schema.stride();
+        }
+        let cells = self.storage.cells.read().expect("storage lock poisoned");
+        let other_cells = other.storage.cells.read().expect("storage lock poisoned");
+        (0..self.len).all(|record| {
+            let start = record * self.schema.stride() + off;
+            let other_start = record * other.schema.stride() + other_off;
+            cells[start..start + width] == other_cells[other_start..other_start + width]
+        })
+    }
+
     /// Write `field` of record `index` (unsharing from snapshots first,
     /// V5), bumping global + field revisions (V4) and the dirty span.
     pub fn write(&mut self, index: usize, field: &str, values: &[f32]) -> bool {

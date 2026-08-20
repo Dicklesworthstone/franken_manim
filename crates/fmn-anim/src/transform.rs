@@ -175,9 +175,18 @@ pub fn interpolate_fields(
         return;
     };
     let endpoint_placements = stage.placement(from).zip(stage.placement(to));
-    let sync_live_points = entry.buffer.live_view_count() > 0
-        && !entry.buffer.is_empty()
-        && entry.buffer.schema().offset("point").is_some();
+    let has_points = !entry.buffer.is_empty() && entry.buffer.schema().offset("point").is_some();
+    let point_representation_drifted = has_points
+        && stage
+            .get(from)
+            .is_some_and(|starting| !entry.buffer.column_eq(&starting.buffer, "point"));
+    // A host-side record access can transiently bake the current placement
+    // into the animated buffer even after its exported view has gone away.
+    // Once that happens, continuing to interpolate only the placement would
+    // compound the baked intermediate geometry. Re-derive explicit world
+    // points from the frozen endpoints just as we do while a view is live.
+    let sync_live_points =
+        has_points && (entry.buffer.live_view_count() > 0 || point_representation_drifted);
     let placement =
         endpoint_placements.map(|(from, to)| interpolate_placement(from, to, alpha, path));
     let schema = entry.buffer.schema();

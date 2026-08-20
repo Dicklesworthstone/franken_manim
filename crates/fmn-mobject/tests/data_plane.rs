@@ -271,6 +271,12 @@ fn custom_dtype_end_to_end() {
 #[test]
 fn data_locking_is_copy_elision_state() {
     let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 4).unwrap();
+    let same = buffer.deep_clone();
+    assert!(buffer.column_eq(&same, "point"));
+    assert!(!buffer.column_eq(&same, "nonexistent"));
+    buffer.write(0, "point", &[1.0, 1.0, 1.0]);
+    assert!(!buffer.column_eq(&same, "point"));
+
     buffer.lock_data(["point", "base_normal", "nonexistent"]);
     assert!(buffer.is_locked("point"));
     assert!(buffer.is_locked("base_normal"));

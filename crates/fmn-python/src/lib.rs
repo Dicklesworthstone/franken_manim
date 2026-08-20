@@ -6686,6 +6686,7 @@ struct AnimSpec {
     path_arc_axis: [f64; 3],
     stroke_color: Option<[f64; 3]>,
     point: [f64; 3],
+    point_color: Option<[f64; 3]>,
     time_span: Option<(f64, f64)>,
     group_lag: f64,
     remover: bool,
@@ -6780,6 +6781,10 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .map(|value| value.extract())
             .transpose()?,
         point: get3("point", [0.0; 3])?,
+        point_color: params
+            .get_item("point_color")?
+            .map(|value| value.extract())
+            .transpose()?,
         time_span: params
             .get_item("time_span")?
             .map(|value| value.extract())
@@ -6913,11 +6918,25 @@ fn build_native_animation(
             }
             Box::new(rotating)
         }
-        "grow_from_center" => Box::new(
-            fmn_anim::grow_from_center(stage, need_mob(spec.mob)?, None).map_err(anim_error)?,
-        ),
-        "grow_arrow" => {
-            Box::new(fmn_anim::grow_arrow(stage, need_mob(spec.mob)?).map_err(anim_error)?)
+        "grow_from_point" | "grow_from_center" | "grow_from_edge" | "grow_arrow" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let point_color = spec
+                .point_color
+                .map(|rgb| [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32]);
+            let mut growing =
+                fmn_anim::grow_from_point(stage, need_mob(spec.mob)?, spec.point, point_color)
+                    .map_err(anim_error)?;
+            if spec.path_arc != 0.0 {
+                growing = growing.with_path_arc(spec.path_arc, spec.path_arc_axis);
+            }
+            fmn_anim::Animation::state_mut(&mut growing).config.name = match spec.kind.as_str() {
+                "grow_from_center" => "GrowFromCenter",
+                "grow_from_edge" => "GrowFromEdge",
+                "grow_arrow" => "GrowArrow",
+                _ => "GrowFromPoint",
+            }
+            .to_owned();
+            Box::new(growing)
         }
         "fade_transform" => Box::new(
             fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
@@ -8117,7 +8136,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, StrokeArrow, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
+            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, GrowArrow, GrowFromCenter, GrowFromEdge, GrowFromPoint, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, StrokeArrow, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField, linear
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8476,6 +8495,23 @@ class _GauntletPortalScene(Scene):
             native_tangent_line,
             native_field,
             native_time_field,
+        )
+        # All four growing classes share Choreo's native start-prep
+        # Transform.  This production play proves the authored Python MRO and
+        # constructor anchors reach real intermediate Lumen frames, including
+        # point-color and edge/arrow specializations, rather than stopping at
+        # import-compatible shells.
+        self.play(
+            GrowFromPoint(
+                native_stroke_arrow,
+                (-3.0, 1.55, 0.0),
+                point_color=BLUE_C,
+            ),
+            GrowFromEdge(primitive_round, (-1.0, 0.0, 0.0)),
+            GrowFromCenter(native_tangent_line),
+            GrowArrow(native_arrow),
+            run_time=1 / 30,
+            rate_func=linear,
         )
         self.wait(1 / 30)
 
