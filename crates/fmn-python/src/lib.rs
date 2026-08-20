@@ -7136,7 +7136,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, DashedVMobject, Scene, VMobject
+            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, DashedVMobject, ParametricSurface, Scene, VMobject
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7189,6 +7189,16 @@ class _GauntletPortalScene(Scene):
             recurse=False,
         )
         smooth_ops.subdivide_intersections(recurse=False, n_subdivisions=1)
+        surface_source = ParametricSurface(
+            lambda u, v: (u, v, 0.0),
+            u_range=(-0.8, 0.8),
+            v_range=(-0.5, 0.5),
+            resolution=(9, 7),
+        ).shift((2.0, 1.2, 0.0))
+        surface_partial = surface_source.copy()
+        surface_partial.pointwise_become_partial(
+            surface_source, 0.2, 0.8, axis=0
+        )
         self.add(
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
@@ -7197,6 +7207,7 @@ class _GauntletPortalScene(Scene):
             native_path,
             portal_ops,
             smooth_ops,
+            surface_partial,
         )
         self.wait(1 / 30)
 
