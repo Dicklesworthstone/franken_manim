@@ -49,10 +49,12 @@ workstream instead, or land in-flight work first. Breaching the cap halts
 
 Every gate G0–G5 has a named owner responsible for convening the
 gate-review session and for the recorded evidence packet. The owner of
-record for all gate *verdicts* is **Jeffrey Emanuel (program owner)**; the
-agent session that assembles a gate's evidence packet ("the marshal") is
-named in the gate's epic bead at review time, and the packet lands in the
-repo before the gate is declared passed.
+record remains **Jeffrey Emanuel (program owner)**. He may delegate a
+named gate verdict to a reviewing agent (ADR-0018); the packet records
+the delegate, the date, and the evidence viewed. The agent session that
+assembles a gate's evidence packet ("the marshal") is named in the gate's
+epic bead at review time, and the packet lands in the repo before the
+gate is declared passed. A chat summary is never a pass.
 
 | Gate | Name | Evidence packet (recorded, in-repo) |
 |---|---|---|

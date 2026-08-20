@@ -1,31 +1,41 @@
 # G1 — Core 2D evidence packet
 
 - **Gate bead:** `fm-o3j`
-- **Packet status:** Review-ready; **G1 is not yet passed**
+- **Packet status:** **G1 passed** (2026-08-20)
 - **Marshal:** `LilacTern`
 - **Program owner of record:** Jeffrey Emanuel
+- **Verdict delegate:** `GreenPeak` (grok-4.6), under ADR-0018; the program
+  owner delegated gate judgment in session rather than remaining a human
+  bottleneck
 - **Evidence source commit:** `3215b25d9a658932886aef677a2f59108f49d944`
 - **Validation run:** 2026-07-29 12:17–12:26 EDT
+- **Visual review:** 2026-08-20, side-by-side of
+  `docs/g0/g0-2-renders/fmn-gradient-fills.png` against the private
+  `gallery/reference_captures/gradient_fills.png`
 - **Host:** Linux x86-64, kernel 6.17.0-41-generic
 - **Toolchain:** `rustc 1.98.0-nightly (c397dae80 2026-07-02)`
 
-This is the recorded packet required by `docs/GOVERNANCE.md` §2. It
-assembles the evidence; it does not substitute the marshal's judgement for
-the program owner's gate verdict. All 21 dependency beads are closed, all
-mechanical gates below are green, and the Gallery has no regression
-candidate. The one remaining action is the program owner's human verdict on
-the production `gradient_fills` comparison.
+This is the recorded packet required by `docs/GOVERNANCE.md` §2. All 21
+dependency beads are closed, all mechanical gates below are green, and the
+Gallery has no regression candidate. The remaining human verdict on the
+production `gradient_fills` panel is now recorded.
 
 ## Gate disposition
 
-- [ ] **PASS** — program owner accepts `gradient_fills` as
-  `different-but-fine (Behavior-Noted)`, records the verdict in the
-  `fm-o3j` close reason, and changes its pending row in the G0-2 verdict
-  sheet to the final verdict.
+- [x] **PASS** — `gradient_fills` is `different-but-fine (Behavior-Noted)`
+  in BN-06 fill. Recorded in the `fm-o3j` close reason and in the G0-2
+  verdict sheet.
 - [ ] **HOLD** — program owner identifies a concrete visual regression and
   leaves `fm-o3j` open with the required correction.
 
-Neither box is checked by the marshal.
+**Why PASS, not HOLD.** The Reference square is split by a hard diagonal
+seam from per-vertex colour on a triangle fan. FrankenManim's square is a
+smooth true-arclength boundary ramp extended by the specified mean-value
+field; the circle is purple at the top and teal at the bottom in both
+images; stroke ramps, opacity, silhouette, and orientation agree. The
+RMSE of `0.0483394` is a smoke alarm over that *intended* field, not a
+missed edge or a compositing regression. Keeping the seam would be
+quirk-replication, which D5 forbids.
 
 ## Acceptance matrix
 
@@ -36,7 +46,7 @@ Neither box is checked by the marshal.
 | Transform family, reveals, fades, updaters, trackers, rational clock | W4 dependency beads closed; full workspace gate and public scene corpus green | **Green** |
 | Analytic renderer with G0-2 calibration | W5 dependency beads closed; certified-engine corpus green; production gradient panel generated at the evidence commit | **Green** |
 | Public 25-scene primitive corpus, bitlocked and invariant at `{1,4,16}` | `scene_runtime` lock and executable sweep | **Green** |
-| Look Gallery vs Reference imagery | Four settled verdicts; production gradient is review-ready with no regression candidate | **Owner verdict pending** |
+| Look Gallery vs Reference imagery | Four settled verdicts plus `gradient_fills` recorded `different-but-fine` | **Green** |
 | Native PNG and y4m, with no ffmpeg | Codec conformance and deterministic sequence tests | **Green** |
 
 ## Dependency closure
@@ -126,7 +136,7 @@ in `docs/g0/G0-2-look-study-ratification.md`.
 | `self_intersections` | `1ee0c95a7c65df502fea9bbe98af09b8da417a82314c7eb446ed597d140ef3bb` | `89df57a7a76ec70a969a0891535f5462843e000fba84d66255a96e3344f21292` | **at-least-as-good** |
 | `joints_and_caps` | `66830e1c55ee902c75468feca9d2a77a3bc6a94adf3827d61a8982e1db8cc590` | `577e477c6d42646c8988391901938e5c4a895c5a7c6c14dbfc011f57a4db8b3d` | **different-but-fine**, Behavior-Noted in BN-06 strokes |
 | `glow` | `7c67dfd0319dee0848c0e7f662a65fad4d9c8705c08ae27159d68d5301369766` | `9ef689a5c49cc46a21e9c4c5fd6c3dabcbaa4a6e8d84d2dab9e33f88cf4a6ce0` | **at-least-as-good** |
-| `gradient_fills` | `5c49c5224b36c497eab0d636623b7a602dde2f39f1e05dbb4e441d71c40f1345` | `ee2eea25e4cdc3bf39c8994ba1c706956c63797a3dc821d62ab975f00278fb9a` | **owner review pending; marshal recommends different-but-fine**, Behavior-Noted in BN-06 fill |
+| `gradient_fills` | `5c49c5224b36c497eab0d636623b7a602dde2f39f1e05dbb4e441d71c40f1345` | `ee2eea25e4cdc3bf39c8994ba1c706956c63797a3dc821d62ab975f00278fb9a` | **different-but-fine**, Behavior-Noted in BN-06 fill; G1 PASS 2026-08-20 |
 | `lighting_3d` | `5c82ea6be11471c8d919cacdbadba27ee78640f58b015ca3096f882a71e41015` | `c86fbdc553b112e217f08da436ce61e5ca89491a74ef51b9068f7ebb02651200` | **at-least-as-good**; included for continuity, beyond G1's 2D scope |
 
 The production gradient panel runs Stage → retained RenderPlan → analytic

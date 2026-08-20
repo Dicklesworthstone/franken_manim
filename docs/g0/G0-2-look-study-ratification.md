@@ -4,8 +4,8 @@
 constant that defines it is now a measured number rather than a remembered
 one.** Six of §20.1 spike 2's decisions are fixed below with their evidence.
 W5's completed interior colour field now makes the last comparison panel
-reviewable; §6 records the marshal's recommendation without substituting it
-for G1's required program-owner verdict.
+reviewable; §6 records the G1 PASS verdict (`different-but-fine`,
+Behavior-Noted in BN-06 fill) under ADR-0018.
 
 **Why this spike exists (D-04, R2).** The Reference's look constants are the
 aesthetic DNA of 3Blue1Brown and are kept deliberately — but they were tuned
@@ -386,7 +386,7 @@ Verdicts in §16.3's vocabulary:
 | `self_intersections` | **at-least-as-good** | The Reference's star core is visibly **lighter** than its limbs: winding number 2 composites the fill twice through the signed-alpha trick. Ours renders one uniform colour, which is what the nonzero rule means. |
 | `joints_and_caps` | **different-but-fine** (Behavior-Noted) | Four different corners become one round join; no notch at any vertex, and round caps at the ends. L6. |
 | `glow` | **at-least-as-good** | Falloff character matches (L7). Registration is close, not exact — our disc reads slightly larger, since `GlowDot`'s `radius` parameter and the visible extent are not the same quantity. |
-| `gradient_fills` | **owner review pending — marshal recommends different-but-fine (Behavior-Noted)** | This now runs through production Lumen's §10.2 field. The Reference's hard **diagonal seam** comes from per-vertex colour interpolated across its triangle fan; ours is the smooth, true-arclength boundary ramp extended by mean value coordinates. Gradient direction, opacity, stroke ramp, and capture registration agree. The smoother, subdivision-stable field is the deliberate BN-06 behavior fm-5oi landed. The marshal found no regression candidate; governance still requires the program owner to record the human Gallery verdict against the G1 packet. |
+| `gradient_fills` | **different-but-fine (Behavior-Noted)** | This now runs through production Lumen's §10.2 field. The Reference's hard **diagonal seam** comes from per-vertex colour interpolated across its triangle fan; ours is the smooth, true-arclength boundary ramp extended by mean value coordinates. Gradient direction, opacity, stroke ramp, and capture registration agree. The smoother, subdivision-stable field is the deliberate BN-06 behavior fm-5oi landed. G1 PASS 2026-08-20: visual side-by-side by `GreenPeak` under ADR-0018; no regression candidate. |
 | `lighting_3d` | **at-least-as-good** | The integrated Lumen path uses the exact capture inputs: `Sphere(radius=2)`, the Reference's `(101, 51)` UV grid and parameterization, BLUE_E, and `frame.reorient(20, 70)`. Silhouette, light direction, and retained Gouraud shading coincide closely. Whole-frame normalized RMSE is **0.00212857** and normalized SSIM distortion is **0.000145104**; these are smoke alarms, not gates. |
 
 The production gradient panel is reproduced with:
@@ -449,8 +449,7 @@ affect any constant decided above.
 
 - **fm-5oi** (closed) — analytic fill consumed (a) and L3 and landed §10.2's
   mean-value-coordinate interior colour field. Its production
-  `gradient_fills` panel is review-ready above; G1's program owner owns the
-  final Gallery verdict.
+  `gradient_fills` panel is the G1 PASS `different-but-fine` verdict above.
 - **fm-oac** — strokes. Consumes (b), (c), L6, and the 3.1623 miter limit.
 - **fm-6cf** — the cubic→quad converter. Consumes (f)'s 0.1 px default and L8's
   measured baseline.
