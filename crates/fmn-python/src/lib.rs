@@ -3877,6 +3877,101 @@ impl BridgeMobject {
         install_native_tree(slf, factory, curve.map_err(native_error)?)
     }
 
+    /// `FunctionGraph(function, ...)`: Atlas owns the bounded scalar graph
+    /// sampling while Python retains the caller-visible function metadata.
+    /// The callback is construction-only and its first exception crosses the
+    /// portal unchanged.
+    fn _build_function_graph<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        function: &Bound<'py, PyAny>,
+        x_range: &Bound<'py, PyAny>,
+        epsilon: f64,
+        discontinuities: Vec<f64>,
+        use_smoothing: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let function = function.clone().unbind();
+        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
+        let closure_errors = Rc::clone(&error_cell);
+        let graph = fmn_library::FunctionGraph::new(move |x| {
+            Python::attach(|py| match function.bind(py).call1((x,)) {
+                Ok(value) => match value.extract::<f64>() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if closure_errors.borrow().is_none() {
+                            *closure_errors.borrow_mut() = Some(error);
+                        }
+                        f64::NAN
+                    }
+                },
+                Err(error) => {
+                    if closure_errors.borrow().is_none() {
+                        *closure_errors.borrow_mut() = Some(error);
+                    }
+                    f64::NAN
+                }
+            })
+        })
+        .x_range(range3(x_range)?)
+        .epsilon(epsilon)
+        .discontinuities(discontinuities)
+        .use_smoothing(use_smoothing)
+        .build();
+        if let Some(error) = error_cell.borrow_mut().take() {
+            return Err(error);
+        }
+        install_native_tree(slf, factory, graph.map_err(native_error)?)
+    }
+
+    /// `ImplicitFunction(func, ...)`: Chisel extracts the bounded zero set
+    /// and Atlas materializes its shared-anchor path. Python callback errors
+    /// remain the authority even when later native samples observe the NaN
+    /// sentinel used to finish the bounded traversal.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_implicit_function<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        func: &Bound<'py, PyAny>,
+        x_range: (f64, f64),
+        y_range: (f64, f64),
+        min_depth: u32,
+        max_quads: usize,
+        use_smoothing: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let func = func.clone().unbind();
+        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
+        let closure_errors = Rc::clone(&error_cell);
+        let implicit = fmn_library::ImplicitFunction::new(move |x, y| {
+            Python::attach(|py| match func.bind(py).call1((x, y)) {
+                Ok(value) => match value.extract::<f64>() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if closure_errors.borrow().is_none() {
+                            *closure_errors.borrow_mut() = Some(error);
+                        }
+                        f64::NAN
+                    }
+                },
+                Err(error) => {
+                    if closure_errors.borrow().is_none() {
+                        *closure_errors.borrow_mut() = Some(error);
+                    }
+                    f64::NAN
+                }
+            })
+        })
+        .x_range([x_range.0, x_range.1])
+        .y_range([y_range.0, y_range.1])
+        .min_depth(min_depth)
+        .max_quads(max_quads)
+        .use_smoothing(use_smoothing)
+        .build();
+        if let Some(error) = error_cell.borrow_mut().take() {
+            return Err(error);
+        }
+        install_native_tree(slf, factory, implicit.map_err(native_error)?)
+    }
+
     /// Build the native VectorField geometry from already-evaluated portal
     /// samples. Python owns callback dispatch so it can release the Scene
     /// borrow; Atlas/Lumen still own arrow geometry, tanh length mapping,
@@ -7640,7 +7735,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7829,6 +7924,22 @@ class _GauntletPortalScene(Scene):
             label_buff=0.04,
             color=BLUE_C,
         ).scale(0.5)
+        native_function_graph = FunctionGraph(
+            lambda x: 0.3 * x * x - 0.2,
+            x_range=(-0.7, 0.7, 0.1),
+            color=BLUE_C,
+            use_smoothing=False,
+            stroke_width=1.5,
+        ).shift((-0.1, 1.25, 0.0))
+        native_implicit = ImplicitFunction(
+            lambda x, y: x * x + y * y - 0.16,
+            x_range=(-0.6, 0.6),
+            y_range=(-0.6, 0.6),
+            min_depth=2,
+            max_quads=128,
+            stroke_color=RED,
+            stroke_width=1.5,
+        ).shift((0.95, 1.25, 0.0))
         self.add(
             frame_fade,
             frame_fill,
@@ -7860,6 +7971,8 @@ class _GauntletPortalScene(Scene):
             native_matrix,
             native_brace_label,
             native_brace_text,
+            native_function_graph,
+            native_implicit,
         )
         self.wait(1 / 30)
 

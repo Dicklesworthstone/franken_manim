@@ -40,7 +40,7 @@ migration guidance users read:
 | BN-04 | Colour: linear-light compositing, with manim's gradient formulas kept | [BN-04-color.md](BN-04-color.md) | W1 | Draft |
 | BN-05 | Native typesetting: metrics differ from LaTeX; the quality bar is documented | [BN-05-native-text-typesetting.md](BN-05-native-text-typesetting.md) | W6 | Draft |
 | BN-06 | **The renderer** — a family, see rule 2: analytic coverage, round caps, arc-length stroke width | [the fill: analytic coverage, a defined gradient field, a border that does not grow the shape (fm-5oi)](BN-06-analytic-fill.md) · [strokes: curve distance, round caps, joins that mean what they are called (fm-oac)](BN-06-strokes.md) | W5 | Draft |
-| BN-07 | **Reference bugs fixed** (Appendix C rulings) — a family, see rule 2 | [stroke uniforms (C-2, C-7)](BN-07-stroke-uniform-fixes.md) · [updaters, group addition, and grid sizing (C-5, C-6, C-14)](BN-07-updater-and-group-fixes.md) | W3/W10 | Draft |
+| BN-07 | **Reference bugs fixed** (Appendix C rulings) — a family, see rule 2 | [stroke uniforms (C-2, C-7)](BN-07-stroke-uniform-fixes.md) · [updaters, group addition, grid sizing, and FunctionGraph color (C-5, C-6, C-14, C-15)](BN-07-updater-and-group-fixes.md) | W3/W10 | Draft |
 | BN-08 | The de-TeX'd classes (§11.6): Brace, Matrix delimiters, DecimalNumber, the drawn marks | [BN-08-de-texed-natives.md](BN-08-de-texed-natives.md) | W7 | Draft |
 | BN-09 | One arc-density rule, never coarser than the Reference's | [BN-09-arc-density.md](BN-09-arc-density.md) | W2/W7 | **Final** |
 | BN-10 | Skip mode delivers the same updater time as playback (§9.3) | [BN-10-skip-mode-updater-time.md](BN-10-skip-mode-updater-time.md) | W4 | Draft |

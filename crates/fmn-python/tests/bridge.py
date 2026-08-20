@@ -5331,6 +5331,19 @@ curve = functions.ParametricCurve(
     lambda t: np.array([t, t * t, 0.0]),
     t_range=(0.0, 1.0, 0.25),
 )
+parametric_curve_signature = inspect.signature(functions.ParametricCurve)
+assert tuple(parametric_curve_signature.parameters) == (
+    "t_func",
+    "t_range",
+    "epsilon",
+    "discontinuities",
+    "use_smoothing",
+    "kwargs",
+)
+assert parametric_curve_signature.parameters["t_range"].default == (0, 1, 0.1)
+assert parametric_curve_signature.parameters["epsilon"].default == 1e-8
+assert parametric_curve_signature.parameters["discontinuities"].default == []
+assert parametric_curve_signature.parameters["use_smoothing"].default is True
 assert curve.has_points()
 assert Mobject().get_num_points() == 0
 assert curve.get_num_points() == len(curve.get_points())
@@ -5338,6 +5351,190 @@ assert curve.get_num_curves() == curve.get_num_points() // 2
 assert np.allclose(curve.get_point_from_function(0.5), [0.5, 0.25, 0.0])
 assert curve.get_t_func() is curve.t_func
 assert curve.get_arc_length() > math.sqrt(2.0)
+
+# FunctionGraph and ImplicitFunction are authored portal classes over Atlas's
+# already-native graph builders, not schema-generated import shells. Scalar
+# callbacks are construction-only, metadata remains Reference-visible, and
+# Chisel owns the bounded zero-set extraction.
+assert functions.FunctionGraph.__bases__ == (functions.ParametricCurve,)
+assert functions.ImplicitFunction.__bases__ == (VMobject,)
+function_graph_signature = inspect.signature(functions.FunctionGraph)
+assert tuple(function_graph_signature.parameters) == (
+    "function",
+    "x_range",
+    "color",
+    "kwargs",
+)
+assert function_graph_signature.parameters["x_range"].default == (-8, 8, 0.25)
+assert function_graph_signature.parameters["color"].default == manimlib.YELLOW
+implicit_signature = inspect.signature(functions.ImplicitFunction)
+assert tuple(implicit_signature.parameters) == (
+    "func",
+    "x_range",
+    "y_range",
+    "min_depth",
+    "max_quads",
+    "use_smoothing",
+    "joint_type",
+    "kwargs",
+)
+assert np.allclose(
+    implicit_signature.parameters["x_range"].default,
+    (-manimlib.FRAME_X_RADIUS, manimlib.FRAME_X_RADIUS),
+)
+assert np.allclose(
+    implicit_signature.parameters["y_range"].default,
+    (-manimlib.FRAME_Y_RADIUS, manimlib.FRAME_Y_RADIUS),
+)
+assert implicit_signature.parameters["min_depth"].default == 5
+assert implicit_signature.parameters["max_quads"].default == 1500
+assert implicit_signature.parameters["use_smoothing"].default is False
+assert implicit_signature.parameters["joint_type"].default == "no_joint"
+
+function_graph_samples = []
+
+
+def portal_parabola(x):
+    function_graph_samples.append(float(x))
+    return x * x - 0.25
+
+
+function_graph = functions.FunctionGraph(
+    portal_parabola,
+    x_range=(-1.0, 1.0, 0.25),
+    color=manimlib.RED,
+    epsilon=1e-6,
+    discontinuities=(0.0,),
+    use_smoothing=False,
+    stroke_width=3.0,
+)
+assert function_graph.function is portal_parabola
+assert function_graph.get_function() is portal_parabola
+assert function_graph.get_t_func() is function_graph.t_func
+assert function_graph.get_x_range() == (-1.0, 1.0, 0.25)
+assert function_graph.t_range == function_graph.x_range
+assert function_graph.epsilon == 1e-6
+assert function_graph.discontinuities == (0.0,)
+assert function_graph.use_smoothing is False
+assert function_graph.get_stroke_color() == manimlib.RED
+assert math.isclose(function_graph.get_stroke_width(), 3.0)
+assert np.allclose(function_graph.get_start(), [-1.0, 0.75, 0.0])
+assert np.allclose(function_graph.get_end(), [1.0, 0.75, 0.0])
+assert function_graph_samples[0] == -1.0
+assert function_graph_samples[-1] == 1.0
+assert any(np.isclose(value, -1e-6) for value in function_graph_samples)
+assert any(np.isclose(value, 1e-6) for value in function_graph_samples)
+assert np.allclose(
+    function_graph.get_point_from_function(0.5),
+    [0.5, 0.0, 0.0],
+)
+
+default_function_graph = functions.FunctionGraph(
+    lambda x: x,
+    x_range=(0.0, 1.0, 0.5),
+    use_smoothing=False,
+)
+assert default_function_graph.get_stroke_color() == manimlib.YELLOW
+
+implicit_calls = []
+
+
+def portal_circle_field(x, y):
+    implicit_calls.append((float(x), float(y)))
+    return x * x + y * y - 1.0
+
+
+implicit_circle = functions.ImplicitFunction(
+    portal_circle_field,
+    x_range=(-1.5, 1.5),
+    y_range=(-1.5, 1.5),
+    min_depth=3,
+    max_quads=512,
+    use_smoothing=False,
+    joint_type="bevel",
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.5,
+)
+assert implicit_circle.func is portal_circle_field
+assert implicit_circle.x_range == (-1.5, 1.5)
+assert implicit_circle.y_range == (-1.5, 1.5)
+assert implicit_circle.min_depth == 3
+assert implicit_circle.max_quads == 512
+assert implicit_circle.use_smoothing is False
+assert implicit_circle.joint_type == "bevel"
+assert implicit_circle.get_joint_type() == VMobject.joint_type_map["bevel"]
+assert implicit_circle.get_stroke_color() == manimlib.BLUE
+assert math.isclose(implicit_circle.get_stroke_width(), 2.5)
+assert implicit_circle.has_points()
+assert implicit_calls
+implicit_box = implicit_circle.get_bounding_box()
+assert np.allclose(implicit_box[0, :2], [-1.0, -1.0], atol=2e-2)
+assert np.allclose(implicit_box[2, :2], [1.0, 1.0], atol=2e-2)
+
+empty_implicit = functions.ImplicitFunction(
+    lambda x, y: x * x + y * y + 1.0,
+    x_range=(-1.0, 1.0),
+    y_range=(-1.0, 1.0),
+    min_depth=2,
+    max_quads=64,
+)
+assert not empty_implicit.has_points()
+
+
+class PortalGraphCallbackError(RuntimeError):
+    pass
+
+
+def refuse_graph_callback(_x):
+    raise PortalGraphCallbackError("function graph callback sentinel")
+
+
+try:
+    functions.FunctionGraph(
+        refuse_graph_callback,
+        x_range=(0.0, 1.0, 0.5),
+        use_smoothing=False,
+    )
+except PortalGraphCallbackError as error:
+    assert str(error) == "function graph callback sentinel"
+else:
+    raise AssertionError("FunctionGraph swallowed its Python callback error")
+
+
+def refuse_implicit_callback(_x, _y):
+    raise PortalGraphCallbackError("implicit callback sentinel")
+
+
+try:
+    functions.ImplicitFunction(
+        refuse_implicit_callback,
+        x_range=(-1.0, 1.0),
+        y_range=(-1.0, 1.0),
+        min_depth=1,
+        max_quads=16,
+    )
+except PortalGraphCallbackError as error:
+    assert str(error) == "implicit callback sentinel"
+else:
+    raise AssertionError("ImplicitFunction swallowed its Python callback error")
+
+preflight_graph_calls = []
+for invalid_kwargs, invalid_name in (
+    ({"unknown_style": True}, "unknown_style"),
+    ({"joint_type": "not-a-joint"}, "not-a-joint"),
+):
+    try:
+        functions.ImplicitFunction(
+            lambda x, y: preflight_graph_calls.append((x, y)) or x + y,
+            x_range=(-1.0, 1.0),
+            y_range=(-1.0, 1.0),
+            **invalid_kwargs,
+        )
+    except (TypeError, ValueError) as error:
+        assert invalid_name in str(error)
+    else:
+        raise AssertionError(f"ImplicitFunction accepted {invalid_name}")
+assert preflight_graph_calls == []
 
 # CoordinateSystem is the Python callable seam over Atlas's native graph
 # sampler. The concrete axes keep their live coordinate transform, graph

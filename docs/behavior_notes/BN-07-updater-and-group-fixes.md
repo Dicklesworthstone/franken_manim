@@ -1,10 +1,10 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15)
 
-**Status:** Draft (W3, fm-yra; W10, fm-23ev). Consumed by Choreo (§9.1's
+**Status:** Draft (W3, fm-yra; W10, fm-23ev and fm-5wq.4.39). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
-Three Appendix-C rulings owned by the mobject surface. All are deliberate,
+Four Appendix-C rulings owned by the mobject surface. All are deliberate,
 correct divergences from the pinned Reference (D-05); the
 API names and everything around them carry over exactly.
 
@@ -102,3 +102,22 @@ argument according to its name now receive the requested width.
 Locked by the actual-extension bridge acceptance in
 `crates/fmn-python/tests/bridge.py`, including the 6-by-2 planted negative and
 row/column grouping checks.
+
+## C-15 — `FunctionGraph(color=…)` styles the graph
+
+The pinned Reference declares `color=YELLOW` on `FunctionGraph.__init__`, then
+constructs its parametric function and calls the parent without forwarding
+`color`. The default happens to look ordinary only when surrounding defaults
+also select yellow; an explicit `FunctionGraph(f, color=RED)` request is
+silently ignored.
+
+**FrankenManim:** the declared color reaches the native Atlas graph style.
+The default is still `YELLOW`, and all other `ParametricCurve` sampling,
+discontinuity, and smoothing options keep their original meaning.
+
+**Migration:** remove any post-construction recoloring that existed solely to
+work around the ignored constructor argument. Code that did not pass `color`
+is unchanged.
+
+Locked by the actual-extension FunctionGraph coverage in
+`crates/fmn-python/tests/bridge.py` and the production Python PNG Gauntlet row.

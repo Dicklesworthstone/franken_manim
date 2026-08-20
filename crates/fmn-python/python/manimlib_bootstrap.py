@@ -57,6 +57,7 @@ _GREY_C = "#888888"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
 _RED = "#FC6255"
+_YELLOW = "#FFFF00"
 _BLUE_D = "#29ABCA"
 _BLUE_E = "#1C758A"
 _ASPECT_RATIO = 16.0 / 9.0
@@ -3177,7 +3178,7 @@ class ParametricCurve(VMobject):
         t_func,
         t_range=(0, 1, 0.1),
         epsilon=1e-8,
-        discontinuities=(),
+        discontinuities=[],
         use_smoothing=True,
         **kwargs,
     ):
@@ -3215,6 +3216,89 @@ class ParametricCurve(VMobject):
     def get_x_range(self):
         if hasattr(self, "x_range"):
             return self.x_range
+
+
+class FunctionGraph(ParametricCurve):
+    """Atlas's bounded graph of ``y = function(x)`` in scene coordinates."""
+
+    def __init__(
+        self,
+        function,
+        x_range=(-8, 8, 0.25),
+        color=_YELLOW,
+        **kwargs,
+    ):
+        if not callable(function):
+            raise TypeError("function must be callable")
+        self.function = function
+        self.x_range = tuple(float(value) for value in x_range)
+        self.epsilon = float(kwargs.pop("epsilon", 1e-8))
+        self.discontinuities = tuple(
+            float(value) for value in kwargs.pop("discontinuities", ())
+        )
+        self.use_smoothing = bool(kwargs.pop("use_smoothing", True))
+        kwargs.setdefault("color", color)
+        _preflight_vmobject_style_kwargs(kwargs)
+
+        def parametric_function(t):
+            return [t, function(t), 0.0]
+
+        self.t_func = parametric_function
+        self.t_range = self.x_range
+        _install_live_state(self)
+        specs = self._build_function_graph(
+            _native_shell_factory,
+            self.function,
+            self.x_range,
+            self.epsilon,
+            list(self.discontinuities),
+            self.use_smoothing,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class ImplicitFunction(VMobject):
+    """Chisel's bounded zero-set extraction under the Reference surface."""
+
+    def __init__(
+        self,
+        func,
+        x_range=(-_FRAME_X_RADIUS, _FRAME_X_RADIUS),
+        y_range=(-_FRAME_Y_RADIUS, _FRAME_Y_RADIUS),
+        min_depth=5,
+        max_quads=1500,
+        use_smoothing=False,
+        joint_type="no_joint",
+        **kwargs,
+    ):
+        if not callable(func):
+            raise TypeError("func must be callable")
+        if joint_type not in VMobject.joint_type_map:
+            raise ValueError(f"unknown VMobject joint type: {joint_type}")
+        _preflight_vmobject_style_kwargs(kwargs)
+        self.func = func
+        self.x_range = tuple(float(value) for value in x_range)
+        self.y_range = tuple(float(value) for value in y_range)
+        if len(self.x_range) != 2 or len(self.y_range) != 2:
+            raise ValueError("implicit-function ranges must contain two entries")
+        self.min_depth = _operator.index(min_depth)
+        self.max_quads = _operator.index(max_quads)
+        self.use_smoothing = bool(use_smoothing)
+        self.joint_type = joint_type
+        _install_live_state(self)
+        specs = self._build_implicit_function(
+            _native_shell_factory,
+            self.func,
+            self.x_range,
+            self.y_range,
+            self.min_depth,
+            self.max_quads,
+            self.use_smoothing,
+        )
+        _hang_native_children(self, specs)
+        self.set_joint_type(self.joint_type)
+        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class CubicBezier(VMobject):
@@ -8771,6 +8855,8 @@ def _install_schema_surface():
             "VHighlight",
         ): VHighlight,
         ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,
+        ("manimlib.mobject.functions", "FunctionGraph"): FunctionGraph,
+        ("manimlib.mobject.functions", "ImplicitFunction"): ImplicitFunction,
         ("manimlib.mobject.geometry", "CubicBezier"): CubicBezier,
         ("manimlib.mobject.geometry", "Polygon"): Polygon,
         ("manimlib.mobject.geometry", "RegularPolygon"): RegularPolygon,
