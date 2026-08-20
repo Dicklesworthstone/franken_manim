@@ -2547,6 +2547,61 @@ impl BridgeMobject {
         .map_err(native_error)
     }
 
+    /// Atlas's `Line.get_vector` after Python performs Reference-style virtual
+    /// endpoint dispatch (notably for `DashedLine`'s first/last children).
+    fn _line_vector(_slf: &Bound<'_, Self>, start: [f64; 3], end: [f64; 3]) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        let line = fmn_library::line::Line::new(start, end)
+            .build()
+            .map_err(native_error)?;
+        Ok(fmn_library::line::line_vector(&line))
+    }
+
+    /// Atlas's `Line.get_unit_vector` after virtual endpoint dispatch.
+    fn _line_unit_vector(
+        _slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+    ) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        let line = fmn_library::line::Line::new(start, end)
+            .build()
+            .map_err(native_error)?;
+        Ok(fmn_library::line::line_unit_vector(&line))
+    }
+
+    /// Atlas's planar `Line.get_angle` after virtual endpoint dispatch.
+    fn _line_angle(_slf: &Bound<'_, Self>, start: [f64; 3], end: [f64; 3]) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        let line = fmn_library::line::Line::new(start, end)
+            .build()
+            .map_err(native_error)?;
+        Ok(fmn_library::line::line_angle(&line))
+    }
+
+    /// Atlas's deterministic-math `Line.get_slope`.
+    fn _line_slope(_slf: &Bound<'_, Self>, start: [f64; 3], end: [f64; 3]) -> PyResult<f64> {
+        crossing::record(CrossingClass::Other);
+        let line = fmn_library::line::Line::new(start, end)
+            .build()
+            .map_err(native_error)?;
+        Ok(fmn_library::line::line_slope(&line))
+    }
+
+    /// Atlas's `Line.get_projection`, preserving all three coordinates.
+    fn _line_projection(
+        _slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+        point: [f64; 3],
+    ) -> PyResult<[f64; 3]> {
+        crossing::record(CrossingClass::Other);
+        let line = fmn_library::line::Line::new(start, end)
+            .build()
+            .map_err(native_error)?;
+        Ok(fmn_library::line::line_projection(&line, point))
+    }
+
     /// The project contract's true-arclength `point_from_proportion`
     /// (BN-03), routed to Chisel through Marionette for both proxy states.
     fn _point_from_proportion(slf: &Bound<'_, Self>, alpha: f64) -> PyResult<[f64; 3]> {
@@ -4239,6 +4294,32 @@ impl BridgeMobject {
             .build()
             .map_err(native_error)?;
         install_native_tree(slf, factory, built)
+    }
+
+    /// Rebuild a scene-bound Line without changing its arena or Python identity.
+    /// Atlas computes the complete point run first, so invalid arc parameters
+    /// cannot partially mutate the live Marionette entry.
+    fn _rebuild_line(
+        slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+        buff: f64,
+        path_arc: f64,
+    ) -> PyResult<()> {
+        let built = fmn_library::line::Line::new(start, end)
+            .buff(buff)
+            .path_arc(path_arc)
+            .build()
+            .map_err(native_error)?;
+        let points = built.points().to_vec();
+        let shape = built.shape();
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_points(mob, &points)?;
+            stage.set_shape(mob, shape);
+            Ok(())
+        })?
+        .map_err(stage_error)
     }
 
     /// `DashedLine(start, end, dash_length, positive_space_ratio)`.
@@ -7795,7 +7876,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, VectorField
+            r#"from manimlib import AnnularSector, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, VectorField
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8000,6 +8081,13 @@ class _GauntletPortalScene(Scene):
             stroke_color=RED,
             stroke_width=1.5,
         ).shift((0.95, 1.25, 0.0))
+        native_line = Line(
+            (-1.15, 1.65, 0.0),
+            (1.15, 1.65, 0.0),
+            stroke_color=RED,
+            stroke_width=1.5,
+        )
+        native_line.set_path_arc(-0.45).set_length(1.8)
         field_axes = Axes(
             x_range=(-1.0, 1.0, 1.0),
             y_range=(-1.0, 1.0, 1.0),
@@ -8061,6 +8149,7 @@ class _GauntletPortalScene(Scene):
             native_brace_text,
             native_function_graph,
             native_implicit,
+            native_line,
             native_field,
             native_time_field,
         )

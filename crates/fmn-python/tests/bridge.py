@@ -4425,6 +4425,82 @@ else:
 # curvature sign (BN-03), and Tex selectors consume the native UTF-8 span map.
 line = geometry.Line((-1.0, 0.0, 0.0), (1.0, 0.0, 0.0))
 assert math.isclose(line.get_arc_length(), 2.0, rel_tol=0.0, abs_tol=1e-9)
+assert np.array_equal(line.get_vector(), [2.0, 0.0, 0.0])
+assert np.array_equal(line.get_unit_vector(), [1.0, 0.0, 0.0])
+assert line.get_angle() == 0.0
+assert line.get_slope() == 0.0
+assert np.array_equal(line.get_projection([0.25, 7.0, 3.0]), [0.25, 0.0, 0.0])
+assert np.array_equal(line.pointify([2.0, 3.0]), [2.0, 3.0, 0.0])
+assert line.set_length(4.0) is line
+assert math.isclose(line.get_length(), 4.0, rel_tol=0.0, abs_tol=1e-9)
+line_start = line.get_start().copy()
+assert line.set_angle(math.pi / 2.0) is line
+assert np.allclose(line.get_start(), line_start, rtol=0.0, atol=1e-9)
+assert np.allclose(line.get_unit_vector(), [0.0, 1.0, 0.0], rtol=0.0, atol=1e-9)
+
+line_style = geometry.Line(
+    (-2.0, -1.0, 0.0),
+    (2.0, -1.0, 0.0),
+    stroke_color=manimlib.RED,
+    stroke_width=3.0,
+).fix_in_frame()
+style_before = line_style.get_style()
+uniforms_before = line_style.uniforms.copy()
+line_style_identity = id(line_style)
+assert line_style.set_points_by_ends(
+    (-1.0, 1.0, 0.0),
+    (1.0, 1.0, 0.0),
+    buff=0.25,
+) is line_style
+assert id(line_style) == line_style_identity
+assert np.allclose(line_style.get_start(), [-0.75, 1.0, 0.0])
+assert np.allclose(line_style.get_end(), [0.75, 1.0, 0.0])
+style_after = line_style.get_style()
+assert style_after.keys() == style_before.keys()
+assert all(np.array_equal(style_after[key], value) for key, value in style_before.items())
+assert line_style.uniforms.keys() == uniforms_before.keys()
+assert all(
+    np.array_equal(line_style.uniforms[key], value)
+    for key, value in uniforms_before.items()
+)
+
+assert line_style.set_path_arc(-math.pi / 2.0) is line_style
+assert line_style.path_arc == -math.pi / 2.0
+assert line_style.get_num_curves() == 4
+assert line_style.get_arc_length() > line_style.get_length()
+curved_points_before = line_style.get_points().copy()
+curved_path_arc_before = line_style.path_arc
+try:
+    line_style.set_path_arc(float("nan"))
+except ValueError as error:
+    assert "arc angle must be finite" in str(error)
+else:
+    raise AssertionError("non-finite path_arc did not refuse")
+assert line_style.path_arc == curved_path_arc_before
+assert np.array_equal(line_style.get_points(), curved_points_before)
+
+null_line = geometry.Line((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+assert null_line.put_start_and_end_on(
+    (-1.0, 2.0, 0.0),
+    (2.0, 2.0, 0.0),
+) is null_line
+assert np.array_equal(null_line.get_start(), [-1.0, 2.0, 0.0])
+assert np.array_equal(null_line.get_end(), [2.0, 2.0, 0.0])
+
+bound_line = geometry.Line((0.0, -2.0, 0.0), (1.0, -2.0, 0.0))
+bound_line_scene = Scene()
+bound_line_scene.add(bound_line)
+bound_line_identity = id(bound_line)
+assert bound_line.set_points_by_ends(
+    (-2.0, -2.0, 0.0),
+    (2.0, -2.0, 0.0),
+    path_arc=math.pi / 3.0,
+) is bound_line
+assert id(bound_line) == bound_line_identity
+assert bound_line_scene.get_mobjects()[0] is bound_line
+assert bound_line.get_arc_length() > bound_line.get_length()
+assert bound_line.reset_points_around_ends() is bound_line
+
 curved_line = geometry.Line(
     (-1.0, 0.0, 0.0),
     (1.0, 0.0, 0.0),

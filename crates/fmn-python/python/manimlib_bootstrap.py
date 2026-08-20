@@ -3957,6 +3957,45 @@ class Line(VMobject):
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
 
+    def _replace_line_geometry(self, start, end, buff=0.0, path_arc=0.0):
+        """Commit one Atlas-built point run while preserving portal state."""
+        start = _vec3(start)
+        end = _vec3(end)
+        style = self.get_style()
+        uniforms = self.uniforms.copy()
+        if self._is_bound():
+            self._rebuild_line(start, end, float(buff), float(path_arc))
+        else:
+            specs = self._build_line(
+                _native_shell_factory,
+                start,
+                end,
+                float(buff),
+                float(path_arc),
+            )
+            _hang_native_children(self, specs)
+        self.set_style(**style, recurse=False)
+        self.uniforms.update(uniforms)
+        return self
+
+    def set_points_by_ends(self, start, end, buff=0, path_arc=0):
+        return self._replace_line_geometry(start, end, buff, path_arc)
+
+    def reset_points_around_ends(self):
+        return self.set_points_by_ends(
+            self.get_start().copy(),
+            self.get_end().copy(),
+            path_arc=self.path_arc,
+        )
+
+    def set_path_arc(self, path_arc):
+        path_arc = float(path_arc)
+        start = self.get_start().copy()
+        end = self.get_end().copy()
+        self.set_points_by_ends(start, end, path_arc=path_arc)
+        self.path_arc = path_arc
+        return self
+
     # Reference-verbatim endpoint resolution (geometry.py:718): mobject
     # endpoints resolve to continuous boundary points along the rough
     # center-to-center direction.
@@ -3982,16 +4021,18 @@ class Line(VMobject):
         return result
 
     def get_vector(self):
-        return self.get_end() - self.get_start()
+        return _np.array(self._line_vector(_vec3(self.get_start()), _vec3(self.get_end())))
 
     def get_unit_vector(self):
-        vect = self.get_vector()
-        norm = float(_np.sqrt((vect * vect).sum()))
-        return vect / norm if norm > 0 else _np.zeros(3)
+        return _np.array(
+            self._line_unit_vector(_vec3(self.get_start()), _vec3(self.get_end()))
+        )
 
     def get_angle(self):
-        vect = self.get_vector()
-        return _math.atan2(vect[1], vect[0])
+        return self._line_angle(_vec3(self.get_start()), _vec3(self.get_end()))
+
+    def get_slope(self):
+        return self._line_slope(_vec3(self.get_start()), _vec3(self.get_end()))
 
     def set_angle(self, angle, about_point=None):
         # Reference geometry.py:723-730: preserve the start by default and
@@ -4009,9 +4050,28 @@ class Line(VMobject):
         return self._get_arc_length()
 
     def get_projection(self, point):
-        unit_vect = self.get_unit_vector()
-        start = self.get_start()
-        return start + _np.dot(_np.asarray(point, dtype=float) - start, unit_vect) * unit_vect
+        return _np.array(
+            self._line_projection(
+                _vec3(self.get_start()),
+                _vec3(self.get_end()),
+                _vec3(point),
+            )
+        )
+
+    def put_start_and_end_on(self, start, end):
+        curr_start, curr_end = self.get_start_and_end()
+        if _np.isclose(curr_start, curr_end).all():
+            return self.set_points_by_ends(
+                start,
+                end,
+                buff=0,
+                path_arc=self.path_arc,
+            )
+        return super().put_start_and_end_on(start, end)
+
+    def set_length(self, length, **kwargs):
+        self.scale(float(length) / self.get_length(), **kwargs)
+        return self
 
 
 class DashedLine(Line):
