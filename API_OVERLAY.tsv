@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	a9ddc5628b9bf014dd26ebce1e7a5aeb616a710ca9caf18f6ad6f1453cc8d183
+ledger_reviewed_digest	a55d1fc727c756a067e3bdc3b8f812c67df949b44e96d7f5185add0a9143d368
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -441,6 +441,16 @@ manimlib.mobject.types.vectorized_mobject:VMobject.subdivide_sharp_curves	same	s
 manimlib.mobject.types.vectorized_mobject:VMobject.tolerance_for_point_equality	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact 1e-8 public tolerance consumed by curve insertion
 manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
 manimlib.mobject.svg.brace:Brace.get_tex	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	builds a native Tex label and positions it beyond the live brace tip along the brace direction
+manimlib.mobject.svg.brace:BraceLabel	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored VMobject composition whose brace geometry comes from native Atlas and whose bundled Tex label remains caller-visible by identity
+manimlib.mobject.svg.brace:BraceLabel.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves list targets brace direction label scale label buffer shared style and two-child topology without an external typesetting tool
+manimlib.mobject.svg.brace:BraceLabel.change_brace_label	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	retargets the native brace then replaces the Scribe label while keeping the public child aliases synchronized
+manimlib.mobject.svg.brace:BraceLabel.change_label	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	replaces the live label with the configured constructor reapplies label scale and positions it at the current brace tip
+manimlib.mobject.svg.brace:BraceLabel.copy	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	remaps brace and label attributes onto the independent copied native family
+manimlib.mobject.svg.brace:BraceLabel.creation_anim	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	returns an AnimationGroup over brace-first GrowFromCenter and label FadeIn defaults with caller-overridable constructors
+manimlib.mobject.svg.brace:BraceLabel.label_constructor	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	exposes Tex as the subclass-overridable default label constructor
+manimlib.mobject.svg.brace:BraceLabel.shift_brace	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	rebuilds only the native brace around the new live target and retains the existing label identity
+manimlib.mobject.svg.brace:BraceText	improved	BN-08	crates/fmn-python/tests/bridge.py	selects bundled native TexText labels over the same authored BraceLabel composition without invoking an external TeX toolchain
+manimlib.mobject.svg.brace:BraceText.label_constructor	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	exposes TexText as the text-mode label constructor
 manimlib.mobject.svg.brace:LineBrace.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	builds the native parametric brace while preserving the Reference flatten-and-restore transform around the translated line centre
 manimlib.mobject.svg.drawings:Checkmark	improved	BN-08	crates/fmn-library/src/matchers.rs#tests	uses Atlas's paired native drawn mark without an implicit TeX or pifont subprocess while preserving the preset-string MRO
 manimlib.mobject.svg.drawings:Checkmark.default_color	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact GREEN preset on the authored native drawn class
