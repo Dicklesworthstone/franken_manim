@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	a40c7abc20c8ba8d99d4d9755d2361569d1078cf2dbbdc0f33334012645379ee
+ledger_reviewed_digest	851c7e5eaad26f0730b543b95e6e67fb0d50aab6e4a0bd4520616987d74876d8
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -366,6 +366,16 @@ manimlib.mobject.svg.text_mobject:MarkupText.get_parts_by_text	same	scripts/mani
 manimlib.mobject.svg.text_mobject:MarkupText.get_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the original plain or markup source string
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native glyph family in place and returns the original text proxy
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order including constructor t2c maps
+manimlib.animation.growing:GrowArrow	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	is the authored GrowFromPoint specialization that freezes the live arrow start at construction and plays through Choreo's native Transform
+manimlib.animation.growing:GrowArrow.__init__	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	preserves the exact arrow constructor surface and the Reference refusal for a point-free arrow
+manimlib.animation.growing:GrowFromCenter	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	is the authored GrowFromPoint specialization that freezes the live family center at construction
+manimlib.animation.growing:GrowFromCenter.__init__	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	preserves the exact mobject constructor surface and forwards ordinary Transform configuration
+manimlib.animation.growing:GrowFromEdge	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	is the authored GrowFromPoint specialization that freezes the directional family bounding-box point at construction
+manimlib.animation.growing:GrowFromEdge.__init__	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	preserves the exact mobject and edge constructor surface and forwards ordinary Transform configuration
+manimlib.animation.growing:GrowFromPoint	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	is the authored Transform subclass whose fixed constructor anchor and play-time target route through Choreo's native start-prep mechanism
+manimlib.animation.growing:GrowFromPoint.__init__	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	preserves point point-color path configuration public state and the exact constructor signature
+manimlib.animation.growing:GrowFromPoint.create_starting_mobject	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	returns an independent zero-scaled anchor-positioned optionally recolored source-family copy
+manimlib.animation.growing:GrowFromPoint.create_target	same	scripts/manim_ref/manimlib/animation/growing.py	crates/fmn-python/tests/bridge.py	returns an independent copy of the source's current state while native playback freezes the same target at begin
 manimlib.animation.transform:ApplyComplexFunction	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	is an authored ApplyMethod adapter over the live complex point transformation
 manimlib.animation.transform:ApplyComplexFunction.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	retains the complex callable targets the current source copy and derives the Reference arc before native playback
 manimlib.animation.transform:ApplyComplexFunction.init_path_func	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	sets path_arc to the imaginary logarithm of the callable at one
