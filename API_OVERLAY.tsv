@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	51bb7e03f5269f9eb388d1a7a0e3f85234d068534590824f67cf7298841b19c8
+ledger_reviewed_digest	a9ddc5628b9bf014dd26ebce1e7a5aeb616a710ca9caf18f6ad6f1453cc8d183
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -458,7 +458,25 @@ manimlib.mobject.svg.special_tex:TexTextFromPresetString.__init__	same	scripts/m
 manimlib.mobject.svg.special_tex:TexTextFromPresetString.default_color	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	retains the exact DEFAULT_MOBJECT_COLOR class default
 manimlib.mobject.svg.special_tex:TexTextFromPresetString.tex	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	retains the exact empty preset class default
 manimlib.mobject.numbers:DecimalNumber	improved	BN-08	crates/fmn-library/src/numbers.rs#tests	uses native glyph layout and bounded incremental updates
-manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-library/src/matrix.rs#tests	uses native delimiters and entry layout without TeX
+manimlib.mobject.matrix:DecimalMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose real-valued entries use the native DecimalNumber shelf and bundled delimiters
+manimlib.mobject.matrix:DecimalMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves decimal places scalar grid configuration live entry identities and style forwarding without an external typesetting tool
+manimlib.mobject.matrix:IntegerMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored DecimalMatrix subclass selecting Atlas's native integer display route at the default zero decimal places
+manimlib.mobject.matrix:IntegerMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves the typed constructor surface while routing zero-place entries through the native Integer shelf
+manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored VMobject whose homogeneous scalar grid uses native Atlas layout and bundled fmd-math delimiters without TeX subprocesses
+manimlib.mobject.matrix:Matrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves scalar dispatch buffers height alignment entry style and constructor-time ellipses while unsupported heterogeneous and live-Mobject grids fail precisely
+manimlib.mobject.matrix:Matrix.add_background_to_entries	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	adds one live BackgroundRectangle behind every non-ellipsis entry and returns the original matrix
+manimlib.mobject.matrix:Matrix.copy	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	remaps row-major entries brackets elements and ellipses onto the independent copied native family
+manimlib.mobject.matrix:Matrix.get_brackets	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns a VGroup over the two live native delimiter children
+manimlib.mobject.matrix:Matrix.get_column	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable caller-visible column group and preserves the exact bounds refusal
+manimlib.mobject.matrix:Matrix.get_columns	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable left-to-right VGroup of live native column views
+manimlib.mobject.matrix:Matrix.get_ellipses	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns constructor-time row and column ellipses in Reference replacement order without duplicating the intersection
+manimlib.mobject.matrix:Matrix.get_entries	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the row-major live entries excluding cells replaced by constructor-time ellipses
+manimlib.mobject.matrix:Matrix.get_mob_matrix	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable nested row-major entry identity table
+manimlib.mobject.matrix:Matrix.get_row	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable caller-visible row group and preserves the exact bounds refusal
+manimlib.mobject.matrix:Matrix.get_rows	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable top-to-bottom VGroup of live native row views
+manimlib.mobject.matrix:Matrix.set_column_colors	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	applies colors by zipped column order recursively over each live entry and returns the matrix
+manimlib.mobject.matrix:TexMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose scalar sources use the bundled fmd-math entry and delimiter engine
+manimlib.mobject.matrix:TexMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves string grid configuration font and style forwarding and live Tex entry identity without an external TeX toolchain
 manimlib.mobject.shape_matchers:BackgroundRectangle	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	is an authored SurroundingRectangle subclass over Atlas geometry rather than an import-only generated shell
 manimlib.mobject.shape_matchers:BackgroundRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	preserves camera-color default no-stroke plate style original opacity and configurable matcher buff
 manimlib.mobject.shape_matchers:BackgroundRectangle.get_fill_color	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	returns the constructor's locked camera-background color independently of the internal black fill record
