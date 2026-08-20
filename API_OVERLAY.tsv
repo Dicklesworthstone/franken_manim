@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	7103e494d4c39a866baf8981efb9bc569a0c8254d9716465356e2270c41e225e
+ledger_reviewed_digest	e85ec957ffe53ab3760f4e1abce29b03fd7989efedc76d4db09ff9b6df8c5b83
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -214,6 +214,19 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 # symbol	status	evidence	tests	notes
 [status]
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
+manimlib.mobject.geometry:Line.get_angle	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	computes the planar bearing from virtual-dispatched live endpoints through Atlas geometry
+manimlib.mobject.geometry:Line.get_projection	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	projects three-dimensional points onto the infinite line through its live endpoints
+manimlib.mobject.geometry:Line.get_slope	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	uses the live planar angle and the governed deterministic tangent implementation
+manimlib.mobject.geometry:Line.get_unit_vector	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	normalizes the virtual-dispatched live endpoint vector through Atlas
+manimlib.mobject.geometry:Line.get_vector	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	returns the difference of virtual-dispatched live endpoints including DashedLine children
+manimlib.mobject.geometry:Line.pointify	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	resolves points centers and directional continuous family bounds before native construction
+manimlib.mobject.geometry:Line.put_start_and_end_on	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	uses family-affine placement for ordinary lines and native rebuilding for coincident endpoints
+manimlib.mobject.geometry:Line.reset_points_around_ends	improved	BN-09	crates/fmn-python/tests/bridge.py	rebuilds the current live endpoints with the retained path arc through the one governed arc-density rule without changing identity or style
+manimlib.mobject.geometry:Line.set_angle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	rotates from the live planar bearing around the start endpoint by default
+manimlib.mobject.geometry:Line.set_length	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	scales by the live endpoint length and preserves the fluent identity
+manimlib.mobject.geometry:Line.set_path_arc	improved	BN-09	crates/fmn-python/tests/bridge.py	commits one complete governed-density Atlas arc rebuild and preserves the prior geometry on typed refusal
+manimlib.mobject.geometry:Line.set_points_by_ends	improved	BN-09	crates/fmn-python/tests/bridge.py	builds buffered straight or governed-density curved points natively before identity-preserving detached or scene-bound commit
+manimlib.mobject.geometry:Line.set_start_and_end_attrs	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	resolves mobject endpoints from continuous bounds along the rough center direction
 manimlib.camera.camera_frame:CameraFrame.add_ambient_rotation	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	runs the frame updater before drawable-root updaters on play and wait samples including camera-only animation and zero-dt epilogues
 manimlib.mobject.coordinate_systems:CoordinateSystem.bind_graph_to_func	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	refreshes live graph points with vectorized functions, optional discontinuities, and declared smoothing
 manimlib.mobject.coordinate_systems:CoordinateSystem.c2p	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live coordinate transform

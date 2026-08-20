@@ -45,6 +45,11 @@ exactly as in the Reference.
   Pass an explicit `n_components` to reproduce old counts.
 - Anything that consumed `quadratic_bezier_points_for_arc`'s fixed default
   of 8 regardless of angle now scales with the angle instead.
+- A non-finite implicit arc angle (`path_arc=NaN` or infinity) is rejected
+  before geometry or the stored angle changes. The Reference can publish the
+  invalid angle and clear the existing points before failing during component
+  selection. Validate computed angles or pass a finite value; FrankenManim
+  returns a typed error and leaves the prior line intact.
 
 ## Worked examples
 
@@ -83,6 +88,8 @@ path.add_arc_to(UP, TAU / 4, n_components=2)   # 5 points, either engine
   (`the_arc_density_rule_is_ours_and_never_coarser`, which asserts the
   rule's value *and* that it is never coarser than the Reference's, over
   the fixture corpus).
+- `crates/fmn-python/tests/bridge.py` (portal `Line.set_path_arc` density,
+  identity preservation, and failure atomicity).
 - Reference sites: `manimlib/mobject/geometry.py` (`Arc.__init__`),
   `manimlib/mobject/types/vectorized_mobject.py` (`add_arc_to`),
   `manimlib/utils/bezier.py` (`quadratic_bezier_points_for_arc`), all at
