@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	2787886589353c408353d1302eb17c17313260e0042b0731786b39470f2bb69b
+ledger_reviewed_digest	4f458f5ff3f3502b1166b1ab5214ba7bc4a72eb03154a3a11a2d570721a62dc5
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -376,6 +376,7 @@ manimlib.mobject.types.dot_cloud:DotCloud.compute_bounding_box	same	scripts/mani
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_point	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	delegates one point and optional rgba color or opacity through the exact multi-point record append
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	uses the authoritative base append semantics then applies explicit rgba or color and opacity only to the appended tail
 manimlib.mobject.types.point_cloud_mobject:PMobject.set_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	canonicalizes empty input and preserves the point-cloud record width across base point replacement
+manimlib.mobject.types.surface:Surface.pointwise_become_partial	same	scripts/manim_ref/manimlib/mobject/types/surface.py	crates/fmn-python/tests/bridge.py	routes detached same-stage and cross-stage sampled UV grids through the Marionette operation shared with Choreo creation animations while preserving non-point record lanes
 manimlib.mobject.types.vectorized_mobject:CurvesAsSubmobjects	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	is an authored VGroup subclass with one native shared-anchor child per source quadratic curve
 manimlib.mobject.types.vectorized_mobject:CurvesAsSubmobjects.__init__	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	splits through Atlas and applies the source VMobject style to every returned child
 manimlib.mobject.types.vectorized_mobject:DashedVMobject	improved	BN-03	crates/fmn-python/tests/bridge.py	is an authored VMobject whose children are placed at equal true-arclength proportions

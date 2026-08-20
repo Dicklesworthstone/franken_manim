@@ -5477,6 +5477,19 @@ class Surface(Mobject):
     Concrete construction routes through the solid subclasses; the
     remaining Surface surface stays precise schema placeholders."""
 
+    def pointwise_become_partial(self, smobject, a, b, axis=None):
+        assert isinstance(smobject, Surface)
+        if axis is None:
+            axis = self.preferred_creation_axis
+        self._surface_pointwise_become_partial(
+            smobject,
+            tuple(smobject.resolution),
+            _operator.index(axis),
+            float(a),
+            float(b),
+        )
+        return self
+
     def _apply_surface_style(self, color, opacity, shading, depth_test):
         # Reference Surface defaults land in the native builders; explicit
         # values reapply through the state-real surfaces.

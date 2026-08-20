@@ -2623,6 +2623,89 @@ impl BridgeMobject {
         }
     }
 
+    /// Reference `Surface.pointwise_become_partial`, routed to the same
+    /// Marionette UV-grid operation used by Choreo's creation animations.
+    /// Surface resolution is Python constructor state, so the authored
+    /// public method supplies the source grid explicitly after resolving the
+    /// Reference's preferred-axis default. As with the VMobject sibling, an
+    /// unrelated Stage contributes a temporary root-entry copy and no Python
+    /// operation runs while either Stage is borrowed.
+    fn _surface_pointwise_become_partial(
+        slf: &Bound<'_, Self>,
+        source: &Bound<'_, BridgeMobject>,
+        resolution: (usize, usize),
+        axis: usize,
+        a: f64,
+        b: f64,
+    ) -> PyResult<()> {
+        if !a.is_finite() || !b.is_finite() {
+            return Err(PyValueError::new_err(
+                "partial-surface bounds must be finite",
+            ));
+        }
+        crossing::record(CrossingClass::FieldWrite);
+
+        let self_bound = {
+            let cell = slf.borrow();
+            cell.engine
+                .as_ref()
+                .zip(cell.mob)
+                .map(|(engine, mob)| (Rc::clone(engine), mob))
+        };
+        if let Some((engine, mob)) = self_bound {
+            let source_bound = {
+                let cell = source.borrow();
+                cell.engine
+                    .as_ref()
+                    .zip(cell.mob)
+                    .map(|(source_engine, source_mob)| (Rc::clone(source_engine), source_mob))
+            };
+            if let Some((source_engine, source_mob)) = source_bound
+                && same_engine(&engine, &source_engine)
+            {
+                return engine
+                    .borrow_mut()
+                    .stage_mut()
+                    .surface_pointwise_become_partial(mob, source_mob, resolution, axis, a, b)
+                    .map_err(stage_error);
+            }
+
+            let mut runtime = engine.borrow_mut();
+            let stage = runtime.stage_mut();
+            let temporary = copy_proxy_entry_into(source, stage)?;
+            let result = stage
+                .surface_pointwise_become_partial(mob, temporary, resolution, axis, a, b)
+                .map_err(stage_error);
+            let cleanup = stage.delete(temporary).map_err(stage_error);
+            result.and(cleanup)
+        } else {
+            let mut cell = slf.borrow_mut();
+            let nursery = cell.nursery.as_mut().ok_or_else(|| {
+                StaleHandleError::new_err("partial surface target has no detached or bound state")
+            })?;
+            if slf.is(source) {
+                return nursery
+                    .stage
+                    .surface_pointwise_become_partial(
+                        nursery.root,
+                        nursery.root,
+                        resolution,
+                        axis,
+                        a,
+                        b,
+                    )
+                    .map_err(stage_error);
+            }
+            let temporary = copy_proxy_entry_into(source, &mut nursery.stage)?;
+            let result = nursery
+                .stage
+                .surface_pointwise_become_partial(nursery.root, temporary, resolution, axis, a, b)
+                .map_err(stage_error);
+            let cleanup = nursery.stage.delete(temporary).map_err(stage_error);
+            result.and(cleanup)
+        }
+    }
+
     /// Atlas/Chisel's true-arclength dash placement expressed as the
     /// curve-index windows consumed by `pointwise_become_partial`.
     fn _dash_curve_intervals(

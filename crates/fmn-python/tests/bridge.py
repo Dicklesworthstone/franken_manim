@@ -2992,6 +2992,144 @@ surface_scene.play(
 )
 assert np.allclose(surface.get_points(), surface_points)
 
+# The public Surface method reaches that same Marionette authority directly.
+# Partial reveals replace only the point grid, preserve the target's normals
+# and style lanes, and never mutate the source. Full-range reveal restores both
+# pointlike columns, matching Mobject.match_points in the pinned Reference.
+assert str(inspect.signature(manimlib.Surface.pointwise_become_partial)) == (
+    "(self, smobject, a, b, axis=None)"
+)
+surface_source = manimlib.ParametricSurface(
+    lambda u, v: np.array([u, v, u + 2.0 * v]),
+    u_range=(0.0, 2.0),
+    v_range=(0.0, 2.0),
+    resolution=(3, 3),
+    color=manimlib.BLUE,
+    opacity=0.8,
+)
+surface_source_before = surface_source.data.copy()
+surface_target = manimlib.ParametricSurface(
+    lambda u, v: np.array([u - 4.0, v - 4.0, 0.0]),
+    resolution=(3, 3),
+    color=manimlib.RED,
+    opacity=0.35,
+)
+surface_target_normals = surface_target.data["d_normal_point"].copy()
+surface_target_rgba = surface_target.data["rgba"].copy()
+expected_v_slice = surface_source_before["point"].reshape((3, 3, 3)).copy()
+expected_v_slice[:, 0] = expected_v_slice[:, 1]
+expected_v_slice[:, 2] = expected_v_slice[:, 1]
+assert (
+    surface_target.pointwise_become_partial(surface_source, 0.5, 0.5, axis=1)
+    is surface_target
+)
+assert np.allclose(surface_target.data["point"], expected_v_slice.reshape((-1, 3)))
+assert np.array_equal(surface_target.data["d_normal_point"], surface_target_normals)
+assert np.array_equal(surface_target.data["rgba"], surface_target_rgba)
+assert np.array_equal(surface_source.data, surface_source_before)
+
+default_axis_target = manimlib.ParametricSurface(
+    lambda u, v: np.array([u + 4.0, v + 4.0, 0.0]),
+    resolution=(3, 3),
+    preferred_creation_axis=0,
+)
+expected_u_slice = surface_source_before["point"].reshape((3, 3, 3)).copy()
+expected_u_slice[0] = expected_u_slice[1]
+expected_u_slice[2] = expected_u_slice[1]
+default_axis_target.pointwise_become_partial(surface_source, 0.5, 0.5)
+assert np.allclose(
+    default_axis_target.data["point"], expected_u_slice.reshape((-1, 3))
+)
+
+full_surface_target = manimlib.ParametricSurface(
+    lambda u, v: np.array([-u, -v, 0.0]),
+    resolution=(3, 3),
+    color=manimlib.GREEN,
+    opacity=0.2,
+)
+full_surface_rgba = full_surface_target.data["rgba"].copy()
+full_surface_target.pointwise_become_partial(surface_source, 0.0, 1.0)
+assert np.array_equal(
+    full_surface_target.data["point"], surface_source_before["point"]
+)
+assert np.array_equal(
+    full_surface_target.data["d_normal_point"],
+    surface_source_before["d_normal_point"],
+)
+assert np.array_equal(full_surface_target.data["rgba"], full_surface_rgba)
+
+self_surface = surface_source.copy()
+self_expected = self_surface.data["point"].reshape((3, 3, 3)).copy()
+self_expected[:, 0] = self_expected[:, 1]
+self_expected[:, 2] = self_expected[:, 1]
+assert self_surface.pointwise_become_partial(self_surface, 0.5, 0.5) is self_surface
+assert np.allclose(self_surface.data["point"], self_expected.reshape((-1, 3)))
+
+bound_surface_scene = Scene()
+bound_surface_source = surface_source.copy()
+bound_surface_target = full_surface_target.copy()
+bound_surface_scene.add(bound_surface_source, bound_surface_target)
+bound_surface_target.pointwise_become_partial(
+    bound_surface_source, 0.5, 0.5, axis=0
+)
+assert np.allclose(
+    bound_surface_target.data["point"], expected_u_slice.reshape((-1, 3))
+)
+
+foreign_surface_scene = Scene()
+foreign_surface_target = full_surface_target.copy()
+foreign_surface_scene.add(foreign_surface_target)
+foreign_surface_target.pointwise_become_partial(
+    bound_surface_source, 0.5, 0.5, axis=1
+)
+assert np.allclose(
+    foreign_surface_target.data["point"], expected_v_slice.reshape((-1, 3))
+)
+
+for invalid_axis in (-1, 2):
+    refused_surface = full_surface_target.copy()
+    refused_before = refused_surface.data.copy()
+    try:
+        refused_surface.pointwise_become_partial(
+            surface_source, 0.25, 0.75, invalid_axis
+        )
+    except (OverflowError, RuntimeError):
+        pass
+    else:
+        raise AssertionError(f"Surface accepted invalid partial axis {invalid_axis}")
+    assert np.array_equal(refused_surface.data, refused_before)
+
+nonfinite_surface = full_surface_target.copy()
+nonfinite_before = nonfinite_surface.data.copy()
+try:
+    nonfinite_surface.pointwise_become_partial(surface_source, float("nan"), 0.5)
+except ValueError as error:
+    assert "finite" in str(error)
+else:
+    raise AssertionError("Surface accepted a non-finite partial bound")
+assert np.array_equal(nonfinite_surface.data, nonfinite_before)
+
+malformed_surface_source = surface_source.copy()
+malformed_surface_source.resolution = (2, 4)
+malformed_surface_target = full_surface_target.copy()
+malformed_target_before = malformed_surface_target.data.copy()
+try:
+    malformed_surface_target.pointwise_become_partial(
+        malformed_surface_source, 0.25, 0.75
+    )
+except RuntimeError as error:
+    assert "schema" in str(error).lower()
+else:
+    raise AssertionError("Surface accepted resolution metadata inconsistent with its records")
+assert np.array_equal(malformed_surface_target.data, malformed_target_before)
+
+try:
+    surface_target.pointwise_become_partial(VMobject(), 0.0, 1.0)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("Surface accepted a non-Surface partial source")
+
 # Filled Arrow endpoint updates rebuild Atlas's length-dependent tip geometry
 # in place, so scene-bound updater callbacks preserve arena identity.
 bound_arrow = manimlib.Vector(manimlib.RIGHT)
@@ -5575,6 +5713,49 @@ def verify_portal_console_scene():
     assert repeated_still["frame_count"] == 1
     assert hmac.compare_digest(repeated_still["digest"], still["digest"])
     assert repeated_still_destination.read_bytes() == still_bytes
+
+    # Direct public Surface partial reveal is production behavior, not only a
+    # structural bridge assertion: its collapsed native UV grid must survive
+    # Scene adoption and reach visible Lumen/Reel pixels.
+    surface_destination = output_root / "surface-partial.png"
+    surface_render_scene = InteractiveScene()
+    surface_render_scene._begin_png(
+        str(surface_destination), 160, 90, 30, 1, 0
+    )
+    surface_render_source = manimlib.ParametricSurface(
+        lambda u, v: np.array([u, v, 0.0]),
+        u_range=(-3.0, 3.0),
+        v_range=(-2.0, 2.0),
+        resolution=(11, 9),
+        color=manimlib.RED,
+        opacity=1.0,
+    )
+    surface_render_target = surface_render_source.copy()
+    assert (
+        surface_render_target.pointwise_become_partial(
+            surface_render_source, 0.2, 0.8, axis=0
+        )
+        is surface_render_target
+    )
+    surface_render_scene.add(surface_render_target)
+    surface_receipt = surface_render_scene._finish_render(
+        surface_render_scene.frame._core,
+        surface_render_scene.camera.light_source.get_center(),
+    )
+    assert pathlib.Path(surface_receipt[0]) == surface_destination
+    assert surface_receipt[1] == 1
+    assert surface_receipt[2] == surface_destination.stat().st_size
+    assert len(surface_receipt[3]) == 64
+    assert surface_receipt[4].split(":")[0] == "fast-cpu"
+    surface_width, surface_height, surface_rows = png_rgba8_rows(
+        surface_destination
+    )
+    assert (surface_width, surface_height) == (160, 90)
+    assert sum(
+        tuple(row[offset : offset + 3]) != (51, 51, 51)
+        for row in surface_rows
+        for offset in range(0, len(row), 4)
+    ) >= 32
 
     # A generic open VMobject remains visibly stroked after ShowCreation,
     # subsequent camera animation, and an ambient-rotation wait.  This is the
