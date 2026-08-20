@@ -4394,8 +4394,7 @@ impl BridgeMobject {
     }
 
     /// `Arrow(start, end, ...)`: one filled path with the native tip
-    /// proportions (thickness, tip ratios, ratio caps at the Reference
-    /// defaults).
+    /// proportions and caller-selected Reference ratio caps.
     #[allow(clippy::too_many_arguments)]
     fn _build_arrow<'py>(
         slf: &Bound<'py, Self>,
@@ -4407,16 +4406,20 @@ impl BridgeMobject {
         thickness: f64,
         tip_width_ratio: f64,
         tip_angle: f64,
-    ) -> PyResult<Bound<'py, PyList>> {
-        let built = fmn_library::line::Arrow::new(start, end)
+        max_tip_length_to_length_ratio: f64,
+        max_width_to_length_ratio: f64,
+    ) -> PyResult<(Bound<'py, PyList>, usize)> {
+        let (built, tip_index) = fmn_library::line::Arrow::new(start, end)
             .buff(buff)
             .path_arc(path_arc)
             .thickness(thickness)
             .tip_width_ratio(tip_width_ratio)
             .tip_angle(tip_angle)
-            .build()
+            .max_tip_length_to_length_ratio(max_tip_length_to_length_ratio)
+            .max_width_to_length_ratio(max_width_to_length_ratio)
+            .build_with_tip_index()
             .map_err(native_error)?;
-        install_native_tree(slf, factory, built)
+        Ok((install_native_tree(slf, factory, built)?, tip_index))
     }
 
     /// Rebuild a scene-bound filled Arrow at new endpoints without changing
@@ -4432,14 +4435,18 @@ impl BridgeMobject {
         thickness: f64,
         tip_width_ratio: f64,
         tip_angle: f64,
-    ) -> PyResult<()> {
-        let built = fmn_library::line::Arrow::new(start, end)
+        max_tip_length_to_length_ratio: f64,
+        max_width_to_length_ratio: f64,
+    ) -> PyResult<usize> {
+        let (built, tip_index) = fmn_library::line::Arrow::new(start, end)
             .buff(buff)
             .path_arc(path_arc)
             .thickness(thickness)
             .tip_width_ratio(tip_width_ratio)
             .tip_angle(tip_angle)
-            .build()
+            .max_tip_length_to_length_ratio(max_tip_length_to_length_ratio)
+            .max_width_to_length_ratio(max_width_to_length_ratio)
+            .build_with_tip_index()
             .map_err(native_error)?;
         let points = built.points().to_vec();
         let shape = built.shape();
@@ -4449,7 +4456,28 @@ impl BridgeMobject {
             stage.set_shape(mob, shape);
             Ok(())
         })?
-        .map_err(stage_error)
+        .map_err(stage_error)?;
+        Ok(tip_index)
+    }
+
+    /// `Arrow.get_key_dimensions` through Atlas's single ratio-cap formula.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _arrow_key_dimensions(
+        length: f64,
+        thickness: f64,
+        tip_width_ratio: f64,
+        tip_angle: f64,
+        max_tip_length_to_length_ratio: f64,
+        max_width_to_length_ratio: f64,
+    ) -> (f64, f64, f64) {
+        fmn_library::line::Arrow::new([0.0; 3], [1.0, 0.0, 0.0])
+            .thickness(thickness)
+            .tip_width_ratio(tip_width_ratio)
+            .tip_angle(tip_angle)
+            .max_tip_length_to_length_ratio(max_tip_length_to_length_ratio)
+            .max_width_to_length_ratio(max_width_to_length_ratio)
+            .key_dimensions(length)
     }
 
     /// `NumberLine(x_range, **config)` over the coords shelf.
@@ -7927,7 +7955,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, VectorField
+            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8142,6 +8170,27 @@ class _GauntletPortalScene(Scene):
             length=0.18,
             width=0.14,
         )
+        native_arrow = Arrow(
+            (-2.35, 2.35, 0.0),
+            (-1.35, 2.35, 0.0),
+            buff=0.04,
+            thickness=2.5,
+            tip_width_ratio=4.0,
+            max_tip_length_to_length_ratio=0.35,
+            max_width_to_length_ratio=0.08,
+            fill_color=BLUE_C,
+        ).scale(0.9)
+        native_arrow.set_thickness(2.75).put_start_and_end_on(
+            (-2.3, 2.35, 0.0),
+            (-1.4, 2.35, 0.0),
+        )
+        native_vector = Vector(
+            (0.65, 0.2, 0.0),
+            thickness=2.25,
+            max_tip_length_to_length_ratio=0.4,
+            max_width_to_length_ratio=0.09,
+            fill_color=RED,
+        ).shift((1.55, 2.25, 0.0))
         field_axes = Axes(
             x_range=(-1.0, 1.0, 1.0),
             y_range=(-1.0, 1.0, 1.0),
@@ -8204,6 +8253,8 @@ class _GauntletPortalScene(Scene):
             native_function_graph,
             native_implicit,
             native_line,
+            native_arrow,
+            native_vector,
             native_field,
             native_time_field,
         )

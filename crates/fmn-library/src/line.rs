@@ -471,7 +471,7 @@ pub struct Arrow {
 }
 
 /// The Reference's `Arrow.tickness_multiplier` (its spelling).
-const THICKNESS_MULTIPLIER: f64 = 0.015;
+pub const THICKNESS_MULTIPLIER: f64 = 0.015;
 
 impl Arrow {
     /// An arrow between two points, at the Reference's defaults.
@@ -536,6 +536,20 @@ impl Arrow {
         self
     }
 
+    /// Cap the head length as a fraction of the arrow's length.
+    #[must_use]
+    pub fn max_tip_length_to_length_ratio(mut self, ratio: f64) -> Self {
+        self.max_tip_length_to_length_ratio = ratio;
+        self
+    }
+
+    /// Cap the shaft width as a fraction of the arrow's length.
+    #[must_use]
+    pub fn max_width_to_length_ratio(mut self, ratio: f64) -> Self {
+        self.max_width_to_length_ratio = ratio;
+        self
+    }
+
     /// Set fill and stroke colour.
     #[must_use]
     pub fn color(mut self, color: Srgb) -> Self {
@@ -577,6 +591,17 @@ impl Arrow {
     /// # Errors
     /// The arc-component contract's typed refusals (fm-4tb.1).
     pub fn build(self) -> Result<VMobject, GeomError> {
+        self.build_with_tip_index().map(|(arrow, _tip_index)| arrow)
+    }
+
+    /// Build the detached mobject and return the point-record index of its tip.
+    ///
+    /// Front doors retain this index so `get_end` stays exact after affine
+    /// transforms without reconstructing or inspecting the governed outline.
+    ///
+    /// # Errors
+    /// The arc-component contract's typed refusals (fm-4tb.1).
+    pub fn build_with_tip_index(self) -> Result<(VMobject, usize), GeomError> {
         let vect = sub(self.end, self.start);
         let length = space_ops::get_norm(vect).max(1e-8);
         let unit = space_ops::normalize(vect);
@@ -696,12 +721,15 @@ impl Arrow {
         let shifted = tilted
             .clone()
             .shifted(sub(start, arrow_start(&tilted, tip_index)));
-        Ok(shifted.with_shape(ShapeTag::Line {
-            start: self.start,
-            end: self.end,
-            path_arc: self.path_arc,
-            buff: self.buff,
-        }))
+        Ok((
+            shifted.with_shape(ShapeTag::Line {
+                start: self.start,
+                end: self.end,
+                path_arc: self.path_arc,
+                buff: self.buff,
+            }),
+            tip_index,
+        ))
     }
 }
 
@@ -1070,6 +1098,23 @@ mod tests {
         let short = Arrow::new([0.0; 3], [0.2, 0.0, 0.0]).buff(0.0);
         let (_, _, tip_length) = short.key_dimensions(0.2);
         assert!(tip_length <= 0.5 * 0.2 + 1e-12, "tip length {tip_length}");
+    }
+
+    #[test]
+    fn arrow_exposes_its_tip_record_and_honors_both_ratio_caps() {
+        let configured = Arrow::new([0.0; 3], [4.0, 0.0, 0.0])
+            .buff(0.0)
+            .max_width_to_length_ratio(0.005)
+            .max_tip_length_to_length_ratio(0.02);
+        let (width, _tip_width, tip_length) = configured.key_dimensions(4.0);
+        assert!(close(width, 0.02, 1e-12));
+        assert!(tip_length <= 0.08 + 1e-12);
+
+        let (arrow, tip_index) = configured
+            .build_with_tip_index()
+            .expect("the configured arrow is valid");
+        assert!(tip_index < arrow.points().len());
+        assert!(space_ops::get_norm(sub(arrow_end(&arrow, tip_index), [4.0, 0.0, 0.0])) < 1e-9);
     }
 
     #[test]
