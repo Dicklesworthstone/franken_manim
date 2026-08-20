@@ -2930,6 +2930,64 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// `Cross(mobject, ...)` over Atlas's tapered two-arm matcher. The
+    /// source proxy contributes its authoritative live family geometry;
+    /// Atlas alone derives the extent, arm paths, and default taper.
+    fn _build_cross<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        target: &Bound<'_, BridgeMobject>,
+        color: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let target = native_family_vmobject(target)?;
+        let built = fmn_library::cross(&target, srgb_from_py(color)?, 6.0);
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `Underline(mobject, ...)` over Atlas's extent-driven tapered rule.
+    /// Non-finite placement controls refuse before any nursery mutation.
+    fn _build_underline<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        target: &Bound<'_, BridgeMobject>,
+        color: &Bound<'_, PyAny>,
+        buff: f64,
+        stretch_factor: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        if !buff.is_finite() || !stretch_factor.is_finite() {
+            return Err(PyValueError::new_err(
+                "Underline buff and stretch_factor must be finite",
+            ));
+        }
+        let target = native_family_vmobject(target)?;
+        let built = fmn_library::underline(&target, srgb_from_py(color)?, buff, stretch_factor);
+        install_native_tree(slf, factory, built)
+    }
+
+    /// The paired `pifont` marks are native drawn paths (BN-08), wrapped in
+    /// one empty TexText-family root so inherited indexing and selector
+    /// behavior retain the Reference's one-glyph family shape.
+    fn _build_checkmark<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        color: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mark = fmn_library::checkmark(srgb_from_py(color)?);
+        let tree = fmn_library::VMobject::new().with_children([mark]);
+        install_native_tree(slf, factory, tree)
+    }
+
+    /// Native drawn sibling of [`Self::_build_checkmark`].
+    fn _build_exmark<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        color: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mark = fmn_library::exmark(srgb_from_py(color)?);
+        let tree = fmn_library::VMobject::new().with_children([mark]);
+        install_native_tree(slf, factory, tree)
+    }
+
     /// Retarget a scene-bound `SurroundingRectangle` without replacing its
     /// arena entry. Atlas remains the one geometry implementation; only the
     /// newly built world-space point run and primitive hint replace the live
@@ -6312,6 +6370,21 @@ fn native_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+/// Snapshot a proxy's authoritative live family points into the detached
+/// value type Atlas's extent-only matcher builders consume. The point math
+/// remains in Atlas; this seam merely crosses the Marionette ownership
+/// boundary without depending on Python family-list timing.
+fn native_family_vmobject(source: &Bound<'_, BridgeMobject>) -> PyResult<fmn_library::VMobject> {
+    let points = with_stage(source, |stage, mob| {
+        stage
+            .family(mob)
+            .into_iter()
+            .flat_map(|member| stage.get_points(member).unwrap_or_default())
+            .collect::<Vec<_>>()
+    })?;
+    Ok(fmn_library::VMobject::from_points(points))
+}
+
 /// `(min, max)` or `(min, max, step)` — the Reference's RangeSpecifier.
 fn range3(value: &Bound<'_, PyAny>) -> PyResult<[f64; 3]> {
     let items: Vec<f64> = value
@@ -7136,7 +7209,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Circle, CurvedDoubleArrow, DashedVMobject, ParametricSurface, Scene, VMobject
+            r#"from manimlib import AnnularSector, Checkmark, Circle, Cross, CurvedDoubleArrow, DashedVMobject, Exmark, ParametricSurface, Scene, Underline, VMobject
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7199,6 +7272,13 @@ class _GauntletPortalScene(Scene):
         surface_partial.pointwise_become_partial(
             surface_source, 0.2, 0.8, axis=0
         )
+        matcher_target = Circle(radius=0.35).shift((2.35, -1.1, 0.0))
+        matcher_cross = Cross(matcher_target, stroke_width=[0, 4, 0])
+        matcher_underline = Underline(
+            matcher_target, buff=0.08, stroke_width=[0, 2, 2, 0]
+        )
+        checkmark = Checkmark(font_size=24).shift((2.5, 0.35, 0.0))
+        exmark = Exmark(font_size=24).shift((1.8, 0.35, 0.0))
         self.add(
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
@@ -7208,6 +7288,10 @@ class _GauntletPortalScene(Scene):
             portal_ops,
             smooth_ops,
             surface_partial,
+            matcher_cross,
+            matcher_underline,
+            checkmark,
+            exmark,
         )
         self.wait(1 / 30)
 

@@ -2348,6 +2348,11 @@ assert np.allclose(
     surround.get_bounding_box()[0][:2], live_target_box[0][:2] - 0.1
 )
 
+fixed_match_target = geometry.Rectangle(width=1.0, height=0.5).fix_in_frame()
+fixed_surround = shape_matchers.SurroundingRectangle(fixed_match_target)
+assert fixed_match_target.is_fixed_in_frame()
+assert fixed_surround.is_fixed_in_frame()
+
 bound_empty_target = Mobject()
 matcher_scene.add(bound_empty_target, empty_surround)
 empty_surround.surround(bound_empty_target)
@@ -2357,6 +2362,178 @@ assert empty_surround.has_points()
 assert np.allclose(
     empty_surround.get_bounding_box()[2][:2], live_target_box[2][:2] + 0.2
 )
+
+# The rest of Atlas's matcher shelf is routed through the same authoritative
+# family-extent crossing. Cross and Underline retain their Reference MRO and
+# tapered record profiles; the Python layer does not reconstruct either path.
+assert str(inspect.signature(shape_matchers.Cross)) == (
+    "(mobject, stroke_color='#FC6255', stroke_width=[0, 6, 0], **kwargs)"
+)
+assert str(inspect.signature(shape_matchers.Underline)) == (
+    "(mobject, buff=0.1, stroke_color='#FFFFFF', "
+    "stroke_width=[0, 3, 3, 0], stretch_factor=1.2, **kwargs)"
+)
+assert shape_matchers.Cross.__bases__ == (manimlib.VGroup,)
+assert shape_matchers.Underline.__bases__ == (geometry.Line,)
+
+native_match_target = manimlib.VGroup(
+    geometry.Rectangle(width=2.0, height=1.0).shift([-1.0, 0.25, 0.0]),
+    geometry.Rectangle(width=1.0, height=2.0).shift([1.75, -0.5, 0.0]),
+)
+native_match_box = native_match_target.get_bounding_box().copy()
+native_cross = shape_matchers.Cross(native_match_target)
+assert len(native_cross.submobjects) == 2
+assert np.allclose(
+    native_cross.get_bounding_box()[[0, 2], :2],
+    native_match_box[[0, 2], :2],
+)
+for arm in native_cross.submobjects:
+    widths = arm.get_stroke_widths()
+    assert len(widths) > 3
+    assert np.isclose(widths[0], 0.0)
+    assert np.isclose(widths[-1], 0.0)
+    assert np.isclose(widths.max(), 6.0)
+    assert arm.get_stroke_color() == manimlib.RED
+
+scalar_cross = shape_matchers.Cross(
+    native_match_target, stroke_color=manimlib.BLUE, stroke_width=2.5
+)
+for arm in scalar_cross.submobjects:
+    assert np.allclose(arm.get_stroke_widths(), 2.5)
+    assert arm.get_stroke_color() == manimlib.BLUE
+
+native_underline = shape_matchers.Underline(native_match_target, buff=0.2)
+underline_box = native_underline.get_bounding_box()
+target_width = native_match_box[2, 0] - native_match_box[0, 0]
+assert np.isclose(underline_box[2, 0] - underline_box[0, 0], 1.2 * target_width)
+assert np.isclose(underline_box[0, 1], native_match_box[0, 1] - 0.2)
+assert np.isclose(underline_box[2, 1], native_match_box[0, 1] - 0.2)
+underline_widths = native_underline.get_stroke_widths()
+assert np.isclose(underline_widths[0], 0.0)
+assert np.isclose(underline_widths[-1], 0.0)
+assert np.isclose(underline_widths.max(), 3.0)
+
+scalar_underline = shape_matchers.Underline(
+    native_match_target,
+    stroke_color=manimlib.GREEN,
+    stroke_width=1.75,
+    stretch_factor=0.8,
+)
+assert np.allclose(scalar_underline.get_stroke_widths(), 1.75)
+assert scalar_underline.get_stroke_color() == manimlib.GREEN
+assert np.isclose(scalar_underline.get_width(), 0.8 * target_width)
+
+empty_cross = shape_matchers.Cross(Mobject())
+empty_underline = shape_matchers.Underline(Mobject())
+assert not empty_cross.family_members_with_points()
+assert not empty_underline.family_members_with_points()
+
+bound_matcher_scene = Scene()
+bound_match_target = geometry.Rectangle(width=1.5, height=0.75)
+bound_matcher_scene.add(bound_match_target)
+bound_cross = shape_matchers.Cross(bound_match_target)
+bound_underline = shape_matchers.Underline(bound_match_target)
+bound_matcher_scene.add(bound_cross, bound_underline)
+assert bound_cross._is_bound()
+assert all(arm._is_bound() for arm in bound_cross.submobjects)
+assert bound_underline._is_bound()
+
+for constructor, message in (
+    (shape_matchers.Cross, "Cross expects a Mobject"),
+    (shape_matchers.Underline, "Underline expects a Mobject"),
+):
+    try:
+        constructor([0.0, 0.0, 0.0])
+    except TypeError as error:
+        assert str(error) == message
+    else:
+        raise AssertionError(f"{constructor.__name__} accepted a non-Mobject target")
+
+for name, kwargs in (
+    ("buff", {"buff": float("nan")}),
+    ("stretch_factor", {"stretch_factor": float("inf")}),
+):
+    try:
+        shape_matchers.Underline(native_match_target, **kwargs)
+    except ValueError as error:
+        assert name in str(error)
+        assert "finite" in str(error)
+    else:
+        raise AssertionError(f"Underline accepted a non-finite {name}")
+
+try:
+    shape_matchers.Underline(native_match_target, path_arc=0.5)
+except NotImplementedError as error:
+    assert "path_arc" in str(error)
+else:
+    raise AssertionError("Underline silently ignored a curved path request")
+
+# Checkmark and Exmark keep the Reference preset-string inheritance and one
+# selectable glyph-family shape, but their visible contours are Atlas's
+# paired BN-08 paths rather than a hidden LaTeX/pifont subprocess.
+drawings = importlib.import_module("manimlib.mobject.svg.drawings")
+special_tex = importlib.import_module("manimlib.mobject.svg.special_tex")
+assert str(inspect.signature(special_tex.TexTextFromPresetString)) == ("(**kwargs)")
+assert str(inspect.signature(drawings.Checkmark)) == ("(**kwargs)")
+assert str(inspect.signature(drawings.Exmark)) == ("(**kwargs)")
+assert drawings.Checkmark.__bases__ == (special_tex.TexTextFromPresetString,)
+assert drawings.Exmark.__bases__ == (special_tex.TexTextFromPresetString,)
+assert issubclass(special_tex.TexTextFromPresetString, manimlib.TexText)
+assert special_tex.TexTextFromPresetString.tex == ""
+assert special_tex.TexTextFromPresetString.default_color == manimlib.DEFAULT_MOBJECT_COLOR
+assert drawings.Checkmark.tex == r"\ding{51}"
+assert drawings.Checkmark.default_color == manimlib.GREEN
+assert drawings.Exmark.tex == r"\ding{55}"
+assert drawings.Exmark.default_color == manimlib.RED
+
+
+class NativePresetProbe(special_tex.TexTextFromPresetString):
+    tex = "x"
+    default_color = manimlib.BLUE
+
+
+native_preset_probe = NativePresetProbe()
+assert native_preset_probe.get_tex() == "x"
+assert native_preset_probe.get_fill_color() == manimlib.BLUE
+
+checkmark = drawings.Checkmark()
+exmark = drawings.Exmark()
+assert checkmark.get_tex() == r"\ding{51}"
+assert exmark.get_tex() == r"\ding{55}"
+assert len(checkmark.submobjects) == 1
+assert len(exmark.submobjects) == 1
+assert checkmark.get_part_by_tex(checkmark.tex)[0] is checkmark[0]
+assert exmark.get_part_by_tex(exmark.tex)[0] is exmark[0]
+assert np.allclose(checkmark.get_bounding_box()[[0, 2], :2], [[-0.5, -0.5], [0.5, 0.5]])
+assert np.allclose(exmark.get_bounding_box()[[0, 2], :2], [[-0.5, -0.5], [0.5, 0.5]])
+assert checkmark[0].get_fill_color() == manimlib.GREEN
+assert exmark[0].get_fill_color() == manimlib.RED
+assert np.isclose(checkmark[0].get_stroke_width(), 0.0)
+assert np.isclose(exmark[0].get_stroke_width(), 0.0)
+
+large_checkmark = drawings.Checkmark(font_size=96, color=manimlib.BLUE)
+assert np.isclose(large_checkmark.get_width(), 2.0)
+assert np.isclose(large_checkmark.get_height(), 2.0)
+assert large_checkmark[0].get_fill_color() == manimlib.BLUE
+
+bound_matcher_scene.add(checkmark, exmark)
+assert checkmark._is_bound() and checkmark[0]._is_bound()
+assert exmark._is_bound() and exmark[0]._is_bound()
+
+for constructor in (drawings.Checkmark, drawings.Exmark):
+    try:
+        constructor(font_size=0)
+    except ValueError as error:
+        assert "positive and finite" in str(error)
+    else:
+        raise AssertionError(f"{constructor.__name__} accepted zero font_size")
+
+try:
+    drawings.Checkmark(template="external-template")
+except NotImplementedError as error:
+    assert "template" in str(error)
+else:
+    raise AssertionError("Checkmark silently accepted an external TeX template")
 
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary

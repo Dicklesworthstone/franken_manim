@@ -50,8 +50,11 @@ _DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
 _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
 _SMALL_BUFF = 0.1
 _BLACK = "#000000"
+_WHITE = "#FFFFFF"
 _GREY_C = "#888888"
 _GREY_E = "#222222"
+_GREEN = "#83C167"
+_RED = "#FC6255"
 
 # Function object -> catalog name, filled by _install_rate_functions;
 # Scene.play maps rate_func callables into the engine's named catalog.
@@ -3281,6 +3284,8 @@ class SurroundingRectangle(Rectangle):
         _hang_native_children(self, specs)
         kwargs.setdefault("color", color)
         _apply_vmobject_style_kwargs(self, kwargs)
+        if mobject.is_fixed_in_frame():
+            self.fix_in_frame()
 
     def surround(self, mobject, buff=None):
         if not isinstance(mobject, _BridgeMobject):
@@ -4940,6 +4945,143 @@ class Tex(StringMobject):
 class TexText(Tex):
     _native_text_mode = True
     tex_environment = ""
+
+
+class TexTextFromPresetString(TexText):
+    """The Reference preset-string base over the native Scribe TexText.
+
+    Concrete presets ordinarily inherit this constructor. The two pifont
+    marks below preserve that MRO but override construction because Atlas
+    owns their de-TeX'd paths under BN-08.
+    """
+
+    tex = ""
+    default_color = _WHITE
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            self.tex,
+            color=kwargs.pop("color", self.default_color),
+            **kwargs,
+        )
+
+
+def _init_native_drawn_mark(mark, build, kwargs):
+    """Install one Atlas mark while retaining TexText's one-glyph surface."""
+    kwargs = dict(kwargs)
+    color = kwargs.pop("color", mark.default_color)
+    font_size = float(kwargs.pop("font_size", 48))
+    alignment = kwargs.pop("alignment", "\\centering")
+    template = kwargs.pop("template", "")
+    additional_preamble = kwargs.pop("additional_preamble", "")
+    color_map = dict(kwargs.pop("t2c", {}) or {})
+    color_map.update(dict(kwargs.pop("tex_to_color_map", {}) or {}))
+    isolate = kwargs.pop("isolate", [])
+    use_labelled_svg = bool(kwargs.pop("use_labelled_svg", True))
+    base_color = kwargs.pop("base_color", _WHITE)
+    protect = kwargs.pop("protect", ())
+    _refuse_unrouted(
+        type(mark).__name__ + "()",
+        [
+            ("alignment", alignment != "\\centering"),
+            ("template", template != ""),
+            ("additional_preamble", additional_preamble != ""),
+        ],
+    )
+    if not _math.isfinite(font_size) or font_size <= 0:
+        raise ValueError("drawn-mark font_size must be positive and finite")
+
+    _install_live_state(mark)
+    mark.alignment = alignment
+    mark.template = template
+    mark.additional_preamble = additional_preamble
+    mark.tex_to_color_map = color_map
+    mark.use_labelled_svg = use_labelled_svg
+    mark.isolate = isolate
+    mark.base_color = base_color
+    mark.protect = protect
+    mark.tex_strings = [mark.tex]
+    mark.tex_string = mark.tex
+    mark.string = mark.tex
+    mark.font_size = font_size
+    specs = build(_native_shell_factory, color)
+    _hang_native_children(mark, specs)
+    # The native tree is an empty TexText-family root with one drawn child.
+    # Its selector span therefore points at that child exactly as a one-glyph
+    # Scribe typeset would.
+    mark._string_sub_spans = [(0, len(mark.tex.encode("utf-8")))]
+    mark._string_sub_paths = [[0]]
+    kwargs["color"] = color
+    _apply_vmobject_style_kwargs(mark, kwargs)
+    if font_size != 48:
+        mark.scale(font_size / 48)
+    mark.set_color_by_tex_to_color_map(color_map)
+
+
+class Checkmark(TexTextFromPresetString):
+    tex = r"\ding{51}"
+    default_color = _GREEN
+
+    def __init__(self, **kwargs):
+        _init_native_drawn_mark(self, self._build_checkmark, kwargs)
+
+
+class Exmark(TexTextFromPresetString):
+    tex = r"\ding{55}"
+    default_color = _RED
+
+    def __init__(self, **kwargs):
+        _init_native_drawn_mark(self, self._build_exmark, kwargs)
+
+
+class Cross(VGroup):
+    """Atlas's native tapered cross over a live family extent."""
+
+    def __init__(
+        self,
+        mobject,
+        stroke_color=_RED,
+        stroke_width=[0, 6, 0],
+        **kwargs,
+    ):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("Cross expects a Mobject")
+        _install_live_state(self)
+        specs = self._build_cross(_native_shell_factory, mobject, stroke_color)
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+        self.set_stroke(stroke_color, width=stroke_width)
+
+
+class Underline(Line):
+    """Atlas's native tapered rule beneath a live family extent."""
+
+    def __init__(
+        self,
+        mobject,
+        buff=_SMALL_BUFF,
+        stroke_color=_WHITE,
+        stroke_width=[0, 3, 3, 0],
+        stretch_factor=1.2,
+        **kwargs,
+    ):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("Underline expects a Mobject")
+        path_arc = float(kwargs.pop("path_arc", 0.0))
+        _refuse_unrouted("Underline()", [("path_arc", path_arc != 0.0)])
+        _install_live_state(self)
+        self.path_arc = 0.0
+        self.buff = float(buff)
+        specs = self._build_underline(
+            _native_shell_factory,
+            mobject,
+            stroke_color,
+            self.buff,
+            float(stretch_factor),
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+        self.set_stroke(stroke_color, width=stroke_width)
 
 
 class Brace(Tex):
@@ -7413,6 +7555,14 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.shape_matchers", "SurroundingRectangle"): SurroundingRectangle,
         ("manimlib.mobject.shape_matchers", "BackgroundRectangle"): BackgroundRectangle,
+        ("manimlib.mobject.shape_matchers", "Cross"): Cross,
+        ("manimlib.mobject.shape_matchers", "Underline"): Underline,
+        (
+            "manimlib.mobject.svg.special_tex",
+            "TexTextFromPresetString",
+        ): TexTextFromPresetString,
+        ("manimlib.mobject.svg.drawings", "Checkmark"): Checkmark,
+        ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         ("manimlib.mobject.geometry", "Arc"): Arc,
