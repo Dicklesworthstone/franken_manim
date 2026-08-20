@@ -5811,6 +5811,194 @@ else:
     raise AssertionError("Title silently discarded an unknown underline option")
 assert not hasattr(failed_title, "submobjects")
 
+# The scalar Matrix family is an authored portal over Atlas's one grid engine
+# and the bundled fmd-math delimiter builder. Python keeps caller-visible
+# entry identities and accessors; no placement or bracket math is duplicated.
+matrix_module = importlib.import_module("manimlib.mobject.matrix")
+assert matrix_module.Matrix.__bases__ == (manimlib.VMobject,)
+assert matrix_module.DecimalMatrix.__bases__ == (matrix_module.Matrix,)
+assert matrix_module.IntegerMatrix.__bases__ == (matrix_module.DecimalMatrix,)
+assert matrix_module.TexMatrix.__bases__ == (matrix_module.Matrix,)
+matrix_signature = inspect.signature(matrix_module.Matrix)
+assert tuple(matrix_signature.parameters) == (
+    "matrix",
+    "v_buff",
+    "h_buff",
+    "bracket_h_buff",
+    "bracket_v_buff",
+    "height",
+    "element_config",
+    "element_alignment_corner",
+    "ellipses_row",
+    "ellipses_col",
+)
+assert tuple(inspect.signature(matrix_module.DecimalMatrix).parameters) == (
+    "matrix", "num_decimal_places", "decimal_config", "config"
+)
+assert tuple(inspect.signature(matrix_module.IntegerMatrix).parameters) == (
+    "matrix", "num_decimal_places", "decimal_config", "config"
+)
+assert tuple(inspect.signature(matrix_module.TexMatrix).parameters) == (
+    "matrix", "tex_config", "config"
+)
+
+integer_tex_matrix = matrix_module.Matrix(
+    [[1, 22], [333, 4]],
+    v_buff=0.7,
+    h_buff=0.8,
+    element_config=dict(font_size=24, color=manimlib.BLUE),
+)
+assert len(integer_tex_matrix) == 6
+assert integer_tex_matrix._matrix_shape == (2, 2)
+assert all(
+    isinstance(entry, manimlib.Tex)
+    for row in integer_tex_matrix.get_mob_matrix()
+    for entry in row
+)
+assert [
+    entry.get_tex()
+    for row in integer_tex_matrix.get_mob_matrix()
+    for entry in row
+] == ["1", "22", "333", "4"]
+assert integer_tex_matrix.get_row(0)[0] is integer_tex_matrix.mob_matrix[0][0]
+assert integer_tex_matrix.get_column(1)[1] is integer_tex_matrix.mob_matrix[1][1]
+assert integer_tex_matrix.get_rows() is integer_tex_matrix.rows
+assert integer_tex_matrix.get_columns() is integer_tex_matrix.columns
+assert len(integer_tex_matrix.get_rows()) == 2
+assert len(integer_tex_matrix.get_columns()) == 2
+assert len(integer_tex_matrix.get_entries()) == 4
+assert len(integer_tex_matrix.get_brackets()) == 2
+assert len(integer_tex_matrix.get_ellipses()) == 0
+assert integer_tex_matrix.mob_matrix[0][0].get_center()[0] < (
+    integer_tex_matrix.mob_matrix[0][1].get_center()[0]
+)
+assert integer_tex_matrix.mob_matrix[0][0].get_center()[1] > (
+    integer_tex_matrix.mob_matrix[1][0].get_center()[1]
+)
+assert all(
+    member.get_fill_color() == manimlib.BLUE
+    for entry in integer_tex_matrix.elements
+    for member in entry.family_members_with_points()
+)
+
+integer_tex_matrix.set_column_colors(manimlib.RED, manimlib.YELLOW)
+assert all(
+    member.get_fill_color() == manimlib.RED
+    for row in integer_tex_matrix.mob_matrix
+    for member in row[0].family_members_with_points()
+)
+assert all(
+    member.get_fill_color() == manimlib.YELLOW
+    for row in integer_tex_matrix.mob_matrix
+    for member in row[1].family_members_with_points()
+)
+matrix_copy = integer_tex_matrix.copy()
+assert matrix_copy is not integer_tex_matrix
+assert matrix_copy.mob_matrix[0][0] is matrix_copy.submobjects[0]
+assert matrix_copy.mob_matrix[0][0] is not integer_tex_matrix.mob_matrix[0][0]
+assert matrix_copy.brackets[-1] is matrix_copy.submobjects[-1]
+background_matrix = matrix_module.Matrix([["x"]])
+assert background_matrix.add_background_to_entries() is background_matrix
+assert background_matrix.elements[0].background_rectangle is (
+    background_matrix.elements[0].submobjects[0]
+)
+
+float_matrix = matrix_module.Matrix(
+    [[1.25, 2.5]],
+    element_config=dict(num_decimal_places=1, font_size=30),
+)
+assert all(isinstance(entry, manimlib.DecimalNumber) for entry in float_matrix.elements)
+assert np.allclose(
+    [entry.get_value() for entry in float_matrix.elements], [1.25, 2.5]
+)
+first_float_entry = float_matrix.elements[0]
+first_float_edge = first_float_entry.get_edge_center(manimlib.LEFT).copy()
+assert first_float_entry.set_value(9.5) is first_float_entry
+assert float_matrix.elements[0] is first_float_entry
+assert np.isclose(first_float_entry.get_value(), 9.5)
+assert np.allclose(
+    first_float_entry.get_edge_center(manimlib.LEFT), first_float_edge, atol=1e-6
+)
+decimal_matrix = matrix_module.DecimalMatrix(
+    [[1, 2.5], [3.75, 4]],
+    num_decimal_places=2,
+    decimal_config=dict(font_size=22, color=manimlib.GREEN),
+    height=2.5,
+)
+assert decimal_matrix.float_matrix == [[1, 2.5], [3.75, 4]]
+assert all(
+    isinstance(entry, manimlib.DecimalNumber)
+    for entry in decimal_matrix.elements
+)
+assert np.allclose(
+    [entry.get_value() for entry in decimal_matrix.elements],
+    [1.0, 2.5, 3.75, 4.0],
+)
+assert decimal_matrix.get_height() <= 2.5 + 1e-6
+integer_matrix = matrix_module.IntegerMatrix(
+    [[1.2, 2.8]], decimal_config=dict(font_size=20)
+)
+assert all(isinstance(entry, manimlib.DecimalNumber) for entry in integer_matrix.elements)
+tex_matrix = matrix_module.TexMatrix(
+    [["x", "y"], ["z", "w"]],
+    tex_config=dict(font_size=20, color=manimlib.RED),
+    ellipses_row=0,
+    ellipses_col=1,
+)
+assert len(tex_matrix.ellipses) == 3
+assert len(tex_matrix.elements) == 1
+assert tex_matrix.get_ellipses()[0] is tex_matrix.mob_matrix[0][0]
+assert all(
+    member.get_fill_color() == manimlib.WHITE
+    for ellipse in tex_matrix.ellipses
+    for member in ellipse.family_members_with_points()
+)
+assert all(
+    member.get_fill_color() == manimlib.RED
+    for entry in tex_matrix.elements
+    for member in entry.family_members_with_points()
+)
+
+for invalid_matrix, expected_text in [
+    ([], "at least one row"),
+    ([[1], [2, 3]], "ragged matrix"),
+]:
+    try:
+        matrix_module.Matrix(invalid_matrix)
+    except ValueError as error:
+        assert expected_text in str(error)
+    else:
+        raise AssertionError("an invalid Matrix shape reached live state")
+for unsupported_matrix, expected_text in [
+    ([[1.0, "x"]], "mixed float"),
+    ([[1 + 2j]], "complex entries"),
+    ([[manimlib.Circle()]], "VMobject entries"),
+]:
+    try:
+        matrix_module.Matrix(unsupported_matrix)
+    except NotImplementedError as error:
+        assert expected_text in str(error)
+    else:
+        raise AssertionError("an unsupported Matrix entry silently succeeded")
+try:
+    matrix_module.TexMatrix([["x"]], tex_config={"template": "legacy"})
+except NotImplementedError as error:
+    assert "template" in str(error)
+else:
+    raise AssertionError("TexMatrix silently discarded an unsupported entry option")
+try:
+    tex_matrix.swap_entries_for_ellipses(0, 0)
+except NotImplementedError as error:
+    assert "constructor-time" in str(error)
+else:
+    raise AssertionError("post-construction Matrix ellipses silently succeeded")
+try:
+    integer_tex_matrix.get_row(-1)
+except IndexError as error:
+    assert "2 rows" in str(error)
+else:
+    raise AssertionError("Matrix.get_row accepted a negative index")
+
 failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
     three_dimensions.Torus.__init__(failed_torus, unrouted_option=True)

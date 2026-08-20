@@ -4369,6 +4369,122 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built.vmob)
     }
 
+    /// `Matrix`/`TexMatrix` over Atlas's native scalar grid engine. The
+    /// portal decides only that every entry belongs to the string route;
+    /// entry typesetting, placement, brackets, height capping, and ellipses
+    /// all remain inside the native builder.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_tex_matrix<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        entries: Vec<Vec<String>>,
+        v_buff: f64,
+        h_buff: f64,
+        bracket_h_buff: f64,
+        bracket_v_buff: f64,
+        height: Option<f64>,
+        element_alignment_corner: [f64; 3],
+        ellipses_row: Option<isize>,
+        ellipses_col: Option<isize>,
+        ellipses_height_ratio: f64,
+        ellipses_width_ratio: f64,
+        font_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let entry_refs: Vec<Vec<&str>> = entries
+            .iter()
+            .map(|row| row.iter().map(String::as_str).collect())
+            .collect();
+        let mut builder = fmn_library::TexMatrix::new(entry_refs)
+            .v_buff(v_buff)
+            .h_buff(h_buff)
+            .bracket_h_buff(bracket_h_buff)
+            .bracket_v_buff(bracket_v_buff)
+            .element_alignment_corner(element_alignment_corner)
+            .ellipses_ratios(ellipses_height_ratio, ellipses_width_ratio)
+            .font_size(font_size);
+        if let Some(height) = height {
+            builder = builder.height(height);
+        }
+        if let Some(row) = ellipses_row {
+            builder = builder.ellipses_row(row);
+        }
+        if let Some(column) = ellipses_col {
+            builder = builder.ellipses_col(column);
+        }
+        let built = with_tex_engine(|engine| builder.build(engine).map_err(native_error))?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
+    /// `DecimalMatrix`/`IntegerMatrix` over Atlas's native number grid.
+    /// `integer=true` selects the dedicated Integer shelf when the public
+    /// constructor retains its default zero decimal places; a non-zero
+    /// explicit value follows the Reference's DecimalMatrix inheritance.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_decimal_matrix<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        entries: Vec<Vec<f64>>,
+        integer: bool,
+        num_decimal_places: usize,
+        v_buff: f64,
+        h_buff: f64,
+        bracket_h_buff: f64,
+        bracket_v_buff: f64,
+        height: Option<f64>,
+        element_alignment_corner: [f64; 3],
+        ellipses_row: Option<isize>,
+        ellipses_col: Option<isize>,
+        ellipses_height_ratio: f64,
+        ellipses_width_ratio: f64,
+        font_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = if integer && num_decimal_places == 0 {
+            let mut builder = fmn_library::IntegerMatrix::new(entries)
+                .v_buff(v_buff)
+                .h_buff(h_buff)
+                .bracket_h_buff(bracket_h_buff)
+                .bracket_v_buff(bracket_v_buff)
+                .element_alignment_corner(element_alignment_corner)
+                .ellipses_ratios(ellipses_height_ratio, ellipses_width_ratio)
+                .font_size(font_size);
+            if let Some(height) = height {
+                builder = builder.height(height);
+            }
+            if let Some(row) = ellipses_row {
+                builder = builder.ellipses_row(row);
+            }
+            if let Some(column) = ellipses_col {
+                builder = builder.ellipses_col(column);
+            }
+            with_tex_engine(|engine| {
+                with_font_book(|book| builder.build(engine, book).map_err(native_error))
+            })?
+        } else {
+            let mut builder = fmn_library::DecimalMatrix::new(entries)
+                .num_decimal_places(num_decimal_places)
+                .v_buff(v_buff)
+                .h_buff(h_buff)
+                .bracket_h_buff(bracket_h_buff)
+                .bracket_v_buff(bracket_v_buff)
+                .element_alignment_corner(element_alignment_corner)
+                .ellipses_ratios(ellipses_height_ratio, ellipses_width_ratio)
+                .font_size(font_size);
+            if let Some(height) = height {
+                builder = builder.height(height);
+            }
+            if let Some(row) = ellipses_row {
+                builder = builder.ellipses_row(row);
+            }
+            if let Some(column) = ellipses_col {
+                builder = builder.ellipses_col(column);
+            }
+            with_tex_engine(|engine| {
+                with_font_book(|book| builder.build(engine, book).map_err(native_error))
+            })?
+        };
+        install_native_tree(slf, factory, built.vmob)
+    }
+
     /// `Text(...)` over the Scribe bridge: one glyph per child from the
     /// bundled FontBook, decorations trailing.
     #[allow(clippy::too_many_arguments)]
@@ -7524,7 +7640,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7693,6 +7809,12 @@ class _GauntletPortalScene(Scene):
             underline_style=dict(stroke_width=1.5, stroke_color=RED),
             color=BLUE_E,
         ).scale(0.25).shift((0.0, -3.0, 0.0))
+        native_matrix = Matrix(
+            [["x", "1"], ["0", "y"]],
+            h_buff=0.25,
+            v_buff=0.2,
+            element_config=dict(font_size=16, color=BLUE_C),
+        ).scale(0.22).shift((-2.45, -1.75, 0.0))
         self.add(
             frame_fade,
             frame_fill,
@@ -7721,6 +7843,7 @@ class _GauntletPortalScene(Scene):
             vector_prismify,
             native_list,
             native_title,
+            native_matrix,
         )
         self.wait(1 / 30)
 

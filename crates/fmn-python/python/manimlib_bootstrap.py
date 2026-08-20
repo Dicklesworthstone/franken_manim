@@ -5216,6 +5216,508 @@ class Title(TexText):
             _apply_vmobject_style_kwargs(self.underline, underline_style)
 
 
+_MAX_MATRIX_ENTRIES = 4096
+
+
+def _bounded_matrix_rows(matrix):
+    """Materialize at most Atlas's public matrix-entry budget.
+
+    Generators are bounded before an untrusted row can force an unbounded
+    copy. Shape equality remains the native builder's typed, atomic check.
+    """
+    try:
+        outer = iter(matrix)
+    except TypeError as error:
+        raise TypeError("matrix must be an iterable of row iterables") from error
+    rows = []
+    total = 0
+    for row in _itertools.islice(outer, _MAX_MATRIX_ENTRIES + 1):
+        if len(rows) == _MAX_MATRIX_ENTRIES:
+            raise ValueError(
+                f"matrix rows exceed the declared limit of {_MAX_MATRIX_ENTRIES}"
+            )
+        try:
+            values = list(
+                _itertools.islice(iter(row), _MAX_MATRIX_ENTRIES + 1)
+            )
+        except TypeError as error:
+            raise TypeError("matrix rows must be iterable") from error
+        if len(values) > _MAX_MATRIX_ENTRIES:
+            raise ValueError(
+                f"matrix columns exceed the declared limit of {_MAX_MATRIX_ENTRIES}"
+            )
+        total += len(values)
+        if total > _MAX_MATRIX_ENTRIES:
+            raise ValueError(
+                f"matrix entries require {total} items, above the declared "
+                f"limit of {_MAX_MATRIX_ENTRIES}"
+            )
+        rows.append(values)
+    return rows
+
+
+def _matrix_common_config(config):
+    """Consume the base Matrix constructor keys from a typed variant."""
+    config = dict(config)
+    common = dict(
+        v_buff=float(config.pop("v_buff", 0.5)),
+        h_buff=float(config.pop("h_buff", 0.5)),
+        bracket_h_buff=float(config.pop("bracket_h_buff", 0.2)),
+        bracket_v_buff=float(config.pop("bracket_v_buff", 0.25)),
+        height=config.pop("height", None),
+        element_alignment_corner=config.pop(
+            "element_alignment_corner", _DOWN
+        ),
+        ellipses_row=config.pop("ellipses_row", None),
+        ellipses_col=config.pop("ellipses_col", None),
+    )
+    if config:
+        raise TypeError(
+            "unexpected keyword arguments: " + ", ".join(sorted(config))
+        )
+    if common["height"] is not None:
+        common["height"] = float(common["height"])
+    return common
+
+
+def _matrix_entry_config(config, *, decimal_places=None):
+    """Split the native entry-size knob from style applied to live entries."""
+    config = dict(config)
+    font_size = float(config.pop("font_size", 48))
+    if decimal_places is None:
+        places = config.pop("num_decimal_places", None)
+        if places is not None:
+            places = int(places)
+    else:
+        if "num_decimal_places" in config:
+            raise TypeError("num_decimal_places was supplied twice")
+        places = int(decimal_places)
+    unsupported = sorted(set(config) - _NATIVE_VMOBJECT_STYLE_KEYS - {"shading"})
+    _refuse_unrouted(
+        "Matrix element configuration",
+        [(name, True) for name in unsupported],
+    )
+    _preflight_vmobject_style_kwargs(config)
+    if not _math.isfinite(font_size) or font_size <= 0:
+        raise ValueError("matrix entry font_size must be positive and finite")
+    if places is not None and places < 0:
+        raise ValueError("num_decimal_places must be non-negative")
+    return font_size, places, config
+
+
+def _matrix_ellipsis_indices(n_rows, n_cols, row_index, col_index):
+    def normalized(index, length):
+        if index is None or not -length <= index < length:
+            return None
+        return index % length
+
+    row_index = normalized(row_index, n_rows)
+    col_index = normalized(col_index, n_cols)
+    indices = []
+    if row_index is not None:
+        indices.extend(row_index * n_cols + col for col in range(n_cols))
+    if col_index is not None:
+        indices.extend(
+            row * n_cols + col_index
+            for row in range(n_rows)
+            if row * n_cols + col_index not in indices
+        )
+    return indices
+
+
+def _decorate_matrix_tex_entry(entry, source, font_size):
+    entry.__class__ = Tex
+    source = str(source).strip() or r"\\"
+    entry.alignment = r"\centering"
+    entry.template = ""
+    entry.additional_preamble = ""
+    entry.tex_to_color_map = {}
+    entry.use_labelled_svg = False
+    entry.isolate = []
+    entry.tex_strings = [source]
+    entry.tex_string = source
+    entry.string = source
+    entry.font_size = font_size
+    # The Matrix builder retains geometry rather than fmd-math's complete
+    # per-primitive span table. The whole entry remains selectable as one
+    # source unit; substring-granular selection is deliberately not claimed.
+    entry._string_sub_spans = [(0, len(source.encode("utf-8")))]
+    entry._string_sub_paths = [[]]
+
+
+def _decorate_matrix_decimal_entry(entry, value, font_size, places, style):
+    entry.__class__ = DecimalNumber
+    entry.number = float(value)
+    entry.font_size = font_size
+    entry.edge_to_fix = _np.array(_LEFT)
+    entry._decimal_params = (
+        places,
+        0,
+        False,
+        True,
+        0.001,
+        False,
+        None,
+        False,
+        _vec3(_LEFT),
+        font_size,
+        style.get("color"),
+        float(style.get("stroke_width", 0)),
+        float(style.get("fill_opacity", 1.0)),
+        float(style.get("fill_border_width", 0.5)),
+    )
+
+
+def _initialize_scalar_matrix(
+    matrix,
+    rows,
+    *,
+    kind,
+    entry_sources,
+    font_size,
+    decimal_places,
+    entry_style,
+    v_buff,
+    h_buff,
+    bracket_h_buff,
+    bracket_v_buff,
+    height,
+    element_alignment_corner,
+    ellipses_row,
+    ellipses_col,
+    ellipses_height_ratio=0.65,
+    ellipses_width_ratio=0.4,
+):
+    _install_live_state(matrix)
+    n_rows = len(rows)
+    n_cols = len(rows[0]) if rows else 0
+    common = (
+        float(v_buff),
+        float(h_buff),
+        float(bracket_h_buff),
+        float(bracket_v_buff),
+        None if height is None else float(height),
+        _vec3(element_alignment_corner),
+        None if ellipses_row is None else int(ellipses_row),
+        None if ellipses_col is None else int(ellipses_col),
+        float(ellipses_height_ratio),
+        float(ellipses_width_ratio),
+        float(font_size),
+    )
+    if kind == "tex":
+        specs = matrix._build_tex_matrix(
+            _native_shell_factory,
+            [[str(value) for value in row] for row in rows],
+            *common,
+        )
+    else:
+        specs = matrix._build_decimal_matrix(
+            _native_shell_factory,
+            [[float(value) for value in row] for row in rows],
+            kind == "integer",
+            int(decimal_places),
+            *common,
+        )
+    _hang_native_children(matrix, specs)
+    n_entries = n_rows * n_cols
+    if len(matrix.submobjects) != n_entries + 2:
+        raise RuntimeError(
+            "native Matrix family contract drift: "
+            f"expected {n_entries + 2} children, got {len(matrix.submobjects)}"
+        )
+    entries = list(matrix.submobjects[:n_entries])
+    flat_sources = [value for row in entry_sources for value in row]
+    ellipse_indices = _matrix_ellipsis_indices(
+        n_rows, n_cols, ellipses_row, ellipses_col
+    )
+    for index, (entry, source) in enumerate(zip(entries, flat_sources)):
+        if kind == "tex":
+            _decorate_matrix_tex_entry(entry, source, font_size)
+        else:
+            _decorate_matrix_decimal_entry(
+                entry, source, font_size, decimal_places, entry_style
+            )
+        # Reference Matrix styles the source entry first, then `become`s a
+        # freshly constructed default-style dot. The native builder has
+        # already performed that replacement, so only surviving entries
+        # receive the caller's entry style here.
+        if index not in ellipse_indices:
+            _apply_vmobject_style_kwargs(entry, dict(entry_style))
+    matrix.mob_matrix = [
+        entries[row * n_cols : (row + 1) * n_cols]
+        for row in range(n_rows)
+    ]
+    matrix.rows = VGroup(*(VGroup(*row) for row in matrix.mob_matrix))
+    matrix.columns = VGroup(
+        *(
+            VGroup(*(row[column] for row in matrix.mob_matrix))
+            for column in range(n_cols)
+        )
+    )
+    matrix.brackets = list(matrix.submobjects[n_entries:])
+    matrix.ellipses = [entries[index] for index in ellipse_indices]
+    matrix.elements = [
+        entry for index, entry in enumerate(entries) if index not in ellipse_indices
+    ]
+    matrix._matrix_kind = kind
+    matrix._matrix_shape = (n_rows, n_cols)
+    return matrix
+
+
+class Matrix(VMobject):
+    """Atlas's native scalar Matrix grid and bundled-math delimiters.
+
+    Homogeneous real grids take the DecimalNumber route; every other scalar
+    grid takes the Reference's Tex(str(value)) route. Mixed scalar types,
+    complex values, and caller-owned VMobjects remain precise refusals until
+    the distinct live-identity transfer seam lands.
+    """
+
+    def __init__(
+        self,
+        matrix,
+        v_buff=0.5,
+        h_buff=0.5,
+        bracket_h_buff=0.2,
+        bracket_v_buff=0.25,
+        height=None,
+        element_config=dict(),
+        element_alignment_corner=_DOWN,
+        ellipses_row=None,
+        ellipses_col=None,
+    ):
+        rows = _bounded_matrix_rows(matrix)
+        flat = [value for row in rows for value in row]
+        _refuse_unrouted(
+            "Matrix()",
+            [
+                ("complex entries", any(isinstance(value, complex) for value in flat)),
+                ("VMobject entries", any(isinstance(value, VMobject) for value in flat)),
+            ],
+        )
+        real_flags = [
+            isinstance(value, (float, _np.floating)) and not isinstance(value, bool)
+            for value in flat
+        ]
+        if any(real_flags) and not all(real_flags):
+            raise NotImplementedError(
+                "Matrix() mixed float and Tex-converted scalar entries await "
+                "the heterogeneous native entry-transfer seam"
+            )
+        font_size, places, style = _matrix_entry_config(
+            element_config, decimal_places=None
+        )
+        kind = "decimal" if real_flags and all(real_flags) else "tex"
+        if kind == "decimal" and places is None:
+            places = 2
+        if kind == "tex" and places is not None:
+            raise TypeError("num_decimal_places applies only to real Matrix entries")
+        _initialize_scalar_matrix(
+            self,
+            rows,
+            kind=kind,
+            entry_sources=rows,
+            font_size=font_size,
+            decimal_places=places,
+            entry_style=style,
+            v_buff=v_buff,
+            h_buff=h_buff,
+            bracket_h_buff=bracket_h_buff,
+            bracket_v_buff=bracket_v_buff,
+            height=height,
+            element_alignment_corner=element_alignment_corner,
+            ellipses_row=ellipses_row,
+            ellipses_col=ellipses_col,
+        )
+
+    def copy(self, deep=False):
+        result = super().copy(deep)
+        source_family = self.get_family()
+        copied_family = result.get_family()
+        mapping = dict(zip(source_family, copied_family))
+        result.mob_matrix = [
+            [mapping[entry] for entry in row] for row in self.mob_matrix
+        ]
+        result.rows = VGroup(*(VGroup(*row) for row in result.mob_matrix))
+        result.columns = VGroup(
+            *(
+                VGroup(*(row[column] for row in result.mob_matrix))
+                for column in range(result._matrix_shape[1])
+            )
+        )
+        result.elements = [mapping[entry] for entry in self.elements]
+        result.ellipses = [mapping[entry] for entry in self.ellipses]
+        result.brackets = [mapping[bracket] for bracket in self.brackets]
+        return result
+
+    def create_mobject_matrix(self, *args, **kwargs):
+        del args, kwargs
+        raise NotImplementedError(
+            "Matrix.create_mobject_matrix is constructor-owned by the native "
+            "grid engine; use Matrix(...)"
+        )
+
+    def element_to_mobject(self, *args, **kwargs):
+        del args, kwargs
+        raise NotImplementedError(
+            "Matrix.element_to_mobject outside construction awaits the native "
+            "heterogeneous entry-transfer seam"
+        )
+
+    def create_brackets(self, *args, **kwargs):
+        del args, kwargs
+        raise NotImplementedError(
+            "Matrix.create_brackets is owned by the bundled native delimiter engine"
+        )
+
+    def get_column(self, index):
+        n_cols = self._matrix_shape[1]
+        if not 0 <= index < n_cols:
+            raise IndexError(
+                f"Index {index} out of bound for matrix with {n_cols} columns"
+            )
+        return self.columns[index]
+
+    def get_row(self, index):
+        n_rows = self._matrix_shape[0]
+        if not 0 <= index < n_rows:
+            raise IndexError(
+                f"Index {index} out of bound for matrix with {n_rows} rows"
+            )
+        return self.rows[index]
+
+    def get_columns(self):
+        return self.columns
+
+    def get_rows(self):
+        return self.rows
+
+    def set_column_colors(self, *colors):
+        for column, color in enumerate(colors[: self._matrix_shape[1]]):
+            for row in self.mob_matrix:
+                row[column].set_color(color)
+        return self
+
+    def add_background_to_entries(self):
+        for entry in list(self.elements):
+            entry.add_background_rectangle()
+        return self
+
+    def swap_entry_for_dots(self, entry, dots):
+        del entry, dots
+        raise NotImplementedError(
+            "Matrix ellipsis replacement is native and constructor-time; "
+            "pass ellipses_row or ellipses_col"
+        )
+
+    def swap_entries_for_ellipses(
+        self,
+        row_index=None,
+        col_index=None,
+        height_ratio=0.65,
+        width_ratio=0.4,
+    ):
+        del row_index, col_index, height_ratio, width_ratio
+        raise NotImplementedError(
+            "Matrix ellipsis replacement is native and constructor-time; "
+            "pass ellipses_row or ellipses_col"
+        )
+
+    def get_mob_matrix(self):
+        return self.mob_matrix
+
+    def get_entries(self):
+        return VGroup(*self.elements)
+
+    def get_brackets(self):
+        return VGroup(*self.brackets)
+
+    def get_ellipses(self):
+        return VGroup(*self.ellipses)
+
+
+class DecimalMatrix(Matrix):
+    def __init__(
+        self,
+        matrix,
+        num_decimal_places=2,
+        decimal_config=dict(),
+        **config,
+    ):
+        rows = _bounded_matrix_rows(matrix)
+        common = _matrix_common_config(config)
+        font_size, places, style = _matrix_entry_config(
+            decimal_config, decimal_places=num_decimal_places
+        )
+        numeric = [[float(value) for value in row] for row in rows]
+        self.float_matrix = matrix
+        _initialize_scalar_matrix(
+            self,
+            numeric,
+            kind="decimal",
+            entry_sources=numeric,
+            font_size=font_size,
+            decimal_places=places,
+            entry_style=style,
+            **common,
+        )
+
+    def element_to_mobject(self, *args, **kwargs):
+        del args, kwargs
+        raise NotImplementedError(
+            "DecimalMatrix.element_to_mobject is constructor-owned by Atlas"
+        )
+
+
+class IntegerMatrix(DecimalMatrix):
+    def __init__(
+        self,
+        matrix,
+        num_decimal_places=0,
+        decimal_config=dict(),
+        **config,
+    ):
+        rows = _bounded_matrix_rows(matrix)
+        common = _matrix_common_config(config)
+        font_size, places, style = _matrix_entry_config(
+            decimal_config, decimal_places=num_decimal_places
+        )
+        numeric = [[float(value) for value in row] for row in rows]
+        self.float_matrix = matrix
+        _initialize_scalar_matrix(
+            self,
+            numeric,
+            kind="integer",
+            entry_sources=numeric,
+            font_size=font_size,
+            decimal_places=places,
+            entry_style=style,
+            **common,
+        )
+
+
+class TexMatrix(Matrix):
+    def __init__(self, matrix, tex_config=dict(), **config):
+        rows = _bounded_matrix_rows(matrix)
+        common = _matrix_common_config(config)
+        font_size, places, style = _matrix_entry_config(
+            tex_config, decimal_places=None
+        )
+        if places is not None:
+            raise TypeError("num_decimal_places is not a TexMatrix option")
+        sources = [[str(value) for value in row] for row in rows]
+        _initialize_scalar_matrix(
+            self,
+            sources,
+            kind="tex",
+            entry_sources=sources,
+            font_size=font_size,
+            decimal_places=None,
+            entry_style=style,
+            **common,
+        )
+
+
 class TexTextFromPresetString(TexText):
     """The Reference preset-string base over the native Scribe TexText.
 
@@ -8236,6 +8738,10 @@ def _install_schema_surface():
         ("manimlib.mobject.types.point_cloud_mobject", "PMobject"): PMobject,
         ("manimlib.mobject.numbers", "DecimalNumber"): DecimalNumber,
         ("manimlib.mobject.numbers", "Integer"): Integer,
+        ("manimlib.mobject.matrix", "Matrix"): Matrix,
+        ("manimlib.mobject.matrix", "DecimalMatrix"): DecimalMatrix,
+        ("manimlib.mobject.matrix", "IntegerMatrix"): IntegerMatrix,
+        ("manimlib.mobject.matrix", "TexMatrix"): TexMatrix,
         ("manimlib.mobject.types.dot_cloud", "DotCloud"): DotCloud,
         ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
         ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,
