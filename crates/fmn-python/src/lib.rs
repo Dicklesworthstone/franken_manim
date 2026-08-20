@@ -4425,6 +4425,52 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// The bounded native dash-count rule over the line's current virtual
+    /// endpoints. Atlas measures curved lines by true arc length (BN-03), so
+    /// this stays in lockstep with `_build_dashed_line` rather than
+    /// re-deriving its arithmetic in the Python skin.
+    fn _calculate_dashed_line_num_dashes(
+        _slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+        dash_length: f64,
+        positive_space_ratio: f64,
+        path_arc: f64,
+    ) -> PyResult<usize> {
+        crossing::record(CrossingClass::Other);
+        fmn_library::line::DashedLine::new(start, end)
+            .dash_length(dash_length)
+            .positive_space_ratio(positive_space_ratio)
+            .path_arc(path_arc)
+            .num_dashes()
+            .map_err(native_error)
+    }
+
+    /// `TangentLine(vmob, alpha, length, d_alpha)` over Atlas's BN-03
+    /// true-arclength tangent construction. The source is materialized from
+    /// its live Marionette records in either detached or scene-bound state.
+    fn _build_tangent_line<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source: &Bound<'_, BridgeMobject>,
+        alpha: f64,
+        length: f64,
+        d_alpha: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let points = with_stage(source, |stage, mob| {
+            stage.get_points(mob).unwrap_or_default()
+        })?;
+        let source = fmn_library::VMobject::from_points(points);
+        let built = fmn_library::line::tangent_line(
+            &source,
+            alpha,
+            length,
+            d_alpha,
+            fmn_library::Style::default(),
+        );
+        install_native_tree(slf, factory, built)
+    }
+
     /// `Arrow(start, end, ...)`: one filled path with the native tip
     /// proportions and caller-selected Reference ratio caps.
     #[allow(clippy::too_many_arguments)]
@@ -7987,7 +8033,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
+            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8248,6 +8294,22 @@ class _GauntletPortalScene(Scene):
             stroke_color=BLUE_C,
             stroke_width=1.5,
         )
+        native_dashed_line = DashedLine(
+            (-3.25, 2.05, 0.0),
+            (-2.55, 2.05, 0.0),
+            dash_length=0.08,
+            positive_space_ratio=0.6,
+            stroke_color=BLUE_C,
+            stroke_width=1.5,
+        )
+        tangent_source = Circle(radius=0.18).shift((2.25, 2.05, 0.0))
+        native_tangent_line = TangentLine(
+            tangent_source,
+            0.125,
+            length=0.55,
+            stroke_color=RED,
+            stroke_width=1.5,
+        )
         field_axes = Axes(
             x_range=(-1.0, 1.0, 1.0),
             y_range=(-1.0, 1.0, 1.0),
@@ -8316,6 +8378,9 @@ class _GauntletPortalScene(Scene):
             primitive_rect,
             primitive_round,
             primitive_polyline,
+            native_dashed_line,
+            tangent_source,
+            native_tangent_line,
             native_field,
             native_time_field,
         )

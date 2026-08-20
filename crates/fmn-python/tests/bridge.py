@@ -3989,11 +3989,93 @@ assert np.allclose(bound_slice_source[1].get_center(), [9.25, 0.0, 0.0])
 
 # Line.set_angle keeps its start fixed by default. DashedLine reads endpoints
 # from its first/last native dash children, matching the Reference override.
+assert geometry.DashedLine.__mro__[:3] == (
+    geometry.DashedLine,
+    geometry.Line,
+    geometry.TipableVMobject,
+)
+assert list(inspect.signature(geometry.DashedLine).parameters) == [
+    "start",
+    "end",
+    "dash_length",
+    "positive_space_ratio",
+    "kwargs",
+]
 dashed = geometry.DashedLine([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0])
 dashed_start = dashed.get_start().copy()
 assert dashed.set_angle(math.pi / 2.0) is dashed
 assert np.allclose(dashed.get_start(), dashed_start)
 assert np.allclose(dashed.get_unit_vector(), [0.0, 1.0, 0.0], atol=1e-9)
+dash_start, dash_end = dashed.get_start_and_end()
+assert np.allclose(dash_start, dashed.get_start())
+assert np.allclose(dash_end, dashed.get_end())
+assert np.allclose(
+    dashed.get_first_handle(), dashed.submobjects[0].get_points()[1]
+)
+assert np.allclose(
+    dashed.get_last_handle(), dashed.submobjects[-1].get_points()[-2]
+)
+assert dashed.calculate_num_dashes(0.5, 0.5) == 4
+for dash_args, refusal in (
+    ((0.0, 0.5), "dash length must be positive and finite"),
+    ((0.5, 0.0), "positive-space ratio must be finite and in (0, 1]"),
+    ((1e-6, 0.5), "above the 4096 cap"),
+):
+    try:
+        dashed.calculate_num_dashes(*dash_args)
+    except ValueError as error:
+        assert refusal in str(error)
+    else:
+        raise AssertionError("invalid native dash count parameters succeeded")
+
+# TangentLine is the Atlas true-arclength construction, not a generated Line
+# shell. On this 1+3 unit corner path, alpha=0.5 is one unit up the long
+# vertical segment; curve-index interpolation would incorrectly stop at the
+# corner. The requested length remains exact in detached and bound states.
+assert geometry.TangentLine.__mro__[:3] == (
+    geometry.TangentLine,
+    geometry.Line,
+    geometry.TipableVMobject,
+)
+assert list(inspect.signature(geometry.TangentLine).parameters) == [
+    "vmob",
+    "alpha",
+    "length",
+    "d_alpha",
+    "kwargs",
+]
+tangent_source = VMobject().set_points_as_corners(
+    ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 3.0, 0.0])
+)
+tangent = geometry.TangentLine(
+    tangent_source,
+    0.5,
+    length=2.0,
+    d_alpha=1e-4,
+    stroke_color=manimlib.RED,
+    stroke_width=3.0,
+)
+assert np.allclose(tangent.get_center(), [1.0, 1.0, 0.0], atol=1e-6)
+assert np.allclose(tangent.get_unit_vector(), [0.0, 1.0, 0.0], atol=1e-6)
+assert math.isclose(tangent.get_length(), 2.0, abs_tol=1e-6)
+assert tangent.get_stroke_color() == manimlib.RED
+assert tangent.get_stroke_width() == 3.0
+
+bound_tangent_source = tangent_source.copy()
+bound_tangent_scene = Scene()
+bound_tangent_scene.add(bound_tangent_source)
+bound_tangent_source.shift([3.0, -2.0, 0.0])
+bound_tangent = geometry.TangentLine(
+    bound_tangent_source, 0.5, length=3.0, d_alpha=1e-4
+)
+bound_tangent_identity = id(bound_tangent)
+bound_tangent_scene.add(bound_tangent)
+assert id(bound_tangent) == bound_tangent_identity
+assert np.allclose(bound_tangent.get_center(), [4.0, -1.0, 0.0], atol=1e-6)
+assert math.isclose(bound_tangent.get_length(), 3.0, abs_tol=1e-6)
+
+empty_tangent = geometry.TangentLine(VMobject(), 0.5)
+assert empty_tangent.get_num_points() == 0
 
 # `become` must keep the Python proxy family and Marionette family aligned
 # when a live redraw changes a generated child's multiplicity.  This is the

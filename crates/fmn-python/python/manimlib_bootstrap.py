@@ -4243,6 +4243,15 @@ class DashedLine(Line):
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
 
+    def calculate_num_dashes(self, dash_length, positive_space_ratio):
+        return self._calculate_dashed_line_num_dashes(
+            _vec3(self.get_start()),
+            _vec3(self.get_end()),
+            float(dash_length),
+            float(positive_space_ratio),
+            self.path_arc,
+        )
+
     def get_start(self):
         if self.submobjects:
             return self.submobjects[0].get_start()
@@ -4252,6 +4261,37 @@ class DashedLine(Line):
         if self.submobjects:
             return self.submobjects[-1].get_end()
         return super().get_end()
+
+    def get_start_and_end(self):
+        return self.get_start(), self.get_end()
+
+    def get_first_handle(self):
+        return self.submobjects[0].get_points()[1]
+
+    def get_last_handle(self):
+        return self.submobjects[-1].get_points()[-2]
+
+
+class TangentLine(Line):
+    def __init__(self, vmob, alpha, length=2, d_alpha=1e-6, **kwargs):
+        _install_live_state(self)
+        self.path_arc = 0.0
+        self.buff = 0.0
+        specs = self._build_tangent_line(
+            _native_shell_factory,
+            vmob,
+            float(alpha),
+            float(length),
+            float(d_alpha),
+        )
+        _hang_native_children(self, specs)
+        if self.has_points():
+            self.start = self.get_start().copy()
+            self.end = self.get_end().copy()
+        else:
+            self.start = _np.zeros(3)
+            self.end = _np.zeros(3)
+        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class Arrow(Line):
@@ -9302,6 +9342,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Elbow"): Elbow,
         ("manimlib.mobject.geometry", "Line"): Line,
         ("manimlib.mobject.geometry", "DashedLine"): DashedLine,
+        ("manimlib.mobject.geometry", "TangentLine"): TangentLine,
         ("manimlib.mobject.geometry", "Arrow"): Arrow,
         ("manimlib.mobject.geometry", "Vector"): Vector,
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
