@@ -5674,6 +5674,143 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Prismify silently discarded a source family")
 
+# The two de-TeX'd special-text compositions are authored portal classes over
+# Atlas/Scribe, not import-only schema shells. Construction owns layout in
+# Rust; the live Python methods retain ordinary manim object identity.
+special_tex = importlib.import_module("manimlib.mobject.svg.special_tex")
+assert special_tex.BulletedList.__bases__ == (manimlib.VGroup,)
+assert special_tex.Title.__bases__ == (manimlib.TexText,)
+bullets_signature = inspect.signature(special_tex.BulletedList)
+assert tuple(bullets_signature.parameters) == (
+    "items", "buff", "aligned_edge", "numbered", "kwargs"
+)
+assert bullets_signature.parameters["items"].kind is inspect.Parameter.VAR_POSITIONAL
+assert bullets_signature.parameters["buff"].kind is inspect.Parameter.KEYWORD_ONLY
+assert bullets_signature.parameters["numbered"].default is False
+title_signature = inspect.signature(special_tex.Title)
+assert tuple(title_signature.parameters) == (
+    "text_parts",
+    "font_size",
+    "include_underline",
+    "underline_width",
+    "match_underline_width_to_text",
+    "underline_buff",
+    "underline_style",
+    "kwargs",
+)
+assert title_signature.parameters["text_parts"].kind is inspect.Parameter.VAR_POSITIONAL
+assert title_signature.parameters["font_size"].default == 72
+assert title_signature.parameters["include_underline"].default is True
+
+bulleted = special_tex.BulletedList(
+    "First",
+    "A much longer second item",
+    "Third",
+    buff=0.35,
+    font_size=30,
+    color=manimlib.BLUE,
+)
+assert len(bulleted) == 3
+assert all(len(item) == 2 for item in bulleted)
+assert all(
+    member.get_fill_color() == manimlib.BLUE
+    for member in bulleted.family_members_with_points()
+)
+item_tops = [item.get_top()[1] for item in bulleted]
+assert item_tops[0] > item_tops[1] > item_tops[2]
+item_lefts = [item.get_left()[0] for item in bulleted]
+assert np.allclose(item_lefts, item_lefts[0], atol=1e-6)
+assert bulleted[1][1].get_width() > bulleted[0][1].get_width()
+
+numbered = special_tex.BulletedList(
+    "First", "Second", numbered=True, font_size=30
+)
+assert len(numbered) == 2
+assert numbered[0][0].get_width() > bulleted[0][0].get_width()
+
+item_identities = [id(item) for item in bulleted]
+max_label_height = max(item[0].get_height() for item in bulleted)
+assert bulleted.fade_all_but(1, opacity=0.2, scale_factor=0.6) is None
+assert [id(item) for item in bulleted] == item_identities
+assert np.isclose(bulleted[1][0].get_height(), max_label_height, atol=1e-6)
+for index, item in enumerate(bulleted):
+    expected_opacity = 1.0 if index == 1 else 0.2
+    assert all(
+        np.isclose(member.get_fill_opacity(), expected_opacity)
+        for member in item.family_members_with_points()
+    )
+
+failed_bullets = special_tex.BulletedList.__new__(special_tex.BulletedList)
+try:
+    special_tex.BulletedList.__init__(failed_bullets, "item", unsupported=True)
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("BulletedList silently discarded an unknown option")
+assert not hasattr(failed_bullets, "submobjects")
+
+title = special_tex.Title(
+    "Native",
+    "Title",
+    font_size=36,
+    underline_width=4.0,
+    underline_buff=0.2,
+    underline_style=dict(stroke_width=3, stroke_color=manimlib.RED),
+    color=manimlib.BLUE,
+)
+assert len(title) == 3
+assert title[0] is title.submobjects[0]
+assert title[1] is title.submobjects[1]
+assert title.underline is title[2]
+assert title.tex_strings == ["Native", "Title"]
+assert title.tex_string == "Native Title"
+assert title._string_sub_paths == [[0], [1]]
+assert np.isclose(title.underline.get_width(), 4.0, atol=1e-6)
+assert title.underline.get_stroke_color() == manimlib.RED
+assert np.isclose(title.underline.get_stroke_width(), 3.0)
+assert all(
+    member.get_fill_color() == manimlib.BLUE
+    for part in title[:2]
+    for member in part.family_members_with_points()
+)
+text_bottom = min(part.get_bottom()[1] for part in title[:2])
+assert np.isclose(
+    title.underline.get_top()[1], text_bottom - 0.2, atol=1e-6
+)
+assert np.isclose(
+    max(part.get_top()[1] for part in title[:2]),
+    manimlib.FRAME_Y_RADIUS - manimlib.MED_SMALL_BUFF,
+    atol=1e-6,
+)
+
+matched_title = special_tex.Title(
+    "Matched",
+    "Underline",
+    font_size=30,
+    match_underline_width_to_text=True,
+)
+matched_text_left = min(part.get_left()[0] for part in matched_title[:-1])
+matched_text_right = max(part.get_right()[0] for part in matched_title[:-1])
+assert np.isclose(
+    matched_title.underline.get_width(),
+    matched_text_right - matched_text_left,
+    atol=1e-6,
+)
+plain_title = special_tex.Title("No underline", include_underline=False)
+assert len(plain_title) == 1
+assert not hasattr(plain_title, "underline")
+
+failed_title = special_tex.Title.__new__(special_tex.Title)
+try:
+    special_tex.Title.__init__(
+        failed_title, "Title", underline_style={"unsupported": True}
+    )
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("Title silently discarded an unknown underline option")
+assert not hasattr(failed_title, "submobjects")
+
 failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
     three_dimensions.Torus.__init__(failed_torus, unrouted_option=True)

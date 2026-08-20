@@ -49,6 +49,8 @@ _ONES = _np.array([1.0, 1.0, 1.0])
 _DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
 _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
 _SMALL_BUFF = 0.1
+_MED_SMALL_BUFF = 0.25
+_MED_LARGE_BUFF = 0.5
 _BLACK = "#000000"
 _WHITE = "#FFFFFF"
 _GREY_C = "#888888"
@@ -2963,6 +2965,7 @@ def _hang_native_children(parent, specs):
 def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     """The Reference's VMobject style constructor keywords, applied after a
     native build (its init_colors pass). Unknown keywords refuse."""
+    _preflight_vmobject_style_kwargs(kwargs)
     color = kwargs.pop("color", None)
     opacity = kwargs.pop("opacity", None)
     fill_color = kwargs.pop("fill_color", None)
@@ -3024,6 +3027,14 @@ _NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
         "fill_border_width",
     }
 )
+
+
+def _preflight_vmobject_style_kwargs(kwargs):
+    unknown = set(kwargs) - _NATIVE_VMOBJECT_STYLE_KEYS - {"shading"}
+    if unknown:
+        raise TypeError(
+            "unexpected keyword arguments: " + ", ".join(sorted(unknown))
+        )
 
 
 def _split_native_vgroup3d_kwargs(class_name, kwargs, default_shading):
@@ -5071,6 +5082,138 @@ class Tex(StringMobject):
 class TexText(Tex):
     _native_text_mode = True
     tex_environment = ""
+
+
+class BulletedList(VGroup):
+    """Atlas's native, bundled-font replacement for the Reference's
+    implicit ``itemize``/``enumerate`` TeX composition."""
+
+    def __init__(
+        self,
+        *items: str,
+        buff: float = _MED_LARGE_BUFF,
+        aligned_edge=_LEFT,
+        numbered: bool = False,
+        **kwargs,
+    ):
+        font_size = float(kwargs.pop("font_size", 48))
+        style_kwargs = dict(kwargs)
+        _preflight_vmobject_style_kwargs(style_kwargs)
+        if not all(isinstance(item, str) for item in items):
+            raise TypeError("BulletedList items must be strings")
+        aligned_edge = _vec3(aligned_edge)
+        buff = float(buff)
+
+        _install_live_state(self)
+        self.items = tuple(items)
+        self.buff = buff
+        self.aligned_edge = _np.array(aligned_edge)
+        self.numbered = bool(numbered)
+        self.font_size = font_size
+        specs = self._build_bulleted_list(
+            _native_shell_factory,
+            list(items),
+            buff,
+            aligned_edge,
+            self.numbered,
+            font_size,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, style_kwargs)
+
+    def fade_all_but(self, index: int, opacity: float = 0.25, scale_factor=0.7):
+        # Reference special_tex.py:41-47 verbatim over the live Marionette
+        # family. Keeping this as ordinary portal composition preserves the
+        # identity of every caller-visible item while native Atlas remains
+        # the sole construction/layout authority.
+        max_dot_height = max(item[0].get_height() for item in self.submobjects)
+        for item_index, part in enumerate(self.submobjects):
+            target_height = (
+                1.0 if item_index == index else float(scale_factor)
+            ) * max_dot_height
+            part.set_fill(
+                opacity=(1.0 if item_index == index else float(opacity))
+            )
+            current_height = part[0].get_height()
+            if current_height > 0:
+                part.scale(target_height / current_height, about_edge=_LEFT)
+
+
+class Title(TexText):
+    """Atlas's native title composition with Scribe part provenance and a
+    real Line underline, retaining the Reference's TexText-facing shape."""
+
+    def __init__(
+        self,
+        *text_parts: str,
+        font_size: int = 72,
+        include_underline: bool = True,
+        underline_width: float = _FRAME_SHAPE[0] - 2,
+        match_underline_width_to_text: bool = False,
+        underline_buff: float = _SMALL_BUFF,
+        underline_style: dict = dict(stroke_width=2, stroke_color=_GREY_C),
+        **kwargs,
+    ):
+        if not all(isinstance(part, str) for part in text_parts):
+            raise TypeError("Title parts must be strings")
+        parts = list(text_parts)
+        if parts:
+            parts[0] = parts[0].lstrip()
+            parts[-1] = parts[-1].rstrip()
+        style_kwargs = dict(kwargs)
+        underline_style = dict(underline_style)
+        _preflight_vmobject_style_kwargs(style_kwargs)
+        _preflight_vmobject_style_kwargs(underline_style)
+        font_size = float(font_size)
+        underline_width = float(underline_width)
+        underline_buff = float(underline_buff)
+
+        _install_live_state(self)
+        self.tex_strings = parts
+        self.tex_string = " ".join(parts)
+        self.string = self.tex_string
+        self.font_size = font_size
+        self.use_labelled_svg = False
+        self.isolate = list(parts)
+        spans = []
+        paths = []
+        byte_offset = 0
+        for index, part in enumerate(parts):
+            end = byte_offset + len(part.encode("utf-8"))
+            spans.append((byte_offset, end))
+            paths.append([index])
+            byte_offset = end + 1
+        self._string_sub_spans = spans
+        self._string_sub_paths = paths
+
+        specs = self._build_title(
+            _native_shell_factory,
+            parts,
+            font_size,
+            bool(include_underline),
+            underline_width,
+            bool(match_underline_width_to_text),
+            underline_buff,
+        )
+        _hang_native_children(self, specs)
+        expected_children = len(parts) + int(bool(include_underline))
+        if len(self.submobjects) != expected_children:
+            raise RuntimeError(
+                "native Title family contract drift: "
+                f"expected {expected_children} children, got {len(self.submobjects)}"
+            )
+
+        # TexText kwargs style only the text. The underline is constructed
+        # afterwards in the Reference and therefore receives its own Line
+        # defaults plus underline_style, never the title's text color.
+        _apply_vmobject_style_kwargs(self, dict(style_kwargs), recurse=False)
+        for part in self.submobjects[: len(parts)]:
+            _apply_vmobject_style_kwargs(part, dict(style_kwargs))
+        if include_underline:
+            self.underline = self.submobjects[-1]
+            self.underline.set_fill(color=_WHITE, opacity=0)
+            self.underline.set_stroke(color=_WHITE, width=2, opacity=1)
+            _apply_vmobject_style_kwargs(self.underline, underline_style)
 
 
 class TexTextFromPresetString(TexText):
@@ -8073,6 +8216,8 @@ def _install_schema_surface():
             "manimlib.mobject.svg.special_tex",
             "TexTextFromPresetString",
         ): TexTextFromPresetString,
+        ("manimlib.mobject.svg.special_tex", "BulletedList"): BulletedList,
+        ("manimlib.mobject.svg.special_tex", "Title"): Title,
         ("manimlib.mobject.svg.drawings", "Checkmark"): Checkmark,
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,

@@ -4316,6 +4316,59 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built.into_vmob())
     }
 
+    /// `BulletedList(*items, ...)` over Atlas's de-TeX'd native list
+    /// composition. Bundled text glyphs, list labels, arrangement, and the
+    /// initial family topology all come from the one fmn-library builder.
+    fn _build_bulleted_list<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        items: Vec<String>,
+        buff: f64,
+        aligned_edge: [f64; 3],
+        numbered: bool,
+        font_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let built = with_font_book(|book| {
+            fmn_library::BulletedList::new(&item_refs)
+                .buff(buff)
+                .aligned_edge(aligned_edge)
+                .numbered(numbered)
+                .font_size(font_size)
+                .build(book)
+                .map_err(native_error)
+        })?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
+    /// `Title(*text_parts, ...)` over Atlas's de-TeX'd title composition.
+    /// The native builder owns bundled-font layout, source-part grouping,
+    /// frame-top placement, and optional underline geometry.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_title<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        text_parts: Vec<String>,
+        font_size: f64,
+        include_underline: bool,
+        underline_width: f64,
+        match_underline_width_to_text: bool,
+        underline_buff: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let part_refs: Vec<&str> = text_parts.iter().map(String::as_str).collect();
+        let built = with_font_book(|book| {
+            fmn_library::Title::new(&part_refs)
+                .font_size(font_size)
+                .include_underline(include_underline)
+                .underline_width(underline_width)
+                .match_underline_width_to_text(match_underline_width_to_text)
+                .underline_buff(underline_buff)
+                .build(book)
+                .map_err(native_error)
+        })?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
     /// `Text(...)` over the Scribe bridge: one glyph per child from the
     /// bundled FontBook, decorations trailing.
     #[allow(clippy::too_many_arguments)]
@@ -7471,7 +7524,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7624,6 +7677,22 @@ class _GauntletPortalScene(Scene):
             ),
             depth=0.15,
         ).shift((1.05, 0.7, 0.0))
+        native_list = BulletedList(
+            "Native text",
+            "Deterministic layout",
+            buff=0.12,
+            font_size=16,
+            color=BLUE_C,
+        ).scale(0.22).shift((2.4, -1.65, 0.0))
+        native_list.fade_all_but(0, opacity=0.4, scale_factor=0.8)
+        native_title = Title(
+            "Franken",
+            "Manim",
+            font_size=20,
+            match_underline_width_to_text=True,
+            underline_style=dict(stroke_width=1.5, stroke_color=RED),
+            color=BLUE_E,
+        ).scale(0.25).shift((0.0, -3.0, 0.0))
         self.add(
             frame_fade,
             frame_fill,
@@ -7650,6 +7719,8 @@ class _GauntletPortalScene(Scene):
             vector_solids,
             vector_dodecahedron,
             vector_prismify,
+            native_list,
+            native_title,
         )
         self.wait(1 / 30)
 
