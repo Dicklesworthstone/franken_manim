@@ -3205,12 +3205,331 @@ assert match_target.n_records() == match_source.n_records()
 assert np.allclose(match_target.get_points(), match_source.get_points())
 
 vector_field = importlib.import_module("manimlib.mobject.vector_field")
+assert vector_field.VectorField.__bases__ == (VMobject,)
+assert vector_field.TimeVaryingVectorField.__bases__ == (
+    vector_field.VectorField,
+)
+assert list(inspect.signature(vector_field.VectorField).parameters) == [
+    "func",
+    "coordinate_system",
+    "sample_coords",
+    "density",
+    "magnitude_range",
+    "color",
+    "color_map_name",
+    "color_map",
+    "stroke_opacity",
+    "stroke_width",
+    "tip_width_ratio",
+    "tip_len_to_width",
+    "max_vect_len",
+    "max_vect_len_to_step_size",
+    "flat_stroke",
+    "norm_to_opacity_func",
+    "kwargs",
+]
+assert inspect.signature(vector_field.VectorField).parameters[
+    "density"
+].default == 2.0
+assert inspect.signature(vector_field.VectorField).parameters[
+    "color_map_name"
+].default == "3b1b_colormap"
+assert list(
+    inspect.signature(vector_field.TimeVaryingVectorField).parameters
+) == ["time_func", "coordinate_system", "kwargs"]
+assert str(inspect.signature(vector_field.VectorField.set_stroke)) == (
+    "(self, color=None, width=None, opacity=None, behind=None, flat=None, "
+    "recurse=True)"
+)
+assert str(inspect.signature(vector_field.VectorField.get_sample_points)) == (
+    "(self, center, width, height, depth, x_density, y_density, z_density)"
+)
+assert str(inspect.signature(vector_field.get_sample_coords)) == (
+    "(coordinate_system, density=1.0)"
+)
+
 field_axes = manimlib.Axes(
     x_range=(0.0, 2.0, 1.0),
     y_range=(-1.0, 1.0, 1.0),
     width=2.0,
     height=2.0,
 )
+sample_grid = vector_field.get_sample_coords(field_axes)
+assert sample_grid.shape == (9, 2)
+assert np.allclose(
+    sample_grid,
+    [
+        [0.0, -1.0],
+        [0.0, 0.0],
+        [0.0, 1.0],
+        [1.0, -1.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [2.0, -1.0],
+        [2.0, 0.0],
+        [2.0, 1.0],
+    ],
+)
+try:
+    vector_field.get_sample_coords(field_axes, density=0.0)
+except ValueError as error:
+    assert str(error) == "VectorField density must be positive and finite"
+else:
+    raise AssertionError("VectorField accepted zero sampling density")
+try:
+    vector_field.get_sample_coords(field_axes, density=1000.0)
+except ValueError as error:
+    assert "65536-point resource budget" in str(error)
+else:
+    raise AssertionError("VectorField accepted an excessive sample grid")
+try:
+    vector_field.VectorField(
+        np.zeros_like,
+        field_axes,
+        sample_coords=np.zeros((65_537, 2)),
+        max_vect_len=0.5,
+        color=manimlib.BLUE,
+    )
+except ValueError as error:
+    assert "65536-point resource budget" in str(error)
+else:
+    raise AssertionError("VectorField accepted excessive explicit samples")
+
+observed_field_shapes = []
+
+
+def two_dimensional_field(coords):
+    observed_field_shapes.append(coords.shape)
+    return np.column_stack([np.ones(len(coords)), np.zeros(len(coords))])
+
+
+static_field = vector_field.VectorField(
+    two_dimensional_field,
+    field_axes,
+    sample_coords=np.array([[0.0, 0.0], [1.0, 0.0]]),
+    max_vect_len=0.5,
+    color=manimlib.BLUE,
+)
+assert observed_field_shapes == [(2, 2)]
+assert static_field.sample_coords.shape == (2, 2)
+assert static_field.get_num_points() == 15
+assert static_field.get_joint_type() == 0
+drawn_length = 0.5 * math.tanh(2.0)
+assert math.isclose(
+    np.linalg.norm(static_field.get_points()[6] - static_field.get_points()[0]),
+    drawn_length,
+    rel_tol=0.0,
+    abs_tol=2e-7,
+)
+base_widths = np.array([1, 1, 1, 1, 4, 2, 0, 0, 1, 1, 1, 1, 4, 2, 0])
+assert np.allclose(static_field.base_stroke_width_array, base_widths)
+assert np.allclose(static_field.get_stroke_widths(), 3.0 * base_widths)
+assert np.allclose(
+    static_field.data["stroke_rgba"][:, :3],
+    np.repeat([manimlib.color_to_rgb(manimlib.BLUE)], 15, axis=0),
+)
+assert static_field.set_stroke_width(2.0) is static_field
+assert np.allclose(static_field.get_stroke_widths(), 2.0 * base_widths)
+assert static_field.set_stroke(
+    manimlib.RED,
+    1.5,
+    opacity=0.4,
+    behind=True,
+    flat=True,
+) is static_field
+assert np.allclose(static_field.get_stroke_widths(), 1.5 * base_widths)
+assert np.allclose(static_field.get_stroke_opacities(), 0.4)
+assert np.allclose(
+    static_field.data["stroke_rgba"][:, :3], manimlib.color_to_rgb(manimlib.RED)
+)
+assert static_field.uniforms["stroke_behind"]
+assert static_field.get_flat_stroke()
+
+old_sample_points = static_field.sample_points.copy()
+assert static_field.set_sample_coords([[0.5, 0.0], [1.5, 0.0]]) is static_field
+assert np.array_equal(static_field.sample_points, old_sample_points)
+assert static_field.update_sample_points() is None
+assert not np.array_equal(static_field.sample_points, old_sample_points)
+assert static_field.update_vectors() is static_field
+assert np.allclose(
+    static_field.data["stroke_rgba"][:, :3], manimlib.color_to_rgb(manimlib.RED)
+)
+assert np.allclose(static_field.get_stroke_opacities(), 0.4)
+
+grid_points = static_field.get_sample_points(
+    np.zeros(3), 2.0, 2.0, 0.0, 1.0, 1.0, 1.0
+)
+assert np.allclose(
+    grid_points,
+    [
+        [-1.0, -1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ],
+)
+try:
+    static_field.get_sample_points(
+        np.zeros(3), 2.0, 2.0, 0.0, 1000.0, 1000.0, 1.0
+    )
+except ValueError as error:
+    assert "65536-point resource budget" in str(error)
+else:
+    raise AssertionError("VectorField accepted an excessive point grid")
+initialized_field = static_field.copy()
+assert initialized_field.init_points() is None
+assert np.array_equal(initialized_field.get_points(), np.zeros((15, 3)))
+assert initialized_field.get_joint_type() == 0
+
+custom_field = vector_field.VectorField(
+    lambda coords: np.array([[0.0, 0.0], [2.0, 0.0]]),
+    field_axes,
+    sample_coords=[[0.0, 0.0], [1.0, 0.0]],
+    magnitude_range=(0.0, 2.0),
+    max_vect_len=0.5,
+    color_map=lambda alphas: np.column_stack(
+        [alphas, np.zeros(len(alphas)), 1.0 - alphas, np.ones(len(alphas))]
+    ),
+    norm_to_opacity_func=lambda norms: norms / 2.0,
+)
+assert np.allclose(custom_field.data["stroke_rgba"][:8, :3], [0.0, 0.0, 1.0])
+assert np.allclose(custom_field.data["stroke_rgba"][8:, :3], [1.0, 0.0, 0.0])
+assert np.allclose(custom_field.get_stroke_opacities()[:8], 0.0)
+assert np.allclose(custom_field.get_stroke_opacities()[8:], 1.0)
+
+native_mapped_field = vector_field.VectorField(
+    lambda coords: np.array([[0.0, 0.0], [2.0, 0.0]]),
+    field_axes,
+    sample_coords=[[0.0, 0.0], [1.0, 0.0]],
+    magnitude_range=(0.0, 2.0),
+    max_vect_len=0.5,
+    stroke_color=manimlib.GREEN,
+)
+assert np.allclose(
+    native_mapped_field.data["stroke_rgba"][:8, :3],
+    manimlib.color_to_rgb(manimlib.BLUE_E),
+)
+assert np.allclose(
+    native_mapped_field.data["stroke_rgba"][8:, :3],
+    manimlib.color_to_rgb(manimlib.RED),
+)
+
+three_dimensional_field = vector_field.VectorField(
+    lambda coords: np.column_stack(
+        [np.ones(len(coords)), np.zeros(len(coords)), coords[:, 2]]
+    ),
+    field_axes,
+    sample_coords=[[0.0, 0.0, 0.25], [1.0, 0.0, 0.5]],
+    max_vect_len=math.inf,
+    color=manimlib.BLUE,
+)
+assert three_dimensional_field.sample_coords.shape == (2, 3)
+assert np.allclose(
+    np.linalg.norm(
+        three_dimensional_field.get_points()[6]
+        - three_dimensional_field.get_points()[0]
+    ),
+    1.0,
+    atol=2e-7,
+)
+try:
+    vector_field.VectorField(
+        lambda coords: np.zeros((len(coords) + 1, 2)),
+        field_axes,
+        sample_coords=[[0.0, 0.0], [1.0, 0.0]],
+    )
+except ValueError as error:
+    assert "one vector per sample" in str(error)
+else:
+    raise AssertionError("VectorField accepted a callback row-count mismatch")
+
+
+def refuse_vector_field_callback(coords):
+    del coords
+    raise LookupError("vector field callback failed")
+
+
+try:
+    vector_field.VectorField(
+        refuse_vector_field_callback,
+        field_axes,
+        sample_coords=[[0.0, 0.0], [1.0, 0.0]],
+    )
+except LookupError as error:
+    assert str(error) == "vector field callback failed"
+else:
+    raise AssertionError("VectorField swallowed its Python callback error")
+try:
+    vector_field.VectorField(
+        lambda coords: coords,
+        field_axes,
+        color_map_name="viridis",
+    )
+except NotImplementedError as error:
+    assert "non-bundled matplotlib map" in str(error)
+else:
+    raise AssertionError("VectorField silently accepted an unavailable color map")
+try:
+    vector_field.VectorField(
+        lambda coords: coords,
+        field_axes,
+        color_map=object(),
+    )
+except TypeError as error:
+    assert str(error) == "VectorField color_map must be callable"
+else:
+    raise AssertionError("VectorField accepted a non-callable color map")
+
+gradient = vector_field.get_vectorized_rgb_gradient_function(
+    0.0, 3.0, "3b1b_colormap"
+)
+gradient_rows = gradient([0.0, 1.0, 2.0, 3.0])
+assert np.allclose(gradient_rows[0], manimlib.color_to_rgb(manimlib.BLUE_E))
+assert np.allclose(gradient_rows[1], manimlib.color_to_rgb(manimlib.GREEN))
+assert np.allclose(gradient_rows[2], manimlib.color_to_rgb(manimlib.YELLOW))
+assert np.allclose(gradient_rows[3], manimlib.color_to_rgb(manimlib.RED))
+scalar_gradient = vector_field.get_rgb_gradient_function(
+    0.0, 3.0, "3b1b_colormap"
+)
+assert np.allclose(scalar_gradient(1.0), manimlib.color_to_rgb(manimlib.GREEN))
+try:
+    vector_field.get_vectorized_rgb_gradient_function(0, 1, "viridis")
+except NotImplementedError as error:
+    assert "non-bundled matplotlib data" in str(error)
+else:
+    raise AssertionError("field gradient silently accepted unavailable map data")
+
+pointwise_field = vector_field.vectorize(lambda x, y: (x + y, x - y))
+assert np.allclose(pointwise_field([[1.0, 2.0], [3.0, 1.0]]), [[3, -1], [4, 2]])
+moving = geometry.Square(side_length=0.2)
+assert vector_field.move_along_vector_field(
+    moving, lambda point: np.array([1.0, 0.0, 0.0])
+) is moving
+moving.update(0.5)
+assert np.allclose(moving.get_center(), [0.5, 0.0, 0.0])
+moving_children = manimlib.Group(
+    geometry.Square(side_length=0.2), geometry.Square(side_length=0.2).shift(manimlib.UP)
+)
+assert vector_field.move_submobjects_along_vector_field(
+    moving_children, lambda point: np.array([0.0, 1.0, 0.0])
+) is moving_children
+moving_children.update(0.25)
+assert np.allclose(moving_children[0].get_center(), [0.0, 0.25, 0.0])
+assert np.allclose(moving_children[1].get_center(), [0.0, 1.25, 0.0])
+moving_points = geometry.Square(side_length=0.2)
+assert vector_field.move_points_along_vector_field(
+    moving_points,
+    lambda x, y: (1.0, 0.0),
+    field_axes,
+) is moving_points
+moving_points.update(0.5)
+assert np.allclose(moving_points.get_center(), [0.5, 0.0, 0.0])
+
 field = vector_field.TimeVaryingVectorField(
     lambda coords, time: np.column_stack(
         [np.full(len(coords), time), np.zeros(len(coords)), np.zeros(len(coords))]
@@ -3226,6 +3545,28 @@ field_scene.add(field_axes, field)
 field_scene.wait(1.0 / 30.0)
 assert math.isclose(field.time, 1.0 / 30.0, rel_tol=0.0, abs_tol=1e-12)
 assert not np.allclose(field.get_points(), field_before)
+assert field.increment_time(0.0) is None
+
+
+def refuse_time_field(coords, time):
+    if time > 0:
+        raise RuntimeError("time field callback failed")
+    return np.zeros_like(coords)
+
+
+refusing_time_field = vector_field.TimeVaryingVectorField(
+    refuse_time_field,
+    field_axes,
+    sample_coords=[[0.0, 0.0], [1.0, 0.0]],
+    max_vect_len=0.5,
+    color=manimlib.BLUE,
+)
+try:
+    refusing_time_field.update(1.0 / 30.0)
+except RuntimeError as error:
+    assert str(error) == "time field callback failed"
+else:
+    raise AssertionError("TimeVaryingVectorField swallowed its callback error")
 
 # Fixed-frame state is the renderer-consumed typed uniform, including the
 # Reference's recursive family default and non-recursive override.

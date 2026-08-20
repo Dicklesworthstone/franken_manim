@@ -6303,23 +6303,48 @@ def _vector_field_sample_coords(coordinate_system, density):
     if not _math.isfinite(density) or density <= 0:
         raise ValueError("VectorField density must be positive and finite")
     axes = []
+    total = 1
     for start, stop, step in coordinate_system.get_all_ranges():
         sample_step = float(step) / density
+        if not _math.isfinite(sample_step) or sample_step <= 0:
+            raise ValueError("VectorField axis steps must be positive and finite")
+        span = (float(stop) + sample_step - float(start)) / sample_step
+        count_bound = max(0, _math.ceil(span))
+        total *= count_bound
+        if total > 65_536:
+            raise ValueError(
+                "VectorField sample grid exceeds the 65536-point resource budget"
+            )
         axes.append(_np.arange(float(start), float(stop) + sample_step, sample_step))
     mesh = _np.meshgrid(*axes, indexing="ij")
     coords = _np.stack(mesh, axis=-1).reshape((-1, len(axes)))
-    if coords.shape[1] < 3:
-        coords = _np.pad(coords, ((0, 0), (0, 3 - coords.shape[1])))
-    return coords[:, :3]
+    return coords
+
+
+def _vector_field_rows(values, context):
+    rows = _np.asarray(values, dtype=float)
+    if rows.ndim != 2 or not 1 <= rows.shape[1] <= 3:
+        raise ValueError(
+            f"{context} must be a two-dimensional array with one to three columns"
+        )
+    return rows
 
 
 def _vector_field_c2p_rows(coordinate_system, rows):
-    rows = _np.asarray(rows, dtype=float).reshape((-1, 3))
-    dimension = int(getattr(coordinate_system, "dimension", 2))
+    rows = _vector_field_rows(rows, "VectorField coordinates")
     return _np.asarray(
-        coordinate_system.c2p(*(rows[:, index] for index in range(dimension))),
+        coordinate_system.c2p(*rows.T),
         dtype=float,
     ).reshape((-1, 3))
+
+
+def _vector_field_default_color_map(values):
+    values = _np.asarray(values, dtype=float).reshape(-1)
+    rgb = _np.asarray(
+        _BridgeMobject._vector_field_gradient(0.0, 1.0, values.tolist()),
+        dtype=float,
+    )
+    return _np.column_stack([rgb, _np.ones(len(rgb))])
 
 
 class VectorField(VMobject):
@@ -6350,25 +6375,24 @@ class VectorField(VMobject):
         norm_to_opacity_func=None,
         **kwargs,
     ):
-        _refuse_unrouted(
-            "VectorField()",
-            [
-                ("color_map", color_map is not None),
-                (
-                    "color_map_name",
-                    color is None and color_map_name not in (None, "3b1b_colormap"),
-                ),
-                ("norm_to_opacity_func", norm_to_opacity_func is not None),
-                *((name, True) for name in sorted(kwargs)),
-            ],
-        )
+        if color is None and color_map is None and color_map_name not in (
+            None,
+            "3b1b_colormap",
+        ):
+            raise NotImplementedError(
+                "VectorField color_map_name requires a non-bundled matplotlib "
+                f"map: {color_map_name!r}; pass color=, color_map=, or "
+                "color_map_name=None"
+            )
+        style_kwargs = dict(kwargs)
+        _preflight_vmobject_style_kwargs(style_kwargs)
         _install_live_state(self)
         self.func = func
         self.coordinate_system = coordinate_system
         self.sample_coords = (
             _vector_field_sample_coords(coordinate_system, density)
             if sample_coords is None
-            else _np.asarray(sample_coords, dtype=float).reshape((-1, 3))
+            else _vector_field_rows(sample_coords, "VectorField sample_coords")
         )
         self.stroke_width = float(stroke_width)
         self.stroke_opacity = float(stroke_opacity)
@@ -6376,6 +6400,22 @@ class VectorField(VMobject):
         self.tip_len_to_width = float(tip_len_to_width)
         self.flat_stroke = bool(flat_stroke)
         self.color = color
+        self.norm_to_opacity_func = norm_to_opacity_func
+        self._native_default_color_map = (
+            color is None
+            and color_map is None
+            and color_map_name == "3b1b_colormap"
+        )
+        if color is not None:
+            self.color_map = None
+        elif color_map is not None:
+            if not callable(color_map):
+                raise TypeError("VectorField color_map must be callable")
+            self.color_map = color_map
+        elif color_map_name == "3b1b_colormap":
+            self.color_map = _vector_field_default_color_map
+        else:
+            self.color_map = None
         self.update_sample_points()
         if len(self.sample_points) < 2:
             raise ValueError("VectorField needs at least two sample points")
@@ -6400,15 +6440,26 @@ class VectorField(VMobject):
             if magnitude_range is None
             else (float(magnitude_range[0]), float(magnitude_range[1]))
         )
+        self.init_base_stroke_width_array(len(self.sample_coords))
         specs = self._build_geometry(_native_shell_factory, outputs)
         _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, style_kwargs)
+        self.set_stroke(
+            color=color,
+            width=stroke_width,
+            opacity=stroke_opacity,
+            flat=flat_stroke,
+        )
+        self._apply_callback_style(outputs)
 
     def _evaluate_outputs(self):
-        outputs = _np.asarray(self.func(self.sample_coords), dtype=float)
-        if outputs.shape != self.sample_coords.shape:
+        outputs = _vector_field_rows(
+            self.func(self.sample_coords), "VectorField callback output"
+        )
+        if len(outputs) != len(self.sample_coords):
             raise ValueError(
-                "VectorField callback must return one three-component vector "
-                f"per sample; got {outputs.shape} for {self.sample_coords.shape}"
+                "VectorField callback must return one vector per sample; "
+                f"got {len(outputs)} vectors for {len(self.sample_coords)} samples"
             )
         return outputs
 
@@ -6436,32 +6487,119 @@ class VectorField(VMobject):
             self.tip_width_ratio,
             self.tip_len_to_width,
             self.flat_stroke,
+            self._native_default_color_map,
             self.color,
             self.magnitude_range,
         )
+
+    def _apply_callback_style(self, outputs):
+        output_norms = _np.linalg.norm(outputs, axis=1)
+        repeated_norms = _np.repeat(output_norms, 8)[:-1]
+        if self.color_map is not None:
+            low, high = self.magnitude_range
+            alphas = _np.true_divide(repeated_norms - low, high - low)
+            rgba = _np.asarray(self.color_map(alphas), dtype=float)
+            if rgba.ndim != 2 or rgba.shape[0] != len(repeated_norms) or rgba.shape[1] < 3:
+                raise ValueError(
+                    "VectorField color_map must return one RGB or RGBA row per point"
+                )
+            self.data["stroke_rgba"][:, :3] = rgba[:, :3]
+        if self.norm_to_opacity_func is not None:
+            self.get_stroke_opacities()[:] = self.norm_to_opacity_func(
+                repeated_norms
+            )
+
+    def init_points(self):
+        n_samples = len(self.sample_coords)
+        self.set_points(_np.zeros((8 * n_samples - 1, 3)))
+        self.set_joint_type("no_joint")
+
+    def get_sample_points(
+        self,
+        center,
+        width,
+        height,
+        depth,
+        x_density,
+        y_density,
+        z_density,
+    ):
+        return _np.asarray(
+            self._vector_field_grid_sample_points(
+                _vec3(center),
+                float(width),
+                float(height),
+                float(depth),
+                float(x_density),
+                float(y_density),
+                float(z_density),
+            ),
+            dtype=float,
+        )
+
+    def init_base_stroke_width_array(self, n_sample_points):
+        arr = _np.ones(8 * _operator.index(n_sample_points) - 1)
+        arr[4::8] = self.tip_width_ratio
+        arr[5::8] = self.tip_width_ratio * 0.5
+        arr[6::8] = 0
+        arr[7::8] = 0
+        self.base_stroke_width_array = arr
+
+    def set_stroke(
+        self,
+        color=None,
+        width=None,
+        opacity=None,
+        behind=None,
+        flat=None,
+        recurse=True,
+    ):
+        VMobject.set_stroke(
+            self,
+            color,
+            None,
+            opacity,
+            behind,
+            flat,
+            recurse,
+        )
+        if width is not None:
+            self.set_stroke_width(float(width))
+        return self
+
+    def set_stroke_width(self, width):
+        if self.get_num_points() > 0:
+            self.get_stroke_widths()[:] = (
+                float(width) * self.base_stroke_width_array
+            )
+            self.stroke_width = float(width)
+        return self
 
     def update_sample_points(self):
         self.sample_points = _vector_field_c2p_rows(
             self.coordinate_system, self.sample_coords
         )
-        return self
 
     def set_sample_coords(self, sample_coords):
-        self.sample_coords = _np.asarray(sample_coords, dtype=float).reshape((-1, 3))
-        return self.update_sample_points()
+        self.sample_coords = _vector_field_rows(
+            sample_coords, "VectorField sample_coords"
+        )
+        return self
 
     def update_vectors(self):
+        outputs = self._evaluate_outputs()
         scratch = VMobject.__new__(VMobject)
         _install_live_state(scratch)
         specs = self._build_geometry(
-            _native_shell_factory, self._evaluate_outputs(), target=scratch
+            _native_shell_factory, outputs, target=scratch
         )
         # The field kernel is a single VMobject root; keep an explicit guard
         # so a future native family expansion cannot be silently discarded.
         if specs:
             raise RuntimeError("native VectorField unexpectedly returned children")
         self.match_points(scratch)
-        self.data[:] = scratch.data
+        self.data["stroke_width"][:] = scratch.data["stroke_width"]
+        self._apply_callback_style(outputs)
         return self
 
 
@@ -9770,6 +9908,98 @@ def _install_mobject_functions():
 
 
 _install_mobject_functions()
+
+
+def _install_vector_field_functions():
+    """Bind the Reference's field helpers over native geometry and live
+    updater surfaces without importing SciPy or matplotlib."""
+
+    def get_vectorized_rgb_gradient_function(min_value, max_value, color_map):
+        if color_map != "3b1b_colormap":
+            raise NotImplementedError(
+                "field gradients support the bundled '3b1b_colormap'; "
+                f"{color_map!r} requires non-bundled matplotlib data"
+            )
+
+        def gradient(values):
+            flat = _np.asarray(values, dtype=float).reshape(-1)
+            return _np.asarray(
+                _BridgeMobject._vector_field_gradient(
+                    float(min_value), float(max_value), flat.tolist()
+                ),
+                dtype=float,
+            )
+
+        return gradient
+
+    def get_rgb_gradient_function(min_value, max_value, color_map):
+        gradient = get_vectorized_rgb_gradient_function(
+            min_value, max_value, color_map
+        )
+        return lambda value: gradient(_np.array([value]))[0]
+
+    def get_sample_coords(coordinate_system, density=1.0):
+        return _vector_field_sample_coords(coordinate_system, density)
+
+    def move_along_vector_field(mobject, func):
+        mobject.add_updater(
+            lambda current, dt: current.shift(func(current.get_center()) * dt)
+        )
+        return mobject
+
+    def move_submobjects_along_vector_field(mobject, func):
+        def apply_nudge(current, dt):
+            for submobject in current:
+                x, y = submobject.get_center()[:2]
+                if abs(x) < 2.0 * _FRAME_X_RADIUS and abs(y) < 2.0 * _FRAME_Y_RADIUS:
+                    submobject.shift(func(submobject.get_center()) * dt)
+
+        mobject.add_updater(apply_nudge)
+        return mobject
+
+    def move_points_along_vector_field(mobject, func, coordinate_system):
+        origin = coordinate_system.get_origin()
+
+        def apply_nudge(current, dt):
+            current.apply_function(
+                lambda point: point
+                + (
+                    coordinate_system.c2p(
+                        *func(*coordinate_system.p2c(point))
+                    )
+                    - origin
+                )
+                * dt
+            )
+
+        mobject.add_updater(apply_nudge)
+        return mobject
+
+    def vectorize(pointwise_function):
+        def vectorized(coords_array):
+            return _np.array(
+                [pointwise_function(*coords) for coords in coords_array]
+            )
+
+        return vectorized
+
+    functions = {
+        "get_rgb_gradient_function": get_rgb_gradient_function,
+        "get_sample_coords": get_sample_coords,
+        "get_vectorized_rgb_gradient_function": get_vectorized_rgb_gradient_function,
+        "move_along_vector_field": move_along_vector_field,
+        "move_points_along_vector_field": move_points_along_vector_field,
+        "move_submobjects_along_vector_field": move_submobjects_along_vector_field,
+        "vectorize": vectorize,
+    }
+    module = _ensure_module("manimlib.mobject.vector_field")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_vector_field_functions()
 
 
 _install_schema_surface()

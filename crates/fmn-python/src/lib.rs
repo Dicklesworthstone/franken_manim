@@ -3989,6 +3989,7 @@ impl BridgeMobject {
         tip_width_ratio: f64,
         tip_len_to_width: f64,
         flat_stroke: bool,
+        use_default_color_map: bool,
         color: Option<&Bound<'py, PyAny>>,
         magnitude_range: Option<(f64, f64)>,
     ) -> PyResult<Bound<'py, PyList>> {
@@ -3998,6 +3999,12 @@ impl BridgeMobject {
                 "VectorField needs at least two sample points",
             ));
         }
+        let sample_budget = fmn_library::SamplingBudget::DEFAULT.max_samples();
+        if n > sample_budget {
+            return Err(PyValueError::new_err(format!(
+                "VectorField sample grid exceeds the {sample_budget}-point resource budget"
+            )));
+        }
         if out_vects.len() != n || output_norms.len() != n {
             return Err(PyValueError::new_err(format!(
                 "VectorField callback returned {} vectors and {} norms for {n} samples",
@@ -4005,9 +4012,9 @@ impl BridgeMobject {
                 output_norms.len()
             )));
         }
-        if !max_displayed_vect_len.is_finite() || max_displayed_vect_len <= 0.0 {
+        if max_displayed_vect_len.is_nan() || max_displayed_vect_len <= 0.0 {
             return Err(PyValueError::new_err(
-                "VectorField max displayed length must be positive and finite",
+                "VectorField max displayed length must be positive and non-NaN",
             ));
         }
         if [
@@ -4036,6 +4043,9 @@ impl BridgeMobject {
             ),
             ..fmn_library::VectorFieldStyle::default()
         };
+        if !use_default_color_map {
+            style.color_map = None;
+        }
         if let Some(color) = color {
             style.color = Some(srgb_from_py(color)?);
             style.color_map = None;
@@ -4072,6 +4082,56 @@ impl BridgeMobject {
             tree.buffer.write_range("stroke_rgba", 0, &rgba);
         }
         install_native_tree(slf, factory, tree)
+    }
+
+    /// The finished Atlas implementation of the Reference's older
+    /// `VectorField.get_sample_points` rectilinear helper.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _vector_field_grid_sample_points(
+        center: [f64; 3],
+        width: f64,
+        height: f64,
+        depth: f64,
+        x_density: f64,
+        y_density: f64,
+        z_density: f64,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        if [x_density, y_density, z_density]
+            .iter()
+            .any(|density| !density.is_finite() || *density <= 0.0)
+        {
+            return Err(PyValueError::new_err(
+                "VectorField sample-point densities must be positive and finite",
+            ));
+        }
+        let points = fmn_library::fields::grid_sample_points(
+            center,
+            [width / 2.0, height / 2.0, depth / 2.0],
+            [x_density, y_density, z_density],
+            fmn_library::SamplingBudget::DEFAULT,
+        );
+        if points.is_empty() && width >= 0.0 && height >= 0.0 && depth >= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "VectorField sample-point grid exceeds the {}-point resource budget",
+                fmn_library::SamplingBudget::DEFAULT.max_samples()
+            )));
+        }
+        Ok(points)
+    }
+
+    /// The native 3b1b colormap interpolation used by the field helpers.
+    #[staticmethod]
+    fn _vector_field_gradient(min_value: f64, max_value: f64, values: Vec<f64>) -> Vec<[f64; 3]> {
+        fmn_library::fields::colormap_gradient(
+            &fmn_core::constants::COLORMAP_3B1B,
+            min_value,
+            max_value,
+            &values,
+        )
+        .into_iter()
+        .map(|color| [color.r, color.g, color.b])
+        .collect()
     }
 
     /// `SurfaceMesh(uv_surface, ...)` — the rebuild oracle: the source
@@ -7735,7 +7795,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
+            r#"from manimlib import AnnularSector, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, VectorField
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7940,6 +8000,34 @@ class _GauntletPortalScene(Scene):
             stroke_color=RED,
             stroke_width=1.5,
         ).shift((0.95, 1.25, 0.0))
+        field_axes = Axes(
+            x_range=(-1.0, 1.0, 1.0),
+            y_range=(-1.0, 1.0, 1.0),
+            width=0.7,
+            height=0.7,
+        ).shift((-0.7, 2.0, 0.0))
+        native_field = VectorField(
+            lambda coords: coords * 0.0 + (0.35, 0.1),
+            field_axes,
+            sample_coords=((-1.0, 0.0), (0.0, 0.0), (1.0, 0.0)),
+            max_vect_len=0.3,
+            color=BLUE_C,
+            stroke_width=1.5,
+        )
+        time_field_axes = Axes(
+            x_range=(-1.0, 1.0, 1.0),
+            y_range=(-1.0, 1.0, 1.0),
+            width=0.7,
+            height=0.7,
+        ).shift((0.7, 2.0, 0.0))
+        native_time_field = TimeVaryingVectorField(
+            lambda coords, time: coords * 0.0 + (0.2 + time, -0.1),
+            time_field_axes,
+            sample_coords=((-1.0, 0.0), (0.0, 0.0), (1.0, 0.0)),
+            max_vect_len=0.3,
+            color=RED,
+            stroke_width=1.5,
+        )
         self.add(
             frame_fade,
             frame_fill,
@@ -7973,6 +8061,8 @@ class _GauntletPortalScene(Scene):
             native_brace_text,
             native_function_graph,
             native_implicit,
+            native_field,
+            native_time_field,
         )
         self.wait(1 / 30)
 
