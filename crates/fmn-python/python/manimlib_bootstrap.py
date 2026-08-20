@@ -5051,9 +5051,7 @@ class Cross(VGroup):
         has_extent = any(member._has_points() for member in _family_preorder(mobject))
         specs = self._build_cross(
             _native_shell_factory,
-            _vec3(rows[0]),
-            _vec3(rows[2]),
-            has_extent,
+            (_vec3(rows[0]), _vec3(rows[2])) if has_extent else None,
             stroke_color,
         )
         _hang_native_children(self, specs)
@@ -5084,9 +5082,7 @@ class Underline(Line):
         has_extent = any(member._has_points() for member in _family_preorder(mobject))
         specs = self._build_underline(
             _native_shell_factory,
-            _vec3(rows[0]),
-            _vec3(rows[2]),
-            has_extent,
+            (_vec3(rows[0]), _vec3(rows[2])) if has_extent else None,
             stroke_color,
             self.buff,
             float(stretch_factor),

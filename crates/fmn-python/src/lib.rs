@@ -2936,12 +2936,10 @@ impl BridgeMobject {
     fn _build_cross<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
-        min: [f64; 3],
-        max: [f64; 3],
-        has_extent: bool,
+        extent: Option<([f64; 3], [f64; 3])>,
         color: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let target = matcher_extent_vmobject(min, max, has_extent);
+        let target = matcher_extent_vmobject(extent);
         let built = fmn_library::cross(&target, srgb_from_py(color)?, 6.0);
         install_native_tree(slf, factory, built)
     }
@@ -2951,9 +2949,7 @@ impl BridgeMobject {
     fn _build_underline<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
-        min: [f64; 3],
-        max: [f64; 3],
-        has_extent: bool,
+        extent: Option<([f64; 3], [f64; 3])>,
         color: &Bound<'_, PyAny>,
         buff: f64,
         stretch_factor: f64,
@@ -2963,7 +2959,7 @@ impl BridgeMobject {
                 "Underline buff and stretch_factor must be finite",
             ));
         }
-        let target = matcher_extent_vmobject(min, max, has_extent);
+        let target = matcher_extent_vmobject(extent);
         let built = fmn_library::underline(&target, srgb_from_py(color)?, buff, stretch_factor);
         install_native_tree(slf, factory, built)
     }
@@ -6376,12 +6372,8 @@ fn native_error(error: impl std::fmt::Display) -> PyErr {
 
 /// Materialize only the authoritative family extent needed by Atlas's
 /// extent-driven matcher builders. No path geometry is reconstructed here.
-fn matcher_extent_vmobject(
-    min: [f64; 3],
-    max: [f64; 3],
-    has_extent: bool,
-) -> fmn_library::VMobject {
-    if has_extent {
+fn matcher_extent_vmobject(extent: Option<([f64; 3], [f64; 3])>) -> fmn_library::VMobject {
+    if let Some((min, max)) = extent {
         fmn_library::VMobject::from_points(vec![min, max])
     } else {
         fmn_library::VMobject::new()
