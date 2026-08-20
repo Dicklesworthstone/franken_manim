@@ -3536,11 +3536,158 @@ impl BridgeMobject {
         install_native_tree(slf, factory, cylinder.build())
     }
 
+    /// `Torus(r1, r2, ...)` over Atlas's native UV-grid sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_torus<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        r1: f64,
+        r2: f64,
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let torus = fmn_library::Torus::new(r1, r2)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
+        install_native_tree(slf, factory, torus.build())
+    }
+
+    /// `Cone(height, radius, axis, ...)` over Atlas's native tapered
+    /// cylinder, preserving the Reference's non-centered `v = (0, 1)` grid.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_cone<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        height: f64,
+        radius: f64,
+        axis: [f64; 3],
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let cone = fmn_library::Cone::new(height, radius)
+            .axis(axis)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
+        install_native_tree(slf, factory, cone.build())
+    }
+
+    /// `Line3D(start, end, width, ...)` over Atlas's thin-cylinder builder.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_line3d<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        width: f64,
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let line = fmn_library::Line3D::new(start, end)
+            .width(width)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
+        install_native_tree(slf, factory, line.build())
+    }
+
+    /// `Disk3D(radius, ...)` over Atlas's native polar surface grid.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_disk3d<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        radius: f64,
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let disk = fmn_library::Disk3D::new(radius)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
+        install_native_tree(slf, factory, disk.build())
+    }
+
+    /// `Square3D(side_length, ...)` over Atlas's native planar surface grid.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_square3d<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        side_length: f64,
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        resolution: (usize, usize),
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let square = fmn_library::Square3D::new(side_length)
+            .u_range(u_range.0, u_range.1)
+            .v_range(v_range.0, v_range.1)
+            .resolution(resolution.0, resolution.1)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
+        install_native_tree(slf, factory, square.build())
+    }
+
     /// `Cylinder.uv_func` through the exact object-space parameterization
     /// sampled by the native builder.
     #[staticmethod]
     fn _cylinder_uv(u: f64, v: f64) -> [f64; 3] {
         fmn_library::Cylinder::uv_func(u, v)
+    }
+
+    /// `Torus.uv_func` through the exact native function sampled by build.
+    #[staticmethod]
+    fn _torus_uv(r1: f64, r2: f64, u: f64, v: f64) -> [f64; 3] {
+        fmn_library::Torus::new(r1, r2).uv_func(u, v)
+    }
+
+    /// `Cone.uv_func` through the exact native function sampled by build.
+    #[staticmethod]
+    fn _cone_uv(u: f64, v: f64) -> [f64; 3] {
+        fmn_library::Cone::uv_func(u, v)
+    }
+
+    /// `Disk3D.uv_func` through the exact native function sampled by build.
+    #[staticmethod]
+    fn _disk3d_uv(u: f64, v: f64) -> [f64; 3] {
+        fmn_library::Disk3D::uv_func(u, v)
+    }
+
+    /// `Square3D.uv_func` through the exact native function sampled by build.
+    #[staticmethod]
+    fn _square3d_uv(u: f64, v: f64) -> [f64; 3] {
+        fmn_library::Square3D::uv_func(u, v)
     }
 
     /// `Sphere.uv_func` through the exact function used by the native
