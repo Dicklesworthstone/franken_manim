@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	ef9c232d45fa36cff140beefa8dc86342d62a7701d1ff821a0097acd9be15401
+ledger_reviewed_digest	d7cea271024be981957518581a2e7e734040d1bb5445a70a2edec3dd8d8ed115
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -437,6 +437,16 @@ manimlib.mobject.geometry:Sector	improved	BN-09	crates/fmn-python/tests/bridge.p
 manimlib.mobject.geometry:Sector.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	forwards angle radius and style through the native concentric-arc builder
 manimlib.mobject.geometry:Annulus	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored VMobject ring whose inner native contour is counter-wound under nonzero fill
 manimlib.mobject.geometry:Annulus.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	preserves inner and outer radii center fill and stroke defaults through the native full-turn builder
+manimlib.mobject.geometry:DashedLine	improved	BN-03	crates/fmn-python/tests/bridge.py	is the authored Line subclass whose bounded native dash family is placed and counted by true arc length
+manimlib.mobject.geometry:DashedLine.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	builds checked native dash children with exact public defaults live endpoint dispatch styling and resource caps
+manimlib.mobject.geometry:DashedLine.calculate_num_dashes	improved	BN-03	crates/fmn-python/tests/bridge.py	uses the same bounded true-arclength Atlas count rule as construction and precisely refuses invalid lengths ratios and multiplicities
+manimlib.mobject.geometry:DashedLine.get_end	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the final live native dash endpoint and falls back to the inherited empty-line behavior
+manimlib.mobject.geometry:DashedLine.get_first_handle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the first native dash child's second live point record
+manimlib.mobject.geometry:DashedLine.get_last_handle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the final native dash child's penultimate live point record
+manimlib.mobject.geometry:DashedLine.get_start	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the first live native dash endpoint and falls back to the inherited empty-line behavior
+manimlib.mobject.geometry:DashedLine.get_start_and_end	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the virtual-dispatched first and final dash endpoints as one pair
+manimlib.mobject.geometry:TangentLine	improved	BN-03	crates/fmn-python/tests/bridge.py	is the authored Line subclass built from the live source path at a true-arclength proportion
+manimlib.mobject.geometry:TangentLine.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	constructs the requested exact-length tangent from detached or scene-bound Marionette records and defines an empty native result for an empty source
 manimlib.mobject.geometry:Polygon	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass backed by Atlas closed shared-anchor geometry rather than a schema-generated shell
 manimlib.mobject.geometry:Polygon.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves variadic vertices closed point topology exact empty-input refusal and VMobject styling
 manimlib.mobject.geometry:Polygon.get_vertices	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live start-anchor view without the repeated closing anchor
