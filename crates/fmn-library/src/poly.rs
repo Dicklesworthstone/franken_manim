@@ -66,6 +66,14 @@ impl CubicBezier {
     /// [`VMobject`] is published on failure.
     pub fn build(self) -> Result<VMobject, GeomError> {
         let [a0, h0, h1, a1] = self.control;
+        if self
+            .control
+            .iter()
+            .flatten()
+            .any(|component| !component.is_finite())
+        {
+            return Err(GeomError::ToleranceUnreachable { needed: usize::MAX });
+        }
         let mut path = QuadPath::new();
         path.start_new_path(a0);
         path.add_cubic_bezier_curve_to(h0, h1, a1)?;
@@ -719,24 +727,24 @@ pub fn screen_rectangle(aspect_ratio: f64, height: f64) -> Rectangle {
     Rectangle::new().width(aspect_ratio * height).height(height)
 }
 
-/// `FullScreenRectangle`: the whole camera frame, at the Reference's
-/// default 1.01 overshoot so no seam shows at the edge.
+/// `FullScreenRectangle`: the whole camera frame with the Reference's
+/// opaque `GREY_E` fill and zero-width stroke.
 #[must_use]
 pub fn full_screen_rectangle() -> Rectangle {
     Rectangle::new()
-        .width(FRAME_WIDTH * 1.01)
-        .height(FRAME_HEIGHT * 1.01)
+        .width(FRAME_WIDTH)
+        .height(FRAME_HEIGHT)
+        .style(Style::default().fill(GREY_E, 1.0).stroke_width(0.0))
 }
 
 /// `FullScreenFadeRectangle`: the full-screen rectangle as a dark,
 /// unstroked veil.
 #[must_use]
 pub fn full_screen_fade_rectangle(opacity: f64) -> Rectangle {
-    full_screen_rectangle().style(
-        Style::default()
-            .fill(GREY_E, opacity)
-            .stroke(BLACK, 0.0, 1.0),
-    )
+    Rectangle::new()
+        .width(FRAME_WIDTH)
+        .height(FRAME_HEIGHT)
+        .style(Style::default().fill(BLACK, opacity).stroke_width(0.0))
 }
 
 fn sub(a: Vec3, b: Vec3) -> Vec3 {
@@ -1023,22 +1031,26 @@ mod tests {
     #[test]
     fn cubic_bezier_rejects_non_finite_controls_without_partial_output() {
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let cubic = CubicBezier::new(
-                [0.0; 3],
-                [1.0, invalid, 0.0],
-                [3.0, 2.0, 0.0],
-                [4.0, 0.0, 0.0],
-            );
-            assert_eq!(
-                cubic.build().expect_err("non-finite cubic must be refused"),
-                GeomError::ToleranceUnreachable { needed: usize::MAX }
-            );
-            assert_eq!(
-                Mobject::try_from(cubic)
-                    .err()
-                    .expect("conversion must expose the same refusal"),
-                GeomError::ToleranceUnreachable { needed: usize::MAX }
-            );
+            for control_index in 0..4 {
+                let mut controls = [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 2.0, 0.0],
+                    [3.0, 2.0, 0.0],
+                    [4.0, 0.0, 0.0],
+                ];
+                controls[control_index][1] = invalid;
+                let cubic = CubicBezier::new(controls[0], controls[1], controls[2], controls[3]);
+                assert_eq!(
+                    cubic.build().expect_err("non-finite cubic must be refused"),
+                    GeomError::ToleranceUnreachable { needed: usize::MAX }
+                );
+                assert_eq!(
+                    Mobject::try_from(cubic)
+                        .err()
+                        .expect("conversion must expose the same refusal"),
+                    GeomError::ToleranceUnreachable { needed: usize::MAX }
+                );
+            }
         }
     }
 
@@ -1056,8 +1068,11 @@ mod tests {
         let full = full_screen_rectangle()
             .build()
             .expect("the full-screen rectangle is unrounded");
-        assert!(close(full.length_over_dim(0), FRAME_WIDTH * 1.01));
-        assert!(close(full.length_over_dim(1), FRAME_HEIGHT * 1.01));
+        assert!(close(full.length_over_dim(0), FRAME_WIDTH));
+        assert!(close(full.length_over_dim(1), FRAME_HEIGHT));
+        assert_eq!(full.style().fill_color, GREY_E);
+        assert!(close(full.style().fill_opacity, 1.0));
+        assert!(close(full.style().stroke_width, 0.0));
         let screen = screen_rectangle(16.0 / 9.0, 4.0)
             .build()
             .expect("the screen rectangle is unrounded");
@@ -1066,6 +1081,7 @@ mod tests {
         let fade = full_screen_fade_rectangle(0.7)
             .build()
             .expect("the fade rectangle is unrounded");
+        assert_eq!(fade.style().fill_color, BLACK);
         assert!(close(fade.style().fill_opacity, 0.7));
         assert!(close(fade.style().stroke_width, 0.0));
     }

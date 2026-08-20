@@ -2799,6 +2799,24 @@ impl BridgeMobject {
     // `install_native_tree`; the returned nested `(shell, children)` specs
     // are hung on the Python family lists by the bootstrap.
 
+    /// `CubicBezier(a0, h0, h1, a1)` over Chisel's one bounded
+    /// cubic-to-quadratic converter. The detached native value is complete
+    /// before it replaces the constructing proxy, so conversion refusal is
+    /// failure-atomic at the Python boundary.
+    fn _build_cubic_bezier<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        a0: [f64; 3],
+        h0: [f64; 3],
+        h1: [f64; 3],
+        a1: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::CubicBezier::new(a0, h0, h1, a1)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
     /// `Polygon(*vertices)` over Atlas's shared-anchor polygon builder.
     fn _build_polygon<'py>(
         slf: &Bound<'py, Self>,
@@ -2906,6 +2924,19 @@ impl BridgeMobject {
         let built = fmn_library::Rectangle::new()
             .width(width)
             .height(height)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `ScreenRectangle(aspect_ratio, height)` over Atlas's frame helper.
+    fn _build_screen_rectangle<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        aspect_ratio: f64,
+        height: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::poly::screen_rectangle(aspect_ratio, height)
             .build()
             .map_err(native_error)?;
         install_native_tree(slf, factory, built)
@@ -3800,6 +3831,17 @@ impl BridgeMobject {
         }
         let built = with_font_book(|book| decimal.build(book).map_err(native_error))?;
         install_native_tree(slf, factory, built.into_vmob())
+    }
+
+    /// `Elbow(width, angle)` over Atlas's native corner-mark builder.
+    fn _build_elbow<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        width: f64,
+        angle: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Elbow::new().width(width).angle(angle).build();
+        install_native_tree(slf, factory, built)
     }
 
     /// `Line(start, end, buff, path_arc)` over the line shelf.
@@ -7204,7 +7246,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Checkmark, Circle, Cross, CurvedDoubleArrow, DashedVMobject, Exmark, ParametricSurface, Scene, Underline, VMobject
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, Checkmark, Circle, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, ParametricSurface, RED, Scene, ScreenRectangle, Underline, VMobject
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7213,6 +7255,31 @@ class _GauntletPortalScene(Scene):
     random_seed = _fmn_seed & 0xFFFF_FFFF
 
     def construct(self):
+        frame_fade = FullScreenFadeRectangle(fill_opacity=0.04)
+        frame_fill = FullScreenRectangle(
+            height=0.45,
+            fill_color=BLUE_E,
+            fill_opacity=0.35,
+        ).shift((0.0, 1.65, 0.0))
+        frame_border = ScreenRectangle(
+            height=3.5,
+            stroke_color=GREY_C,
+            stroke_width=1.0,
+        )
+        cubic = CubicBezier(
+            (-2.6, 1.45, 0.0),
+            (-2.2, 2.0, 0.0),
+            (-1.4, 2.0, 0.0),
+            (-1.0, 1.45, 0.0),
+            stroke_color=BLUE_C,
+            stroke_width=2.0,
+        )
+        elbow = Elbow(
+            width=0.45,
+            angle=0.35,
+            stroke_color=RED,
+            stroke_width=2.0,
+        ).shift((1.9, 1.25, 0.0))
         native_path = VMobject(stroke_width=3.0)
         native_path.start_new_path((-2.0, -1.4, 0.0))
         native_path.add_cubic_bezier_curve_to(
@@ -7275,6 +7342,11 @@ class _GauntletPortalScene(Scene):
         checkmark = Checkmark(font_size=24).shift((2.5, 0.35, 0.0))
         exmark = Exmark(font_size=24).shift((1.8, 0.35, 0.0))
         self.add(
+            frame_fade,
+            frame_fill,
+            frame_border,
+            cubic,
+            elbow,
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
             AnnularSector(inner_radius=0.25, outer_radius=0.6).shift((0, 1, 0)),

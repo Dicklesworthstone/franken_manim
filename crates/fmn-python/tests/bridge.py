@@ -2196,6 +2196,111 @@ geometry = importlib.import_module("manimlib.mobject.geometry")
 circle = geometry.Circle()
 assert isinstance(circle, VMobject)
 
+# Atlas already owns these curve, corner, and camera-frame primitives. Their
+# public classes must drive those native builders rather than stop at the
+# schema-generated constructor refusal which previously occupied each row.
+frame_mobjects = importlib.import_module("manimlib.mobject.frame")
+assert geometry.CubicBezier.__bases__ == (VMobject,)
+assert geometry.Elbow.__bases__ == (VMobject,)
+assert frame_mobjects.ScreenRectangle.__bases__ == (geometry.Rectangle,)
+assert frame_mobjects.FullScreenRectangle.__bases__ == (
+    frame_mobjects.ScreenRectangle,
+)
+assert frame_mobjects.FullScreenFadeRectangle.__bases__ == (
+    frame_mobjects.FullScreenRectangle,
+)
+assert str(inspect.signature(geometry.CubicBezier)) == (
+    "(a0, h0, h1, a1, **kwargs)"
+)
+assert str(inspect.signature(geometry.Elbow)) == (
+    "(width=0.2, angle=0, **kwargs)"
+)
+assert str(inspect.signature(frame_mobjects.ScreenRectangle)) == (
+    "(aspect_ratio=1.7777777777777777, height=4, **kwargs)"
+)
+assert str(inspect.signature(frame_mobjects.FullScreenRectangle)) == (
+    "(height=8.0, fill_color='#222222', fill_opacity=1, "
+    "stroke_width=0, **kwargs)"
+)
+assert str(inspect.signature(frame_mobjects.FullScreenFadeRectangle)) == (
+    "(stroke_width=0.0, fill_color='#000000', fill_opacity=0.7, **kwargs)"
+)
+
+native_cubic = geometry.CubicBezier(
+    (-2.0, 0.0, 0.0),
+    (-1.0, 2.0, 0.0),
+    (1.0, 2.0, 0.0),
+    (2.0, 0.0, 0.0),
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.5,
+)
+assert np.allclose(native_cubic.get_points()[0], [-2.0, 0.0, 0.0])
+assert np.allclose(native_cubic.get_points()[-1], [2.0, 0.0, 0.0])
+assert native_cubic.get_stroke_color() == manimlib.BLUE
+assert np.isclose(native_cubic.get_stroke_width(), 2.5)
+
+failed_cubic = geometry.CubicBezier.__new__(geometry.CubicBezier)
+try:
+    geometry.CubicBezier.__init__(
+        failed_cubic,
+        (0.0, 0.0, 0.0),
+        (1.0, math.nan, 0.0),
+        (2.0, 1.0, 0.0),
+        (3.0, 0.0, 0.0),
+    )
+except ValueError as error:
+    assert "tolerance" in str(error).lower()
+else:
+    raise AssertionError("CubicBezier published a non-finite native path")
+assert failed_cubic.get_num_points() == 0
+
+native_elbow = geometry.Elbow(width=2.0, angle=math.pi / 2, color=manimlib.RED)
+assert np.isclose(native_elbow.get_height(), 2.0)
+assert native_elbow.get_stroke_color() == manimlib.RED
+
+screen_rectangle = frame_mobjects.ScreenRectangle()
+assert np.isclose(screen_rectangle.get_width(), 4.0 * 16.0 / 9.0)
+assert np.isclose(screen_rectangle.get_height(), 4.0)
+
+full_screen_rectangle = frame_mobjects.FullScreenRectangle()
+assert np.isclose(full_screen_rectangle.get_width(), manimlib.FRAME_WIDTH)
+assert np.isclose(full_screen_rectangle.get_height(), manimlib.FRAME_HEIGHT)
+assert full_screen_rectangle.get_fill_color() == manimlib.GREY_E
+assert np.isclose(full_screen_rectangle.get_fill_opacity(), 1.0)
+assert np.isclose(full_screen_rectangle.get_stroke_width(), 0.0)
+
+custom_full_screen = frame_mobjects.FullScreenRectangle(
+    height=3.0,
+    fill_color=manimlib.BLUE,
+    fill_opacity=0.25,
+    stroke_width=1.5,
+    stroke_color=manimlib.RED,
+)
+assert np.isclose(custom_full_screen.get_width(), 3.0 * 16.0 / 9.0)
+assert np.isclose(custom_full_screen.get_height(), 3.0)
+assert custom_full_screen.get_fill_color() == manimlib.BLUE
+assert np.isclose(custom_full_screen.get_fill_opacity(), 0.25)
+assert custom_full_screen.get_stroke_color() == manimlib.RED
+assert np.isclose(custom_full_screen.get_stroke_width(), 1.5)
+
+fade_rectangle = frame_mobjects.FullScreenFadeRectangle(height=2.0)
+assert np.isclose(fade_rectangle.get_width(), manimlib.FRAME_WIDTH)
+assert np.isclose(fade_rectangle.get_height(), manimlib.FRAME_HEIGHT)
+assert fade_rectangle.get_fill_color() == manimlib.BLACK
+assert np.isclose(fade_rectangle.get_fill_opacity(), 0.7)
+assert np.isclose(fade_rectangle.get_stroke_width(), 0.0)
+
+native_shelf_scene = Scene()
+native_shelf_scene.add(
+    native_cubic,
+    native_elbow,
+    screen_rectangle,
+    full_screen_rectangle,
+    custom_full_screen,
+    fade_rectangle,
+)
+assert all(mobject._is_bound() for mobject in native_shelf_scene.mobjects)
+
 # Shape matchers consume the real family bounding box and retain the native
 # empty-target rule.  A generated schema shell used to fail here before any
 # geometry reached Atlas.
@@ -2375,15 +2480,15 @@ assert np.allclose(
 # The rest of Atlas's matcher shelf is routed through the same authoritative
 # family-extent crossing. Cross and Underline retain their Reference MRO and
 # tapered record profiles; the Python layer does not reconstruct either path.
-cross_signature = str(inspect.signature(shape_matchers.Cross))
-assert cross_signature == (
+cross_call_shape = str(inspect.signature(shape_matchers.Cross))
+assert cross_call_shape == (
     "(mobject, stroke_color='#FC6255', stroke_width=[0, 6, 0], **kwargs)"
-), cross_signature
-underline_signature = str(inspect.signature(shape_matchers.Underline))
-assert underline_signature == (
+), cross_call_shape
+underline_call_shape = str(inspect.signature(shape_matchers.Underline))
+assert underline_call_shape == (
     "(mobject, buff=0.1, stroke_color='#FFFFFF', "
     "stroke_width=[0, 3, 3, 0], stretch_factor=1.2, **kwargs)"
-), underline_signature
+), underline_call_shape
 assert shape_matchers.Cross.__bases__ == (manimlib.VGroup,)
 assert shape_matchers.Underline.__bases__ == (geometry.Line,)
 
@@ -2498,14 +2603,14 @@ assert drawings.Exmark.tex == r"\ding{55}"
 assert drawings.Exmark.default_color == manimlib.RED
 
 
-class NativePresetProbe(special_tex.TexTextFromPresetString):
+class NativeTexTemplateProbe(special_tex.TexTextFromPresetString):
     tex = "x"
     default_color = manimlib.BLUE
 
 
-native_preset_probe = NativePresetProbe()
-assert native_preset_probe.get_tex() == "x"
-assert native_preset_probe.get_fill_color() == manimlib.BLUE
+native_tex_template_probe = NativeTexTemplateProbe()
+assert native_tex_template_probe.get_tex() == "x"
+assert native_tex_template_probe.get_fill_color() == manimlib.BLUE
 
 checkmark = drawings.Checkmark()
 exmark = drawings.Exmark()

@@ -55,6 +55,8 @@ _GREY_C = "#888888"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
 _RED = "#FC6255"
+_ASPECT_RATIO = 16.0 / 9.0
+_FRAME_HEIGHT = 8.0
 
 # Function object -> catalog name, filled by _install_rate_functions;
 # Scene.play maps rate_func callables into the engine's named catalog.
@@ -3150,6 +3152,20 @@ class ParametricCurve(VMobject):
             return self.x_range
 
 
+class CubicBezier(VMobject):
+    def __init__(self, a0, h0, h1, a1, **kwargs):
+        _install_live_state(self)
+        specs = self._build_cubic_bezier(
+            _native_shell_factory,
+            _vec3(a0),
+            _vec3(h0),
+            _vec3(h1),
+            _vec3(a1),
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
 class Polygon(VMobject):
     """Atlas's closed shared-anchor polygon over caller-supplied vertices."""
 
@@ -3261,6 +3277,52 @@ class Square(Rectangle):
     def __init__(self, side_length=2.0, **kwargs):
         self.side_length = side_length
         super().__init__(side_length, side_length, **kwargs)
+
+
+class ScreenRectangle(Rectangle):
+    def __init__(self, aspect_ratio=_ASPECT_RATIO, height=4, **kwargs):
+        _install_live_state(self)
+        specs = self._build_screen_rectangle(
+            _native_shell_factory, float(aspect_ratio), float(height)
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class FullScreenRectangle(ScreenRectangle):
+    def __init__(
+        self,
+        height=_FRAME_HEIGHT,
+        fill_color=_GREY_E,
+        fill_opacity=1,
+        stroke_width=0,
+        **kwargs,
+    ):
+        super().__init__(
+            height=height,
+            fill_color=fill_color,
+            fill_opacity=fill_opacity,
+            stroke_width=stroke_width,
+            **kwargs,
+        )
+
+
+class FullScreenFadeRectangle(FullScreenRectangle):
+    def __init__(
+        self,
+        stroke_width=0.0,
+        fill_color=_BLACK,
+        fill_opacity=0.7,
+        **kwargs,
+    ):
+        # The pinned Reference accepts but does not forward `kwargs` here.
+        # Preserve that source-level quirk until it receives a Behavior Note.
+        del kwargs
+        super().__init__(
+            stroke_width=stroke_width,
+            fill_color=fill_color,
+            fill_opacity=fill_opacity,
+        )
 
 
 class SurroundingRectangle(Rectangle):
@@ -3718,6 +3780,16 @@ class ImageMobject(Mobject):
         if result is None:
             raise ValueError("Cannot sample color from outside an image")
         return _np.array(result)
+
+
+class Elbow(VMobject):
+    def __init__(self, width=0.2, angle=0, **kwargs):
+        _install_live_state(self)
+        specs = self._build_elbow(
+            _native_shell_factory, float(width), float(angle)
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class Line(VMobject):
@@ -7555,12 +7627,19 @@ def _install_schema_surface():
             "VHighlight",
         ): VHighlight,
         ("manimlib.mobject.functions", "ParametricCurve"): ParametricCurve,
+        ("manimlib.mobject.geometry", "CubicBezier"): CubicBezier,
         ("manimlib.mobject.geometry", "Polygon"): Polygon,
         ("manimlib.mobject.geometry", "RegularPolygon"): RegularPolygon,
         ("manimlib.mobject.geometry", "Triangle"): Triangle,
         ("manimlib.mobject.geometry", "ArrowTip"): ArrowTip,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
+        ("manimlib.mobject.frame", "ScreenRectangle"): ScreenRectangle,
+        ("manimlib.mobject.frame", "FullScreenRectangle"): FullScreenRectangle,
+        (
+            "manimlib.mobject.frame",
+            "FullScreenFadeRectangle",
+        ): FullScreenFadeRectangle,
         ("manimlib.mobject.shape_matchers", "SurroundingRectangle"): SurroundingRectangle,
         ("manimlib.mobject.shape_matchers", "BackgroundRectangle"): BackgroundRectangle,
         ("manimlib.mobject.shape_matchers", "Cross"): Cross,
@@ -7608,6 +7687,7 @@ def _install_schema_surface():
         ("manimlib.mobject.three_dimensions", "Cube"): Cube,
         ("manimlib.mobject.three_dimensions", "Prism"): Prism,
         ("manimlib.mobject.three_dimensions", "SurfaceMesh"): SurfaceMesh,
+        ("manimlib.mobject.geometry", "Elbow"): Elbow,
         ("manimlib.mobject.geometry", "Line"): Line,
         ("manimlib.mobject.geometry", "DashedLine"): DashedLine,
         ("manimlib.mobject.geometry", "Arrow"): Arrow,
