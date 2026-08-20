@@ -4457,6 +4457,186 @@ assert np.min(
     np.linalg.norm(curved_double.start_tip.get_points() - [-2.0, 0.0, 0.0], axis=1)
 ) < 1e-9
 
+# The highest-demand primitive shelf is authored over Atlas rather than
+# schema-generated shells.  Lock its declared hierarchy and signatures before
+# checking the live construction and mutation semantics together.
+assert geometry.Circle.__bases__ == (geometry.Arc,)
+assert geometry.Dot.__bases__ == (geometry.Circle,)
+assert geometry.SmallDot.__bases__ == (geometry.Dot,)
+assert geometry.Rectangle.__bases__ == (geometry.Polygon,)
+assert geometry.Square.__bases__ == (geometry.Rectangle,)
+assert geometry.RoundedRectangle.__bases__ == (geometry.Rectangle,)
+assert geometry.Polyline.__bases__ == (VMobject,)
+assert list(inspect.signature(geometry.Circle).parameters) == [
+    "start_angle",
+    "stroke_color",
+    "kwargs",
+]
+assert inspect.signature(geometry.Circle).parameters["stroke_color"].default == manimlib.RED
+assert list(inspect.signature(geometry.Dot).parameters) == [
+    "point",
+    "radius",
+    "stroke_color",
+    "stroke_width",
+    "fill_opacity",
+    "fill_color",
+    "kwargs",
+]
+dot_parameters = inspect.signature(geometry.Dot).parameters
+assert dot_parameters["radius"].default == geometry.DEFAULT_DOT_RADIUS == 0.08
+assert dot_parameters["stroke_color"].default == manimlib.BLACK
+assert dot_parameters["stroke_width"].default == 0.0
+assert dot_parameters["fill_opacity"].default == 1.0
+assert dot_parameters["fill_color"].default == manimlib.DEFAULT_MOBJECT_COLOR
+assert str(inspect.signature(geometry.SmallDot)) == (
+    "(point=array([0., 0., 0.]), radius=0.04, **kwargs)"
+)
+assert geometry.DEFAULT_SMALL_DOT_RADIUS == 0.04
+assert str(inspect.signature(geometry.Rectangle)) == (
+    "(width=4.0, height=2.0, **kwargs)"
+)
+assert str(inspect.signature(geometry.Square)) == (
+    "(side_length=2.0, **kwargs)"
+)
+assert str(inspect.signature(geometry.RoundedRectangle)) == (
+    "(width=4.0, height=2.0, corner_radius=0.5, **kwargs)"
+)
+assert str(inspect.signature(geometry.Polyline)) == "(*vertices, **kwargs)"
+
+arc_center_mover = geometry.Arc(
+    start_angle=0.3,
+    angle=1.2,
+    radius=1.4,
+    arc_center=[-0.5, 0.25, 0.0],
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.0,
+)
+arc_center_identity = id(arc_center_mover)
+arc_center_style = arc_center_mover.get_style()
+arc_center_mover.uniforms["anti_alias_width"] = 2.5
+assert arc_center_mover.move_arc_center_to([1.25, -0.75, 0.0]) is arc_center_mover
+assert id(arc_center_mover) == arc_center_identity
+assert np.allclose(arc_center_mover.get_arc_center(), [1.25, -0.75, 0.0])
+arc_center_style_after = arc_center_mover.get_style()
+assert all(
+    np.array_equal(arc_center_style_after[key], value)
+    for key, value in arc_center_style.items()
+)
+assert arc_center_mover.uniforms["anti_alias_width"] == 2.5
+
+circle_target = geometry.Rectangle(width=2.0, height=1.0).shift([0.5, -0.25, 0.0])
+circle_surround = geometry.Circle(stroke_width=3.0)
+circle_surround_identity = id(circle_surround)
+circle_surround.uniforms["depth_test"] = True
+assert circle_surround.surround(
+    circle_target, dim_to_match=0, stretch=True, buff=0.2
+) is circle_surround
+assert id(circle_surround) == circle_surround_identity
+assert np.allclose(circle_surround.get_center(), circle_target.get_center())
+assert np.allclose(
+    [circle_surround.get_width(), circle_surround.get_height()],
+    [2.4, 1.4],
+    atol=1e-6,
+)
+assert circle_surround.get_stroke_width() == 3.0
+assert circle_surround.uniforms["depth_test"] is True
+
+rectangle_surround = geometry.Rectangle(
+    width=0.5,
+    height=0.25,
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.0,
+)
+rectangle_identity = id(rectangle_surround)
+rectangle_surround.uniforms["anti_alias_width"] = 3.25
+assert rectangle_surround.surround(circle_target, buff=0.15) is rectangle_surround
+assert id(rectangle_surround) == rectangle_identity
+assert np.allclose(rectangle_surround.get_center(), circle_target.get_center())
+assert np.allclose(
+    [rectangle_surround.get_width(), rectangle_surround.get_height()],
+    [2.3, 1.3],
+    atol=1e-6,
+)
+assert rectangle_surround.get_stroke_color() == manimlib.BLUE
+assert rectangle_surround.get_stroke_width() == 2.0
+assert rectangle_surround.uniforms["anti_alias_width"] == 3.25
+
+point_target = manimlib.VectorizedPoint([2.0, 3.0, 0.0])
+degenerate_surround = geometry.Rectangle().surround(point_target, buff=0.1)
+assert np.allclose(degenerate_surround.get_center(), [2.0, 3.0, 0.0])
+assert np.allclose(
+    [degenerate_surround.get_width(), degenerate_surround.get_height()],
+    [0.2, 0.2],
+    atol=1e-6,
+)
+
+bound_primitive_scene = Scene()
+bound_rectangle = geometry.Rectangle(width=0.5, height=0.5)
+bound_primitive_scene.add(bound_rectangle)
+bound_rectangle_identity = id(bound_rectangle)
+assert bound_rectangle._is_bound()
+assert bound_rectangle.surround(circle_target, buff=0.05) is bound_rectangle
+assert id(bound_rectangle) == bound_rectangle_identity
+assert bound_rectangle._is_bound()
+assert bound_primitive_scene.mobjects == [bound_rectangle]
+assert np.allclose(
+    [bound_rectangle.get_width(), bound_rectangle.get_height()],
+    [2.1, 1.1],
+    atol=1e-6,
+)
+
+dot = geometry.Dot([1.0, -2.0, 0.0], radius=0.2)
+assert isinstance(dot, geometry.Circle)
+assert np.allclose(dot.get_center(), [1.0, -2.0, 0.0])
+assert math.isclose(dot.get_radius(), 0.2, abs_tol=1e-6)
+assert dot.get_stroke_color() == manimlib.BLACK
+assert dot.get_stroke_width() == 0.0
+assert dot.get_fill_opacity() == 1.0
+assert dot.get_fill_color() == manimlib.DEFAULT_MOBJECT_COLOR
+small_dot = geometry.SmallDot([-1.0, 2.0, 0.0])
+assert isinstance(small_dot, geometry.Dot)
+assert math.isclose(small_dot.get_radius(), 0.04, abs_tol=1e-6)
+
+rectangle = geometry.Rectangle(
+    width=3.0,
+    height=1.5,
+    stroke_color=manimlib.BLUE,
+    stroke_width=1.5,
+)
+assert isinstance(rectangle, geometry.Polygon)
+assert np.allclose([rectangle.get_width(), rectangle.get_height()], [3.0, 1.5])
+assert len(rectangle.get_vertices()) == 4
+square = geometry.Square(side_length=1.25)
+assert np.allclose([square.get_width(), square.get_height()], [1.25, 1.25])
+rounded = geometry.RoundedRectangle(
+    width=3.0,
+    height=1.5,
+    corner_radius=0.25,
+    stroke_color=manimlib.RED,
+)
+assert np.allclose([rounded.get_width(), rounded.get_height()], [3.0, 1.5])
+assert rounded.get_num_curves() > rectangle.get_num_curves()
+assert rounded.get_stroke_color() == manimlib.RED
+try:
+    geometry.RoundedRectangle(corner_radius=math.nan)
+except ValueError:
+    pass
+else:
+    raise AssertionError("RoundedRectangle accepted a non-finite corner radius")
+
+polyline = geometry.Polyline(
+    [-1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0],
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.0,
+)
+assert np.allclose(polyline.get_start(), [-1.0, 0.0, 0.0])
+assert np.allclose(polyline.get_end(), [1.0, 0.0, 0.0])
+assert not np.allclose(polyline.get_start(), polyline.get_end())
+assert polyline.get_stroke_color() == manimlib.BLUE
+assert geometry.Polyline().get_num_points() == 0
+
 circle_query = geometry.Circle(radius=2.0, arc_center=[1.0, -1.0, 0.0])
 assert math.isclose(circle_query.get_radius(), 2.0, abs_tol=1e-6)
 assert np.allclose(circle_query.point_at_angle(math.pi / 2.0), [1.0, 1.0, 0.0])

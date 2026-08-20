@@ -2932,6 +2932,19 @@ impl BridgeMobject {
         install_native_tree(slf, factory, fmn_library::Polygon::new(vertices).build())
     }
 
+    /// `Polyline(*vertices)` over Atlas's open shared-anchor polygon builder.
+    fn _build_polyline<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        vertices: Vec<[f64; 3]>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        install_native_tree(
+            slf,
+            factory,
+            fmn_library::Polygon::polyline(vertices).build(),
+        )
+    }
+
     /// `VectorizedPoint(location)` over Atlas's one-record native value.
     fn _build_vectorized_point<'py>(
         slf: &Bound<'py, Self>,
@@ -3030,6 +3043,25 @@ impl BridgeMobject {
         let built = fmn_library::Rectangle::new()
             .width(width)
             .height(height)
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// `RoundedRectangle(width, height, corner_radius)` over the same Atlas
+    /// rectangle builder.  Atlas rounds only after applying the requested
+    /// extent, so the corners remain circular rather than stretched arcs.
+    fn _build_rounded_rectangle<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        width: f64,
+        height: f64,
+        corner_radius: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::Rectangle::new()
+            .width(width)
+            .height(height)
+            .corner_radius(corner_radius)
             .build()
             .map_err(native_error)?;
         install_native_tree(slf, factory, built)
@@ -7955,7 +7987,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
+            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8191,6 +8223,31 @@ class _GauntletPortalScene(Scene):
             max_width_to_length_ratio=0.09,
             fill_color=RED,
         ).shift((1.55, 2.25, 0.0))
+        primitive_dot = Dot(
+            (-3.0, 2.45, 0.0),
+            radius=0.08,
+            fill_color=RED,
+        )
+        primitive_rect = Rectangle(
+            width=0.4,
+            height=0.25,
+            stroke_color=BLUE_C,
+            stroke_width=1.0,
+        ).surround(primitive_dot, buff=0.06)
+        primitive_round = RoundedRectangle(
+            width=0.45,
+            height=0.28,
+            corner_radius=0.07,
+            stroke_color=RED,
+            stroke_width=1.0,
+        ).shift((3.0, 2.45, 0.0))
+        primitive_polyline = Polyline(
+            (2.7, 2.1, 0.0),
+            (3.0, 2.3, 0.0),
+            (3.3, 2.1, 0.0),
+            stroke_color=BLUE_C,
+            stroke_width=1.5,
+        )
         field_axes = Axes(
             x_range=(-1.0, 1.0, 1.0),
             y_range=(-1.0, 1.0, 1.0),
@@ -8255,6 +8312,10 @@ class _GauntletPortalScene(Scene):
             native_line,
             native_arrow,
             native_vector,
+            primitive_dot,
+            primitive_rect,
+            primitive_round,
+            primitive_polyline,
             native_field,
             native_time_field,
         )

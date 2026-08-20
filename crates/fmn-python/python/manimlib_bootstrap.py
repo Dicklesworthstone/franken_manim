@@ -2983,9 +2983,11 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
         raise TypeError(
             "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
         )
-    if fill_color is None:
+    # `VMobject(color=...)` is the one-shot public override for both channels.
+    # Constructor-specific defaults (notably Dot's white fill and black
+    # zero-width stroke) must not mask that shorthand when it is supplied.
+    if color is not None:
         fill_color = color
-    if stroke_color is None:
         stroke_color = color
     if fill_opacity is None:
         fill_opacity = opacity
@@ -3341,6 +3343,18 @@ class Polygon(VMobject):
         return self
 
 
+class Polyline(VMobject):
+    """Atlas's open shared-anchor path through caller-supplied vertices."""
+
+    def __init__(self, *vertices, **kwargs):
+        _install_live_state(self)
+        specs = self._build_polyline(
+            _native_shell_factory, [_vec3(vertex) for vertex in vertices]
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+
 class RegularPolygon(Polygon):
     """The bounded native regular-polygon compass construction."""
 
@@ -3413,11 +3427,32 @@ class ArrowTip(Triangle):
         return float(_np.sqrt(_np.dot(vector, vector)))
 
 
-class Rectangle(VMobject):
+class Rectangle(Polygon):
     def __init__(self, width=4.0, height=2.0, **kwargs):
         _install_live_state(self)
         specs = self._build_rectangle(
             _native_shell_factory, float(width), float(height)
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, kwargs)
+
+    def surround(self, mobject, buff=_SMALL_BUFF):
+        self.set_shape(
+            mobject.get_width() + 2 * float(buff),
+            mobject.get_height() + 2 * float(buff),
+        )
+        self.move_to(mobject)
+        return self
+
+
+class RoundedRectangle(Rectangle):
+    def __init__(self, width=4.0, height=2.0, corner_radius=0.5, **kwargs):
+        _install_live_state(self)
+        specs = self._build_rounded_rectangle(
+            _native_shell_factory,
+            float(width),
+            float(height),
+            float(corner_radius),
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
@@ -3719,6 +3754,10 @@ class Arc(TipableVMobject):
     def get_stop_angle(self):
         return self._arc_stop_angle()
 
+    def move_arc_center_to(self, point):
+        self.shift(_np.array(_vec3(point)) - self.get_arc_center())
+        return self
+
 
 class ArcBetweenPoints(Arc):
     def __init__(self, start, end, angle=_math.tau / 4, **kwargs):
@@ -3786,7 +3825,7 @@ class CurvedDoubleArrow(CurvedArrow):
 
 
 class Circle(Arc):
-    def __init__(self, start_angle=0, stroke_color=None, **kwargs):
+    def __init__(self, start_angle=0, stroke_color=_RED, **kwargs):
         radius = kwargs.pop("radius", 1.0)
         arc_center = kwargs.pop("arc_center", _ORIGIN)
         _install_live_state(self)
@@ -3799,11 +3838,14 @@ class Circle(Arc):
             _vec3(arc_center),
         )
         _hang_native_children(self, specs)
-        # The native circle carries the Reference's RED stroke default; an
-        # explicit stroke_color reapplies.
-        if stroke_color is not None:
-            kwargs.setdefault("stroke_color", stroke_color)
+        kwargs.setdefault("stroke_color", stroke_color)
         _apply_vmobject_style_kwargs(self, kwargs)
+
+    def surround(self, mobject, dim_to_match=0, stretch=False, buff=_MED_SMALL_BUFF):
+        self.replace(mobject, dim_to_match, stretch)
+        self.stretch((self.get_width() + 2 * buff) / self.get_width(), 0)
+        self.stretch((self.get_height() + 2 * buff) / self.get_height(), 1)
+        return self
 
     def get_radius(self):
         return self._circle_radius()
@@ -3812,15 +3854,15 @@ class Circle(Arc):
         return _np.array(self._circle_point_at_angle(float(angle)))
 
 
-class Dot(VMobject):
+class Dot(Circle):
     def __init__(
         self,
         point=_ORIGIN,
         radius=0.08,
-        stroke_color=None,
-        stroke_width=None,
-        fill_opacity=None,
-        fill_color=None,
+        stroke_color=_BLACK,
+        stroke_width=0.0,
+        fill_opacity=1.0,
+        fill_color=_WHITE,
         **kwargs,
     ):
         _install_live_state(self)
@@ -3828,16 +3870,15 @@ class Dot(VMobject):
             _native_shell_factory, _vec3(point), float(radius)
         )
         _hang_native_children(self, specs)
-        # The native dot carries the Reference defaults (white fill at 1,
-        # black zero-width stroke); explicit values reapply.
+        # Route the public values through the ordinary style path even though
+        # Atlas already installs the same Reference defaults.
         for name, value in (
             ("stroke_color", stroke_color),
             ("stroke_width", stroke_width),
             ("fill_opacity", fill_opacity),
             ("fill_color", fill_color),
         ):
-            if value is not None:
-                kwargs.setdefault(name, value)
+            kwargs.setdefault(name, value)
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
@@ -9181,10 +9222,12 @@ def _install_schema_surface():
         ("manimlib.mobject.functions", "ImplicitFunction"): ImplicitFunction,
         ("manimlib.mobject.geometry", "CubicBezier"): CubicBezier,
         ("manimlib.mobject.geometry", "Polygon"): Polygon,
+        ("manimlib.mobject.geometry", "Polyline"): Polyline,
         ("manimlib.mobject.geometry", "RegularPolygon"): RegularPolygon,
         ("manimlib.mobject.geometry", "Triangle"): Triangle,
         ("manimlib.mobject.geometry", "ArrowTip"): ArrowTip,
         ("manimlib.mobject.geometry", "Rectangle"): Rectangle,
+        ("manimlib.mobject.geometry", "RoundedRectangle"): RoundedRectangle,
         ("manimlib.mobject.geometry", "Square"): Square,
         ("manimlib.mobject.frame", "ScreenRectangle"): ScreenRectangle,
         ("manimlib.mobject.frame", "FullScreenRectangle"): FullScreenRectangle,
