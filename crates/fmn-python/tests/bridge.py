@@ -2200,6 +2200,15 @@ assert isinstance(circle, VMobject)
 # empty-target rule.  A generated schema shell used to fail here before any
 # geometry reached Atlas.
 shape_matchers = importlib.import_module("manimlib.mobject.shape_matchers")
+assert str(inspect.signature(shape_matchers.SurroundingRectangle)) == (
+    "(mobject, buff=0.1, color='#FFFF00', **kwargs)"
+)
+assert str(inspect.signature(shape_matchers.SurroundingRectangle.set_buff)) == (
+    "(self, buff)"
+)
+assert str(inspect.signature(shape_matchers.SurroundingRectangle.surround)) == (
+    "(self, mobject, buff=None)"
+)
 assert str(inspect.signature(shape_matchers.BackgroundRectangle)) == (
     "(mobject, color=None, stroke_width=0, stroke_opacity=0, "
     "fill_opacity=0.75, buff=0, **kwargs)"
@@ -2366,13 +2375,15 @@ assert np.allclose(
 # The rest of Atlas's matcher shelf is routed through the same authoritative
 # family-extent crossing. Cross and Underline retain their Reference MRO and
 # tapered record profiles; the Python layer does not reconstruct either path.
-assert str(inspect.signature(shape_matchers.Cross)) == (
+cross_signature = str(inspect.signature(shape_matchers.Cross))
+assert cross_signature == (
     "(mobject, stroke_color='#FC6255', stroke_width=[0, 6, 0], **kwargs)"
-)
-assert str(inspect.signature(shape_matchers.Underline)) == (
+), cross_signature
+underline_signature = str(inspect.signature(shape_matchers.Underline))
+assert underline_signature == (
     "(mobject, buff=0.1, stroke_color='#FFFFFF', "
     "stroke_width=[0, 3, 3, 0], stretch_factor=1.2, **kwargs)"
-)
+), underline_signature
 assert shape_matchers.Cross.__bases__ == (manimlib.VGroup,)
 assert shape_matchers.Underline.__bases__ == (geometry.Line,)
 
