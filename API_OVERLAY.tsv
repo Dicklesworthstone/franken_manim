@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	4b14448c880c7e6245688f9989e35c2fadfbdbe7d30f3bce804c7430e2818b09
+ledger_reviewed_digest	4fdfe75bec90c44e579d7ece61d4ba9f8e5b83fb032ca360a39cf8bf6ca0cfb7
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -526,6 +526,16 @@ manimlib.mobject.value_tracker:ComplexValueTracker	same	scripts/manim_ref/maniml
 manimlib.mobject.value_tracker:ComplexValueTracker.value_type	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	exposes the exact NumPy complex128 public type marker
 manimlib.mobject.value_tracker:ExponentialValueTracker	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	is the authored ValueTracker subclass whose native logarithmic lane gives geometric Transform interpolation
 manimlib.mobject.value_tracker:ValueTracker.value_type	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	exposes the exact NumPy float64 public type marker
+manimlib.mobject.geometry:CubicBezier	improved	BN-13	crates/fmn-library/src/poly.rs#tests	is an authored VMobject subclass whose cubic controls enter Chisel's one error-bounded shared-anchor quadratic converter
+manimlib.mobject.geometry:CubicBezier.__init__	improved	BN-13	crates/fmn-python/tests/bridge.py	preserves four control points and VMobject styling while refusing every non-finite or over-budget conversion before publishing geometry
+manimlib.mobject.geometry:Elbow	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass backed by Atlas's origin-anchored corner-mark geometry
+manimlib.mobject.geometry:Elbow.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves width angle origin-relative rotation and VMobject styling through the native builder
+manimlib.mobject.frame:ScreenRectangle	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	is the authored Rectangle subclass over Atlas's exact aspect-ratio frame helper
+manimlib.mobject.frame:ScreenRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	preserves aspect-ratio times height dimensions and ordinary VMobject styling
+manimlib.mobject.frame:FullScreenRectangle	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	is the authored ScreenRectangle subclass with exact camera-frame dimensions and Reference style defaults
+manimlib.mobject.frame:FullScreenRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	preserves custom height fill and stroke configuration over the native frame geometry
+manimlib.mobject.frame:FullScreenFadeRectangle	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	is the authored FullScreenRectangle subclass with the Reference black translucent veil defaults
+manimlib.mobject.frame:FullScreenFadeRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	preserves explicit veil style and the pinned constructor's accepted-but-unforwarded extra keyword quirk
 
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
