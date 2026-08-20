@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	37a41b436b08ea457dff6b5eb25768f01eaf28cec65e726d692dc5558ad56386
+ledger_reviewed_digest	fa278247d3e671377481fe4084684f8513606350bf52e85693ac0acb4a8e962b
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -192,6 +192,7 @@ OOT-CLI-EMBED	-e,--embed	tiered	Embed points exist through fmn-python or a Studi
 OOT-COMPLEX-SCRIPT	complex-script shaping, bidi, and mark positioning	tiered	Latin, Greek, Cyrillic, and mathematics are first-class; complex shaping needs a larger upstream text contract	A corpus or supported user workflow requires Arabic, Indic, or bidi layout and fmd-font has fixture-backed shaping support
 OOT-EXOTIC-MEDIA-MESH	exotic image, media, and mesh formats	tiered	Owned native codecs and the OBJ subset cover the governed core; other media routes through the one ffmpeg boundary where applicable	A corpus-ranked format cannot use the declared native set or ffmpeg capability and has an owned bounded-parser design
 OOT-IMAGE-ASSET-INPUT	ImageMobject input acquisition and decode	tiered	Local PNG and JPEG are native; implicit URL downloads are replaced by the host AssetFetcher boundary and other PIL formats have no silent substitute	A corpus-ranked input requires a host-wired AssetFetcher or an owned budgeted decoder with malformed-input Gauntlet evidence
+OOT-PRISMIFY-FAMILY	Prismify over VMobject families	tiered	The native extrusion consumes one live point buffer; silently flattening or discarding child geometry would corrupt source-unedited group semantics	Marionette exposes a bounded identity-preserving family-value extraction contract and the portal proves nested extrusion topology
 OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a documented no-op and analytic nonzero winding has no alternate earclip mode	Pinned-Reference evidence shows observable semantics beyond the accepted no-op
 OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
 
@@ -550,6 +551,18 @@ manimlib.mobject.frame:FullScreenRectangle	same	scripts/manim_ref/manimlib/mobje
 manimlib.mobject.frame:FullScreenRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	preserves custom height fill and stroke configuration over the native frame geometry
 manimlib.mobject.frame:FullScreenFadeRectangle	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	is the authored FullScreenRectangle subclass with the Reference black translucent veil defaults
 manimlib.mobject.frame:FullScreenFadeRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/frame.py	crates/fmn-python/tests/bridge.py	preserves explicit veil style and the pinned constructor's accepted-but-unforwarded extra keyword quirk
+manimlib.mobject.three_dimensions:VGroup3D	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored identity-preserving VGroup whose depth test shading and joint configuration recurse through the live native family
+manimlib.mobject.three_dimensions:VGroup3D.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves variadic VMobject membership keyword-only 3D configuration exact validation and caller proxy identity
+manimlib.mobject.three_dimensions:VCube	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored six-face vector solid built by Atlas and rendered through Lumen's depth-tested vector path
+manimlib.mobject.three_dimensions:VCube.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves side length face topology style forwarding and recursive 3D configuration through the native builder
+manimlib.mobject.three_dimensions:VPrism	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored VCube specialization whose six native vector faces span the requested width height and depth
+manimlib.mobject.three_dimensions:VPrism.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves dimensions inherited vector style and recursive 3D configuration through the native builder
+manimlib.mobject.three_dimensions:Dodecahedron	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored twelve-pentagon Atlas solid with the exact golden-ratio topology and depth-tested production rendering
+manimlib.mobject.three_dimensions:Dodecahedron.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves face colors opacity stroke width shading and golden-ratio extents through the native builder
+manimlib.mobject.three_dimensions:Prismify	tiered	OOT-PRISMIFY-FAMILY	crates/fmn-python/tests/bridge.py	extrudes one pointful VMobject into native base walls and reversed top while precisely refusing source families
+manimlib.mobject.three_dimensions:Prismify.__init__	tiered	OOT-PRISMIFY-FAMILY	crates/fmn-python/tests/bridge.py	preserves source immutability style direction depth and straight-edge topology for the supported single-buffer tier
+manimlib.mobject.types.vectorized_mobject:VMobject.get_joint_type	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	returns the live typed native joint uniform code
+manimlib.mobject.types.vectorized_mobject:VMobject.set_joint_type	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	maps the exact public names to the typed native uniform recurses in family order and rejects unknown names before mutation
 
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
