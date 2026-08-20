@@ -2782,6 +2782,57 @@ impl BridgeMobject {
         .map_err(native_error)
     }
 
+    /// Position an existing Python-owned tip with Atlas's true terminal
+    /// tangent.  Only the completed point run crosses back to Python, which
+    /// preserves the tip proxy's identity and style records.
+    fn _position_tip_points(
+        slf: &Bound<'_, Self>,
+        tip: &Bound<'_, BridgeMobject>,
+        at_start: bool,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        let path = configured_quad_path(slf)?;
+        let shape = fmn_library::VMobject::from_path(&path);
+        let tip_points = with_stage(tip, |stage, mob| stage.get_points(mob).unwrap_or_default())?;
+        let end = if at_start {
+            fmn_library::TipEnd::Start
+        } else {
+            fmn_library::TipEnd::End
+        };
+        Ok(fmn_library::tip::position_tip(
+            &shape,
+            fmn_library::VMobject::from_points(tip_points),
+            end,
+        )
+        .points()
+        .to_vec())
+    }
+
+    /// Pull this shaft back to a positioned tip's base through Atlas's
+    /// true-arc-length trim (BN-03).  The detached native result is complete
+    /// before Marionette commits the point run, so geometry refusal cannot
+    /// partially rewrite the live record buffer.
+    fn _trim_to_tip(
+        slf: &Bound<'_, Self>,
+        tip: &Bound<'_, BridgeMobject>,
+        at_start: bool,
+    ) -> PyResult<()> {
+        let path = configured_quad_path(slf)?;
+        let shape = fmn_library::VMobject::from_path(&path);
+        let tip_points = with_stage(tip, |stage, mob| stage.get_points(mob).unwrap_or_default())?;
+        let tip = fmn_library::VMobject::from_points(tip_points);
+        let end = if at_start {
+            fmn_library::TipEnd::Start
+        } else {
+            fmn_library::TipEnd::End
+        };
+        let points = fmn_library::tip::trim_to_tip(shape, &tip, end)
+            .points()
+            .to_vec();
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.set_points(mob, &points))?.map_err(stage_error)
+    }
+
     /// `Arc.get_arc_center` over this entry's current world-space points.
     fn _arc_center(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
@@ -8087,7 +8138,10 @@ class _GauntletPortalScene(Scene):
             stroke_color=RED,
             stroke_width=1.5,
         )
-        native_line.set_path_arc(-0.45).set_length(1.8)
+        native_line.set_path_arc(-0.45).set_length(1.8).add_tip(
+            length=0.18,
+            width=0.14,
+        )
         field_axes = Axes(
             x_range=(-1.0, 1.0, 1.0),
             y_range=(-1.0, 1.0, 1.0),

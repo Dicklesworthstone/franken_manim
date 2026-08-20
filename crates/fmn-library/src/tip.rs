@@ -38,12 +38,32 @@ pub enum TipEnd {
 /// Mirrors `TipableVMobject.add_tip`: create, position, re-end, add.
 #[must_use]
 pub fn attach_tip(shape: VMobject, tip: ArrowTip, end: TipEnd) -> VMobject {
-    let built = tip.build();
+    attach_built_tip(shape, tip.build(), end)
+}
+
+/// Attach an already-built tip value to one end of `shape`.
+///
+/// This is the object-model-neutral half of [`attach_tip`]: front doors that
+/// already own a first-class tip object can reuse Atlas's one placement and
+/// trimming implementation without rebuilding or replacing that object.
+#[must_use]
+pub fn attach_built_tip(shape: VMobject, tip: VMobject, end: TipEnd) -> VMobject {
+    let positioned = position_tip(&shape, tip, end);
+    let trimmed = trim_to_tip(shape, &positioned, end);
+    trimmed.with_child(positioned)
+}
+
+/// Rotate and translate an already-built tip onto one end of `shape`.
+///
+/// Empty or malformed paths leave the tip unchanged, matching the total
+/// behavior of [`attach_tip`] for degenerate shafts.
+#[must_use]
+pub fn position_tip(shape: &VMobject, tip: VMobject, end: TipEnd) -> VMobject {
     let Ok(path) = shape.path() else {
-        return shape.with_child(built);
+        return tip;
     };
     if !path.has_points() {
-        return shape.with_child(built);
+        return tip;
     }
 
     let anchor = match end {
@@ -51,10 +71,15 @@ pub fn attach_tip(shape: VMobject, tip: ArrowTip, end: TipEnd) -> VMobject {
         TipEnd::End => *path.points().last().expect("non-empty"),
     };
     let outward = outward_tangent(&path, end);
-    let positioned = position_tip(built, anchor, outward);
-    let base = tip_base(&positioned);
-    let trimmed = trim_to(shape, base, end);
-    trimmed.with_child(positioned)
+    position_tip_at(tip, anchor, outward)
+}
+
+/// Trim `shape` so its selected end stops at the positioned tip's base.
+///
+/// The cut uses the same true-arc-length rule as [`attach_tip`] (BN-03).
+#[must_use]
+pub fn trim_to_tip(shape: VMobject, tip: &VMobject, end: TipEnd) -> VMobject {
+    trim_to(shape, tip_base(tip), end)
 }
 
 /// The unit tangent at one end of the path, pointing *out* of it.
@@ -101,7 +126,7 @@ pub fn outward_tangent(path: &QuadPath, end: TipEnd) -> Vec3 {
 
 /// Rotate `tip` to point along `outward` and move its point onto `anchor`
 /// (the Reference's `position_tip`).
-fn position_tip(tip: VMobject, anchor: Vec3, outward: Vec3) -> VMobject {
+fn position_tip_at(tip: VMobject, anchor: Vec3, outward: Vec3) -> VMobject {
     let angle = space_ops::angle_of_vector(outward);
     let center = tip.center_point();
     let current = tip_angle_of(&tip);
@@ -234,6 +259,29 @@ mod tests {
             close(shaft_end[0], 3.5, 1e-6),
             "shaft ends at {shaft_end:?}, expected x ≈ 3.5"
         );
+    }
+
+    #[test]
+    fn built_tip_placement_and_trim_are_reusable_without_replacing_the_tip() {
+        let shaft = straight([0.0; 3], [4.0, 0.0, 0.0]);
+        let tip = ArrowTip::new().length(0.5).build();
+        let positioned = position_tip(&shaft, tip, TipEnd::End);
+        assert!(close(tip_point(&positioned)[0], 4.0, 1e-9));
+
+        let trimmed = trim_to_tip(shaft.clone(), &positioned, TipEnd::End);
+        assert!(close(
+            trimmed.points().last().expect("shaft end")[0],
+            3.5,
+            1e-6
+        ));
+
+        let attached = attach_built_tip(shaft, positioned, TipEnd::End);
+        assert_eq!(attached.children().len(), 1);
+        assert!(close(
+            tip_point(attached.children().first().expect("tip"))[0],
+            4.0,
+            1e-9
+        ));
     }
 
     #[test]

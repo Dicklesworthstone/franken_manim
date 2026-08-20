@@ -4090,6 +4090,131 @@ assert math.isclose(
     np.linalg.norm(inner_smooth_tip.get_vector()),
 )
 
+# TipableVMobject is an authored portal base, not a generated import shell.
+# The Python layer owns the Reference lifecycle and object identity; Atlas
+# owns the terminal tangent, placement, and BN-03 true-length shaft trim.
+assert manimlib.TipableVMobject is geometry.TipableVMobject
+assert geometry.TipableVMobject.__bases__ == (VMobject,)
+assert geometry.Arc.__bases__ == (geometry.TipableVMobject,)
+assert geometry.Line.__bases__ == (geometry.TipableVMobject,)
+assert geometry.TipableVMobject.tip_config == dict(
+    fill_opacity=1.0,
+    stroke_width=0.0,
+    tip_style=0.0,
+)
+
+untipped = geometry.Line([-2.0, -2.0, 0.0], [2.0, -2.0, 0.0])
+assert not untipped.has_tip()
+assert not untipped.has_start_tip()
+try:
+    untipped.get_tip()
+except Exception as error:
+    assert str(error) == "tip not found"
+else:
+    raise AssertionError("get_tip accepted a tipless TipableVMobject")
+try:
+    untipped.get_default_tip_length()
+except AttributeError:
+    pass
+else:
+    raise AssertionError("get_default_tip_length hid a missing public attribute")
+untipped.tip_length = 0.625
+assert untipped.get_default_tip_length() == 0.625
+assert np.array_equal(untipped.get_first_handle(), untipped.get_points()[1])
+assert np.array_equal(untipped.get_last_handle(), untipped.get_points()[-2])
+
+manual_line = geometry.Line([-1.0, -3.0, 0.0], [1.0, -3.0, 0.0])
+manual_logical_end = manual_line.get_end().copy()
+manual_tip = manual_line.get_unpositioned_tip(length=0.2, width=0.3)
+manual_tip_identity = id(manual_tip)
+assert isinstance(manual_tip, geometry.ArrowTip)
+assert manual_tip not in manual_line
+assert manual_line.position_tip(manual_tip) is manual_tip
+assert id(manual_tip) == manual_tip_identity
+assert np.allclose(manual_tip.get_tip_point(), manual_logical_end, atol=1e-9)
+assert manual_line.reset_endpoints_based_on_tip(manual_tip, False) is manual_line
+assert VMobject.get_end(manual_line)[0] < manual_logical_end[0]
+assert manual_line.asign_tip_attr(manual_tip, False) is manual_line
+assert not manual_line.has_tip()
+manual_line.add(manual_tip)
+assert manual_line.has_tip()
+
+tipped_line = geometry.Line(
+    [-2.0, -1.0, 0.0],
+    [2.0, -1.0, 0.0],
+    stroke_color=manimlib.BLUE,
+)
+tipped_identity = id(tipped_line)
+logical_start = tipped_line.get_start().copy()
+logical_end = tipped_line.get_end().copy()
+assert tipped_line.add_tip(length=0.5, width=0.4) is tipped_line
+assert id(tipped_line) == tipped_identity
+end_tip = tipped_line.tip
+assert isinstance(end_tip, geometry.ArrowTip)
+assert tipped_line.has_tip()
+assert not tipped_line.has_start_tip()
+assert tipped_line.submobjects == [end_tip]
+assert np.allclose(end_tip.get_tip_point(), logical_end, atol=1e-9)
+assert np.allclose(tipped_line.get_end(), logical_end, atol=1e-9)
+assert VMobject.get_end(tipped_line)[0] < logical_end[0]
+assert end_tip.get_fill_color() == manimlib.BLUE
+assert math.isclose(tipped_line.get_length(), 4.0, abs_tol=1e-9)
+
+assert tipped_line.add_tip(at_start=True, length=0.25) is tipped_line
+start_tip = tipped_line.start_tip
+assert isinstance(start_tip, geometry.ArrowTip)
+assert tipped_line.has_start_tip()
+assert tipped_line.submobjects == [end_tip, start_tip]
+assert np.allclose(start_tip.get_tip_point(), logical_start, atol=1e-9)
+assert np.allclose(tipped_line.get_start(), logical_start, atol=1e-9)
+assert VMobject.get_start(tipped_line)[0] > logical_start[0]
+assert tipped_line.get_tip() is end_tip
+assert tipped_line.get_tips().submobjects == [end_tip, start_tip]
+
+popped_tips = tipped_line.pop_tips()
+assert isinstance(popped_tips, manimlib.VGroup)
+assert popped_tips.submobjects == [end_tip, start_tip]
+assert not tipped_line.has_tip()
+assert not tipped_line.has_start_tip()
+assert tipped_line.submobjects == []
+assert np.allclose(tipped_line.get_start(), logical_start, atol=1e-9)
+assert np.allclose(tipped_line.get_end(), logical_end, atol=1e-9)
+# Reference get_tips is attribute-based, whereas has_tip also requires current
+# family membership. Popping deliberately leaves the attributes in place.
+assert tipped_line.get_tips().submobjects == [end_tip, start_tip]
+
+curved_tippable = geometry.ArcBetweenPoints(
+    [-2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    angle=math.pi,
+)
+curved_logical_end = curved_tippable.get_end().copy()
+curved_points_before = curved_tippable.get_points().copy()
+terminal_tangent = curved_points_before[-1] - curved_points_before[-2]
+terminal_tangent /= np.linalg.norm(terminal_tangent)
+assert curved_tippable.add_tip(length=0.35) is curved_tippable
+curved_tip_vector = curved_tippable.tip.get_vector()
+curved_tip_vector /= np.linalg.norm(curved_tip_vector)
+assert np.dot(curved_tip_vector, terminal_tangent) > 1.0 - 1e-9
+assert np.allclose(curved_tippable.get_end(), curved_logical_end, atol=1e-9)
+assert not np.array_equal(curved_tippable.get_points(), curved_points_before)
+assert curved_tippable.get_arc_length() < geometry.ArcBetweenPoints(
+    [-2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    angle=math.pi,
+).get_arc_length()
+
+bound_tippable = geometry.Line([0.0, 2.0, 0.0], [3.0, 2.0, 0.0])
+bound_tip_scene = Scene()
+bound_tip_scene.add(bound_tippable)
+bound_tippable_identity = id(bound_tippable)
+assert bound_tippable.add_tip(length=0.3) is bound_tippable
+assert id(bound_tippable) == bound_tippable_identity
+assert bound_tip_scene.get_mobjects()[0] is bound_tippable
+assert bound_tippable.tip._is_bound()
+assert bound_tippable.submobjects == [bound_tippable.tip]
+assert bound_tippable.family_size() == 2
+
 try:
     geometry.Polygon()
 except IndexError as error:

@@ -3585,7 +3585,107 @@ class BackgroundRectangle(SurroundingRectangle):
         return self.color
 
 
-class Arc(VMobject):
+class TipableVMobject(VMobject):
+    """Reference tip ownership over Atlas's native placement algebra."""
+
+    tip_config = dict(
+        fill_opacity=1.0,
+        stroke_width=0.0,
+        tip_style=0.0,
+    )
+
+    def add_tip(self, at_start=False, **kwargs):
+        tip = self.create_tip(at_start, **kwargs)
+        self.reset_endpoints_based_on_tip(tip, at_start)
+        self.asign_tip_attr(tip, at_start)
+        tip.set_color(self.get_stroke_color())
+        self.add(tip)
+        return self
+
+    def create_tip(self, at_start=False, **kwargs):
+        tip = self.get_unpositioned_tip(**kwargs)
+        self.position_tip(tip, at_start)
+        return tip
+
+    def get_unpositioned_tip(self, **kwargs):
+        config = dict(self.tip_config)
+        config.update(kwargs)
+        return ArrowTip(**config)
+
+    def position_tip(self, tip, at_start=False):
+        tip.set_points(self._position_tip_points(tip, bool(at_start)))
+        return tip
+
+    def reset_endpoints_based_on_tip(self, tip, at_start):
+        if self.get_length() == 0:
+            return self
+        self._trim_to_tip(tip, bool(at_start))
+        return self
+
+    def asign_tip_attr(self, tip, at_start):
+        if at_start:
+            self.start_tip = tip
+        else:
+            self.tip = tip
+        return self
+
+    def has_tip(self):
+        return hasattr(self, "tip") and self.tip in self
+
+    def has_start_tip(self):
+        return hasattr(self, "start_tip") and self.start_tip in self
+
+    def pop_tips(self):
+        start, end = self.get_start_and_end()
+        result = VGroup()
+        if self.has_tip():
+            result.add(self.tip)
+            self.remove(self.tip)
+        if self.has_start_tip():
+            result.add(self.start_tip)
+            self.remove(self.start_tip)
+        self.put_start_and_end_on(start, end)
+        return result
+
+    def get_tips(self):
+        result = VGroup()
+        if hasattr(self, "tip"):
+            result.add(self.tip)
+        if hasattr(self, "start_tip"):
+            result.add(self.start_tip)
+        return result
+
+    def get_tip(self):
+        tips = self.get_tips()
+        if len(tips) == 0:
+            raise Exception("tip not found")
+        return tips[0]
+
+    def get_default_tip_length(self):
+        return self.tip_length
+
+    def get_first_handle(self):
+        return self.get_points()[1]
+
+    def get_last_handle(self):
+        return self.get_points()[-2]
+
+    def get_end(self):
+        if self.has_tip():
+            return self.tip.get_start()
+        return VMobject.get_end(self)
+
+    def get_start(self):
+        if self.has_start_tip():
+            return self.start_tip.get_start()
+        return VMobject.get_start(self)
+
+    def get_length(self):
+        start, end = self.get_start_and_end()
+        return float(_np.linalg.norm(start - end))
+
+
+class Arc(TipableVMobject):
     def __init__(
         self,
         start_angle=0,
@@ -3941,7 +4041,7 @@ class Elbow(VMobject):
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
-class Line(VMobject):
+class Line(TipableVMobject):
     def __init__(self, start=_LEFT, end=_RIGHT, buff=0.0, path_arc=0.0, **kwargs):
         _install_live_state(self)
         self.path_arc = float(path_arc)
@@ -9082,6 +9182,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
+        ("manimlib.mobject.geometry", "TipableVMobject"): TipableVMobject,
         ("manimlib.mobject.geometry", "Arc"): Arc,
         ("manimlib.mobject.geometry", "ArcBetweenPoints"): ArcBetweenPoints,
         ("manimlib.mobject.geometry", "CurvedArrow"): CurvedArrow,

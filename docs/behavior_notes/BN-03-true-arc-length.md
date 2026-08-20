@@ -49,6 +49,17 @@ arc-length fraction.
 overestimates curved paths (its outer polygon dominates). Dash counts and
 tip placements derived from it move accordingly — by design.
 
+Tip attachment also follows the actual curve. Classic manim aims a curved
+tip from the final control handle and then shortens the shaft by applying
+`put_start_and_end_on` to the whole path. The head can therefore follow a
+component-local approximation while the shaft is chord-rescaled away from
+its original curve. FrankenManim aims the head along the true terminal
+quadratic derivative and cuts the shaft back by true arc length, preserving
+the remaining curve. Straight shafts are unchanged. Scenes that deliberately
+compensated for the classic curved-tip tilt or rescaling should remove that
+compensation; custom `ArrowTip` subclasses keep their Python identity and
+style while the native placement algebra transforms their point run.
+
 ## Evidence
 
 - `crates/fmn-geom/src/arclength.rs`; `crates/fmn-geom/tests/arclength.rs`
@@ -59,3 +70,7 @@ tip placements derived from it move accordingly — by design.
   cache tests).
 - Reference: `VMobject.get_arc_length` / `point_from_proportion` /
   `quick_point_from_proportion` at the pinned commit.
+- `crates/fmn-library/src/tip.rs` (true terminal tangents, reusable built-tip
+  placement, true-length trimming, straight/curved/degenerate tests).
+- `crates/fmn-python/tests/bridge.py` (authored `TipableVMobject` MRO and full
+  detached/scene-bound lifecycle with curved placement and family identity).

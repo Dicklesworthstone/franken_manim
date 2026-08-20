@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	e85ec957ffe53ab3760f4e1abce29b03fd7989efedc76d4db09ff9b6df8c5b83
+ledger_reviewed_digest	1a2807ba62af8da3df68bca8a57bf6e135b6677220a5d589c72956b003c7b632
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -213,6 +213,7 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 #
 # symbol	status	evidence	tests	notes
 [status]
+manimlib.mobject.geometry:Line	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored TipableVMobject subclass whose constructor uses Atlas's governed straight or curved geometry and preserves the declared Reference MRO
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
 manimlib.mobject.geometry:Line.get_angle	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	computes the planar bearing from virtual-dispatched live endpoints through Atlas geometry
 manimlib.mobject.geometry:Line.get_projection	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	projects three-dimensional points onto the infinite line through its live endpoints
@@ -227,6 +228,25 @@ manimlib.mobject.geometry:Line.set_length	same	scripts/manim_ref/manimlib/mobjec
 manimlib.mobject.geometry:Line.set_path_arc	improved	BN-09	crates/fmn-python/tests/bridge.py	commits one complete governed-density Atlas arc rebuild and preserves the prior geometry on typed refusal
 manimlib.mobject.geometry:Line.set_points_by_ends	improved	BN-09	crates/fmn-python/tests/bridge.py	builds buffered straight or governed-density curved points natively before identity-preserving detached or scene-bound commit
 manimlib.mobject.geometry:Line.set_start_and_end_attrs	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	resolves mobject endpoints from continuous bounds along the rough center direction
+manimlib.mobject.geometry:TipableVMobject	improved	BN-03	crates/fmn-python/tests/bridge.py	is the authored VMobject base for Arc and Line with Reference object lifecycle over Atlas's true-tangent and true-length tip algebra
+manimlib.mobject.geometry:TipableVMobject.add_tip	improved	BN-03	crates/fmn-python/tests/bridge.py	preserves tip proxy identity styling attributes and family adoption while positioning and trimming curved shafts by the governed native rule
+manimlib.mobject.geometry:TipableVMobject.asign_tip_attr	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	assigns the exact end-tip or start-tip public attribute and preserves the fluent receiver
+manimlib.mobject.geometry:TipableVMobject.create_tip	improved	BN-03	crates/fmn-python/tests/bridge.py	builds an ArrowTip from merged configuration and positions it along the true terminal tangent without attaching it
+manimlib.mobject.geometry:TipableVMobject.get_default_tip_length	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the public tip_length attribute including the Reference AttributeError when absent
+manimlib.mobject.geometry:TipableVMobject.get_end	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the attached end-tip point when present and the live shaft endpoint otherwise
+manimlib.mobject.geometry:TipableVMobject.get_first_handle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the second live point record
+manimlib.mobject.geometry:TipableVMobject.get_last_handle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the penultimate live point record
+manimlib.mobject.geometry:TipableVMobject.get_length	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the Euclidean distance between the logical tip-aware endpoints
+manimlib.mobject.geometry:TipableVMobject.get_start	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the attached start-tip point when present and the live shaft endpoint otherwise
+manimlib.mobject.geometry:TipableVMobject.get_tip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the first attribute-ordered tip and raises the exact generic tip-not-found exception when empty
+manimlib.mobject.geometry:TipableVMobject.get_tips	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns an end-then-start VGroup from the public tip attributes
+manimlib.mobject.geometry:TipableVMobject.get_unpositioned_tip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	merges the class tip_config with call keywords and constructs the familiar ArrowTip without positioning it
+manimlib.mobject.geometry:TipableVMobject.has_start_tip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	requires both the start_tip attribute and current direct family membership
+manimlib.mobject.geometry:TipableVMobject.has_tip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	requires both the tip attribute and current direct family membership
+manimlib.mobject.geometry:TipableVMobject.pop_tips	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns attached tips in end-then-start order removes their family edges and restores the logical endpoints
+manimlib.mobject.geometry:TipableVMobject.position_tip	improved	BN-03	crates/fmn-python/tests/bridge.py	rotates along the true terminal path derivative and lands the existing tip point on the selected endpoint without replacing its proxy
+manimlib.mobject.geometry:TipableVMobject.reset_endpoints_based_on_tip	improved	BN-03	crates/fmn-python/tests/bridge.py	trims the selected shaft end by true arc length while retaining curved geometry instead of chord-rescaling the whole path
+manimlib.mobject.geometry:TipableVMobject.tip_config	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	exposes the exact filled unstroked triangular default configuration
 manimlib.camera.camera_frame:CameraFrame.add_ambient_rotation	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	runs the frame updater before drawable-root updaters on play and wait samples including camera-only animation and zero-dt epilogues
 manimlib.mobject.coordinate_systems:CoordinateSystem.bind_graph_to_func	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	refreshes live graph points with vectorized functions, optional discontinuities, and declared smoothing
 manimlib.mobject.coordinate_systems:CoordinateSystem.c2p	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live coordinate transform
