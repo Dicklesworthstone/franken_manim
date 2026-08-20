@@ -5875,6 +5875,10 @@ class Brace(Tex):
         **kwargs,
     ):
         _install_live_state(self)
+        # Brace keeps the Reference's Tex MRO even though Atlas supplies its
+        # points directly. Preserve Tex's public scale bookkeeping so an
+        # inherited group transform cannot reach a half-initialized object.
+        self.font_size = float(kwargs.pop("font_size", 48))
         self.tex_string = str(tex_string)
         self.tex_strings = [self.tex_string]
         specs, tip_index = self._build_brace(
@@ -5926,6 +5930,7 @@ class LineBrace(Brace):
         buff = float(kwargs.pop("buff", 0.2))
         tex_string = kwargs.pop("tex_string", r"\underbrace{\qquad}")
         _install_live_state(self)
+        self.font_size = float(kwargs.pop("font_size", 48))
         self.tex_string = str(tex_string)
         self.tex_strings = [self.tex_string]
         specs, tip_index = self._build_line_brace(
@@ -8316,6 +8321,75 @@ class LaggedStartMap(LaggedStart):
         )
 
 
+class BraceLabel(VMobject):
+    """A live native brace and Scribe label under the Reference API.
+
+    Atlas owns the parametric brace geometry through :class:`Brace`, while
+    ``label_constructor`` selects Scribe's bundled-font ``Tex`` or
+    ``TexText`` route. Keeping the two caller-visible children explicit is
+    important: Reference scenes retain and mutate ``brace`` and ``label`` by
+    identity after construction.
+    """
+
+    label_constructor = Tex
+
+    def __init__(
+        self,
+        obj,
+        text,
+        brace_direction=_DOWN,
+        label_scale=1.0,
+        label_buff=_DEFAULT_MOBJECT_TO_MOBJECT_BUFF,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.brace_direction = _np.array(_vec3(brace_direction))
+        self.label_scale = float(label_scale)
+        self.label_buff = float(label_buff)
+
+        if isinstance(obj, list):
+            obj = VGroup(*obj)
+        self.brace = Brace(obj, self.brace_direction, **kwargs)
+        self.label = self.label_constructor(*_listify(text), **kwargs)
+        self.label.scale(self.label_scale)
+        self.brace.put_at_tip(self.label, buff=self.label_buff)
+        self.set_submobjects([self.brace, self.label])
+
+    def creation_anim(self, label_anim=FadeIn, brace_anim=GrowFromCenter):
+        return AnimationGroup(brace_anim(self.brace), label_anim(self.label))
+
+    def shift_brace(self, obj, **kwargs):
+        if isinstance(obj, list):
+            obj = VGroup(*obj)
+        self.brace = Brace(obj, self.brace_direction, **kwargs)
+        self.brace.put_at_tip(self.label)
+        self.submobjects[0] = self.brace
+        return self
+
+    def change_label(self, *text, **kwargs):
+        self.label = self.label_constructor(*text, **kwargs)
+        if self.label_scale != 1:
+            self.label.scale(self.label_scale)
+        self.brace.put_at_tip(self.label)
+        self.submobjects[1] = self.label
+        return self
+
+    def change_brace_label(self, obj, *text):
+        self.shift_brace(obj)
+        self.change_label(*text)
+        return self
+
+    def copy(self):
+        # The shared graph copier remaps direct Mobject-valued attributes to
+        # their copied family members. Defining the method here preserves the
+        # Reference owner/signature and makes that brace/label remap explicit.
+        return super().copy()
+
+
+class BraceText(BraceLabel):
+    label_constructor = TexText
+
+
 
 def _portal_embed(scene=None, namespace=None):
     """Enter IPython with an explicit scene/namespace capability boundary."""
@@ -8837,6 +8911,8 @@ def _install_schema_surface():
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
         ("manimlib.animation.transform", "Restore"): Restore,
         ("manimlib.mobject.svg.brace", "Brace"): Brace,
+        ("manimlib.mobject.svg.brace", "BraceLabel"): BraceLabel,
+        ("manimlib.mobject.svg.brace", "BraceText"): BraceText,
         ("manimlib.mobject.svg.brace", "LineBrace"): LineBrace,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,

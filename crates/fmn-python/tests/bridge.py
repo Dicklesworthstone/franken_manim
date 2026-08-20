@@ -3944,6 +3944,141 @@ brace_tip = line_brace.get_tip()
 brace_label = line_brace.get_tex("1")
 assert np.dot(brace_label.get_center() - brace_tip, line_brace.get_direction()) > 0
 
+# BraceLabel/BraceText are authored live compositions over Atlas's parametric
+# Brace and Scribe's bundled Tex/TexText constructors. The two public children
+# keep stable identity across mutation, copying remaps those aliases, and the
+# familiar creation animation is a real Choreo composition.
+assert brace_module.BraceLabel.__bases__ == (VMobject,)
+assert brace_module.BraceText.__bases__ == (brace_module.BraceLabel,)
+brace_label_signature = inspect.signature(brace_module.BraceLabel)
+assert tuple(brace_label_signature.parameters) == (
+    "obj",
+    "text",
+    "brace_direction",
+    "label_scale",
+    "label_buff",
+    "kwargs",
+)
+assert np.array_equal(
+    brace_label_signature.parameters["brace_direction"].default,
+    manimlib.DOWN,
+)
+assert brace_label_signature.parameters["label_scale"].default == 1.0
+assert (
+    brace_label_signature.parameters["label_buff"].default
+    == manimlib.DEFAULT_MOBJECT_TO_MOBJECT_BUFF
+)
+assert str(inspect.signature(brace_module.BraceLabel.creation_anim)) == (
+    "(self, label_anim=<class 'manimlib.animation.fading.FadeIn'>, "
+    "brace_anim=<class 'manimlib.animation.growing.GrowFromCenter'>)"
+)
+assert str(inspect.signature(brace_module.BraceLabel.shift_brace)) == (
+    "(self, obj, **kwargs)"
+)
+assert str(inspect.signature(brace_module.BraceLabel.change_label)) == (
+    "(self, *text, **kwargs)"
+)
+assert str(inspect.signature(brace_module.BraceLabel.change_brace_label)) == (
+    "(self, obj, *text)"
+)
+assert str(inspect.signature(brace_module.BraceLabel.copy)) == "(self)"
+assert brace_module.BraceLabel.label_constructor is manimlib.Tex
+assert brace_module.BraceText.label_constructor is manimlib.TexText
+
+label_target = geometry.Rectangle(width=2.0, height=0.75).shift((0.25, 0.5, 0.0))
+native_brace_label = brace_module.BraceLabel(
+    label_target,
+    ("x", "+", "y"),
+    brace_direction=manimlib.DOWN,
+    label_scale=0.6,
+    label_buff=0.15,
+    color=manimlib.BLUE,
+)
+assert native_brace_label.submobjects == [
+    native_brace_label.brace,
+    native_brace_label.label,
+]
+assert isinstance(native_brace_label.brace, brace_module.Brace)
+assert isinstance(native_brace_label.label, manimlib.Tex)
+assert native_brace_label.label.get_tex() == "x + y"
+assert np.dot(
+    native_brace_label.label.get_center() - native_brace_label.brace.get_tip(),
+    native_brace_label.brace.get_direction(),
+) > 0
+assert all(
+    member.get_fill_color() == manimlib.BLUE
+    for member in native_brace_label.family_members_with_points()
+)
+brace_font_size = native_brace_label.brace.font_size
+label_font_size = native_brace_label.label.font_size
+native_brace_label.scale(0.8)
+assert np.isclose(native_brace_label.brace.font_size, 0.8 * brace_font_size)
+assert np.isclose(native_brace_label.label.font_size, 0.8 * label_font_size)
+
+creation = native_brace_label.creation_anim()
+assert isinstance(creation, manimlib.AnimationGroup)
+assert len(creation.animations) == 2
+assert isinstance(creation.animations[0], manimlib.GrowFromCenter)
+assert creation.animations[0].mobject is native_brace_label.brace
+assert isinstance(creation.animations[1], manimlib.FadeIn)
+assert creation.animations[1].mobject is native_brace_label.label
+
+native_brace_label_copy = native_brace_label.copy()
+assert native_brace_label_copy is not native_brace_label
+assert native_brace_label_copy.brace is native_brace_label_copy[0]
+assert native_brace_label_copy.label is native_brace_label_copy[1]
+assert native_brace_label_copy.brace is not native_brace_label.brace
+assert native_brace_label_copy.label is not native_brace_label.label
+native_brace_label_copy.shift((1.0, 0.0, 0.0))
+assert not np.allclose(
+    native_brace_label_copy.brace.get_center(),
+    native_brace_label.brace.get_center(),
+)
+
+original_brace = native_brace_label.brace
+original_label = native_brace_label.label
+replacement_target = geometry.Circle(radius=0.5).shift((-1.0, 0.25, 0.0))
+assert native_brace_label.shift_brace(replacement_target) is native_brace_label
+assert native_brace_label.brace is native_brace_label[0]
+assert native_brace_label.brace is not original_brace
+assert native_brace_label.label is original_label
+assert native_brace_label.label is native_brace_label[1]
+
+shifted_brace = native_brace_label.brace
+assert native_brace_label.change_label("z", color=manimlib.RED) is native_brace_label
+assert native_brace_label.brace is shifted_brace
+assert native_brace_label.label is native_brace_label[1]
+assert native_brace_label.label is not original_label
+assert native_brace_label.label.get_tex() == "z"
+assert all(
+    member.get_fill_color() == manimlib.RED
+    for member in native_brace_label.label.family_members_with_points()
+)
+
+changed_label = native_brace_label.label
+assert native_brace_label.change_brace_label(label_target, "q") is native_brace_label
+assert native_brace_label.brace is native_brace_label[0]
+assert native_brace_label.label is native_brace_label[1]
+assert native_brace_label.label is not changed_label
+assert native_brace_label.label.get_tex() == "q"
+
+native_brace_text = brace_module.BraceText(
+    [geometry.Circle(radius=0.2), geometry.Circle(radius=0.2).shift((1, 0, 0))],
+    "native text",
+    label_scale=0.75,
+)
+assert isinstance(native_brace_text.label, manimlib.TexText)
+assert native_brace_text.submobjects == [
+    native_brace_text.brace,
+    native_brace_text.label,
+]
+try:
+    brace_module.BraceLabel(object(), "invalid target")
+except TypeError:
+    pass
+else:
+    raise AssertionError("BraceLabel accepted a non-Mobject target")
+
 # Existing Chisel/Scribe semantics are live through the portal, rather than
 # being shadowed by schema placeholders. Arc length remains true for either
 # curvature sign (BN-03), and Tex selectors consume the native UTF-8 span map.

@@ -7640,7 +7640,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, Matrix, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7815,6 +7815,20 @@ class _GauntletPortalScene(Scene):
             v_buff=0.2,
             element_config=dict(font_size=16, color=BLUE_C),
         ).scale(0.22).shift((-2.45, -1.75, 0.0))
+        native_brace_label = BraceLabel(
+            Circle(radius=0.28).shift((1.4, -1.7, 0.0)),
+            "r",
+            label_scale=0.35,
+            label_buff=0.04,
+            color=RED,
+        ).scale(0.55)
+        native_brace_text = BraceText(
+            Circle(radius=0.24).shift((0.75, -1.7, 0.0)),
+            "text",
+            label_scale=0.25,
+            label_buff=0.04,
+            color=BLUE_C,
+        ).scale(0.5)
         self.add(
             frame_fade,
             frame_fill,
@@ -7844,6 +7858,8 @@ class _GauntletPortalScene(Scene):
             native_list,
             native_title,
             native_matrix,
+            native_brace_label,
+            native_brace_text,
         )
         self.wait(1 / 30)
 
