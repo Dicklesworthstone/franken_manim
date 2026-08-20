@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	1a2807ba62af8da3df68bca8a57bf6e135b6677220a5d589c72956b003c7b632
+ledger_reviewed_digest	eada3a21a23651cbafc2171f7a6818d12c2186fb9e541d90363d1d9cffe2128c
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -392,6 +392,19 @@ manimlib.animation.transform:ShrinkToCenter	same	scripts/manim_ref/manimlib/anim
 manimlib.animation.transform:ShrinkToCenter.__init__	same	scripts/manim_ref/manimlib/animation/transform.py	crates/fmn-python/tests/bridge.py	delegates to ScaleInPlace with the Reference zero scale request
 manimlib.animation.composition:AnimationGroup.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors the composition's declared timing and raw alpha
 manimlib.animation.composition:Succession.interpolate	improved	BN-11	crates/fmn-anim/tests/composition.rs	honors member run times and continuous handoff state
+manimlib.mobject.geometry:Arrow	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored Line subclass whose filled shaft and head are one native Atlas path under the governed arc-density rule
+manimlib.mobject.geometry:Arrow.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	forwards buffer arc thickness tip angle and both ratio caps to one native builder while preserving the Reference fill and stroke defaults
+manimlib.mobject.geometry:Arrow.get_end	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the retained native tip point record after construction rebuild and affine transforms
+manimlib.mobject.geometry:Arrow.get_key_dimensions	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	applies the Reference shaft-width head-width and head-length ratio caps in the native Atlas builder
+manimlib.mobject.geometry:Arrow.get_start	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the midpoint of the two live shaft-back point records
+manimlib.mobject.geometry:Arrow.get_start_and_end	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live shaft-back midpoint and retained tip record as a pair
+manimlib.mobject.geometry:Arrow.put_start_and_end_on	improved	BN-09	crates/fmn-python/tests/bridge.py	rebuilds the current filled native outline at unbuffered endpoints under the retained path arc without changing proxy identity
+manimlib.mobject.geometry:Arrow.scale	improved	BN-09	crates/fmn-python/tests/bridge.py	scales the live family then rebuilds Atlas geometry so thickness and tip caps follow the transformed endpoint length
+manimlib.mobject.geometry:Arrow.set_points_by_ends	improved	BN-09	crates/fmn-python/tests/bridge.py	commits one complete governed-density straight or curved Atlas outline while preserving style uniforms and detached or scene-bound identity
+manimlib.mobject.geometry:Arrow.set_thickness	improved	BN-09	crates/fmn-python/tests/bridge.py	updates the public thickness and rebuilds the live native outline at its current endpoints
+manimlib.mobject.geometry:Arrow.tickness_multiplier	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	exposes the exact public Reference spelling and value 0.015 while the canonical Rust-facing name remains thickness_multiplier
+manimlib.mobject.geometry:Vector	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored Arrow subclass backed by the same native filled-outline builder
+manimlib.mobject.geometry:Vector.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	constructs an unbuffered native Arrow from the origin to a two-dimensional or three-dimensional direction
 manimlib.mobject.geometry:ArrowTip	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored Triangle subclass backed by Atlas tip geometry rather than a schema-generated shell
 manimlib.mobject.geometry:ArrowTip.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves dimensions orientation style-code fallback and explicit fill and stroke configuration through the native builder
 manimlib.mobject.geometry:ArrowTip.get_angle	improved	BN-03	crates/fmn-python/tests/bridge.py	derives the live true-length base-to-tip vector angle after construction and transforms

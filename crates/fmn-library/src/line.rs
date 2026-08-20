@@ -609,11 +609,12 @@ impl Arrow {
 
         // Trim the ends by the buffer, and — for a curved arrow — rotate
         // them about the arc's centre, as the Reference does.
-        let (start, end, path_arc) = if self.path_arc == 0.0 {
+        let (start, end, path_arc, arc_radius) = if self.path_arc == 0.0 {
             (
                 add(self.start, scale(unit, self.buff)),
                 sub(self.end, scale(unit, self.buff)),
                 0.0,
+                None,
             )
         } else {
             let r = length / 2.0 / fmn_dmath::sin(self.path_arc / 2.0);
@@ -637,6 +638,7 @@ impl Arrow {
                 start,
                 end,
                 self.path_arc - (2.0 * self.buff + tip_length) / r,
+                Some(r),
             )
         };
 
@@ -656,7 +658,11 @@ impl Arrow {
             }
             (base, mirrored)
         } else {
-            let r = length / 2.0 / fmn_dmath::sin(path_arc / 2.0);
+            // The Reference keeps the radius of the original requested arc
+            // after shortening only its sweep for the two buffers and tip.
+            // Re-solving a radius from the shortened sweep makes the tip's
+            // chord longer and misses the caller's endpoint.
+            let r = arc_radius.expect("a curved arrow retains its source radius");
             let arc: Vec<Vec3> = QuadPath::try_arc(0.0, path_arc, 1.0, ORIGIN, None)?
                 .points()
                 .to_vec();
@@ -1115,6 +1121,28 @@ mod tests {
             .expect("the configured arrow is valid");
         assert!(tip_index < arrow.points().len());
         assert!(space_ops::get_norm(sub(arrow_end(&arrow, tip_index), [4.0, 0.0, 0.0])) < 1e-9);
+
+        let (curved, curved_tip_index) = Arrow::new([-1.0, -1.0, 0.0], [2.0, 2.0, 0.0])
+            .buff(0.0)
+            .path_arc(PI / 3.0)
+            .thickness(4.0)
+            .tip_width_ratio(3.0)
+            .tip_angle(PI / 2.0)
+            .max_width_to_length_ratio(0.005)
+            .max_tip_length_to_length_ratio(0.005)
+            .build_with_tip_index()
+            .expect("the configured curved arrow is valid");
+        let start_error = space_ops::get_norm(sub(
+            arrow_start(&curved, curved_tip_index),
+            [-1.0, -1.0, 0.0],
+        ));
+        assert!(start_error < 1e-8, "curved start missed by {start_error}");
+        let end_error =
+            space_ops::get_norm(sub(arrow_end(&curved, curved_tip_index), [2.0, 2.0, 0.0]));
+        // The pinned Reference shortens the sweep for the head but retains
+        // the source radius. Its resulting tip chord is therefore within
+        // the path's 1e-4 point-equality tolerance, not algebraically exact.
+        assert!(end_error < 1e-4, "curved tip missed by {end_error}");
     }
 
     #[test]

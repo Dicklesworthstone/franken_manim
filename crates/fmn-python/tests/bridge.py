@@ -3764,6 +3764,123 @@ except AssertionError:
 else:
     raise AssertionError("Surface accepted a non-Surface partial source")
 
+# Filled Arrow and Vector are authored over Atlas rather than inherited Line
+# approximations.  Exercise every public row together so the tip-record
+# identity, Reference ratio caps, and rebuild side effects cannot drift apart.
+assert manimlib.Arrow is geometry.Arrow
+assert manimlib.Vector is geometry.Vector
+assert geometry.Arrow.__bases__ == (geometry.Line,)
+assert geometry.Vector.__bases__ == (geometry.Arrow,)
+assert geometry.Arrow.tickness_multiplier == 0.015
+assert list(inspect.signature(geometry.Arrow).parameters) == [
+    "start",
+    "end",
+    "buff",
+    "path_arc",
+    "fill_color",
+    "fill_opacity",
+    "stroke_width",
+    "thickness",
+    "tip_width_ratio",
+    "tip_angle",
+    "max_tip_length_to_length_ratio",
+    "max_width_to_length_ratio",
+    "kwargs",
+]
+assert list(inspect.signature(geometry.Vector).parameters) == [
+    "direction",
+    "buff",
+    "kwargs",
+]
+
+capped_arrow = geometry.Arrow(
+    [0.0, 0.0, 0.0],
+    [4.0, 0.0, 0.0],
+    buff=0.0,
+    thickness=4.0,
+    tip_width_ratio=3.0,
+    tip_angle=math.pi / 2.0,
+    max_tip_length_to_length_ratio=0.005,
+    max_width_to_length_ratio=0.005,
+    fill_color=manimlib.RED,
+    fill_opacity=0.65,
+    stroke_color=manimlib.BLUE,
+    stroke_width=1.25,
+)
+assert capped_arrow.thickness == 4.0
+assert capped_arrow.tip_width_ratio == 3.0
+assert capped_arrow.tip_angle == math.pi / 2.0
+assert capped_arrow.max_tip_length_to_length_ratio == 0.005
+assert capped_arrow.max_width_to_length_ratio == 0.005
+# width=min(4*0.015, 4*0.005)=0.02; the 0.005 head-length cap then
+# scales the initial (tip width, tip length) pair from (0.06, 0.03).
+assert np.allclose(capped_arrow.get_key_dimensions(4.0), [0.02, 0.04, 0.02])
+assert np.allclose(capped_arrow.get_start(), [0.0, 0.0, 0.0], atol=1e-9)
+assert np.allclose(capped_arrow.get_end(), [4.0, 0.0, 0.0], atol=1e-9)
+start, end = capped_arrow.get_start_and_end()
+assert np.allclose(start, capped_arrow.get_start())
+assert np.allclose(end, capped_arrow.get_end())
+
+capped_identity = id(capped_arrow)
+capped_style = (
+    capped_arrow.get_fill_color(),
+    capped_arrow.get_fill_opacity(),
+    capped_arrow.get_stroke_color(),
+    capped_arrow.get_stroke_opacity(),
+    capped_arrow.get_stroke_width(),
+)
+capped_arrow.uniforms["depth_test"] = True
+capped_arrow.uniforms["anti_alias_width"] = 2.75
+assert capped_arrow.set_points_by_ends(
+    [-1.0, -1.0, 0.0],
+    [2.0, 2.0, 0.0],
+    buff=0.0,
+    path_arc=math.pi / 3.0,
+) is capped_arrow
+assert id(capped_arrow) == capped_identity
+assert np.allclose(capped_arrow.get_start(), [-1.0, -1.0, 0.0], atol=1e-8)
+curved_end = capped_arrow.get_end()
+assert np.allclose(curved_end, [2.0, 2.0, 0.0], atol=1e-4), curved_end
+assert capped_arrow.uniforms["depth_test"] is True
+assert capped_arrow.uniforms["anti_alias_width"] == 2.75
+assert capped_style == (
+    capped_arrow.get_fill_color(),
+    capped_arrow.get_fill_opacity(),
+    capped_arrow.get_stroke_color(),
+    capped_arrow.get_stroke_opacity(),
+    capped_arrow.get_stroke_width(),
+)
+
+transformed_arrow = geometry.Arrow(
+    [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], buff=0.0
+)
+transformed_identity = id(transformed_arrow)
+assert transformed_arrow.rotate(
+    math.pi / 2.0, about_point=manimlib.ORIGIN
+) is transformed_arrow
+assert np.allclose(transformed_arrow.get_start(), [0.0, 0.0, 0.0], atol=1e-8)
+assert np.allclose(transformed_arrow.get_end(), [0.0, 2.0, 0.0], atol=1e-8)
+assert transformed_arrow.scale(
+    0.5, about_point=manimlib.ORIGIN
+) is transformed_arrow
+assert id(transformed_arrow) == transformed_identity
+assert np.allclose(transformed_arrow.get_end(), [0.0, 1.0, 0.0], atol=1e-8)
+assert transformed_arrow.set_thickness(6.0) is transformed_arrow
+assert transformed_arrow.thickness == 6.0
+assert np.allclose(transformed_arrow.get_end(), [0.0, 1.0, 0.0], atol=1e-8)
+assert transformed_arrow.put_start_and_end_on(
+    [1.0, 2.0, 3.0], [2.0, 4.0, 6.0]
+) is transformed_arrow
+assert np.allclose(transformed_arrow.get_start(), [1.0, 2.0, 3.0], atol=1e-8)
+assert np.allclose(transformed_arrow.get_end(), [2.0, 4.0, 6.0], atol=1e-8)
+
+vector_2d = geometry.Vector([3.0, 4.0])
+assert np.allclose(vector_2d.get_start(), manimlib.ORIGIN, atol=1e-9)
+assert np.allclose(vector_2d.get_end(), [3.0, 4.0, 0.0], atol=1e-9)
+vector_3d = geometry.Vector([1.0, -2.0, 3.0])
+assert np.allclose(vector_3d.get_start(), manimlib.ORIGIN, atol=1e-9)
+assert np.allclose(vector_3d.get_end(), [1.0, -2.0, 3.0], atol=1e-8)
+
 # Filled Arrow endpoint updates rebuild Atlas's length-dependent tip geometry
 # in place, so scene-bound updater callbacks preserve arena identity.
 bound_arrow = manimlib.Vector(manimlib.RIGHT)
