@@ -60,6 +60,7 @@ _RED = "#FC6255"
 _YELLOW = "#FFFF00"
 _BLUE_D = "#29ABCA"
 _BLUE_E = "#1C758A"
+_DEFAULT_LIGHT_COLOR = "#BBBBBB"
 _ASPECT_RATIO = 16.0 / 9.0
 _FRAME_HEIGHT = 8.0
 
@@ -4213,15 +4214,17 @@ class DashedLine(Line):
 
 
 class Arrow(Line):
+    tickness_multiplier = 0.015
+
     def __init__(
         self,
         start=_LEFT,
         end=_LEFT,
         buff=0.25,
         path_arc=0.0,
-        fill_color=None,
-        fill_opacity=None,
-        stroke_width=None,
+        fill_color=_DEFAULT_LIGHT_COLOR,
+        fill_opacity=1.0,
+        stroke_width=0.0,
         thickness=3.0,
         tip_width_ratio=5,
         tip_angle=_math.pi / 3,
@@ -4229,78 +4232,99 @@ class Arrow(Line):
         max_width_to_length_ratio=0.1,
         **kwargs,
     ):
-        # The ratio caps are the Reference defaults baked into the native
-        # builder; off-default values refuse precisely.
-        _refuse_unrouted(
-            "Arrow()",
-            [
-                (
-                    "max_tip_length_to_length_ratio",
-                    max_tip_length_to_length_ratio != 0.5,
-                ),
-                ("max_width_to_length_ratio", max_width_to_length_ratio != 0.1),
-            ],
-        )
         _install_live_state(self)
         self.path_arc = float(path_arc)
         self.buff = float(buff)
-        self.set_start_and_end_attrs(start, end)
-        self._arrow_params = (
-            self.buff,
-            self.path_arc,
-            float(thickness),
-            float(tip_width_ratio),
-            float(tip_angle),
+        self.thickness = float(thickness)
+        self.tip_width_ratio = float(tip_width_ratio)
+        self.tip_angle = float(tip_angle)
+        self.max_tip_length_to_length_ratio = float(
+            max_tip_length_to_length_ratio
         )
-        specs = self._build_arrow(
+        self.max_width_to_length_ratio = float(max_width_to_length_ratio)
+        self.set_start_and_end_attrs(start, end)
+        specs, self.tip_index = self._build_arrow(
             _native_shell_factory,
             _vec3(self.start),
             _vec3(self.end),
-            *self._arrow_params,
+            self.buff,
+            self.path_arc,
+            self.thickness,
+            self.tip_width_ratio,
+            self.tip_angle,
+            self.max_tip_length_to_length_ratio,
+            self.max_width_to_length_ratio,
         )
         _hang_native_children(self, specs)
-        # The explicit style parameters default to the native builder's
-        # (Reference) style; only caller-supplied values reapply.
-        if fill_color is not None:
-            kwargs.setdefault("fill_color", fill_color)
-        if fill_opacity is not None:
-            kwargs.setdefault("fill_opacity", fill_opacity)
-        if stroke_width is not None:
-            kwargs.setdefault("stroke_width", stroke_width)
+        kwargs.setdefault("fill_color", fill_color)
+        kwargs.setdefault("fill_opacity", fill_opacity)
+        kwargs.setdefault("stroke_width", stroke_width)
         _apply_vmobject_style_kwargs(self, kwargs)
 
-    def put_start_and_end_on(self, start, end):
-        # An Arrow is ONE filled path whose tip proportions are functions
-        # of its length; the generic family affine would stretch the tip.
-        # Rebuild natively at the new endpoints instead, carrying style and
-        # every engine uniform.  The detached builder replaces the nursery
-        # root with a fresh native Arrow, so without the uniform snapshot an
-        # updater's immediate call silently drops fix_in_frame/depth/camera
-        # state before the Arrow ever enters a Scene.  The bound rebuild only
-        # replaces points and already preserves these fields.
-        # Reference Arrow.put_start_and_end_on explicitly rebuilds with
-        # `buff=0`, independent of the constructor's initial trim.
+    def get_key_dimensions(self, length):
+        return self._arrow_key_dimensions(
+            float(length),
+            self.thickness,
+            self.tip_width_ratio,
+            self.tip_angle,
+            self.max_tip_length_to_length_ratio,
+            self.max_width_to_length_ratio,
+        )
+
+    def set_points_by_ends(self, start, end, buff=0, path_arc=0):
+        start = _vec3(start)
+        end = _vec3(end)
         style = self.get_style()
         uniforms = self.uniforms.copy()
-        rebuild_params = (0.0, *self._arrow_params[1:])
+        params = (
+            float(buff),
+            float(path_arc),
+            self.thickness,
+            self.tip_width_ratio,
+            self.tip_angle,
+            self.max_tip_length_to_length_ratio,
+            self.max_width_to_length_ratio,
+        )
         if self._is_bound():
-            self._rebuild_arrow(
-                _vec3(start),
-                _vec3(end),
-                *rebuild_params,
-            )
+            self.tip_index = self._rebuild_arrow(start, end, *params)
         else:
-            specs = self._build_arrow(
+            specs, self.tip_index = self._build_arrow(
                 _native_shell_factory,
-                _vec3(start),
-                _vec3(end),
-                *rebuild_params,
+                start,
+                end,
+                *params,
             )
             _hang_native_children(self, specs)
         self.set_style(**style, recurse=False)
         self.uniforms.update(uniforms)
-        self.start = _np.array(_vec3(start))
-        self.end = _np.array(_vec3(end))
+        self.start = _np.array(start)
+        self.end = _np.array(end)
+        return self
+
+    def get_start(self):
+        points = self.get_points()
+        return 0.5 * (points[0] + points[-3])
+
+    def get_end(self):
+        return self.get_points()[self.tip_index]
+
+    def get_start_and_end(self):
+        return self.get_start(), self.get_end()
+
+    def put_start_and_end_on(self, start, end):
+        # Reference Arrow.put_start_and_end_on explicitly rebuilds with
+        # `buff=0`, independent of the constructor's initial trim.
+        self.set_points_by_ends(start, end, buff=0, path_arc=self.path_arc)
+        return self
+
+    def scale(self, *args, **kwargs):
+        super().scale(*args, **kwargs)
+        self.reset_points_around_ends()
+        return self
+
+    def set_thickness(self, thickness):
+        self.thickness = float(thickness)
+        self.reset_points_around_ends()
         return self
 
 
