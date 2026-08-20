@@ -5047,7 +5047,15 @@ class Cross(VGroup):
         if not isinstance(mobject, _BridgeMobject):
             raise TypeError("Cross expects a Mobject")
         _install_live_state(self)
-        specs = self._build_cross(_native_shell_factory, mobject, stroke_color)
+        rows = mobject._bbox_rows()
+        has_extent = any(member._has_points() for member in _family_preorder(mobject))
+        specs = self._build_cross(
+            _native_shell_factory,
+            _vec3(rows[0]),
+            _vec3(rows[2]),
+            has_extent,
+            stroke_color,
+        )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
         self.set_stroke(stroke_color, width=stroke_width)
@@ -5072,9 +5080,13 @@ class Underline(Line):
         _install_live_state(self)
         self.path_arc = 0.0
         self.buff = float(buff)
+        rows = mobject._bbox_rows()
+        has_extent = any(member._has_points() for member in _family_preorder(mobject))
         specs = self._build_underline(
             _native_shell_factory,
-            mobject,
+            _vec3(rows[0]),
+            _vec3(rows[2]),
+            has_extent,
             stroke_color,
             self.buff,
             float(stretch_factor),

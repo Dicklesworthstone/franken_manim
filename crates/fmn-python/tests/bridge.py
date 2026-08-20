@@ -2393,7 +2393,7 @@ native_match_target = manimlib.VGroup(
 )
 native_match_box = native_match_target.get_bounding_box().copy()
 native_cross = shape_matchers.Cross(native_match_target)
-assert len(native_cross.submobjects) == 2
+assert len(native_cross.submobjects) == 2, len(native_cross.submobjects)
 assert np.allclose(
     native_cross.get_bounding_box()[[0, 2], :2],
     native_match_box[[0, 2], :2],
