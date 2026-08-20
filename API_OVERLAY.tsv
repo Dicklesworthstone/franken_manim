@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	a55d1fc727c756a067e3bdc3b8f812c67df949b44e96d7f5185add0a9143d368
+ledger_reviewed_digest	4475729c8e3ab4af17b763c1fe1b65a0ecf4e7b4e579382e15cfebdcaa4aa368
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -225,6 +225,16 @@ manimlib.mobject.coordinate_systems:CoordinateSystem.get_y_axis	same	scripts/man
 manimlib.mobject.coordinate_systems:CoordinateSystem.i2gp	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	preserves the input_to_graph_point alias over metadata-backed and function-less graphs
 manimlib.mobject.coordinate_systems:CoordinateSystem.input_to_graph_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	uses retained functions directly and the pinned quick-curve binary-search fallback otherwise
 manimlib.mobject.coordinate_systems:CoordinateSystem.p2c	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live inverse coordinate transform
+manimlib.mobject.functions:FunctionGraph	improved	BN-07	crates/fmn-python/tests/bridge.py	is an authored ParametricCurve subclass backed by Atlas sampling whose declared constructor color is no longer silently ignored under C-15
+manimlib.mobject.functions:FunctionGraph.__init__	improved	BN-07	crates/fmn-python/tests/bridge.py	preserves function and range metadata hidden discontinuity and smoothing options callback errors and native style while honoring explicit color
+manimlib.mobject.functions:ImplicitFunction	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	is an authored VMobject whose bounded Chisel zero-set extraction replaces the external isosurfaces mechanism without changing the public class contract
+manimlib.mobject.functions:ImplicitFunction.__init__	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	preserves domain depth leaf budget smoothing joint style empty-set and callback-error semantics through the native Atlas builder
+manimlib.mobject.functions:ParametricCurve	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	is the authored VMobject backed by native bounded parameter sampling and shared-anchor Chisel smoothing
+manimlib.mobject.functions:ParametricCurve.__init__	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	preserves the exact function range epsilon discontinuity smoothing and style constructor surface while propagating Python callback failures
+manimlib.mobject.functions:ParametricCurve.get_function	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	returns retained underlying or direct function metadata and otherwise preserves the Reference None result
+manimlib.mobject.functions:ParametricCurve.get_point_from_function	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	evaluates the original Python parameter callable and returns its NumPy point value
+manimlib.mobject.functions:ParametricCurve.get_t_func	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	returns the original caller-visible parameter function identity
+manimlib.mobject.functions:ParametricCurve.get_x_range	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	returns retained graph range metadata and otherwise preserves the Reference None result
 manimlib.mobject.mobject:Mobject.add	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	inserts children as an ordered identity set and commits each accepted edge into the live Marionette family graph
 manimlib.mobject.mobject:Mobject.add_n_more_submobjects	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	pads direct children in Reference repeat-index order with invisible copies under Marionette's fixed resource ceiling
 manimlib.mobject.mobject:Mobject.add_background_rectangle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	builds the Atlas-backed camera-colored plate and prepends it through the live family-order seam
