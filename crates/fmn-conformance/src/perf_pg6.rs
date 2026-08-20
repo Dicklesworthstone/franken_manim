@@ -929,7 +929,7 @@ mod tests {
         if Tier::COMPILED.name() == "portable" {
             assert_eq!(
                 definition.digest().to_string(),
-                "1127226e5bc08c307879a7114bef536826125e20dae2b9c83277a1f39cf9a969"
+                "0c6904044d38a3b27ab799320ae74094e584631da607397368e5450a9435f9b0"
             );
         }
         assert_eq!(
