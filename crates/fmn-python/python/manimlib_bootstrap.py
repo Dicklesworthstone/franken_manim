@@ -55,6 +55,8 @@ _GREY_C = "#888888"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
 _RED = "#FC6255"
+_BLUE_D = "#29ABCA"
+_BLUE_E = "#1C758A"
 _ASPECT_RATIO = 16.0 / 9.0
 _FRAME_HEIGHT = 8.0
 
@@ -2763,6 +2765,15 @@ class VMobject(Mobject):
     def get_flat_stroke(self):
         return bool(self.uniforms["flat_stroke"])
 
+    def set_joint_type(self, joint_type, recurse=True):
+        joint_code = self.joint_type_map[joint_type]
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["joint_type"] = joint_code
+        return self
+
+    def get_joint_type(self):
+        return self.uniforms["joint_type"]
+
     def set_anti_alias_width(self, anti_alias_width, recurse=True):
         for mob in _family_preorder(self) if recurse else [self]:
             mob.uniforms["anti_alias_width"] = float(anti_alias_width)
@@ -2949,7 +2960,7 @@ def _hang_native_children(parent, specs):
         parent.submobjects.extend(shells)
 
 
-def _apply_vmobject_style_kwargs(mob, kwargs):
+def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     """The Reference's VMobject style constructor keywords, applied after a
     native build (its init_colors pass). Unknown keywords refuse."""
     color = kwargs.pop("color", None)
@@ -2985,13 +2996,56 @@ def _apply_vmobject_style_kwargs(mob, kwargs):
             opacity=stroke_opacity,
             behind=stroke_behind,
             flat=flat_stroke,
+            recurse=recurse,
         )
     if any(value is not None for value in (fill_color, fill_opacity, fill_border_width)):
         mob.set_fill(
-            color=fill_color, opacity=fill_opacity, border_width=fill_border_width
+            color=fill_color,
+            opacity=fill_opacity,
+            border_width=fill_border_width,
+            recurse=recurse,
         )
     if shading is not None:
-        mob.set_shading(*shading)
+        mob.set_shading(*shading, recurse=recurse)
+    return mob
+
+
+_NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
+    {
+        "color",
+        "opacity",
+        "fill_color",
+        "fill_opacity",
+        "stroke_color",
+        "stroke_width",
+        "stroke_opacity",
+        "stroke_behind",
+        "flat_stroke",
+        "fill_border_width",
+    }
+)
+
+
+def _split_native_vgroup3d_kwargs(class_name, kwargs, default_shading):
+    """Preflight the shared vectorized-solid kwargs before native install."""
+    style = dict(kwargs)
+    depth_test = bool(style.pop("depth_test", True))
+    shading = tuple(style.pop("shading", default_shading))
+    joint_type = style.pop("joint_type", "no_joint")
+    if joint_type not in VMobject.joint_type_map:
+        raise KeyError(joint_type)
+    unknown = sorted(set(style) - _NATIVE_VMOBJECT_STYLE_KEYS)
+    _refuse_unrouted(class_name, [(name, True) for name in unknown])
+    return style, depth_test, shading, joint_type
+
+
+def _apply_vgroup3d_config(mob, depth_test, shading, joint_type):
+    mob.set_shading(*shading)
+    mob.set_joint_type(joint_type)
+    if depth_test:
+        mob.apply_depth_test()
+    else:
+        mob.deactivate_depth_test()
     return mob
 
 
@@ -6133,6 +6187,146 @@ class Prism(Cube):
         self._apply_surface_style(color, opacity, shading, depth_test)
 
 
+class VGroup3D(VGroup):
+    def __init__(
+        self,
+        *vmobjects,
+        depth_test=True,
+        shading=(0.2, 0.2, 0.2),
+        joint_type="no_joint",
+        **kwargs,
+    ):
+        if any(not isinstance(vmob, VMobject) for vmob in vmobjects):
+            raise Exception("Only VMobjects can be passed into VGroup")
+        if joint_type not in VMobject.joint_type_map:
+            raise KeyError(joint_type)
+        super().__init__(*vmobjects, **kwargs)
+        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+
+
+class VCube(VGroup3D):
+    def __init__(
+        self,
+        side_length=2.0,
+        fill_color=_BLUE_D,
+        fill_opacity=1,
+        stroke_width=0,
+        **kwargs,
+    ):
+        style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
+            "VCube()", kwargs, (0.2, 0.2, 0.2)
+        )
+        _install_live_state(self)
+        specs = self._build_vcube(
+            _native_shell_factory,
+            float(side_length),
+            fill_color,
+            float(fill_opacity),
+            float(stroke_width),
+        )
+        _hang_native_children(self, specs)
+        style.setdefault("fill_color", fill_color)
+        style.setdefault("fill_opacity", fill_opacity)
+        style.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, style)
+        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+
+
+class VPrism(VCube):
+    def __init__(self, width=3.0, height=2.0, depth=1.0, **kwargs):
+        side_length = kwargs.pop("side_length", 2.0)
+        _refuse_unrouted(
+            "VPrism()", [("side_length", float(side_length) != 2.0)]
+        )
+        fill_color = kwargs.pop("fill_color", _BLUE_D)
+        fill_opacity = kwargs.pop("fill_opacity", 1)
+        stroke_width = kwargs.pop("stroke_width", 0)
+        style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
+            "VPrism()", kwargs, (0.2, 0.2, 0.2)
+        )
+        _install_live_state(self)
+        specs = self._build_vprism(
+            _native_shell_factory,
+            float(width),
+            float(height),
+            float(depth),
+            fill_color,
+            float(fill_opacity),
+            float(stroke_width),
+        )
+        _hang_native_children(self, specs)
+        style.setdefault("fill_color", fill_color)
+        style.setdefault("fill_opacity", fill_opacity)
+        style.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, style)
+        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+
+
+class Dodecahedron(VGroup3D):
+    def __init__(
+        self,
+        fill_color=_BLUE_E,
+        fill_opacity=1,
+        stroke_color=_BLUE_E,
+        stroke_width=1,
+        shading=(0.2, 0.2, 0.2),
+        **kwargs,
+    ):
+        style, depth_test, resolved_shading, joint_type = (
+            _split_native_vgroup3d_kwargs(
+                "Dodecahedron()", kwargs, tuple(shading)
+            )
+        )
+        _install_live_state(self)
+        specs = self._build_dodecahedron(
+            _native_shell_factory,
+            fill_color,
+            float(fill_opacity),
+            stroke_color,
+            float(stroke_width),
+            tuple(float(value) for value in resolved_shading),
+        )
+        _hang_native_children(self, specs)
+        style.setdefault("fill_color", fill_color)
+        style.setdefault("fill_opacity", fill_opacity)
+        style.setdefault("stroke_color", stroke_color)
+        style.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, style)
+        _apply_vgroup3d_config(
+            self, depth_test, resolved_shading, joint_type
+        )
+
+
+class Prismify(VGroup3D):
+    def __init__(self, vmobject, depth=1.0, direction=_IN, **kwargs):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError("Prismify source must be a VMobject")
+        if vmobject.submobjects:
+            raise NotImplementedError(
+                "Prismify over a VMobject family awaits native family-value extraction"
+            )
+        direction = tuple(float(value) for value in _vec3(direction))
+        if not _math.isfinite(float(depth)) or not all(
+            _math.isfinite(value) for value in direction
+        ):
+            raise ValueError("Prismify depth and direction must be finite")
+        style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
+            "Prismify()", kwargs, (0.2, 0.2, 0.2)
+        )
+        _install_live_state(self)
+        specs = self._build_prismify(
+            _native_shell_factory,
+            vmobject,
+            float(depth),
+            direction,
+        )
+        _hang_native_children(self, specs)
+        for piece in self.submobjects:
+            piece.match_style(vmobject)
+        _apply_vmobject_style_kwargs(self, style, recurse=False)
+        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+
+
 class SurfaceMesh(VGroup):
     """The wireframe over a native surface — a VMobject family (Reference
     MRO SurfaceMesh(VGroup)), built by the native mesher through the
@@ -7922,6 +8116,11 @@ def _install_schema_surface():
         ("manimlib.mobject.three_dimensions", "Square3D"): Square3D,
         ("manimlib.mobject.three_dimensions", "Cube"): Cube,
         ("manimlib.mobject.three_dimensions", "Prism"): Prism,
+        ("manimlib.mobject.three_dimensions", "VGroup3D"): VGroup3D,
+        ("manimlib.mobject.three_dimensions", "VCube"): VCube,
+        ("manimlib.mobject.three_dimensions", "VPrism"): VPrism,
+        ("manimlib.mobject.three_dimensions", "Dodecahedron"): Dodecahedron,
+        ("manimlib.mobject.three_dimensions", "Prismify"): Prismify,
         ("manimlib.mobject.three_dimensions", "SurfaceMesh"): SurfaceMesh,
         ("manimlib.mobject.geometry", "Elbow"): Elbow,
         ("manimlib.mobject.geometry", "Line"): Line,

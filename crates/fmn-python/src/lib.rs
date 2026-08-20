@@ -3487,6 +3487,84 @@ impl BridgeMobject {
         install_native_tree(slf, factory, fmn_library::Cube::new(side_length))
     }
 
+    /// `VCube(side_length, ...)` over Atlas's six vectorized faces. Style
+    /// is part of the native build so the first observable Python state is
+    /// already the Reference's filled, unstroked cube.
+    fn _build_vcube<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        side_length: f64,
+        fill_color: &Bound<'_, PyAny>,
+        fill_opacity: f64,
+        stroke_width: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let cube = fmn_library::VCube::new(side_length)
+            .fill_color(srgb_from_py(fill_color)?)
+            .fill_opacity(fill_opacity)
+            .stroke_width(stroke_width);
+        install_native_tree(slf, factory, cube)
+    }
+
+    /// `VPrism(width, height, depth)` over Atlas's vectorized cube stretch.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_vprism<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        width: f64,
+        height: f64,
+        depth: f64,
+        fill_color: &Bound<'_, PyAny>,
+        fill_opacity: f64,
+        stroke_width: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let prism = fmn_library::VPrism::new(width, height, depth)
+            .fill_color(srgb_from_py(fill_color)?)
+            .fill_opacity(fill_opacity)
+            .stroke_width(stroke_width);
+        install_native_tree(slf, factory, prism)
+    }
+
+    /// The twelve native pentagons of the Reference `Dodecahedron`.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_dodecahedron<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        fill_color: &Bound<'_, PyAny>,
+        fill_opacity: f64,
+        stroke_color: &Bound<'_, PyAny>,
+        stroke_width: f64,
+        shading: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let solid = fmn_library::Dodecahedron::new()
+            .fill_color(srgb_from_py(fill_color)?)
+            .fill_opacity(fill_opacity)
+            .stroke_color(srgb_from_py(stroke_color)?)
+            .stroke_width(stroke_width)
+            .shading(shading);
+        install_native_tree(slf, factory, solid)
+    }
+
+    /// `Prismify(vmobject, depth, direction)`: Atlas owns the straight-edge
+    /// extrusion geometry. The bootstrap reapplies the source's live style
+    /// arrays to the returned base/walls/top, matching the Reference's
+    /// `copy`/`match_style` construction without a second point kernel.
+    fn _build_prismify<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source: &Bound<'_, BridgeMobject>,
+        depth: f64,
+        direction: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let points = with_stage(source, |stage, mob| {
+            stage.get_points(mob).unwrap_or_default()
+        })?;
+        let source = fmn_library::VMobject::from_points(points);
+        let prism = fmn_library::Prismify::new(source)
+            .depth(depth)
+            .direction(direction);
+        install_native_tree(slf, factory, prism)
+    }
+
     /// `Sphere(radius, ...)` over the solids shelf: the Reference's UV
     /// grid with radial true normals.
     #[allow(clippy::too_many_arguments)]
@@ -7393,7 +7471,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, ParametricSurface, RED, Scene, ScreenRectangle, Square3D, Torus, Underline, VMobject
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, ParametricSurface, Polygon, Prismify, RED, Scene, ScreenRectangle, Square3D, Torus, Underline, VCube, VGroup3D, VMobject, VPrism
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7517,6 +7595,35 @@ class _GauntletPortalScene(Scene):
             resolution=(3, 3),
             color=BLUE_C,
         ).shift((-0.95, 0.7, 0.0))
+        vector_solids = VGroup3D(
+            VCube(
+                side_length=0.35,
+                fill_color=BLUE_C,
+                stroke_width=0.5,
+            ).shift((-0.45, 0.7, 0.0)),
+            VPrism(
+                width=0.45,
+                height=0.3,
+                depth=0.2,
+                fill_color=RED,
+            ).shift((0.05, 0.7, 0.0)),
+        )
+        vector_dodecahedron = Dodecahedron(
+            fill_color=BLUE_E,
+            stroke_color=BLUE_C,
+            stroke_width=0.5,
+        ).scale(0.12).shift((0.55, 0.7, 0.0))
+        vector_prismify = Prismify(
+            Polygon(
+                (-0.2, -0.15, 0.0),
+                (0.2, -0.15, 0.0),
+                (0.0, 0.2, 0.0),
+                fill_color=RED,
+                fill_opacity=0.6,
+                stroke_width=0.5,
+            ),
+            depth=0.15,
+        ).shift((1.05, 0.7, 0.0))
         self.add(
             frame_fade,
             frame_fill,
@@ -7540,6 +7647,9 @@ class _GauntletPortalScene(Scene):
             solid_line,
             solid_disk,
             solid_square,
+            vector_solids,
+            vector_dodecahedron,
+            vector_prismify,
         )
         self.wait(1 / 30)
 

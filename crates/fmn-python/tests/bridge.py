@@ -5500,6 +5500,180 @@ assert np.allclose(
 solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
 assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
 
+# Atlas's vectorized 3D shelf is authored rather than schema-generated: the
+# group keeps caller proxy identity while the four concrete solids install
+# Atlas geometry and recurse 3D uniforms through the live family.
+assert three_dimensions.VGroup3D.__bases__ == (manimlib.VGroup,)
+assert three_dimensions.VCube.__bases__ == (three_dimensions.VGroup3D,)
+assert three_dimensions.VPrism.__bases__ == (three_dimensions.VCube,)
+assert three_dimensions.Dodecahedron.__bases__ == (three_dimensions.VGroup3D,)
+assert three_dimensions.Prismify.__bases__ == (three_dimensions.VGroup3D,)
+assert str(inspect.signature(three_dimensions.VGroup3D)) == (
+    "(*vmobjects, depth_test=True, shading=(0.2, 0.2, 0.2), "
+    "joint_type='no_joint', **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.VCube)) == (
+    "(side_length=2.0, fill_color='#29ABCA', fill_opacity=1, "
+    "stroke_width=0, **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.VPrism)) == (
+    "(width=3.0, height=2.0, depth=1.0, **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.Dodecahedron)) == (
+    "(fill_color='#1C758A', fill_opacity=1, stroke_color='#1C758A', "
+    "stroke_width=1, shading=(0.2, 0.2, 0.2), **kwargs)"
+)
+prismify_signature = inspect.signature(three_dimensions.Prismify)
+assert tuple(prismify_signature.parameters) == (
+    "vmobject", "depth", "direction", "kwargs"
+)
+assert prismify_signature.parameters["depth"].default == 1.0
+assert np.array_equal(
+    prismify_signature.parameters["direction"].default, manimlib.IN
+)
+
+group_left = manimlib.Square(side_length=0.5)
+group_right = manimlib.Square(side_length=0.75).shift(manimlib.RIGHT)
+joint_probe = manimlib.VGroup(
+    manimlib.Square(side_length=0.2),
+    manimlib.Square(side_length=0.2).shift(manimlib.RIGHT),
+)
+assert joint_probe.get_joint_type() == 1
+assert joint_probe.set_joint_type("bevel") is joint_probe
+assert all(member.get_joint_type() == 2 for member in joint_probe.get_family())
+try:
+    joint_probe.set_joint_type("rounded")
+except KeyError as error:
+    assert error.args == ("rounded",)
+else:
+    raise AssertionError("an unknown joint type was silently accepted")
+assert all(member.get_joint_type() == 2 for member in joint_probe.get_family())
+
+vector_group = three_dimensions.VGroup3D(
+    group_left,
+    group_right,
+    depth_test=False,
+    shading=(0.3, 0.4, 0.5),
+    joint_type="miter",
+)
+assert vector_group.submobjects == [group_left, group_right]
+assert vector_group.submobjects[0] is group_left
+for member in vector_group.submobjects:
+    assert member.uniforms["depth_test"] is False
+    assert np.allclose(member.uniforms["shading"], [0.3, 0.4, 0.5])
+    assert member.uniforms["joint_type"] == 3
+
+vcube = three_dimensions.VCube(
+    side_length=2.5,
+    fill_color=manimlib.RED,
+    fill_opacity=0.4,
+    stroke_color=manimlib.BLUE,
+    stroke_width=1.5,
+    depth_test=False,
+    shading=(0.1, 0.2, 0.3),
+)
+assert len(vcube.submobjects) == 6
+assert np.allclose(
+    [vcube.get_width(), vcube.get_height(), vcube.get_depth()],
+    [2.5, 2.5, 2.5],
+    atol=1e-6,
+)
+for face in vcube.submobjects:
+    assert face.get_fill_color() == manimlib.RED
+    assert np.isclose(face.get_fill_opacity(), 0.4)
+    assert face.get_stroke_color() == manimlib.BLUE
+    assert np.isclose(face.get_stroke_width(), 1.5)
+    assert face.uniforms["depth_test"] is False
+    assert np.allclose(face.uniforms["shading"], [0.1, 0.2, 0.3])
+    assert face.get_joint_type() == 0
+
+vprism = three_dimensions.VPrism(
+    width=4.0,
+    height=3.0,
+    depth=2.0,
+    fill_color=manimlib.BLUE,
+    fill_opacity=0.7,
+)
+assert len(vprism.submobjects) == 6
+assert np.allclose(
+    [vprism.get_width(), vprism.get_height(), vprism.get_depth()],
+    [4.0, 3.0, 2.0],
+    atol=1e-6,
+)
+assert all(face.get_fill_color() == manimlib.BLUE for face in vprism.submobjects)
+
+dodecahedron = three_dimensions.Dodecahedron(
+    fill_color=manimlib.RED,
+    fill_opacity=0.6,
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.0,
+)
+assert len(dodecahedron.submobjects) == 12
+assert all(face.n_records() == 11 for face in dodecahedron.submobjects)
+phi = (1.0 + math.sqrt(5.0)) / 2.0
+assert np.allclose(
+    [dodecahedron.get_width(), dodecahedron.get_height(), dodecahedron.get_depth()],
+    [2.0 * phi, 2.0 * phi, 2.0 * phi],
+    atol=1e-6,
+)
+
+prismify_source = manimlib.Polygon(
+    [-0.5, -0.5, 0.0],
+    [0.75, -0.5, 0.0],
+    [0.0, 0.75, 0.0],
+    fill_color=manimlib.RED,
+    fill_opacity=0.5,
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.5,
+)
+prismify_source_points = prismify_source.get_points().copy()
+prismified = three_dimensions.Prismify(
+    prismify_source, depth=0.75, direction=manimlib.OUT
+)
+assert len(prismified.submobjects) == 5
+assert np.array_equal(prismify_source.get_points(), prismify_source_points)
+assert np.allclose(prismified.submobjects[0].get_points(), prismify_source_points)
+assert np.isclose(prismified.submobjects[-1].get_depth(), 0.0)
+assert np.allclose(
+    prismified.submobjects[-1].get_center()
+    - prismify_source.get_center(),
+    [0.0, 0.0, 0.75],
+    atol=1e-6,
+)
+for piece in prismified.submobjects:
+    assert piece.get_fill_color() == manimlib.RED
+    assert np.isclose(piece.get_fill_opacity(), 0.5)
+    assert piece.get_stroke_color() == manimlib.BLUE
+    assert np.isclose(piece.get_stroke_width(), 2.5)
+
+vector_solid_scene = Scene().add(
+    vector_group, vcube, vprism, dodecahedron, prismified
+)
+assert vector_solid_scene.get_mobjects() == [
+    vector_group, vcube, vprism, dodecahedron, prismified
+]
+
+failed_vcube = three_dimensions.VCube.__new__(three_dimensions.VCube)
+try:
+    three_dimensions.VCube.__init__(failed_vcube, unrouted_option=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "VCube() keyword(s) not yet routed to the native builder: "
+        "unrouted_option"
+    )
+else:
+    raise AssertionError("an unrouted VCube keyword reached the native builder")
+assert not hasattr(failed_vcube, "submobjects")
+
+try:
+    three_dimensions.Prismify(manimlib.VGroup(prismify_source))
+except NotImplementedError as error:
+    assert str(error) == (
+        "Prismify over a VMobject family awaits native family-value extraction"
+    )
+else:
+    raise AssertionError("Prismify silently discarded a source family")
+
 failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
     three_dimensions.Torus.__init__(failed_torus, unrouted_option=True)
@@ -5840,7 +6014,7 @@ console_code, console_out, console_err = run_portal_console("--version")
 assert console_code == 0
 assert console_out.startswith(
     f"fmn-python {_expected_package_version} (CPython 3.13."
-)
+), console_out
 assert console_err == ""
 
 console_code, console_out, console_err = run_portal_console("--robot", "--version")
