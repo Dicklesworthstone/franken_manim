@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	fa278247d3e671377481fe4084684f8513606350bf52e85693ac0acb4a8e962b
+ledger_reviewed_digest	51bb7e03f5269f9eb388d1a7a0e3f85234d068534590824f67cf7298841b19c8
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -448,6 +448,11 @@ manimlib.mobject.svg.drawings:Checkmark.tex	same	scripts/manim_ref/manimlib/mobj
 manimlib.mobject.svg.drawings:Exmark	improved	BN-08	crates/fmn-library/src/matchers.rs#tests	uses Atlas's paired native drawn mark without an implicit TeX or pifont subprocess while preserving the preset-string MRO
 manimlib.mobject.svg.drawings:Exmark.default_color	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact RED preset on the authored native drawn class
 manimlib.mobject.svg.drawings:Exmark.tex	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact public preset string for selectors and introspection
+manimlib.mobject.svg.special_tex:BulletedList	improved	BN-08	crates/fmn-library/src/special_tex.rs#tests	uses bundled Scribe text and native list composition without constructing an itemize or enumerate TeX document
+manimlib.mobject.svg.special_tex:BulletedList.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves item order labels spacing alignment font and style forwarding through the native family builder without an external typesetting tool
+manimlib.mobject.svg.special_tex:BulletedList.fade_all_but	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	mutates the live native item family with the exact selected-opacity and label-height scaling rule while preserving child identities
+manimlib.mobject.svg.special_tex:Title	improved	BN-08	crates/fmn-library/src/special_tex.rs#tests	uses bundled Scribe part layout plus a native Line underline instead of an implicit TexText render
+manimlib.mobject.svg.special_tex:Title.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves isolated part topology frame-top placement optional underline fixed or matched width independent underline style and live underline identity
 manimlib.mobject.svg.special_tex:TexTextFromPresetString	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	is an authored TexText subclass whose preset source and default color remain subclass-overridable
 manimlib.mobject.svg.special_tex:TexTextFromPresetString.__init__	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	forwards the class preset through the native Scribe TexText constructor with the exact color override rule
 manimlib.mobject.svg.special_tex:TexTextFromPresetString.default_color	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	retains the exact DEFAULT_MOBJECT_COLOR class default
