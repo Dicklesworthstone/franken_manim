@@ -2003,6 +2003,15 @@ fn shape_unit_normal(segments: &[Segment], subpath_starts: &[u32]) -> Vec3 {
 }
 
 fn vector_is_planar(segments: &[Segment], normal: Vec3) -> bool {
+    // Marionette's authoritative RecordBuffer stores point lanes as `f32`.
+    // Lumen widens them to `f64`, but that cannot recover the rounding already
+    // present in irrational coordinates (the Dodecahedron's golden-ratio
+    // faces are the canonical example).  Bound the accumulated subtraction,
+    // normal, and dot-product error by a small multiple of the source-lane
+    // epsilon.  The scale is strictly local so translating a shape cannot
+    // weaken the fail-closed test.
+    const F32_PLANAR_ERROR_FACTOR: f64 = 8.0;
+
     let Some(origin) = segments.first().map(|segment| segment.p0) else {
         return true;
     };
@@ -2010,8 +2019,8 @@ fn vector_is_planar(segments: &[Segment], normal: Vec3) -> bool {
         .iter()
         .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
         .flat_map(|point| sub(point, origin))
-        .fold(1.0f64, |largest, value| largest.max(value.abs()));
-    let tolerance = 1e-10 * scale;
+        .fold(0.0f64, |largest, value| largest.max(value.abs()));
+    let tolerance = F32_PLANAR_ERROR_FACTOR * f64::from(f32::EPSILON) * scale;
     segments
         .iter()
         .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
@@ -4852,6 +4861,51 @@ mod tests {
     }
 
     #[test]
+    fn vector_planarity_admits_f32_quantized_dodecahedron_face() {
+        let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let quantize = |value: f64| f64::from(value as f32);
+        let vertices = [
+            [quantize(phi), quantize(1.0 / phi), 0.0],
+            [1.0, 1.0, 1.0],
+            [quantize(1.0 / phi), 0.0, quantize(phi)],
+            [1.0, -1.0, 1.0],
+            [quantize(phi), quantize(-1.0 / phi), 0.0],
+        ];
+        let mut segments = std::array::from_fn::<_, 5, _>(|index| {
+            let p0 = vertices[index];
+            let p2 = vertices[(index + 1) % vertices.len()];
+            Segment {
+                p0,
+                p1: mul(add(p0, p2), 0.5),
+                p2,
+                s0: index as f64 / vertices.len() as f64,
+                s1: (index + 1) as f64 / vertices.len() as f64,
+            }
+        });
+        let normal = shape_unit_normal(&segments, &[0]);
+        let origin = segments[0].p0;
+        let old_residual = segments
+            .iter()
+            .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
+            .map(|point| dot(normal, sub(point, origin)).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            old_residual > 1e-10,
+            "fixture must exercise f32 quantization, residual={old_residual:e}"
+        );
+        assert!(
+            vector_is_planar(&segments, normal),
+            "f32-rounded points from one mathematical plane must be admitted"
+        );
+
+        segments[0].p1 = add(segments[0].p1, mul(normal, 1.0e-5));
+        assert!(
+            !vector_is_planar(&segments, normal),
+            "geometric non-planarity above the quantization budget must still be refused"
+        );
+    }
+
+    #[test]
     fn fill_and_stroke_depth_partition_as_distinct_fragments() {
         let camera = camera();
         let tilted = path_points(
@@ -5295,6 +5349,37 @@ mod tests {
             )
             .expect_err("a nonplanar MVC field has no silent 2D substitute"),
             ThreeDError::NonPlanarVectorGradient
+        );
+    }
+
+    #[test]
+    fn nonplanar_depth_fill_is_a_named_refusal() {
+        let camera = camera();
+        let twisted = path_points(
+            &[
+                [-2.0, -2.0, 0.0],
+                [2.0, -2.0, 0.0],
+                [2.0, 2.0, 1.0],
+                [-2.0, 2.0, 0.0],
+            ],
+            true,
+        );
+        let plan = vector_plan(
+            &twisted,
+            [1.0; 4],
+            [0.0; 4],
+            0.0,
+            camera.revision(),
+            |uniforms| uniforms.depth_test = true,
+        );
+        assert_eq!(
+            ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+                Tiling::default(),
+            )
+            .expect_err("a nonplanar fill has no single depth plane"),
+            ThreeDError::NonPlanarVectorDepth
         );
     }
 
