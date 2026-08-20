@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	4fdfe75bec90c44e579d7ece61d4ba9f8e5b83fb032ca360a39cf8bf6ca0cfb7
+ledger_reviewed_digest	37a41b436b08ea457dff6b5eb25768f01eaf28cec65e726d692dc5558ad56386
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -522,6 +522,20 @@ manimlib.mobject.types.vectorized_mobject:VMobject.quick_point_from_proportion	s
 manimlib.mobject.types.vectorized_mobject:VMobject.use_winding_fill	excluded	OOT-USE-WINDING-FILL	crates/fmn-mobject/tests/bbox_uniforms.rs	accepted for source compatibility but cannot select a second fill mechanism
 manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-conformance/tests/api_schema.rs	arbitrary GLSL is outside the semantic compatibility claim
 manimlib.mobject.three_dimensions:Cylinder.uv_func	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	returns the exact object-space unit-cylinder parameterization sampled by the native builder
+manimlib.mobject.three_dimensions:Torus	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored Surface subclass whose ranges radii style and sampled grid route through Atlas
+manimlib.mobject.three_dimensions:Torus.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves the exact public signature and installs the native torus atomically with custom Surface configuration
+manimlib.mobject.three_dimensions:Torus.uv_func	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	uses the exact deterministic major/minor-radius parameterization consumed by native sampling
+manimlib.mobject.three_dimensions:Cone	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored Cylinder subclass over Atlas's non-centered tapered surface authority
+manimlib.mobject.three_dimensions:Cone.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves range forwarding height radius axis resolution style and the pinned impossible positional-forwarding refusal
+manimlib.mobject.three_dimensions:Cone.uv_func	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	uses the exact object-space taper sampled by the native cone builder
+manimlib.mobject.three_dimensions:Line3D	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored Cylinder subclass whose thin native surface spans the caller endpoints
+manimlib.mobject.three_dimensions:Line3D.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves start end width resolution inherited cylinder state style and scene adoption through Atlas
+manimlib.mobject.three_dimensions:Disk3D	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored Surface subclass over Atlas's polar disk grid including its coincident center row
+manimlib.mobject.three_dimensions:Disk3D.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves radius ranges resolution style and native grid installation under the exact public signature
+manimlib.mobject.three_dimensions:Disk3D.uv_func	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	uses the exact unit polar map consumed before the native radius scale
+manimlib.mobject.three_dimensions:Square3D	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored Surface subclass over Atlas's planar cube-face authority
+manimlib.mobject.three_dimensions:Square3D.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves side length ranges resolution style and native grid installation under the exact public signature
+manimlib.mobject.three_dimensions:Square3D.uv_func	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	uses the exact object-space plane map consumed before the native side-length scale
 manimlib.mobject.value_tracker:ComplexValueTracker	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	is the authored ValueTracker subclass whose native two-lane payload preserves complex values through copy pickle adoption and animation
 manimlib.mobject.value_tracker:ComplexValueTracker.value_type	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	exposes the exact NumPy complex128 public type marker
 manimlib.mobject.value_tracker:ExponentialValueTracker	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	is the authored ValueTracker subclass whose native logarithmic lane gives geometric Transform interpolation
