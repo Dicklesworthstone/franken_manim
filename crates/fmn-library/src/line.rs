@@ -19,9 +19,7 @@ use fmn_core::types::Vec3;
 use fmn_geom::{ArcLengthTable, GeomError, QuadPath, space_ops};
 use fmn_mobject::{Mobject, ShapeTag};
 
-use crate::poly::ArrowTip;
 use crate::style::Style;
-use crate::tip::{TipEnd, attach_tip};
 use crate::vmobject::{
     DashError, VMobject, dashed_vmobject, validate_dash_count, validate_dash_length,
     validate_positive_space_ratio,
@@ -755,14 +753,16 @@ impl TryFrom<Arrow> for Mobject {
     }
 }
 
-/// `StrokeArrow(start, end, …)`: a stroked line whose width tapers into a
-/// separate tip, rather than one filled outline.
+/// `StrokeArrow(start, end, …)`: one stroked path whose final three records
+/// widen and then taper to zero, rather than a filled outline (`Arrow`) or a
+/// separate child (`TipableVMobject.add_tip`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StrokeArrow {
     line: Line,
     tip_width_ratio: f64,
     tip_len_to_width: f64,
     max_tip_length_to_length_ratio: f64,
+    max_width_to_length_ratio: f64,
 }
 
 impl StrokeArrow {
@@ -776,13 +776,49 @@ impl StrokeArrow {
             tip_width_ratio: 5.0,
             tip_len_to_width: 0.0075,
             max_tip_length_to_length_ratio: 0.3,
+            max_width_to_length_ratio: 8.0,
         }
+    }
+
+    /// Distance trimmed from each end before the taper is inserted.
+    #[must_use]
+    pub fn buff(mut self, buff: f64) -> Self {
+        self.line = self.line.buff(buff);
+        self
     }
 
     /// Bend the arrow.
     #[must_use]
     pub fn path_arc(mut self, path_arc: f64) -> Self {
         self.line = self.line.path_arc(path_arc);
+        self
+    }
+
+    /// Width multiplier applied to the final three stroke records.
+    #[must_use]
+    pub fn tip_width_ratio(mut self, ratio: f64) -> Self {
+        self.tip_width_ratio = ratio;
+        self
+    }
+
+    /// Tip length per unit of the widened stroke.
+    #[must_use]
+    pub fn tip_len_to_width(mut self, ratio: f64) -> Self {
+        self.tip_len_to_width = ratio;
+        self
+    }
+
+    /// Cap the fraction of the shaft consumed by the tip run.
+    #[must_use]
+    pub fn max_tip_length_to_length_ratio(mut self, ratio: f64) -> Self {
+        self.max_tip_length_to_length_ratio = ratio;
+        self
+    }
+
+    /// Cap the base stroke width relative to the end-to-end length.
+    #[must_use]
+    pub fn max_width_to_length_ratio(mut self, ratio: f64) -> Self {
+        self.max_width_to_length_ratio = ratio;
         self
     }
 
@@ -800,8 +836,9 @@ impl StrokeArrow {
         self
     }
 
-    /// Build the detached mobject: the shaft, with a tip sized from the
-    /// stroke width exactly as the Reference's `insert_tip_anchor` does.
+    /// Build the detached mobject with the Reference's inserted terminal
+    /// segment and per-record stroke-width taper. BN-03 changes only the cut
+    /// parameter: curved arrows reserve their tip by true arc length.
     ///
     /// # Errors
     /// The typed arc-component refusal for an invalid `path_arc`.
@@ -810,22 +847,41 @@ impl StrokeArrow {
         let style = shaft.style();
         let arc_len = line_arc_length(&shaft);
         let tip_len = style.stroke_width * self.tip_width_ratio * self.tip_len_to_width;
-        let tip_length = if arc_len <= 0.0 {
-            tip_len
-        } else if tip_len >= self.max_tip_length_to_length_ratio * arc_len {
+        let alpha = if arc_len <= 0.0 || tip_len >= self.max_tip_length_to_length_ratio * arc_len {
             self.max_tip_length_to_length_ratio * arc_len
         } else {
             tip_len
-        };
-        let tip_width = self.tip_width_ratio * style.stroke_width * self.tip_len_to_width * 2.0;
-        Ok(attach_tip(
-            shaft,
-            ArrowTip::new()
-                .length(tip_length)
-                .width(tip_width.max(tip_length))
-                .color(style.stroke_color),
-            TipEnd::End,
-        ))
+        } / arc_len.max(f64::MIN_POSITIVE);
+
+        let original_path = shaft.path()?;
+        let original_end = original_path.points().last().copied().unwrap_or(ORIGIN);
+        let shortened = partial_by_length(&original_path, 0.0, 1.0 - alpha)
+            .unwrap_or_else(|| original_path.points().to_vec());
+        let mut tapered_path = QuadPath::from_points(shortened)?;
+        let near_end = tapered_path
+            .point_from_proportion(1.0 - 1e-5)
+            .unwrap_or(original_end);
+        tapered_path.start_new_path(near_end);
+        tapered_path.add_line_to(original_end, true)?;
+
+        let points = tapered_path.points().to_vec();
+        let end_to_end = points
+            .first()
+            .map_or(0.0, |start| space_ops::get_norm(sub(original_end, *start)));
+        let tip_width = self.tip_width_ratio
+            * style
+                .stroke_width
+                .min(self.max_width_to_length_ratio * end_to_end);
+        let mut profile = vec![style.stroke_width; points.len()];
+        let tip_start = profile.len().saturating_sub(3);
+        if let Some(tip) = profile.get_mut(tip_start..) {
+            tip.copy_from_slice(&[tip_width, tip_width * 0.5, 0.0]);
+        }
+
+        Ok(VMobject::from_points(points)
+            .with_style(style)
+            .with_shape(shaft.shape())
+            .with_stroke_profile(profile))
     }
 }
 
@@ -1166,12 +1222,74 @@ mod tests {
     }
 
     #[test]
-    fn stroke_arrow_carries_a_tip_child() {
+    fn stroke_arrow_is_one_path_with_a_three_record_taper() {
         let arrow = StrokeArrow::new([0.0; 3], [4.0, 0.0, 0.0])
             .build()
             .expect("the fixture stroke arrow is valid");
-        assert_eq!(arrow.children().len(), 1, "shaft plus one tip");
-        assert!(!arrow.points().is_empty(), "the shaft keeps its path");
+        assert!(arrow.children().is_empty(), "the taper is not a child");
+        assert_eq!(arrow.points().len(), 7, "one line plus one tip segment");
+        assert_eq!(
+            arrow.stroke_profile(),
+            Some([5.0, 5.0, 5.0, 5.0, 25.0, 12.5, 0.0].as_slice())
+        );
+        assert_eq!(arrow.points().last(), Some(&[3.75, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn stroke_arrow_ratio_caps_and_degeneracy_are_explicit() {
+        let style = Style::default().stroke(DEFAULT_LIGHT_COLOR, 2.0, 1.0);
+        let capped = StrokeArrow::new([0.0; 3], [2.0, 0.0, 0.0])
+            .buff(0.0)
+            .tip_width_ratio(3.0)
+            .tip_len_to_width(0.1)
+            .max_tip_length_to_length_ratio(0.25)
+            .max_width_to_length_ratio(0.4)
+            .style(style)
+            .build()
+            .expect("the capped fixture is valid");
+        let capped_tip = capped
+            .stroke_profile()
+            .and_then(|widths| widths.get(4..))
+            .expect("the taper occupies the final three records");
+        for (actual, expected) in capped_tip.iter().zip([2.4, 1.2, 0.0]) {
+            assert!((actual - expected).abs() <= 1e-12);
+        }
+        assert_eq!(capped.points().last(), Some(&[2.0, 0.0, 0.0]));
+
+        let curved = StrokeArrow::new([0.0; 3], [2.0, 0.0, 0.0])
+            .buff(0.0)
+            .path_arc(PI / 2.0)
+            .style(style)
+            .build()
+            .expect("the curved fixture is valid");
+        assert!(curved.points().len() > 7, "the arc keeps its components");
+        let curved_end = curved.points().last().expect("the arc has an endpoint");
+        for (actual, expected) in curved_end.iter().zip([2.0, 0.0, 0.0]) {
+            assert!((actual - expected).abs() <= 1e-12);
+        }
+        assert_eq!(
+            curved
+                .stroke_profile()
+                .and_then(|widths| widths.get(widths.len() - 3..)),
+            Some([10.0, 5.0, 0.0].as_slice())
+        );
+
+        let point = StrokeArrow::new([1.0, 2.0, 0.0], [1.0, 2.0, 0.0])
+            .build()
+            .expect("a degenerate stroke arrow is defined");
+        assert!(
+            point
+                .points()
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
+        assert_eq!(
+            point
+                .stroke_profile()
+                .and_then(|widths| widths.get(widths.len() - 3..)),
+            Some([0.0, 0.0, 0.0].as_slice())
+        );
     }
 
     #[test]

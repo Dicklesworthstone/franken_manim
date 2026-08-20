@@ -4471,6 +4471,90 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// `StrokeArrow(start, end, ...)` over Atlas's single-path terminal
+    /// stroke taper. Every public ratio reaches the native builder; the
+    /// Python skin owns only Reference object lifecycle and record dispatch.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_stroke_arrow<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        start: [f64; 3],
+        end: [f64; 3],
+        stroke_width: f64,
+        buff: f64,
+        path_arc: f64,
+        tip_width_ratio: f64,
+        tip_len_to_width: f64,
+        max_tip_length_to_length_ratio: f64,
+        max_width_to_length_ratio: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let built = fmn_library::line::StrokeArrow::new(start, end)
+            .buff(buff)
+            .path_arc(path_arc)
+            .tip_width_ratio(tip_width_ratio)
+            .tip_len_to_width(tip_len_to_width)
+            .max_tip_length_to_length_ratio(max_tip_length_to_length_ratio)
+            .max_width_to_length_ratio(max_width_to_length_ratio)
+            .style(fmn_library::Style::default().stroke(
+                fmn_core::constants::DEFAULT_LIGHT_COLOR,
+                stroke_width,
+                1.0,
+            ))
+            .build()
+            .map_err(native_error)?;
+        install_native_tree(slf, factory, built)
+    }
+
+    /// Rebuild a StrokeArrow in place while retaining the root proxy and its
+    /// arena identity. Stage preserves the other record columns across the
+    /// resize; the native stroke profile then replaces the width column.
+    #[allow(clippy::too_many_arguments)]
+    fn _rebuild_stroke_arrow(
+        slf: &Bound<'_, Self>,
+        start: [f64; 3],
+        end: [f64; 3],
+        stroke_width: f64,
+        buff: f64,
+        path_arc: f64,
+        tip_width_ratio: f64,
+        tip_len_to_width: f64,
+        max_tip_length_to_length_ratio: f64,
+        max_width_to_length_ratio: f64,
+    ) -> PyResult<()> {
+        let built = fmn_library::line::StrokeArrow::new(start, end)
+            .buff(buff)
+            .path_arc(path_arc)
+            .tip_width_ratio(tip_width_ratio)
+            .tip_len_to_width(tip_len_to_width)
+            .max_tip_length_to_length_ratio(max_tip_length_to_length_ratio)
+            .max_width_to_length_ratio(max_width_to_length_ratio)
+            .style(fmn_library::Style::default().stroke(
+                fmn_core::constants::DEFAULT_LIGHT_COLOR,
+                stroke_width,
+                1.0,
+            ))
+            .build()
+            .map_err(native_error)?;
+        let points = built.points().to_vec();
+        let shape = built.shape();
+        #[allow(clippy::cast_possible_truncation)]
+        let widths: Vec<f32> = built
+            .stroke_profile()
+            .unwrap_or_default()
+            .iter()
+            .map(|width| *width as f32)
+            .collect();
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| {
+            stage.set_points(mob, &points)?;
+            stage.set_shape(mob, shape);
+            let entry = stage.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            entry.buffer.write_range("stroke_width", 0, &widths);
+            Ok(())
+        })?
+        .map_err(stage_error)
+    }
+
     /// `Arrow(start, end, ...)`: one filled path with the native tip
     /// proportions and caller-selected Reference ratio caps.
     #[allow(clippy::too_many_arguments)]
@@ -8033,7 +8117,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
+            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, StrokeArrow, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8302,6 +8386,14 @@ class _GauntletPortalScene(Scene):
             stroke_color=BLUE_C,
             stroke_width=1.5,
         )
+        native_stroke_arrow = StrokeArrow(
+            (-3.25, 1.78, 0.0),
+            (-2.55, 1.78, 0.0),
+            buff=0.02,
+            tip_width_ratio=3.0,
+            stroke_color=RED,
+            stroke_width=1.5,
+        )
         tangent_source = Circle(radius=0.18).shift((2.25, 2.05, 0.0))
         native_tangent_line = TangentLine(
             tangent_source,
@@ -8379,6 +8471,7 @@ class _GauntletPortalScene(Scene):
             primitive_round,
             primitive_polyline,
             native_dashed_line,
+            native_stroke_arrow,
             tangent_source,
             native_tangent_line,
             native_field,

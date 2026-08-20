@@ -4294,6 +4294,107 @@ class TangentLine(Line):
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
+class StrokeArrow(Line):
+    """The pinned one-path stroke taper over Atlas's BN-03 geometry."""
+
+    def __init__(
+        self,
+        start,
+        end,
+        stroke_color=_DEFAULT_LIGHT_COLOR,
+        stroke_width=5,
+        buff=0.25,
+        tip_width_ratio=5,
+        tip_len_to_width=0.0075,
+        max_tip_length_to_length_ratio=0.3,
+        max_width_to_length_ratio=8.0,
+        **kwargs,
+    ):
+        _install_live_state(self)
+        self.path_arc = float(kwargs.pop("path_arc", 0.0))
+        self.buff = float(buff)
+        self.tip_width_ratio = float(tip_width_ratio)
+        self.tip_len_to_width = float(tip_len_to_width)
+        self.max_tip_length_to_length_ratio = float(
+            max_tip_length_to_length_ratio
+        )
+        self.max_width_to_length_ratio = float(max_width_to_length_ratio)
+        self.n_tip_points = 3
+        self.original_stroke_width = float(stroke_width)
+        self.set_start_and_end_attrs(start, end)
+        specs = self._build_stroke_arrow(
+            _native_shell_factory,
+            _vec3(self.start),
+            _vec3(self.end),
+            self.original_stroke_width,
+            self.buff,
+            self.path_arc,
+            self.tip_width_ratio,
+            self.tip_len_to_width,
+            self.max_tip_length_to_length_ratio,
+            self.max_width_to_length_ratio,
+        )
+        _hang_native_children(self, specs)
+        kwargs.setdefault("stroke_color", stroke_color)
+        kwargs.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, kwargs, recurse=False)
+
+    def _replace_stroke_arrow_geometry(self, start, end, buff=0, path_arc=0):
+        self._rebuild_stroke_arrow(
+            _vec3(start),
+            _vec3(end),
+            self.original_stroke_width,
+            float(buff),
+            float(path_arc),
+            self.tip_width_ratio,
+            self.tip_len_to_width,
+            self.max_tip_length_to_length_ratio,
+            self.max_width_to_length_ratio,
+        )
+        return self
+
+    def set_points_by_ends(self, start, end, buff=0, path_arc=0):
+        return self._replace_stroke_arrow_geometry(start, end, buff, path_arc)
+
+    def insert_tip_anchor(self):
+        # Atlas performs the complete operation idempotently: reset from the
+        # live endpoints, true-length trim, then append the terminal segment.
+        return self._replace_stroke_arrow_geometry(
+            self.get_start(), self.get_end(), path_arc=self.path_arc
+        )
+
+    def create_tip_with_stroke_width(self):
+        if self.get_num_points() < self.n_tip_points:
+            return self
+        tip_width = self.tip_width_ratio * min(
+            float(self.original_stroke_width),
+            self.max_width_to_length_ratio * self.get_length(),
+        )
+        widths = self.get_stroke_widths()
+        widths[: -self.n_tip_points] = widths[0]
+        widths[-self.n_tip_points :] = tip_width * _np.linspace(
+            1.0, 0.0, self.n_tip_points
+        )
+        return self
+
+    def reset_tip(self):
+        return self.set_points_by_ends(
+            self.get_start(), self.get_end(), path_arc=self.path_arc
+        )
+
+    def set_stroke(self, color=None, width=None, *args, **kwargs):
+        super().set_stroke(color=color, width=width, *args, **kwargs)
+        self.original_stroke_width = self.get_stroke_width()
+        if self.has_points():
+            self.reset_tip()
+        return self
+
+    def _handle_scale_side_effects(self, scale_factor):
+        if _np.any(_np.asarray(scale_factor) != 1.0):
+            self.reset_tip()
+        return self
+
+
 class Arrow(Line):
     tickness_multiplier = 0.015
 
@@ -9343,6 +9444,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Line"): Line,
         ("manimlib.mobject.geometry", "DashedLine"): DashedLine,
         ("manimlib.mobject.geometry", "TangentLine"): TangentLine,
+        ("manimlib.mobject.geometry", "StrokeArrow"): StrokeArrow,
         ("manimlib.mobject.geometry", "Arrow"): Arrow,
         ("manimlib.mobject.geometry", "Vector"): Vector,
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,

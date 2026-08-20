@@ -4077,6 +4077,103 @@ assert math.isclose(bound_tangent.get_length(), 3.0, abs_tol=1e-6)
 empty_tangent = geometry.TangentLine(VMobject(), 0.5)
 assert empty_tangent.get_num_points() == 0
 
+# StrokeArrow is the authored Line subclass and Atlas now emits the pinned
+# one-path, three-record stroke taper directly. There is no synthetic tip
+# child for Python family traversal to observe.
+assert geometry.StrokeArrow.__mro__[:4] == (
+    geometry.StrokeArrow,
+    geometry.Line,
+    geometry.TipableVMobject,
+    VMobject,
+)
+assert list(inspect.signature(geometry.StrokeArrow).parameters) == [
+    "start",
+    "end",
+    "stroke_color",
+    "stroke_width",
+    "buff",
+    "tip_width_ratio",
+    "tip_len_to_width",
+    "max_tip_length_to_length_ratio",
+    "max_width_to_length_ratio",
+    "kwargs",
+]
+stroke_arrow = geometry.StrokeArrow(
+    [0.0, 0.0, 0.0], [4.0, 0.0, 0.0], stroke_color=manimlib.RED
+)
+assert stroke_arrow.submobjects == []
+assert stroke_arrow.get_num_points() == 7
+assert np.allclose(stroke_arrow.get_start(), [0.25, 0.0, 0.0])
+assert np.allclose(stroke_arrow.get_end(), [3.75, 0.0, 0.0])
+assert np.allclose(
+    stroke_arrow.get_stroke_widths(), [5.0, 5.0, 5.0, 5.0, 25.0, 12.5, 0.0]
+)
+assert stroke_arrow.get_stroke_color() == manimlib.RED
+
+ratio_arrow = geometry.StrokeArrow(
+    [0.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    stroke_width=2.0,
+    buff=0.0,
+    tip_width_ratio=3.0,
+    tip_len_to_width=0.1,
+    max_tip_length_to_length_ratio=0.25,
+    max_width_to_length_ratio=0.4,
+)
+assert np.allclose(ratio_arrow.get_stroke_widths()[-3:], [2.4, 1.2, 0.0])
+assert np.allclose(ratio_arrow.get_points()[-1], [2.0, 0.0, 0.0])
+ratio_points = ratio_arrow.get_points().copy()
+assert ratio_arrow.insert_tip_anchor() is ratio_arrow
+assert ratio_arrow.submobjects == []
+assert ratio_arrow.get_num_points() == 7
+assert np.allclose(ratio_arrow.get_points(), ratio_points, atol=1e-9)
+
+# The width-profile method is a real live RecordBuffer update, while reset,
+# endpoint changes, and scale route geometry back through Atlas.
+ratio_arrow.get_stroke_widths()[:] = 7.0
+assert ratio_arrow.create_tip_with_stroke_width() is ratio_arrow
+assert np.allclose(ratio_arrow.get_stroke_widths()[:4], 7.0)
+assert np.allclose(ratio_arrow.get_stroke_widths()[-3:], [2.4, 1.2, 0.0])
+ratio_identity = id(ratio_arrow)
+assert ratio_arrow.set_stroke(color=manimlib.BLUE, width=1.5) is ratio_arrow
+assert id(ratio_arrow) == ratio_identity
+assert ratio_arrow.get_stroke_color() == manimlib.BLUE
+assert np.allclose(ratio_arrow.get_stroke_widths()[-3:], [2.4, 1.2, 0.0])
+assert ratio_arrow.set_points_by_ends(
+    [-3.0, 1.0, 0.0], [3.0, 1.0, 0.0], buff=0.5, path_arc=0.0
+) is ratio_arrow
+assert np.allclose(ratio_arrow.get_start(), [-2.5, 1.0, 0.0])
+assert np.allclose(ratio_arrow.get_end(), [2.5, 1.0, 0.0])
+length_before_scale = ratio_arrow.get_length()
+assert ratio_arrow.scale(2.0) is ratio_arrow
+assert math.isclose(ratio_arrow.get_length(), 2.0 * length_before_scale, abs_tol=1e-6)
+assert ratio_arrow.get_num_points() == 7
+assert ratio_arrow.reset_tip() is ratio_arrow
+
+bound_stroke_scene = Scene()
+bound_stroke_scene.add(ratio_arrow)
+assert ratio_arrow.set_stroke(width=2.0) is ratio_arrow
+assert id(ratio_arrow) == ratio_identity
+assert np.allclose(ratio_arrow.get_stroke_widths()[-3:], [6.0, 3.0, 0.0])
+assert ratio_arrow.set_points_by_ends(
+    [-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], path_arc=math.pi / 3.0
+) is ratio_arrow
+assert id(ratio_arrow) == ratio_identity
+assert ratio_arrow.get_num_points() > 7
+assert ratio_arrow.submobjects == []
+
+degenerate_stroke = geometry.StrokeArrow([1.0, 2.0, 0.0], [1.0, 2.0, 0.0])
+assert degenerate_stroke.submobjects == []
+assert np.isfinite(degenerate_stroke.get_points()).all()
+assert np.isfinite(degenerate_stroke.get_stroke_widths()).all()
+assert np.allclose(degenerate_stroke.get_stroke_widths()[-3:], 0.0)
+try:
+    geometry.StrokeArrow([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], path_arc=math.nan)
+except ValueError as error:
+    assert "arc angle must be finite" in str(error)
+else:
+    raise AssertionError("StrokeArrow accepted a non-finite path_arc")
+
 # `become` must keep the Python proxy family and Marionette family aligned
 # when a live redraw changes a generated child's multiplicity.  This is the
 # exact varying-dash-count shape exercised by MaxProcess's always_redraw line.
