@@ -5811,6 +5811,53 @@ class Sphere(Surface):
         )
 
 
+class Torus(Surface):
+    def __init__(
+        self,
+        u_range=(0, _math.tau),
+        v_range=(0, _math.tau),
+        r1=3.0,
+        r2=1.0,
+        **kwargs,
+    ):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        resolution = kwargs.pop("resolution", (101, 101))
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        _refuse_unrouted("Torus()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        self.r1 = float(r1)
+        self.r2 = float(r2)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        specs = self._build_torus(
+            _native_surface_shell_factory,
+            self.r1,
+            self.r2,
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            self.resolution,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return _np.array(
+            self._torus_uv(self.r1, self.r2, float(u), float(v))
+        )
+
+
 class Cylinder(Surface):
     """The Reference cylinder over Atlas's native sampled solid."""
 
@@ -5859,6 +5906,190 @@ class Cylinder(Surface):
 
     def uv_func(self, u, v):
         return _np.array(self._cylinder_uv(float(u), float(v)))
+
+
+class Cone(Cylinder):
+    def __init__(
+        self,
+        u_range=(0, _math.tau),
+        v_range=(0, 1),
+        *args,
+        **kwargs,
+    ):
+        if args:
+            raise TypeError(
+                "Cylinder.__init__() got multiple values for argument 'u_range'"
+            )
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        resolution = kwargs.pop("resolution", (101, 11))
+        height = kwargs.pop("height", 2)
+        radius = kwargs.pop("radius", 1)
+        axis = kwargs.pop("axis", _OUT)
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        _refuse_unrouted("Cone()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        self.height = float(height)
+        self.radius = float(radius)
+        self.axis = _np.array(_vec3(axis), dtype=float)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        specs = self._build_cone(
+            _native_surface_shell_factory,
+            self.height,
+            self.radius,
+            _vec3(self.axis),
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            self.resolution,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return _np.array(self._cone_uv(float(u), float(v)))
+
+
+class Line3D(Cylinder):
+    def __init__(
+        self,
+        start,
+        end,
+        width=0.05,
+        resolution=(21, 25),
+        **kwargs,
+    ):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        u_range = kwargs.pop("u_range", (0, _math.tau))
+        v_range = kwargs.pop("v_range", (-1, 1))
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        _refuse_unrouted("Line3D()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        start_point = _np.array(_vec3(start), dtype=float)
+        end_point = _np.array(_vec3(end), dtype=float)
+        self.height = float(_np.linalg.norm(end_point - start_point))
+        self.radius = float(width) / 2.0
+        self.axis = end_point - start_point
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        specs = self._build_line3d(
+            _native_surface_shell_factory,
+            _vec3(start_point),
+            _vec3(end_point),
+            float(width),
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            self.resolution,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+
+class Disk3D(Surface):
+    def __init__(
+        self,
+        radius=1,
+        u_range=(0, 1),
+        v_range=(0, _math.tau),
+        resolution=(2, 100),
+        **kwargs,
+    ):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        _refuse_unrouted("Disk3D()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        self.radius = float(radius)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        specs = self._build_disk3d(
+            _native_surface_shell_factory,
+            self.radius,
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            self.resolution,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return _np.array(self._disk3d_uv(float(u), float(v)))
+
+
+class Square3D(Surface):
+    def __init__(
+        self,
+        side_length=2.0,
+        u_range=(-1, 1),
+        v_range=(-1, 1),
+        resolution=(2, 2),
+        **kwargs,
+    ):
+        color = kwargs.pop("color", None)
+        opacity = kwargs.pop("opacity", None)
+        shading = kwargs.pop("shading", None)
+        depth_test = kwargs.pop("depth_test", True)
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        _refuse_unrouted("Square3D()", [(name, True) for name in sorted(kwargs)])
+        _install_live_state(self)
+        self.side_length = float(side_length)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        specs = self._build_square3d(
+            _native_surface_shell_factory,
+            self.side_length,
+            (float(u_range[0]), float(u_range[1])),
+            (float(v_range[0]), float(v_range[1])),
+            self.resolution,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
+        )
+        _hang_native_children(self, specs)
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return _np.array(self._square3d_uv(float(u), float(v)))
 
 
 class Cube(SGroup):
@@ -7683,7 +7914,12 @@ def _install_schema_surface():
         ("manimlib.mobject.types.surface", "SGroup"): SGroup,
         ("manimlib.mobject.types.surface", "ParametricSurface"): ParametricSurface,
         ("manimlib.mobject.three_dimensions", "Sphere"): Sphere,
+        ("manimlib.mobject.three_dimensions", "Torus"): Torus,
         ("manimlib.mobject.three_dimensions", "Cylinder"): Cylinder,
+        ("manimlib.mobject.three_dimensions", "Cone"): Cone,
+        ("manimlib.mobject.three_dimensions", "Line3D"): Line3D,
+        ("manimlib.mobject.three_dimensions", "Disk3D"): Disk3D,
+        ("manimlib.mobject.three_dimensions", "Square3D"): Square3D,
         ("manimlib.mobject.three_dimensions", "Cube"): Cube,
         ("manimlib.mobject.three_dimensions", "Prism"): Prism,
         ("manimlib.mobject.three_dimensions", "SurfaceMesh"): SurfaceMesh,

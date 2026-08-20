@@ -7393,7 +7393,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, Checkmark, Circle, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, ParametricSurface, RED, Scene, ScreenRectangle, Underline, VMobject
+            r#"from manimlib import AnnularSector, BLUE_C, BLUE_E, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedVMobject, Disk3D, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, GREY_C, Line3D, ParametricSurface, RED, Scene, ScreenRectangle, Square3D, Torus, Underline, VMobject
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -7488,6 +7488,35 @@ class _GauntletPortalScene(Scene):
         )
         checkmark = Checkmark(font_size=24).shift((2.5, 0.35, 0.0))
         exmark = Exmark(font_size=24).shift((1.8, 0.35, 0.0))
+        solid_torus = Torus(
+            r1=0.35,
+            r2=0.12,
+            resolution=(9, 7),
+            color=BLUE_C,
+        ).shift((-2.55, 0.75, 0.0))
+        solid_cone = Cone(
+            height=0.65,
+            radius=0.22,
+            resolution=(9, 5),
+            color=RED,
+        ).shift((-2.0, 0.65, 0.0))
+        solid_line = Line3D(
+            (-2.7, 0.15, 0.0),
+            (-1.8, 0.15, 0.0),
+            width=0.08,
+            resolution=(7, 5),
+            color=BLUE_E,
+        )
+        solid_disk = Disk3D(
+            radius=0.22,
+            resolution=(3, 9),
+            color=RED,
+        ).shift((-1.45, 0.7, 0.0))
+        solid_square = Square3D(
+            side_length=0.4,
+            resolution=(3, 3),
+            color=BLUE_C,
+        ).shift((-0.95, 0.7, 0.0))
         self.add(
             frame_fade,
             frame_fill,
@@ -7506,6 +7535,11 @@ class _GauntletPortalScene(Scene):
             matcher_underline,
             checkmark,
             exmark,
+            solid_torus,
+            solid_cone,
+            solid_line,
+            solid_disk,
+            solid_square,
         )
         self.wait(1 / 30)
 

@@ -5355,10 +5355,9 @@ sphere = three_dimensions.Sphere(radius=2.0, clockwise=True, resolution=(5, 3))
 assert np.allclose(sphere.uv_func(0.0, 0.0), [0.0, 0.0, -2.0])
 assert np.allclose(sphere.uv_func(0.0, math.pi / 2.0), [2.0, 0.0, 0.0])
 
-# Generated subclasses with class-specific constructors must never inherit an
-# ancestor's incompatible defaults. Cylinder is corpus-used and routes to the
-# already-native solid; the rest fail closed until their semantic builders
-# land instead of constructing an unrelated Mobject/Surface/Animation.
+# Atlas owns the complete parametric solid shelf. Every authored portal class
+# preserves the pinned MRO/signature while construction and public uv_func
+# calls share the exact native parameterization.
 cylinder = three_dimensions.Cylinder(
     u_range=(0.0, math.tau),
     v_range=(-1.0, 1.0),
@@ -5394,16 +5393,133 @@ assert np.allclose(
     atol=1e-6,
 )
 
+assert three_dimensions.Torus.__bases__ == (manimlib.Surface,)
+assert three_dimensions.Cone.__bases__ == (three_dimensions.Cylinder,)
+assert three_dimensions.Line3D.__bases__ == (three_dimensions.Cylinder,)
+assert three_dimensions.Disk3D.__bases__ == (manimlib.Surface,)
+assert three_dimensions.Square3D.__bases__ == (manimlib.Surface,)
+assert str(inspect.signature(three_dimensions.Torus)) == (
+    "(u_range=(0, 6.283185307179586), v_range=(0, 6.283185307179586), "
+    "r1=3.0, r2=1.0, **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.Cone)) == (
+    "(u_range=(0, 6.283185307179586), v_range=(0, 1), *args, **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.Line3D)) == (
+    "(start, end, width=0.05, resolution=(21, 25), **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.Disk3D)) == (
+    "(radius=1, u_range=(0, 1), v_range=(0, 6.283185307179586), "
+    "resolution=(2, 100), **kwargs)"
+)
+assert str(inspect.signature(three_dimensions.Square3D)) == (
+    "(side_length=2.0, u_range=(-1, 1), v_range=(-1, 1), "
+    "resolution=(2, 2), **kwargs)"
+)
+
+torus = three_dimensions.Torus(
+    r1=2.0,
+    r2=0.5,
+    resolution=(5, 5),
+    color=manimlib.BLUE,
+    opacity=0.6,
+    shading=(0.1, 0.2, 0.3),
+    depth_test=False,
+)
+assert torus.n_records() == 25
+assert np.allclose(torus.uv_func(0.0, 0.0), [1.5, 0.0, 0.0])
+assert np.allclose(torus.uv_func(0.0, math.pi), [2.5, 0.0, 0.0])
+assert np.allclose(
+    [torus.get_width(), torus.get_height(), torus.get_depth()],
+    [5.0, 5.0, 1.0],
+    atol=1e-6,
+)
+assert torus.get_color() == manimlib.BLUE
+assert np.isclose(torus.get_opacity(), 0.6)
+assert np.allclose(torus.uniforms["shading"], [0.1, 0.2, 0.3])
+assert torus.uniforms["depth_test"] is False
+
+cone = three_dimensions.Cone(
+    resolution=(5, 3),
+    height=3.0,
+    radius=2.0,
+    axis=manimlib.RIGHT,
+)
+assert cone.n_records() == 15
+assert cone.u_range == (0, math.tau)
+assert cone.v_range == (0, 1)
+assert np.allclose(cone.uv_func(0.0, 0.0), [1.0, 0.0, 0.0])
+assert np.allclose(cone.uv_func(0.0, 1.0), [0.0, 0.0, 1.0])
+assert np.allclose(
+    [cone.get_width(), cone.get_height(), cone.get_depth()],
+    [3.0, 4.0, 4.0],
+    atol=1e-6,
+)
+assert np.allclose(cone.get_center(), [1.5, 0.0, 0.0], atol=1e-6)
+
+line3d = three_dimensions.Line3D(
+    [-2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    width=0.4,
+    resolution=(5, 3),
+)
+assert line3d.n_records() == 15
+assert np.isclose(line3d.height, 4.0)
+assert np.isclose(line3d.radius, 0.2)
+assert np.array_equal(line3d.axis, [4.0, 0.0, 0.0])
+assert np.allclose(line3d.uv_func(0.0, 0.25), [1.0, 0.0, 0.25])
+assert np.allclose(
+    [line3d.get_width(), line3d.get_height(), line3d.get_depth()],
+    [4.0, 0.4, 0.4],
+    atol=1e-6,
+)
+
+disk3d = three_dimensions.Disk3D(radius=2.0, resolution=(2, 5))
+assert disk3d.n_records() == 10
+assert np.allclose(disk3d.uv_func(0.5, 0.0), [0.5, 0.0, 0.0])
+assert np.allclose(
+    [disk3d.get_width(), disk3d.get_height(), disk3d.get_depth()],
+    [4.0, 4.0, 0.0],
+    atol=1e-6,
+)
+
+square3d = three_dimensions.Square3D(
+    side_length=3.0,
+    u_range=(-2.0, 2.0),
+    v_range=(-1.0, 1.0),
+    resolution=(3, 2),
+)
+assert square3d.n_records() == 6
+assert np.allclose(square3d.uv_func(-2.0, 1.0), [-2.0, 1.0, 0.0])
+assert np.allclose(
+    [square3d.get_width(), square3d.get_height(), square3d.get_depth()],
+    [6.0, 3.0, 0.0],
+    atol=1e-6,
+)
+
+solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
+assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
+
+failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
-    three_dimensions.Torus()
+    three_dimensions.Torus.__init__(failed_torus, unrouted_option=True)
 except NotImplementedError as error:
     assert str(error) == (
-        "manimlib.mobject.three_dimensions.Torus declares class-specific "
-        "constructor semantics that have not landed; refusing to inherit "
-        "an ancestor's incompatible defaults"
+        "Torus() keyword(s) not yet routed to the native builder: "
+        "unrouted_option"
     )
 else:
-    raise AssertionError("a generated Torus silently inherited Surface defaults")
+    raise AssertionError("an unrouted Torus keyword reached the native builder")
+assert not hasattr(failed_torus, "submobjects")
+
+try:
+    three_dimensions.Cone((0, math.tau), (0, 1), 7)
+except TypeError as error:
+    assert str(error) == (
+        "Cylinder.__init__() got multiple values for argument 'u_range'"
+    )
+else:
+    raise AssertionError("Cone accepted impossible Reference positional forwarding")
 
 old_tex = importlib.import_module("manimlib.mobject.svg.old_tex_mobject").OldTex
 quadratic_label = old_tex(
