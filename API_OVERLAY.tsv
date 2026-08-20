@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	d7cea271024be981957518581a2e7e734040d1bb5445a70a2edec3dd8d8ed115
+ledger_reviewed_digest	a40c7abc20c8ba8d99d4d9755d2361569d1078cf2dbbdc0f33334012645379ee
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -447,6 +447,13 @@ manimlib.mobject.geometry:DashedLine.get_start	same	scripts/manim_ref/manimlib/m
 manimlib.mobject.geometry:DashedLine.get_start_and_end	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the virtual-dispatched first and final dash endpoints as one pair
 manimlib.mobject.geometry:TangentLine	improved	BN-03	crates/fmn-python/tests/bridge.py	is the authored Line subclass built from the live source path at a true-arclength proportion
 manimlib.mobject.geometry:TangentLine.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	constructs the requested exact-length tangent from detached or scene-bound Marionette records and defines an empty native result for an empty source
+manimlib.mobject.geometry:StrokeArrow	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is the authored Line subclass with the exact MRO and one-path three-record taper rather than a synthetic tip child
+manimlib.mobject.geometry:StrokeArrow.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	builds the bounded native taper with every public ratio and cap while curved arrows reserve their terminal run by true arc length
+manimlib.mobject.geometry:StrokeArrow.create_tip_with_stroke_width	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	updates the final three live stroke-width records from the retained base width and configured width cap
+manimlib.mobject.geometry:StrokeArrow.insert_tip_anchor	improved	BN-03	crates/fmn-python/tests/bridge.py	idempotently rebuilds the terminal segment by true arc length while retaining detached or scene-bound root identity
+manimlib.mobject.geometry:StrokeArrow.reset_tip	improved	BN-03	crates/fmn-python/tests/bridge.py	rebuilds the one-path taper from live endpoints through Atlas after mutations and scaling
+manimlib.mobject.geometry:StrokeArrow.set_points_by_ends	improved	BN-03	crates/fmn-python/tests/bridge.py	rebuilds buffered straight or curved endpoints with a native true-arclength terminal run
+manimlib.mobject.geometry:StrokeArrow.set_stroke	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	retains color and base-width mutation semantics then regenerates the live three-record taper
 manimlib.mobject.geometry:Polygon	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass backed by Atlas closed shared-anchor geometry rather than a schema-generated shell
 manimlib.mobject.geometry:Polygon.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	preserves variadic vertices closed point topology exact empty-input refusal and VMobject styling
 manimlib.mobject.geometry:Polygon.get_vertices	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	returns the live start-anchor view without the repeated closing anchor
