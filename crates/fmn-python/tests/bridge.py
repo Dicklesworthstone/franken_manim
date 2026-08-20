@@ -305,12 +305,13 @@ utility_signatures = {
     space_utils.angle_of_vector: "(vector)",
     space_utils.compass_directions: "(n=4, start_vect=array([1., 0., 0.]))",
     space_utils.cross: "(v1, v2, out=None)",
+    space_utils.line_intersects_path: "(start, end, path)",
     path_utils.clockwise_path: "()",
     path_utils.counterclockwise_path: "()",
     path_utils.path_along_arc: "(arc_angle, axis=array([0., 0., 1.]))",
     path_utils.straight_path: "(start_points, end_points, alpha)",
 }
-assert len(utility_signatures) == 33
+assert len(utility_signatures) == 34
 for function, declared_call_shape in utility_signatures.items():
     actual_call_shape = str(inspect.signature(function))
     assert actual_call_shape == declared_call_shape
@@ -421,6 +422,27 @@ assert math.isclose(
     math.pi / 2,
 )
 assert space_utils.angle_between_vectors([0.0] * 4, [1.0] * 4) == 0.0
+assert space_utils.line_intersects_path(
+    [0.0, -1.0],
+    [0.0, 1.0],
+    np.array([[-1.0, 0.0], [1.0, 0.0]]),
+)
+assert space_utils.line_intersects_path(
+    [0.0, -1.0, 8.0],
+    [0.0, 1.0, -3.0],
+    np.array([[-1.0, 0.0, 12.0], [1.0, 0.0, -5.0]]),
+)
+assert not space_utils.line_intersects_path(
+    [0.0, 0.0],
+    [0.0, 1.0],
+    np.array([[-1.0, 0.0], [1.0, 0.0]]),
+)
+try:
+    space_utils.line_intersects_path([0.0], [0.0, 1.0], [[-1.0, 0.0]])
+except ValueError as error:
+    assert "two or three components" in str(error)
+else:
+    raise AssertionError("line_intersects_path accepted a one-dimensional point")
 out_vector = np.zeros(3)
 assert space_utils.cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], out_vector) is out_vector
 assert np.array_equal(out_vector, [0.0, 0.0, 1.0])
@@ -4315,6 +4337,195 @@ bound_sharp = VMobject().set_points(
 bound_sharp_scene.add(bound_sharp)
 bound_sharp.subdivide_sharp_curves(recurse=False)
 assert bound_sharp.get_num_curves() == 4
+
+# Smooth construction and condition/intersection subdivision are the sibling
+# Chisel-backed VMobject operations. Callback arguments retain the Reference's
+# live float32 NumPy row shape, callbacks run exactly once per original curve,
+# and the whole family is planned before the first RecordBuffer mutation.
+smooth_points = np.array(
+    [[-2.0, 0.0, 0.0], [-1.0, 1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
+)
+for approx in (True, False):
+    corner_points = VMobject().set_points_as_corners(smooth_points).get_points().copy()
+    manual_smooth = VMobject().set_points_as_corners(smooth_points)
+    manual_smooth.make_smooth(approx=approx)
+    smooth = VMobject(stroke_width=7.0)
+    assert smooth.set_points_smoothly(smooth_points, approx=approx) is smooth
+    assert np.array_equal(smooth.get_points(), manual_smooth.get_points())
+    assert np.allclose(smooth.data["stroke_width"], 7.0)
+    assert not np.array_equal(smooth.get_points()[1::2], corner_points[1::2])
+
+assert str(inspect.signature(VMobject.set_points_smoothly)) == (
+    "(self, points, approx=True)"
+)
+assert str(inspect.signature(VMobject.subdivide_curves_by_condition)) == (
+    "(self, tuple_to_subdivisions, recurse=True)"
+)
+assert str(inspect.signature(VMobject.subdivide_intersections)) == (
+    "(self, recurse=True, n_subdivisions=1)"
+)
+
+conditional = VMobject().set_points(
+    [
+        [0.0, 0.0, 0.0],
+        [0.5, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.5, -1.0, 0.0],
+        [2.0, 0.0, 0.0],
+    ]
+)
+conditional.data["stroke_width"][:, 0] = [1.0, 2.0, 3.0, 4.0, 5.0]
+conditional_before = conditional.data.copy()
+conditional_length = conditional.get_arc_length()
+callback_rows = []
+
+
+def conditional_counts(b0, b1, b2):
+    callback_rows.append((b0.copy(), b1.copy(), b2.copy()))
+    assert all(isinstance(point, np.ndarray) for point in (b0, b1, b2))
+    assert all(point.dtype == np.float32 for point in (b0, b1, b2))
+    return np.int64(len(callback_rows))
+
+
+assert (
+    conditional.subdivide_curves_by_condition(conditional_counts, recurse=False)
+    is conditional
+)
+assert len(callback_rows) == 2
+assert conditional.get_num_curves() == 5
+assert np.array_equal(
+    conditional.data["stroke_width"],
+    manimlib.resize_preserving_order(conditional_before, 11)["stroke_width"],
+)
+assert math.isclose(
+    conditional.get_arc_length(), conditional_length, rel_tol=0.0, abs_tol=2e-7
+)
+
+condition_parent = VMobject().set_points_as_corners(
+    [[0.0, 10.0, 0.0], [1.0, 10.0, 0.0]]
+)
+condition_child = VMobject().set_points_as_corners(
+    [[2.0, 10.0, 0.0], [3.0, 10.0, 0.0]]
+)
+condition_parent.add(condition_child)
+condition_parent.subdivide_curves_by_condition(lambda *curve: 1, recurse=False)
+assert condition_parent.get_num_curves() == 2
+assert condition_child.get_num_curves() == 1
+condition_parent.subdivide_curves_by_condition(lambda *curve: 1)
+assert condition_parent.get_num_curves() == 4
+assert condition_child.get_num_curves() == 2
+
+atomic_condition_parent = VMobject().set_points_as_corners(
+    [[0.0, 11.0, 0.0], [1.0, 11.0, 0.0]]
+)
+atomic_condition_child = VMobject().set_points_as_corners(
+    [[2.0, 11.0, 0.0], [3.0, 11.0, 0.0]]
+)
+atomic_condition_parent.add(atomic_condition_child)
+atomic_condition_parent_before = atomic_condition_parent.data.copy()
+atomic_condition_child_before = atomic_condition_child.data.copy()
+atomic_callback_calls = 0
+
+
+def failing_condition(*curve):
+    global atomic_callback_calls
+    atomic_callback_calls += 1
+    if atomic_callback_calls == 2:
+        raise LookupError("second family callback refusal")
+    return 1
+
+
+try:
+    atomic_condition_parent.subdivide_curves_by_condition(failing_condition)
+except LookupError as error:
+    assert "second family callback refusal" in str(error)
+else:
+    raise AssertionError("a callback failure partially subdivided a family")
+assert atomic_callback_calls == 2
+assert np.array_equal(atomic_condition_parent.data, atomic_condition_parent_before)
+assert np.array_equal(atomic_condition_child.data, atomic_condition_child_before)
+
+for refused_count, exception in [(1.5, TypeError), (10**100, ValueError)]:
+    refused = VMobject().set_points_as_corners(
+        [[0.0, 12.0, 0.0], [1.0, 12.0, 0.0]]
+    )
+    refused_before = refused.data.copy()
+    try:
+        refused.subdivide_curves_by_condition(lambda *curve: refused_count)
+    except exception:
+        pass
+    else:
+        raise AssertionError(f"invalid subdivision count {refused_count!r} succeeded")
+    assert np.array_equal(refused.data, refused_before)
+
+negative_count = VMobject().set_points_as_corners(
+    [[0.0, 13.0, 0.0], [1.0, 13.0, 0.0]]
+)
+negative_view = negative_count.get_points()
+negative_count.subdivide_curves_by_condition(lambda *curve: -3)
+negative_view[0] = [-1.0, 13.0, 0.0]
+assert np.allclose(negative_count.get_points()[0], [-1.0, 13.0, 0.0])
+
+intersection = VMobject().set_points(
+    [
+        [-2.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-2.0, 1.0, 0.0],
+        [-1.0, 2.0, 0.0],
+        [2.0, -1.0, 0.0],
+    ]
+)
+intersection_path = intersection.get_anchors().copy()
+intersection_flags = [
+    space_utils.line_intersects_path(b0, b1, intersection_path)
+    for b0, b1, b2 in intersection.get_bezier_tuples()
+]
+assert any(intersection_flags)
+intersection_curves = intersection.get_num_curves()
+assert intersection.subdivide_intersections(False, 2) is intersection
+assert intersection.get_num_curves() == intersection_curves + 2 * sum(
+    intersection_flags
+)
+
+non_intersection = VMobject().set_points_as_corners(
+    [[0.0, 15.0, 0.0], [1.0, 15.0, 0.0]]
+)
+non_intersection_view = non_intersection.get_points()
+assert non_intersection.subdivide_intersections(False, 1.5) is non_intersection
+non_intersection_view[0] = [-1.0, 15.0, 0.0]
+assert np.allclose(non_intersection.get_points()[0], [-1.0, 15.0, 0.0])
+
+for refused_count, exception in [(1.5, TypeError), (10**100, ValueError)]:
+    refused_intersection = VMobject().set_points(
+        [
+            [-2.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-2.0, 1.0, 0.0],
+            [-1.0, 2.0, 0.0],
+            [2.0, -1.0, 0.0],
+        ]
+    )
+    refused_intersection_before = refused_intersection.data.copy()
+    try:
+        refused_intersection.subdivide_intersections(False, refused_count)
+    except exception:
+        pass
+    else:
+        raise AssertionError(
+            f"invalid intersection subdivision count {refused_count!r} succeeded"
+        )
+    assert np.array_equal(
+        refused_intersection.data, refused_intersection_before
+    )
+
+bound_condition_scene = Scene()
+bound_condition = VMobject().set_points_as_corners(
+    [[-1.0, 14.0, 0.0], [1.0, 14.0, 0.0]]
+)
+bound_condition_scene.add(bound_condition)
+bound_condition.subdivide_curves_by_condition(lambda *curve: 1, recurse=False)
+assert bound_condition.get_num_curves() == 2
+assert bound_condition in bound_condition_scene.mobjects
 
 line.set_stroke(manimlib.BLACK, 3, background=True)
 assert line.uniforms["stroke_behind"] is True

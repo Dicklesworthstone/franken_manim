@@ -20,7 +20,7 @@ mod method_cache;
 pub mod perf_harness;
 mod report;
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_int, c_void};
 use std::path::PathBuf;
@@ -47,6 +47,7 @@ use fmn_render::{
     RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
 };
 use fmn_scene::{RuntimeConfig, Scene};
+use pyo3::basic::CompareOp;
 use pyo3::create_exception;
 use pyo3::exceptions::{
     PyBufferError, PyImportError, PyKeyError, PyNotImplementedError, PyOverflowError,
@@ -612,6 +613,34 @@ fn configured_quad_path(proxy: &Bound<'_, BridgeMobject>) -> PyResult<fmn_librar
     path.set_tolerance_for_point_equality(tolerance);
     path.set_long_lines(long_lines);
     Ok(path)
+}
+
+/// Convert an `operator.index`-normalized Python subdivision count without
+/// ever narrowing an attacker-controlled large integer. Returning the native
+/// cap makes QuadPath produce its ordinary typed budget refusal.
+fn bounded_subdivision_count(value: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if value
+        .rich_compare(fmn_library::MAX_SUBDIVIDED_CURVES, CompareOp::Gt)?
+        .is_truthy()?
+    {
+        Ok(fmn_library::MAX_SUBDIVIDED_CURVES)
+    } else {
+        value.extract::<usize>()
+    }
+}
+
+/// Reference count coercion: non-positive values mean no split; positive
+/// values must implement `__index__`, as NumPy's `linspace(num=...)` requires.
+fn positive_subdivision_count(value: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if !value.rich_compare(0, CompareOp::Gt)?.is_truthy()? {
+        return Ok(0);
+    }
+    let indexed = value
+        .py()
+        .import("operator")?
+        .getattr("index")?
+        .call1((value,))?;
+    bounded_subdivision_count(&indexed)
 }
 
 /// Apply one native path-building operation without mutating the Stage and
@@ -2368,6 +2397,71 @@ impl BridgeMobject {
         Ok(path.points().to_vec())
     }
 
+    /// Apply caller-supplied subdivision counts through Chisel's bounded
+    /// preflight. Python evaluates the host callback exactly once for every
+    /// live quadratic before entering this method, so no Stage borrow crosses
+    /// user code and a whole requested family can be planned before its first
+    /// RecordBuffer write.
+    fn _subdivide_curve_points_by_counts(
+        slf: &Bound<'_, Self>,
+        subdivision_counts: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        let mut path = configured_quad_path(slf)?;
+        let mut counts = Vec::with_capacity(path.num_curves());
+        for count in subdivision_counts.try_iter()? {
+            let count = count?;
+            counts.push(bounded_subdivision_count(&count)?);
+        }
+        if counts.len() != path.num_curves() {
+            return Err(PyValueError::new_err(format!(
+                "subdivision count length {} does not match the live curve count {}",
+                counts.len(),
+                path.num_curves()
+            )));
+        }
+        let cursor = Cell::new(0usize);
+        path.subdivide_curves_by_condition(|_| {
+            let index = cursor.get();
+            cursor.set(index + 1);
+            counts
+                .get(index)
+                .copied()
+                .unwrap_or(fmn_library::MAX_SUBDIVIDED_CURVES)
+        })
+        .map_err(native_error)?;
+        Ok(path.points().to_vec())
+    }
+
+    /// Reference `subdivide_intersections` with both the strict crossing test
+    /// and the bounded split performed in Chisel. Count coercion remains lazy:
+    /// just like the Reference, an invalid positive count is never inspected
+    /// when no curve intersects the captured anchor path.
+    fn _subdivide_intersection_curve_points(
+        slf: &Bound<'_, Self>,
+        intersection_path: Vec<[f64; 3]>,
+        n_subdivisions: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        let mut path = configured_quad_path(slf)?;
+        let intersects = path
+            .bezier_tuples()
+            .any(|[b0, b1, _]| fmn_library::line_intersects_path(b0, b1, &intersection_path));
+        if !intersects {
+            return Ok(path.points().to_vec());
+        }
+        let count = positive_subdivision_count(n_subdivisions)?;
+        path.subdivide_curves_by_condition(|[b0, b1, _]| {
+            if fmn_library::line_intersects_path(b0, b1, &intersection_path) {
+                count
+            } else {
+                0
+            }
+        })
+        .map_err(native_error)?;
+        Ok(path.points().to_vec())
+    }
+
     /// Revalidate a Python-authored VMobject point run and refresh the native
     /// shared-anchor metadata through Marionette's one `Stage::set_points`
     /// path.  The Python layer owns Reference record-resize semantics; this
@@ -2900,6 +2994,14 @@ impl BridgeMobject {
     #[staticmethod]
     fn _angle_between_vectors(v1: [f64; 3], v2: [f64; 3]) -> f64 {
         fmn_library::angle_between_vectors(v1, v2)
+    }
+
+    /// Chisel's exact strict-crossing predicate for a line segment and a
+    /// polygonal path. Only xy coordinates participate, matching the pinned
+    /// Reference for both two- and three-dimensional inputs.
+    #[staticmethod]
+    fn _line_intersects_path(start: [f64; 3], end: [f64; 3], path: Vec<[f64; 3]>) -> bool {
+        fmn_library::line_intersects_path(start, end, &path)
     }
 
     /// `Arc(start_angle, angle, radius, arc_center)` over the arc shelf.
@@ -6994,6 +7096,16 @@ class _GauntletPortalScene(Scene):
         ))
         portal_ops.align_points(alignment_peer)
         portal_ops.subdivide_sharp_curves(1.0, recurse=False)
+        smooth_ops = VMobject(stroke_width=2.0).set_points_smoothly((
+            (0.2, 0.0, 0.0),
+            (0.8, 0.5, 0.0),
+            (1.4, 0.0, 0.0),
+        ))
+        smooth_ops.subdivide_curves_by_condition(
+            lambda b0, b1, b2: 1 if b1[1] > b0[1] else 0,
+            recurse=False,
+        )
+        smooth_ops.subdivide_intersections(recurse=False, n_subdivisions=1)
         self.add(
             Circle(radius=0.9),
             CurvedDoubleArrow((-1.5, -0.5, 0), (1.5, -0.5, 0)),
@@ -7001,6 +7113,7 @@ class _GauntletPortalScene(Scene):
             DashedVMobject(Circle(radius=0.45), num_dashes=6).shift((-1.25, 1, 0)),
             native_path,
             portal_ops,
+            smooth_ops,
         )
         self.wait(1 / 30)
 

@@ -2428,6 +2428,11 @@ class VMobject(Mobject):
                 data[field][:] = defaults[field]
         return self
 
+    def set_points_smoothly(self, points, approx=True):
+        self.set_points_as_corners(points)
+        self.make_smooth(approx=approx)
+        return self
+
     def get_num_curves(self):
         return self.get_num_points() // 2
 
@@ -2526,6 +2531,27 @@ class VMobject(Mobject):
         vmobject.needs_new_unit_normal = True
         return self
 
+    def subdivide_curves_by_condition(
+        self, tuple_to_subdivisions, recurse=True
+    ):
+        targets = _family_preorder(self) if recurse else [self]
+        planned = []
+        for mob in targets:
+            if not mob.has_points():
+                continue
+            counts = []
+            for curve in mob.get_bezier_tuples():
+                count = tuple_to_subdivisions(*curve)
+                counts.append(_operator.index(count) if count > 0 else 0)
+            planned.append(
+                (mob, mob._subdivide_curve_points_by_counts(counts))
+            )
+        # Callback exceptions, count coercion errors, and Chisel budget
+        # refusals above leave every requested family member untouched.
+        for mob, points in planned:
+            mob.set_points(points)
+        return self
+
     def subdivide_sharp_curves(
         self, angle_threshold=30 * _DEG, recurse=True
     ):
@@ -2535,6 +2561,23 @@ class VMobject(Mobject):
         # when a later descendant is the malformed member.
         planned = [
             (mob, mob._subdivide_sharp_curve_points(float(angle_threshold)))
+            for mob in targets
+            if mob.has_points()
+        ]
+        for mob, points in planned:
+            mob.set_points(points)
+        return self
+
+    def subdivide_intersections(self, recurse=True, n_subdivisions=1):
+        path = [_vec3(point) for point in self.get_anchors()]
+        targets = _family_preorder(self) if recurse else [self]
+        planned = [
+            (
+                mob,
+                mob._subdivide_intersection_curve_points(
+                    path, n_subdivisions
+                ),
+            )
             for mob in targets
             if mob.has_points()
         ]
@@ -8073,6 +8116,21 @@ def _install_space_ops():
         cosine = _np.dot(left, right) / _np.float64(n1 * n2)
         return _math.acos(max(-1.0, min(1.0, cosine)))
 
+    def line_intersects_path(start, end, path):
+        def xy_point(value):
+            point = _np.asarray(value, dtype=float)
+            if point.shape == (2,):
+                return (float(point[0]), float(point[1]), 0.0)
+            if point.shape == (3,):
+                return _vec3(point)
+            raise ValueError("line_intersects_path points need two or three components")
+
+        return _BridgeMobject._line_intersects_path(
+            xy_point(start),
+            xy_point(end),
+            [xy_point(point) for point in path],
+        )
+
     def compass_directions(n=4, start_vect=_RIGHT):
         angle = _math.tau / n
         return _np.array(
@@ -8091,6 +8149,7 @@ def _install_space_ops():
         "cross": cross,
         "angle_of_vector": angle_of_vector,
         "angle_between_vectors": angle_between_vectors,
+        "line_intersects_path": line_intersects_path,
         "compass_directions": compass_directions,
     }
     module = _ensure_module("manimlib.utils.space_ops")

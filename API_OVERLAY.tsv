@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	380565eda8292cae512fa34bc86041d6760157f0a7c5523ab84ac90bb2fa82fe
+ledger_reviewed_digest	2787886589353c408353d1302eb17c17313260e0042b0731786b39470f2bb69b
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -431,7 +431,10 @@ manimlib.mobject.types.vectorized_mobject:VMobject.reverse_points	same	scripts/m
 manimlib.mobject.types.vectorized_mobject:VMobject.set_anchors_and_handles	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	interleaves validated anchors and handles natively then commits the complete run through structured-record resize semantics
 manimlib.mobject.types.vectorized_mobject:VMobject.set_points	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	enforces the empty-or-odd shared-anchor invariant and refreshes native joint metadata through Stage set_points
 manimlib.mobject.types.vectorized_mobject:VMobject.set_points_as_corners	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	uses native midpoint handles while retaining visible-stroke and transparent-fill defaults on the first point allocation
+manimlib.mobject.types.vectorized_mobject:VMobject.set_points_smoothly	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	composes native corner-path construction with approximate or true Chisel smoothing while preserving the familiar fluent surface
 manimlib.mobject.types.vectorized_mobject:VMobject.start_new_path	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	appends the exact handle-on-terminal-anchor break marker or seeds a point-free path from its structured style defaults
+manimlib.mobject.types.vectorized_mobject:VMobject.subdivide_curves_by_condition	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	calls the host predicate once per original float32 curve row then plans the complete family through Chisel's bounded subdivision before mutation
+manimlib.mobject.types.vectorized_mobject:VMobject.subdivide_intersections	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	uses Chisel's strict xy segment-path predicate and bounded condition subdivision over the requested family
 manimlib.mobject.types.vectorized_mobject:VMobject.subdivide_sharp_curves	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	plans the requested family through Chisel's bounded angle subdivision before committing any RecordBuffer mutation
 manimlib.mobject.types.vectorized_mobject:VMobject.tolerance_for_point_equality	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact 1e-8 public tolerance consumed by curve insertion
 manimlib.mobject.svg.brace:Brace	improved	BN-08	crates/fmn-library/src/brace.rs#tests	builds the brace natively without an implicit TeX subprocess
@@ -485,6 +488,7 @@ manimlib.utils.space_ops:angle_between_vectors	same	scripts/manim_ref/manimlib/u
 manimlib.utils.space_ops:angle_of_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes two and three dimensional polar projection through Chisel's deterministic atan2 kernel
 manimlib.utils.space_ops:compass_directions	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	rotates the start vector through Chisel's one rotation implementation at exact equal angular steps
 manimlib.utils.space_ops:cross	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves scalar vectorized row and caller-owned output-array semantics
+manimlib.utils.space_ops:line_intersects_path	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes two- and three-dimensional inputs through Chisel's exact strict xy segment-path crossing predicate
 manimlib.scene.scene:Scene.get_time	improved	BN-02	crates/fmn-python/tests/bridge.py	exposes the native drift-free rational frame clock through the familiar float result
 manimlib.scene.scene:Scene.get_top_level_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	keeps only placements appearing in exactly one current family, including duplicate-placement elimination
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched
