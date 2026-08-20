@@ -890,16 +890,20 @@ impl Torus {
 
     forward_spec!();
 
+    /// Reference `Torus.uv_func`: map angular parameters to the torus using
+    /// the same deterministic transcendental path as construction.
+    #[must_use]
+    pub fn uv_func(&self, u: f64, v: f64) -> Vec3 {
+        let (sin_u, cos_u) = (fmn_dmath::sin(u), fmn_dmath::cos(u));
+        let (sin_v, cos_v) = (fmn_dmath::sin(v), fmn_dmath::cos(v));
+        let ring = self.r1 - self.r2 * cos_v;
+        [ring * cos_u, ring * sin_u, -self.r2 * sin_v]
+    }
+
     /// Sample the torus.
     #[must_use]
     pub fn build(self) -> Surface {
-        let (r1, r2) = (self.r1, self.r2);
-        self.spec.sample(move |u, v| {
-            let (sin_u, cos_u) = (fmn_dmath::sin(u), fmn_dmath::cos(u));
-            let (sin_v, cos_v) = (fmn_dmath::sin(v), fmn_dmath::cos(v));
-            let ring = r1 - r2 * cos_v;
-            [ring * cos_u, ring * sin_u, -r2 * sin_v]
-        })
+        self.spec.sample(|u, v| self.uv_func(u, v))
     }
 }
 
@@ -1039,16 +1043,21 @@ impl Cone {
         self
     }
 
+    /// Reference `Cone.uv_func`: the object-space tapered cylinder before
+    /// the constructor's radius, height, and axis transforms.
+    #[must_use]
+    pub fn uv_func(u: f64, v: f64) -> Vec3 {
+        [
+            (1.0 - v) * fmn_dmath::cos(u),
+            (1.0 - v) * fmn_dmath::sin(u),
+            v,
+        ]
+    }
+
     /// Sample the cone.
     #[must_use]
     pub fn build(self) -> Surface {
-        let surface = self.spec.sample(|u, v| {
-            [
-                (1.0 - v) * fmn_dmath::cos(u),
-                (1.0 - v) * fmn_dmath::sin(u),
-                v,
-            ]
-        });
+        let surface = self.spec.sample(Self::uv_func);
         finish_cylinder(surface, self.radius, self.height, self.axis)
     }
 }
@@ -1153,12 +1162,17 @@ impl Disk3D {
 
     forward_spec!();
 
+    /// Reference `Disk3D.uv_func`: the unit-radius object-space disk before
+    /// the constructor's radius scale.
+    #[must_use]
+    pub fn uv_func(u: f64, v: f64) -> Vec3 {
+        [u * fmn_dmath::cos(v), u * fmn_dmath::sin(v), 0.0]
+    }
+
     /// Sample the disc.
     #[must_use]
     pub fn build(self) -> Surface {
-        let surface = self
-            .spec
-            .sample(|u, v| [u * fmn_dmath::cos(v), u * fmn_dmath::sin(v), 0.0]);
+        let surface = self.spec.sample(Self::uv_func);
         surface.scaled(self.radius)
     }
 }
@@ -1206,10 +1220,17 @@ impl Square3D {
 
     forward_spec!();
 
+    /// Reference `Square3D.uv_func`: the object-space plane before the
+    /// constructor's side-length scale.
+    #[must_use]
+    pub const fn uv_func(u: f64, v: f64) -> Vec3 {
+        [u, v, 0.0]
+    }
+
     /// Sample the square.
     #[must_use]
     pub fn build(self) -> Surface {
-        let surface = self.spec.sample(|u, v| [u, v, 0.0]);
+        let surface = self.spec.sample(Self::uv_func);
         surface.scaled(self.side_length / 2.0)
     }
 }
@@ -2736,7 +2757,10 @@ mod tests {
 
     #[test]
     fn torus_radii_fix_extents() {
-        let torus = Torus::new(3.0, 1.0).build();
+        let builder = Torus::new(3.0, 1.0);
+        assert_close(builder.uv_func(0.0, 0.0), [2.0, 0.0, 0.0]);
+        assert_close(builder.uv_func(0.0, PI), [4.0, 0.0, 0.0]);
+        let torus = builder.build();
         assert_eq!(torus.resolution(), SURFACE_RESOLUTION);
         assert_eq!(torus.points().len(), 101 * 101);
         let (min, max) = extents(&torus);
@@ -2770,6 +2794,8 @@ mod tests {
 
     #[test]
     fn cone_spans_zero_to_height_like_the_reference() {
+        assert_close(Cone::uv_func(0.0, 0.0), [1.0, 0.0, 0.0]);
+        assert_close(Cone::uv_func(0.0, 1.0), [0.0, 0.0, 1.0]);
         let cone = Cone::new(2.0, 1.0).build();
         let (min, max) = extents(&cone);
         assert!((min[0] + 1.0).abs() < 1e-9 && (max[0] - 1.0).abs() < 1e-9);
@@ -2803,6 +2829,7 @@ mod tests {
 
     #[test]
     fn disk3d_has_coincident_center_row() {
+        assert_close(Disk3D::uv_func(0.5, 0.0), [0.5, 0.0, 0.0]);
         let disk = Disk3D::new(2.0).build();
         assert_eq!(disk.resolution(), (2, 100));
         assert_eq!(disk.points().len(), 200);
@@ -2822,6 +2849,7 @@ mod tests {
 
     #[test]
     fn square3d_corners() {
+        assert_close(Square3D::uv_func(-1.0, 1.0), [-1.0, 1.0, 0.0]);
         let square = Square3D::new(2.0).build();
         assert_eq!(square.resolution(), (2, 2));
         assert_eq!(square.points().len(), 4);
