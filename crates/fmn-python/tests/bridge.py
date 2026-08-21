@@ -10513,3 +10513,46 @@ except TypeError as error:
     assert "requires a VMobject" in str(error)
 else:
     raise AssertionError("AnimatedBoundary accepted a non-VMobject")
+
+# fm-5wq.4.75: the fading base class per the pinned schema — Fade(Transform)
+# stores shift/scale; FadeIn/FadeOut are its concrete subclasses. The
+# Reference's bare Fade has no target and dies at begin; the portal
+# constructs it and refuses by name at play instead of crashing.
+assert fading.Fade.__bases__ == (manimlib.Transform,)
+assert fading.FadeIn.__bases__ == (fading.Fade,)
+assert fading.FadeOut.__bases__ == (fading.Fade,)
+fade_signature = inspect.signature(fading.Fade)
+assert tuple(fade_signature.parameters) == ("mobject", "shift", "scale", "kwargs")
+assert fade_signature.parameters["scale"].default == 1.0
+
+try:
+    fading.Fade(None)
+except TypeError as error:
+    assert "Fade expects a Mobject" in str(error), error
+    assert "NoneType" in str(error), error
+else:
+    raise AssertionError("Fade accepted None")
+
+fade_base_dot = manimlib.Dot()
+fade_base_scene = InteractiveScene()
+fade_base_scene.add(fade_base_dot)
+fade_base_probe = fading.Fade(fade_base_dot, shift=(1.0, 0.0, 0.0), scale=2.0)
+assert np.allclose(fade_base_probe.shift_vect, [1.0, 0.0, 0.0])
+assert fade_base_probe.scale_factor == 2.0
+try:
+    fade_base_scene.play(fade_base_probe, run_time=1.0 / 30.0)
+except ValueError as error:
+    assert "requires a target" in str(error), error
+else:
+    raise AssertionError("bare Fade played without a target")
+
+# The concrete fade still plays through the rebased hierarchy: opacity
+# actually drops to zero.
+fade_out_dot = manimlib.Dot()
+fade_base_scene.add(fade_out_dot)
+fade_base_scene.play(
+    fading.FadeOut(fade_out_dot),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(fade_out_dot.data["fill_rgba"][:, 3], 0.0)

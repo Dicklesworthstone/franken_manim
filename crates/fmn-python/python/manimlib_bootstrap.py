@@ -9281,59 +9281,6 @@ class MaintainPositionRelativeTo(_NativeAnimation):
         self.tracked_mobject = tracked_mobject
 
 
-class Fade(Transform):
-    """fading.py's shared base at the pin (fm-5wq.4.75): a Transform that
-    stores the shift/scale the concrete fades compose.  The Reference's
-    bare ``Fade(mobject)`` has no target and dies at begin; here it
-    constructs (base surface) and refuses by name at play instead."""
-
-    def __init__(self, mobject, shift=_ORIGIN, scale=1.0, **kwargs):
-        if not isinstance(mobject, Mobject):
-            raise TypeError(
-                "Fade expects a Mobject; got " + type(mobject).__name__
-            )
-        super().__init__(mobject, None, **kwargs)
-        self.shift_vect = _vec3(shift)
-        self.scale_factor = float(scale)
-
-    def _allows_deferred_target(self):
-        return True
-
-    def _native_params(self):
-        return {"shift": self.shift_vect, "scale": self.scale_factor}
-
-
-class FadeIn(Fade):
-    _native_kind = "fade_in"
-
-
-class FadeOut(Fade):
-    _native_kind = "fade_out"
-
-    def __init__(self, mobject, shift=_ORIGIN, remover=True, final_alpha_value=0.0, **kwargs):
-        scale = kwargs.pop("scale", 1.0)
-        _refuse_unrouted(
-            "FadeOut()",
-            [
-                ("remover", remover is not True),
-                ("final_alpha_value", final_alpha_value != 0.0),
-            ],
-        )
-        super().__init__(mobject, shift=shift, scale=scale, **kwargs)
-
-
-class FadeInFromLarge(FadeIn):
-    """Compatibility spelling for a fade from an enlarged start state."""
-
-    def __init__(self, mobject, scale_factor=2, **kwargs):
-        self.scale_factor = float(scale_factor)
-        if not _math.isfinite(self.scale_factor) or self.scale_factor <= 0:
-            raise ValueError(
-                "FadeInFromLarge scale_factor must be positive and finite"
-            )
-        super().__init__(mobject, scale=1.0 / self.scale_factor, **kwargs)
-
-
 class VFadeIn(_NativeAnimation):
     _native_kind = "v_fade_in"
 
@@ -9656,6 +9603,59 @@ class Transform(_NativeAnimation):
         if self._allows_deferred_target():
             self.target_mobject = self.create_target()
         return self.target_mobject
+
+
+class Fade(Transform):
+    """fading.py's shared base at the pin (fm-5wq.4.75): a Transform that
+    stores the shift/scale the concrete fades compose.  The Reference's
+    bare ``Fade(mobject)`` has no target and dies at begin; here it
+    constructs (base surface) and refuses by name at play instead."""
+
+    def __init__(self, mobject, shift=_ORIGIN, scale=1.0, **kwargs):
+        if not isinstance(mobject, Mobject):
+            raise TypeError(
+                "Fade expects a Mobject; got " + type(mobject).__name__
+            )
+        super().__init__(mobject, None, **kwargs)
+        self.shift_vect = _vec3(shift)
+        self.scale_factor = float(scale)
+
+    def _allows_deferred_target(self):
+        return True
+
+    def _native_params(self):
+        return {"shift": self.shift_vect, "scale": self.scale_factor}
+
+
+class FadeIn(Fade):
+    _native_kind = "fade_in"
+
+
+class FadeOut(Fade):
+    _native_kind = "fade_out"
+
+    def __init__(self, mobject, shift=_ORIGIN, remover=True, final_alpha_value=0.0, **kwargs):
+        scale = kwargs.pop("scale", 1.0)
+        _refuse_unrouted(
+            "FadeOut()",
+            [
+                ("remover", remover is not True),
+                ("final_alpha_value", final_alpha_value != 0.0),
+            ],
+        )
+        super().__init__(mobject, shift=shift, scale=scale, **kwargs)
+
+
+class FadeInFromLarge(FadeIn):
+    """Compatibility spelling for a fade from an enlarged start state."""
+
+    def __init__(self, mobject, scale_factor=2, **kwargs):
+        self.scale_factor = float(scale_factor)
+        if not _math.isfinite(self.scale_factor) or self.scale_factor <= 0:
+            raise ValueError(
+                "FadeInFromLarge scale_factor must be positive and finite"
+            )
+        super().__init__(mobject, scale=1.0 / self.scale_factor, **kwargs)
 
 
 class GrowFromPoint(Transform):
@@ -11440,6 +11440,7 @@ def _install_schema_surface():
             "manimlib.animation.creation",
             "ShowSubmobjectsOneByOne",
         ): ShowSubmobjectsOneByOne,
+        ("manimlib.animation.fading", "Fade"): Fade,
         ("manimlib.animation.fading", "FadeIn"): FadeIn,
         ("manimlib.animation.fading", "FadeOut"): FadeOut,
         ("manimlib.animation.fading", "FadeInFromLarge"): FadeInFromLarge,
