@@ -9281,19 +9281,33 @@ class MaintainPositionRelativeTo(_NativeAnimation):
         self.tracked_mobject = tracked_mobject
 
 
-class FadeIn(_NativeAnimation):
-    _native_kind = "fade_in"
+class Fade(Transform):
+    """fading.py's shared base at the pin (fm-5wq.4.75): a Transform that
+    stores the shift/scale the concrete fades compose.  The Reference's
+    bare ``Fade(mobject)`` has no target and dies at begin; here it
+    constructs (base surface) and refuses by name at play instead."""
 
     def __init__(self, mobject, shift=_ORIGIN, scale=1.0, **kwargs):
-        super().__init__(mobject, **kwargs)
+        if not isinstance(mobject, Mobject):
+            raise TypeError(
+                "Fade expects a Mobject; got " + type(mobject).__name__
+            )
+        super().__init__(mobject, None, **kwargs)
         self.shift_vect = _vec3(shift)
         self.scale_factor = float(scale)
+
+    def _allows_deferred_target(self):
+        return True
 
     def _native_params(self):
         return {"shift": self.shift_vect, "scale": self.scale_factor}
 
 
-class FadeOut(FadeIn):
+class FadeIn(Fade):
+    _native_kind = "fade_in"
+
+
+class FadeOut(Fade):
     _native_kind = "fade_out"
 
     def __init__(self, mobject, shift=_ORIGIN, remover=True, final_alpha_value=0.0, **kwargs):
@@ -10364,11 +10378,17 @@ class TransformMatchingStrings(_NativeAnimation):
                 type(self).__name__
                 + " requires non-empty native span maps"
             )
-        if matched_pairs:
-            raise NotImplementedError(
-                type(self).__name__
-                + " matched_pairs awaits the explicit-pair native key override"
+        pairs = [tuple(pair) for pair in matched_pairs]
+        if not all(
+            len(pair) == 2
+            and isinstance(pair[0], Mobject)
+            and isinstance(pair[1], Mobject)
+            for pair in pairs
+        ):
+            raise TypeError(
+                type(self).__name__ + " matched_pairs must pair Mobjects"
             )
+        self.matched_pairs = pairs
         self.target_mobject = target
         self.matched_keys = tuple(matched_keys)
         self.key_map = dict(key_map or {})
@@ -10432,9 +10452,72 @@ class TransformMatchingStrings(_NativeAnimation):
             scope(target_keys, target_block, "target-only"),
         )
 
+    def _claim_matched_pairs(self, source_keys, target_keys):
+        """The explicit-pair native key override (fm-5wq.4.76): each user
+        pair claims its two parts with a unique shared key BEFORE the
+        matching-blocks pass, so the pair always transforms together and
+        the block matcher only sees the remainder. A pair member that is
+        not a live span-map part, or a part claimed twice, refuses by
+        name."""
+        source_claims = {}
+        target_claims = {}
+        for ordinal, (source_part, target_part) in enumerate(
+            self.matched_pairs
+        ):
+            key = "matched-pair:" + str(ordinal)
+            if (
+                id(source_part) in source_claims
+                or id(target_part) in target_claims
+            ):
+                raise ValueError(
+                    type(self).__name__
+                    + " matched_pairs claims the same part twice"
+                )
+            source_claims[id(source_part)] = key
+            target_claims[id(target_part)] = key
+
+        def claim(keys, claims, side):
+            remaining = []
+            claimed = []
+            for part, key in keys:
+                pair_key = claims.pop(id(part), None)
+                if pair_key is not None:
+                    claimed.append((part, pair_key))
+                else:
+                    remaining.append((part, key))
+            if claims:
+                raise ValueError(
+                    type(self).__name__
+                    + " matched_pairs member is not a live span-map part "
+                    "of the " + side + " family"
+                )
+            return remaining, claimed
+
+        source_remaining, source_claimed = claim(
+            source_keys, source_claims, "source"
+        )
+        target_remaining, target_claimed = claim(
+            target_keys, target_claims, "target"
+        )
+        return (
+            source_remaining,
+            source_claimed,
+            target_remaining,
+            target_claimed,
+        )
+
     def _native_params(self):
         source_keys = self._native_span_keys(self.mobject)
         target_keys = self._native_span_keys(self.target_mobject)
+        source_claimed = []
+        target_claimed = []
+        if self.matched_pairs:
+            (
+                source_keys,
+                source_claimed,
+                target_keys,
+                target_claimed,
+            ) = self._claim_matched_pairs(source_keys, target_keys)
         if self.matched_keys and not self._match_by_blocks:
             admitted = set(self.matched_keys)
             source_keys = [
@@ -10455,7 +10538,10 @@ class TransformMatchingStrings(_NativeAnimation):
             source_keys, target_keys = self._matching_block_keys(
                 source_keys, target_keys, pinned
             )
-        return {"source_keys": source_keys, "target_keys": target_keys}
+        return {
+            "source_keys": source_keys + source_claimed,
+            "target_keys": target_keys + target_claimed,
+        }
 
 
 class TransformMatchingTex(TransformMatchingStrings):
