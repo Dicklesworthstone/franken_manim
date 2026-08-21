@@ -10815,7 +10815,7 @@ class FlashAround(VShowPassingFlash):
         **kwargs,
     ):
         if not isinstance(mobject, _BridgeMobject):
-            raise TypeError("FlashAround expects a Mobject")
+            raise TypeError(f"{type(self).__name__} expects a Mobject")
         path = self.get_path(mobject, buff)
         if mobject.is_fixed_in_frame():
             path.fix_in_frame()
@@ -10850,7 +10850,7 @@ class ShowPassingFlashAround(VShowPassingFlash):
         **kwargs,
     ):
         if not isinstance(mobject, _BridgeMobject):
-            raise TypeError("ShowPassingFlashAround expects a Mobject")
+            raise TypeError(f"{type(self).__name__} expects a Mobject")
         rect = SurroundingRectangle(
             mobject,
             stroke_width=stroke_width,
