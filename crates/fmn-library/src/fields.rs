@@ -2878,6 +2878,20 @@ mod tests {
                 .all(|p| space_ops::get_dist(*p, [2.0, 1.0, 0.0]) < 1e-6),
             "prefilled tail must sit on the start point"
         );
+
+        let custom_tail = TracingTail::new()
+            .with_time_per_anchor(1.0 / 30.0)
+            .unwrap_or_else(|error| std::panic::panic_any(format!("cadence: {error}")))
+            .add_to_stage(&mut stage, cursor)
+            .unwrap_or_else(|error| std::panic::panic_any(format!("custom tail: {error}")));
+        let custom_points = stage
+            .get_points(custom_tail)
+            .unwrap_or_else(|| std::panic::panic_any("custom tail points"));
+        assert_eq!(custom_points.len(), 59);
+        assert!(matches!(
+            TracingTail::new().with_time_per_anchor(0.0),
+            Err(FieldError::NonFiniteControl { .. })
+        ));
         assert!(!classify_wait(&stage, false).is_pure());
     }
 
