@@ -11214,6 +11214,49 @@ class ModuleLoader:
         return module
 
 
+def get_indent(code_lines, line_number):
+    line = code_lines[int(line_number)]
+    return line[: len(line) - len(line.lstrip())]
+
+
+def is_child_scene(obj, module):
+    if module is None or not _inspect.isclass(obj):
+        return False
+    try:
+        if not issubclass(obj, Scene):
+            return False
+    except TypeError:
+        return False
+    if obj in (Scene, InteractiveScene, ThreeDScene, BlankScene):
+        return False
+    module_name = getattr(module, "__name__", "")
+    if not module_name:
+        return False
+    return str(getattr(obj, "__module__", "")).startswith(module_name)
+
+
+def get_scene_classes(module):
+    if module is None:
+        return []
+    return [
+        member
+        for member in vars(module).values()
+        if is_child_scene(member, module)
+    ]
+
+
+def get_module(run_config):
+    if not isinstance(run_config, dict):
+        raise TypeError("get_module run_config must be a dict")
+    file_name = run_config.get("file_name")
+    if file_name is None:
+        file_name = run_config.get("module")
+    return ModuleLoader.get_module(
+        file_name,
+        is_during_reload=bool(run_config.get("is_during_reload", False)),
+    )
+
+
 class CheckpointManager:
     """Named SceneState snapshots for interactive re-run of a comment-keyed block."""
 
@@ -15333,6 +15376,10 @@ def _install_schema_surface():
             "manimlib.animation.animation",
             "prepare_animation",
         ): prepare_animation,
+        ("manimlib.extract_scene", "get_indent"): get_indent,
+        ("manimlib.extract_scene", "is_child_scene"): is_child_scene,
+        ("manimlib.extract_scene", "get_scene_classes"): get_scene_classes,
+        ("manimlib.extract_scene", "get_module"): get_module,
     }
     for (module_name, name), function in special_functions.items():
         function.__module__ = module_name

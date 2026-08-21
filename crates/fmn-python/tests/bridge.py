@@ -3301,6 +3301,43 @@ try:
 finally:
     pathlib.Path(loader_path).unlink(missing_ok=True)
 
+assert str(inspect.signature(extract_scene.get_indent)) == (
+    "(code_lines, line_number)"
+)
+assert extract_scene.get_indent(["    play()", "wait()"], 0) == "    "
+assert extract_scene.get_indent(["    play()", "wait()"], 1) == ""
+assert extract_scene.get_scene_classes(None) == []
+assert extract_scene.is_child_scene(Scene, extract_scene) is False
+assert extract_scene.is_child_scene(InteractiveScene, extract_scene) is False
+assert extract_scene.get_module({}) is None
+try:
+    extract_scene.get_module(object())
+except TypeError as error:
+    assert str(error) == "get_module run_config must be a dict"
+else:
+    raise AssertionError("extract_scene.get_module accepted a non-dict")
+with tempfile.NamedTemporaryFile(
+    "w", suffix=".py", delete=False, encoding="utf-8"
+) as handle:
+    handle.write(
+        "from manimlib import InteractiveScene, Scene\n"
+        "class Demo(Scene):\n"
+        "    def construct(self):\n"
+        "        pass\n"
+        "class Also(InteractiveScene):\n"
+        "    def construct(self):\n"
+        "        pass\n"
+    )
+    extract_path = handle.name
+try:
+    extracted = extract_scene.get_module({"file_name": extract_path})
+    classes = extract_scene.get_scene_classes(extracted)
+    assert [cls.__name__ for cls in classes] == ["Demo", "Also"]
+    assert all(extract_scene.is_child_scene(cls, extracted) for cls in classes)
+    assert extract_scene.is_child_scene(extracted.Scene, extracted) is False
+finally:
+    pathlib.Path(extract_path).unlink(missing_ok=True)
+
 # The next honest native constructor is legacy SingleStringTex over Scribe's
 # existing fmn-library Tex builder.
 old_tex_mobjects = importlib.import_module(
