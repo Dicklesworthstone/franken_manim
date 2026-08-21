@@ -2577,7 +2577,7 @@ assert np.allclose(
     [64.0 / 255.0, 128.0 / 255.0, 1.0, 0.5],
 )
 assert np.allclose(
-    _color_to_rgb(color_sliders.selected_color_box.get_fill_color()),
+    manimlib.color_to_rgb(color_sliders.selected_color_box.get_fill_color()),
     [64.0 / 255.0, 128.0 / 255.0, 1.0],
     atol=1.0 / 255.0,
 )
