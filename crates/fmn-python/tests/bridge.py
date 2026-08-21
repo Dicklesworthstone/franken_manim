@@ -10768,6 +10768,75 @@ except bridge_errors.CapabilityError as error:
     )
 else:
     raise AssertionError("Window accepted a Scene without a Studio host")
+
+writer_mod = importlib.import_module("manimlib.scene.scene_file_writer")
+assert writer_mod.SceneFileWriter.__bases__ == (object,)
+writer_signature = inspect.signature(writer_mod.SceneFileWriter)
+assert list(writer_signature.parameters) == [
+    "scene",
+    "write_to_movie",
+    "subdivide_output",
+    "png_mode",
+    "save_last_frame",
+    "movie_file_extension",
+    "output_directory",
+    "file_name",
+    "open_file_upon_completion",
+    "show_file_location_upon_completion",
+    "quiet",
+    "total_frames",
+    "progress_description_len",
+    "ffmpeg_bin",
+    "video_codec",
+    "pixel_format",
+    "saturation",
+    "gamma",
+    "kwargs",
+]
+writer_scene = Scene()
+writer = writer_mod.SceneFileWriter(
+    writer_scene,
+    file_name="demo",
+    output_directory="/tmp/out",
+    write_to_movie=True,
+    open_file_upon_completion=True,
+)
+assert writer.scene is writer_scene
+assert writer.file_name == "demo"
+assert writer.get_output_file_name() == "demo"
+assert writer.get_output_file_rootname() == "/tmp/out/demo"
+assert writer.get_image_file_path() == "/tmp/out/demo.png"
+assert writer.get_movie_file_path() == "/tmp/out/demo.mp4"
+assert writer.get_insert_file_path(2) == "/tmp/out/demo_2.mp4"
+assert writer.get_next_partial_movie_path() == (
+    "/tmp/out/partial_movie_files/demo/00000.mp4"
+)
+assert writer.should_open_file() is True
+assert writer.has_progress_display() is True
+assert writer.use_fast_encoding() is True
+default_writer = writer_mod.SceneFileWriter(Scene())
+assert default_writer.get_output_file_name() == "Scene"
+assert default_writer.get_image_file_path() == "Scene.png"
+assert default_writer.has_progress_display() is False
+try:
+    writer.open_movie_pipe("/tmp/out/demo.mp4")
+except bridge_errors.CapabilityError as error:
+    assert "ffmpeg Reel boundary" in str(error)
+else:
+    raise AssertionError("SceneFileWriter opened a movie pipe")
+try:
+    writer_mod.SceneFileWriter(manimlib.Square())
+except TypeError as error:
+    assert str(error) == "SceneFileWriter scene must be a Scene"
+else:
+    raise AssertionError("SceneFileWriter accepted a non-Scene")
+failed_writer = writer_mod.SceneFileWriter.__new__(writer_mod.SceneFileWriter)
+try:
+    writer_mod.SceneFileWriter.__init__(failed_writer, writer_scene, unsupported=True)
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("SceneFileWriter silently discarded an unknown option")
 assert not any(
     name == root or name.startswith(root + ".")
     for name in sys.modules

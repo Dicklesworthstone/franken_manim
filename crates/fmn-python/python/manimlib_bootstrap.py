@@ -14410,6 +14410,130 @@ class Window(_UnavailablePygletWindow):
         )
 
 
+class SceneFileWriter:
+    """Reference write-surface constructor over Reel path/config knobs.
+
+    Construction records the scene and encode knobs without mkdir or ffmpeg.
+    Path queries are pure. Movie encode/mux stays the ffmpeg Reel boundary.
+    """
+
+    def __init__(
+        self,
+        scene,
+        write_to_movie=False,
+        subdivide_output=False,
+        png_mode="RGBA",
+        save_last_frame=False,
+        movie_file_extension=".mp4",
+        output_directory=".",
+        file_name=None,
+        open_file_upon_completion=False,
+        show_file_location_upon_completion=False,
+        quiet=False,
+        total_frames=0,
+        progress_description_len=40,
+        ffmpeg_bin="ffmpeg",
+        video_codec="libx264",
+        pixel_format="yuv420p",
+        saturation=1.0,
+        gamma=1.0,
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not isinstance(scene, Scene):
+            raise TypeError("SceneFileWriter scene must be a Scene")
+        self.scene = scene
+        self.write_to_movie = bool(write_to_movie)
+        self.subdivide_output = bool(subdivide_output)
+        self.png_mode = str(png_mode)
+        self.save_last_frame = bool(save_last_frame)
+        self.movie_file_extension = str(movie_file_extension)
+        self.output_directory = str(output_directory)
+        self.file_name = None if file_name is None else str(file_name)
+        self.open_file_upon_completion = bool(open_file_upon_completion)
+        self.show_file_location_upon_completion = bool(
+            show_file_location_upon_completion
+        )
+        self.quiet = bool(quiet)
+        self.total_frames = int(total_frames)
+        self.progress_description_len = int(progress_description_len)
+        self.ffmpeg_bin = str(ffmpeg_bin)
+        self.video_codec = str(video_codec)
+        self.pixel_format = str(pixel_format)
+        self.saturation = float(saturation)
+        self.gamma = float(gamma)
+        self.image_file_path = self.get_image_file_path()
+        self.movie_file_path = self.get_movie_file_path()
+
+    def _movie_extension(self):
+        extension = self.movie_file_extension
+        if not extension.startswith("."):
+            return "." + extension
+        return extension
+
+    def get_output_file_name(self):
+        if self.file_name:
+            return self.file_name
+        return type(self.scene).__name__
+
+    def get_output_file_rootname(self):
+        return str(_pathlib.Path(self.output_directory) / self.get_output_file_name())
+
+    def get_image_file_path(self):
+        return self.get_output_file_rootname() + ".png"
+
+    def get_movie_file_path(self):
+        return self.get_output_file_rootname() + self._movie_extension()
+
+    def get_insert_file_path(self, index):
+        return (
+            self.get_output_file_rootname()
+            + f"_{int(index)}"
+            + self._movie_extension()
+        )
+
+    def get_next_partial_movie_path(self):
+        plays = int(getattr(self.scene, "num_plays", 0))
+        directory = (
+            _pathlib.Path(self.output_directory)
+            / "partial_movie_files"
+            / self.get_output_file_name()
+        )
+        return str(directory / f"{plays:05}{self._movie_extension()}")
+
+    def should_open_file(self):
+        return bool(self.open_file_upon_completion)
+
+    def has_progress_display(self):
+        return bool(self.write_to_movie) and not bool(self.quiet)
+
+    def use_fast_encoding(self):
+        return self.pixel_format != "yuv444p"
+
+    def open_movie_pipe(self, file_path):
+        del file_path
+        raise _CapabilityError(
+            "SceneFileWriter movie encode is the ffmpeg Reel boundary; "
+            "use native PNG/y4m output or the fmn CLI"
+        )
+
+    def close_movie_pipe(self):
+        raise _CapabilityError(
+            "SceneFileWriter movie encode is the ffmpeg Reel boundary; "
+            "use native PNG/y4m output or the fmn CLI"
+        )
+
+    def write_frame(self, camera):
+        del camera
+        raise _CapabilityError(
+            "SceneFileWriter movie encode is the ffmpeg Reel boundary; "
+            "use native PNG/y4m output or the fmn CLI"
+        )
+
+
 def _constant_expression(detail, env):
     """Evaluate only the closed expression grammar used by schema constants.
 
@@ -15027,6 +15151,7 @@ def _install_schema_surface():
         ): InteractiveSceneEmbed,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.window", "Window"): Window,
+        ("manimlib.scene.scene_file_writer", "SceneFileWriter"): SceneFileWriter,
         ("manimlib.animation.animation", "Animation"): Animation,
     }
     pyglet_module = _ensure_module("manimlib.window")
