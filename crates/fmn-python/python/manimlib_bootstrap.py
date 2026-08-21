@@ -12636,6 +12636,10 @@ def _install_schema_surface():
         ): ShowCreationThenDestruction,
         (
             "manimlib.animation.indication",
+            "ShowCreationThenFadeOut",
+        ): ShowCreationThenFadeOut,
+        (
+            "manimlib.animation.indication",
             "VShowPassingFlash",
         ): VShowPassingFlash,
         ("manimlib.animation.indication", "FlashAround"): FlashAround,
