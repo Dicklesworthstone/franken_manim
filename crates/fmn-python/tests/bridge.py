@@ -12530,37 +12530,69 @@ except TypeError as error:
 else:
     raise AssertionError("ApplyComplexFunction accepted a non-complex map")
 
-# fm-5wq.4.103: ShowCreationThenFadeOut — constant-rate probes freeze each
-# half of the native show_creation_then_fade_out composition (Succession
-# window [0, 0.5] creates, [0.5, 1] fades; the end-state removal is pinned
-# earlier), and the None refusal names the composite class.
+# fm-5wq.4.103: ShowCreationThenFadeOut through the native
+# show_creation_then_fade_out Succession. The mid-window states are
+# observable only mid-segment: Succession.finish lands the active member
+# on ITS OWN final_alpha_value (Reference AnimationGroup semantics), so
+# ShowCreation completes and FadeOut (final_alpha_value = 0) restores at
+# play end. A per-frame updater probe captures the contract states at
+# their honest moments: the create half at group alpha 0.25 matches
+# pointwise_become_partial(reference, 0.0, 0.5), the fade half at 0.75
+# holds stroke alpha 0.5, and the end state is the finished-then-restored
+# removed square.
 sctfo_scene = InteractiveScene()
-sctfo_create_square = manimlib.Square(side_length=1.0)
-sctfo_create_square.set_stroke(manimlib.WHITE, width=4.0)
-sctfo_create_reference = sctfo_create_square.copy()
-sctfo_create_expected = sctfo_create_square.copy()
-sctfo_create_expected.pointwise_become_partial(
-    sctfo_create_reference, 0.0, 0.5
-)
-sctfo_scene.add(sctfo_create_square)
-sctfo_scene.play(
-    indication_module.ShowCreationThenFadeOut(sctfo_create_square),
-    run_time=2.0 / 30.0,
-    rate_func=lambda t: 0.25,
-)
-assert np.allclose(
-    sctfo_create_square.get_points(), sctfo_create_expected.get_points()
-)
+sctfo_square = manimlib.Square(side_length=1.0)
+sctfo_square.set_stroke(manimlib.WHITE, width=4.0, opacity=1.0)
+sctfo_reference = sctfo_square.copy()
+sctfo_expected_half = sctfo_square.copy()
+sctfo_expected_half.pointwise_become_partial(sctfo_reference, 0.0, 0.5)
+sctfo_probe = manimlib.Dot()
+sctfo_scene.add(sctfo_square, sctfo_probe)
+sctfo_frames = []
 
-sctfo_fade_square = manimlib.Square(side_length=1.0)
-sctfo_fade_square.set_stroke(manimlib.WHITE, width=4.0, opacity=1.0)
-sctfo_scene.add(sctfo_fade_square)
+
+def _sctfo_capture(mobject, dt):
+    del mobject
+    if dt > 0:
+        sctfo_frames.append(
+            (
+                np.array(sctfo_square.get_points(), dtype=float).copy(),
+                np.array(
+                    sctfo_square.data["stroke_rgba"][:, 3], dtype=float
+                ).copy(),
+            )
+        )
+
+
+sctfo_probe.add_updater(_sctfo_capture)
 sctfo_scene.play(
-    indication_module.ShowCreationThenFadeOut(sctfo_fade_square),
-    run_time=2.0 / 30.0,
-    rate_func=lambda t: 0.75,
+    indication_module.ShowCreationThenFadeOut(sctfo_square),
+    run_time=4.0 / 30.0,
+    rate_func=manimlib.linear,
 )
-assert np.allclose(sctfo_fade_square.data["stroke_rgba"][:, 3], 0.5, atol=1e-9)
+sctfo_probe.remove_updater(_sctfo_capture)
+assert len(sctfo_frames) == 4, len(sctfo_frames)
+
+# Frame 1 (group alpha 0.25): the create half, frozen mid-window — the
+# member's symmetric smooth makes sub-alpha exactly 0.5.
+sctfo_quarter_points, sctfo_quarter_alpha = sctfo_frames[0]
+assert np.allclose(sctfo_quarter_points, sctfo_expected_half.get_points())
+assert np.allclose(sctfo_quarter_alpha, 1.0)
+
+# Frame 3 (group alpha 0.75): creation complete, the fade half at stroke
+# alpha exactly 0.5.
+sctfo_fade_points, sctfo_fade_alpha = sctfo_frames[2]
+assert np.allclose(sctfo_fade_points, sctfo_reference.get_points())
+assert np.allclose(sctfo_fade_alpha, 0.5)
+
+# Frame 4 (group alpha 1.0): fully faded before the finish epilogue.
+assert np.allclose(sctfo_frames[3][1], 0.0)
+
+# Play end: the remover took the square out, and FadeOut's
+# final_alpha_value = 0 restored its records (fading.py:76).
+assert sctfo_square not in sctfo_scene.get_mobjects()
+assert np.allclose(sctfo_square.get_points(), sctfo_reference.get_points())
+assert np.allclose(sctfo_square.data["stroke_rgba"][:, 3], 1.0)
 
 try:
     indication_module.ShowCreationThenFadeOut(None)
