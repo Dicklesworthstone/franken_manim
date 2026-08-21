@@ -6223,8 +6223,9 @@ class Matrix(VMobject):
     """Atlas's native scalar Matrix grid and bundled-math delimiters.
 
     Real entries take the DecimalNumber route and other scalars take the
-    Reference's Tex(str(value)) route, including heterogeneous grids.
-    Complex values and caller-owned VMobjects remain precise refusals.
+    Reference's Tex(str(value)) route, including heterogeneous grids and
+    explicit complex element conversion. Complex values and caller-owned
+    VMobjects remain constructor refusals until the native grid accepts them.
     """
 
     def __init__(
@@ -6315,11 +6316,6 @@ class Matrix(VMobject):
         if not isinstance(self, Matrix):
             raise TypeError(
                 "Matrix.element_to_mobject requires a Matrix instance"
-            )
-        if isinstance(element, complex):
-            raise NotImplementedError(
-                "Matrix.element_to_mobject complex entries await the native "
-                "complex entry factory"
             )
         if isinstance(element, VMobject):
             return element

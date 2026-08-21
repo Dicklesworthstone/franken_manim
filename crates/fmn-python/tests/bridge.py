@@ -8971,15 +8971,14 @@ assert mapped_decimal_entry.get_value() == 7.25
 assert mapped_decimal_entry.family_members_with_points()
 passthrough_entry = manimlib.Circle()
 assert integer_tex_matrix.element_to_mobject(passthrough_entry) is passthrough_entry
-try:
-    integer_tex_matrix.element_to_mobject(1 + 2j)
-except NotImplementedError as error:
-    assert str(error) == (
-        "Matrix.element_to_mobject complex entries await the native "
-        "complex entry factory"
-    )
-else:
-    raise AssertionError("Matrix.element_to_mobject accepted a complex entry")
+mapped_complex_entry = integer_tex_matrix.element_to_mobject(1 + 0j)
+assert isinstance(mapped_complex_entry, manimlib.Tex)
+assert mapped_complex_entry.get_tex() == "(1+0j)"
+assert mapped_complex_entry.family_members_with_points()
+assert all(
+    member.get_fill_color() == manimlib.BLUE
+    for member in mapped_complex_entry.family_members_with_points()
+)
 try:
     matrix_module.Matrix.element_to_mobject(object(), 0)
 except TypeError as error:
