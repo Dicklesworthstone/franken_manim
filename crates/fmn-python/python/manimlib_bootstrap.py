@@ -12069,6 +12069,15 @@ class SceneState:
         scene.num_plays = self.num_plays
 
 
+# pyglet.window.key tokens used by InteractiveScene key dispatch. The portal
+# never imports pyglet; these integers are the Reference's published values.
+_PYGLET_MOD_SHIFT = 1
+_PYGLET_MOD_CTRL = 2
+_PYGLET_MOD_COMMAND = 64
+_PYGLET_BACKSPACE = 0xFF08
+_PYGLET_ARROW_SYMBOLS = (0xFF51, 0xFF52, 0xFF53, 0xFF54)
+
+
 class ThreeDScene(Scene):
     """Scene with the Reference three-d camera default and add-time depth/stroke."""
 
@@ -12155,6 +12164,94 @@ class InteractiveScene(Scene):
                 "InteractiveScene windowed resize/sweep motion requires a "
                 "host key-state adapter"
             )
+
+    def on_mouse_drag(self, point, d_point, buttons, modifiers):
+        base_handler = Scene.__dict__.get("on_mouse_drag")
+        if base_handler is not None and not getattr(
+            base_handler, "_fmn_schema_placeholder", False
+        ):
+            base_handler(self, point, d_point, buttons, modifiers)
+        else:
+            self.mouse_point.move_to(point)
+
+        crosshair = getattr(self, "crosshair", None)
+        if crosshair is not None:
+            crosshair.move_to(self.frame.to_fixed_frame_point(point))
+
+    def on_mouse_release(self, point, button, mods):
+        base_handler = Scene.__dict__.get("on_mouse_release")
+        if base_handler is not None and not getattr(
+            base_handler, "_fmn_schema_placeholder", False
+        ):
+            base_handler(self, point, button, mods)
+        else:
+            self.mouse_point.move_to(point)
+
+        if self.color_palette in self.mobjects:
+            self.choose_color(point)
+        else:
+            self.clear_selection()
+
+    def on_key_press(self, symbol, modifiers):
+        base_handler = Scene.__dict__.get("on_key_press")
+        if base_handler is not None and not getattr(
+            base_handler, "_fmn_schema_placeholder", False
+        ):
+            base_handler(self, symbol, modifiers)
+        try:
+            char = chr(int(symbol))
+        except (OverflowError, ValueError, TypeError):
+            return
+        keys = _pinned_manim_config().key_bindings
+        grab_keys = (keys.grab, keys.x_grab, keys.y_grab, keys.z_grab)
+        all_mods = _PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND | _PYGLET_MOD_SHIFT
+        modifiers = int(modifiers)
+        if char == keys.select and (modifiers & all_mods) == 0:
+            self.enable_selection()
+        if char == keys.unselect:
+            self.clear_selection()
+        elif char in grab_keys and (modifiers & all_mods) == 0:
+            self.prepare_grab()
+        elif char == keys.color and (modifiers & all_mods) == 0:
+            self.toggle_color_palette()
+        elif char == keys.information and (modifiers & all_mods) == 0:
+            self.display_information()
+        elif int(symbol) == _PYGLET_BACKSPACE:
+            self.delete_selection()
+        elif int(symbol) in _PYGLET_ARROW_SYMBOLS:
+            vects = (_LEFT, _UP, _RIGHT, _DOWN)
+            self.nudge_selection(
+                vects[_PYGLET_ARROW_SYMBOLS.index(int(symbol))],
+                large=bool(modifiers & _PYGLET_MOD_SHIFT),
+            )
+        if char == keys.cursor:
+            if self.crosshair in self.mobjects:
+                self.remove(self.crosshair)
+            else:
+                self.add(self.crosshair)
+        if char == keys.select:
+            self.add(self.crosshair)
+        if char in grab_keys or char == keys.resize:
+            self.save_state()
+
+    def on_key_release(self, symbol, modifiers):
+        base_handler = Scene.__dict__.get("on_key_release")
+        if base_handler is not None and not getattr(
+            base_handler, "_fmn_schema_placeholder", False
+        ):
+            base_handler(self, symbol, modifiers)
+        del modifiers
+        try:
+            char = chr(int(symbol))
+        except (OverflowError, ValueError, TypeError):
+            return
+        keys = _pinned_manim_config().key_bindings
+        if char == keys.select:
+            self.gather_new_selection()
+        if char in (keys.grab, keys.x_grab, keys.y_grab, keys.z_grab):
+            self.is_grabbing = False
+        elif char == keys.information:
+            self.display_information(False)
 
     def add(self, *mobjects):
         super().add(*mobjects)

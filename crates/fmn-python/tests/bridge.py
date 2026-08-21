@@ -3303,6 +3303,88 @@ assert np.allclose(
     motion_start + [1.0, 1.0, 0.0],
 )
 
+# fm-5wq.4: mouse drag shares the native pointer and fixed-frame crosshair
+# path without requiring the Reference's pyglet Window.
+assert str(inspect.signature(InteractiveScene.on_mouse_drag)) == (
+    "(self, point, d_point, buttons, modifiers)"
+)
+drag_scene = InteractiveScene()
+drag_scene.setup()
+assert drag_scene.on_mouse_drag(
+    [1.0, 2.0, 0.0],
+    [0.0, 0.0, 0.0],
+    1,
+    0,
+) is None
+fixed_drag_point = drag_scene.frame.to_fixed_frame_point([1.0, 2.0, 0.0])
+assert np.allclose(
+    drag_scene.mouse_point.get_center(),
+    [1.0, 2.0, 0.0],
+)
+assert np.allclose(
+    drag_scene.crosshair.get_center()[:2],
+    fixed_drag_point[:2],
+    atol=1e-4,
+)
+
+# fm-5wq.4: mouse release clears ordinary selection, while a mounted palette
+# routes the release point through the existing native choose_color path.
+assert str(inspect.signature(InteractiveScene.on_mouse_release)) == (
+    "(self, point, button, mods)"
+)
+release_scene = InteractiveScene()
+release_scene.setup()
+release_circle = manimlib.Circle()
+release_scene.add(release_circle)
+release_scene.add_to_selection(release_circle)
+assert release_circle in release_scene.selection
+assert release_scene.on_mouse_release(manimlib.ORIGIN, 0, 0) is None
+assert len(release_scene.selection) == 0
+
+palette_release_scene = InteractiveScene()
+palette_release_scene.setup()
+palette_release_target = manimlib.Circle().set_color(manimlib.BLUE)
+palette_release_source = manimlib.Square().set_color(manimlib.RED).move_to(
+    [3.0, 0.0, 0.0]
+)
+palette_release_scene.add(palette_release_target, palette_release_source)
+palette_release_scene.add_to_selection(palette_release_target)
+palette_release_scene.toggle_color_palette()
+assert palette_release_scene.color_palette in palette_release_scene.mobjects
+assert palette_release_scene.on_mouse_release(
+    palette_release_source.get_center(), 0, 0
+) is None
+assert palette_release_target.get_color() == manimlib.RED
+assert palette_release_scene.color_palette not in palette_release_scene.mobjects
+
+# fm-5wq.4: key press/release dispatch pinned manim_config bindings without
+# pyglet. Select enables the sweep rectangle and mounts the crosshair;
+# grab/release toggles is_grabbing; unselect clears the live Group.
+assert str(inspect.signature(InteractiveScene.on_key_press)) == (
+    "(self, symbol, modifiers)"
+)
+assert str(inspect.signature(InteractiveScene.on_key_release)) == (
+    "(self, symbol, modifiers)"
+)
+key_scene = InteractiveScene()
+key_scene.setup()
+assert key_scene.on_key_press(ord("s"), 0) is None
+assert key_scene.is_selecting is True
+assert key_scene.selection_rectangle in key_scene.mobjects
+assert key_scene.crosshair in key_scene.mobjects
+key_circle = manimlib.Circle()
+key_scene.add(key_circle)
+key_scene.add_to_selection(key_circle)
+assert key_circle in key_scene.selection
+assert key_scene.on_key_press(ord("u"), 0) is None
+assert len(key_scene.selection) == 0
+assert key_scene.on_key_press(ord("g"), 0) is None
+assert key_scene.is_grabbing is True
+assert key_scene.on_key_release(ord("g"), 0) is None
+assert key_scene.is_grabbing is False
+assert key_scene.on_key_release(ord("s"), 0) is None
+assert key_scene.is_selecting is False
+
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
 assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
