@@ -5168,6 +5168,75 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built.vmob)
     }
 
+    /// `Matrix`'s heterogeneous post-`element_to_mobject` route. Each
+    /// tagged scalar is first built by its native Tex or DecimalNumber
+    /// engine, then transferred into Atlas's base Matrix grid so placement,
+    /// brackets, height capping, and ellipses still have one owner.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_mixed_matrix<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        entries: Vec<Vec<(bool, f64, String)>>,
+        num_decimal_places: usize,
+        v_buff: f64,
+        h_buff: f64,
+        bracket_h_buff: f64,
+        bracket_v_buff: f64,
+        height: Option<f64>,
+        element_alignment_corner: [f64; 3],
+        ellipses_row: Option<isize>,
+        ellipses_col: Option<isize>,
+        ellipses_height_ratio: f64,
+        ellipses_width_ratio: f64,
+        font_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let grid = with_tex_engine(|engine| {
+            with_font_book(|book| {
+                entries
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|(is_decimal, number, tex)| {
+                                if *is_decimal {
+                                    fmn_library::DecimalNumber::new(*number)
+                                        .num_decimal_places(num_decimal_places)
+                                        .font_size(font_size)
+                                        .build(book)
+                                        .map(fmn_library::DecimalNumber::into_vmob)
+                                        .map_err(native_error)
+                                } else {
+                                    fmn_library::Tex::new(tex)
+                                        .font_size(font_size)
+                                        .build(engine)
+                                        .map(|built| built.vmob)
+                                        .map_err(native_error)
+                                }
+                            })
+                            .collect::<PyResult<Vec<_>>>()
+                    })
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })?;
+        let mut builder = fmn_library::Matrix::new(grid)
+            .v_buff(v_buff)
+            .h_buff(h_buff)
+            .bracket_h_buff(bracket_h_buff)
+            .bracket_v_buff(bracket_v_buff)
+            .element_alignment_corner(element_alignment_corner)
+            .ellipses_ratios(ellipses_height_ratio, ellipses_width_ratio);
+        if let Some(height) = height {
+            builder = builder.height(height);
+        }
+        if let Some(row) = ellipses_row {
+            builder = builder.ellipses_row(row);
+        }
+        if let Some(column) = ellipses_col {
+            builder = builder.ellipses_col(column);
+        }
+        let built = with_tex_engine(|engine| builder.build(engine).map_err(native_error))?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
     /// `DecimalMatrix`/`IntegerMatrix` over Atlas's native number grid.
     /// `integer=true` selects the dedicated Integer shelf when the public
     /// constructor retains its default zero decimal places; a non-zero

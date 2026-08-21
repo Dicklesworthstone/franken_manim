@@ -8477,6 +8477,21 @@ assert np.isclose(first_float_entry.get_value(), 9.5)
 assert np.allclose(
     first_float_entry.get_edge_center(manimlib.LEFT), first_float_edge, atol=1e-6
 )
+mixed_matrix = matrix_module.Matrix(
+    [[1.25, "x"], [2, 3.5]],
+    element_config=dict(num_decimal_places=1, font_size=30),
+)
+assert [type(entry) for entry in mixed_matrix.elements] == [
+    manimlib.DecimalNumber,
+    manimlib.Tex,
+    manimlib.Tex,
+    manimlib.DecimalNumber,
+]
+assert mixed_matrix.mob_matrix[0][0].get_value() == 1.25
+assert mixed_matrix.mob_matrix[0][1].get_tex() == "x"
+assert mixed_matrix.mob_matrix[1][0].get_tex() == "2"
+assert mixed_matrix.mob_matrix[1][1].get_value() == 3.5
+assert all(entry.family_members_with_points() for entry in mixed_matrix.elements)
 decimal_matrix = matrix_module.DecimalMatrix(
     [[1, 2.5], [3.75, 4]],
     num_decimal_places=2,
@@ -8527,8 +8542,13 @@ for invalid_matrix, expected_text in [
         assert expected_text in str(error)
     else:
         raise AssertionError("an invalid Matrix shape reached live state")
+try:
+    matrix_module.Matrix(None)
+except TypeError as error:
+    assert str(error) == "matrix must be an iterable of row iterables"
+else:
+    raise AssertionError("Matrix(None) did not raise its named TypeError")
 for unsupported_matrix, expected_text in [
-    ([[1.0, "x"]], "mixed float"),
     ([[1 + 2j]], "complex entries"),
     ([[manimlib.Circle()]], "VMobject entries"),
 ]:

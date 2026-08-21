@@ -6121,6 +6121,27 @@ def _initialize_scalar_matrix(
             [[str(value) for value in row] for row in rows],
             *common,
         )
+    elif kind == "mixed":
+        specs = matrix._build_mixed_matrix(
+            _native_shell_factory,
+            [
+                [
+                    (
+                        isinstance(value, (float, _np.floating))
+                        and not isinstance(value, bool),
+                        float(value)
+                        if isinstance(value, (float, _np.floating))
+                        and not isinstance(value, bool)
+                        else 0.0,
+                        str(value),
+                    )
+                    for value in row
+                ]
+                for row in rows
+            ],
+            int(decimal_places),
+            *common,
+        )
     else:
         specs = matrix._build_decimal_matrix(
             _native_shell_factory,
@@ -6142,12 +6163,17 @@ def _initialize_scalar_matrix(
         n_rows, n_cols, ellipses_row, ellipses_col
     )
     for index, (entry, source) in enumerate(zip(entries, flat_sources)):
-        if kind == "tex":
-            _decorate_matrix_tex_entry(entry, source, font_size)
-        else:
+        is_decimal = kind == "decimal" or (
+            kind == "mixed"
+            and isinstance(source, (float, _np.floating))
+            and not isinstance(source, bool)
+        )
+        if is_decimal:
             _decorate_matrix_decimal_entry(
                 entry, source, font_size, decimal_places, entry_style
             )
+        else:
+            _decorate_matrix_tex_entry(entry, source, font_size)
         # Reference Matrix styles the source entry first, then `become`s a
         # freshly constructed default-style dot. The native builder has
         # already performed that replacement, so only surviving entries
@@ -6178,10 +6204,9 @@ def _initialize_scalar_matrix(
 class Matrix(VMobject):
     """Atlas's native scalar Matrix grid and bundled-math delimiters.
 
-    Homogeneous real grids take the DecimalNumber route; every other scalar
-    grid takes the Reference's Tex(str(value)) route. Mixed scalar types,
-    complex values, and caller-owned VMobjects remain precise refusals until
-    the distinct live-identity transfer seam lands.
+    Real entries take the DecimalNumber route and other scalars take the
+    Reference's Tex(str(value)) route, including heterogeneous grids.
+    Complex values and caller-owned VMobjects remain precise refusals.
     """
 
     def __init__(
@@ -6210,16 +6235,16 @@ class Matrix(VMobject):
             isinstance(value, (float, _np.floating)) and not isinstance(value, bool)
             for value in flat
         ]
-        if any(real_flags) and not all(real_flags):
-            raise NotImplementedError(
-                "Matrix() mixed float and Tex-converted scalar entries await "
-                "the heterogeneous native entry-transfer seam"
-            )
         font_size, places, style = _matrix_entry_config(
             element_config, decimal_places=None
         )
-        kind = "decimal" if real_flags and all(real_flags) else "tex"
-        if kind == "decimal" and places is None:
+        if real_flags and all(real_flags):
+            kind = "decimal"
+        elif any(real_flags):
+            kind = "mixed"
+        else:
+            kind = "tex"
+        if kind in {"decimal", "mixed"} and places is None:
             places = 2
         if kind == "tex" and places is not None:
             raise TypeError("num_decimal_places applies only to real Matrix entries")
