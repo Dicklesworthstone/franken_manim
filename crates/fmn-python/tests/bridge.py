@@ -2529,6 +2529,16 @@ assert np.isclose(palette.get_width(), manimlib.FRAME_WIDTH - 0.5, atol=1e-4)
 assert palette.submobjects[0].get_fill_color() == manimlib.color_to_hex(
     manimlib.MANIM_COLORS[0]
 )
+assert str(inspect.signature(InteractiveScene.get_corner_dots)) == (
+    "(self, mobject)"
+)
+corner_source = manimlib.Circle()
+corner_dots = interactive_scene.get_corner_dots(corner_source)
+assert isinstance(corner_dots, manimlib.DotCloud)
+assert corner_dots.get_num_points() == 4
+assert np.isclose(corner_dots.get_radius(), 0.05)
+assert np.isclose(corner_dots.get_glow_factor(), 2.0)
+assert len(corner_dots.updaters) == 1
 
 
 # The schema-generated import topology and exact-name aliases are present.

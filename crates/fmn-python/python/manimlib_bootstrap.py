@@ -12066,7 +12066,11 @@ class InteractiveScene(Scene):
     )
     selection_rectangle_stroke_color = _WHITE
     selection_rectangle_stroke_width = 1.0
-    palette_colors = _FMN_ROOT.MANIM_COLORS
+    corner_dot_config = dict(
+        color=_WHITE,
+        radius=0.05,
+        glow_factor=2.0,
+    )
 
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
@@ -12094,10 +12098,15 @@ class InteractiveScene(Scene):
         return rect
 
     def get_color_palette(self):
+        colors = getattr(self, "palette_colors", None)
+        if isinstance(colors, str) or not isinstance(colors, (list, tuple)):
+            colors = getattr(_FMN_ROOT, "MANIM_COLORS", None)
+        if isinstance(colors, str) or not colors:
+            colors = list(_pinned_manim_config().colors.values())
         palette = VGroup(
             *(
                 Square(side_length=1, fill_color=color, fill_opacity=1)
-                for color in self.palette_colors
+                for color in colors
             )
         )
         palette.set_stroke(width=0)
@@ -12106,6 +12115,32 @@ class InteractiveScene(Scene):
         palette.to_edge(_DOWN, buff=_SMALL_BUFF)
         palette.fix_in_frame()
         return palette
+
+    def get_corner_dots(self, mobject):
+        dots = DotCloud(**self.corner_dot_config)
+        radius = float(self.corner_dot_config["radius"])
+        if mobject.get_depth() < 1e-2:
+            vects = [
+                _LEFT + _DOWN,
+                _LEFT + _UP,
+                _RIGHT + _UP,
+                _RIGHT + _DOWN,
+            ]
+        else:
+            vects = [
+                _np.array(xyz, dtype=float)
+                for xyz in _itertools.product((-1.0, 1.0), repeat=3)
+            ]
+
+        def place(dots_mob):
+            dots_mob.set_points(
+                [mobject.get_corner(vect) + vect * radius for vect in vects]
+            )
+            return dots_mob
+
+        place(dots)
+        dots.add_updater(place)
+        return dots
 
 
 class BlankScene(InteractiveScene):
@@ -15978,6 +16013,17 @@ def _base_names(detail):
     return result
 
 
+class _AttrDict(dict):
+    """Dict with attribute access so `manim_config.colors.values()` and
+    `manim_config.colors.blue_c` both work for schema constant evaluation."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+
 def _pinned_manim_config():
     """The Reference's default_config.yml at the pin, as namespaces.
 
@@ -16001,7 +16047,7 @@ def _pinned_manim_config():
             grab="g", x_grab="h", y_grab="v", z_grab="z", resize="t", color="c",
             information="i", cursor="k",
         ),
-        colors=ns(
+        colors=_AttrDict(
             blue_e="#1C758A", blue_d="#29ABCA", blue_c="#58C4DD", blue_b="#9CDCEB", blue_a="#C7E9F1",
             teal_e="#49A88F", teal_d="#55C1A7", teal_c="#5CD0B3", teal_b="#76DDC0", teal_a="#ACEAD7",
             green_e="#699C52", green_d="#77B05D", green_c="#83C167", green_b="#A6CF8C", green_a="#C9E2AE",
@@ -16669,6 +16715,8 @@ def _install_schema_surface():
         module = _ensure_module(module_name)
         if hasattr(module, name):
             setattr(root, name, getattr(module, name))
+
+    InteractiveScene.palette_colors = getattr(root, "MANIM_COLORS", None)
 
     root.__reference_commit__ = (
         "6199a00d4c1b1127ebe45cb629c3f22538b10e13"
