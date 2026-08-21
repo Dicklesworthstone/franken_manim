@@ -11597,6 +11597,18 @@ class Scene(_SceneCore):
         self.frame = CameraFrame()
         self.num_plays = 0
         self.undo_stack = []
+        # Reference Scene.__init__ keeps the pointer as two live Point
+        # mobjects on the scene itself, and they are the same Point class
+        # EventDispatcher constructs (dispatch() moves the drag point for
+        # MouseDragEvent and the plain one for everything else), so a scene's
+        # pointer state and a dispatcher's are one kind of object rather than
+        # two lookalikes. InteractiveScene.get_information_label's coordinate
+        # updater reads `mouse_point` every frame; before this it found
+        # nothing and fell back to ORIGIN through its getattr guard.
+        # Two distinct instances, both at ORIGIN: a drag must never drag the
+        # hover point along with it.
+        self.mouse_point = Point()
+        self.mouse_drag_point = Point()
 
     @property
     def frame(self):
@@ -12234,7 +12246,10 @@ class InteractiveScene(Scene):
         for mob in mobs:
             setter = getattr(mob, "set_animating_status", None)
             if callable(setter):
-                setter(True)
+                try:
+                    setter(True)
+                except NotImplementedError:
+                    pass
 
     def toggle_from_selection(self, *mobjects):
         selection = getattr(self, "selection", None)
@@ -12248,7 +12263,10 @@ class InteractiveScene(Scene):
                 selection.remove(mob)
                 setter = getattr(mob, "set_animating_status", None)
                 if callable(setter):
-                    setter(False)
+                    try:
+                        setter(False)
+                    except NotImplementedError:
+                        pass
                 mob.refresh_bounding_box()
             else:
                 self.add_to_selection(mob)
@@ -12263,9 +12281,60 @@ class InteractiveScene(Scene):
         for mob in selection:
             setter = getattr(mob, "set_animating_status", None)
             if callable(setter):
-                setter(False)
+                try:
+                    setter(False)
+                except NotImplementedError:
+                    pass
             mob.refresh_bounding_box()
         selection.set_submobjects([])
+
+    def setup(self):
+        self.selection = Group()
+        self.selection_highlight = self.get_selection_highlight()
+        self.selection_rectangle = self.get_selection_rectangle()
+        self.crosshair = self.get_crosshair()
+        self.information_label = self.get_information_label()
+        self.color_palette = self.get_color_palette()
+        self.unselectables = [
+            self.selection,
+            self.selection_highlight,
+            self.selection_rectangle,
+            self.crosshair,
+            self.information_label,
+            self.camera.frame,
+        ]
+        self.select_top_level_mobs = True
+        self.is_selecting = False
+        self.is_grabbing = False
+        self.add(self.selection_highlight)
+        self.regenerate_selection_search_set()
+
+    def regenerate_selection_search_set(self):
+        unselectables = getattr(self, "unselectables", ())
+        selectable = [mob for mob in self.mobjects if mob not in unselectables]
+        if self.select_top_level_mobs:
+            self.selection_search_set = selectable
+        else:
+            self.selection_search_set = [
+                submob
+                for mob in selectable
+                for submob in mob.family_members_with_points()
+            ]
+
+    def get_selection_search_set(self):
+        return getattr(self, "selection_search_set", [])
+
+    def add(self, *mobjects):
+        result = super().add(*mobjects)
+        if getattr(self, "unselectables", None) is not None:
+            self.regenerate_selection_search_set()
+        return result
+
+    def remove(self, *mobjects):
+        result = super().remove(*mobjects)
+        if getattr(self, "unselectables", None) is not None:
+            self.regenerate_selection_search_set()
+        return result
 
 
 class BlankScene(InteractiveScene):

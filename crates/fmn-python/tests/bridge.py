@@ -2556,6 +2556,26 @@ assert loc_label.is_fixed_in_frame()
 assert time_label.is_fixed_in_frame()
 assert np.isclose(time_label.get_value(), 0.0)
 assert time_label.get_fill_color() == manimlib.GREY_C
+assert isinstance(interactive_scene.mouse_point, manimlib.Point)
+assert isinstance(interactive_scene.mouse_drag_point, manimlib.Point)
+assert interactive_scene.mouse_point is not interactive_scene.mouse_drag_point
+assert np.allclose(interactive_scene.mouse_point.get_center(), 0.0)
+assert str(inspect.signature(InteractiveScene.setup)) == "(self)"
+interactive_scene.setup()
+assert isinstance(interactive_scene.selection, manimlib.Group)
+assert interactive_scene.selection_highlight in interactive_scene.mobjects
+assert interactive_scene.is_selecting is False
+assert interactive_scene.is_grabbing is False
+assert interactive_scene.select_top_level_mobs is True
+assert interactive_scene.crosshair is not interactive_scene.color_palette
+assert interactive_scene.get_selection_search_set() == []
+circle_for_select = manimlib.Circle()
+interactive_scene.add(circle_for_select)
+assert circle_for_select in interactive_scene.get_selection_search_set()
+interactive_scene.add_to_selection(circle_for_select)
+assert list(interactive_scene.selection.submobjects) == [circle_for_select]
+interactive_scene.clear_selection()
+assert list(interactive_scene.selection.submobjects) == []
 assert InteractiveScene.select_top_level_mobs is True
 assert str(inspect.signature(InteractiveScene.get_highlight)) == (
     "(self, mobject)"
@@ -2578,6 +2598,61 @@ selection_highlight = interactive_scene.get_selection_highlight()
 assert isinstance(selection_highlight, manimlib.Group)
 assert selection_highlight.tracked_mobjects == []
 assert len(selection_highlight.updaters) == 1
+
+# fm-5wq.4: the Reference keeps the pointer as two live Point mobjects on the
+# Scene itself. Before this binding they were simply absent, and
+# get_information_label's coordinate updater fell through its getattr guard to
+# a dead ORIGIN on every frame.
+assert isinstance(interactive_scene.mouse_point, manimlib.Point)
+assert isinstance(interactive_scene.mouse_drag_point, manimlib.Point)
+assert type(interactive_scene.mouse_point) is manimlib.Point
+assert type(interactive_scene.mouse_drag_point) is manimlib.Point
+assert np.allclose(interactive_scene.mouse_point.get_center(), manimlib.ORIGIN)
+assert np.allclose(
+    interactive_scene.mouse_drag_point.get_center(), manimlib.ORIGIN
+)
+# Two distinct mobjects, not one location aliased under two names.
+assert interactive_scene.mouse_point is not interactive_scene.mouse_drag_point
+# The binding lives on Scene, so a plain Scene carries it identically.
+mouse_base_scene = Scene()
+assert isinstance(mouse_base_scene.mouse_point, manimlib.Point)
+assert isinstance(mouse_base_scene.mouse_drag_point, manimlib.Point)
+assert np.allclose(mouse_base_scene.mouse_point.get_center(), manimlib.ORIGIN)
+assert np.allclose(
+    mouse_base_scene.mouse_drag_point.get_center(), manimlib.ORIGIN
+)
+assert mouse_base_scene.mouse_point is not mouse_base_scene.mouse_drag_point
+# Pointer state is per scene; two scenes never share one Point.
+assert interactive_scene.mouse_point is not mouse_base_scene.mouse_point
+assert interactive_scene.mouse_drag_point is not mouse_base_scene.mouse_drag_point
+# Moving one never drags the other along with it, in either direction.
+interactive_scene.mouse_point.move_to([1.0, 2.0, 0.0])
+assert np.allclose(interactive_scene.mouse_point.get_center(), [1.0, 2.0, 0.0])
+assert np.allclose(
+    interactive_scene.mouse_drag_point.get_center(), manimlib.ORIGIN
+)
+interactive_scene.mouse_drag_point.move_to([-3.0, 0.5, 0.0])
+assert np.allclose(
+    interactive_scene.mouse_drag_point.get_center(), [-3.0, 0.5, 0.0]
+)
+assert np.allclose(interactive_scene.mouse_point.get_center(), [1.0, 2.0, 0.0])
+assert np.allclose(mouse_base_scene.mouse_point.get_center(), manimlib.ORIGIN)
+# The information label's own coordinate updater reads the live scene Point.
+# `loc_label` was built while mouse_point still sat at ORIGIN, so running the
+# updater it already carries must now track the move — the existing updater is
+# exercised here, never rewritten.
+assert np.allclose([part.get_value() for part in loc_label], manimlib.ORIGIN)
+assert len(loc_label.updaters) == 1
+loc_label.updaters[0](loc_label)
+assert np.allclose([part.get_value() for part in loc_label], [1.0, 2.0, 0.0])
+# A label constructed after the move reads the same live location up front.
+moved_info_label = interactive_scene.get_information_label()
+moved_loc_label = moved_info_label.submobjects[0]
+assert np.allclose(
+    [part.get_value() for part in moved_loc_label], [1.0, 2.0, 0.0]
+)
+interactive_scene.mouse_point.move_to(manimlib.ORIGIN)
+interactive_scene.mouse_drag_point.move_to(manimlib.ORIGIN)
 assert str(inspect.signature(InteractiveScene.add_to_selection)) == (
     "(self, *mobjects)"
 )
