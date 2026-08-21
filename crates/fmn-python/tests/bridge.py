@@ -8250,6 +8250,25 @@ assert np.allclose(
 )
 assert np.allclose(cone.get_center(), [1.5, 0.0, 0.0], atol=1e-6)
 
+default_cone = three_dimensions.Cone()
+assert default_cone.n_records() == 101 * 11
+
+back_cone = three_dimensions.Cone(resolution=(3, 3), z_index=-1)
+front_cone = three_dimensions.Cone(resolution=(3, 3), z_index=1)
+cone_order_scene = Scene().add(front_cone, back_cone)
+assert cone_order_scene.get_mobjects() == [back_cone, front_cone]
+
+failed_cone = three_dimensions.Cone.__new__(three_dimensions.Cone)
+try:
+    three_dimensions.Cone.__init__(failed_cone, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Cone() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Cone keyword reached the native builder")
+assert not hasattr(failed_cone, "submobjects")
+
 line3d = three_dimensions.Line3D(
     [-2.0, 0.0, 0.0],
     [2.0, 0.0, 0.0],

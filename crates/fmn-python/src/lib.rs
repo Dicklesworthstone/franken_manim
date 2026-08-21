@@ -3897,6 +3897,7 @@ impl BridgeMobject {
         preferred_creation_axis: usize,
         epsilon: f64,
         normal_nudge: f64,
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
         let cone = fmn_library::Cone::new(height, radius)
             .axis(axis)
@@ -3905,8 +3906,10 @@ impl BridgeMobject {
             .resolution(resolution.0, resolution.1)
             .preferred_creation_axis(preferred_creation_axis)
             .epsilon(epsilon)
-            .normal_nudge(normal_nudge);
-        install_native_tree(slf, factory, cone.build())
+            .normal_nudge(normal_nudge)
+            .build()
+            .with_z_index(z_index);
+        install_native_tree(slf, factory, cone)
     }
 
     /// `Line3D(start, end, width, ...)` over Atlas's thin-cylinder builder.
