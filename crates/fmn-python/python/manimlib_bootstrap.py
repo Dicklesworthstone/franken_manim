@@ -9171,6 +9171,62 @@ def _string_word_groups(string_mobject):
     return groups
 
 
+def _string_glyph_reveal_plan(string_mobject):
+    """fm-5wq.4.82: how the first N glyphs of a nested StringMobject
+    reveal. Two-level families (multi-part Tex: sub-paths ``[part,
+    glyph]``) reveal parts progressively — fully passed parts whole, the
+    boundary part sliced to its own glyph prefix — through the same live
+    `set_submobjects` seam the flat reveal uses. Parts out of reading
+    order or nesting deeper than one part level refuse by name."""
+    paths = [list(path) for path in string_mobject._string_sub_paths]
+    if not all(len(path) == 2 for path in paths):
+        raise NotImplementedError(
+            "glyph families nested deeper than one part level await a "
+            "general flattening seam"
+        )
+    parts = list(string_mobject.submobjects)
+    part_children = [list(part.submobjects) for part in parts]
+    ranges = {}
+    last_part = -1
+    for ordinal, (part_index, _glyph_index) in enumerate(paths):
+        if part_index < last_part:
+            raise NotImplementedError(
+                "span-map parts out of reading order await a general "
+                "flattening seam"
+            )
+        last_part = part_index
+        ranges.setdefault(part_index, [ordinal, ordinal])[1] = ordinal + 1
+    return (paths, parts, part_children, ranges)
+
+
+def _apply_glyph_reveal(string_mobject, plan, count):
+    """Show the first `count` glyphs of a two-level family in place; the
+    full count re-seats every part's original child list, so the finished
+    frame is the untouched original structure."""
+    paths, parts, part_children, ranges = plan
+    if count >= len(paths):
+        for part_index, part in enumerate(parts):
+            part.set_submobjects(part_children[part_index])
+        string_mobject.set_submobjects(parts)
+        return
+    shown = []
+    for part_index, part in enumerate(parts):
+        bounds = ranges.get(part_index)
+        if bounds is None:
+            continue
+        start, end = bounds
+        if end <= count:
+            part.set_submobjects(part_children[part_index])
+            shown.append(part)
+        elif start < count:
+            # The first hidden glyph's own child index bounds the slice.
+            part.set_submobjects(
+                part_children[part_index][: paths[count][1]]
+            )
+            shown.append(part)
+    string_mobject.set_submobjects(shown)
+
+
 class AddTextWordByWord(Animation):
     """The Reference's word-by-word reveal (creation.py:210) over native
     span-map word groups (fm-5wq.4.54): `ShowIncreasingSubsets` semantics —
@@ -9201,18 +9257,23 @@ class AddTextWordByWord(Animation):
             len(path) != 1
             for path in getattr(string_mobject, "_string_sub_paths", [])
         ):
-            raise NotImplementedError(
-                "AddTextWordByWord over multi-part nested glyph families "
-                "awaits per-part group flattening"
-            )
-        self._all_submobs = list(string_mobject.submobjects)
-        # Each word group ends at its last glyph ordinal; the final
-        # boundary covers trailing non-glyph children (decorations), so
-        # the finished frame is the whole family.
-        self._boundaries = [0]
-        for group in groups[:-1]:
-            self._boundaries.append(group[-1] + 1)
-        self._boundaries.append(len(self._all_submobs))
+            # fm-5wq.4.82: nested (multi-part) families reveal through
+            # the per-part flattening plan; boundaries stay glyph counts.
+            self._nested_plan = _string_glyph_reveal_plan(string_mobject)
+            self._all_submobs = []
+            self._boundaries = [0]
+            for group in groups:
+                self._boundaries.append(group[-1] + 1)
+        else:
+            self._nested_plan = None
+            self._all_submobs = list(string_mobject.submobjects)
+            # Each word group ends at its last glyph ordinal; the final
+            # boundary covers trailing non-glyph children (decorations),
+            # so the finished frame is the whole family.
+            self._boundaries = [0]
+            for group in groups[:-1]:
+                self._boundaries.append(group[-1] + 1)
+            self._boundaries.append(len(self._all_submobs))
         if run_time < 0:
             run_time = time_per_word * len(groups)
         super().__init__(
@@ -9235,6 +9296,11 @@ class AddTextWordByWord(Animation):
         index = int(
             min(max(_np.round(self.rate_func(float(alpha)) * words), 0), words)
         )
+        if self._nested_plan is not None:
+            _apply_glyph_reveal(
+                self.mobject, self._nested_plan, self._boundaries[index]
+            )
+            return
         self.mobject.set_submobjects(self._all_submobs[: self._boundaries[index]])
 
 
@@ -9265,20 +9331,25 @@ class AddTextLetterByLetter(Animation):
                 "AddTextLetterByLetter requires span-map letter groups; "
                 "the string mobject produced none"
             )
+        letters = len(spans)
         if any(
             len(path) != 1
             for path in getattr(string_mobject, "_string_sub_paths", [])
         ):
-            raise NotImplementedError(
-                "AddTextLetterByLetter over multi-part nested glyph "
-                "families awaits per-part group flattening"
-            )
-        self._all_submobs = list(string_mobject.submobjects)
-        # One boundary per glyph; the final boundary covers trailing
-        # non-glyph children (decorations), so the finished frame is the
-        # whole family.
-        letters = len(spans)
-        self._boundaries = list(range(letters)) + [len(self._all_submobs)]
+            # fm-5wq.4.82: the word sibling's flattening plan covers the
+            # letter grain too — boundaries are plain glyph counts.
+            self._nested_plan = _string_glyph_reveal_plan(string_mobject)
+            self._all_submobs = []
+            self._boundaries = list(range(letters + 1))
+        else:
+            self._nested_plan = None
+            self._all_submobs = list(string_mobject.submobjects)
+            # One boundary per glyph; the final boundary covers trailing
+            # non-glyph children (decorations), so the finished frame is
+            # the whole family.
+            self._boundaries = list(range(letters)) + [
+                len(self._all_submobs)
+            ]
         if run_time < 0:
             run_time = time_per_char * letters
         super().__init__(
@@ -9300,6 +9371,11 @@ class AddTextLetterByLetter(Animation):
         index = int(
             min(max(_np.round(self.rate_func(float(alpha)) * letters), 0), letters)
         )
+        if self._nested_plan is not None:
+            _apply_glyph_reveal(
+                self.mobject, self._nested_plan, self._boundaries[index]
+            )
+            return
         self.mobject.set_submobjects(self._all_submobs[: self._boundaries[index]])
 
 

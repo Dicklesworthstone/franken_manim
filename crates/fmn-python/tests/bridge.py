@@ -11014,3 +11014,67 @@ except TypeError as error:
     assert "NoneType" in str(error), error
 else:
     raise AssertionError("Transform accepted None")
+
+
+# --------------------------- AddTextWordByWord nested glyph flattening
+# fm-5wq.4.82: multi-part Tex families (sub-paths [part, glyph]) reveal
+# word-by-word through the per-part flattening plan; the finished frame is
+# the untouched original part structure.
+
+nested_tex = manimlib.Tex("a b", "c d")
+assert any(len(path) == 2 for path in nested_tex._string_sub_paths)
+nested_parts_before = [
+    len(part.submobjects) for part in nested_tex.submobjects
+]
+nested_anim = creation_animation.AddTextWordByWord(
+    nested_tex, run_time=4.0 / 30.0
+)
+nested_scene = Scene()
+nested_probe = geometry.Rectangle(width=1.0, height=1.0)
+nested_glyph_counts = []
+nested_scene.play(
+    nested_anim,
+    update_animation.UpdateFromFunc(
+        nested_probe,
+        lambda mob: nested_glyph_counts.append(
+            sum(len(part.submobjects) for part in nested_tex.submobjects)
+        ),
+    ),
+    run_time=4.0 / 30.0,
+)
+# Glyphs only accumulate on word boundaries and the reveal crossed the
+# part seam mid-flight.
+assert nested_glyph_counts == sorted(nested_glyph_counts), nested_glyph_counts
+assert set(nested_glyph_counts) <= {0, 1, 2, 3, 4}, nested_glyph_counts
+# The finished frame is the whole family with the original structure.
+assert [
+    len(part.submobjects) for part in nested_tex.submobjects
+] == nested_parts_before
+assert len(nested_tex.submobjects) == len(nested_parts_before)
+
+# The same flattening plan covers the letter grain (fm-5wq.4.59's nested
+# refusal is retired).
+nested_letters = manimlib.Tex("a b", "c d")
+letters_before = [
+    len(part.submobjects) for part in nested_letters.submobjects
+]
+letters_scene = Scene()
+letters_scene.play(
+    creation_animation.AddTextLetterByLetter(
+        nested_letters, run_time=4.0 / 30.0
+    ),
+    run_time=4.0 / 30.0,
+)
+assert [
+    len(part.submobjects) for part in nested_letters.submobjects
+] == letters_before
+
+# The non-StringMobject refusal is unchanged.
+try:
+    creation_animation.AddTextWordByWord(
+        geometry.Rectangle(width=1.0, height=1.0)
+    )
+except AssertionError:
+    pass
+else:
+    raise AssertionError("AddTextWordByWord accepted a non-StringMobject")
