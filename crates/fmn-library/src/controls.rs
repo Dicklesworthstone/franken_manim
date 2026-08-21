@@ -3047,11 +3047,25 @@ mod tests {
         assert!((panel.panel().length_over_dim(1) - (MED_SMALL_BUFF + FRAME_HEIGHT)).abs() < 1e-9);
         assert_eq!(panel.panel().style().fill_color, GREY_C);
         assert_eq!(panel.panel().style().fill_opacity, 1.0);
+        assert_eq!(
+            panel.panel().style().stroke_color,
+            DEFAULT_VMOBJECT_STROKE_COLOR
+        );
         assert_eq!(panel.panel().style().stroke_width, 0.0);
+        assert_eq!(panel.panel().style().stroke_opacity, 1.0);
         assert!((panel.opener_rect().length_over_dim(0) - FRAME_WIDTH / 8.0).abs() < 1e-9);
         assert!((panel.opener_rect().length_over_dim(1) - 0.5).abs() < 1e-9);
         assert_eq!(panel.opener_rect().style().fill_color, GREY_C);
         assert_eq!(panel.opener_rect().style().fill_opacity, 1.0);
+        assert_eq!(
+            panel.opener_rect().style().stroke_color,
+            DEFAULT_VMOBJECT_STROKE_COLOR
+        );
+        assert_eq!(
+            panel.opener_rect().style().stroke_width,
+            DEFAULT_STROKE_WIDTH
+        );
+        assert_eq!(panel.opener_rect().style().stroke_opacity, 1.0);
 
         // After move_panel_and_controls_to_panel_opener the panel sits
         // directly on the opener (buff 0)…
