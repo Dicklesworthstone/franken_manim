@@ -4608,10 +4608,11 @@ class NumberLine(VMobject):
         return vect / norm if norm > 0 else _np.zeros(3)
 
     def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
-        # The Reference forwards **kwargs to get_number_mobject; the two
-        # positional overrides the corpus uses route natively.
+        # The Reference forwards **kwargs to get_number_mobject; the native
+        # label builder owns the supported placement/precision overrides.
         direction = kwargs.pop("direction", None)
         buff = kwargs.pop("buff", None)
+        num_decimal_places = kwargs.pop("num_decimal_places", None)
         _refuse_unrouted(
             "NumberLine.add_numbers()",
             [(name, True) for name in sorted(kwargs)],
@@ -4628,6 +4629,7 @@ class NumberLine(VMobject):
             None if excluding is None else [float(v) for v in excluding],
             None if direction is None else _vec3(direction),
             None if buff is None else float(buff),
+            None if num_decimal_places is None else int(num_decimal_places),
         )
         _hang_native_children(self, specs)
         self.numbers = self.submobjects[-1]

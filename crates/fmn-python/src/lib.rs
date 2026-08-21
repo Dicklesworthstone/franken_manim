@@ -5512,6 +5512,7 @@ impl BridgeMobject {
         excluding: Option<Vec<f64>>,
         direction: Option<[f64; 3]>,
         buff: Option<f64>,
+        num_decimal_places: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
         let mut line = number_line_from_config(range3(x_range)?, config)?
             .numbers_font_size(font_size)
@@ -5521,6 +5522,9 @@ impl BridgeMobject {
         }
         if let Some(buff) = buff {
             line = line.line_to_number_buff(buff);
+        }
+        if let Some(num_decimal_places) = num_decimal_places {
+            line = line.num_decimal_places(num_decimal_places);
         }
         let mut built = line.build().map_err(native_error)?;
         let before = built.vmob().children().len();

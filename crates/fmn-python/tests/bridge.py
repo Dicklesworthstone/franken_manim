@@ -7893,6 +7893,34 @@ assert graph_axes.get_y_axis() is graph_axes.y_axis
 assert np.allclose(graph_axes.get_origin(), graph_axes.c2p(0.0, 0.0))
 assert np.allclose(graph_axes.p2c(graph_axes.c2p(0.5, 0.25)), [0.5, 0.25])
 
+# NumberLine.add_numbers forwards DecimalNumber precision through Atlas's
+# native label builder. Unknown forwarded keys refuse before hanging a label
+# group, rather than disappearing into **kwargs.
+integer_label_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0))
+integer_labels = integer_label_line.add_numbers(
+    x_values=[0.5], num_decimal_places=0
+)
+precise_label_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0))
+precise_labels = precise_label_line.add_numbers(
+    x_values=[0.5], num_decimal_places=2
+)
+assert precise_labels.get_width() > integer_labels.get_width()
+assert precise_label_line.numbers is precise_labels
+
+refusing_label_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0))
+refusing_label_children = len(refusing_label_line.submobjects)
+try:
+    refusing_label_line.add_numbers(x_values=[0.5], bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "NumberLine.add_numbers() keyword(s) not yet routed to the native builder: "
+        "bogus"
+    )
+else:
+    raise AssertionError("NumberLine.add_numbers silently dropped bogus")
+assert len(refusing_label_line.submobjects) == refusing_label_children
+assert not hasattr(refusing_label_line, "numbers")
+
 # NumberPlane shares Axes' native decimal-label shells while retaining the
 # plane-specific axis defaults used to place labels below-left of each axis.
 label_plane = manimlib.NumberPlane(
