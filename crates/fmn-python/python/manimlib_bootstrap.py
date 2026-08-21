@@ -8564,6 +8564,22 @@ class UpdateFromAlphaFunc(Animation):
         self.update_function(self.mobject, true_alpha)
 
 
+class ChangeSpeed(Animation):
+    """ManimCE's `animation/speed.py` time remap — not a pinned-Reference
+    class. The native seam it needs (a Choreo child-segment clock remap
+    driven by a piecewise `speedinfo` curve, including updater `dt`
+    scaling) has not landed, so construction refuses by name instead of
+    playing the wrapped animation at the wrong speed (fm-5wq.4.62)."""
+
+    def __init__(self, anim=None, speedinfo=None, rate_func=None, **kwargs):
+        del anim, speedinfo, rate_func, kwargs
+        raise NotImplementedError(
+            "ChangeSpeed requires Choreo's child-segment clock-remap seam "
+            "(piecewise speedinfo over a wrapped animation, with updater "
+            "dt scaling); that seam has not landed"
+        )
+
+
 class ChangingDecimal(Animation):
     """The Reference's update mechanism pointed at `DecimalNumber.set_value`
     (fm-5wq.4.55, animation/numbers.py): each frame feeds the time-spanned
@@ -9058,6 +9074,30 @@ class ShowSubmobjectsOneByOne(ShowIncreasingSubsets):
 
     _native_kind = "show_submobjects_one_by_one"
     _int_round_default = "ceil"
+
+
+class MaintainPositionRelativeTo(_NativeAnimation):
+    """update.py:53 through the native tracker (fm-5wq.4.62): the
+    follower's offset from the tracked mobject is captured at construction
+    and re-imposed every frame, so the follower rides along while the
+    tracked mobject moves in the same play call."""
+
+    _native_kind = "maintain_position_relative_to"
+    _target_attr = "tracked_mobject"
+
+    def __init__(self, mobject, tracked_mobject=None, **kwargs):
+        if not isinstance(mobject, Mobject) or not isinstance(
+            tracked_mobject, Mobject
+        ):
+            raise TypeError(
+                "MaintainPositionRelativeTo requires a follower Mobject and "
+                "a tracked Mobject; got "
+                + type(mobject).__name__
+                + " and "
+                + type(tracked_mobject).__name__
+            )
+        super().__init__(mobject, **kwargs)
+        self.tracked_mobject = tracked_mobject
 
 
 class FadeIn(_NativeAnimation):
@@ -10844,6 +10884,11 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
+        (
+            "manimlib.animation.update",
+            "MaintainPositionRelativeTo",
+        ): MaintainPositionRelativeTo,
+        ("manimlib.animation.speed", "ChangeSpeed"): ChangeSpeed,
         ("manimlib.animation.numbers", "ChangingDecimal"): ChangingDecimal,
         ("manimlib.animation.numbers", "ChangeDecimalToValue"): ChangeDecimalToValue,
         ("manimlib.animation.numbers", "CountInFrom"): CountInFrom,

@@ -9924,3 +9924,55 @@ except TypeError as error:
     assert "no curve to sample" in str(error), error
 else:
     raise AssertionError("MoveAlongPath accepted a non-VMobject path")
+
+
+# --------------------------------- MaintainPositionRelativeTo / ChangeSpeed
+# fm-5wq.4.62: the follower holds its construction-time offset while the
+# tracked mobject moves in the same play call, through the native tracker.
+
+follow_scene = Scene()
+follow_tracked = geometry.Rectangle(width=1.0, height=1.0)
+follow_er = geometry.Rectangle(width=0.5, height=0.5)
+follow_er.shift([1.0, 2.0, 0.0])
+follow_scene.add(follow_tracked, follow_er)
+follow_diff = follow_er.get_center() - follow_tracked.get_center()
+assert np.allclose(follow_diff, [1.0, 2.0, 0.0])
+follow_scene.play(
+    follow_tracked.animate.shift([2.0, -1.0, 0.0]),
+    update_animation.MaintainPositionRelativeTo(follow_er, follow_tracked),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(follow_tracked.get_center(), [2.0, -1.0, 0.0])
+assert np.allclose(
+    follow_er.get_center() - follow_tracked.get_center(), follow_diff
+)
+
+# Named refusals: a missing or non-Mobject tracked target.
+try:
+    update_animation.MaintainPositionRelativeTo(
+        geometry.Rectangle(width=1.0, height=1.0)
+    )
+except TypeError as error:
+    assert "tracked Mobject" in str(error)
+else:
+    raise AssertionError("MaintainPositionRelativeTo accepted a missing target")
+
+try:
+    update_animation.MaintainPositionRelativeTo(
+        geometry.Rectangle(width=1.0, height=1.0), "not a mobject"
+    )
+except TypeError as error:
+    assert "tracked Mobject" in str(error)
+else:
+    raise AssertionError("MaintainPositionRelativeTo accepted a str target")
+
+# ChangeSpeed is ManimCE surface whose native clock-remap seam has not
+# landed: construction is the precise named refusal, never a wrong-speed
+# play.
+speed_module = importlib.import_module("manimlib.animation.speed")
+try:
+    speed_module.ChangeSpeed(None, {})
+except NotImplementedError as error:
+    assert "clock-remap seam" in str(error)
+else:
+    raise AssertionError("ChangeSpeed constructed without its native seam")
