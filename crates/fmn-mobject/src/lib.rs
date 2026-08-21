@@ -49,9 +49,7 @@ pub use mobject::{
     ImageColorSpace, ImagePixelFormat, ImageResource, ImageResourceError, ImageSampler, ImageWrap,
     Mobject, RenderPrimitive,
 };
-pub use numpy::{
-    ExportError, LANE_BYTES, LANE_DTYPE, RecordArray, RecordArrayMut, RecordDType,
-};
+pub use numpy::{ExportError, LANE_BYTES, LANE_DTYPE, RecordArray, RecordArrayMut, RecordDType};
 pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{
     DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,

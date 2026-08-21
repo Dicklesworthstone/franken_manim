@@ -80,8 +80,8 @@ pub use composition::{
 pub use creation::{
     DrawBorderThenFill, IntRound, RevealBounds, ShowIncreasingSubsets, ShowPartial,
     add_text_letter_by_letter, add_text_word_by_word, show_creation, show_increasing_subsets,
-    show_passing_flash,
-    show_submobjects_one_by_one, show_surface_creation, uncreate, uncreate_surface, write,
+    show_passing_flash, show_submobjects_one_by_one, show_surface_creation, uncreate,
+    uncreate_surface, write,
 };
 pub use fading::{
     FadeTransform, VFade, fade_in, fade_in_from_point, fade_out, fade_out_to_point, fade_transform,

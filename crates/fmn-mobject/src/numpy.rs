@@ -56,7 +56,11 @@ pub const LANE_BYTES: usize = LANE_DTYPE.item_size();
 /// The NumPy byte-order character for natively-laid-out records. The export
 /// aliases host memory, so the descriptor must claim host endianness.
 const fn native_byte_order() -> char {
-    if cfg!(target_endian = "little") { '<' } else { '>' }
+    if cfg!(target_endian = "little") {
+        '<'
+    } else {
+        '>'
+    }
 }
 
 /// Why a NumPy export could not be produced.
@@ -185,9 +189,7 @@ impl RecordDType {
             .fields
             .iter()
             .zip(&self.shapes)
-            .map(|(field, width)| {
-                format!("('{}', '{order}f{size}', ({width},))", field.name)
-            })
+            .map(|(field, width)| format!("('{}', '{order}f{size}', ({width},))", field.name))
             .collect();
         format!("[{}]", entries.join(", "))
     }
@@ -204,7 +206,11 @@ pub(crate) fn whole_layout(
     writable: bool,
 ) -> Result<NdLayout, ShapeError> {
     let layout = NdLayout::contiguous(vec![len], record_bytes, MemoryOrder::C)?;
-    Ok(if writable { layout } else { layout.as_read_only() })
+    Ok(if writable {
+        layout
+    } else {
+        layout.as_read_only()
+    })
 }
 
 /// Build the 2-D lane layout of one field: `arr[name]` with shape
@@ -220,15 +226,17 @@ pub(crate) fn field_layout(
     width: usize,
     writable: bool,
 ) -> Result<NdLayout, ShapeError> {
-    let total_bytes = len
-        .checked_mul(record_bytes)
-        .ok_or(ShapeError::Overflow)?;
+    let total_bytes = len.checked_mul(record_bytes).ok_or(ShapeError::Overflow)?;
     let reachable_lanes = total_bytes.saturating_sub(byte_offset) / LANE_BYTES;
     let base = NdLayout::contiguous(vec![reachable_lanes], LANE_BYTES, MemoryOrder::C)?;
     let record_stride = isize::try_from(record_bytes).map_err(|_| ShapeError::Overflow)?;
     let lane_stride = isize::try_from(LANE_BYTES).map_err(|_| ShapeError::Overflow)?;
     let layout = base.as_strided(vec![len, width], vec![record_stride, lane_stride])?;
-    Ok(if writable { layout } else { layout.as_read_only() })
+    Ok(if writable {
+        layout
+    } else {
+        layout.as_read_only()
+    })
 }
 
 // ------------------------------------------------------------------ arrays
@@ -446,7 +454,10 @@ mod tests {
         // The dtype is the Reference's `Mobject.data_dtype`, from fnp's
         // structured-record vocabulary.
         let dtype = buffer.numpy_dtype();
-        assert_eq!(dtype.descr(), "[('point', '<f4', (3,)), ('rgba', '<f4', (4,))]");
+        assert_eq!(
+            dtype.descr(),
+            "[('point', '<f4', (3,)), ('rgba', '<f4', (4,))]"
+        );
         assert_eq!(dtype.itemsize(), 28);
         assert_eq!(dtype.byte_offset("point"), Some(0));
         assert_eq!(dtype.byte_offset("rgba"), Some(12));
@@ -497,7 +508,11 @@ mod tests {
 
         // Leg 4 — back in the engine, over the same generation.
         drop(view);
-        assert_eq!(buffer.storage_id(), generation, "no generation was swapped in");
+        assert_eq!(
+            buffer.storage_id(),
+            generation,
+            "no generation was swapped in"
+        );
         assert_eq!(buffer.read(2, "rgba"), Some(vec![0.25, 0.5, 0.75, 1.0]));
         assert_eq!(buffer.read(0, "point"), Some(vec![-1.5, 0.0, 0.0]));
 
@@ -557,7 +572,9 @@ mod tests {
         buffer.resize(5).expect("growth fits");
         assert!(!view.is_attached_to(&buffer));
 
-        let array = view.as_numpy().expect("the pinned generation still exports");
+        let array = view
+            .as_numpy()
+            .expect("the pinned generation still exports");
         assert_eq!(array.len(), 2, "the view's extent is fixed at export");
         assert_eq!(array.data_ptr(), pinned.cast_const());
         assert_eq!(array.field(0, "point"), Some(&[7.0, 8.0, 9.0][..]));

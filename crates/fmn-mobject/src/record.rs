@@ -972,8 +972,7 @@ impl RecordView {
                 let offset = dtype
                     .byte_offset(&spec.name)
                     .expect("the dtype describes every schema field");
-                let layout =
-                    field_layout(self.len, record_bytes, offset, spec.width, writable)?;
+                let layout = field_layout(self.len, record_bytes, offset, spec.width, writable)?;
                 (layout, offset, Some(spec.name.clone()))
             }
         };
