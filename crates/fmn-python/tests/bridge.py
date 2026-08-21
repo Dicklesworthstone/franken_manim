@@ -4410,6 +4410,30 @@ wide_laptop = drawings.Laptop(width=4.0, body_color=manimlib.BLUE)
 assert wide_laptop.submobjects[0][0].get_fill_color() == manimlib.GREY
 assert wide_laptop.screen.get_fill_color() == manimlib.BLACK
 
+assert drawings.Piano3D.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.Piano3D).parameters) == [
+    "shading",
+    "stroke_width",
+    "stroke_color",
+    "key_depth",
+    "black_key_shift",
+    "piano_2d_config",
+    "kwargs",
+]
+piano3d = drawings.Piano3D(
+    piano_2d_config=dict(
+        n_white_keys=8,
+        total_width=4.0,
+        white_key_color=manimlib.GREY_A,
+        key_buff=0.001,
+    ),
+)
+assert len(piano3d) == 13
+assert all(isinstance(key, manimlib.Prismify) for key in piano3d)
+zs = [key.get_center()[2] for key in piano3d]
+assert max(zs) - min(zs) >= 0.05 - 1e-6
+assert piano3d[0].get_stroke_color() == manimlib.BLACK
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.

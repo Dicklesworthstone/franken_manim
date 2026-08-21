@@ -7875,6 +7875,37 @@ class Laptop(VGroup):
         self.add(body, screen_plate, axis)
 
 
+class Piano3D(VGroup):
+    """Prismified Piano keys over native Prismify extrusions."""
+
+    def __init__(
+        self,
+        shading=(1.0, 0.2, 0.2),
+        stroke_width=0.25,
+        stroke_color=_BLACK,
+        key_depth=0.1,
+        black_key_shift=0.05,
+        piano_2d_config=dict(
+            white_key_color=_GREY_A,
+            key_buff=0.001,
+        ),
+        **kwargs,
+    ):
+        piano_2d = Piano(**dict(piano_2d_config))
+        super().__init__(
+            *(Prismify(key, float(key_depth)) for key in piano_2d),
+            **kwargs,
+        )
+        self.set_stroke(stroke_color, float(stroke_width))
+        self.set_shading(*tuple(float(value) for value in shading))
+        self.apply_depth_test()
+        black_keys = list(piano_2d.black_keys)
+        for index, key in enumerate(self):
+            if piano_2d[index] in black_keys:
+                key.shift(float(black_key_shift) * _OUT)
+                key.set_color(_BLACK)
+
+
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
@@ -15870,6 +15901,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Piano"): Piano,
         ("manimlib.mobject.svg.drawings", "ThoughtBubble"): ThoughtBubble,
         ("manimlib.mobject.svg.drawings", "Laptop"): Laptop,
+        ("manimlib.mobject.svg.drawings", "Piano3D"): Piano3D,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (
