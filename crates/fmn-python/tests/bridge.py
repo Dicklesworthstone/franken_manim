@@ -2569,10 +2569,27 @@ assert interactive_scene.is_grabbing is False
 assert interactive_scene.select_top_level_mobs is True
 assert interactive_scene.crosshair is not interactive_scene.color_palette
 assert interactive_scene.get_selection_search_set() == []
+assert str(inspect.signature(InteractiveScene.add)) == "(self, *mobjects)"
+assert str(inspect.signature(InteractiveScene.remove)) == "(self, *mobjects)"
+assert str(inspect.signature(InteractiveScene.remove_all_except)) == (
+    "(self, *mobjects_to_keep)"
+)
 circle_for_select = manimlib.Circle()
 interactive_scene.add(circle_for_select)
-interactive_scene.regenerate_selection_search_set()
 assert circle_for_select in interactive_scene.get_selection_search_set()
+second_circle_for_select = manimlib.Circle()
+interactive_scene.add(second_circle_for_select)
+selection_search_set = interactive_scene.get_selection_search_set()
+assert circle_for_select in selection_search_set
+assert second_circle_for_select in selection_search_set
+interactive_scene.remove(circle_for_select)
+selection_search_set = interactive_scene.get_selection_search_set()
+assert circle_for_select not in selection_search_set
+assert second_circle_for_select in selection_search_set
+assert all(
+    mobject not in selection_search_set
+    for mobject in interactive_scene.unselectables
+)
 interactive_scene.add_to_selection(circle_for_select)
 assert list(interactive_scene.selection.submobjects) == [circle_for_select]
 interactive_scene.clear_selection()
@@ -2706,6 +2723,46 @@ unselectable_source = manimlib.Circle()
 selection_scene.unselectables.append(unselectable_source)
 selection_scene.add_to_selection(unselectable_source)
 assert unselectable_source not in selection_scene.selection
+
+# fm-5wq.4: InteractiveScene.enable_selection pins the sweep rectangle at
+# the live mouse in fixed-frame coordinates; group_selection wraps the
+# current selection through Scene.get_group and re-selects that group.
+assert str(inspect.signature(InteractiveScene.enable_selection)) == "(self)"
+assert str(inspect.signature(InteractiveScene.group_selection)) == "(self)"
+enable_scene = InteractiveScene()
+enable_scene.setup()
+enable_scene.mouse_point.move_to([1.25, -0.5, 0.0])
+assert enable_scene.enable_selection() is None
+assert enable_scene.is_selecting is True
+assert enable_scene.selection_rectangle in enable_scene.mobjects
+assert np.allclose(
+    enable_scene.selection_rectangle.fixed_corner,
+    enable_scene.frame.to_fixed_frame_point(
+        enable_scene.mouse_point.get_center()
+    ),
+)
+assert np.allclose(
+    enable_scene.selection_rectangle.fixed_corner,
+    [1.25, -0.5, 0.0],
+)
+enable_scene.enable_selection()
+assert list(enable_scene.mobjects).count(enable_scene.selection_rectangle) == 1
+
+group_scene = InteractiveScene()
+group_scene.setup()
+left_selected = manimlib.Circle().shift([-1.0, 0.0, 0.0])
+right_selected = manimlib.Square().shift([1.0, 0.0, 0.0])
+group_scene.add(left_selected, right_selected)
+group_scene.add_to_selection(left_selected, right_selected)
+assert list(group_scene.selection) == [left_selected, right_selected]
+assert group_scene.group_selection() is None
+assert len(group_scene.selection) == 1
+grouped_selection = group_scene.selection[0]
+assert isinstance(grouped_selection, manimlib.VGroup)
+assert list(grouped_selection) == [left_selected, right_selected]
+assert grouped_selection in group_scene.mobjects
+assert left_selected not in group_scene.selection
+assert right_selected not in group_scene.selection
 
 
 # The schema-generated import topology and exact-name aliases are present.

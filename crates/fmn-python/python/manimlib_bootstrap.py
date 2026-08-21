@@ -12101,6 +12101,21 @@ class InteractiveScene(Scene):
     def checkpoint_paste(self):
         return _portal_checkpoint_paste(self)
 
+    def add(self, *mobjects):
+        super().add(*mobjects)
+        if getattr(self, "unselectables", None) is not None:
+            self.regenerate_selection_search_set()
+
+    def remove(self, *mobjects):
+        super().remove(*mobjects)
+        if getattr(self, "unselectables", None) is not None:
+            self.regenerate_selection_search_set()
+
+    def remove_all_except(self, *mobjects_to_keep):
+        super().remove_all_except(*mobjects_to_keep)
+        if getattr(self, "unselectables", None) is not None:
+            self.regenerate_selection_search_set()
+
     def get_crosshair(self):
         lines = VMobject().replicate(2)
         lines[0].set_points([_LEFT, _ORIGIN, _RIGHT])
@@ -12326,6 +12341,19 @@ class InteractiveScene(Scene):
 
     def get_selection_search_set(self):
         return self.selection_search_set
+
+    def enable_selection(self):
+        self.is_selecting = True
+        self.add(self.selection_rectangle)
+        self.selection_rectangle.fixed_corner = self.frame.to_fixed_frame_point(
+            self.mouse_point.get_center()
+        )
+
+    def group_selection(self):
+        group = self.get_group(*self.selection)
+        self.add(group)
+        self.clear_selection()
+        self.add_to_selection(group)
 
 
 class BlankScene(InteractiveScene):
