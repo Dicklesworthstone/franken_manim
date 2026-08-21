@@ -12892,3 +12892,34 @@ except TypeError as error:
     assert "bogus" in str(error)
 else:
     raise AssertionError("RoundedRectangle silently dropped bogus")
+
+
+# ------------------------------------- RoundedRectangle leftover kwargs
+# fm-5wq.4.136: the **kwargs surface is the Reference's verbatim flow into
+# the shared style preflight; the Reference docstring's own example
+# spelling works, and unknown keys stay the named refusal.
+
+rr_kw = geometry.RoundedRectangle(
+    width=3.0, height=4.0, corner_radius=1.0, color=manimlib.BLUE
+)
+assert np.allclose([rr_kw.get_width(), rr_kw.get_height()], [3.0, 4.0])
+# The color shorthand reaches both paint channels through the preflight.
+assert rr_kw.get_stroke_color() == manimlib.BLUE
+rr_filled = geometry.RoundedRectangle(
+    width=2.0,
+    height=1.0,
+    corner_radius=0.25,
+    fill_color=manimlib.RED,
+    fill_opacity=0.5,
+    stroke_width=6.0,
+)
+assert np.isclose(rr_filled.get_fill_opacity(), 0.5)
+assert np.isclose(rr_filled.get_stroke_width(), 6.0)
+
+# Unknown keywords stay the shared preflight's named refusal.
+try:
+    geometry.RoundedRectangle(bogus=True)
+except TypeError as error:
+    assert "bogus" in str(error)
+else:
+    raise AssertionError("RoundedRectangle silently dropped bogus")
