@@ -10631,6 +10631,29 @@ class LinearNumberSlider(ControlMobject):
             setattr(self, key, item)
         self.bar, self.slider, self.slider_axis = parts
 
+    def slider_on_mouse_drag(self, mob, event_data):
+        del mob
+        start, end = self.slider_axis.get_start_and_end()
+        segment = end - start
+        proportion = _np.dot(
+            _np.asarray(event_data["point"], dtype=float) - start,
+            segment,
+        ) / _np.dot(segment, segment)
+        proportion = min(1.0, max(0.0, float(proportion)))
+        value = self.min_value + proportion * (
+            self.max_value - self.min_value
+        )
+        step_count = int((value - self.min_value) / self.step)
+        snapped = self.min_value + step_count * self.step
+        snapped_proportion = (snapped - self.min_value) / (
+            self.max_value - self.min_value
+        )
+        self.slider.move_to(
+            self.slider_axis.point_from_proportion(snapped_proportion)
+        )
+        ValueTracker.set_value(self, snapped)
+        return False
+
 
 class ColorSliders(Group):
     """Atlas's four-channel slider bank and checkerboard swatch."""

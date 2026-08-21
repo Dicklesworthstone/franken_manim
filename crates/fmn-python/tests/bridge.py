@@ -2774,17 +2774,31 @@ assert linear_slider.slider.is_fixed_in_frame()
 assert linear_slider.slider_axis.is_fixed_in_frame()
 assert np.allclose(linear_slider.slider.get_center(), [0.0, 0.0, 0.0])
 assert linear_slider.slider_axis.get_opacity() == 0.0
-
-try:
-    linear_slider.slider_on_mouse_drag(
-        linear_slider.slider,
-        {"point": np.zeros(3)},
-    )
-except NotImplementedError as error:
-    assert "LinearNumberSlider.slider_on_mouse_drag" in str(error), error
-    assert "semantic binding has not landed" in str(error), error
-else:
-    raise AssertionError("LinearNumberSlider fabricated an unbound drag gateway")
+assert str(
+    inspect.signature(interactive.LinearNumberSlider.slider_on_mouse_drag)
+) == "(self, mob, event_data)"
+linear_handle = linear_slider.slider
+linear_bar = linear_slider.bar
+assert linear_slider.slider_on_mouse_drag(
+    linear_handle,
+    {"point": np.array([0.37, 1.0, 0.0])},
+) is False
+assert linear_slider.get_value() == np.float64(6.5)
+assert np.allclose(
+    linear_handle.get_center(),
+    linear_slider.slider_axis.point_from_proportion(0.65),
+)
+assert linear_slider.slider is linear_handle
+assert linear_slider.bar is linear_bar
+assert linear_slider.slider_on_mouse_drag(
+    linear_handle,
+    {"point": np.array([10.0, 0.0, 0.0])},
+) is False
+assert linear_slider.get_value() == np.float64(10.0)
+assert np.allclose(
+    linear_handle.get_center(),
+    linear_slider.slider_axis.get_end(),
+)
 
 custom_linear = interactive.LinearNumberSlider(
     0.0,
