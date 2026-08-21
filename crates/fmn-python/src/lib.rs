@@ -3123,6 +3123,9 @@ impl BridgeMobject {
         step: f64,
         bar_width: f64,
         bar_height: f64,
+        corner_radius: f64,
+        handle_radius: f64,
+        handle_fill_opacity: f64,
         handle_color: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
         let mut slider = fmn_library::LinearNumberSlider::new(value).map_err(native_error)?;
@@ -3141,7 +3144,10 @@ impl BridgeMobject {
             .step(step)
             .and_then(|slider| slider.bar_width(bar_width))
             .and_then(|slider| slider.bar_height(bar_height))
+            .and_then(|slider| slider.corner_radius(corner_radius))
             .map_err(native_error)?
+            .handle_radius(handle_radius)
+            .handle_fill_opacity(handle_fill_opacity)
             .handle_color(fmn_core::color::Srgb {
                 r: handle_color[0],
                 g: handle_color[1],
@@ -8937,9 +8943,13 @@ fn hoist_descendant_records(root: &mut Mobject) -> PyResult<()> {
                 PyOverflowError::new_err("native text descendant record count overflows usize")
             })
         })?;
-        let separators = sources.len().saturating_sub(1).checked_mul(2).ok_or_else(|| {
-            PyOverflowError::new_err("native text separator record count overflows usize")
-        })?;
+        let separators = sources
+            .len()
+            .saturating_sub(1)
+            .checked_mul(2)
+            .ok_or_else(|| {
+                PyOverflowError::new_err("native text separator record count overflows usize")
+            })?;
         let total = source_records.checked_add(separators).ok_or_else(|| {
             PyOverflowError::new_err("native text flattened record count overflows usize")
         })?;

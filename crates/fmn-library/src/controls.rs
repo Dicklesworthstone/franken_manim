@@ -785,6 +785,7 @@ pub struct LinearNumberSlider {
     bar_height: f64,
     corner_radius: f64,
     handle_radius: f64,
+    handle_fill_opacity: f64,
     handle_color: Srgb,
     bar: VMobject,
     handle: VMobject,
@@ -817,6 +818,7 @@ impl LinearNumberSlider {
             bar_height: 0.075,
             corner_radius: 0.0375,
             handle_radius: 0.1,
+            handle_fill_opacity: 1.0,
             handle_color: GREY_A,
             bar: VMobject::new(),
             handle: VMobject::new(),
@@ -884,6 +886,32 @@ impl LinearNumberSlider {
         self.bar_height = height;
         self.rebuild_geometry()?;
         Ok(self)
+    }
+
+    /// Bar corner radius (`rounded_rect_kwargs["corner_radius"]`).
+    ///
+    /// # Errors
+    /// [`SliderError::Geometry`] if the rounded bar refuses the radius.
+    pub fn corner_radius(mut self, radius: f64) -> Result<Self, SliderError> {
+        self.corner_radius = radius;
+        self.rebuild_geometry()?;
+        Ok(self)
+    }
+
+    /// Handle radius (`circle_kwargs["radius"]`).
+    #[must_use]
+    pub fn handle_radius(mut self, radius: f64) -> Self {
+        self.handle_radius = radius;
+        self.handle = self.build_handle(self.handle_center());
+        self
+    }
+
+    /// Handle fill opacity (`circle_kwargs["fill_opacity"]`).
+    #[must_use]
+    pub fn handle_fill_opacity(mut self, opacity: f64) -> Self {
+        self.handle_fill_opacity = opacity;
+        self.handle = self.build_handle(self.handle_center());
+        self
     }
 
     /// Handle colour (`circle_kwargs` stroke+fill `GREY_A`). Used by
@@ -1136,7 +1164,7 @@ impl LinearNumberSlider {
             .style(
                 Style::default()
                     .stroke(self.handle_color, Style::default().stroke_width, 1.0)
-                    .fill(self.handle_color, 1.0),
+                    .fill(self.handle_color, self.handle_fill_opacity),
             )
             .build()
             .moved_to(center)
@@ -2048,7 +2076,20 @@ mod tests {
         // [-10, 10] — midpoint and fraction coincide here.
         assert!((slider.handle().length_over_dim(0) - 0.2).abs() < 1e-9);
         assert_eq!(slider.handle().style().fill_color, GREY_A);
+        assert_eq!(slider.handle().style().fill_opacity, 1.0);
         assert_vec3_close(slider.handle().center_point(), ORIGIN, 1e-9, "handle");
+    }
+
+    #[test]
+    fn slider_custom_corner_radius_and_handle() {
+        let slider = LinearNumberSlider::new(0.0)
+            .expect("valid slider")
+            .corner_radius(0.02)
+            .expect("corner radius fits")
+            .handle_radius(0.2)
+            .handle_fill_opacity(0.4);
+        assert!((slider.handle().length_over_dim(0) - 0.4).abs() < 1e-9);
+        assert_eq!(slider.handle().style().fill_opacity, 0.4);
     }
 
     #[test]

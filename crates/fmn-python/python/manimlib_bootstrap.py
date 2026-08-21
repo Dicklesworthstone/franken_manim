@@ -9093,11 +9093,6 @@ class LinearNumberSlider(ControlMobject):
                 )
             )
         corner_radius = float(rect_config.get("corner_radius", 0.0375))
-        if corner_radius != 0.0375:
-            raise NotImplementedError(
-                "LinearNumberSlider rounded_rect_kwargs.corner_radius is not "
-                "routed to the native builder"
-            )
 
         handle_config = dict(circle_kwargs)
         handle_unknown = sorted(
@@ -9111,16 +9106,8 @@ class LinearNumberSlider(ControlMobject):
                     "circle_kwargs." + name for name in handle_unknown
                 )
             )
-        if float(handle_config.get("radius", 0.1)) != 0.1:
-            raise NotImplementedError(
-                "LinearNumberSlider circle_kwargs.radius is not routed to "
-                "the native builder"
-            )
-        if float(handle_config.get("fill_opacity", 1.0)) != 1.0:
-            raise NotImplementedError(
-                "LinearNumberSlider circle_kwargs.fill_opacity is not routed "
-                "to the native builder"
-            )
+        handle_radius = float(handle_config.get("radius", 0.1))
+        handle_fill_opacity = float(handle_config.get("fill_opacity", 1.0))
         stroke_color = tuple(
             _color_to_rgb(handle_config.get("stroke_color", _GREY_A))
         )
@@ -9147,6 +9134,9 @@ class LinearNumberSlider(ControlMobject):
             self.step,
             float(rect_config.get("width", 2.0)),
             float(rect_config.get("height", 0.075)),
+            corner_radius,
+            handle_radius,
+            handle_fill_opacity,
             stroke_color,
         )
         parts = []

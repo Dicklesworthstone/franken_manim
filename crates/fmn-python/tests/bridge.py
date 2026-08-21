@@ -2551,20 +2551,22 @@ except NotImplementedError as error:
 else:
     raise AssertionError("LinearNumberSlider fabricated an unbound drag gateway")
 
-try:
-    interactive.LinearNumberSlider(
-        circle_kwargs={
-            "radius": 0.2,
-            "stroke_color": manimlib.GREY_A,
-            "fill_color": manimlib.GREY_A,
-            "fill_opacity": 1.0,
-        }
-    )
-except NotImplementedError as error:
-    assert "circle_kwargs.radius" in str(error), error
-    assert "not routed to the native builder" in str(error), error
-else:
-    raise AssertionError("LinearNumberSlider silently ignored handle radius")
+custom_linear = interactive.LinearNumberSlider(
+    0.0,
+    rounded_rect_kwargs={
+        "height": 0.075,
+        "width": 2.0,
+        "corner_radius": 0.02,
+    },
+    circle_kwargs={
+        "radius": 0.2,
+        "stroke_color": manimlib.GREY_A,
+        "fill_color": manimlib.GREY_A,
+        "fill_opacity": 0.4,
+    },
+)
+assert np.isclose(custom_linear.slider.get_width(), 0.4)
+assert np.isclose(custom_linear.slider.get_fill_opacity(), 0.4)
 
 # ColorSliders is the Reference's Group, not a ControlMobject. Atlas owns its
 # checkerboard/swatch and the four native LinearNumberSlider compositions.
