@@ -3121,6 +3121,30 @@ assert np.isclose(styled_control_panel.panel.get_width(), 3.0)
 assert styled_control_panel.panel.get_fill_color() == manimlib.BLUE
 assert np.isclose(styled_control_panel.panel.get_fill_opacity(), 0.4)
 
+# opener_text_kwargs ride Atlas's opener Text builder (text + font_size).
+labeled_panel = interactive.ControlPanel(
+    interactive.Checkbox(True),
+    opener_text_kwargs=dict(text="Settings", font_size=32),
+)
+assert labeled_panel.opener_text_kwargs["text"] == "Settings"
+assert np.isclose(labeled_panel.opener_text_kwargs["font_size"], 32)
+assert len(labeled_panel.panel_opener.submobjects) == 2
+default_opener_text = control_panel.panel_opener.submobjects[1]
+labeled_opener_text = labeled_panel.panel_opener.submobjects[1]
+assert labeled_opener_text.get_height() > default_opener_text.get_height()
+labeled_opener_identity = labeled_panel.panel_opener
+labeled_panel.open_panel()
+assert labeled_panel.panel_opener is labeled_opener_identity
+assert labeled_panel.panel_opener.submobjects[1] is labeled_opener_text
+try:
+    interactive.ControlPanel(opener_text_kwargs=dict(font="Comic Sans"))
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: opener_text_kwargs.font"
+else:
+    raise AssertionError(
+        "ControlPanel silently accepted unknown opener_text_kwargs"
+    )
+
 # PGroup is Atlas's native point-cloud family root, with the original live
 # PMobject proxies grafted beneath it in Reference order.
 point_cloud_mobjects = importlib.import_module(
