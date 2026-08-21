@@ -17636,3 +17636,38 @@ else:
     raise AssertionError(
         "pixel_coords_to_space_coords accepted a non-numeric coordinate"
     )
+
+# fm-5wq.4: the mapping follows the LIVE pixel shape after
+# reset_pixel_shape, never the constructor resolution — the scale divides
+# by the live pixel height (480) and relative offsets normalize by the
+# live (640, 480) shape.
+live_coords_camera = camera_module.Camera(resolution=(1920, 1080))
+live_coords_camera.reset_pixel_shape(640, 480)
+assert live_coords_camera.get_pixel_shape() == (640, 480)
+assert np.allclose(
+    live_coords_camera.pixel_coords_to_space_coords(320, 240),
+    live_coords_camera.get_frame_center(),
+    atol=1e-9,
+)
+live_coords_scale = live_coords_camera.get_frame_height() / 480.0
+assert np.allclose(
+    live_coords_camera.pixel_coords_to_space_coords(0, 0),
+    live_coords_camera.get_frame_center()
+    + live_coords_scale * np.array([-320.0, -240.0, 0.0]),
+)
+# A /1080 constructor-resolution scale would disagree with the live one;
+# make the distinction observable rather than trusting the formula pin.
+stale_coords_scale = live_coords_camera.get_frame_height() / 1080.0
+assert not np.allclose(
+    live_coords_camera.pixel_coords_to_space_coords(0, 0),
+    live_coords_camera.get_frame_center()
+    + stale_coords_scale * np.array([-320.0, -240.0, 0.0]),
+)
+assert np.allclose(
+    live_coords_camera.pixel_coords_to_space_coords(640, 480, relative=True),
+    (2.0, 2.0, 0.0),
+)
+assert np.allclose(
+    live_coords_camera.pixel_coords_to_space_coords(160, 360, relative=True),
+    (0.5, 1.5, 0.0),
+)
