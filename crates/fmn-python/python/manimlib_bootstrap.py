@@ -12066,6 +12066,7 @@ class InteractiveScene(Scene):
     )
     selection_rectangle_stroke_color = _WHITE
     selection_rectangle_stroke_width = 1.0
+    palette_colors = _FMN_ROOT.MANIM_COLORS
 
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
@@ -12093,13 +12094,10 @@ class InteractiveScene(Scene):
         return rect
 
     def get_color_palette(self):
-        colors = getattr(self, "palette_colors", None)
-        if colors is None:
-            colors = _FMN_ROOT.MANIM_COLORS
         palette = VGroup(
             *(
                 Square(side_length=1, fill_color=color, fill_opacity=1)
-                for color in colors
+                for color in self.palette_colors
             )
         )
         palette.set_stroke(width=0)

@@ -2520,6 +2520,7 @@ assert np.isclose(selection_rect.get_stroke_width(), 1.0)
 assert selection_rect.is_fixed_in_frame()
 assert np.allclose(selection_rect.fixed_corner, manimlib.ORIGIN)
 assert str(inspect.signature(InteractiveScene.get_color_palette)) == "(self)"
+assert InteractiveScene.palette_colors is manimlib.MANIM_COLORS
 palette = interactive_scene.get_color_palette()
 assert isinstance(palette, manimlib.VGroup)
 assert len(palette.submobjects) == len(manimlib.MANIM_COLORS)
