@@ -81,6 +81,12 @@ create_exception!(
     PyRuntimeError,
     "An optional host capability required by this operation is unavailable."
 );
+create_exception!(
+    manimlib,
+    TexError,
+    PyValueError,
+    "Native TeX parsing or span provenance failed."
+);
 
 type Engine = Rc<EngineState>;
 type ProxyPairs = Vec<(Py<PyAny>, Py<PyAny>)>;
@@ -6728,12 +6734,25 @@ struct AnimSpec {
     stroke_color: Option<[f64; 3]>,
     point: [f64; 3],
     point_color: Option<[f64; 3]>,
+    color: Option<[f64; 3]>,
+    scale_factor: f64,
+    scale_value: f64,
+    rotation_angle: f64,
+    n_wiggles: f64,
+    scale_about_point: Option<[f64; 3]>,
+    rotate_about_point: Option<[f64; 3]>,
+    time_width: f64,
+    taper_width: f64,
+    direction: [f64; 3],
+    amplitude: f64,
     time_span: Option<(f64, f64)>,
     group_lag: f64,
     remover: bool,
     suspend_mobject_updating: bool,
     surface_resolution: (usize, usize),
     surface_axis: usize,
+    source_keys: Vec<(Mob, String)>,
+    target_keys: Vec<(Mob, String)>,
     members: Vec<AnimSpec>,
 }
 
@@ -6789,6 +6808,18 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             None => Ok(default),
         }
     };
+    let get_keyed_parts = |name: &str| -> PyResult<Vec<(Mob, String)>> {
+        let Some(values) = params.get_item(name)? else {
+            return Ok(Vec::new());
+        };
+        values
+            .try_iter()?
+            .map(|item| {
+                let (proxy, key): (Bound<'_, BridgeMobject>, String) = item?.extract()?;
+                Ok((resolve(&proxy)?, key))
+            })
+            .collect()
+    };
     let members = match params.get_item("members")? {
         Some(list) => list
             .try_iter()?
@@ -6827,6 +6858,26 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .get_item("point_color")?
             .map(|value| value.extract())
             .transpose()?,
+        color: params
+            .get_item("color")?
+            .map(|value| value.extract())
+            .transpose()?,
+        scale_factor: get1("scale_factor", 1.2)?,
+        scale_value: get1("scale_value", 1.1)?,
+        rotation_angle: get1("rotation_angle", 0.01 * std::f64::consts::TAU)?,
+        n_wiggles: get1("n_wiggles", 6.0)?,
+        scale_about_point: params
+            .get_item("scale_about_point")?
+            .map(|value| value.extract())
+            .transpose()?,
+        rotate_about_point: params
+            .get_item("rotate_about_point")?
+            .map(|value| value.extract())
+            .transpose()?,
+        time_width: get1("time_width", 0.3)?,
+        taper_width: get1("taper_width", 0.05)?,
+        direction: get3("direction", [0.0, 1.0, 0.0])?,
+        amplitude: get1("amplitude", 0.2)?,
         time_span: params
             .get_item("time_span")?
             .map(|value| value.extract())
@@ -6836,6 +6887,8 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
         suspend_mobject_updating: get_bool("suspend_mobject_updating", false)?,
         surface_resolution: get_usize_pair("surface_resolution", (0, 0))?,
         surface_axis: get_usize("surface_axis", 1)?,
+        source_keys: get_keyed_parts("source_keys")?,
+        target_keys: get_keyed_parts("target_keys")?,
         members,
     })
 }
@@ -6855,7 +6908,7 @@ fn build_native_animation(
     };
     let is_composition = matches!(
         spec.kind.as_str(),
-        "animation_group" | "lagged_start" | "succession"
+        "animation_group" | "lagged_start" | "succession" | "transform_matching_tex"
     );
     let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
         "python_callback" => Box::new(PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover)),
@@ -6880,6 +6933,21 @@ fn build_native_animation(
             Box::new(
                 fmn_anim::Succession::with_lag_ratio(stage, members, spec.group_lag)
                     .map_err(anim_error)?,
+            )
+        }
+        "transform_matching_tex" => {
+            let members = fmn_anim::transform_matching_keys(
+                stage,
+                need_mob(spec.mob)?,
+                need_target(spec.target)?,
+                &spec.source_keys,
+                &spec.target_keys,
+            )
+            .map_err(anim_error)?;
+            Box::new(
+                fmn_anim::AnimationGroup::new(stage, members)
+                    .map_err(anim_error)?
+                    .with_name("TransformMatchingTex"),
             )
         }
         "transform" => {
@@ -6981,6 +7049,52 @@ fn build_native_animation(
             .to_owned();
             Box::new(growing)
         }
+        "indicate" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let color = spec
+                .color
+                .map(|rgb| [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32]);
+            Box::new(
+                fmn_anim::indicate(stage, need_mob(spec.mob)?, spec.scale_factor, color)
+                    .map_err(anim_error)?,
+            )
+        }
+        "turn_inside_out" => Box::new(
+            fmn_anim::turn_inside_out(stage, need_mob(spec.mob)?, spec.path_arc)
+                .map_err(anim_error)?,
+        ),
+        "wiggle_out_then_in" => {
+            let mut wiggle = fmn_anim::WiggleOutThenIn::new(need_mob(spec.mob)?)
+                .with_scale_value(spec.scale_value)
+                .with_rotation_angle(spec.rotation_angle)
+                .with_n_wiggles(spec.n_wiggles);
+            if let Some(point) = spec.scale_about_point {
+                wiggle = wiggle.with_scale_about_point(point);
+            }
+            if let Some(point) = spec.rotate_about_point {
+                wiggle = wiggle.with_rotate_about_point(point);
+            }
+            Box::new(wiggle)
+        }
+        "show_passing_flash" | "show_creation_then_destruction" => {
+            let mut flash = fmn_anim::show_passing_flash(need_mob(spec.mob)?, spec.time_width);
+            if spec.kind == "show_creation_then_destruction" {
+                fmn_anim::Animation::state_mut(&mut flash).config.name =
+                    "ShowCreationThenDestruction".to_owned();
+            }
+            Box::new(flash)
+        }
+        "v_show_passing_flash" => Box::new(
+            fmn_anim::VShowPassingFlash::new(need_mob(spec.mob)?)
+                .with_time_width(spec.time_width)
+                .with_taper_width(spec.taper_width),
+        ),
+        "apply_wave" => Box::new(fmn_anim::apply_wave(
+            stage,
+            need_mob(spec.mob)?,
+            spec.direction,
+            spec.amplitude,
+        )),
         "fade_transform" => Box::new(
             fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
                 .map_err(anim_error)?,
@@ -7344,6 +7458,10 @@ fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<
 
 fn native_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+fn tex_error(error: impl std::fmt::Display) -> PyErr {
+    TexError::new_err(error.to_string())
 }
 
 /// Materialize only the authoritative family extent needed by Atlas's

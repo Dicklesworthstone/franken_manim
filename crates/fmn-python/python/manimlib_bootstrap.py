@@ -77,6 +77,11 @@ def _smooth_rate(t):
     s = 1 - t
     return (t**3) * (10 * s * s + 5 * s * t + t * t)
 
+
+def _there_and_back_rate(t):
+    new_t = 2 * t if t < 0.5 else 2 * (1 - t)
+    return _smooth_rate(new_t)
+
 # The Reference leaks its OpenGL/window implementation modules into ordinary
 # Python namespaces.  Those names remain part of the compatibility surface,
 # but importing their host packages would initialize a second renderer (and
@@ -8798,6 +8803,187 @@ class GrowArrow(GrowFromPoint):
         super().__init__(arrow, arrow.get_start(), **kwargs)
 
 
+class Indicate(Transform):
+    _native_kind = "indicate"
+
+    def __init__(
+        self,
+        mobject,
+        scale_factor=1.2,
+        color=_YELLOW,
+        rate_func=_there_and_back_rate,
+        **kwargs,
+    ):
+        self.scale_factor = float(scale_factor)
+        self.color = color
+        super().__init__(mobject, None, rate_func=rate_func, **kwargs)
+
+    def create_target(self):
+        return self.mobject.copy().scale(self.scale_factor).set_color(self.color)
+
+    def _allows_deferred_target(self):
+        return True
+
+    def _native_target(self):
+        return None
+
+    def _native_params(self):
+        return {
+            "scale_factor": self.scale_factor,
+            "color": tuple(_color_to_rgb(self.color)),
+        }
+
+
+class TurnInsideOut(Transform):
+    _native_kind = "turn_inside_out"
+
+    def __init__(self, mobject, path_arc=0.5 * _math.pi, **kwargs):
+        super().__init__(mobject, None, path_arc=path_arc, **kwargs)
+
+    def create_target(self):
+        return self.mobject.copy().reverse_points()
+
+    def _allows_deferred_target(self):
+        return True
+
+    def _native_target(self):
+        return None
+
+
+class WiggleOutThenIn(Animation):
+    _native_kind = "wiggle_out_then_in"
+
+    def __init__(
+        self,
+        mobject,
+        scale_value=1.1,
+        rotation_angle=0.01 * _math.tau,
+        n_wiggles=6,
+        scale_about_point=None,
+        rotate_about_point=None,
+        run_time=2,
+        **kwargs,
+    ):
+        super().__init__(mobject, run_time=run_time, **kwargs)
+        self.scale_value = float(scale_value)
+        self.rotation_angle = float(rotation_angle)
+        self.n_wiggles = float(n_wiggles)
+        self.scale_about_point = (
+            None if scale_about_point is None else _vec3(scale_about_point)
+        )
+        self.rotate_about_point = (
+            None if rotate_about_point is None else _vec3(rotate_about_point)
+        )
+
+    def get_scale_about_point(self):
+        if self.scale_about_point is not None:
+            return _np.array(self.scale_about_point)
+        return self.mobject.get_center()
+
+    def get_rotate_about_point(self):
+        if self.rotate_about_point is not None:
+            return _np.array(self.rotate_about_point)
+        return self.mobject.get_center()
+
+    def _native_params(self):
+        params = {
+            "scale_value": self.scale_value,
+            "rotation_angle": self.rotation_angle,
+            "n_wiggles": self.n_wiggles,
+        }
+        if self.scale_about_point is not None:
+            params["scale_about_point"] = self.scale_about_point
+        if self.rotate_about_point is not None:
+            params["rotate_about_point"] = self.rotate_about_point
+        return params
+
+    def _native_target(self):
+        return None
+
+
+class ShowPassingFlash(_NativeAnimation):
+    _native_kind = "show_passing_flash"
+
+    def __init__(self, mobject, time_width=0.1, remover=True, **kwargs):
+        _refuse_unrouted(
+            "ShowPassingFlash()", [("remover", remover is not True)]
+        )
+        super().__init__(mobject, **kwargs)
+        self.time_width = float(time_width)
+
+    def get_bounds(self, alpha):
+        upper = _interpolate(0.0, 1.0 + self.time_width, float(alpha))
+        return (max(upper - self.time_width, 0.0), min(upper, 1.0))
+
+    def _native_params(self):
+        return {"time_width": self.time_width, "remover": True}
+
+
+class ShowCreationThenDestruction(ShowPassingFlash):
+    _native_kind = "show_creation_then_destruction"
+
+    def __init__(self, vmobject, time_width=2.0, **kwargs):
+        super().__init__(vmobject, time_width=time_width, **kwargs)
+
+
+class VShowPassingFlash(Animation):
+    _native_kind = "v_show_passing_flash"
+
+    def __init__(
+        self,
+        vmobject,
+        time_width=0.3,
+        taper_width=0.05,
+        remover=True,
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "VShowPassingFlash()", [("remover", remover is not True)]
+        )
+        super().__init__(vmobject, remover=True, **kwargs)
+        self.time_width = float(time_width)
+        self.taper_width = float(taper_width)
+
+    def taper_kernel(self, x):
+        if x < self.taper_width:
+            return x
+        if x > 1.0 - self.taper_width:
+            return 1.0 - x
+        return 1.0
+
+    def _native_params(self):
+        return {
+            "time_width": self.time_width,
+            "taper_width": self.taper_width,
+            "remover": True,
+        }
+
+    def _native_target(self):
+        return None
+
+
+class ApplyWave(Animation):
+    _native_kind = "apply_wave"
+
+    def __init__(
+        self,
+        mobject,
+        direction=_UP,
+        amplitude=0.2,
+        run_time=1.0,
+        **kwargs,
+    ):
+        super().__init__(mobject, run_time=run_time, **kwargs)
+        self.direction = _vec3(direction)
+        self.amplitude = float(amplitude)
+
+    def _native_params(self):
+        return {"direction": self.direction, "amplitude": self.amplitude}
+
+    def _native_target(self):
+        return None
+
+
 class ApplyMethod(Transform):
     def __init__(self, method, *args, **kwargs):
         self.check_validity_of_input(method)
@@ -9581,6 +9767,19 @@ def _install_schema_surface():
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
         ("manimlib.animation.growing", "GrowFromEdge"): GrowFromEdge,
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
+        ("manimlib.animation.indication", "Indicate"): Indicate,
+        ("manimlib.animation.indication", "TurnInsideOut"): TurnInsideOut,
+        ("manimlib.animation.indication", "WiggleOutThenIn"): WiggleOutThenIn,
+        ("manimlib.animation.indication", "ShowPassingFlash"): ShowPassingFlash,
+        (
+            "manimlib.animation.indication",
+            "ShowCreationThenDestruction",
+        ): ShowCreationThenDestruction,
+        (
+            "manimlib.animation.indication",
+            "VShowPassingFlash",
+        ): VShowPassingFlash,
+        ("manimlib.animation.indication", "ApplyWave"): ApplyWave,
         ("manimlib.animation.transform", "Transform"): Transform,
         ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,
         (
@@ -9846,9 +10045,7 @@ def _install_rate_functions():
             return 0.5 * smooth(2 * t)
         return 0.5 * (1 + smooth(2 * t - 1))
 
-    def there_and_back(t):
-        new_t = 2 * t if t < 0.5 else 2 * (1 - t)
-        return smooth(new_t)
+    there_and_back = _there_and_back_rate
 
     def there_and_back_with_pause(t, pause_ratio=1.0 / 3):
         a = 2.0 / (1.0 - pause_ratio)
