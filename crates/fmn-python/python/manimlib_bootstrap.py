@@ -4806,6 +4806,10 @@ class SampleSpace(Rectangle):
         default_label_scale_val=1,
         **kwargs,
     ):
+        texture_paths = kwargs.pop("texture_paths", None)
+        fixed_in_frame = bool(kwargs.pop("is_fixed_in_frame", False))
+        depth_test = bool(kwargs.pop("depth_test", False))
+        z_index = int(kwargs.pop("z_index", 0))
         _preflight_vmobject_style_kwargs(dict(kwargs))
         super().__init__(
             width,
@@ -4816,6 +4820,14 @@ class SampleSpace(Rectangle):
             stroke_color=stroke_color,
             **kwargs,
         )
+        self.texture_paths = texture_paths
+        self.depth_test = depth_test
+        self.z_index = z_index
+        self.set_z_index(z_index)
+        if depth_test:
+            self.apply_depth_test()
+        if fixed_in_frame:
+            self.fix_in_frame()
         self.default_label_scale_val = default_label_scale_val
 
 
