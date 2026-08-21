@@ -9078,13 +9078,25 @@ assert mapped_decimal_entry.family_members_with_points()
 passthrough_entry = manimlib.Circle()
 assert integer_tex_matrix.element_to_mobject(passthrough_entry) is passthrough_entry
 mapped_complex_entry = integer_tex_matrix.element_to_mobject(1 + 0j)
-assert isinstance(mapped_complex_entry, manimlib.Tex)
-assert mapped_complex_entry.get_tex() == "(1+0j)"
+# fm-5wq.4.108 retarget: complex entries route through DecimalNumber — the
+# zero-imag value takes the fm-5wq.4.80 hide-zero real path, never
+# Tex(str(...))'s "(1+0j)" spelling; the element_config color still lands
+# on the rendered glyphs.
+assert isinstance(mapped_complex_entry, manimlib.DecimalNumber)
+assert mapped_complex_entry.get_value() == (1 + 0j)
 assert mapped_complex_entry.family_members_with_points()
 assert all(
     member.get_fill_color() == manimlib.BLUE
     for member in mapped_complex_entry.family_members_with_points()
 )
+# A general complex entry inherits BN-08's named refusal from
+# DecimalNumber itself — no silent rendering.
+try:
+    integer_tex_matrix.element_to_mobject(1 + 2j)
+except NotImplementedError as error:
+    assert "BN-08" in str(error), error
+else:
+    raise AssertionError("a general complex entry was rendered silently")
 try:
     matrix_module.Matrix.element_to_mobject(object(), 0)
 except TypeError as error:
