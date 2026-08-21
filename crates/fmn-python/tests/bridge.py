@@ -3384,6 +3384,23 @@ try:
         raise AssertionError("scene_from_class accepted a non-Scene")
     assert extract_scene.compute_total_frames(extracted.Demo, {}) == 0
     assert extract_scene.compute_total_frames(extracted.Waiter, {}) == 30
+    ran = extract_scene.main(
+        {}, {"file_name": extract_path, "scene_names": ["Demo"]}
+    )
+    assert len(ran) == 1
+    assert type(ran[0]).__name__ == "Demo"
+    try:
+        extract_scene.main({}, {})
+    except ValueError as error:
+        assert str(error) == "main run_config needs file_name"
+    else:
+        raise AssertionError("main accepted a config with no file_name")
+    try:
+        extract_scene.main(object(), {"file_name": extract_path})
+    except TypeError as error:
+        assert str(error) == "main scene_config must be a dict"
+    else:
+        raise AssertionError("main accepted a non-dict scene_config")
     patched = extract_scene.insert_embed_line_to_module(
         extracted, {"embed_line": 4}
     )

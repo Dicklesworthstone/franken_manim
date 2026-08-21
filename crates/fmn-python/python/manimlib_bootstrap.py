@@ -11374,6 +11374,29 @@ def compute_total_frames(scene_class, scene_config):
     return int(scene.get_time() * fps)
 
 
+_get_module = get_module
+_get_scene_classes = get_scene_classes
+_insert_embed_line_to_module = insert_embed_line_to_module
+_get_scenes_to_render = get_scenes_to_render
+_compute_total_frames = compute_total_frames
+
+
+def main(scene_config, run_config):
+    if not isinstance(scene_config, dict):
+        raise TypeError("main scene_config must be a dict")
+    if not isinstance(run_config, dict):
+        raise TypeError("main run_config must be a dict")
+    module = _get_module(run_config)
+    if module is None:
+        raise ValueError("main run_config needs file_name")
+    module = _insert_embed_line_to_module(module, run_config)
+    classes = _get_scene_classes(module)
+    scenes = _get_scenes_to_render(classes, scene_config, run_config)
+    for scene in scenes:
+        scene.run()
+    return scenes
+
+
 class CheckpointManager:
     """Named SceneState snapshots for interactive re-run of a comment-keyed block."""
 
@@ -15507,6 +15530,7 @@ def _install_schema_surface():
             "insert_embed_line_to_module",
         ): insert_embed_line_to_module,
         ("manimlib.extract_scene", "compute_total_frames"): compute_total_frames,
+        ("manimlib.extract_scene", "main"): main,
     }
     for (module_name, name), function in special_functions.items():
         function.__module__ = module_name
