@@ -12568,6 +12568,18 @@ class InteractiveScene(Scene):
         if palette is not None:
             self.remove(palette)
 
+    def copy_selection(self):
+        raise _CapabilityError(
+            "InteractiveScene selection clipboard requires a host clipboard "
+            "capability supplied by pyperclip or IPython"
+        )
+
+    def paste_selection(self):
+        raise _CapabilityError(
+            "InteractiveScene selection clipboard requires a host clipboard "
+            "capability supplied by pyperclip or IPython"
+        )
+
     def group_selection(self):
         group = self.get_group(*self.selection)
         self.add(group)

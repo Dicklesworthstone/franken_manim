@@ -3202,6 +3202,33 @@ assert recolor_scene.choose_color(recolor_source.get_center()) is None
 assert recolor_target.get_color() == manimlib.RED
 assert recolor_scene.color_palette not in recolor_scene.mobjects
 
+# fm-5wq.4: clipboard selection transfer is an explicit host-capability
+# refusal; the sovereign portal never imports pyperclip or IPython implicitly.
+assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
+assert str(inspect.signature(InteractiveScene.paste_selection)) == "(self)"
+clipboard_scene = InteractiveScene()
+clipboard_scene.setup()
+clipboard_circle = manimlib.Circle()
+clipboard_scene.add(clipboard_circle)
+clipboard_scene.add_to_selection(clipboard_circle)
+try:
+    clipboard_scene.copy_selection()
+except bridge_errors.CapabilityError as error:
+    clipboard_error = str(error).lower()
+    assert "clipboard" in clipboard_error
+    assert "pyperclip" in clipboard_error or "ipython" in clipboard_error
+else:
+    raise AssertionError("copy_selection faked a clipboard transfer")
+assert clipboard_circle in clipboard_scene.selection
+try:
+    clipboard_scene.paste_selection()
+except bridge_errors.CapabilityError as error:
+    clipboard_error = str(error).lower()
+    assert "clipboard" in clipboard_error
+    assert "pyperclip" in clipboard_error or "ipython" in clipboard_error
+else:
+    raise AssertionError("paste_selection faked a clipboard transfer")
+
 
 # The schema-generated import topology and exact-name aliases are present.
 geometry = importlib.import_module("manimlib.mobject.geometry")
