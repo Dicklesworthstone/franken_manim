@@ -1849,6 +1849,35 @@ assert frame_ticks == [0.25]
 assert frame_scene.update_frame(0.125) is None
 assert np.isclose(frame_scene.get_time(), 0.875)
 assert frame_ticks == [0.25, 0.125]
+
+# fm-5wq.4: always_update_mobjects=True forces should_update_mobjects with
+# zero mobjects and with updater-less mobjects; increment_time still never
+# runs updaters while update_mobjects still does. The constructor
+# bool()-casts the flag (same style as show_animation_progress /
+# leave_progress_bars), so a truthy string pins to True and a falsy one
+# to False rather than raising.
+always_scene = Scene(always_update_mobjects=True)
+assert always_scene.always_update_mobjects is True
+assert always_scene.should_update_mobjects() is True
+always_plain = manimlib.Circle()
+always_scene.add(always_plain)
+assert list(always_plain.updaters) == []
+assert always_scene.should_update_mobjects() is True
+assert always_scene.increment_time(0.5) is None
+assert np.isclose(always_scene.get_time(), 0.5)
+always_ticks = []
+always_probe = manimlib.Circle()
+always_probe.add_updater(lambda mob, dt: always_ticks.append(dt))
+always_scene.add(always_probe)
+assert always_scene.increment_time(0.25) is None
+assert always_ticks == []
+assert always_scene.update_mobjects(0.25) is None
+assert always_ticks == [0.25]
+coerced_always_scene = Scene(always_update_mobjects="yes")
+assert coerced_always_scene.always_update_mobjects is True
+assert coerced_always_scene.should_update_mobjects() is True
+assert Scene(always_update_mobjects="").always_update_mobjects is False
+
 skip_frame = Scene(skip_animations=True)
 assert skip_frame.update_frame(0.25) is None
 assert np.isclose(skip_frame.get_time(), 0.25)
@@ -2149,6 +2178,16 @@ except NotImplementedError as error:
     assert str(error) == "Scene.wait unsupported keyword(s): bogus"
 else:
     raise AssertionError("Scene.wait accepted unsupported keyword bogus")
+
+# fm-5wq.4: wait() without a duration uses the constructor default_wait_time
+# (Reference 1.0s) instead of a native None sentinel.
+assert scene_module.Scene.default_wait_time == 1.0
+default_wait_scene = Scene(default_wait_time=2.0 / 30.0)
+assert np.isclose(default_wait_scene.default_wait_time, 2.0 / 30.0)
+assert default_wait_scene.wait() is None
+assert math.isclose(default_wait_scene.get_time(), 2.0 / 30.0)
+assert default_wait_scene.leave_progress_bars is False
+assert Scene(leave_progress_bars=True).leave_progress_bars is True
 
 copy_source = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
@@ -4463,14 +4502,34 @@ assert default_grid_squares[0].get_fill_color() == manimlib.GREY_A
 assert default_grid_squares[1].get_fill_color() == manimlib.GREY_C
 empty_slider_config = interactive.ColorSliders(sliders_kwargs={})
 assert np.allclose(empty_slider_config.get_value(), [1.0, 1.0, 1.0, 1.0])
-try:
-    interactive.ColorSliders(sliders_kwargs=dict(step=2.0))
-except NotImplementedError as error:
-    assert str(error) == (
-        "ColorSliders sliders_kwargs are not routed to the native builder"
+stepped_color_sliders = interactive.ColorSliders(
+    sliders_kwargs=dict(step=2.0)
+)
+stepped_color_sliders.set_value(63.0, 128.0, 254.0, 0.5)
+assert np.allclose(
+    stepped_color_sliders.get_value(),
+    [62.0 / 255.0, 128.0 / 255.0, 254.0 / 255.0, 0.5],
+)
+styled_color_sliders = interactive.ColorSliders(
+    sliders_kwargs=dict(
+        rounded_rect_kwargs=dict(width=1.0, height=0.1, corner_radius=0.02),
+        circle_kwargs=dict(radius=0.2, fill_opacity=0.4),
     )
+)
+styled_bar, styled_handle, _ = styled_color_sliders.r_slider.submobjects
+assert np.isclose(styled_bar.get_width(), 1.0)
+assert np.isclose(styled_handle.get_width(), 0.4)
+assert np.isclose(styled_handle.get_fill_opacity(), 0.4)
+try:
+    interactive.ColorSliders(
+        sliders_kwargs=dict(rounded_rect_kwargs=dict(foo=1))
+    )
+except TypeError as error:
+    assert "sliders_kwargs.rounded_rect_kwargs.foo" in str(error)
 else:
-    raise AssertionError("ColorSliders silently discarded sliders_kwargs")
+    raise AssertionError(
+        "ColorSliders silently discarded sliders_kwargs.rounded_rect_kwargs.foo"
+    )
 try:
     interactive.ColorSliders(sliders_kwargs=dict(bogus=1))
 except TypeError as error:
@@ -17372,3 +17431,68 @@ for bad_width, bad_height in ((0, 480), (-640, 480)):
     else:
         raise AssertionError("reset_pixel_shape accepted a non-positive shape")
 assert resize_camera.get_pixel_shape() == (640, 360)
+
+# fm-5wq.4: get_pixel_size, resize_frame_shape, and refresh_uniforms pin the
+# rest of the live pixel-shape surface those resets feed.
+assert str(inspect.signature(camera_module.Camera.get_pixel_size)) == "(self)"
+assert str(inspect.signature(camera_module.Camera.resize_frame_shape)) == (
+    "(self, fixed_dimension=False)"
+)
+assert str(inspect.signature(camera_module.Camera.refresh_uniforms)) == "(self)"
+
+# get_pixel_size is frame_width / pixel_width, so shrinking the pixel width
+# while the frame width holds must grow the pixel size by the same factor.
+pixel_size_camera = camera_module.Camera(resolution=(1920, 1080))
+initial_pixel_size = pixel_size_camera.get_pixel_size()
+assert np.isclose(
+    initial_pixel_size,
+    pixel_size_camera.get_frame_width() / 1920.0,
+)
+pixel_size_camera.reset_pixel_shape(640, 480)
+resized_pixel_size = pixel_size_camera.get_pixel_size()
+assert np.isclose(
+    resized_pixel_size,
+    pixel_size_camera.get_frame_width() / 640.0,
+)
+assert np.isclose(resized_pixel_size, 3.0 * initial_pixel_size)
+assert not np.isclose(resized_pixel_size, initial_pixel_size)
+
+# resize_frame_shape restores the live pixel aspect after the frame shape is
+# distorted: the default keeps width and moves height, fixed_dimension=True
+# keeps height and moves width.
+frame_shape_camera = camera_module.Camera(resolution=(1600, 900))
+frame_shape_camera.frame._core.set_shape((10.0, 10.0))
+assert frame_shape_camera.resize_frame_shape() is None
+assert np.allclose(
+    frame_shape_camera.get_frame_shape(), (10.0, 10.0 * 900.0 / 1600.0)
+)
+frame_shape_camera.frame._core.set_shape((10.0, 10.0))
+assert frame_shape_camera.resize_frame_shape(fixed_dimension=True) is None
+assert np.allclose(
+    frame_shape_camera.get_frame_shape(), (10.0 * 1600.0 / 900.0, 10.0)
+)
+
+# refresh_uniforms after a frame move: every Reference uniform key is present
+# with finite values, and camera_position tracks the moved frame.
+uniforms_camera = camera_module.Camera(resolution=(1280, 720))
+uniforms_camera.frame.shift([1.0, -2.0, 0.0])
+assert uniforms_camera.refresh_uniforms() is None
+for uniform_key in (
+    "view",
+    "frame_scale",
+    "pixel_size",
+    "camera_position",
+    "light_position",
+):
+    assert uniform_key in uniforms_camera.uniforms
+    assert np.all(
+        np.isfinite(
+            np.asarray(uniforms_camera.uniforms[uniform_key], dtype=float)
+        )
+    )
+assert np.allclose(
+    uniforms_camera.uniforms["camera_position"][:2], (1.0, -2.0)
+)
+assert np.isclose(
+    uniforms_camera.uniforms["pixel_size"], uniforms_camera.get_pixel_size()
+)
