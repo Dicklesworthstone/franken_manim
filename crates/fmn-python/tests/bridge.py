@@ -3435,6 +3435,34 @@ except scene_module.EndScene as error:
 else:
     raise AssertionError("native Scene.end did not raise EndScene")
 
+assert str(inspect.signature(Scene.wait_until)) == (
+    "(self, stop_condition, max_time=60)"
+)
+wait_until_scene = Scene()
+wait_until_samples = []
+
+
+def stop_waiting_after_two_frames():
+    wait_until_samples.append(wait_until_scene.get_time())
+    return len(wait_until_samples) >= 2
+
+
+assert (
+    wait_until_scene.wait_until(stop_waiting_after_two_frames, max_time=1)
+    is None
+)
+assert len(wait_until_samples) == 2
+assert np.allclose(wait_until_samples, [1 / 30, 2 / 30])
+assert np.isclose(wait_until_scene.get_time(), 2 / 30)
+try:
+    Scene().wait_until(object(), max_time=1 / 30)
+except TypeError as error:
+    assert str(error) == (
+        "Scene.wait stop_condition must be callable or None; got object"
+    )
+else:
+    raise AssertionError("Scene.wait_until accepted a non-callable predicate")
+
 # The next honest native constructor is legacy SingleStringTex over Scribe's
 # existing fmn-library Tex builder.
 old_tex_mobjects = importlib.import_module(

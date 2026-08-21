@@ -11020,6 +11020,9 @@ class Scene(_SceneCore):
             ignore_presenter_mode,
         )
 
+    def wait_until(self, stop_condition, max_time=60):
+        self.wait(max_time, stop_condition=stop_condition)
+
     def add_sound(
         self,
         sound_file,
