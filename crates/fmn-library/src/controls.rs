@@ -2391,6 +2391,31 @@ mod tests {
     }
 
     #[test]
+    fn slider_range_clamps_without_snapping_and_refuses_invalid_bounds() {
+        let mut slider = LinearNumberSlider::new(0.0)
+            .expect("valid slider")
+            .range(0.0, 1.0)
+            .expect("ordered finite range");
+        slider.set_value(2.0).expect("out-of-range value clamps");
+        assert_eq!(slider.value(), 1.0);
+        slider.set_value(0.25).expect("in-range value is accepted");
+        assert_eq!(slider.value(), 0.25);
+
+        assert!(matches!(
+            LinearNumberSlider::new(0.0)
+                .expect("valid slider")
+                .range(1.0, 0.0),
+            Err(SliderError::InvalidRange)
+        ));
+        assert!(matches!(
+            LinearNumberSlider::new(0.0)
+                .expect("valid slider")
+                .range(f64::NAN, 1.0),
+            Err(SliderError::InvalidRange)
+        ));
+    }
+
+    #[test]
     fn slider_refuses_non_finite_values_before_mutation() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
