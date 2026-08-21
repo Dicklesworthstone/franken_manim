@@ -12261,10 +12261,38 @@ assert len(lsm_anim.animations) == 2
 assert all(
     isinstance(member, manimlib.FadeOut) for member in lsm_anim.animations
 )
+# Composed FadeOut members follow the same restore-then-remove finish
+# contract as top-level fades (fading.py:76, delegated through the
+# composition's member cleanup — the SCTFO pins above prove it), so the
+# honest fade observable is the mid-play probe: both children reach
+# stroke alpha exactly 0.0 at the last captured frame (group alpha 1.0,
+# before the finish epilogue), and the records come back restored.
+lsm_probe = manimlib.Dot().move_to((3.0, 0.0, 0.0))
+lsm_scene.add(lsm_probe)
+lsm_frames = []
+
+
+def _lsm_capture(mobject, dt):
+    del mobject
+    if dt > 0:
+        lsm_frames.append(
+            (
+                float(lsm_first.data["stroke_rgba"][0, 3]),
+                float(lsm_second.data["stroke_rgba"][0, 3]),
+            )
+        )
+
+
+lsm_probe.add_updater(_lsm_capture)
 lsm_scene.play(lsm_anim, run_time=2.0 / 30.0)
-# Both children faded out through the lagged composition.
-assert np.allclose(lsm_first.data["stroke_rgba"][:, 3], 0.0)
-assert np.allclose(lsm_second.data["stroke_rgba"][:, 3], 0.0)
+lsm_probe.remove_updater(_lsm_capture)
+assert len(lsm_frames) == 2, lsm_frames
+assert any(first < 1.0 for first, _ in lsm_frames), lsm_frames
+assert any(second < 1.0 for _, second in lsm_frames), lsm_frames
+assert np.allclose(lsm_frames[-1], [0.0, 0.0], atol=1e-9), lsm_frames
+# Finish restored both children's records (the composed remover contract).
+assert np.allclose(lsm_first.data["stroke_rgba"][:, 3], 1.0)
+assert np.allclose(lsm_second.data["stroke_rgba"][:, 3], 1.0)
 
 # Mapped kwargs reach every member; lag_ratio stays the group's.
 lsm_shifted = manimlib.LaggedStartMap(
