@@ -6960,7 +6960,13 @@ fn build_native_animation(
     };
     let is_composition = matches!(
         spec.kind.as_str(),
-        "animation_group" | "lagged_start" | "succession" | "transform_matching_tex"
+        "animation_group"
+            | "flash"
+            | "lagged_start"
+            | "show_creation_then_fade_out"
+            | "succession"
+            | "transform_matching_strings"
+            | "transform_matching_tex"
     );
     let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
         "python_callback" => Box::new(PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover)),
@@ -6987,7 +6993,24 @@ fn build_native_animation(
                     .map_err(anim_error)?,
             )
         }
-        "transform_matching_tex" => {
+        "flash" => {
+            let mut members = Vec::with_capacity(spec.members.len());
+            for member in spec.members {
+                members.push(build_native_animation(stage, member)?);
+            }
+            Box::new(fmn_anim::flash(stage, members).map_err(anim_error)?)
+        }
+        "show_creation_then_fade_out" => {
+            let mut members = Vec::with_capacity(spec.members.len());
+            for member in spec.members {
+                members.push(build_native_animation(stage, member)?);
+            }
+            Box::new(
+                fmn_anim::show_creation_then_fade_out(stage, members, spec.remover)
+                    .map_err(anim_error)?,
+            )
+        }
+        "transform_matching_tex" | "transform_matching_strings" => {
             let members = fmn_anim::transform_matching_keys(
                 stage,
                 need_mob(spec.mob)?,
@@ -6996,10 +7019,15 @@ fn build_native_animation(
                 &spec.target_keys,
             )
             .map_err(anim_error)?;
+            let name = if spec.kind == "transform_matching_strings" {
+                "TransformMatchingStrings"
+            } else {
+                "TransformMatchingTex"
+            };
             Box::new(
                 fmn_anim::AnimationGroup::new(stage, members)
                     .map_err(anim_error)?
-                    .with_name("TransformMatchingTex"),
+                    .with_name(name),
             )
         }
         "transform" => {
@@ -7130,6 +7158,11 @@ fn build_native_animation(
             .to_owned();
             Box::new(growing)
         }
+        "focus_on" => Box::new(fmn_anim::focus_on(
+            need_mob(spec.mob)?,
+            need_target(spec.target)?,
+            spec.remover,
+        )),
         "indicate" => {
             #[allow(clippy::cast_possible_truncation)]
             let color = spec
@@ -7137,9 +7170,14 @@ fn build_native_animation(
                 .map(|rgb| [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32]);
             Box::new(
                 fmn_anim::indicate(stage, need_mob(spec.mob)?, spec.scale_factor, color)
-                    .map_err(anim_error)?,
+                .map_err(anim_error)?,
             )
         }
+        "circle_indicate" => Box::new(fmn_anim::circle_indicate(
+            need_mob(spec.mob)?,
+            need_target(spec.target)?,
+            spec.remover,
+        )),
         "turn_inside_out" => Box::new(
             fmn_anim::turn_inside_out(stage, need_mob(spec.mob)?, spec.path_arc)
                 .map_err(anim_error)?,

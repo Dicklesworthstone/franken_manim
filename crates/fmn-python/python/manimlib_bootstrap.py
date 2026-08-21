@@ -12,6 +12,7 @@ import abc as _abc
 import ast as _ast
 import collections.abc as _collections_abc
 import copy as _copy
+import difflib as _difflib
 import enum as _enum
 import importlib as _importlib
 import inspect as _inspect
@@ -8562,6 +8563,109 @@ class CountInFrom(ChangingDecimal):
         )
 
 
+def _string_word_groups(string_mobject):
+    """`StringMobject.build_groups()`' word boundaries from native span maps
+    (fm-5wq.4.54): partition the glyph ordinals, in order, into runs that
+    share a whitespace-delimited word of the source string. A glyph whose
+    span starts outside every word (an isolated command glyph) stays with
+    the current run, so the runs always partition the ordinals."""
+    spans = getattr(string_mobject, "_string_sub_spans", None)
+    string = getattr(string_mobject, "string", None)
+    if not spans or string is None:
+        return []
+    word_bytes = [
+        string_mobject._byte_span(match.span())
+        for match in _re.finditer(r"\S+", string)
+    ]
+    groups = []
+    current = []
+    current_word = -1
+    for ordinal, (start, _end) in enumerate(spans):
+        word = next(
+            (
+                index
+                for index, (word_start, word_end) in enumerate(word_bytes)
+                if word_start <= start < word_end
+            ),
+            current_word,
+        )
+        if word != current_word and current:
+            groups.append(current)
+            current = []
+        current_word = word
+        current.append(ordinal)
+    if current:
+        groups.append(current)
+    return groups
+
+
+class AddTextWordByWord(Animation):
+    """The Reference's word-by-word reveal (creation.py:210) over native
+    span-map word groups (fm-5wq.4.54): `ShowIncreasingSubsets` semantics —
+    rate applied to the raw alpha, banker's rounding, `run_time` derived as
+    `time_per_word * n_words` when negative, linear rate — with the word
+    boundaries coming from the glyph children's retained source spans
+    instead of the Reference's second labelled-SVG render. The native
+    constructor is fmn-anim's `add_text_word_by_word`; this skin drives the
+    same prefix reveal through the live `set_submobjects` seam."""
+
+    def __init__(
+        self,
+        string_mobject,
+        time_per_word=0.2,
+        run_time=-1.0,
+        rate_func=None,
+        **kwargs,
+    ):
+        # The Reference's exact refusal for a non-StringMobject target.
+        assert isinstance(string_mobject, StringMobject)
+        groups = _string_word_groups(string_mobject)
+        if not groups:
+            raise ValueError(
+                "AddTextWordByWord requires span-map word groups; "
+                "the string mobject produced none"
+            )
+        if any(
+            len(path) != 1
+            for path in getattr(string_mobject, "_string_sub_paths", [])
+        ):
+            raise NotImplementedError(
+                "AddTextWordByWord over multi-part nested glyph families "
+                "awaits per-part group flattening"
+            )
+        self._all_submobs = list(string_mobject.submobjects)
+        # Each word group ends at its last glyph ordinal; the final
+        # boundary covers trailing non-glyph children (decorations), so
+        # the finished frame is the whole family.
+        self._boundaries = [0]
+        for group in groups[:-1]:
+            self._boundaries.append(group[-1] + 1)
+        self._boundaries.append(len(self._all_submobs))
+        if run_time < 0:
+            run_time = time_per_word * len(groups)
+        super().__init__(
+            string_mobject,
+            run_time=run_time,
+            rate_func=(
+                rate_func
+                if rate_func is not None
+                else getattr(_FMN_ROOT, "linear", lambda alpha: alpha)
+            ),
+            **kwargs,
+        )
+        self.mobject = string_mobject
+        self.string_mobject = string_mobject
+
+    def interpolate_mobject(self, alpha):
+        # ShowIncreasingSubsets' exact indexing: rate on the raw alpha,
+        # np.round's ties-to-even, Python-slice clamping.
+        words = len(self._boundaries) - 1
+        index = int(
+            min(max(_np.round(self.rate_func(float(alpha)) * words), 0), words)
+        )
+        self.mobject.set_submobjects(self._all_submobs[: self._boundaries[index]])
+
+
 # ---------------------------------------------------------------------------
 # Explicit animation classes (fm-d3gt): thin specs over fmn-anim's native
 # five-mechanisms shelf. Scene.play builds one native segment animation per
@@ -9033,6 +9137,58 @@ class GrowArrow(GrowFromPoint):
         super().__init__(arrow, arrow.get_start(), **kwargs)
 
 
+class FocusOn(Transform):
+    _native_kind = "focus_on"
+
+    def __init__(
+        self,
+        focus_point,
+        opacity=0.2,
+        color=_GREY_C,
+        run_time=2,
+        remover=True,
+        **kwargs,
+    ):
+        if isinstance(focus_point, _BridgeMobject):
+            raise NotImplementedError(
+                "manimlib.animation.indication.FocusOn with a Mobject "
+                "focus_point awaits the live target-follow updater seam"
+            )
+        self.focus_point = _np.array(_vec3(focus_point))
+        self.opacity = float(opacity)
+        self.color = color
+        self.remover = bool(remover)
+        super().__init__(
+            self.create_starting_mobject(),
+            self.create_target(),
+            run_time=run_time,
+            **kwargs,
+        )
+
+    def create_target(self):
+        return Dot(
+            self.focus_point,
+            radius=0,
+            stroke_width=0,
+            fill_color=self.color,
+            fill_opacity=self.opacity,
+        )
+
+    def create_starting_mobject(self):
+        return Dot(
+            self.focus_point,
+            radius=_FRAME_X_RADIUS + _FRAME_Y_RADIUS,
+            stroke_width=0,
+            fill_color=self.color,
+            fill_opacity=0,
+        )
+
+    def _native_params(self):
+        params = super()._native_params()
+        params["remover"] = self.remover
+        return params
+
+
 class Indicate(Transform):
     _native_kind = "indicate"
 
@@ -9062,6 +9218,47 @@ class Indicate(Transform):
             "scale_factor": self.scale_factor,
             "color": tuple(_color_to_rgb(self.color)),
         }
+
+
+class CircleIndicate(Transform):
+    _native_kind = "circle_indicate"
+
+    def __init__(
+        self,
+        mobject,
+        scale_factor=1.2,
+        rate_func=_there_and_back_rate,
+        stroke_color=_YELLOW,
+        stroke_width=3.0,
+        remover=True,
+        **kwargs,
+    ):
+        self.scale_factor = float(scale_factor)
+        if not _math.isfinite(self.scale_factor) or self.scale_factor <= 0:
+            raise ValueError("CircleIndicate scale_factor must be positive and finite")
+        self.stroke_color = stroke_color
+        self.stroke_width = float(stroke_width)
+        if not _math.isfinite(self.stroke_width) or self.stroke_width < 0:
+            raise ValueError("CircleIndicate stroke_width must be non-negative and finite")
+        self.remover = bool(remover)
+        circle = Circle(
+            stroke_color=self.stroke_color,
+            stroke_width=self.stroke_width,
+        ).surround(mobject)
+        pre_circle = circle.copy().set_stroke(width=0)
+        pre_circle.scale(1.0 / self.scale_factor)
+        self.circle = circle
+        super().__init__(
+            pre_circle,
+            circle,
+            rate_func=rate_func,
+            **kwargs,
+        )
+
+    def _native_params(self):
+        params = super()._native_params()
+        params["remover"] = self.remover
+        return params
 
 
 class TurnInsideOut(Transform):
@@ -9190,6 +9387,69 @@ class VShowPassingFlash(Animation):
 
     def _native_target(self):
         return None
+
+
+class FlashAround(VShowPassingFlash):
+    """Sweep a tapered native stroke around Atlas matcher geometry."""
+
+    def __init__(
+        self,
+        mobject,
+        time_width=1.0,
+        taper_width=0.0,
+        stroke_width=4.0,
+        color=_YELLOW,
+        buff=_SMALL_BUFF,
+        n_inserted_curves=100,
+        **kwargs,
+    ):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("FlashAround expects a Mobject")
+        path = self.get_path(mobject, buff)
+        if mobject.is_fixed_in_frame():
+            path.fix_in_frame()
+        path.insert_n_curves(n_inserted_curves)
+        path.set_points(path.get_points_without_null_curves())
+        path.set_stroke(color, stroke_width)
+        super().__init__(
+            path,
+            time_width=time_width,
+            taper_width=taper_width,
+            **kwargs,
+        )
+
+    def get_path(self, mobject, buff):
+        return SurroundingRectangle(mobject, buff=buff)
+
+
+class FlashUnder(FlashAround):
+    def get_path(self, mobject, buff):
+        return Underline(mobject, buff=buff, stretch_factor=1.0)
+
+
+class ShowPassingFlashAround(VShowPassingFlash):
+    """Track a native surrounding rectangle while its stroke sweeps."""
+
+    def __init__(
+        self,
+        mobject,
+        stroke_width=2.0,
+        stroke_color=_YELLOW,
+        buff=_SMALL_BUFF,
+        **kwargs,
+    ):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("ShowPassingFlashAround expects a Mobject")
+        rect = SurroundingRectangle(
+            mobject,
+            stroke_width=stroke_width,
+            stroke_color=stroke_color,
+            buff=buff,
+        )
+        rect.add_updater(lambda surrounding: surrounding.move_to(mobject))
+        kwargs.setdefault("time_width", 0.1)
+        kwargs.setdefault("taper_width", 0.0)
+        super().__init__(rect, **kwargs)
 
 
 class ApplyWave(Animation):
@@ -9356,10 +9616,20 @@ class FadeTransform(_NativeAnimation):
 
 
 class TransformMatchingStrings(_NativeAnimation):
-    """Match native string primitives by their source-span identity."""
+    """Match native string primitives by their source-span identity.
 
-    _native_kind = "transform_matching_tex"
+    Plain-text span maps are one glyph per part, so bare key equality would
+    pair every ``e`` with any other ``e``.  This class therefore matches by
+    string identity over the longest matching blocks of the two key
+    sequences (``difflib.SequenceMatcher``, ``autojunk=False`` — pure
+    deterministic sequence data), the pinned Reference's matching-blocks
+    discipline: a glyph pairs only inside a genuinely shared substring run.
+    ``TransformMatchingTex`` opts back into bare key equality, because Tex
+    span parts are semantic isolate units rather than glyphs."""
+
+    _native_kind = "transform_matching_strings"
     _target_attr = "target_mobject"
+    _match_by_blocks = True
 
     def __init__(
         self,
@@ -9376,16 +9646,18 @@ class TransformMatchingStrings(_NativeAnimation):
             target, StringMobject
         ):
             raise TypeError(
-                "TransformMatchingStrings expects two StringMobject instances"
+                type(self).__name__
+                + " expects two StringMobject instances"
             )
         if not source._string_sub_spans or not target._string_sub_spans:
             raise _TexError(
-                "TransformMatchingTex requires non-empty native span maps"
+                type(self).__name__
+                + " requires non-empty native span maps"
             )
         if matched_pairs:
             raise NotImplementedError(
-                "TransformMatchingTex matched_pairs awaits the explicit-pair "
-                "native key override"
+                type(self).__name__
+                + " matched_pairs awaits the explicit-pair native key override"
             )
         self.target_mobject = target
         self.matched_keys = tuple(matched_keys)
@@ -9397,28 +9669,63 @@ class TransformMatchingStrings(_NativeAnimation):
             **kwargs,
         )
 
-    @staticmethod
-    def _native_span_keys(mobject):
+    def _native_span_keys(self, mobject):
         encoded = mobject.get_string().encode("utf-8")
         keys = []
         for ordinal, (start, end) in enumerate(mobject._string_sub_spans):
             if not 0 <= start < end <= len(encoded):
                 raise _TexError(
-                    "TransformMatchingTex received an invalid native span"
+                    type(self).__name__
+                    + " received an invalid native span"
                 )
             try:
                 key = encoded[start:end].decode("utf-8")
             except UnicodeDecodeError as error:
                 raise _TexError(
-                    "TransformMatchingTex native span split a UTF-8 code point"
+                    type(self).__name__
+                    + " native span split a UTF-8 code point"
                 ) from error
             keys.append((mobject._string_submobject(ordinal), key))
         return keys
 
+    @staticmethod
+    def _matching_block_keys(source_keys, target_keys, pinned):
+        """Scope keys to `SequenceMatcher` matching blocks: parts inside a
+        shared block keep pairwise-aligned block-scoped keys, pinned keys
+        (`matched_keys` / `key_map` sources) stay raw everywhere, and
+        everything else becomes unpairable so it takes the native fades."""
+        source_sequence = [key for _, key in source_keys]
+        target_sequence = [key for _, key in target_keys]
+        matcher = _difflib.SequenceMatcher(
+            None, source_sequence, target_sequence, autojunk=False
+        )
+        source_block = {}
+        target_block = {}
+        for block_ordinal, block in enumerate(matcher.get_matching_blocks()):
+            for offset in range(block.size):
+                source_block[block.a + offset] = block_ordinal
+                target_block[block.b + offset] = block_ordinal
+
+        def scope(keys, blocks, side):
+            scoped = []
+            for index, (part, key) in enumerate(keys):
+                if key in pinned:
+                    scoped.append((part, key))
+                elif index in blocks:
+                    scoped.append((part, f"block:{blocks[index]}:{key}"))
+                else:
+                    scoped.append((part, f"{side}:{index}:{key}"))
+            return scoped
+
+        return (
+            scope(source_keys, source_block, "source-only"),
+            scope(target_keys, target_block, "target-only"),
+        )
+
     def _native_params(self):
         source_keys = self._native_span_keys(self.mobject)
         target_keys = self._native_span_keys(self.target_mobject)
-        if self.matched_keys:
+        if self.matched_keys and not self._match_by_blocks:
             admitted = set(self.matched_keys)
             source_keys = [
                 (part, key if key in admitted else f"source-only:{index}:{key}")
@@ -9433,11 +9740,17 @@ class TransformMatchingStrings(_NativeAnimation):
             target_keys = [
                 (part, reverse.get(key, key)) for part, key in target_keys
             ]
+        if self._match_by_blocks:
+            pinned = set(self.matched_keys) | set(self.key_map)
+            source_keys, target_keys = self._matching_block_keys(
+                source_keys, target_keys, pinned
+            )
         return {"source_keys": source_keys, "target_keys": target_keys}
 
 
 class TransformMatchingTex(TransformMatchingStrings):
-    pass
+    _native_kind = "transform_matching_tex"
+    _match_by_blocks = False
 
 
 class FadeInFromPoint(_NativeAnimation):
@@ -9493,6 +9806,83 @@ class LaggedStart(AnimationGroup):
 class Succession(AnimationGroup):
     _native_kind = "succession"
     _default_lag_ratio = 1.0
+
+
+class Flash(AnimationGroup):
+    _native_kind = "flash"
+
+    def __init__(
+        self,
+        point,
+        color=_YELLOW,
+        line_length=0.2,
+        num_lines=12,
+        flash_radius=0.3,
+        line_stroke_width=3.0,
+        run_time=1.0,
+        **kwargs,
+    ):
+        if isinstance(point, _BridgeMobject):
+            raise NotImplementedError(
+                "manimlib.animation.indication.Flash with a Mobject point "
+                "awaits the live radial-group updater seam"
+            )
+        self.point = _np.array(_vec3(point))
+        self.color = color
+        self.line_length = float(line_length)
+        self.flash_radius = float(flash_radius)
+        self.line_stroke_width = float(line_stroke_width)
+        try:
+            self.num_lines = _operator.index(num_lines)
+        except TypeError:
+            raise TypeError("Flash num_lines must be an integer") from None
+        if self.num_lines <= 0:
+            raise ValueError("Flash num_lines must be greater than zero")
+        for name, value in (
+            ("line_length", self.line_length),
+            ("flash_radius", self.flash_radius),
+            ("line_stroke_width", self.line_stroke_width),
+        ):
+            if not _math.isfinite(value) or value < 0:
+                raise ValueError(
+                    "Flash " + name + " must be non-negative and finite"
+                )
+        self.lines = self.create_lines()
+        super().__init__(
+            *self.create_line_anims(),
+            run_time=run_time,
+            **kwargs,
+        )
+
+    def create_lines(self):
+        lines = VGroup()
+        for index in range(self.num_lines):
+            angle = index * _math.tau / self.num_lines
+            line = Line(_ORIGIN, self.line_length * _RIGHT)
+            line.shift((self.flash_radius - self.line_length) * _RIGHT)
+            line.rotate(angle, about_point=_ORIGIN)
+            lines.add(line)
+        lines.set_stroke(color=self.color, width=self.line_stroke_width)
+        lines.move_to(self.point)
+        return lines
+
+    def create_line_anims(self):
+        return [ShowCreationThenDestruction(line) for line in self.lines]
+
+
+class ShowCreationThenFadeOut(Succession):
+    _native_kind = "show_creation_then_fade_out"
+
+    def __init__(self, mobject, remover=True, **kwargs):
+        self.remover = bool(remover)
+        super().__init__(
+            ShowCreation(mobject),
+            FadeOut(mobject),
+            **kwargs,
+        )
+
+    def _native_params(self):
+        return {"remover": self.remover}
 
 
 class LaggedStartMap(LaggedStart):
@@ -9991,6 +10381,7 @@ def _install_schema_surface():
         ("manimlib.animation.numbers", "ChangingDecimal"): ChangingDecimal,
         ("manimlib.animation.numbers", "ChangeDecimalToValue"): ChangeDecimalToValue,
         ("manimlib.animation.numbers", "CountInFrom"): CountInFrom,
+        ("manimlib.animation.creation", "AddTextWordByWord"): AddTextWordByWord,
         ("manimlib.mobject.geometry", "TipableVMobject"): TipableVMobject,
         ("manimlib.mobject.geometry", "Arc"): Arc,
         ("manimlib.mobject.geometry", "ArcBetweenPoints"): ArcBetweenPoints,
@@ -10102,6 +10493,12 @@ def _install_schema_surface():
             "manimlib.animation.indication",
             "VShowPassingFlash",
         ): VShowPassingFlash,
+        ("manimlib.animation.indication", "FlashAround"): FlashAround,
+        ("manimlib.animation.indication", "FlashUnder"): FlashUnder,
+        (
+            "manimlib.animation.indication",
+            "ShowPassingFlashAround",
+        ): ShowPassingFlashAround,
         ("manimlib.animation.indication", "ApplyWave"): ApplyWave,
         ("manimlib.animation.transform", "Transform"): Transform,
         ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,

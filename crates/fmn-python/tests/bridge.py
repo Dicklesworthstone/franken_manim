@@ -3154,6 +3154,11 @@ assert indication.Indicate.__bases__ == (manimlib.Transform,)
 assert indication.TurnInsideOut.__bases__ == (manimlib.Transform,)
 assert indication.WiggleOutThenIn.__bases__ == (manimlib.Animation,)
 assert indication.VShowPassingFlash.__bases__ == (manimlib.Animation,)
+assert indication.FlashAround.__bases__ == (indication.VShowPassingFlash,)
+assert indication.FlashUnder.__bases__ == (indication.FlashAround,)
+assert indication.ShowPassingFlashAround.__bases__ == (
+    indication.VShowPassingFlash,
+)
 assert indication.ShowCreationThenDestruction.__bases__ == (
     indication.ShowPassingFlash,
 )
@@ -3332,13 +3337,196 @@ indication_composition_scene.play(
 assert np.allclose(composition_indicate.get_center(), manimlib.LEFT)
 assert np.allclose(composition_wiggle.get_center(), manimlib.RIGHT)
 
+around_target = geometry.Rectangle(width=2.0, height=1.0).shift(manimlib.LEFT)
+around_scene = Scene()
+around_scene.add(around_target)
+around_flash = indication.FlashAround(
+    around_target,
+    time_width=0.6,
+    stroke_width=5.0,
+    color=manimlib.GREEN,
+    buff=0.2,
+    n_inserted_curves=12,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert isinstance(around_flash.mobject, shape_matchers.SurroundingRectangle)
+assert np.allclose(
+    around_flash.mobject.get_bounding_box()[0][:2],
+    around_target.get_bounding_box()[0][:2] - 0.2,
+)
+assert around_flash.mobject.get_stroke_color() == manimlib.GREEN
+around_samples = []
+around_flash.mobject.add_updater(
+    lambda mob: around_samples.append(mob.get_stroke_widths().copy()),
+    call=False,
+)
+around_scene.play(around_flash)
+assert any(
+    widths.max() > 0.0 and not np.allclose(widths, widths[0])
+    for widths in around_samples
+)
+assert around_target in around_scene.get_mobjects()
+assert around_flash.mobject not in around_scene.get_mobjects()
+
+under_target = geometry.Rectangle(width=2.5, height=1.0)
+under_scene = Scene()
+under_scene.add(under_target)
+under_flash = indication.FlashUnder(
+    under_target,
+    buff=0.15,
+    n_inserted_curves=8,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert isinstance(under_flash.mobject, shape_matchers.Underline)
+assert np.isclose(
+    under_flash.mobject.get_center()[1],
+    under_target.get_bottom()[1] - 0.15,
+)
+under_scene.play(under_flash)
+assert under_flash.mobject not in under_scene.get_mobjects()
+
+tracked_target = geometry.Square().shift(manimlib.RIGHT)
+tracked_scene = Scene()
+tracked_scene.add(tracked_target)
+tracked_flash = indication.ShowPassingFlashAround(
+    tracked_target,
+    stroke_width=3.0,
+    stroke_color=manimlib.BLUE,
+    buff=0.25,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert isinstance(tracked_flash.mobject, shape_matchers.SurroundingRectangle)
+assert tracked_flash.mobject.get_stroke_color() == manimlib.BLUE
+tracked_target.add_updater(
+    lambda mob, dt: mob.shift(dt * manimlib.RIGHT),
+    call=False,
+)
+tracked_scene.play(tracked_flash)
+assert np.allclose(
+    tracked_flash.mobject.get_center(),
+    tracked_target.get_center(),
+)
+assert tracked_flash.mobject not in tracked_scene.get_mobjects()
+
+for flash_type in (
+    indication.FlashAround,
+    indication.FlashUnder,
+    indication.ShowPassingFlashAround,
+):
+    try:
+        flash_type(None)
+    except TypeError as error:
+        assert str(error) == f"{flash_type.__name__} expects a Mobject"
+    else:
+        raise AssertionError(f"{flash_type.__name__} accepted None")
+
+# The remaining Reference indication compositions use Atlas geometry above
+# Choreo's native Transform/fade/composition mechanisms. Static point inputs
+# stay wholly native; moving-Mobject targets refuse by class name until the
+# animation-owned live-target updater seam lands.
+assert indication.FocusOn.__bases__ == (manimlib.Transform,)
+assert indication.Flash.__bases__ == (manimlib.AnimationGroup,)
+assert indication.CircleIndicate.__bases__ == (manimlib.Transform,)
+assert indication.ShowCreationThenFadeOut.__bases__ == (manimlib.Succession,)
+assert tuple(inspect.signature(indication.FocusOn).parameters) == (
+    "focus_point",
+    "opacity",
+    "color",
+    "run_time",
+    "remover",
+    "kwargs",
+)
+assert tuple(inspect.signature(indication.Flash).parameters) == (
+    "point",
+    "color",
+    "line_length",
+    "num_lines",
+    "flash_radius",
+    "line_stroke_width",
+    "run_time",
+    "kwargs",
+)
+
+focus = indication.FocusOn(
+    [1.25, -0.5, 0.0],
+    color=manimlib.BLUE,
+    opacity=0.35,
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(focus.mobject.get_center(), [1.25, -0.5, 0.0])
+assert focus.mobject.get_width() > focus.target_mobject.get_width()
+focus_scene = Scene()
+focus_scene.play(focus, rate_func=manimlib.linear)
+assert focus.mobject not in focus_scene.get_mobjects()
+
+flash = indication.Flash(
+    [-1.0, 0.5, 0.0],
+    color=manimlib.GREEN,
+    line_length=0.4,
+    num_lines=6,
+    flash_radius=0.7,
+    line_stroke_width=5.0,
+    run_time=2.0 / 30.0,
+)
+assert len(flash.lines) == 6
+assert all(
+    np.isclose(line.get_length(), 0.4)
+    and line.get_stroke_color() == manimlib.GREEN
+    for line in flash.lines
+)
+flash_scene = Scene()
+flash_scene.play(flash, rate_func=manimlib.linear)
+assert all(line not in flash_scene.get_mobjects() for line in flash.lines)
+
+circle_target = geometry.Rectangle(width=2.0, height=1.0)
+circle_scene = Scene()
+circle_scene.add(circle_target)
+circle_indication = indication.CircleIndicate(
+    circle_target,
+    scale_factor=1.5,
+    stroke_color=manimlib.YELLOW,
+    stroke_width=4.0,
+    run_time=2.0 / 30.0,
+)
+assert circle_indication.target_mobject.get_width() > circle_indication.mobject.get_width()
+circle_scene.play(circle_indication, rate_func=manimlib.linear)
+assert circle_target in circle_scene.get_mobjects()
+assert circle_indication.mobject not in circle_scene.get_mobjects()
+
+fade_scene = Scene()
+fade_mobject = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
+fade_scene.play(
+    indication.ShowCreationThenFadeOut(
+        fade_mobject,
+        run_time=2.0 / 30.0,
+    ),
+    rate_func=manimlib.linear,
+)
+assert fade_mobject not in fade_scene.get_mobjects()
+
 try:
-    indication.FlashAround(geometry.Square())
-except NotImplementedError as error:
-    assert "manimlib.animation.indication.FlashAround" in str(error)
-    assert "constructor semantics" in str(error)
+    indication.Flash(manimlib.ORIGIN, num_lines=0)
+except ValueError as error:
+    assert str(error) == "Flash num_lines must be greater than zero"
 else:
-    raise AssertionError("FlashAround silently bypassed its geometry dependency")
+    raise AssertionError("Flash accepted num_lines=0")
+
+for moving_target_type, moving_target in (
+    (indication.FocusOn, geometry.Square()),
+    (indication.Flash, geometry.Square()),
+):
+    try:
+        moving_target_type(moving_target)
+    except NotImplementedError as error:
+        assert f"manimlib.animation.indication.{moving_target_type.__name__}" in str(error)
+        assert "updater seam" in str(error)
+    else:
+        raise AssertionError(
+            f"{moving_target_type.__name__} silently froze a moving Mobject target"
+        )
 
 # Restore is a Transform onto Marionette's saved-state copy, so its standard
 # path-arc parameters route through the same native path function.
@@ -9028,6 +9216,66 @@ except (AssertionError, AttributeError):
 else:
     raise AssertionError("CountInFrom accepted a non-DecimalNumber")
 
+
+# ------------------------------------------------------- AddTextWordByWord
+# fm-5wq.4.54: word-by-word reveal over native span-map word groups.
+
+creation_animation = importlib.import_module("manimlib.animation.creation")
+
+word_text = manimlib.Text("hello brave world")
+assert len(word_text.submobjects) == 15  # three five-glyph words
+word_anim = creation_animation.AddTextWordByWord(word_text)
+# The Reference's derived parameters: 0.2 s per word, three words.
+assert abs(word_anim.run_time - 0.6) < 1e-12
+assert word_anim.rate_func(0.25) == 0.25  # linear, not smooth
+
+word_scene = Scene()
+word_probe = geometry.Rectangle(width=1.0, height=1.0)
+word_counts = []
+word_scene.play(
+    word_anim,
+    update_animation.UpdateFromFunc(
+        word_probe,
+        lambda mob: word_counts.append(len(word_text.submobjects)),
+    ),
+    run_time=0.6,
+)
+# Every observed frame sits on a word boundary, the reveal only grows, at
+# least one word appeared mid-flight, and the family finishes whole.
+assert set(word_counts) <= {0, 5, 10, 15}, word_counts
+assert word_counts == sorted(word_counts), word_counts
+assert any(count in (5, 10) for count in word_counts), word_counts
+assert len(word_text.submobjects) == 15
+
+# An explicit non-negative run_time is kept, not recomputed.
+assert (
+    abs(
+        creation_animation.AddTextWordByWord(
+            manimlib.Text("two words"), run_time=1.5
+        ).run_time
+        - 1.5
+    )
+    < 1e-12
+)
+
+# The Reference's exact refusal for a non-StringMobject target.
+try:
+    creation_animation.AddTextWordByWord(
+        geometry.Rectangle(width=1.0, height=1.0)
+    )
+except AssertionError:
+    pass
+else:
+    raise AssertionError("AddTextWordByWord accepted a non-StringMobject")
+
+# A string with no glyphs has no word groups: named, never a silent no-op.
+try:
+    creation_animation.AddTextWordByWord(manimlib.Text(" "))
+except ValueError as error:
+    assert "word groups" in str(error)
+else:
+    raise AssertionError("AddTextWordByWord accepted an empty string mobject")
+
 # fm-5wq.4.53: DrawBorderThenFill and ShowPartial are native animations, not
 # schema placeholders.  Bases follow the schema rows exactly.
 creation = importlib.import_module("manimlib.animation.creation")
@@ -9169,3 +9417,96 @@ assert isinstance(write_probe, creation.DrawBorderThenFill)
 assert write_probe.run_time is None
 assert write_probe.lag_ratio is None
 assert write_probe._native_params() == {}
+
+# fm-5wq.4.57: TransformMatchingStrings matches by string identity over the
+# longest matching blocks of the two glyph-key sequences — native span parts,
+# not the two-render hack — while TransformMatchingTex keeps bare span-key
+# equality for its semantic isolate units.
+assert matching_module.TransformMatchingStrings._native_kind == (
+    "transform_matching_strings"
+)
+assert matching_module.TransformMatchingTex._native_kind == (
+    "transform_matching_tex"
+)
+
+strings_source = manimlib.Text("abc xyz").shift(manimlib.LEFT)
+strings_target = manimlib.Text("qrs xyz").shift(manimlib.RIGHT)
+strings_animation = matching_module.TransformMatchingStrings(
+    strings_source,
+    strings_target,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+strings_params = strings_animation._native_params()
+strings_source_keys = strings_params["source_keys"]
+strings_target_keys = strings_params["target_keys"]
+assert len(strings_source_keys) == len(strings_target_keys) == 6
+matched_source_keys = [
+    key for _, key in strings_source_keys if key.startswith("block:")
+]
+matched_target_keys = [
+    key for _, key in strings_target_keys if key.startswith("block:")
+]
+assert matched_source_keys == matched_target_keys
+assert [key.rsplit(":", 1)[1] for key in matched_source_keys] == ["x", "y", "z"]
+assert all(
+    key.startswith("source-only:")
+    for _, key in strings_source_keys
+    if not key.startswith("block:")
+)
+assert all(
+    key.startswith("target-only:")
+    for _, key in strings_target_keys
+    if not key.startswith("block:")
+)
+
+# The matched glyphs move: after play the source "x" sits on the target "x".
+strings_scene = Scene()
+strings_scene.play(strings_animation)
+strings_source_x = strings_source_keys[3][0]
+strings_target_x = strings_target_keys[3][0]
+assert strings_source_x is not strings_target_x
+assert np.allclose(strings_source_x.get_center(), strings_target_x.get_center())
+
+# Bare key equality would pair both glyphs of "ab" → "ba"; the matching-blocks
+# discipline admits exactly the one longest shared run.
+swap_params = matching_module.TransformMatchingStrings(
+    manimlib.Text("ab"), manimlib.Text("ba")
+)._native_params()
+assert (
+    len([key for _, key in swap_params["source_keys"] if key.startswith("block:")])
+    == 1
+)
+
+# matched_keys pins a key to raw global identity on both sides, so the user's
+# asserted match survives outside any block.
+pinned_params = matching_module.TransformMatchingStrings(
+    manimlib.Text("ab"), manimlib.Text("ba"), matched_keys=["b"]
+)._native_params()
+assert "b" in [key for _, key in pinned_params["source_keys"]]
+assert "b" in [key for _, key in pinned_params["target_keys"]]
+
+# Empty span maps cannot claim success: the refusal is named for the class.
+strings_blank_source = manimlib.Text("stub")
+strings_blank_source._string_sub_spans = []
+try:
+    matching_module.TransformMatchingStrings(
+        strings_blank_source, manimlib.Text("x")
+    )
+except bridge_errors.TexError as error:
+    assert "TransformMatchingStrings requires non-empty native span maps" in str(
+        error
+    ), error
+else:
+    raise AssertionError(
+        "TransformMatchingStrings accepted an empty span map"
+    )
+
+try:
+    matching_module.TransformMatchingStrings(
+        geometry.Rectangle(width=1.0, height=1.0), manimlib.Text("x")
+    )
+except TypeError as error:
+    assert "TransformMatchingStrings expects two StringMobject" in str(error), error
+else:
+    raise AssertionError("TransformMatchingStrings accepted a non-StringMobject")
