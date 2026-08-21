@@ -12341,13 +12341,7 @@ class InteractiveScene(Scene):
         return _portal_checkpoint_paste(self)
 
     def on_mouse_motion(self, point, d_point):
-        base_handler = Scene.__dict__.get("on_mouse_motion")
-        if base_handler is not None and not getattr(
-            base_handler, "_fmn_schema_placeholder", False
-        ):
-            base_handler(self, point, d_point)
-        else:
-            self.mouse_point.move_to(point)
+        super().on_mouse_motion(point, d_point)
 
         crosshair = getattr(self, "crosshair", None)
         if crosshair is not None:
@@ -12362,26 +12356,14 @@ class InteractiveScene(Scene):
             )
 
     def on_mouse_drag(self, point, d_point, buttons, modifiers):
-        base_handler = Scene.__dict__.get("on_mouse_drag")
-        if base_handler is not None and not getattr(
-            base_handler, "_fmn_schema_placeholder", False
-        ):
-            base_handler(self, point, d_point, buttons, modifiers)
-        else:
-            self.mouse_point.move_to(point)
+        super().on_mouse_drag(point, d_point, buttons, modifiers)
 
         crosshair = getattr(self, "crosshair", None)
         if crosshair is not None:
             crosshair.move_to(self.frame.to_fixed_frame_point(point))
 
     def on_mouse_release(self, point, button, mods):
-        base_handler = Scene.__dict__.get("on_mouse_release")
-        if base_handler is not None and not getattr(
-            base_handler, "_fmn_schema_placeholder", False
-        ):
-            base_handler(self, point, button, mods)
-        else:
-            self.mouse_point.move_to(point)
+        super().on_mouse_release(point, button, mods)
 
         if self.color_palette in self.mobjects:
             self.choose_color(point)
@@ -12389,11 +12371,7 @@ class InteractiveScene(Scene):
             self.clear_selection()
 
     def on_key_press(self, symbol, modifiers):
-        base_handler = Scene.__dict__.get("on_key_press")
-        if base_handler is not None and not getattr(
-            base_handler, "_fmn_schema_placeholder", False
-        ):
-            base_handler(self, symbol, modifiers)
+        super().on_key_press(symbol, modifiers)
         try:
             char = chr(int(symbol))
         except (OverflowError, ValueError, TypeError):
@@ -12402,29 +12380,41 @@ class InteractiveScene(Scene):
         grab_keys = (keys.grab, keys.x_grab, keys.y_grab, keys.z_grab)
         all_mods = _PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND | _PYGLET_MOD_SHIFT
         modifiers = int(modifiers)
+        ctrl = modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)
         if char == keys.select and (modifiers & all_mods) == 0:
             self.enable_selection()
         if char == keys.unselect:
             self.clear_selection()
         elif char in grab_keys and (modifiers & all_mods) == 0:
             self.prepare_grab()
+        elif char == keys.resize and (modifiers & _PYGLET_MOD_SHIFT):
+            self.prepare_resizing(about_corner=True)
         elif char == keys.color and (modifiers & all_mods) == 0:
             self.toggle_color_palette()
         elif char == keys.information and (modifiers & all_mods) == 0:
             self.display_information()
-        elif char == "g" and (
-            modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)
-        ) and (modifiers & _PYGLET_MOD_SHIFT):
+        elif char == "c" and ctrl:
+            self.copy_selection()
+        elif char == "v" and ctrl:
+            self.paste_selection()
+        elif char == "x" and ctrl:
+            self.copy_selection()
+            self.delete_selection()
+        elif char == "g" and ctrl and (modifiers & _PYGLET_MOD_SHIFT):
             self.ungroup_selection()
-        elif char == "g" and (modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)):
+        elif char == "g" and ctrl:
             self.group_selection()
-        elif char == "t" and (modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)):
+        elif char == "t" and ctrl:
             self.toggle_selection_mode()
-        elif char == "a" and (modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)):
+        elif char == "a" and ctrl:
             self.clear_selection()
             self.add_to_selection(*self.mobjects)
         elif int(symbol) == _PYGLET_BACKSPACE:
             self.delete_selection()
+        elif char == "d" and (modifiers & _PYGLET_MOD_SHIFT):
+            self.copy_frame_positioning()
+        elif char == "c" and (modifiers & _PYGLET_MOD_SHIFT):
+            self.copy_cursor_position()
         elif int(symbol) in _PYGLET_ARROW_SYMBOLS:
             vects = (_LEFT, _UP, _RIGHT, _DOWN)
             self.nudge_selection(
@@ -12442,11 +12432,7 @@ class InteractiveScene(Scene):
             self.save_state()
 
     def on_key_release(self, symbol, modifiers):
-        base_handler = Scene.__dict__.get("on_key_release")
-        if base_handler is not None and not getattr(
-            base_handler, "_fmn_schema_placeholder", False
-        ):
-            base_handler(self, symbol, modifiers)
+        super().on_key_release(symbol, modifiers)
         del modifiers
         try:
             char = chr(int(symbol))

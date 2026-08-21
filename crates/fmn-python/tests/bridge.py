@@ -3478,8 +3478,12 @@ assert drag_scene.on_mouse_drag(
 ) is None
 fixed_drag_point = drag_scene.frame.to_fixed_frame_point([1.0, 2.0, 0.0])
 assert np.allclose(
-    drag_scene.mouse_point.get_center(),
+    drag_scene.mouse_drag_point.get_center(),
     [1.0, 2.0, 0.0],
+)
+assert np.allclose(
+    drag_scene.mouse_point.get_center(),
+    [0.0, 0.0, 0.0],
 )
 assert np.allclose(
     drag_scene.crosshair.get_center()[:2],
@@ -3634,6 +3638,50 @@ assert cursor_scene.on_key_press(ord("k"), 0) is None
 assert cursor_scene.crosshair in cursor_scene.mobjects
 assert cursor_scene.on_key_press(ord("k"), 0) is None
 assert cursor_scene.crosshair not in cursor_scene.mobjects
+
+# fm-5wq.4: grab and resize keys checkpoint through Scene.save_state
+# without a pyglet window; shift-t prepares a corner resize.
+resize_key_scene = InteractiveScene()
+resize_key_scene.setup()
+resize_key_circle = manimlib.Circle()
+resize_key_scene.add(resize_key_circle)
+resize_key_scene.add_to_selection(resize_key_circle)
+assert resize_key_scene.undo_stack == []
+assert resize_key_scene.on_key_press(ord("t"), 0) is None
+assert len(resize_key_scene.undo_stack) == 1
+assert not hasattr(resize_key_scene, "scale_about_point")
+assert resize_key_scene.on_key_press(ord("t"), 1) is None  # pyglet MOD_SHIFT
+assert len(resize_key_scene.undo_stack) == 2
+assert hasattr(resize_key_scene, "scale_about_point")
+color_key_scene = InteractiveScene()
+color_key_scene.setup()
+color_key_circle = manimlib.Circle()
+color_key_scene.add(color_key_circle)
+color_key_scene.add_to_selection(color_key_circle)
+assert color_key_scene.on_key_press(ord("c"), 0) is None
+assert color_key_scene.color_palette in color_key_scene.mobjects
+assert color_key_scene.on_key_press(ord("i"), 0) is None
+assert color_key_scene.information_label in color_key_scene.mobjects
+assert color_key_scene.on_key_release(ord("i"), 0) is None
+assert color_key_scene.information_label not in color_key_scene.mobjects
+try:
+    color_key_scene.on_key_press(ord("c"), 2)  # CTRL-c clipboard
+except bridge_errors.CapabilityError as error:
+    assert "clipboard" in str(error).lower()
+else:
+    raise AssertionError("ctrl-c faked a clipboard transfer")
+for clipboard_key in ("v", "x"):
+    selection_before_refusal = list(color_key_scene.selection)
+    try:
+        color_key_scene.on_key_press(ord(clipboard_key), 2)
+    except bridge_errors.CapabilityError as error:
+        assert "clipboard" in str(error).lower()
+    else:
+        raise AssertionError(
+            f"ctrl-{clipboard_key} faked a clipboard transfer"
+        )
+    assert list(color_key_scene.selection) == selection_before_refusal
+    assert color_key_circle in color_key_scene.mobjects
 
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
