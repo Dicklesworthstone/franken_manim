@@ -2502,6 +2502,14 @@ assert sound_scene._sound_request_facts() == sound_requests_before_refusal
 
 interactive_scene = InteractiveScene()
 assert isinstance(interactive_scene.checkpoint_paste(), bytes)
+assert str(inspect.signature(InteractiveScene.get_crosshair)) == "(self)"
+assert np.isclose(InteractiveScene.crosshair_width, 0.2)
+crosshair = interactive_scene.get_crosshair()
+assert isinstance(crosshair, manimlib.VGroup)
+assert len(crosshair.submobjects) == 2
+assert np.isclose(crosshair.get_width(), 0.2)
+assert crosshair.is_fixed_in_frame()
+assert crosshair.get_stroke_color() == manimlib.GREY_A
 
 
 # The schema-generated import topology and exact-name aliases are present.

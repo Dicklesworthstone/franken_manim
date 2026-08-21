@@ -12059,11 +12059,27 @@ class ThreeDScene(Scene):
 
 
 class InteractiveScene(Scene):
+    crosshair_width = 0.2
+    crosshair_style = dict(
+        stroke_color=_GREY_A,
+        stroke_width=[3, 0, 3],
+    )
+
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
 
     def checkpoint_paste(self):
         return _portal_checkpoint_paste(self)
+
+    def get_crosshair(self):
+        lines = VMobject().replicate(2)
+        lines[0].set_points([_LEFT, _ORIGIN, _RIGHT])
+        lines[1].set_points([_UP, _ORIGIN, _DOWN])
+        crosshair = VGroup(*lines)
+        crosshair.set_width(self.crosshair_width)
+        crosshair.set_style(**self.crosshair_style)
+        crosshair.fix_in_frame()
+        return crosshair
 
 
 class BlankScene(InteractiveScene):
