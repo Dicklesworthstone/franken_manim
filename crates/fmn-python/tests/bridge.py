@@ -2600,6 +2600,67 @@ else:
     raise AssertionError("ColorSliders silently discarded an unknown option")
 assert not hasattr(failed_color_sliders, "submobjects")
 
+# Textbox keeps the ControlMobject lineage while Atlas and the bundled
+# FontBook own each string layout. Updates commit into the existing text proxy
+# only after the full native candidate succeeds.
+textbox = interactive.Textbox("seed", isInitiallyActive=True)
+assert interactive.Textbox.__bases__ == (interactive.ControlMobject,)
+assert interactive.ControlMobject in interactive.Textbox.__mro__
+assert ValueTracker in interactive.Textbox.__mro__
+assert list(textbox.submobjects) == [textbox.box, textbox.text]
+assert textbox.get_value() == "seed"
+assert textbox.isActive is True
+assert textbox.is_fixed_in_frame()
+assert textbox.box.is_fixed_in_frame()
+assert textbox.text.is_fixed_in_frame()
+assert len(textbox.updaters) == 1
+assert len(textbox.text.updaters) == 1
+
+text_proxy = textbox.text
+seed_points = text_proxy.get_points().copy()
+assert textbox.set_value("committed") is textbox
+assert textbox.get_value() == "committed"
+assert textbox.text is text_proxy
+committed_points = text_proxy.get_points().copy()
+assert not np.array_equal(committed_points, seed_points)
+
+assert textbox.update_text("preview") is None
+assert textbox.get_value() == "committed"
+assert textbox.text is text_proxy
+preview_points = text_proxy.get_points().copy()
+assert not np.array_equal(preview_points, committed_points)
+
+atomic_value = textbox.get_value()
+atomic_points = textbox.text.get_points().copy()
+atomic_children = list(textbox.submobjects)
+try:
+    textbox.set_value("\U0001f980")
+except ValueError as error:
+    assert "unmapped" in str(error).lower(), error
+else:
+    raise AssertionError("Textbox accepted an unmapped glyph")
+assert textbox.get_value() == atomic_value
+assert textbox.text is text_proxy
+assert list(textbox.submobjects) == atomic_children
+assert np.array_equal(textbox.text.get_points(), atomic_points)
+
+failed_textbox = interactive.Textbox.__new__(interactive.Textbox)
+try:
+    interactive.Textbox.__init__(failed_textbox, unsupported=True)
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("Textbox silently discarded an unknown option")
+assert not hasattr(failed_textbox, "submobjects")
+
+try:
+    textbox.box_on_mouse_press(textbox.box, {"point": np.zeros(3)})
+except NotImplementedError as error:
+    assert "Textbox.box_on_mouse_press" in str(error), error
+    assert "semantic binding has not landed" in str(error), error
+else:
+    raise AssertionError("Textbox fabricated an unbound mouse-press gateway")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.

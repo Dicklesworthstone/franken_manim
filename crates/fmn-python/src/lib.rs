@@ -3187,6 +3187,36 @@ impl BridgeMobject {
         native_shell_specs(slf.py(), factory, children)
     }
 
+    /// Build a `Textbox` candidate with the bundled FontBook. Supplying
+    /// `replacement` routes through Atlas's string `set_value` mutator before
+    /// any Python proxy is changed, making rejected re-typesets atomic.
+    fn _build_textbox<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        current: &str,
+        replacement: Option<&str>,
+        initially_active: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let book = Rc::new(fmn_library::FontBook::bundled().map_err(|error| {
+            PyRuntimeError::new_err(format!("bundled FontBook unavailable: {error}"))
+        })?);
+        let mut textbox = fmn_library::Textbox::new(book, current)
+            .map_err(native_error)?
+            .initially_active(initially_active);
+        if let Some(value) = replacement {
+            textbox.set_value(value).map_err(native_error)?;
+        }
+        let mut composition = fmn_mobject::Mobject::from(textbox.composition());
+        let children = std::mem::take(&mut composition.submobjects);
+        if children.len() != 2 {
+            return Err(PyRuntimeError::new_err(format!(
+                "native Textbox family contract drift: expected 2 children, got {}",
+                children.len()
+            )));
+        }
+        native_shell_specs(slf.py(), factory, children)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the

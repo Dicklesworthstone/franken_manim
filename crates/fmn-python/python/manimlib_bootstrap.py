@@ -60,6 +60,7 @@ _GREY_E = "#222222"
 _GREEN = "#83C167"
 _RED = "#FC6255"
 _YELLOW = "#FFFF00"
+_BLUE = "#58C4DD"
 _BLUE_D = "#29ABCA"
 _BLUE_E = "#1C758A"
 _DEFAULT_LIGHT_COLOR = "#BBBBBB"
@@ -9307,6 +9308,148 @@ class ColorSliders(Group):
         return float(self.get_value()[3])
 
 
+class Textbox(ControlMobject):
+    """Atlas's native FontBook-backed string control.
+
+    Strings cannot inhabit Marionette's scalar tracker lane, so this authored
+    ControlMobject subclass keeps its value as portal string state while Atlas
+    owns every box and text candidate. Candidate construction completes before
+    the live text proxy or stored value changes.
+    """
+
+    def __init__(
+        self,
+        value="",
+        value_type=_np.dtype(object),
+        box_kwargs=dict(
+            width=2.0,
+            height=1.0,
+            fill_color=_WHITE,
+            fill_opacity=1.0,
+        ),
+        text_kwargs=dict(color=_BLUE),
+        text_buff=0.25,
+        isInitiallyActive=False,
+        active_color=_BLUE,
+        deactive_color=_RED,
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not isinstance(value, str):
+            raise TypeError("Textbox value must be a string")
+
+        box_config = dict(box_kwargs)
+        box_unknown = sorted(
+            set(box_config)
+            - {"width", "height", "fill_color", "fill_opacity"}
+        )
+        if box_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("box_kwargs." + name for name in box_unknown)
+            )
+        if (
+            float(box_config.get("width", 2.0)) != 2.0
+            or float(box_config.get("height", 1.0)) != 1.0
+            or tuple(_color_to_rgb(box_config.get("fill_color", _WHITE)))
+            != tuple(_color_to_rgb(_WHITE))
+            or float(box_config.get("fill_opacity", 1.0)) != 1.0
+        ):
+            raise NotImplementedError(
+                "Textbox custom box_kwargs are not routed to the native builder"
+            )
+
+        text_config = dict(text_kwargs)
+        text_unknown = sorted(set(text_config) - {"color"})
+        if text_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("text_kwargs." + name for name in text_unknown)
+            )
+        if tuple(_color_to_rgb(text_config.get("color", _BLUE))) != tuple(
+            _color_to_rgb(_BLUE)
+        ):
+            raise NotImplementedError(
+                "Textbox custom text_kwargs.color is not routed to the native builder"
+            )
+        if float(text_buff) != 0.25:
+            raise NotImplementedError(
+                "Textbox text_buff is not routed to the native builder"
+            )
+        if tuple(_color_to_rgb(active_color)) != tuple(_color_to_rgb(_BLUE)):
+            raise NotImplementedError(
+                "Textbox active_color is not routed to the native builder"
+            )
+        if tuple(_color_to_rgb(deactive_color)) != tuple(_color_to_rgb(_RED)):
+            raise NotImplementedError(
+                "Textbox deactive_color is not routed to the native builder"
+            )
+
+        self.value_type = _np.dtype(value_type).type
+        self.box_kwargs = box_config
+        self.text_kwargs = text_config
+        self.text_buff = 0.25
+        self.isInitiallyActive = bool(isInitiallyActive)
+        self.active_color = active_color
+        self.deactive_color = deactive_color
+        self.isActive = self.isInitiallyActive
+        self._textbox_value = value
+        box, text = self._native_textbox_parts(value, None)
+        _install_live_state(self)
+        self.add(box, text)
+        self.add_updater(lambda mob: None)
+        self.fix_in_frame()
+        self.box = box
+        self.text = text
+        self.text.add_updater(lambda mob: mob.move_to(self.box))
+
+    def _native_textbox_parts(self, current, replacement):
+        specs = self._build_textbox(
+            _native_shell_factory,
+            current,
+            replacement,
+            self.isActive,
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if len(parts) != 2:
+            raise RuntimeError(
+                "native Textbox family contract drift: expected box + text"
+            )
+        return parts
+
+    def get_value(self):
+        return self.value_type(self._textbox_value)
+
+    def set_value(self, value):
+        if not isinstance(value, str):
+            raise TypeError("Textbox value must be a string")
+        _, candidate = self._native_textbox_parts(
+            self._textbox_value,
+            value,
+        )
+        self.text.become(candidate)
+        self._textbox_value = value
+        return self
+
+    def set_value_anim(self, value):
+        self.update_text(value)
+
+    def update_text(self, value):
+        if not isinstance(value, str):
+            raise TypeError("Textbox value must be a string")
+        _, candidate = self._native_textbox_parts(
+            self._textbox_value,
+            value,
+        )
+        self.text.become(candidate)
+
+
 class CameraFrame(Mobject):
     """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
     real Mobject whose authoritative state lives in one engine
@@ -13329,6 +13472,7 @@ def _install_schema_surface():
             "LinearNumberSlider",
         ): LinearNumberSlider,
         ("manimlib.mobject.interactive", "ColorSliders"): ColorSliders,
+        ("manimlib.mobject.interactive", "Textbox"): Textbox,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (
