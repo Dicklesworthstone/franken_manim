@@ -5632,6 +5632,40 @@ triangle = geometry.Triangle()
 assert len(triangle.get_vertices()) == 3
 assert np.allclose(triangle.get_vertices()[0], [0.0, 1.0, 0.0], atol=1e-12)
 
+# fm-5wq.4.137: Triangle locks n=3 while routing the remaining
+# RegularPolygon geometry and VMobject style kwargs through the native path.
+styled_triangle = geometry.Triangle(
+    radius=1.75,
+    start_angle=0.0,
+    fill_color=manimlib.RED,
+    fill_opacity=0.3,
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.25,
+)
+assert len(styled_triangle.get_vertices()) == 3
+assert np.allclose(
+    np.linalg.norm(styled_triangle.get_vertices(), axis=1), 1.75
+)
+assert np.allclose(styled_triangle.get_vertices()[0], [1.75, 0.0, 0.0])
+assert styled_triangle.get_fill_color() == manimlib.RED
+assert np.isclose(styled_triangle.get_fill_opacity(), 0.3)
+assert styled_triangle.get_stroke_color() == manimlib.BLUE
+assert np.isclose(styled_triangle.get_stroke_width(), 2.25)
+
+try:
+    geometry.Triangle(n=4)
+except TypeError as error:
+    assert "n" in str(error), error
+else:
+    raise AssertionError("Triangle allowed its fixed vertex count to be replaced")
+
+try:
+    geometry.Triangle(wobble_amount=1)
+except TypeError as error:
+    assert "wobble_amount" in str(error), error
+else:
+    raise AssertionError("Triangle silently ignored an unknown keyword")
+
 tip = geometry.ArrowTip(
     angle=math.pi / 3.0,
     width=0.4,
