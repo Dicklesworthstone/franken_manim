@@ -752,6 +752,10 @@ pub enum SliderError {
     InvalidAxis,
     /// The optional number readout could not be rebuilt.
     Text(TextMobjectError),
+    /// A checkerboard needs at least one background colour.
+    EmptyGridColors,
+    /// Checkerboard square length must be positive and finite.
+    InvalidGridSquareLen,
 }
 
 impl core::fmt::Display for SliderError {
@@ -774,6 +778,10 @@ impl core::fmt::Display for SliderError {
             Self::NonFinitePoint => write!(f, "slider projection points must be finite"),
             Self::InvalidAxis => write!(f, "slider axis must support finite projection"),
             Self::Text(e) => write!(f, "slider readout update failed: {e}"),
+            Self::EmptyGridColors => write!(f, "checkerboard colors must not be empty"),
+            Self::InvalidGridSquareLen => {
+                write!(f, "checkerboard square length must be positive and finite")
+            }
         }
     }
 }
@@ -1334,6 +1342,30 @@ impl ColorSliders {
         self.rect_width = width;
         self.rect_height = height;
         self.color_box = self.build_color_box()?;
+        Ok(self)
+    }
+
+    /// Checkerboard colours and nominal square length
+    /// (`background_grid_kwargs["colors"]` / `["single_square_len"]`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError::EmptyGridColors`] for an empty palette or
+    /// [`SliderError::InvalidGridSquareLen`] unless `square_len` is positive
+    /// and finite.
+    pub fn background_grid(
+        mut self,
+        colors: Vec<Srgb>,
+        square_len: f64,
+    ) -> Result<Self, SliderError> {
+        if colors.is_empty() {
+            return Err(SliderError::EmptyGridColors);
+        }
+        if !square_len.is_finite() || square_len <= 0.0 {
+            return Err(SliderError::InvalidGridSquareLen);
+        }
+        self.grid_colors = colors;
+        self.single_square_len = square_len;
         Ok(self)
     }
 

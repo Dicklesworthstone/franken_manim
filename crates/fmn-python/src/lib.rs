@@ -3239,12 +3239,22 @@ impl BridgeMobject {
         alpha: f64,
         rect_width: f64,
         rect_height: f64,
+        grid_colors: Vec<[f64; 3]>,
+        single_square_len: f64,
         sliders_buff: f64,
         apply_value: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         let mut sliders = fmn_library::ColorSliders::new()
             .map_err(native_error)?
             .rect_size(rect_width, rect_height)
+            .map_err(native_error)?
+            .background_grid(
+                grid_colors
+                    .into_iter()
+                    .map(|[r, g, b]| fmn_core::color::Srgb { r, g, b })
+                    .collect(),
+                single_square_len,
+            )
             .map_err(native_error)?
             .sliders_buff(sliders_buff);
         if apply_value {
