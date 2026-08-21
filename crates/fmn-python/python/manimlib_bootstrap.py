@@ -58,6 +58,7 @@ _WHITE = "#FFFFFF"
 _GREY_A = "#DDDDDD"
 _GREY_B = "#BBBBBB"
 _GREY_C = "#888888"
+_GREY = _GREY_C
 _GREY_D = "#444444"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
@@ -7666,10 +7667,12 @@ class ThoughtBubble(Bubble):
         ]
         points = []
         for corner, next_corner in zip(corners, corners[1:] + corners[:1]):
-            n_alphas = int(
-                _np.linalg.norm(corner - next_corner) / step
-            ) + 1
-            for alpha in _np.linspace(0.0, 1.0, n_alphas):
+            n_alphas = max(
+                1, int(_np.linalg.norm(corner - next_corner) / step)
+            )
+            for alpha in _np.linspace(
+                0.0, 1.0, n_alphas, endpoint=False
+            ):
                 jitter = (
                     noise
                     * (step / n_alphas)
@@ -7784,6 +7787,92 @@ class Piano(VGroup):
 
     def sort_keys(self):
         self.sort(lambda point: point[0])
+
+
+class Laptop(VGroup):
+    """Body, keyboard, and hinged screen over native VCube/Square geometry."""
+
+    def __init__(
+        self,
+        width=3,
+        body_dimensions=(4.0, 3.0, 0.05),
+        screen_thickness=0.01,
+        keyboard_width_to_body_width=0.9,
+        keyboard_height_to_body_height=0.5,
+        screen_width_to_screen_plate_width=0.9,
+        key_color_kwargs=dict(
+            stroke_width=0,
+            fill_color=_BLACK,
+            fill_opacity=1,
+        ),
+        fill_opacity=1.0,
+        stroke_width=0.0,
+        body_color=_GREY_B,
+        shaded_body_color=_GREY,
+        open_angle=_math.pi / 4.0,
+        **kwargs,
+    ):
+        del fill_opacity, stroke_width
+        super().__init__(**kwargs)
+        body_dimensions = tuple(float(value) for value in body_dimensions)
+        body = VCube(side_length=1)
+        for dim, scale_factor in enumerate(body_dimensions):
+            body.stretch(scale_factor, dim=dim)
+        body.set_width(float(width))
+        body.set_fill(shaded_body_color, opacity=1)
+        body.sort(lambda point: point[2])
+        body[-1].set_fill(body_color)
+        screen_plate = body.copy()
+        key_style = dict(key_color_kwargs)
+        keyboard = VGroup(
+            *(
+                VGroup(
+                    *(
+                        Square(**key_style)
+                        for _column in range(12 - row % 2)
+                    )
+                ).arrange(_RIGHT, buff=_SMALL_BUFF)
+                for row in range(4)
+            )
+        ).arrange(_DOWN, buff=_MED_SMALL_BUFF)
+        keyboard.stretch_to_fit_width(
+            float(keyboard_width_to_body_width) * body.get_width()
+        )
+        keyboard.stretch_to_fit_height(
+            float(keyboard_height_to_body_height) * body.get_height()
+        )
+        keyboard.next_to(body, _OUT, buff=0.1 * _SMALL_BUFF)
+        keyboard.shift(_MED_SMALL_BUFF * _UP)
+        body.add(keyboard)
+
+        screen_plate.stretch(
+            float(screen_thickness) / body_dimensions[2], dim=2
+        )
+        screen = Rectangle(
+            stroke_width=0,
+            fill_color=_BLACK,
+            fill_opacity=1,
+        )
+        screen.replace(screen_plate, stretch=True)
+        screen.scale(float(screen_width_to_screen_plate_width))
+        screen.next_to(screen_plate, _OUT, buff=0.1 * _SMALL_BUFF)
+        screen_plate.add(screen)
+        screen_plate.next_to(body, _UP, buff=0)
+        screen_plate.rotate(
+            float(open_angle),
+            _RIGHT,
+            about_point=screen_plate.get_bottom(),
+        )
+        self.screen_plate = screen_plate
+        self.screen = screen
+        axis = Line(
+            body.get_corner(_UP + _LEFT + _OUT),
+            body.get_corner(_UP + _RIGHT + _OUT),
+            color=_BLACK,
+            stroke_width=2,
+        )
+        self.axis = axis
+        self.add(body, screen_plate, axis)
 
 
 class Cross(VGroup):
@@ -15780,6 +15869,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "SpeechBubble"): SpeechBubble,
         ("manimlib.mobject.svg.drawings", "Piano"): Piano,
         ("manimlib.mobject.svg.drawings", "ThoughtBubble"): ThoughtBubble,
+        ("manimlib.mobject.svg.drawings", "Laptop"): Laptop,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (

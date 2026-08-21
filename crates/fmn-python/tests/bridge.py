@@ -4381,6 +4381,35 @@ except ValueError as error:
 else:
     raise AssertionError("Piano accepted zero white keys")
 
+assert drawings.Laptop.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.Laptop).parameters) == [
+    "width",
+    "body_dimensions",
+    "screen_thickness",
+    "keyboard_width_to_body_width",
+    "keyboard_height_to_body_height",
+    "screen_width_to_screen_plate_width",
+    "key_color_kwargs",
+    "fill_opacity",
+    "stroke_width",
+    "body_color",
+    "shaded_body_color",
+    "open_angle",
+    "kwargs",
+]
+laptop = drawings.Laptop()
+assert laptop.screen_plate is laptop.submobjects[1]
+assert laptop.screen is laptop.screen_plate.submobjects[-1]
+assert laptop.axis is laptop.submobjects[2]
+assert len(laptop.submobjects) == 3
+keyboard = laptop.submobjects[0].submobjects[-1]
+assert [len(row) for row in keyboard] == [12, 11, 12, 11]
+assert laptop.screen.get_fill_color() == manimlib.BLACK
+assert laptop.axis.get_stroke_color() == manimlib.BLACK
+wide_laptop = drawings.Laptop(width=4.0, body_color=manimlib.BLUE)
+assert wide_laptop.submobjects[0][0].get_fill_color() == manimlib.GREY
+assert wide_laptop.screen.get_fill_color() == manimlib.BLACK
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.
