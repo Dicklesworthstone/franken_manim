@@ -9574,8 +9574,10 @@ class ControlPanel(Group):
             tuple(self.controls.submobjects),
             open=open,
         )
-        self.panel.become(panel)
-        self.panel_opener.become(opener)
+        self.panel.shift(panel.get_center() - self.panel.get_center())
+        self.panel_opener.shift(
+            opener.get_center() - self.panel_opener.get_center()
+        )
         del controls_group
         self._control_panel_open = bool(open)
         return self
