@@ -7123,6 +7123,7 @@ struct AnimSpec {
     time_span: Option<(f64, f64)>,
     group_lag: f64,
     remover: bool,
+    final_alpha_value: Option<f64>,
     suspend_mobject_updating: bool,
     surface_resolution: (usize, usize),
     surface_axis: usize,
@@ -7300,6 +7301,10 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .transpose()?,
         group_lag: get1("lag_ratio", 0.0)?,
         remover: get_bool("remover", false)?,
+        final_alpha_value: params
+            .get_item("final_alpha_value")?
+            .map(|value| value.extract())
+            .transpose()?,
         suspend_mobject_updating: get_bool("suspend_mobject_updating", false)?,
         surface_resolution: get_usize_pair("surface_resolution", (0, 0))?,
         surface_axis: get_usize("surface_axis", 1)?,
@@ -7755,6 +7760,15 @@ fn build_native_animation(
         }
         if let Some(span) = spec.time_span {
             config.time_span = Some(span);
+        }
+        if matches!(
+            spec.kind.as_str(),
+            "v_fade_in" | "v_fade_out" | "v_fade_in_then_out"
+        ) {
+            config.remover = spec.remover;
+            if let Some(value) = spec.final_alpha_value {
+                config.final_alpha_value = value;
+            }
         }
         config.suspend_mobject_updating = spec.suspend_mobject_updating;
     }

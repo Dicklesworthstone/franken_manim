@@ -9894,25 +9894,43 @@ class VFadeIn(_NativeAnimation):
     _native_kind = "v_fade_in"
 
     def __init__(self, vmobject, suspend_mobject_updating=False, **kwargs):
-        _refuse_unrouted(
-            "VFadeIn()",
-            [("suspend_mobject_updating", bool(suspend_mobject_updating))],
+        if not isinstance(vmobject, VMobject):
+            raise TypeError(
+                type(self).__name__
+                + " requires a VMobject; got "
+                + type(vmobject).__name__
+            )
+        super().__init__(
+            vmobject,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
         )
-        super().__init__(vmobject, **kwargs)
+
+    def _native_params(self):
+        return {"final_alpha_value": self.final_alpha_value}
 
 
 class VFadeOut(_NativeAnimation):
     _native_kind = "v_fade_out"
 
     def __init__(self, vmobject, remover=True, final_alpha_value=0.0, **kwargs):
-        _refuse_unrouted(
-            "VFadeOut()",
-            [
-                ("remover", remover is not True),
-                ("final_alpha_value", final_alpha_value != 0.0),
-            ],
+        if not isinstance(vmobject, VMobject):
+            raise TypeError(
+                "VFadeOut requires a VMobject; got "
+                + type(vmobject).__name__
+            )
+        super().__init__(
+            vmobject,
+            final_alpha_value=final_alpha_value,
+            **kwargs,
         )
-        super().__init__(vmobject, **kwargs)
+        self.remover = bool(remover)
+
+    def _native_params(self):
+        return {
+            "remover": self.remover,
+            "final_alpha_value": self.final_alpha_value,
+        }
 
 
 class VFadeInThenOut(VFadeIn):
@@ -9926,14 +9944,19 @@ class VFadeInThenOut(VFadeIn):
         final_alpha_value=0.5,
         **kwargs,
     ):
-        _refuse_unrouted(
-            "VFadeInThenOut()",
-            [
-                ("remover", remover is not True),
-                ("final_alpha_value", final_alpha_value != 0.5),
-            ],
+        super().__init__(
+            vmobject,
+            rate_func=rate_func,
+            final_alpha_value=final_alpha_value,
+            **kwargs,
         )
-        super().__init__(vmobject, rate_func=rate_func, **kwargs)
+        self.remover = bool(remover)
+
+    def _native_params(self):
+        return {
+            "remover": self.remover,
+            "final_alpha_value": self.final_alpha_value,
+        }
 
 
 class Rotating(Animation):

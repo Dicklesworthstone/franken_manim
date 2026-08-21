@@ -3427,6 +3427,83 @@ Scene().play(
 )
 assert max(vfade_opacities) > min(vfade_opacities)
 
+# fm-5wq.4.101: the remaining VFade constructor config reaches the shared
+# native AnimConfig instead of stopping at the Python shell.  The default
+# VFadeIn still plays, while updater suspension, remover, and finish alpha
+# are observable through the native lifecycle.
+vfade_in_scene = Scene()
+vfade_in = geometry.Circle(fill_opacity=0.8)
+vfade_in_scene.play(
+    fading.VFadeIn(
+        vfade_in,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert vfade_in in vfade_in_scene.get_mobjects()
+assert np.allclose(vfade_in.data["fill_rgba"][:, 3], 0.8)
+
+suspended_vfade = geometry.Circle(fill_opacity=0.7)
+suspended_vfade_updates = []
+suspended_vfade.add_updater(
+    lambda _mob, dt: suspended_vfade_updates.append(dt), call=False
+)
+Scene().play(
+    fading.VFadeIn(
+        suspended_vfade,
+        run_time=1.0 / 30.0,
+        rate_func=manimlib.linear,
+        suspend_mobject_updating=True,
+    )
+)
+assert suspended_vfade_updates == [0.0, 0.0], suspended_vfade_updates
+
+kept_vfade_out = geometry.Circle(fill_opacity=0.9)
+kept_vfade_out_scene = Scene()
+kept_vfade_out_scene.add(kept_vfade_out)
+kept_vfade_out_scene.play(
+    fading.VFadeOut(
+        kept_vfade_out,
+        remover=False,
+        final_alpha_value=1.0,
+        run_time=1.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert kept_vfade_out in kept_vfade_out_scene.get_mobjects()
+assert np.allclose(kept_vfade_out.data["fill_rgba"][:, 3], 0.0)
+
+kept_vfade_cycle = geometry.Circle(fill_opacity=0.6)
+kept_vfade_cycle_scene = Scene()
+kept_vfade_cycle_scene.add(kept_vfade_cycle)
+kept_vfade_cycle_scene.play(
+    fading.VFadeInThenOut(
+        kept_vfade_cycle,
+        remover=False,
+        final_alpha_value=0.0,
+        run_time=1.0 / 30.0,
+    )
+)
+assert kept_vfade_cycle in kept_vfade_cycle_scene.get_mobjects()
+assert np.allclose(kept_vfade_cycle.data["fill_rgba"][:, 3], 0.0)
+
+try:
+    fading.VFadeIn(None)
+except TypeError as error:
+    assert str(error) == "VFadeIn requires a VMobject; got NoneType"
+else:
+    raise AssertionError("VFadeIn accepted None")
+
+try:
+    fading.VFadeIn(geometry.Circle(), leftover_vfade_keyword=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "VFadeIn() keyword(s) not yet routed to the native builder: "
+        "leftover_vfade_keyword"
+    )
+else:
+    raise AssertionError("an unrouted VFadeIn keyword reached native play")
+
 # The mechanism-pure indication shelf is routed to Choreo.  These are live
 # Scene.play checks: each animation must cross the native segment boundary and
 # expose the intermediate state its mechanism owns, not merely construct.
