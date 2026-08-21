@@ -10717,10 +10717,69 @@ class ColorSliders(Group):
                     "sliders_kwargs." + name for name in slider_unknown
                 )
             )
-        if slider_config:
-            raise NotImplementedError(
-                "ColorSliders sliders_kwargs are not routed to the native builder"
+        slider_rect_config = dict(
+            slider_config.get("rounded_rect_kwargs", {})
+        )
+        slider_rect_unknown = sorted(
+            set(slider_rect_config) - {"height", "width", "corner_radius"}
+        )
+        slider_circle_config = dict(slider_config.get("circle_kwargs", {}))
+        slider_circle_unknown = sorted(
+            set(slider_circle_config)
+            - {"radius", "stroke_color", "fill_color", "fill_opacity"}
+        )
+        slider_nested_unknown = [
+            *(
+                "sliders_kwargs.rounded_rect_kwargs." + name
+                for name in slider_rect_unknown
+            ),
+            *(
+                "sliders_kwargs.circle_kwargs." + name
+                for name in slider_circle_unknown
+            ),
+        ]
+        if slider_nested_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join(slider_nested_unknown)
             )
+        slider_config["rounded_rect_kwargs"] = slider_rect_config
+        slider_config["circle_kwargs"] = slider_circle_config
+        self._slider_value_type = _np.dtype(
+            slider_config.get("value_type", _np.float64)
+        ).type
+        self._native_slider_config = (
+            None
+            if "min_value" not in slider_config
+            else float(slider_config["min_value"]),
+            None
+            if "max_value" not in slider_config
+            else float(slider_config["max_value"]),
+            None
+            if "step" not in slider_config
+            else float(slider_config["step"]),
+            None
+            if "width" not in slider_rect_config
+            else float(slider_rect_config["width"]),
+            None
+            if "height" not in slider_rect_config
+            else float(slider_rect_config["height"]),
+            None
+            if "corner_radius" not in slider_rect_config
+            else float(slider_rect_config["corner_radius"]),
+            None
+            if "radius" not in slider_circle_config
+            else float(slider_circle_config["radius"]),
+            None
+            if "fill_opacity" not in slider_circle_config
+            else float(slider_circle_config["fill_opacity"]),
+            None
+            if "stroke_color" not in slider_circle_config
+            else tuple(_color_to_rgb(slider_circle_config["stroke_color"])),
+            None
+            if "fill_color" not in slider_circle_config
+            else tuple(_color_to_rgb(slider_circle_config["fill_color"])),
+        )
         rect_config = dict(rect_kwargs)
         rect_unknown = sorted(
             set(rect_config) - {"width", "height", "stroke_opacity"}
@@ -10764,19 +10823,23 @@ class ColorSliders(Group):
         self.sliders_buff = float(sliders_buff)
         self.default_rgb_value = float(default_rgb_value)
         self.default_a_value = float(default_a_value)
-        self._color_slider_components = (
-            self.default_rgb_value,
-            self.default_rgb_value,
-            self.default_rgb_value,
-            self.default_a_value,
+        requested_components = tuple(
+            float(self._slider_value_type(value))
+            for value in (
+                self.default_rgb_value,
+                self.default_rgb_value,
+                self.default_rgb_value,
+                self.default_a_value,
+            )
         )
-        swatch, sliders = self._native_color_slider_parts(
-            self._color_slider_components,
+        swatch, sliders, native_components = self._native_color_slider_parts(
+            requested_components,
             apply_value=(
                 self.default_rgb_value != 255.0
                 or self.default_a_value != 1.0
             ),
         )
+        self._color_slider_components = native_components
         super().__init__(swatch, sliders)
         self.swatch = swatch
         self.background, self.selected_color_box = swatch.submobjects
@@ -10789,7 +10852,7 @@ class ColorSliders(Group):
         ) = sliders.submobjects
 
     def _native_color_slider_parts(self, components, *, apply_value):
-        specs = self._build_color_sliders(
+        specs, native_components = self._build_color_sliders(
             _native_shell_factory,
             *components,
             float(self.rect_kwargs.get("width", 2.0)),
@@ -10797,6 +10860,7 @@ class ColorSliders(Group):
             self._background_grid_colors,
             float(self.background_grid_kwargs.get("single_square_len", 0.1)),
             self.sliders_buff,
+            *self._native_slider_config,
             bool(apply_value),
         )
         parts = []
@@ -10811,15 +10875,19 @@ class ColorSliders(Group):
             raise RuntimeError(
                 "native ColorSliders family contract drift: expected swatch + four sliders"
             )
-        return parts
+        for slider in parts[1].submobjects:
+            slider.value_type = self._slider_value_type
+        return parts[0], parts[1], tuple(float(value) for value in native_components)
 
     def get_value(self):
         red, green, blue, alpha = self._color_slider_components
         return _np.array([red / 255.0, green / 255.0, blue / 255.0, alpha])
 
     def set_value(self, r, g, b, a):
-        components = (float(r), float(g), float(b), float(a))
-        swatch, sliders = self._native_color_slider_parts(
+        components = tuple(
+            float(self._slider_value_type(value)) for value in (r, g, b, a)
+        )
+        swatch, sliders, native_components = self._native_color_slider_parts(
             components,
             apply_value=True,
         )
@@ -10827,7 +10895,7 @@ class ColorSliders(Group):
         self.background.become(next_background)
         self.selected_color_box.become(next_color_box)
         self.sliders.become(sliders)
-        self._color_slider_components = components
+        self._color_slider_components = native_components
 
     def get_picked_color(self):
         return _rgb_to_hex(self.get_value()[:3])

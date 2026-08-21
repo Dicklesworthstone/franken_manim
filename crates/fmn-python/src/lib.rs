@@ -3253,9 +3253,32 @@ impl BridgeMobject {
         grid_colors: Vec<[f64; 3]>,
         single_square_len: f64,
         sliders_buff: f64,
+        slider_min_value: Option<f64>,
+        slider_max_value: Option<f64>,
+        slider_step: Option<f64>,
+        slider_bar_width: Option<f64>,
+        slider_bar_height: Option<f64>,
+        slider_corner_radius: Option<f64>,
+        slider_handle_radius: Option<f64>,
+        slider_handle_fill_opacity: Option<f64>,
+        slider_handle_stroke_color: Option<[f64; 3]>,
+        slider_handle_fill_color: Option<[f64; 3]>,
         apply_value: bool,
-    ) -> PyResult<Bound<'py, PyList>> {
+    ) -> PyResult<(Bound<'py, PyList>, Vec<f64>)> {
         let mut sliders = fmn_library::ColorSliders::new()
+            .map_err(native_error)?
+            .slider_overrides(
+                slider_min_value,
+                slider_max_value,
+                slider_step,
+                slider_bar_width,
+                slider_bar_height,
+                slider_corner_radius,
+                slider_handle_radius,
+                slider_handle_fill_opacity,
+                slider_handle_stroke_color.map(|[r, g, b]| fmn_core::color::Srgb { r, g, b }),
+                slider_handle_fill_color.map(|[r, g, b]| fmn_core::color::Srgb { r, g, b }),
+            )
             .map_err(native_error)?
             .rect_size(rect_width, rect_height)
             .map_err(native_error)?
@@ -3273,6 +3296,11 @@ impl BridgeMobject {
                 .set_value(red, green, blue, alpha)
                 .map_err(native_error)?;
         }
+        let component_values = sliders
+            .sliders()
+            .iter()
+            .map(fmn_library::LinearNumberSlider::value)
+            .collect();
         let mut composition = fmn_mobject::Mobject::from(sliders.composition());
         let children = std::mem::take(&mut composition.submobjects);
         if children.len() != 2 {
@@ -3281,7 +3309,10 @@ impl BridgeMobject {
                 children.len()
             )));
         }
-        native_shell_specs(slf.py(), factory, children)
+        Ok((
+            native_shell_specs(slf.py(), factory, children)?,
+            component_values,
+        ))
     }
 
     /// Build a `Textbox` candidate with the bundled FontBook. Supplying

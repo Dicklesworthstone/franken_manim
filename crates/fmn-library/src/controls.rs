@@ -894,6 +894,20 @@ impl LinearNumberSlider {
         Ok(self)
     }
 
+    /// Set both range endpoints atomically, avoiding an invalid transient
+    /// when the requested interval does not overlap the current one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError`] when the requested range or existing step
+    /// cannot support finite slider arithmetic.
+    pub fn range(mut self, min_value: f64, max_value: f64) -> Result<Self, SliderError> {
+        Self::validate_configuration_values(min_value, max_value, self.step)?;
+        self.min_value = min_value;
+        self.max_value = max_value;
+        Ok(self)
+    }
+
     /// `step=`.
     ///
     /// # Errors
@@ -1093,7 +1107,14 @@ impl LinearNumberSlider {
         if !value.is_finite() {
             return Err(SliderError::InvalidRange);
         }
-        let steps = ((value - self.min_value) / self.step).trunc();
+        self.snap_value(value)
+    }
+
+    fn snap_value(&self, value: f64) -> Result<f64, SliderError> {
+        self.validate_configuration()?;
+        Self::validate_value(value)?;
+        let clamped = value.clamp(self.min_value, self.max_value);
+        let steps = ((clamped - self.min_value) / self.step).trunc();
         if !steps.is_finite() {
             return Err(SliderError::InvalidStep);
         }
@@ -1286,6 +1307,7 @@ impl From<LinearNumberSlider> for Mobject {
 #[derive(Clone)]
 pub struct ColorSliders {
     sliders: [LinearNumberSlider; 4],
+    snap_on_set: [bool; 4],
     rect_width: f64,
     rect_height: f64,
     grid_colors: Vec<Srgb>,
@@ -1323,6 +1345,7 @@ impl ColorSliders {
                 rgb(fmn_core::constants::BLUE)?,
                 alpha,
             ],
+            snap_on_set: [false; 4],
             rect_width: 2.0,
             rect_height: 0.5,
             grid_colors: vec![GREY_A, GREY_C],
@@ -1376,6 +1399,78 @@ impl ColorSliders {
         self
     }
 
+    /// Apply the Reference's shared `sliders_kwargs` after the RGB/A range
+    /// defaults have been established.
+    ///
+    /// A shared step larger than the unchanged alpha `[0, 1]` span remains
+    /// an RGB-only override, preserving alpha's usable `0.04` default. If
+    /// the caller also expands the shared range enough to accommodate the
+    /// step, alpha receives the override as well.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SliderError`] when a requested range, step, or geometry
+    /// override violates the underlying [`LinearNumberSlider`] contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_overrides(
+        mut self,
+        min_value: Option<f64>,
+        max_value: Option<f64>,
+        step: Option<f64>,
+        bar_width: Option<f64>,
+        bar_height: Option<f64>,
+        corner_radius: Option<f64>,
+        handle_radius: Option<f64>,
+        handle_fill_opacity: Option<f64>,
+        handle_stroke_color: Option<Srgb>,
+        handle_fill_color: Option<Srgb>,
+    ) -> Result<Self, SliderError> {
+        for (index, current) in self.sliders.iter_mut().enumerate() {
+            let mut slider = current.clone();
+            if let (Some(minimum), Some(maximum)) = (min_value, max_value) {
+                slider = slider.range(minimum, maximum)?;
+            } else {
+                if let Some(minimum) = min_value {
+                    slider = slider.min_value(minimum)?;
+                }
+                if let Some(maximum) = max_value {
+                    slider = slider.max_value(maximum)?;
+                }
+            }
+            if let Some(requested_step) = step {
+                let alpha_range_is_too_small =
+                    index == 3 && requested_step > slider.max() - slider.min();
+                if !alpha_range_is_too_small {
+                    slider = slider.step(requested_step)?;
+                    self.snap_on_set[index] = true;
+                }
+            }
+            if let Some(width) = bar_width {
+                slider = slider.bar_width(width)?;
+            }
+            if let Some(height) = bar_height {
+                slider = slider.bar_height(height)?;
+            }
+            if let Some(radius) = corner_radius {
+                slider = slider.corner_radius(radius)?;
+            }
+            if let Some(radius) = handle_radius {
+                slider = slider.handle_radius(radius);
+            }
+            if let Some(opacity) = handle_fill_opacity {
+                slider = slider.handle_fill_opacity(opacity);
+            }
+            if let Some(color) = handle_stroke_color {
+                slider = slider.handle_stroke_color(color);
+            }
+            if let Some(color) = handle_fill_color {
+                slider = slider.handle_fill_color(color);
+            }
+            *current = slider;
+        }
+        Ok(self)
+    }
+
     /// `set_value(r, g, b, a)`: set all four sliders and refill the swatch.
     ///
     /// # Errors
@@ -1384,10 +1479,14 @@ impl ColorSliders {
     /// refused. All four sliders and the swatch commit atomically.
     pub fn set_value(&mut self, r: f64, g: f64, b: f64, a: f64) -> Result<(), SliderError> {
         let mut candidate = self.clone();
-        candidate.sliders[0].set_value(r)?;
-        candidate.sliders[1].set_value(g)?;
-        candidate.sliders[2].set_value(b)?;
-        candidate.sliders[3].set_value(a)?;
+        for (index, value) in [r, g, b, a].into_iter().enumerate() {
+            let value = if candidate.snap_on_set[index] {
+                candidate.sliders[index].snap_value(value)?
+            } else {
+                value
+            };
+            candidate.sliders[index].set_value(value)?;
+        }
         candidate.color_box = candidate.build_color_box()?;
         *self = candidate;
         Ok(())
