@@ -10753,3 +10753,37 @@ fade_base_scene.play(
     rate_func=manimlib.linear,
 )
 assert np.allclose(fade_out_dot.data["fill_rgba"][:, 3], 0.0)
+
+
+# ------------------------------------------ FocusOn Mobject focus_point
+# fm-5wq.4.77: a Mobject focus point follows live — the shrinking dot
+# re-centres on the moving target every frame through the updater phase.
+
+indication_module = importlib.import_module("manimlib.animation.indication")
+
+focus_target = geometry.Rectangle(width=0.6, height=0.6)
+focus_anim = indication_module.FocusOn(focus_target, run_time=2.0 / 30.0)
+focus_scene = Scene()
+focus_scene.add(focus_target)
+focus_scene.play(
+    focus_anim,
+    focus_target.animate.shift([1.25, -0.75, 0.0]),
+    run_time=2.0 / 30.0,
+)
+# The target moved; the shrinking dot tracked its live centre.
+assert np.allclose(focus_target.get_center(), [1.25, -0.75, 0.0])
+assert np.allclose(
+    focus_anim.mobject.get_center(), focus_target.get_center(), atol=1e-6
+)
+
+# A numeric focus point still constructs (fm-5wq.4.52 surface untouched).
+numeric_focus = indication_module.FocusOn([0.5, 0.5, 0.0], run_time=2.0 / 30.0)
+assert np.allclose(numeric_focus.focus_point, [0.5, 0.5, 0.0])
+
+# Named refusal: FocusOn(None) is a TypeError, not a crash.
+try:
+    indication_module.FocusOn(None)
+except TypeError as error:
+    assert "3D point or a Mobject" in str(error)
+else:
+    raise AssertionError("FocusOn accepted None")
