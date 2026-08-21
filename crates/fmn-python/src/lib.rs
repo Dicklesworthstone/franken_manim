@@ -6998,7 +6998,9 @@ fn build_native_animation(
             for member in spec.members {
                 members.push(build_native_animation(stage, member)?);
             }
-            Box::new(fmn_anim::flash(stage, members).map_err(anim_error)?)
+            Box::new(
+                fmn_anim::flash(stage, members, spec.group_lag).map_err(anim_error)?,
+            )
         }
         "show_creation_then_fade_out" => {
             let mut members = Vec::with_capacity(spec.members.len());
@@ -7006,8 +7008,13 @@ fn build_native_animation(
                 members.push(build_native_animation(stage, member)?);
             }
             Box::new(
-                fmn_anim::show_creation_then_fade_out(stage, members, spec.remover)
-                    .map_err(anim_error)?,
+                fmn_anim::show_creation_then_fade_out(
+                    stage,
+                    members,
+                    spec.group_lag,
+                    spec.remover,
+                )
+                .map_err(anim_error)?,
             )
         }
         "transform_matching_tex" | "transform_matching_strings" => {

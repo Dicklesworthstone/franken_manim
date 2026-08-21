@@ -5,6 +5,11 @@
 //! - [`indicate`] (indication.py:73): a Transform whose target is a
 //!   scaled, recolored copy under `there_and_back` — the mobject swells,
 //!   flushes, and returns.
+//! - [`focus_on`] / [`circle_indicate`] accept Atlas-built source/target
+//!   geometry and own the indication-specific Transform configuration;
+//!   [`flash`] and [`show_creation_then_fade_out`] similarly own the
+//!   composition identity over already-built mechanism members. Keeping
+//!   geometry construction above Choreo preserves the crate DAG.
 //! - [`WiggleOutThenIn`] (indication.py:357): per frame, restore the
 //!   pointlike data and apply an absolute scale-and-rotate about fixed
 //!   pivots (`there_and_back` for the swell, the `wiggle` rate for the
@@ -25,13 +30,11 @@
 //!   `there_and_back(t^power)·amplitude·direction`, power sliding with
 //!   the x-proportion — functional-map family under an indication name.
 //!
-//! The rest of the module is geometry- or composition-bound and lands
-//! with its dependencies (the seams the fm-cye bead records): `FocusOn`,
-//! `CircleIndicate`, `FlashAround`/`FlashUnder` need `Dot`/`Circle`/
-//! `SurroundingRectangle`/`Underline` (fmn-library, §12); `Flash`,
-//! `ShowCreationThenFadeOut`, the `AnimationOnSurroundingRectangle`
-//! family, `FlashyFadeIn`, and specialized.py's `Broadcast` need
-//! `AnimationGroup`/`Succession`/`LaggedStart` (fm-hfe). Their mechanisms
+//! The remaining geometry-bound classes land with their dependencies (the
+//! seams the fm-cye bead records): `FlashAround`/`FlashUnder` and the
+//! `AnimationOnSurroundingRectangle` family need `SurroundingRectangle`/
+//! `Underline` (fmn-library, §12); `FlashyFadeIn` and specialized.py's
+//! `Broadcast` need their additional composition policies. Their mechanisms
 //! — Transform, passing flash, fade, restore — are all already here.
 
 use fmn_core::rate;
@@ -39,12 +42,26 @@ use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Stage};
 
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc};
+use crate::composition::{AnimationGroup, Succession};
 use crate::creation::match_style_from;
 use crate::movement::Homotopy;
 use crate::transform::{Transform, set_family_rgb};
 
 /// The Reference's `YELLOW` (`#FFFF00`), the indication default color.
 pub const INDICATION_YELLOW: [f32; 3] = [1.0, 1.0, 0.0];
+
+/// `FocusOn` (indication.py:37): transform the Atlas-built full-frame,
+/// transparent dot onto the zero-radius focus dot. Geometry and style are
+/// supplied by the caller because Choreo cannot depend upward on Atlas.
+/// Reference defaults owned here: `run_time = 2`, remover.
+#[must_use]
+pub fn focus_on(starting_dot: Mob, focus_dot: Mob, remover: bool) -> Transform {
+    let mut transform = Transform::new(starting_dot, focus_dot);
+    transform.state_mut().config.name = "FocusOn".to_owned();
+    transform.state_mut().config.run_time = 2.0;
+    transform.state_mut().config.remover = remover;
+    transform
+}
 
 /// `Indicate` (indication.py:73): transform onto a copy scaled by
 /// `scale_factor` and recolored, under `there_and_back`. Reference
@@ -65,6 +82,35 @@ pub fn indicate(
     t.state_mut().config.name = "Indicate".to_owned();
     t.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
     Ok(t)
+}
+
+/// `Flash` (indication.py:85): simultaneous creation-then-destruction
+/// members over radial lines built by Atlas.
+///
+/// # Errors
+/// [`AnimError::EmptyComposition`] for no line animations, or the Stage
+/// errors reported while assembling the member container.
+pub fn flash(
+    stage: &mut Stage,
+    line_animations: Vec<Box<dyn Animation>>,
+    lag_ratio: f64,
+) -> Result<AnimationGroup, AnimError> {
+    let mut group = AnimationGroup::with_lag_ratio(stage, line_animations, lag_ratio)?;
+    group.state_mut().config.name = "Flash".to_owned();
+    group.state_mut().config.run_time = 1.0;
+    Ok(group)
+}
+
+/// `CircleIndicate` (indication.py:130): transform the Atlas-built narrow,
+/// zero-stroke circle onto its surrounding-circle target under
+/// `there_and_back` and remove the auxiliary geometry by default.
+#[must_use]
+pub fn circle_indicate(pre_circle: Mob, circle: Mob, remover: bool) -> Transform {
+    let mut transform = Transform::new(pre_circle, circle);
+    transform.state_mut().config.name = "CircleIndicate".to_owned();
+    transform.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
+    transform.state_mut().config.remover = remover;
+    transform
 }
 
 /// `TurnInsideOut` (indication.py:401): transform onto a points-reversed
@@ -378,6 +424,24 @@ pub fn show_creation_then_destruction(vmobject: Mob) -> crate::creation::ShowPar
     let mut anim = crate::creation::show_passing_flash(vmobject, 2.0);
     anim.state_mut().config.name = "ShowCreationThenDestruction".to_owned();
     anim
+}
+
+/// `ShowCreationThenFadeOut` (indication.py:266): the supplied
+/// `ShowCreation` and `FadeOut` members play as a just-in-time succession.
+///
+/// # Errors
+/// [`AnimError::EmptyComposition`] when no members are supplied, or the
+/// Stage errors reported while assembling the member container.
+pub fn show_creation_then_fade_out(
+    stage: &mut Stage,
+    animations: Vec<Box<dyn Animation>>,
+    lag_ratio: f64,
+    remover: bool,
+) -> Result<Succession, AnimError> {
+    let mut succession = Succession::with_lag_ratio(stage, animations, lag_ratio)?;
+    succession.state_mut().config.name = "ShowCreationThenFadeOut".to_owned();
+    succession.state_mut().config.remover = remover;
+    Ok(succession)
 }
 
 // ------------------------------------------------------------ ApplyWave
