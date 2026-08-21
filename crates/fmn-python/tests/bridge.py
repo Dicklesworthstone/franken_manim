@@ -10976,3 +10976,41 @@ except TypeError as error:
     assert "real or complex number" in str(error)
 else:
     raise AssertionError("DecimalNumber accepted a string")
+
+# fm-5wq.4.83: in-place Transform — a None target resolves at play time to
+# a copy of the mobject's current state through Transform.create_target
+# (the schema method), so bare Transform(mob) plays through the native
+# transform kind.
+inplace_dot = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+inplace_scene = InteractiveScene()
+inplace_scene.add(inplace_dot)
+inplace_probe = transform_module.Transform(inplace_dot)
+assert inplace_probe.target_mobject is None
+inplace_created = inplace_probe.create_target()
+assert inplace_created is not inplace_dot
+assert np.array_equal(inplace_created.get_points(), inplace_dot.get_points())
+inplace_scene.play(
+    inplace_probe, run_time=2.0 / 30.0, rate_func=manimlib.linear
+)
+assert inplace_probe.target_mobject is not None
+assert np.allclose(inplace_dot.get_center(), [1.0, 0.0, 0.0], atol=1e-9)
+
+# The deferred resolution respects the class contracts around it: fades
+# stay target-less (bare Fade keeps its named play-time refusal, pinned
+# above), and target-free Transform subclasses resolve no identity target.
+assert fading.FadeIn(manimlib.Dot())._native_target() is None
+assert (
+    transform_module.CyclicReplace(
+        manimlib.Dot(), manimlib.Dot().shift((1.0, 0.0, 0.0))
+    )._native_target()
+    is None
+)
+
+# Named negative: a non-Mobject Transform source.
+try:
+    transform_module.Transform(None)
+except TypeError as error:
+    assert "Transform expects a Mobject" in str(error), error
+    assert "NoneType" in str(error), error
+else:
+    raise AssertionError("Transform accepted None")

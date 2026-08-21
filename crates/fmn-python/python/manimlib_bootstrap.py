@@ -9902,11 +9902,11 @@ class Transform(_NativeAnimation):
             path_arc = float(routed_arc)
             path_arc_axis = getattr(path_func, "_fmn_path_axis", path_arc_axis)
         self.path_func = path_func
-        super().__init__(mobject, **kwargs)
-        if target_mobject is None and not self._allows_deferred_target():
-            raise NotImplementedError(
-                "Transform without a target (in-place) awaits its binding"
+        if not isinstance(mobject, Mobject):
+            raise TypeError(
+                "Transform expects a Mobject; got " + type(mobject).__name__
             )
+        super().__init__(mobject, **kwargs)
         self.target_mobject = target_mobject
         self.path_arc = float(path_arc)
         self.path_arc_axis = _vec3(path_arc_axis)
@@ -9915,11 +9915,25 @@ class Transform(_NativeAnimation):
         return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
 
     def _allows_deferred_target(self):
-        return False
+        return True
+
+    def create_target(self):
+        # Reference create_target hands back the stored target; the
+        # in-place reading (fm-5wq.4.83): a None target resolves to a copy
+        # of the mobject's play-time state, so `Transform(mob)` after
+        # in-place mutation snaps records to that state through the same
+        # native transform kind.
+        if getattr(self, "target_mobject", None) is not None:
+            return self.target_mobject
+        return self.mobject.copy()
 
     def _native_target(self):
-        if self._allows_deferred_target():
-            self.target_mobject = self.create_target()
+        # Subclasses that carry no target at all (CyclicReplace/Swap set
+        # `_target_attr = None`) stay target-less rather than resolving
+        # the in-place identity.
+        if self._target_attr is None:
+            return None
+        self.target_mobject = self.create_target()
         return self.target_mobject
 
 
@@ -9940,6 +9954,13 @@ class Fade(Transform):
 
     def _allows_deferred_target(self):
         return True
+
+    def _native_target(self):
+        # The fade_in/fade_out kinds carry no target, and the Reference's
+        # bare Fade dies at begin — so a None target stays None here and
+        # bare Fade keeps its named play-time refusal instead of silently
+        # resolving to the in-place identity (fm-5wq.4.83).
+        return self.target_mobject
 
     def _native_params(self):
         return {"shift": self.shift_vect, "scale": self.scale_factor}
