@@ -17534,3 +17534,66 @@ except TypeError:
     pass
 else:
     raise AssertionError("convert_pixel_array accepted a non-array payload")
+
+# fm-5wq.4: Camera.pixel_coords_to_space_coords maps pixel-space points into
+# the frame from the live pixel shape and frame state alone. Absolute
+# mapping is the Reference's height-axis-only scale from the frame center:
+# center + (frame_height / pixel_height) * [px - pw/2, py - ph/2, 0];
+# relative=True is the Reference's 2 * [px/pw, py/ph, 0] offset.
+assert str(
+    inspect.signature(camera_module.Camera.pixel_coords_to_space_coords)
+) == "(self, px, py, relative=False)"
+coords_camera = camera_module.Camera(resolution=(1920, 1080))
+assert np.allclose(
+    coords_camera.pixel_coords_to_space_coords(960, 540),
+    coords_camera.get_frame_center(),
+    atol=1e-9,
+)
+coords_scale = coords_camera.get_frame_height() / 1080.0
+assert np.allclose(
+    coords_camera.pixel_coords_to_space_coords(0, 0),
+    coords_camera.get_frame_center()
+    + coords_scale * np.array([-960.0, -540.0, 0.0]),
+)
+assert np.allclose(
+    coords_camera.pixel_coords_to_space_coords(0, 0, relative=True),
+    (0.0, 0.0, 0.0),
+)
+assert np.allclose(
+    coords_camera.pixel_coords_to_space_coords(1920, 1080, relative=True),
+    (2.0, 2.0, 0.0),
+)
+assert np.allclose(
+    coords_camera.pixel_coords_to_space_coords(480, 810, relative=True),
+    (0.5, 1.5, 0.0),
+)
+# The mapping follows the live frame center.
+coords_camera.frame.shift([1.0, -2.0, 0.0])
+assert np.allclose(
+    coords_camera.pixel_coords_to_space_coords(960, 540),
+    (1.0, -2.0, 0.0),
+)
+
+# Planted negative: non-finite pixel coordinates are a named refusal, never
+# a NaN point.
+for bad_px, bad_py in (
+    (float("nan"), 0.0),
+    (0.0, float("inf")),
+    (float("-inf"), 0.0),
+):
+    try:
+        coords_camera.pixel_coords_to_space_coords(bad_px, bad_py)
+    except ValueError as error:
+        assert "finite pixel" in str(error)
+    else:
+        raise AssertionError(
+            "pixel_coords_to_space_coords accepted a non-finite coordinate"
+        )
+try:
+    coords_camera.pixel_coords_to_space_coords(object(), 0.0)
+except TypeError:
+    pass
+else:
+    raise AssertionError(
+        "pixel_coords_to_space_coords accepted a non-numeric coordinate"
+    )

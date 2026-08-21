@@ -11692,6 +11692,25 @@ class Camera:
             ).astype(self.pixel_array_dtype)
         return retval.astype(self.pixel_array_dtype)
 
+    def pixel_coords_to_space_coords(self, px, py, relative=False):
+        px = float(px)
+        py = float(py)
+        if not (_math.isfinite(px) and _math.isfinite(py)):
+            raise ValueError(
+                "Camera.pixel_coords_to_space_coords requires finite pixel "
+                f"coordinates, got ({px}, {py})"
+            )
+        pixel_width, pixel_height = self.get_pixel_shape()
+        frame_height = self.get_frame_height()
+        frame_center = self.get_frame_center()
+        if relative:
+            return 2.0 * _np.array([px / pixel_width, py / pixel_height, 0.0])
+        # The Reference scales with respect to the height axis only.
+        scale = frame_height / pixel_height
+        return frame_center + scale * _np.array(
+            [px - pixel_width / 2.0, py - pixel_height / 2.0, 0.0]
+        )
+
 
 class ThreeDCamera(Camera):
     """Camera with Lumen's Reference four-sample constructor default."""
