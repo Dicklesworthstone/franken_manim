@@ -4450,6 +4450,45 @@ split_handle = interactive.LinearNumberSlider(
 assert split_handle.slider.get_stroke_color() == manimlib.RED
 assert split_handle.slider.get_fill_color() == manimlib.GREEN
 
+# fm-5wq.4: the signature is re-pinned against the live constructor, the
+# constructor keeps an off-step value exactly (range assert only, no build
+# snap), and the drag path is where step snapping lives —
+# get_value_from_point ceils to the NEXT step boundary, so value 3 with
+# step 2 snaps to 4, and an on-step point stays put.
+assert list(
+    inspect.signature(interactive.LinearNumberSlider).parameters
+) == [
+    "value",
+    "value_type",
+    "min_value",
+    "max_value",
+    "step",
+    "rounded_rect_kwargs",
+    "circle_kwargs",
+    "kwargs",
+]
+step_slider = interactive.LinearNumberSlider(
+    3, min_value=0, max_value=10, step=2
+)
+assert float(step_slider.get_value()) == 3.0
+step_off_point = step_slider.slider_axis.point_from_proportion(0.3)
+assert step_slider.get_value_from_point(step_off_point) == 4.0
+step_on_point = step_slider.slider_axis.point_from_proportion(0.4)
+assert step_slider.get_value_from_point(step_on_point) == 4.0
+assert step_slider.slider_on_mouse_drag(
+    step_slider.slider, {"point": step_off_point}
+) is False
+assert float(step_slider.get_value()) == 4.0
+
+# Planted negative: an inverted range is the native slider's named refusal,
+# never a silent build.
+try:
+    interactive.LinearNumberSlider(0.0, min_value=5.0, max_value=-5.0)
+except ValueError as error:
+    assert "slider bounds must be finite, ordered" in str(error)
+else:
+    raise AssertionError("LinearNumberSlider accepted an inverted range")
+
 # ColorSliders is the Reference's Group, not a ControlMobject. Atlas owns its
 # checkerboard/swatch and the four native LinearNumberSlider compositions.
 color_sliders = interactive.ColorSliders()
