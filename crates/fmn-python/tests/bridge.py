@@ -1753,6 +1753,16 @@ assert forced_skip.skip_animations is True
 assert forced_skip.original_skipping_status is True
 assert Scene(start_at_animation_number=2).skip_animations is True
 
+# fm-5wq.4: preview_while_skipping is a constructor flag defaulting to
+# True (stored per-instance from kwargs — no class attribute), and it is
+# bool()-cast like the other Scene flags, so truthy strings become True.
+assert skip_scene.preview_while_skipping is True
+assert Scene().preview_while_skipping is True
+assert Scene(preview_while_skipping=False).preview_while_skipping is False
+assert Scene(preview_while_skipping="yes").preview_while_skipping is True
+assert Scene(preview_while_skipping=0).preview_while_skipping is False
+assert Scene(preview_while_skipping=1).preview_while_skipping is True
+
 # fm-5wq.4: start_at_animation_number skips until post_play's num_plays
 # increment reaches it; the next pre_play's update_skipping_status then
 # releases the skip. The Reference captures original_skipping_status
