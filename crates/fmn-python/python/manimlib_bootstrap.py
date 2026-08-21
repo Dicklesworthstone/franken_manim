@@ -11265,8 +11265,6 @@ def get_module(run_config):
 
 
 _is_child_scene = is_child_scene
-_scene_from_class = scene_from_class
-_note_missing_scenes = note_missing_scenes
 
 
 def scene_from_class(scene_class, scene_config, run_config):
@@ -11332,6 +11330,10 @@ def get_scenes_to_render(all_scene_classes, scene_config, run_config):
         "get_scenes_to_render needs scene_names or write_all; "
         "interactive prompt_user_for_choice is unavailable"
     )
+
+
+_scene_from_class = scene_from_class
+_note_missing_scenes = note_missing_scenes
 
 
 class CheckpointManager:
