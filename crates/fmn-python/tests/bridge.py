@@ -2879,6 +2879,35 @@ assert grouped_selection not in group_scene.selection
 assert left_selected in group_scene.mobjects
 assert right_selected in group_scene.mobjects
 
+# fm-5wq.4: gather_new_selection ends the sweep through native bounding
+# boxes: the rectangle grown by update_selection_rectangle hit-tests the
+# search set in fixed-frame coordinates and toggles covered mobjects into
+# the live selection. A vanished rectangle leaves the selection untouched.
+assert str(inspect.signature(InteractiveScene.gather_new_selection)) == (
+    "(self)"
+)
+assert str(inspect.signature(InteractiveScene.update_selection_rectangle)) == (
+    "(self, rect)"
+)
+sweep_scene = InteractiveScene()
+sweep_scene.setup()
+sweep_target = manimlib.Circle().move_to(manimlib.ORIGIN)
+sweep_scene.add(sweep_target)
+sweep_scene.mouse_point.move_to(manimlib.ORIGIN)
+sweep_scene.enable_selection()
+sweep_scene.mouse_point.move_to([2.0, 2.0, 0.0])
+assert (
+    sweep_scene.update_selection_rectangle(sweep_scene.selection_rectangle)
+    is sweep_scene.selection_rectangle
+)
+assert sweep_scene.gather_new_selection() is None
+assert sweep_scene.is_selecting is False
+assert sweep_scene.selection_rectangle not in sweep_scene.mobjects
+assert sweep_target in sweep_scene.selection
+assert sweep_scene.gather_new_selection() is None
+assert sweep_scene.selection_rectangle not in sweep_scene.mobjects
+assert sweep_target in sweep_scene.selection
+
 # fm-5wq.4: nudge_selection shifts the live native selection Group with the
 # Reference step size and tenfold large-nudge modifier.
 assert InteractiveScene.selection_nudge_size == 0.05

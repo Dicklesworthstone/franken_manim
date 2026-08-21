@@ -12410,6 +12410,16 @@ class InteractiveScene(Scene):
             self.mouse_point.get_center()
         )
 
+    def update_selection_rectangle(self, rect):
+        p1 = rect.fixed_corner
+        p2 = self.frame.to_fixed_frame_point(self.mouse_point.get_center())
+        rect.set_points_as_corners([
+            p1, _np.array([p2[0], p1[1], 0]),
+            p2, _np.array([p1[0], p2[1], 0]),
+            p1,
+        ])
+        return rect
+
     def gather_new_selection(self):
         self.is_selecting = False
         rectangle = getattr(self, "selection_rectangle", None)
