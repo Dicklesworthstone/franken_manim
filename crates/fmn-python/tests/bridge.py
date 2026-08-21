@@ -2283,6 +2283,35 @@ geometry = importlib.import_module("manimlib.mobject.geometry")
 circle = geometry.Circle()
 assert isinstance(circle, VMobject)
 
+# fm-5wq.4: MotionMobject is an authored portal class over Atlas's native
+# wrapper builder. It retains the original child proxy while the separately
+# owned drag-event gateway remains an explicit, precisely named capability gap.
+interactive = importlib.import_module("manimlib.mobject.interactive")
+assert interactive.MotionMobject.__bases__ == (Mobject,)
+assert str(inspect.signature(interactive.MotionMobject)) == "(mobject, **kwargs)"
+motion_source = geometry.Circle(radius=0.4)
+motion = interactive.MotionMobject(motion_source, name="draggable-circle")
+assert motion.mobject is motion_source
+assert list(motion.submobjects) == [motion_source]
+assert motion.name == "draggable-circle"
+assert len(motion_source.updaters) == 1
+assert motion_source.updaters[0](motion_source) is None
+
+try:
+    interactive.MotionMobject(object())
+except AssertionError:
+    pass
+else:
+    raise AssertionError("MotionMobject accepted a non-Mobject child")
+
+try:
+    motion.mob_on_mouse_drag(motion_source, {"point": np.zeros(3)})
+except NotImplementedError as error:
+    assert "MotionMobject.mob_on_mouse_drag" in str(error), error
+    assert "semantic binding has not landed" in str(error), error
+else:
+    raise AssertionError("MotionMobject fabricated an unbound drag gateway")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.

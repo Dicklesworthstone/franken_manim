@@ -7788,6 +7788,27 @@ class AnimatedStreamLines(VGroup):
         return self
 
 
+class MotionMobject(Mobject):
+    """A draggable wrapper whose composition comes from Atlas's native
+    ``MotionMobject`` builder.
+
+    The separately owned event gateway has not landed, so schema installation
+    deliberately retains the precise ``mob_on_mouse_drag`` capability refusal.
+    Constructor identity, grouping, and the Reference's no-op updater are real.
+    """
+
+    def __init__(self, mobject, **kwargs):
+        assert isinstance(mobject, Mobject)
+        _install_live_state(self)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        specs = self._build_motion_mobject(_native_shell_factory, mobject)
+        _hang_native_children(self, specs)
+        self.mobject = mobject
+        self.mobject.add_updater(lambda mob: None)
+        self.add(mobject)
+
+
 class Surface(Mobject):
     """The Surface-family MRO anchor (Reference Surface(Mobject), NOT a
     VMobject — VGroup's only-VMobjects refusal stays correct for it).
@@ -12694,6 +12715,7 @@ def _install_schema_surface():
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
         ("manimlib.mobject.mobject", "Group"): Group,
         ("manimlib.mobject.mobject", "Point"): Point,
+        ("manimlib.mobject.interactive", "MotionMobject"): MotionMobject,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (

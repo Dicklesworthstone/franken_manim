@@ -2985,6 +2985,25 @@ impl BridgeMobject {
         )
     }
 
+    /// `MotionMobject(mobject)` over Atlas's native wrapper builder. The
+    /// builder establishes the root composition; Python then hangs the
+    /// original proxy below that root so the Reference's child identity is
+    /// preserved instead of substituting a cloned compatibility shell.
+    fn _build_motion_mobject<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source: &Bound<'_, BridgeMobject>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let points = with_stage(source, |stage, mob| {
+            stage.get_points(mob).unwrap_or_default()
+        })?;
+        let built =
+            fmn_library::MotionMobject::new(fmn_library::VMobject::from_points(points)).build();
+        let mut root = fmn_mobject::Mobject::from(built);
+        root.submobjects.clear();
+        install_native_tree(slf, factory, root)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the
