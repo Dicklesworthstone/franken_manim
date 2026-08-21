@@ -9565,6 +9565,12 @@ class ShowPassingFlashAround(VShowPassingFlash):
             stroke_color=stroke_color,
             buff=buff,
         )
+        # The Reference's ShowPassingFlash works on continuous path bounds.
+        # Our native VShowPassingFlash samples per-record stroke widths, so
+        # densify the same rectangle before sweeping it to keep the wrapper
+        # visually continuous rather than exposing four coarse edge samples.
+        rect.insert_n_curves(100)
+        rect.set_points(rect.get_points_without_null_curves())
         rect.add_updater(lambda surrounding: surrounding.move_to(mobject))
         kwargs.setdefault("time_width", 0.1)
         kwargs.setdefault("taper_width", 0.0)

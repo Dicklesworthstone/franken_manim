@@ -3159,6 +3159,26 @@ assert indication.FlashUnder.__bases__ == (indication.FlashAround,)
 assert indication.ShowPassingFlashAround.__bases__ == (
     indication.VShowPassingFlash,
 )
+assert tuple(inspect.signature(indication.FlashAround).parameters) == (
+    "mobject",
+    "time_width",
+    "taper_width",
+    "stroke_width",
+    "color",
+    "buff",
+    "n_inserted_curves",
+    "kwargs",
+)
+assert inspect.signature(indication.FlashUnder) == inspect.signature(
+    indication.FlashAround
+)
+assert tuple(inspect.signature(indication.ShowPassingFlashAround).parameters) == (
+    "mobject",
+    "stroke_width",
+    "stroke_color",
+    "buff",
+    "kwargs",
+)
 assert indication.ShowCreationThenDestruction.__bases__ == (
     indication.ShowPassingFlash,
 )
@@ -3400,11 +3420,20 @@ tracked_flash = indication.ShowPassingFlashAround(
 )
 assert isinstance(tracked_flash.mobject, shape_matchers.SurroundingRectangle)
 assert tracked_flash.mobject.get_stroke_color() == manimlib.BLUE
+tracked_samples = []
+tracked_flash.mobject.add_updater(
+    lambda mob: tracked_samples.append(mob.get_stroke_widths().copy()),
+    call=False,
+)
 tracked_target.add_updater(
     lambda mob, dt: mob.shift(dt * manimlib.RIGHT),
     call=False,
 )
 tracked_scene.play(tracked_flash)
+assert any(
+    widths.max() > 0.0 and not np.allclose(widths, widths[0])
+    for widths in tracked_samples
+)
 assert np.allclose(
     tracked_flash.mobject.get_center(),
     tracked_target.get_center(),
