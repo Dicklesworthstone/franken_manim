@@ -3270,7 +3270,7 @@ impl BridgeMobject {
                 children.len()
             )));
         }
-        hoist_descendant_records(&mut children[1])?;
+        hoist_descendant_records(&mut children[1], false)?;
         native_shell_specs(slf.py(), factory, children)
     }
 
@@ -5928,6 +5928,7 @@ impl BridgeMobject {
         indent: f64,
         line_width: Option<f64>,
         disable_ligatures: bool,
+        hoist_records: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         let mut builder = if markup {
             fmn_library::Text::markup(text)
@@ -5948,7 +5949,11 @@ impl BridgeMobject {
         let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
         slf.as_any().setattr("_string_sub_spans", spans)?;
         slf.as_any().setattr("_string_sub_paths", paths)?;
-        install_native_tree(slf, factory, built.vmob)
+        let mut tree = fmn_mobject::Mobject::from(built.vmob);
+        if hoist_records {
+            hoist_descendant_records(&mut tree, true)?;
+        }
+        install_native_tree(slf, factory, tree)
     }
 
     /// `Tex(...)` / `TexText(...)` over fmd-math. An unsupported construct
@@ -9030,8 +9035,9 @@ fn native_shell_specs<'py>(
 /// single Python identity across `become` rebuilds, so their portal candidate
 /// owns a flattened copy of the glyph outlines instead. Separate glyph paths
 /// are joined with the shared-anchor model's null-curve marker; per-record
-/// style lanes are copied unchanged. The native Rust family is never mutated.
-fn hoist_descendant_records(root: &mut Mobject) -> PyResult<()> {
+/// style lanes are copied unchanged. Callers that still need glyph-level
+/// family traversal may retain those children alongside the flattened root.
+fn hoist_descendant_records(root: &mut Mobject, retain_children: bool) -> PyResult<()> {
     fn collect_pointful<'a>(node: &'a Mobject, out: &mut Vec<&'a RecordBuffer>) {
         if !node.buffer.is_empty() {
             out.push(&node.buffer);
@@ -9097,7 +9103,9 @@ fn hoist_descendant_records(root: &mut Mobject) -> PyResult<()> {
         buffer
     };
     root.buffer = hoisted;
-    root.submobjects.clear();
+    if !retain_children {
+        root.submobjects.clear();
+    }
     Ok(())
 }
 

@@ -5748,6 +5748,7 @@ class MarkupText(StringMobject):
     tier remain precise refusals."""
 
     _native_markup = True
+    _hoist_descendant_records = False
 
     def __init__(
         self,
@@ -5836,6 +5837,7 @@ class MarkupText(StringMobject):
             float(indent),
             None if line_width is None else float(line_width),
             bool(disable_ligatures),
+            type(self)._hoist_descendant_records,
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
@@ -5892,6 +5894,7 @@ class Code(MarkupText):
     """
 
     _native_markup = False
+    _hoist_descendant_records = True
 
     def __init__(
         self,
