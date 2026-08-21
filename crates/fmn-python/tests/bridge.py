@@ -3443,6 +3443,38 @@ assert manimlib.COLOR_KEY == "c"
 assert manimlib.ALL_MODIFIERS == (2 | 64 | 1)
 assert manimlib.ARROW_SYMBOLS == [0xFF51, 0xFF52, 0xFF53, 0xFF54]
 
+# fm-5wq.4: backspace deletes the live selection through native Scene.remove;
+# arrow keys nudge by selection_nudge_size (x10 with shift); cursor key
+# toggles the native crosshair without a pyglet window.
+nudge_key_scene = InteractiveScene()
+nudge_key_scene.setup()
+nudge_key_circle = manimlib.Circle()
+nudge_key_scene.add(nudge_key_circle)
+nudge_key_scene.add_to_selection(nudge_key_circle)
+nudge_key_start = nudge_key_circle.get_center().copy()
+assert nudge_key_scene.on_key_press(0xFF53, 0) is None  # pyglet RIGHT
+assert np.allclose(
+    nudge_key_circle.get_center(),
+    nudge_key_start + InteractiveScene.selection_nudge_size * manimlib.RIGHT,
+)
+assert nudge_key_scene.on_key_press(0xFF53, 1) is None  # SHIFT|RIGHT
+assert np.allclose(
+    nudge_key_circle.get_center(),
+    nudge_key_start
+    + InteractiveScene.selection_nudge_size * manimlib.RIGHT
+    + 10.0 * InteractiveScene.selection_nudge_size * manimlib.RIGHT,
+)
+assert nudge_key_scene.on_key_press(0xFF08, 0) is None  # BACKSPACE
+assert nudge_key_circle not in nudge_key_scene.mobjects
+assert len(nudge_key_scene.selection) == 0
+cursor_scene = InteractiveScene()
+cursor_scene.setup()
+assert cursor_scene.crosshair not in cursor_scene.mobjects
+assert cursor_scene.on_key_press(ord("k"), 0) is None
+assert cursor_scene.crosshair in cursor_scene.mobjects
+assert cursor_scene.on_key_press(ord("k"), 0) is None
+assert cursor_scene.crosshair not in cursor_scene.mobjects
+
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
 assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
