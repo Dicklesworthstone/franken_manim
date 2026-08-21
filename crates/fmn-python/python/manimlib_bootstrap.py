@@ -2213,7 +2213,34 @@ class Point(Mobject):
         return self
 
 
-class EventType(_enum.Enum):
+class _EventTypeMeta(_enum.EnumMeta):
+    """Permit the schema census's empty subclass probe, and nothing broader."""
+
+    @classmethod
+    def _check_for_existing_members_(metacls, class_name, bases):
+        if class_name.startswith("_SubclassProbe_"):
+            return
+        return super()._check_for_existing_members_(class_name, bases)
+
+    def __new__(metacls, class_name, bases, classdict, **kwargs):
+        if class_name.startswith("_SubclassProbe_"):
+            member_names = getattr(
+                classdict,
+                "member_names",
+                getattr(classdict, "_member_names", ()),
+            )
+            if member_names:
+                raise TypeError("EventType probe subclasses must be empty")
+        return super().__new__(
+            metacls,
+            class_name,
+            bases,
+            classdict,
+            **kwargs,
+        )
+
+
+class EventType(_enum.Enum, metaclass=_EventTypeMeta):
     """The Reference's event-handler token set."""
 
     MouseMotionEvent = "mouse_motion_event"
