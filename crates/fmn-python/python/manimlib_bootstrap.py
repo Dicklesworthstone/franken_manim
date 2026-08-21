@@ -10453,6 +10453,11 @@ class Checkbox(ControlMobject):
     def toggle_value(self):
         self.set_value(not bool(self.get_value()))
 
+    def on_mouse_press(self, mob, event_data):
+        del event_data
+        mob.toggle_value()
+        return False
+
 
 class EnableDisableButton(ControlMobject):
     """Atlas's native enabled/disabled box over a live bool tracker."""
@@ -10528,6 +10533,11 @@ class EnableDisableButton(ControlMobject):
 
     def toggle_value(self):
         self.set_value(not bool(self.get_value()))
+
+    def on_mouse_press(self, mob, event_data):
+        del event_data
+        mob.toggle_value()
+        return False
 
 
 class LinearNumberSlider(ControlMobject):

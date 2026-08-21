@@ -2614,13 +2614,12 @@ except AssertionError as error:
 else:
     raise AssertionError("Checkbox accepted a non-bool value")
 
-try:
-    checkbox_true.on_mouse_press(checkbox_true, {"point": np.zeros(3)})
-except NotImplementedError as error:
-    assert "Checkbox.on_mouse_press" in str(error), error
-    assert "semantic binding has not landed" in str(error), error
-else:
-    raise AssertionError("Checkbox fabricated an unbound mouse-press gateway")
+assert checkbox_true.on_mouse_press(
+    checkbox_true, {"point": np.zeros(3)}
+) is False
+assert bool(checkbox_true.get_value()) is False
+assert checkbox_true.box_content is true_content
+assert len(checkbox_true.box_content.get_points()) == crossed_points
 
 failed_checkbox = interactive.Checkbox.__new__(interactive.Checkbox)
 try:
@@ -2686,15 +2685,12 @@ except AssertionError as error:
 else:
     raise AssertionError("EnableDisableButton accepted a non-bool value")
 
-try:
-    enabled_button.on_mouse_press(enabled_button, {"point": np.zeros(3)})
-except NotImplementedError as error:
-    assert "EnableDisableButton.on_mouse_press" in str(error), error
-    assert "semantic binding has not landed" in str(error), error
-else:
-    raise AssertionError(
-        "EnableDisableButton fabricated an unbound mouse-press gateway"
-    )
+assert enabled_button.on_mouse_press(
+    enabled_button, {"point": np.zeros(3)}
+) is False
+assert bool(enabled_button.get_value()) is False
+assert enabled_button.box is enabled_box
+assert enabled_button.box.get_fill_color() == manimlib.RED
 
 failed_enable_disable = interactive.EnableDisableButton.__new__(
     interactive.EnableDisableButton
