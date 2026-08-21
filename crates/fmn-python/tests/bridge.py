@@ -1434,6 +1434,7 @@ class FlatThreeDScene(scene_module.ThreeDScene):
 
 
 flat_three_d_scene = FlatThreeDScene()
+assert flat_three_d_scene.default_frame_orientation == (0, 0)
 assert np.isclose(flat_three_d_scene.frame.get_theta(), 0.0)
 assert np.isclose(flat_three_d_scene.frame.get_phi(), 0.0)
 depth_circle = manimlib.Circle()
