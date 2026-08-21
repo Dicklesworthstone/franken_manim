@@ -10440,7 +10440,7 @@ class FadeInFromLarge(FadeIn):
             raise ValueError(
                 "FadeInFromLarge scale_factor must be positive and finite"
             )
-        super().__init__(mobject, scale=1.0 / self.scale_factor, **kwargs)
+        super().__init__(mobject, scale=self.scale_factor, **kwargs)
 
 
 class GrowFromPoint(Transform):
