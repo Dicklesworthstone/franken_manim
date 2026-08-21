@@ -11846,6 +11846,16 @@ class Flash(AnimationGroup):
             self._native_kind = None
             self.mobject = self.lines
             self.remover = True
+            # The python-callback slot floats these; the native spec path
+            # tolerates None but the callback path must not crash on it —
+            # the same normalization FocusOn's follow case carries
+            # (fm-5wq.4.77).
+            if self.rate_func is None:
+                self.rate_func = getattr(
+                    _FMN_ROOT, "smooth", lambda value: value
+                )
+            if self.lag_ratio is None:
+                self.lag_ratio = 0.0
 
     # The Python-driven follow lifecycle (only the Mobject-point case is
     # ever driven; the numeric case plays natively and never calls these).
