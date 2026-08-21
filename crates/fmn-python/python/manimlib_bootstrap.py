@@ -11280,11 +11280,17 @@ class Flash(AnimationGroup):
         **kwargs,
     ):
         if isinstance(point, _BridgeMobject):
-            raise NotImplementedError(
-                "manimlib.animation.indication.Flash with a Mobject point "
-                "awaits the live radial-group updater seam"
-            )
-        self.point = _np.array(_vec3(point))
+            self._flash_target = point
+            self.point = _np.array(_vec3(point.get_center()))
+        else:
+            self._flash_target = None
+            try:
+                self.point = _np.array(_vec3(point))
+            except Exception as error:
+                raise TypeError(
+                    "Flash point must be a 3D point or a Mobject; got "
+                    + type(point).__name__
+                ) from error
         self.color = color
         self.line_length = float(line_length)
         self.flash_radius = float(flash_radius)
@@ -11305,6 +11311,15 @@ class Flash(AnimationGroup):
                     "Flash " + name + " must be non-negative and finite"
                 )
         self.lines = self.create_lines()
+        if self._flash_target is not None:
+            # Each line becomes a scene root through the native Flash
+            # composition. One member therefore owns the single live updater
+            # that moves the detached Python VGroup as a radial unit after
+            # interpolation and before capture.
+            self.lines[0].add_updater(
+                lambda _line: self.lines.move_to(self._flash_target),
+                call=False,
+            )
         super().__init__(
             *self.create_line_anims(),
             run_time=run_time,

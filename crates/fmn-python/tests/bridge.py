@@ -3797,7 +3797,6 @@ else:
 
 for moving_target_type, moving_target in (
     (indication.FocusOn, geometry.Square()),
-    (indication.Flash, geometry.Square()),
 ):
     try:
         moving_target_type(moving_target)
@@ -10834,6 +10833,50 @@ except TypeError as error:
     assert "3D point or a Mobject" in str(error)
 else:
     raise AssertionError("FocusOn accepted None")
+
+
+# --------------------------------------------- Flash Mobject point follow
+# fm-5wq.4.78: the native Flash composition binds every radial line, and
+# one member updater re-centres the complete radial group after each native
+# interpolation step so a moving Mobject point stays live through capture.
+
+flash_target = geometry.Rectangle(width=0.6, height=0.4)
+mobject_flash = indication_module.Flash(
+    flash_target,
+    num_lines=8,
+    flash_radius=0.5,
+    line_length=0.2,
+    run_time=2.0 / 30.0,
+)
+assert len(mobject_flash.lines) == 8
+assert np.allclose(mobject_flash.lines.get_center(), flash_target.get_center())
+radial_centers = np.asarray(
+    [line.get_center() for line in mobject_flash.lines], dtype=float
+)
+assert np.allclose(
+    np.linalg.norm(radial_centers - flash_target.get_center(), axis=1),
+    0.4,
+)
+flash_scene = Scene()
+flash_scene.add(flash_target)
+flash_scene.play(
+    mobject_flash,
+    flash_target.animate.shift([1.0, -0.5, 0.0]),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(flash_target.get_center(), [1.0, -0.5, 0.0])
+assert np.allclose(
+    mobject_flash.lines.get_center(), flash_target.get_center(), atol=1e-6
+)
+assert all(line not in flash_scene.get_mobjects() for line in mobject_flash.lines)
+
+# Named refusal: Flash(None) is a TypeError, not an indexing crash.
+try:
+    indication_module.Flash(None)
+except TypeError as error:
+    assert str(error) == "Flash point must be a 3D point or a Mobject; got NoneType"
+else:
+    raise AssertionError("Flash accepted None")
 
 # fm-5wq.4.74: StreamLines over the one native RK45 integrator, and
 # AnimatedStreamLines as the reference gaussian flash sweep driven by a
