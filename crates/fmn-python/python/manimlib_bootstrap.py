@@ -11184,6 +11184,36 @@ class BlankScene(InteractiveScene):
         self.embed()
 
 
+class ModuleLoader:
+    """In-process scene-file loader. Never locates or spawns a second CPython."""
+
+    @staticmethod
+    def get_module(file_name, is_during_reload=False):
+        if file_name is None:
+            return None
+        path = _pathlib.Path(file_name).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"ModuleLoader cannot read {str(file_name)!r}"
+            )
+        resolved = path.resolve()
+        module_name = "manimlib_loaded_" + _re.sub(
+            r"[^0-9A-Za-z_]", "_", str(resolved)
+        )
+        if is_during_reload:
+            _sys.modules.pop(module_name, None)
+        elif module_name in _sys.modules:
+            return _sys.modules[module_name]
+        util = _importlib.import_module("importlib.util")
+        spec = util.spec_from_file_location(module_name, resolved)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"ModuleLoader cannot load {str(file_name)!r}")
+        module = util.module_from_spec(spec)
+        _sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
 class CheckpointManager:
     """Named SceneState snapshots for interactive re-run of a comment-keyed block."""
 
@@ -15269,6 +15299,7 @@ def _install_schema_surface():
         ): InteractiveSceneEmbed,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.extract_scene", "BlankScene"): BlankScene,
+        ("manimlib.module_loader", "ModuleLoader"): ModuleLoader,
         ("manimlib.window", "Window"): Window,
         ("manimlib.scene.scene_file_writer", "SceneFileWriter"): SceneFileWriter,
         ("manimlib.shader_wrapper", "ShaderWrapper"): ShaderWrapper,

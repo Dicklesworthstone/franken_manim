@@ -3268,6 +3268,39 @@ blank_scene = extract_scene.BlankScene()
 assert isinstance(blank_scene, InteractiveScene)
 assert extract_scene.BlankScene.construct is not Scene.construct
 
+loader_mod = importlib.import_module("manimlib.module_loader")
+assert loader_mod.ModuleLoader.__bases__ == (object,)
+assert str(inspect.signature(loader_mod.ModuleLoader.get_module)) == (
+    "(file_name, is_during_reload=False)"
+)
+assert loader_mod.ModuleLoader.get_module(None) is None
+try:
+    loader_mod.ModuleLoader.get_module("/no/such/scene.py")
+except FileNotFoundError as error:
+    assert "ModuleLoader cannot read" in str(error)
+else:
+    raise AssertionError("ModuleLoader accepted a missing scene file")
+with tempfile.NamedTemporaryFile(
+    "w", suffix=".py", delete=False, encoding="utf-8"
+) as handle:
+    handle.write("MARKER = 7\n")
+    loader_path = handle.name
+try:
+    loaded = loader_mod.ModuleLoader.get_module(loader_path)
+    assert loaded.MARKER == 7
+    loaded.MARKER = 9
+    cached = loader_mod.ModuleLoader.get_module(loader_path)
+    assert cached is loaded
+    assert cached.MARKER == 9
+    pathlib.Path(loader_path).write_text("MARKER = 11\n", encoding="utf-8")
+    reloaded = loader_mod.ModuleLoader.get_module(
+        loader_path, is_during_reload=True
+    )
+    assert reloaded is not loaded
+    assert reloaded.MARKER == 11
+finally:
+    pathlib.Path(loader_path).unlink(missing_ok=True)
+
 # The next honest native constructor is legacy SingleStringTex over Scribe's
 # existing fmn-library Tex builder.
 old_tex_mobjects = importlib.import_module(
