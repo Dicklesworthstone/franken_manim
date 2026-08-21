@@ -11743,6 +11743,7 @@ class Scene(_SceneCore):
     max_num_saved_states = 50
     default_wait_time = 1.0
     default_camera_config = dict()
+    default_file_writer_config = dict()
     samples = 0
 
     def __init__(self, *args, **kwargs):
@@ -11804,9 +11805,12 @@ class Scene(_SceneCore):
         self.skip_animations = bool(kwargs.get("skip_animations", False))
         self.start_at_animation_number = kwargs.get("start_at_animation_number")
         self.end_at_animation_number = kwargs.get("end_at_animation_number")
+        # Reference order: original_skipping_status is captured BEFORE the
+        # start-at forcing, so update_skipping_status can stop_skipping back
+        # to live rendering once num_plays reaches start_at_animation_number.
+        self.original_skipping_status = self.skip_animations
         if self.start_at_animation_number is not None:
             self.skip_animations = True
-        self.original_skipping_status = self.skip_animations
         self.show_animation_progress = bool(
             kwargs.get("show_animation_progress", False)
         )
@@ -11830,6 +11834,21 @@ class Scene(_SceneCore):
             merged = dict(type(self).default_camera_config)
             merged.update(camera_config)
             self.camera_config = merged
+        # Reference Scene.__init__ merge: class default_file_writer_config,
+        # then constructor file_writer_config. SceneFileWriter records
+        # knobs without mkdir or ffmpeg.
+        file_writer_config = kwargs.get("file_writer_config", None)
+        if file_writer_config is None:
+            self.file_writer_config = dict(
+                type(self).default_file_writer_config
+            )
+        elif not isinstance(file_writer_config, dict):
+            raise TypeError("Scene file_writer_config must be a dict")
+        else:
+            merged = dict(type(self).default_file_writer_config)
+            merged.update(file_writer_config)
+            self.file_writer_config = merged
+        self.file_writer = SceneFileWriter(self, **self.file_writer_config)
 
     @property
     def frame(self):

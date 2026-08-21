@@ -17895,3 +17895,61 @@ assert not np.isclose(
     pixel_size_config_scene.camera.get_pixel_size(),
     pixel_size_default_scene.camera.get_pixel_size(),
 )
+
+# fm-5wq.4: Scene.file_writer_config is the remaining constructor seam
+# that builds SceneFileWriter — class default_file_writer_config, then
+# constructor file_writer_config. Construction records knobs; movie
+# encode stays the ffmpeg Reel boundary.
+assert scene_module.Scene.default_file_writer_config == {}
+writer_scene = Scene()
+assert writer_scene.file_writer_config == {}
+assert isinstance(writer_scene.file_writer, writer_mod.SceneFileWriter)
+assert writer_scene.file_writer.scene is writer_scene
+assert writer_scene.file_writer.get_output_file_name() == "Scene"
+assert writer_scene.file_writer.get_image_file_path() == "Scene.png"
+assert writer_scene.file_writer.movie_file_extension == ".mp4"
+assert writer_scene.file_writer.has_progress_display() is False
+
+named_writer_scene = Scene(
+    file_writer_config=dict(
+        file_name="clip",
+        output_directory="/tmp/out",
+        write_to_movie=True,
+        movie_file_extension=".mov",
+    )
+)
+assert named_writer_scene.file_writer_config["file_name"] == "clip"
+assert named_writer_scene.file_writer.scene is named_writer_scene
+assert named_writer_scene.file_writer.get_movie_file_path() == (
+    "/tmp/out/clip.mov"
+)
+assert named_writer_scene.file_writer.has_progress_display() is True
+
+
+class _ConfiguredWriterScene(Scene):
+    default_file_writer_config = dict(
+        file_name="base",
+        output_directory="/tmp/out",
+    )
+
+
+overlay_writer_scene = _ConfiguredWriterScene(
+    file_writer_config=dict(movie_file_extension=".mov")
+)
+assert overlay_writer_scene.file_writer.get_movie_file_path() == (
+    "/tmp/out/base.mov"
+)
+
+try:
+    Scene(file_writer_config="nope")
+except TypeError as error:
+    assert str(error) == "Scene file_writer_config must be a dict"
+else:
+    raise AssertionError("Scene accepted a non-dict file_writer_config")
+
+try:
+    Scene(file_writer_config=dict(bogus=True))
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: bogus"
+else:
+    raise AssertionError("Scene silently dropped file_writer_config.bogus")
