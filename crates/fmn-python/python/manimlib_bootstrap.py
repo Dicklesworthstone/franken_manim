@@ -6947,6 +6947,28 @@ class DecimalNumber(VMobject):
 
 class Integer(DecimalNumber):
     def __init__(self, number=0, num_decimal_places=0, **kwargs):
+        inherited = {
+            "color",
+            "stroke_width",
+            "fill_opacity",
+            "fill_border_width",
+            "min_total_width",
+            "include_sign",
+            "group_with_commas",
+            "digit_buff_per_font_unit",
+            "show_ellipsis",
+            "unit",
+            "include_background_rectangle",
+            "hide_zero_components_on_complex",
+            "edge_to_fix",
+            "font_size",
+            "text_config",
+            *_NATIVE_VMOBJECT_STYLE_KEYS,
+        }
+        _refuse_unrouted(
+            "Integer()",
+            [(name, True) for name in sorted(set(kwargs) - inherited)],
+        )
         super().__init__(number, num_decimal_places=num_decimal_places, **kwargs)
 
     def get_value(self):

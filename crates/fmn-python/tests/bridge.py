@@ -11623,6 +11623,30 @@ except TypeError as error:
 else:
     raise AssertionError("DecimalNumber accepted a string")
 
+# Integer inherits DecimalNumber's native formatting/style kwargs while
+# preserving its rounded get_value contract.
+plain_integer = manimlib.Integer(7)
+signed_integer = manimlib.Integer(
+    7, include_sign=True, font_size=30, color=manimlib.GREEN
+)
+assert signed_integer.get_value() == 7
+assert len(signed_integer.submobjects) > len(plain_integer.submobjects)
+assert all(
+    child.get_fill_color() == manimlib.GREEN
+    for child in signed_integer.family_members_with_points()
+)
+
+failed_integer = manimlib.Integer.__new__(manimlib.Integer)
+try:
+    manimlib.Integer.__init__(failed_integer, 7, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Integer() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("Integer silently dropped bogus")
+assert not hasattr(failed_integer, "submobjects")
+
 # fm-5wq.4.83: in-place Transform — a None target resolves at play time to
 # a copy of the mobject's current state through Transform.create_target
 # (the schema method), so bare Transform(mob) plays through the native
