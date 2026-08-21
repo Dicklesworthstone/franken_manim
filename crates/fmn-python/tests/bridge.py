@@ -5818,6 +5818,36 @@ for invalid_n, error_type in ((0, ZeroDivisionError), (-1, IndexError), (3.5, Ty
             f"RegularPolygon({invalid_n!r}) did not preserve the Reference refusal"
         )
 
+# fm-5wq.4.134: RegularPolygon's geometry parameters route through the
+# native compass builder, while VMobject style kwargs route through the
+# shared style pass instead of being silently discarded.
+styled_pentagon = geometry.RegularPolygon(
+    n=5,
+    radius=1.5,
+    start_angle=math.pi / 7.0,
+    fill_color=manimlib.RED,
+    fill_opacity=0.4,
+    stroke_color=manimlib.BLUE,
+    stroke_width=2.5,
+    flat_stroke=True,
+)
+assert len(styled_pentagon.get_vertices()) == 5
+assert np.allclose(
+    np.linalg.norm(styled_pentagon.get_vertices(), axis=1), 1.5
+)
+assert styled_pentagon.get_fill_color() == manimlib.RED
+assert np.isclose(styled_pentagon.get_fill_opacity(), 0.4)
+assert styled_pentagon.get_stroke_color() == manimlib.BLUE
+assert np.isclose(styled_pentagon.get_stroke_width(), 2.5)
+assert styled_pentagon.get_flat_stroke() is True
+
+try:
+    geometry.RegularPolygon(wobble_amount=1)
+except TypeError as error:
+    assert "wobble_amount" in str(error), error
+else:
+    raise AssertionError("RegularPolygon silently ignored an unknown keyword")
+
 quarter_arc = geometry.Arc(
     start_angle=0.0,
     angle=math.pi / 2.0,
