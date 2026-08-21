@@ -17715,3 +17715,25 @@ assert np.allclose(
     live_coords_camera.pixel_coords_to_space_coords(160, 360, relative=True),
     (0.5, 1.5, 0.0),
 )
+
+# fm-5wq.4: get_aspect_ratio follows the LIVE pixel shape — 16:9 at
+# construction, 4:3 after reset_pixel_shape(640, 480) — and
+# resize_frame_shape keeps the frame aspect matching that live ratio.
+aspect_camera = camera_module.Camera(resolution=(1920, 1080))
+assert np.isclose(aspect_camera.get_aspect_ratio(), 1920.0 / 1080.0)
+aspect_camera.reset_pixel_shape(640, 480)
+assert np.isclose(aspect_camera.get_aspect_ratio(), 4.0 / 3.0)
+assert not np.isclose(aspect_camera.get_aspect_ratio(), 1920.0 / 1080.0)
+assert np.isclose(
+    aspect_camera.get_frame_width() / aspect_camera.get_frame_height(),
+    4.0 / 3.0,
+)
+# Distort the frame, then resize_frame_shape restores the live 4:3 aspect.
+aspect_camera.frame._core.set_shape((10.0, 10.0))
+assert aspect_camera.resize_frame_shape() is None
+assert np.isclose(aspect_camera.get_frame_width(), 10.0)
+assert np.isclose(aspect_camera.get_frame_height(), 7.5)
+aspect_camera.frame._core.set_shape((10.0, 10.0))
+assert aspect_camera.resize_frame_shape(fixed_dimension=True) is None
+assert np.isclose(aspect_camera.get_frame_height(), 10.0)
+assert np.isclose(aspect_camera.get_frame_width(), 10.0 * 4.0 / 3.0)
