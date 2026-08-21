@@ -11253,3 +11253,66 @@ except TypeError as error:
     assert "NoneType" in str(error), error
 else:
     raise AssertionError("TracingTail accepted None")
+
+
+# --------------------------- nested AnimationGroup Python callbacks
+# fm-5wq.4.88: Python-driven members inside compositions build the same
+# python_callback placeholder slots, and one driver callback mirrors the
+# native window math (build_timings / timeline_position) for the leaves.
+
+group_cb_scene = Scene()
+group_cb_rect = geometry.Rectangle(width=1.0, height=1.0)
+group_cb_decimal = manimlib.DecimalNumber(0.0)
+group_cb_scene.add(group_cb_rect, group_cb_decimal)
+group_cb_seen = []
+group_cb_probe = geometry.Rectangle(width=0.2, height=0.2)
+group_cb_probe.add_updater(
+    lambda mob: group_cb_seen.append(group_cb_decimal.get_value())
+)
+group_cb_scene.add(group_cb_probe)
+group_cb_scene.play(
+    manimlib.AnimationGroup(
+        manimlib.FadeIn(group_cb_rect),
+        numbers_animation.ChangeDecimalToValue(
+            group_cb_decimal, 6.0, run_time=2.0 / 30.0
+        ),
+        run_time=2.0 / 30.0,
+    ),
+    run_time=2.0 / 30.0,
+)
+assert math.isclose(group_cb_decimal.get_value(), 6.0)
+assert any(0.0 < value < 6.0 for value in group_cb_seen), group_cb_seen
+
+# Nested-in-nested: a Succession of Python leaves inside an AnimationGroup
+# still drives every leaf to completion.
+deep_scene = Scene()
+deep_rect = geometry.Rectangle(width=1.0, height=1.0)
+deep_decimal = manimlib.DecimalNumber(1.0)
+deep_scene.add(deep_rect, deep_decimal)
+deep_scene.play(
+    manimlib.AnimationGroup(
+        manimlib.FadeIn(deep_rect),
+        manimlib.Succession(
+            specialized_animation.Delay(run_time=1.0 / 30.0),
+            numbers_animation.ChangeDecimalToValue(
+                deep_decimal, 9.0, run_time=1.0 / 30.0
+            ),
+        ),
+        run_time=2.0 / 30.0,
+    ),
+    run_time=2.0 / 30.0,
+)
+assert math.isclose(deep_decimal.get_value(), 9.0)
+
+# A non-Animation nested member stays the existing named refusal.
+try:
+    Scene().play(
+        manimlib.AnimationGroup(
+            manimlib.FadeIn(geometry.Rectangle(width=1.0, height=1.0)),
+            42,
+        )
+    )
+except NotImplementedError as error:
+    assert "a composition member" in str(error)
+else:
+    raise AssertionError("AnimationGroup accepted a non-Animation member")

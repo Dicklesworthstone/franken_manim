@@ -8797,12 +8797,10 @@ class Scene(_SceneCore):
                     params,
                 )
             if isinstance(proto, Animation):
-                if nested:
-                    raise NotImplementedError(
-                        type(proto).__name__
-                        + " inside a composition awaits the nested Python "
-                        "animation release window"
-                    )
+                # fm-5wq.4.88: nested Python-driven members build the same
+                # python_callback placeholder slot as top-level ones — the
+                # enclosing composition's _CompositionCallbackDriver runs
+                # them at the mirrored sub-alphas in the release window.
                 mobject = proto.mobject
                 if not isinstance(mobject, _BridgeMobject):
                     raise TypeError(
@@ -8854,6 +8852,12 @@ class Scene(_SceneCore):
                 if lag_ratio is not None:
                     proto.lag_ratio = float(lag_ratio)
                 callbacks.append(proto)
+            elif isinstance(proto, AnimationGroup) and _python_composition_members(
+                proto
+            ):
+                # fm-5wq.4.88: a composition carrying Python-driven leaves
+                # gets one driver callback in the same release window.
+                callbacks.append(_CompositionCallbackDriver(proto))
             else:
                 callbacks.append(None)
             specs.append(build_spec(proto, False))
@@ -11162,6 +11166,103 @@ class LaggedStart(AnimationGroup):
 class Succession(AnimationGroup):
     _native_kind = "succession"
     _default_lag_ratio = 1.0
+
+
+def _python_composition_members(group):
+    """fm-5wq.4.88: every Python-driven leaf animation inside a
+    composition, recursively (builders and native-kind classes are the
+    native module's; nested groups recurse)."""
+    members = []
+    for member in group.animations:
+        if isinstance(member, AnimationGroup):
+            members.extend(_python_composition_members(member))
+        elif isinstance(member, Animation) and not getattr(
+            member, "_native_kind", None
+        ):
+            members.append(member)
+    return members
+
+
+def _composition_member_run_time(member):
+    run_time = getattr(member, "run_time", None)
+    return 1.0 if run_time is None else float(run_time)
+
+
+def _composition_timings(group):
+    """fmn-anim composition.rs `build_timings`, mirrored: member k spans
+    [start, start + run_time_k] and the next member starts at
+    `start + run_time_k * lag_ratio`."""
+    lag = float(
+        type(group)._default_lag_ratio
+        if group.lag_ratio is None
+        else group.lag_ratio
+    )
+    timings = []
+    curr = 0.0
+    for member in group.animations:
+        start = curr
+        end = start + _composition_member_run_time(member)
+        timings.append((member, start, end))
+        curr = start + (end - start) * lag
+    max_end = max((end for _, _, end in timings), default=0.0)
+    return timings, max_end
+
+
+def _composition_timeline_position(group, alpha, max_end):
+    """fmn-anim composition.rs `timeline_position`: time_span re-window,
+    then the rate curve, scaled by max_end_time."""
+    span = getattr(group, "time_span", None)
+    if span is not None:
+        start, end = span
+        run_time = _composition_member_run_time(group)
+        alpha = min(max(alpha * run_time - start, 0.0), end - start) / (
+            end - start
+        )
+    rate = getattr(group, "rate_func", None)
+    if rate is None:
+        rate = getattr(_FMN_ROOT, "smooth", lambda value: value)
+    return rate(float(alpha)) * max_end
+
+
+def _drive_python_composition(group, alpha):
+    """Interpolate every Python-driven leaf at the exact sub-alpha its
+    native placeholder slot occupies: the native group interpolates its
+    members at `Interval.sub_alpha(timeline_position(alpha))`, and this
+    mirror computes the same windows for the Python leaves only."""
+    timings, max_end = _composition_timings(group)
+    time = _composition_timeline_position(group, alpha, max_end)
+    for member, start, end in timings:
+        duration = end - start
+        sub = 1.0 if duration <= 0 else min(max((time - start) / duration, 0.0), 1.0)
+        if isinstance(member, AnimationGroup):
+            _drive_python_composition(member, sub)
+        elif isinstance(member, Animation) and not getattr(
+            member, "_native_kind", None
+        ):
+            member.interpolate(sub)
+
+
+class _CompositionCallbackDriver:
+    """The one top-level release-window callback for a composition that
+    carries Python-driven members (fm-5wq.4.88): the native group drives
+    its native members and the python_callback placeholder slots; this
+    driver runs the Python leaves at the mirrored sub-alphas in the same
+    release window."""
+
+    def __init__(self, group):
+        self.group = group
+        self.members = _python_composition_members(group)
+
+    def begin(self):
+        for member in self.members:
+            member.begin()
+
+    def interpolate(self, alpha):
+        _drive_python_composition(self.group, float(alpha))
+
+    def finish(self):
+        for member in self.members:
+            member.finish()
 
 
 class Flash(AnimationGroup):
