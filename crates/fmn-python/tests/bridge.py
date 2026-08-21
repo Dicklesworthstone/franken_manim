@@ -3417,6 +3417,8 @@ assert str(inspect.signature(InteractiveScene.copy_cursor_position)) == (
 assert str(inspect.signature(InteractiveScene.copy_frame_positioning)) == (
     "(self)"
 )
+clipboard_frame_center = clipboard_scene.frame.get_center().copy()
+clipboard_mouse_center = clipboard_scene.mouse_point.get_center().copy()
 try:
     clipboard_scene.copy_cursor_position()
 except bridge_errors.CapabilityError as error:
@@ -3433,6 +3435,12 @@ except bridge_errors.CapabilityError as error:
     assert "pyperclip" in clipboard_error
 else:
     raise AssertionError("copy_frame_positioning faked a clipboard transfer")
+assert np.allclose(
+    clipboard_scene.frame.get_center(), clipboard_frame_center
+)
+assert np.allclose(
+    clipboard_scene.mouse_point.get_center(), clipboard_mouse_center
+)
 
 
 # The schema-generated import topology and exact-name aliases are present.
