@@ -12830,3 +12830,65 @@ except TypeError as error:
     assert "wobble_amount" in str(error), error
 else:
     raise AssertionError("Arc silently ignored an unknown keyword")
+
+# fm-5wq.4.135: audit result — Ellipse has no _refuse_unrouted: width/
+# height route natively, the Circle-chain arc_center/start_angle kwargs
+# are consumed explicitly, and style kwargs ride the shared pass (the
+# parameterized construction is pinned earlier). Pinned here: the schema
+# defaults, and that every unrecognized key — including the chain's
+# n_components, which the native ellipse builder deliberately owns —
+# stays a TypeError naming the key, never a silent drop.
+ellipse_default = geometry.Ellipse()
+assert np.allclose(
+    [ellipse_default.get_width(), ellipse_default.get_height()],
+    [2.0, 1.0],
+    atol=1e-6,
+)
+assert np.allclose(ellipse_default.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+assert np.allclose(ellipse_default.get_points()[0], [1.0, 0.0, 0.0], atol=1e-6)
+assert ellipse_default.has_points()
+
+try:
+    geometry.Ellipse(n_components=4)
+except TypeError as error:
+    assert "n_components" in str(error), error
+else:
+    raise AssertionError("Ellipse silently dropped n_components")
+
+try:
+    geometry.Ellipse(squash_factor=2)
+except TypeError as error:
+    assert "squash_factor" in str(error), error
+else:
+    raise AssertionError("Ellipse silently ignored an unknown keyword")
+
+
+# ------------------------------------- RoundedRectangle leftover kwargs
+# fm-5wq.4.136: the **kwargs surface is the Reference's verbatim flow into
+# the shared style preflight; the Reference docstring's own example
+# spelling works, and unknown keys stay the named refusal.
+
+rr_kw = geometry.RoundedRectangle(
+    width=3.0, height=4.0, corner_radius=1.0, color=manimlib.BLUE
+)
+assert np.allclose([rr_kw.get_width(), rr_kw.get_height()], [3.0, 4.0])
+# The color shorthand reaches both paint channels through the preflight.
+assert rr_kw.get_stroke_color() == manimlib.BLUE
+rr_filled = geometry.RoundedRectangle(
+    width=2.0,
+    height=1.0,
+    corner_radius=0.25,
+    fill_color=manimlib.RED,
+    fill_opacity=0.5,
+    stroke_width=6.0,
+)
+assert np.isclose(rr_filled.get_fill_opacity(), 0.5)
+assert np.isclose(rr_filled.get_stroke_width(), 6.0)
+
+# Unknown keywords stay the shared preflight's named refusal.
+try:
+    geometry.RoundedRectangle(bogus=True)
+except TypeError as error:
+    assert "bogus" in str(error)
+else:
+    raise AssertionError("RoundedRectangle silently dropped bogus")
