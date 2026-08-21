@@ -1914,12 +1914,19 @@ class Mobject(_BridgeMobject):
         return self.remove(*list(self.submobjects), recurse=False)
 
     def add_updater(self, updater, index=None, call=True):
+        if not callable(updater):
+            raise TypeError(
+                "Mobject.add_updater requires a callable updater; got "
+                + type(updater).__name__
+            )
         if index is None:
             self.updaters.append(updater)
         else:
             self.updaters.insert(index, updater)
         if call:
-            self._dispatch_updater(updater, 0.0)
+            # BN-07: one canonical child-first update pass, rather than the
+            # Reference's accidental double pass or a new-updater-only call.
+            self.update(0.0)
         return self
 
     def remove_updater(self, updater):
@@ -1927,9 +1934,11 @@ class Mobject(_BridgeMobject):
         return self
 
     def clear_updaters(self, recurse=True):
+        recurse = bool(recurse)
         targets = _family_preorder(self) if recurse else [self]
         for target in targets:
             target.updaters.clear()
+        self._clear_native_updaters(recurse)
         return self
 
     def _update_python_family(self, dt, recurse):

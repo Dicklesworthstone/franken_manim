@@ -2529,6 +2529,14 @@ impl BridgeMobject {
         })
     }
 
+    /// Clear Marionette-owned updater slots alongside the bootstrap's host
+    /// callback list. Python owns callable identity; Marionette owns native
+    /// updater identities installed by engine-backed mobject features.
+    fn _clear_native_updaters(slf: &Bound<'_, Self>, recurse: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.clear_updaters(mob, recurse))
+    }
+
     /// Run only Marionette-owned updaters for this mobject. The bootstrap
     /// first performs the matching Python family pass outside any Stage
     /// borrow, preserving the portal's callback-safety boundary.

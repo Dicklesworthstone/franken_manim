@@ -2044,6 +2044,61 @@ suspension_order.clear()
 suspension_parent.update(0.5, recurse=False)
 assert suspension_order == [("parent", 0.5)]
 
+# Public updater removal and suspension remain effective across later native
+# Scene.play segments, not only direct Scene.update calls.
+updater_lifecycle_scene = Scene()
+updater_lifecycle_target = Mobject()
+updater_lifecycle_clock = Mobject()
+updater_lifecycle_scene.add(updater_lifecycle_target, updater_lifecycle_clock)
+
+
+def shift_lifecycle_target(mob, dt):
+    mob.shift(dt * manimlib.RIGHT)
+
+
+updater_lifecycle_target.add_updater(shift_lifecycle_target, call=False)
+updater_lifecycle_scene.play(
+    updater_lifecycle_clock.animate.shift(manimlib.UP),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+after_registered_play = updater_lifecycle_target.get_center().copy()
+assert after_registered_play[0] > 0.0
+
+updater_lifecycle_target.remove_updater(shift_lifecycle_target)
+updater_lifecycle_scene.play(
+    updater_lifecycle_clock.animate.shift(manimlib.UP),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.array_equal(
+    updater_lifecycle_target.get_center(), after_registered_play
+)
+
+updater_lifecycle_target.add_updater(shift_lifecycle_target, call=False)
+updater_lifecycle_target.suspend_updating()
+updater_lifecycle_scene.play(
+    updater_lifecycle_clock.animate.shift(manimlib.UP),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.array_equal(
+    updater_lifecycle_target.get_center(), after_registered_play
+)
+updater_lifecycle_target.resume_updating(call_updater=False)
+
+updater_lifecycle_target.clear_updaters()
+assert updater_lifecycle_target.updaters == []
+
+try:
+    updater_lifecycle_target.add_updater(None)
+except TypeError as error:
+    assert str(error) == (
+        "Mobject.add_updater requires a callable updater; got NoneType"
+    )
+else:
+    raise AssertionError("Mobject.add_updater accepted None")
+
 
 class ExplodingUpdater(Mobject):
     pass
