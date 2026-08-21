@@ -1988,6 +1988,22 @@ impl TracingTail {
         self
     }
 
+    /// `time_per_anchor` (Reference default 1/15): the cadence used to
+    /// pre-fill the tail with copies of its starting point.
+    ///
+    /// # Errors
+    /// [`FieldError::NonFiniteControl`] when the cadence is non-finite or
+    /// not positive.
+    pub fn with_time_per_anchor(mut self, time_per_anchor: f64) -> Result<Self, FieldError> {
+        ensure_positive(
+            "TracingTail time_per_anchor must be finite and positive",
+            time_per_anchor,
+        )?;
+        self.traced.time_per_anchor = time_per_anchor;
+        self.prefill = (self.traced.time_traced / time_per_anchor) as usize;
+        Ok(self)
+    }
+
     /// Stroke color.
     #[must_use]
     pub fn with_stroke_color(mut self, color: Srgb) -> Self {

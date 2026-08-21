@@ -1957,12 +1957,21 @@ impl BridgeMobject {
     /// `TracingTail` construction: create the native tracer — a bound
     /// stage entry whose native dt-updater follows the traced mobject's
     /// center (fmn-library fields.rs) — and bind THIS proxy to it.
-    #[pyo3(signature = (scene, traced, time_traced, stroke_color, stroke_width_taper, stroke_opacity_taper))]
+    #[pyo3(signature = (
+        scene,
+        traced,
+        time_traced,
+        time_per_anchor,
+        stroke_color,
+        stroke_width_taper,
+        stroke_opacity_taper,
+    ))]
     fn _init_native_tracer(
         slf: &Bound<'_, Self>,
         scene: &Bound<'_, PyScene>,
         traced: &Bound<'_, BridgeMobject>,
         time_traced: f64,
+        time_per_anchor: f64,
         stroke_color: Option<&Bound<'_, PyAny>>,
         stroke_width_taper: Vec<f64>,
         stroke_opacity_taper: Vec<f64>,
@@ -1981,6 +1990,8 @@ impl BridgeMobject {
         }
         let mut tail = fmn_library::TracingTail::new()
             .with_time_traced(time_traced)
+            .with_time_per_anchor(time_per_anchor)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
             .with_stroke_width_taper(stroke_width_taper)
             .with_stroke_opacity_taper(stroke_opacity_taper);
         if let Some(color) = stroke_color {
@@ -9509,6 +9520,13 @@ impl PyCameraCore {
 
     fn pixel_shape(&self) -> (u32, u32) {
         self.camera.pixel_shape()
+    }
+
+    fn set_pixel_shape(&mut self, width: u32, height: u32) -> PyResult<()> {
+        self.camera
+            .set_pixel_shape(width, height)
+            .map_err(camera_error)?;
+        Ok(())
     }
 
     fn fps(&self) -> u32 {

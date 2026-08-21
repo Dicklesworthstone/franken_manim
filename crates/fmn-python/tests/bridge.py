@@ -1879,6 +1879,85 @@ except bridge_errors.CapabilityError as error:
 else:
     raise AssertionError("update_frame entered a host capture loop")
 
+# fm-5wq.4: time-progression helpers are host-free numpy grids (no tqdm);
+# skip collapses to a single terminal sample; pre_play/post_play bump
+# num_plays without a file writer.
+assert str(inspect.signature(scene_module.Scene.get_time_progression)) == (
+    "(self, run_time, n_iterations=None, desc='', override_skip_animations=False)"
+)
+assert str(inspect.signature(scene_module.Scene.get_run_time)) == (
+    "(self, animations)"
+)
+assert str(inspect.signature(scene_module.Scene.get_animation_time_progression)) == (
+    "(self, animations)"
+)
+assert str(inspect.signature(scene_module.Scene.get_wait_time_progression)) == (
+    "(self, duration, stop_condition=None)"
+)
+assert str(inspect.signature(scene_module.Scene.pre_play)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.post_play)) == "(self)"
+progress_scene = Scene()
+times = progress_scene.get_time_progression(1.0)
+assert isinstance(times, np.ndarray)
+assert np.isclose(times[0], 1.0 / progress_scene.camera.fps)
+assert np.isclose(times[-1], 1.0)
+skip_progress = Scene(skip_animations=True)
+assert skip_progress.get_time_progression(2.0) == [2.0]
+assert np.allclose(
+    skip_progress.get_wait_time_progression(0.5, stop_condition=lambda: False),
+    progress_scene.get_time_progression(0.5),
+)
+play_anim = manimlib.Animation(manimlib.Circle(), run_time=1.5)
+assert np.isclose(play_anim.get_run_time(), 1.5)
+assert play_anim.set_run_time(2.0) is play_anim
+assert np.isclose(play_anim.get_run_time(), 2.0)
+assert np.isclose(progress_scene.get_run_time([play_anim]), 2.0)
+spanned = manimlib.Animation(manimlib.Circle(), run_time=0.5, time_span=(0.0, 1.25))
+assert np.isclose(spanned.get_run_time(), 1.25)
+assert progress_scene.num_plays == 0
+assert progress_scene.pre_play() is None
+assert progress_scene.num_plays == 0
+assert progress_scene.post_play() is None
+assert progress_scene.num_plays == 1
+try:
+    Scene(presenter_mode=True).pre_play()
+except bridge_errors.CapabilityError as error:
+    assert "hold_loop" in str(error)
+else:
+    raise AssertionError("presenter pre_play spun hold_loop")
+
+# fm-5wq.4: begin_animations adopts off-scene mobjects; finish_animations
+# interpolates to the final alpha and honors remover cleanup; skip
+# progress_through_animations does not require a file writer.
+assert str(inspect.signature(scene_module.Scene.begin_animations)) == (
+    "(self, animations)"
+)
+assert str(inspect.signature(scene_module.Scene.progress_through_animations)) == (
+    "(self, animations)"
+)
+assert str(inspect.signature(scene_module.Scene.finish_animations)) == (
+    "(self, animations)"
+)
+begin_scene = Scene()
+begin_circle = manimlib.Circle()
+begin_anim = manimlib.Animation(begin_circle, run_time=0.5)
+assert begin_circle not in begin_scene.mobjects
+assert begin_scene.begin_animations([begin_anim]) is None
+assert begin_circle in begin_scene.mobjects
+remover_scene = Scene()
+remover_circle = manimlib.Circle()
+remover_scene.add(remover_circle)
+remover_anim = manimlib.Animation(remover_circle, run_time=0.25, remover=True)
+assert remover_scene.finish_animations([remover_anim]) is None
+assert remover_circle not in remover_scene.mobjects
+skip_progress_scene = Scene(skip_animations=True)
+skip_progress_circle = manimlib.Circle()
+skip_progress_anim = manimlib.Animation(skip_progress_circle, run_time=0.5)
+assert skip_progress_scene.progress_through_animations(
+    [skip_progress_anim]
+) is None
+assert np.isclose(skip_progress_scene.get_time(), 0.5)
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
@@ -16797,10 +16876,10 @@ else:
     raise AssertionError("element_to_mobject accepted a non-Matrix self")
 
 # fm-5wq.4.123: TracingTail's leftover constructor kwargs — the schema's
-# TracedPath chain carries time_per_anchor (stored-but-inert at the pin,
-# exactly like TracedPath's own) and VMobject style keys; the native
-# tail's fixed prefill cadence refuses a custom value by name, and
-# unknown keys stay named TypeErrors.
+# TracedPath chain carries time_per_anchor (stored-but-inert for the callable
+# path, exactly like TracedPath's own) and VMobject style keys; the native
+# tail routes that cadence into its constructor prefill, and unknown keys
+# stay named TypeErrors.
 tail_kw_func = manimlib.TracingTail(
     lambda: (0.0, 0.0, 0.0),
     time_per_anchor=1.0 / 30,
@@ -16813,16 +16892,27 @@ tail_kw_dot = manimlib.Dot()
 tail_kw_scene.add(tail_kw_dot)
 tail_kw_native = manimlib.TracingTail(tail_kw_dot, fill_opacity=0.0)
 assert tail_kw_native.time_per_anchor == 1.0 / 15
-assert tail_kw_native.get_num_points() > 0
+assert tail_kw_native.get_num_points() == 29
+tail_kw_native_30hz = manimlib.TracingTail(
+    tail_kw_dot,
+    time_per_anchor=1.0 / 30,
+)
+assert tail_kw_native_30hz.time_per_anchor == 1.0 / 30
+assert tail_kw_native_30hz.get_num_points() == 59
 
-try:
-    manimlib.TracingTail(tail_kw_dot, time_per_anchor=1.0 / 30)
-except NotImplementedError as error:
-    assert "time_per_anchor is not yet routed" in str(error), error
-else:
-    raise AssertionError(
-        "the native tail accepted an unrouted prefill cadence"
-    )
+for invalid_time_per_anchor in (0.0, -1.0, float("inf"), float("nan")):
+    try:
+        manimlib.TracingTail(
+            tail_kw_dot,
+            time_per_anchor=invalid_time_per_anchor,
+        )
+    except ValueError as error:
+        assert "time_per_anchor must be finite and positive" in str(error), error
+    else:
+        raise AssertionError(
+            "TracingTail accepted invalid time_per_anchor "
+            f"{invalid_time_per_anchor!r}"
+        )
 
 try:
     manimlib.TracingTail(tail_kw_dot, wobble=3)
@@ -17193,3 +17283,40 @@ except TypeError as error:
     assert "bogus" in str(error)
 else:
     raise AssertionError("Line silently dropped bogus")
+
+# fm-5wq.4: Camera.reset_pixel_shape routes the native pixel-shape setter.
+# default_pixel_shape stays the constructor resolution while the live shape
+# changes and the frame aspect follows; Scene.on_resize drives it.
+assert str(inspect.signature(camera_module.Camera.reset_pixel_shape)) == (
+    "(self, new_width=None, new_height=None)"
+)
+resize_camera = camera_module.Camera(resolution=(1920, 1080))
+assert resize_camera.default_pixel_shape == (1920, 1080)
+assert resize_camera.reset_pixel_shape(640, 480) is None
+assert resize_camera.get_pixel_width() == 640
+assert resize_camera.get_pixel_height() == 480
+assert resize_camera.get_pixel_shape() == (640, 480)
+assert resize_camera.default_pixel_shape == (1920, 1080)
+assert np.isclose(
+    resize_camera.get_frame_width() / resize_camera.get_frame_height(),
+    640.0 / 480.0,
+)
+# An omitted dimension keeps the live value for that axis.
+assert resize_camera.reset_pixel_shape(new_height=360) is None
+assert resize_camera.get_pixel_shape() == (640, 360)
+
+resize_scene = Scene()
+assert resize_scene.on_resize(800, 600) is None
+assert resize_scene.camera.get_pixel_width() == 800
+assert resize_scene.camera.get_pixel_height() == 600
+
+# Planted negative: zero or negative pixel dimensions are a named refusal,
+# never a silent clamp.
+for bad_width, bad_height in ((0, 480), (-640, 480)):
+    try:
+        resize_camera.reset_pixel_shape(bad_width, bad_height)
+    except ValueError as error:
+        assert "positive pixel" in str(error)
+    else:
+        raise AssertionError("reset_pixel_shape accepted a non-positive shape")
+assert resize_camera.get_pixel_shape() == (640, 360)

@@ -635,6 +635,21 @@ impl Camera {
         self.resolution
     }
 
+    /// Change the output pixel shape.
+    ///
+    /// The internal frame follows the new pixel aspect ratio the same way
+    /// construction does, so camera-derived artifacts stay consistent.
+    pub fn set_pixel_shape(&mut self, width: u32, height: u32) -> Result<(), CameraError> {
+        if width == 0 || height == 0 {
+            return Err(CameraError::ZeroDimension);
+        }
+        self.frame
+            .resize_to_aspect_ratio(f64::from(width) / f64::from(height), false)?;
+        self.resolution = (width, height);
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
     /// Output width.
     #[must_use]
     pub const fn pixel_width(&self) -> u32 {

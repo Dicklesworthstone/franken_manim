@@ -10221,6 +10221,10 @@ class TracingTail(VMobject):
         style_kwargs = dict(kwargs)
         _preflight_vmobject_style_kwargs(style_kwargs)
         self.time_per_anchor = float(time_per_anchor)
+        if not _np.isfinite(self.time_per_anchor) or self.time_per_anchor <= 0:
+            raise ValueError(
+                "TracingTail time_per_anchor must be finite and positive"
+            )
         if not isinstance(mobject_or_func, _BridgeMobject) and not callable(
             mobject_or_func
         ):
@@ -10261,18 +10265,12 @@ class TracingTail(VMobject):
                 "Scene before tracing (fm-p107)"
             )
 
-        if self.time_per_anchor != 1.0 / 15:
-            # The native tail's prefill cadence is fixed at the Reference
-            # default; a custom cadence has no native setter yet.
-            raise NotImplementedError(
-                "TracingTail time_per_anchor is not yet routed to the "
-                "native tracer's prefill; the 1/15 default works"
-            )
         _install_live_state(self)
         self._init_native_tracer(
             mobject_or_func._scene,
             mobject_or_func,
             float(time_traced),
+            self.time_per_anchor,
             stroke_color,
             taper(stroke_width),
             taper(stroke_opacity),
@@ -11577,6 +11575,24 @@ class Camera:
     def get_location(self):
         return tuple(self.frame.get_implied_camera_location())
 
+    def reset_pixel_shape(self, new_width=None, new_height=None):
+        width, height = self.get_pixel_shape()
+        if new_width is not None:
+            width = new_width
+        if new_height is not None:
+            height = new_height
+        width = int(width)
+        height = int(height)
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                "Camera.reset_pixel_shape requires positive pixel "
+                f"dimensions, got ({width}, {height})"
+            )
+        # default_pixel_shape stays the constructor resolution; only the
+        # live pixel shape changes, and the frame follows its aspect.
+        self._core.set_pixel_shape(width, height)
+        self.resize_frame_shape()
+
     def resize_frame_shape(self, fixed_dimension=False):
         width, height = self.get_frame_shape()
         if fixed_dimension:
@@ -11664,7 +11680,11 @@ class Scene(_SceneCore):
         # live without one; pan_3d/pan key-state is skipped until a host
         # adapter is bound.
         self.window = kwargs.get("window")
-        self.hold_on_wait = bool(kwargs.get("presenter_mode", False))
+        self.presenter_mode = bool(kwargs.get("presenter_mode", False))
+        self.hold_on_wait = self.presenter_mode
+        self.preview_while_skipping = bool(
+            kwargs.get("preview_while_skipping", True)
+        )
         self.quit_interaction = False
         self.skip_animations = bool(kwargs.get("skip_animations", False))
         self.start_at_animation_number = kwargs.get("start_at_animation_number")
@@ -11896,9 +11916,12 @@ class Scene(_SceneCore):
                     )
                 mobject = proto.mobject
                 if isinstance(mobject, CameraFrame):
+                    # Top-level explicit CameraFrame animations ride the
+                    # camera track in the play loop; only composition
+                    # members reach here.
                     raise NotImplementedError(
-                        "explicit animations of the camera frame await the "
-                        "camera track; use frame.animate"
+                        "the camera-frame lerp cannot nest inside a "
+                        "composition; play frame.animate at the top level"
                     )
                 if not mobject._is_bound():
                     self.add(mobject)
@@ -11936,6 +11959,16 @@ class Scene(_SceneCore):
                 if not isinstance(mobject, _BridgeMobject):
                     raise TypeError(
                         type(proto).__name__ + " must animate a Mobject"
+                    )
+                if isinstance(mobject, CameraFrame):
+                    # The frame is not a Stage drawable, so a Python-driven
+                    # interpolator cannot ride the record lerp; it awaits a
+                    # per-frame callback seam on the camera track.
+                    raise NotImplementedError(
+                        "Python-callback animations of the camera frame "
+                        "await the camera track's per-frame callback seam; "
+                        "use frame.animate or Transform onto a CameraFrame "
+                        "target"
                     )
                 if not mobject._is_bound():
                     self.add(mobject)
@@ -12186,7 +12219,7 @@ class Scene(_SceneCore):
             self.hold_on_wait = False
 
     def on_resize(self, width, height):
-        del width, height
+        self.camera.reset_pixel_shape(width, height)
 
     def on_show(self):
         pass
@@ -12364,6 +12397,110 @@ class Scene(_SceneCore):
             stack.close()
             raise
         return stack
+
+    def get_time_progression(
+        self,
+        run_time,
+        n_iterations=None,
+        desc="",
+        override_skip_animations=False,
+    ):
+        del n_iterations, desc
+        run_time = float(run_time)
+        if self.skip_animations and not override_skip_animations:
+            return [run_time]
+        fps = float(getattr(self.camera, "fps", 30.0) or 30.0)
+        return _np.arange(0.0, run_time, 1.0 / fps) + 1.0 / fps
+
+    def get_run_time(self, animations):
+        return float(
+            max(animation.get_run_time() for animation in animations)
+        )
+
+    def get_animation_time_progression(self, animations):
+        animations = list(animations)
+        run_time = self.get_run_time(animations)
+        description = f"{self.num_plays} {animations[0]}"
+        if len(animations) > 1:
+            description += ", etc."
+        return self.get_time_progression(run_time, desc=description)
+
+    def get_wait_time_progression(self, duration, stop_condition=None):
+        keywords = {"desc": f"{self.num_plays} Waiting"}
+        if stop_condition is not None:
+            keywords["n_iterations"] = -1
+            keywords["override_skip_animations"] = True
+        return self.get_time_progression(float(duration), **keywords)
+
+    def pre_play(self):
+        if self.presenter_mode and self.num_plays == 0:
+            self.hold_loop()
+        self.update_skipping_status()
+        if not self.skip_animations:
+            writer = getattr(self, "file_writer", None)
+            begin = getattr(writer, "begin_animation", None)
+            if callable(begin):
+                begin()
+        if self.get_window() is not None:
+            self.virtual_animation_start_time = self.get_time()
+
+    def post_play(self):
+        if not self.skip_animations:
+            writer = getattr(self, "file_writer", None)
+            end = getattr(writer, "end_animation", None)
+            if callable(end):
+                end()
+        if (
+            self.preview_while_skipping
+            and self.skip_animations
+            and self.get_window() is not None
+        ):
+            self.update_frame(dt=0, force_draw=True)
+        self.num_plays += 1
+
+    def begin_animations(self, animations):
+        all_mobjects = set(self.get_mobject_family_members())
+        for animation in animations:
+            animation.begin()
+            mobject = getattr(animation, "mobject", None)
+            if mobject is not None and mobject not in all_mobjects:
+                self.add(mobject)
+                all_mobjects = all_mobjects.union(mobject.get_family())
+
+    def progress_through_animations(self, animations):
+        animations = list(animations)
+        last_t = 0.0
+        writer = getattr(self, "file_writer", None)
+        for t in self.get_animation_time_progression(animations):
+            t = float(t)
+            dt = t - last_t
+            last_t = t
+            for animation in animations:
+                updater = getattr(animation, "update_mobjects", None)
+                if callable(updater) and not getattr(
+                    updater, "_fmn_schema_placeholder", False
+                ):
+                    updater(dt)
+                run_time = float(animation.get_run_time())
+                alpha = t / run_time if run_time else 1.0
+                animation.interpolate(alpha)
+            self.update_frame(dt)
+            if writer is not None:
+                self.emit_frame()
+
+    def finish_animations(self, animations):
+        animations = list(animations)
+        for animation in animations:
+            animation.finish()
+            cleanup = getattr(animation, "clean_up_from_scene", None)
+            if callable(cleanup) and not getattr(
+                cleanup, "_fmn_schema_placeholder", False
+            ):
+                cleanup(self)
+        if self.skip_animations:
+            self.update_mobjects(self.get_run_time(animations))
+        else:
+            self.update_mobjects(0)
 
 
 def _mobject_looks_identical(mobject, other):
@@ -13520,6 +13657,22 @@ class Animation:
 
     def interpolate_mobject(self, alpha):
         del alpha
+
+    def set_run_time(self, run_time):
+        self.run_time = float(run_time)
+        return self
+
+    def get_run_time(self):
+        if self.time_span:
+            return max(self.run_time, float(self.time_span[1]))
+        return self.run_time
+
+    def is_remover(self):
+        return bool(self.remover)
+
+    def clean_up_from_scene(self, scene):
+        if self.is_remover():
+            scene.remove(self.mobject)
 
     def copy(self):
         return _copy.copy(self)
