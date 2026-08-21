@@ -8723,6 +8723,71 @@ class AddTextWordByWord(Animation):
         self.mobject.set_submobjects(self._all_submobs[: self._boundaries[index]])
 
 
+class AddTextLetterByLetter(Animation):
+    """The letter-granularity sibling of `AddTextWordByWord`
+    (fm-5wq.4.59): every span-map letter group is one non-whitespace glyph
+    in reading order, revealed with the same `ShowIncreasingSubsets`
+    semantics (linear rate on the raw alpha, banker's rounding, `run_time`
+    derived as `time_per_char * n_letters` when negative). The native
+    constructor is fmn-anim's `add_text_letter_by_letter`. The pinned
+    Reference's creation.py has no letter-granularity class — this is
+    compatibility surface for the wider manim ecosystem's spelling, built
+    from the same native span maps."""
+
+    def __init__(
+        self,
+        string_mobject,
+        time_per_char=0.1,
+        run_time=-1.0,
+        rate_func=None,
+        **kwargs,
+    ):
+        # The word sibling's exact refusal shape for a non-StringMobject.
+        assert isinstance(string_mobject, StringMobject)
+        spans = getattr(string_mobject, "_string_sub_spans", None) or []
+        if not spans:
+            raise ValueError(
+                "AddTextLetterByLetter requires span-map letter groups; "
+                "the string mobject produced none"
+            )
+        if any(
+            len(path) != 1
+            for path in getattr(string_mobject, "_string_sub_paths", [])
+        ):
+            raise NotImplementedError(
+                "AddTextLetterByLetter over multi-part nested glyph "
+                "families awaits per-part group flattening"
+            )
+        self._all_submobs = list(string_mobject.submobjects)
+        # One boundary per glyph; the final boundary covers trailing
+        # non-glyph children (decorations), so the finished frame is the
+        # whole family.
+        letters = len(spans)
+        self._boundaries = list(range(letters)) + [len(self._all_submobs)]
+        if run_time < 0:
+            run_time = time_per_char * letters
+        super().__init__(
+            string_mobject,
+            run_time=run_time,
+            rate_func=(
+                rate_func
+                if rate_func is not None
+                else getattr(_FMN_ROOT, "linear", lambda alpha: alpha)
+            ),
+            **kwargs,
+        )
+        self.mobject = string_mobject
+        self.string_mobject = string_mobject
+
+    def interpolate_mobject(self, alpha):
+        # ShowIncreasingSubsets' exact indexing, letter-grained.
+        letters = len(self._boundaries) - 1
+        index = int(
+            min(max(_np.round(self.rate_func(float(alpha)) * letters), 0), letters)
+        )
+        self.mobject.set_submobjects(self._all_submobs[: self._boundaries[index]])
+
+
 # ---------------------------------------------------------------------------
 # Explicit animation classes (fm-d3gt): thin specs over fmn-anim's native
 # five-mechanisms shelf. Scene.play builds one native segment animation per
@@ -10667,6 +10732,10 @@ def _install_schema_surface():
         ("manimlib.animation.numbers", "ChangeDecimalToValue"): ChangeDecimalToValue,
         ("manimlib.animation.numbers", "CountInFrom"): CountInFrom,
         ("manimlib.animation.creation", "AddTextWordByWord"): AddTextWordByWord,
+        (
+            "manimlib.animation.creation",
+            "AddTextLetterByLetter",
+        ): AddTextLetterByLetter,
         ("manimlib.mobject.geometry", "TipableVMobject"): TipableVMobject,
         ("manimlib.mobject.geometry", "Arc"): Arc,
         ("manimlib.mobject.geometry", "ArcBetweenPoints"): ArcBetweenPoints,

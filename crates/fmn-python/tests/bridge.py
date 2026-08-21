@@ -9680,3 +9680,61 @@ else:
 
 iso_absent_tex = manimlib.Tex("x^2 + y^2", isolate=["z"])
 assert len(iso_absent_tex.get_parts_by_tex("z")) == 0
+
+
+# ----------------------------------------------------- AddTextLetterByLetter
+# fm-5wq.4.59: letter-granularity reveal over native span-map letter groups
+# (one non-whitespace glyph per group, in reading order).
+
+letter_text = manimlib.Text("hi you")
+assert len(letter_text.submobjects) == 5  # h i y o u
+letter_anim = creation_animation.AddTextLetterByLetter(letter_text)
+# Derived parameters: 0.1 s per letter, five letters, linear rate.
+assert abs(letter_anim.run_time - 0.5) < 1e-12
+assert letter_anim.rate_func(0.375) == 0.375
+
+letter_scene = Scene()
+letter_probe = geometry.Rectangle(width=1.0, height=1.0)
+letter_counts = []
+letter_scene.play(
+    letter_anim,
+    update_animation.UpdateFromFunc(
+        letter_probe,
+        lambda mob: letter_counts.append(len(letter_text.submobjects)),
+    ),
+    run_time=0.5,
+)
+# Letters only accumulate, one glyph at a time, and finish whole.
+assert set(letter_counts) <= {0, 1, 2, 3, 4, 5}, letter_counts
+assert letter_counts == sorted(letter_counts), letter_counts
+assert any(0 < count < 5 for count in letter_counts), letter_counts
+assert len(letter_text.submobjects) == 5
+
+# An explicit non-negative run_time is kept, not recomputed.
+assert (
+    abs(
+        creation_animation.AddTextLetterByLetter(
+            manimlib.Text("abc"), run_time=2.0
+        ).run_time
+        - 2.0
+    )
+    < 1e-12
+)
+
+# The word sibling's exact refusal shape for a non-StringMobject.
+try:
+    creation_animation.AddTextLetterByLetter(
+        geometry.Rectangle(width=1.0, height=1.0)
+    )
+except AssertionError:
+    pass
+else:
+    raise AssertionError("AddTextLetterByLetter accepted a non-StringMobject")
+
+# A string with no glyphs has no letter groups: named, never a silent no-op.
+try:
+    creation_animation.AddTextLetterByLetter(manimlib.Text(" "))
+except ValueError as error:
+    assert "letter groups" in str(error)
+else:
+    raise AssertionError("AddTextLetterByLetter accepted an empty string mobject")
