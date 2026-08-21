@@ -5115,11 +5115,82 @@ def _refuse_unrouted(class_name, entries):
 
 
 class SVGMobject(VMobject):
-    """Structural portal base for native SVG-derived mobjects.
+    """User SVG files through Chisel's hardened document processor
+    (fm-5wq.4.50, G2 criterion 4).
 
-    The schema-owned SVG parser methods remain precise unavailable callables;
-    Scribe-backed text subclasses use native layout provenance instead.
+    The native side reads the file under the processor's byte budget and
+    parses it under the full accept/reject matrix — bombs, deep nesting,
+    DOCTYPE, external references, and unsupported features are all *named*
+    refusals, never hangs or silent drops. The built family is the
+    Reference's: one child per rendered shape in document order, each with
+    its resolved SVG style; this constructor then applies the Reference's
+    own post-passes (y-flip, style overrides, centring, height 2.0).
+
+    Scribe-backed text subclasses keep their native layout provenance and
+    never route through this constructor.
     """
+
+    file_name = ""
+    height = 2.0
+    width = None
+
+    def __init__(
+        self,
+        file_name: str = "",
+        svg_string: str = "",
+        should_center: bool = True,
+        height: float | None = None,
+        width: float | None = None,
+        color=None,
+        fill_color=None,
+        fill_opacity: float | None = None,
+        stroke_width: float | None = 0.0,
+        stroke_color=None,
+        stroke_opacity: float | None = None,
+        svg_default: dict | None = None,
+        path_string_config: dict | None = None,
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [
+                (
+                    "svg_default",
+                    bool(svg_default)
+                    and any(value is not None for value in svg_default.values()),
+                ),
+                ("path_string_config", bool(path_string_config)),
+            ],
+        )
+        _install_live_state(self)
+        if svg_string:
+            specs = self._build_svg_mobject(_native_shell_factory, "", svg_string)
+        else:
+            name = file_name or type(self).file_name
+            if not name:
+                # Reference svg_mobject.py raises this exact bare Exception.
+                raise Exception(
+                    "Must specify either a file_name or svg_string SVGMobject"
+                )
+            specs = self._build_svg_mobject(_native_shell_factory, name, None)
+        _hang_native_children(self, specs)
+        self.flip(_RIGHT)  # SVG y-down becomes scene y-up, the Reference's flip
+        self.set_style(
+            fill_color=color or fill_color,
+            fill_opacity=fill_opacity,
+            stroke_color=color or stroke_color,
+            stroke_width=stroke_width,
+            stroke_opacity=stroke_opacity,
+        )
+        _apply_vmobject_style_kwargs(self, kwargs)
+        height = height if height is not None else type(self).height
+        width = width if width is not None else type(self).width
+        if should_center:
+            self.center()
+        if height is not None:
+            self.set_height(height)
+        if width is not None:
+            self.set_width(width)
 
 
 class StringMobject(SVGMobject, _abc.ABC):

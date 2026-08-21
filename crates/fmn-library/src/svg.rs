@@ -20,7 +20,11 @@
 //! processor documents. `fill-rule` is carried by the geometry's records
 //! downstream; a paint of SVG `none` becomes a zero-opacity channel.
 
-use fmn_geom::svg::{Paint, SvgDocument, SvgShape, SvgStyle};
+use fmn_geom::svg::{Paint, SvgShape, SvgStyle};
+// Consumers above this crate (the fmn-python portal) reach the processor's
+// document, budgets, and typed refusals through this seam rather than
+// depending on the geometry kernel directly.
+pub use fmn_geom::svg::{SvgDocument, SvgError, SvgLimits};
 
 use crate::style::Style;
 use crate::vmobject::{VMobject, v_group};
