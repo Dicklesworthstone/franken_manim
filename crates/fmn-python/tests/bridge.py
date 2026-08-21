@@ -3939,6 +3939,14 @@ assert len(default_grid_squares) == 5 * 21
 assert color_sliders.background_grid_kwargs["single_square_len"] == 0.1
 assert default_grid_squares[0].get_fill_color() == manimlib.GREY_A
 assert default_grid_squares[1].get_fill_color() == manimlib.GREY_C
+try:
+    interactive.ColorSliders(sliders_kwargs=dict(step=2.0))
+except NotImplementedError as error:
+    assert str(error) == (
+        "ColorSliders sliders_kwargs are not routed to the native builder"
+    )
+else:
+    raise AssertionError("ColorSliders silently discarded sliders_kwargs")
 
 swatch_identity = color_sliders.swatch
 sliders_identity = color_sliders.sliders
