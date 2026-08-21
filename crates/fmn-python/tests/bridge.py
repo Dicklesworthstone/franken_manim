@@ -4568,6 +4568,17 @@ else:
         "ColorSliders accepted an unordered min_value/max_value range"
     )
 
+assert str(inspect.signature(interactive.ColorSliders.get_picked_color)) == (
+    "(self)"
+)
+assert str(inspect.signature(interactive.ColorSliders.get_picked_opacity)) == (
+    "(self)"
+)
+assert color_sliders.get_picked_opacity() == 1.0
+assert np.allclose(
+    manimlib.color_to_rgb(color_sliders.get_picked_color()),
+    [1.0, 1.0, 1.0],
+)
 swatch_identity = color_sliders.swatch
 sliders_identity = color_sliders.sliders
 color_sliders.set_value(64.0, 128.0, 255.0, 0.5)
@@ -4576,6 +4587,11 @@ assert color_sliders.sliders is sliders_identity
 assert np.allclose(
     color_sliders.get_value(),
     [64.0 / 255.0, 128.0 / 255.0, 1.0, 0.5],
+)
+assert color_sliders.get_picked_opacity() == 0.5
+assert np.allclose(
+    manimlib.color_to_rgb(color_sliders.get_picked_color()),
+    [64.0 / 255.0, 128.0 / 255.0, 1.0],
 )
 assert np.allclose(
     manimlib.color_to_rgb(color_sliders.selected_color_box.get_fill_color()),
