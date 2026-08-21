@@ -5198,6 +5198,61 @@ else:
         "ControlPanel silently accepted unknown opener_text_kwargs"
     )
 
+# Remaining Rectangle constructor keys on panel_kwargs / opener_kwargs ride
+# Atlas stroke colour/width/opacity. add_controls/remove_controls keep the
+# constructor stroke (matcher layout is unstyled extents; shift-only).
+stroked_panel = interactive.ControlPanel(
+    interactive.Checkbox(True),
+    panel_kwargs=dict(
+        width=3.0,
+        height=2.0,
+        fill_color=manimlib.BLUE,
+        stroke_color=manimlib.RED,
+        stroke_width=3.0,
+        stroke_opacity=0.4,
+    ),
+    opener_kwargs=dict(
+        width=1.5,
+        height=0.75,
+        fill_color=manimlib.GREEN,
+        stroke_color=manimlib.YELLOW,
+        stroke_width=2.0,
+        stroke_opacity=0.6,
+    ),
+)
+assert stroked_panel.panel.get_stroke_color() == manimlib.RED
+assert np.isclose(stroked_panel.panel.get_stroke_width(), 3.0)
+assert np.isclose(stroked_panel.panel.get_stroke_opacity(), 0.4)
+stroked_opener_rect = stroked_panel.panel_opener.submobjects[0]
+assert stroked_opener_rect.get_stroke_color() == manimlib.YELLOW
+assert np.isclose(stroked_opener_rect.get_stroke_width(), 2.0)
+assert np.isclose(stroked_opener_rect.get_stroke_opacity(), 0.6)
+stroked_panel_identity = stroked_panel.panel
+assert stroked_panel.add_controls(interactive.EnableDisableButton(True)) is None
+assert stroked_panel.panel is stroked_panel_identity
+assert stroked_panel.panel.get_stroke_color() == manimlib.RED
+assert np.isclose(stroked_panel.panel.get_stroke_width(), 3.0)
+assert np.isclose(stroked_panel.panel.get_stroke_opacity(), 0.4)
+assert stroked_panel.remove_controls(stroked_panel.controls.submobjects[0]) is None
+assert stroked_panel.panel is stroked_panel_identity
+assert stroked_panel.panel.get_stroke_color() == manimlib.RED
+assert np.isclose(stroked_panel.panel.get_stroke_opacity(), 0.4)
+assert stroked_panel.panel_opener.submobjects[0].get_stroke_color() == (
+    manimlib.YELLOW
+)
+try:
+    interactive.ControlPanel(panel_kwargs=dict(bogus=1))
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: panel_kwargs.bogus"
+else:
+    raise AssertionError("ControlPanel silently discarded panel_kwargs.bogus")
+try:
+    interactive.ControlPanel(opener_kwargs=dict(bogus=1))
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: opener_kwargs.bogus"
+else:
+    raise AssertionError("ControlPanel silently discarded opener_kwargs.bogus")
+
 # PGroup is Atlas's native point-cloud family root, with the original live
 # PMobject proxies grafted beneath it in Reference order.
 point_cloud_mobjects = importlib.import_module(

@@ -97,24 +97,24 @@ use std::rc::Rc;
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
-    DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_MOBJECT_BUFF, DOWN, FRAME_HEIGHT, FRAME_WIDTH,
-    FRAME_X_RADIUS, FRAME_Y_RADIUS, GREEN, GREY_A, GREY_C, LEFT, MED_SMALL_BUFF, ORIGIN, RED,
-    RIGHT, SMALL_BUFF, UP, WHITE,
+    DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_MOBJECT_BUFF, DEFAULT_STROKE_WIDTH,
+    DEFAULT_VMOBJECT_STROKE_COLOR, DOWN, FRAME_HEIGHT, FRAME_WIDTH, FRAME_X_RADIUS, FRAME_Y_RADIUS,
+    GREEN, GREY_A, GREY_C, LEFT, MED_SMALL_BUFF, ORIGIN, RED, RIGHT, SMALL_BUFF, UP, WHITE,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::GeomError;
-use fmn_mobject::Mobject;
 use fmn_mobject::stage::{Mob, Stage};
+use fmn_mobject::Mobject;
 use fmn_text::FontBook;
 
 use crate::arc::Circle;
 use crate::line::Line;
-use crate::matchers::{SurroundingRectangle, checkmark, exmark};
+use crate::matchers::{checkmark, exmark, SurroundingRectangle};
 use crate::numbers::DecimalNumber;
 use crate::poly::Rectangle;
 use crate::style::Style;
-use crate::text::{Text, TextMobjectError, text_style};
-use crate::vmobject::{VMobject, v_group};
+use crate::text::{text_style, Text, TextMobjectError};
+use crate::vmobject::{v_group, VMobject};
 
 // ---------------------------------------------------------------------------
 // ControlMobject's Stage side: the tracker binding
@@ -514,7 +514,11 @@ impl EnableDisableButton {
 
 impl ScalarControl for EnableDisableButton {
     fn scalar_value(&self) -> f64 {
-        if self.value { 1.0 } else { 0.0 }
+        if self.value {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     fn at_value(&self, value: f64) -> Self {
@@ -711,7 +715,11 @@ impl Checkbox {
 
 impl ScalarControl for Checkbox {
     fn scalar_value(&self) -> f64 {
-        if self.value { 1.0 } else { 0.0 }
+        if self.value {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     fn at_value(&self, value: f64) -> Self {
@@ -1836,11 +1844,16 @@ pub struct ControlPanel {
     panel_height: f64,
     panel_fill: Srgb,
     panel_fill_opacity: f64,
+    panel_stroke: Srgb,
     panel_stroke_width: f64,
+    panel_stroke_opacity: f64,
     opener_width: f64,
     opener_height: f64,
     opener_fill: Srgb,
     opener_fill_opacity: f64,
+    opener_stroke: Srgb,
+    opener_stroke_width: f64,
+    opener_stroke_opacity: f64,
 }
 
 impl ControlPanel {
@@ -1857,11 +1870,16 @@ impl ControlPanel {
             panel_height: MED_SMALL_BUFF + FRAME_HEIGHT,
             panel_fill: GREY_C,
             panel_fill_opacity: 1.0,
+            panel_stroke: DEFAULT_VMOBJECT_STROKE_COLOR,
             panel_stroke_width: 0.0,
+            panel_stroke_opacity: 1.0,
             opener_width: FRAME_WIDTH / 8.0,
             opener_height: 0.5,
             opener_fill: GREY_C,
             opener_fill_opacity: 1.0,
+            opener_stroke: DEFAULT_VMOBJECT_STROKE_COLOR,
+            opener_stroke_width: DEFAULT_STROKE_WIDTH,
+            opener_stroke_opacity: 1.0,
         }
     }
 
@@ -1901,6 +1919,16 @@ impl ControlPanel {
         self
     }
 
+    /// Panel stroke (`panel_kwargs["stroke_color"]` / `["stroke_width"]` /
+    /// `["stroke_opacity"]`).
+    #[must_use]
+    pub fn panel_stroke(mut self, color: Srgb, width: f64, opacity: f64) -> Self {
+        self.panel_stroke = color;
+        self.panel_stroke_width = width;
+        self.panel_stroke_opacity = opacity;
+        self
+    }
+
     /// Panel stroke width (`panel_kwargs["stroke_width"]`).
     #[must_use]
     pub fn panel_stroke_width(mut self, width: f64) -> Self {
@@ -1930,6 +1958,16 @@ impl ControlPanel {
         self
     }
 
+    /// Opener stroke (`opener_kwargs["stroke_color"]` / `["stroke_width"]` /
+    /// `["stroke_opacity"]`).
+    #[must_use]
+    pub fn opener_stroke(mut self, color: Srgb, width: f64, opacity: f64) -> Self {
+        self.opener_stroke = color;
+        self.opener_stroke_width = width;
+        self.opener_stroke_opacity = opacity;
+        self
+    }
+
     /// Build the panel.
     ///
     /// # Errors
@@ -1942,7 +1980,11 @@ impl ControlPanel {
             .style(
                 Style::default()
                     .fill(self.panel_fill, self.panel_fill_opacity)
-                    .stroke(GREY_C, self.panel_stroke_width, 1.0),
+                    .stroke(
+                        self.panel_stroke,
+                        self.panel_stroke_width,
+                        self.panel_stroke_opacity,
+                    ),
             )
             .build()
             .expect("an unrounded control panel cannot request arc components");
@@ -1952,7 +1994,15 @@ impl ControlPanel {
         let opener_rect = Rectangle::new()
             .width(self.opener_width)
             .height(self.opener_height)
-            .style(Style::default().fill(self.opener_fill, self.opener_fill_opacity))
+            .style(
+                Style::default()
+                    .fill(self.opener_fill, self.opener_fill_opacity)
+                    .stroke(
+                        self.opener_stroke,
+                        self.opener_stroke_width,
+                        self.opener_stroke_opacity,
+                    ),
+            )
             .build()
             .expect("an unrounded opener cannot request arc components");
         let info_text = Text::new(&self.opener_text)
@@ -2592,13 +2642,11 @@ mod tests {
                 .expect("zero-span ranges are defined"),
             5.0
         );
-        assert!(
-            slider
-                .handle()
-                .center_point()
-                .into_iter()
-                .all(f64::is_finite)
-        );
+        assert!(slider
+            .handle()
+            .center_point()
+            .into_iter()
+            .all(f64::is_finite));
     }
 
     #[test]
@@ -3063,21 +3111,27 @@ mod tests {
             .panel_width(3.0)
             .panel_height(2.0)
             .panel_fill(RED, 0.4)
-            .panel_stroke_width(2.0)
+            .panel_stroke(WHITE, 2.0, 0.5)
             .opener_width(1.5)
             .opener_height(0.75)
             .opener_fill(GREEN, 0.8)
+            .opener_stroke(GREY_A, 1.5, 0.25)
             .build(&book)
             .expect("opener text typesets");
         assert!((panel.panel().length_over_dim(0) - 3.0).abs() < 1e-9);
         assert!((panel.panel().length_over_dim(1) - 2.0).abs() < 1e-9);
         assert_eq!(panel.panel().style().fill_color, RED);
         assert_eq!(panel.panel().style().fill_opacity, 0.4);
+        assert_eq!(panel.panel().style().stroke_color, WHITE);
         assert_eq!(panel.panel().style().stroke_width, 2.0);
+        assert_eq!(panel.panel().style().stroke_opacity, 0.5);
         assert!((panel.opener_rect().length_over_dim(0) - 1.5).abs() < 1e-9);
         assert!((panel.opener_rect().length_over_dim(1) - 0.75).abs() < 1e-9);
         assert_eq!(panel.opener_rect().style().fill_color, GREEN);
         assert_eq!(panel.opener_rect().style().fill_opacity, 0.8);
+        assert_eq!(panel.opener_rect().style().stroke_color, GREY_A);
+        assert_eq!(panel.opener_rect().style().stroke_width, 1.5);
+        assert_eq!(panel.opener_rect().style().stroke_opacity, 0.25);
     }
 
     // --------------------------------------------- tracker integration

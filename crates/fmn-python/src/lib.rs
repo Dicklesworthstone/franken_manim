@@ -3385,8 +3385,8 @@ impl BridgeMobject {
     /// `ControlPanel(*controls)` over Atlas's native panel, opener tab, and
     /// controls column. The Python root is a `Group`; these three children
     /// keep stable shell identities across open/close rebuilds.
-    /// `panel` is `(width, height, fill_rgb, fill_opacity, stroke_width)`;
-    /// `opener` is `(width, height, fill_rgb, fill_opacity)`.
+    /// `panel` is `(width, height, fill_rgb, fill_opacity, stroke_rgb,
+    /// stroke_width, stroke_opacity)`; `opener` is the same 7-tuple.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn _build_control_panel<'py>(
         slf: &Bound<'py, Self>,
@@ -3395,11 +3395,27 @@ impl BridgeMobject {
         opener_text: &str,
         opener_font_size: f64,
         open: bool,
-        panel: (f64, f64, [f64; 3], f64, f64),
-        opener: (f64, f64, [f64; 3], f64),
+        panel: (f64, f64, [f64; 3], f64, [f64; 3], f64, f64),
+        opener: (f64, f64, [f64; 3], f64, [f64; 3], f64, f64),
     ) -> PyResult<Bound<'py, PyList>> {
-        let (panel_width, panel_height, panel_fill, panel_fill_opacity, panel_stroke_width) = panel;
-        let (opener_width, opener_height, opener_fill, opener_fill_opacity) = opener;
+        let (
+            panel_width,
+            panel_height,
+            panel_fill,
+            panel_fill_opacity,
+            panel_stroke,
+            panel_stroke_width,
+            panel_stroke_opacity,
+        ) = panel;
+        let (
+            opener_width,
+            opener_height,
+            opener_fill,
+            opener_fill_opacity,
+            opener_stroke,
+            opener_stroke_width,
+            opener_stroke_opacity,
+        ) = opener;
         let controls = control_extents
             .into_iter()
             .map(|extent| matcher_extent_vmobject(Some(extent)));
@@ -3417,7 +3433,15 @@ impl BridgeMobject {
                     },
                     panel_fill_opacity,
                 )
-                .panel_stroke_width(panel_stroke_width)
+                .panel_stroke(
+                    fmn_core::color::Srgb {
+                        r: panel_stroke[0],
+                        g: panel_stroke[1],
+                        b: panel_stroke[2],
+                    },
+                    panel_stroke_width,
+                    panel_stroke_opacity,
+                )
                 .opener_width(opener_width)
                 .opener_height(opener_height)
                 .opener_fill(
@@ -3427,6 +3451,15 @@ impl BridgeMobject {
                         b: opener_fill[2],
                     },
                     opener_fill_opacity,
+                )
+                .opener_stroke(
+                    fmn_core::color::Srgb {
+                        r: opener_stroke[0],
+                        g: opener_stroke[1],
+                        b: opener_stroke[2],
+                    },
+                    opener_stroke_width,
+                    opener_stroke_opacity,
                 )
                 .build(book)
                 .map_err(native_error)?;

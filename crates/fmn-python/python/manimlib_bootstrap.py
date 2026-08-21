@@ -11113,7 +11113,15 @@ class ControlPanel(Group):
         panel_config = dict(panel_kwargs)
         panel_unknown = sorted(
             set(panel_config)
-            - {"width", "height", "fill_color", "fill_opacity", "stroke_width"}
+            - {
+                "width",
+                "height",
+                "fill_color",
+                "fill_opacity",
+                "stroke_color",
+                "stroke_width",
+                "stroke_opacity",
+            }
         )
         if panel_unknown:
             raise TypeError(
@@ -11123,7 +11131,16 @@ class ControlPanel(Group):
 
         opener_config = dict(opener_kwargs)
         opener_unknown = sorted(
-            set(opener_config) - {"width", "height", "fill_color", "fill_opacity"}
+            set(opener_config)
+            - {
+                "width",
+                "height",
+                "fill_color",
+                "fill_opacity",
+                "stroke_color",
+                "stroke_width",
+                "stroke_opacity",
+            }
         )
         if opener_unknown:
             raise TypeError(
@@ -11181,13 +11198,18 @@ class ControlPanel(Group):
                 float(panel_config.get("height", _MED_SMALL_BUFF + _FRAME_HEIGHT)),
                 tuple(_color_to_rgb(panel_config.get("fill_color", _GREY_C))),
                 float(panel_config.get("fill_opacity", 1.0)),
+                tuple(_color_to_rgb(panel_config.get("stroke_color", _GREY_A))),
                 float(panel_config.get("stroke_width", 0.0)),
+                float(panel_config.get("stroke_opacity", 1.0)),
             ),
             (
                 float(opener_config.get("width", _FRAME_SHAPE[0] / 8.0)),
                 float(opener_config.get("height", 0.5)),
                 tuple(_color_to_rgb(opener_config.get("fill_color", _GREY_C))),
                 float(opener_config.get("fill_opacity", 1.0)),
+                tuple(_color_to_rgb(opener_config.get("stroke_color", _GREY_A))),
+                float(opener_config.get("stroke_width", 4.0)),
+                float(opener_config.get("stroke_opacity", 1.0)),
             ),
         )
         parts = []
