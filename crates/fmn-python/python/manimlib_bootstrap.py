@@ -9987,14 +9987,20 @@ class Write(DrawBorderThenFill):
         return {"stroke_color": tuple(_color_to_rgb(self.stroke_color))}
 
 
-class ShowIncreasingSubsets(_NativeAnimation):
-    """creation.py:176 through Choreo's native subset reveal
-    (fm-5wq.4.58): the group's child list is rewritten each frame from
-    the construction-time snapshot, with the Reference's raw-alpha rate
-    application and banker's rounding owned by the native mechanism."""
+class ShowIncreasingSubsets(Animation):
+    """creation.py:176 with the native rounding rules (fm-5wq.4.58): the
+    group's child list is rewritten each frame from the construction-time
+    snapshot, through the live `set_submobjects` seam.
 
-    _native_kind = "show_increasing_subsets"
+    The seam matters: a bound proxy's Reference-visible `submobjects` is
+    the Python family list, and the native arena-only rewiring the spec
+    kind used to drive never reached it — the reveal was invisible to
+    scene code. `set_submobjects` mutates both worlds in step, exactly the
+    AddTextWordByWord pattern; the Rust `show_increasing_subsets` /
+    `show_submobjects_one_by_one` kinds stay the native-user surface."""
+
     _int_round_default = "round"
+    _one_by_one = False
 
     def __init__(
         self,
@@ -10016,6 +10022,7 @@ class ShowIncreasingSubsets(_NativeAnimation):
                 + " requires a family with submobjects; the group is empty"
             )
         self._int_round = self._classify_int_func(int_func)
+        self.all_submobs = list(group.submobjects)
         super().__init__(
             group,
             suspend_mobject_updating=suspend_mobject_updating,
@@ -10041,12 +10048,40 @@ class ShowIncreasingSubsets(_NativeAnimation):
     def _native_params(self):
         return {"int_round": self._int_round}
 
+    def interpolate_mobject(self, alpha):
+        # The Reference overrides interpolate_mobject (creation.py:190):
+        # the rate function applies to the RAW alpha, then the rounding
+        # rule turns it into a child count.
+        rated = self.rate_func(float(alpha))
+        count = len(self.all_submobs)
+        value = rated * count
+        if self._int_round == "ceil":
+            index = int(_np.ceil(value))
+        else:
+            index = int(_np.round(value))  # ties-to-even, IntRound::Round
+        self._update_submobject_list(index)
+
+    def _update_submobject_list(self, index):
+        # creation.py:196 / creation.py:207, with Python-slice clamping
+        # and set_submobjects' identity short-circuit.
+        count = len(self.all_submobs)
+        if count == 0:
+            return
+        if self._one_by_one:
+            clipped = int(min(max(index, 0), count - 1))
+            desired = [] if clipped == 0 else [self.all_submobs[clipped - 1]]
+        else:
+            clipped = int(min(max(index, 0), count))
+            desired = self.all_submobs[:clipped]
+        if list(self.mobject.submobjects) != desired:
+            self.mobject.set_submobjects(list(desired))
+
 
 class ShowSubmobjectsOneByOne(ShowIncreasingSubsets):
     """creation.py:200: ceiling rounding, one visible child at a time."""
 
-    _native_kind = "show_submobjects_one_by_one"
     _int_round_default = "ceil"
+    _one_by_one = True
 
 
 class MaintainPositionRelativeTo(_NativeAnimation):
