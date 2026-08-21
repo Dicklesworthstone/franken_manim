@@ -6180,7 +6180,11 @@ def _initialize_scalar_matrix(
         n_rows, n_cols, ellipses_row, ellipses_col
     )
     for index, (entry, source) in enumerate(zip(entries, flat_sources)):
-        is_decimal = kind == "decimal" or (
+        # IntegerMatrix is DecimalMatrix's zero-places route in the
+        # Reference, so its entries are DecimalNumbers too — the native
+        # builder already renders the rounded integer glyphs; only the
+        # Python-side class decoration selects here.
+        is_decimal = kind in ("decimal", "integer") or (
             kind == "mixed"
             and isinstance(source, (float, _np.floating))
             and not isinstance(source, bool)
