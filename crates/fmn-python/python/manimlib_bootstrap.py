@@ -8028,6 +8028,11 @@ class ThreeDModel(Group):
         self.height = float(height)
 
 
+# The module postpones annotations globally, while the pinned Reference
+# signature exposes the concrete builtin rather than the string ``'str'``.
+ThreeDModel.__init__.__annotations__["obj_file"] = str
+
+
 class ParametricSurface(Surface):
     def __init__(self, uv_func, u_range=(0, 1), v_range=(0, 1), **kwargs):
         color = kwargs.pop("color", None)
