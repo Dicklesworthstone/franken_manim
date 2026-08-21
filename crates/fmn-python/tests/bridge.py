@@ -12661,3 +12661,73 @@ arrow3d_probe_module = importlib.import_module(
 assert not hasattr(arrow3d_probe_module, "Arrow3D")
 assert hasattr(arrow3d_probe_module, "Line3D")
 assert hasattr(arrow3d_probe_module, "Cone")
+
+# fm-5wq.4.131: audit result — Annulus has no _refuse_unrouted anywhere:
+# its **kwargs already route through the style pass (unknown keys are the
+# named TypeError pinned earlier). The remaining unpinned surface was the
+# schema's default contract, pinned here: filled at opacity 1 with zero
+# stroke width in DEFAULT_LIGHT_COLOR (GREY_B), radii (1, 2), at ORIGIN.
+annulus_default = geometry.Annulus()
+assert math.isclose(annulus_default.radius, 2.0)
+assert len(annulus_default.get_subpaths()) == 2
+assert np.allclose(annulus_default.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+assert math.isclose(annulus_default.get_width(), 4.0, rel_tol=0.0, abs_tol=2e-3)
+assert annulus_default.get_fill_color() == manimlib.GREY_B
+assert np.allclose(annulus_default.data["fill_rgba"][:, 3], 1.0)
+assert np.allclose(annulus_default.data["stroke_width"], 0.0)
+
+# Explicit stroke kwargs keep routing through the same style pass.
+annulus_stroked = geometry.Annulus(stroke_width=2.0, stroke_color=manimlib.RED)
+assert np.allclose(annulus_stroked.data["stroke_width"], 2.0)
+assert np.allclose(
+    annulus_stroked.data["stroke_rgba"][:, :3],
+    manimlib.color_to_rgb(manimlib.RED),
+)
+
+
+# ------------------------------------------------ Sector leftover kwargs
+# fm-5wq.4.132: Sector's **kwargs are the Reference's verbatim flow into
+# AnnularSector — placement keywords route positionally, style keywords
+# through the shared preflight, and unknown keys stay its named refusal.
+
+sector_kw = geometry.Sector(
+    angle=math.pi / 2.0,
+    radius=2.0,
+    start_angle=math.pi / 3.0,
+    arc_center=[0.0, 3.0, 0.0],
+    fill_color=manimlib.RED,
+    fill_opacity=0.5,
+)
+assert sector_kw.has_points()
+assert np.isclose(sector_kw.get_fill_opacity(), 0.5)
+# inner_radius is pinned to 0: the wedge tip sits on arc_center.
+sector_tip_distance = min(
+    np.linalg.norm(point - np.array([0.0, 3.0, 0.0]))
+    for point in sector_kw.get_points()
+)
+assert sector_tip_distance < 1e-9, sector_tip_distance
+# arc_center routes: the same sector at the origin is the exact shift.
+sector_origin = geometry.Sector(
+    angle=math.pi / 2.0, radius=2.0, start_angle=math.pi / 3.0
+)
+assert np.allclose(
+    sector_kw.get_center() - sector_origin.get_center(), [0.0, 3.0, 0.0]
+)
+
+# The Reference's own duplicate-keyword crash is kept verbatim: radius is
+# Sector's spelling, and outer_radius/inner_radius collide with the
+# explicit super() arguments exactly as in the pinned tree.
+try:
+    geometry.Sector(outer_radius=3.0)
+except TypeError:
+    pass
+else:
+    raise AssertionError("Sector accepted outer_radius (Reference collides)")
+
+# Unknown keywords stay the shared preflight's named refusal.
+try:
+    geometry.Sector(bogus=True)
+except TypeError as error:
+    assert "bogus" in str(error)
+else:
+    raise AssertionError("Sector silently dropped bogus")
