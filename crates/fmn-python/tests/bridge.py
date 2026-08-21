@@ -4161,6 +4161,17 @@ Scene().play(
 )
 assert np.allclose(center_source.get_center(), [2.0, 1.0, 0.0])
 
+try:
+    manimlib.ApplyPointwiseFunctionToCenter(None, geometry.Rectangle())
+except TypeError as error:
+    assert str(error) == (
+        "ApplyPointwiseFunctionToCenter function must be callable; got NoneType"
+    )
+else:
+    raise AssertionError(
+        "ApplyPointwiseFunctionToCenter accepted a non-callable function"
+    )
+
 fade_source = geometry.Square().set_color(manimlib.BLUE)
 Scene().play(
     manimlib.FadeToColor(fade_source, manimlib.RED),

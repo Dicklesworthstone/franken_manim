@@ -10833,6 +10833,11 @@ class ApplyPointwiseFunction(ApplyMethod):
 
 class ApplyPointwiseFunctionToCenter(Transform):
     def __init__(self, function, mobject, **kwargs):
+        if not callable(function):
+            raise TypeError(
+                "ApplyPointwiseFunctionToCenter function must be callable; got "
+                + type(function).__name__
+            )
         self.function = function
         super().__init__(mobject, None, **kwargs)
 
