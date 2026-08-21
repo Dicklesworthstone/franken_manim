@@ -2696,6 +2696,31 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Textbox fabricated an unbound mouse-press gateway")
 
+styled_textbox = interactive.Textbox(
+    "hi",
+    box_kwargs=dict(
+        width=3.0,
+        height=1.5,
+        fill_color=manimlib.GREEN,
+        fill_opacity=0.4,
+    ),
+    text_kwargs=dict(color=manimlib.RED),
+    text_buff=0.1,
+    active_color=manimlib.WHITE,
+    deactive_color=manimlib.GREEN,
+)
+assert np.isclose(styled_textbox.box.get_width(), 3.0)
+assert np.isclose(styled_textbox.box.get_height(), 1.5)
+assert styled_textbox.box.get_fill_color() == manimlib.GREEN
+assert np.isclose(styled_textbox.box.get_fill_opacity(), 0.4)
+assert styled_textbox.box.get_stroke_color() == manimlib.GREEN
+assert styled_textbox.text.get_fill_color() == manimlib.RED
+styled_box = styled_textbox.box
+styled_textbox.set_value("ok")
+assert styled_textbox.box is styled_box
+assert styled_textbox.box.get_fill_color() == manimlib.GREEN
+assert styled_textbox.text.get_fill_color() == manimlib.RED
+
 # ControlPanel is the remaining interactive Group: Atlas ingests the complete
 # variadic control list, lays out native extent targets, and the portal grafts
 # the original control proxies into that native controls column.

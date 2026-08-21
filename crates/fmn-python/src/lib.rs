@@ -3206,18 +3206,54 @@ impl BridgeMobject {
     /// Build a `Textbox` candidate with the bundled FontBook. Supplying
     /// `replacement` routes through Atlas's string `set_value` mutator before
     /// any Python proxy is changed, making rejected re-typesets atomic.
+    /// `box` is `(width, height, fill_rgb, fill_opacity)`.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn _build_textbox<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
         current: &str,
         replacement: Option<&str>,
         initially_active: bool,
+        box_spec: (f64, f64, [f64; 3], f64),
+        text_color: [f64; 3],
+        text_buff: f64,
+        active_color: [f64; 3],
+        deactive_color: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
+        let (box_width, box_height, box_fill, box_fill_opacity) = box_spec;
         let book = Rc::new(fmn_library::FontBook::bundled().map_err(|error| {
             PyRuntimeError::new_err(format!("bundled FontBook unavailable: {error}"))
         })?);
         let mut textbox = fmn_library::Textbox::new(book, current)
             .map_err(textbox_error)?
+            .box_size(box_width, box_height)
+            .map_err(textbox_error)?
+            .box_fill(
+                fmn_core::color::Srgb {
+                    r: box_fill[0],
+                    g: box_fill[1],
+                    b: box_fill[2],
+                },
+                box_fill_opacity,
+            )
+            .text_color(fmn_core::color::Srgb {
+                r: text_color[0],
+                g: text_color[1],
+                b: text_color[2],
+            })
+            .map_err(textbox_error)?
+            .text_buff(text_buff)
+            .map_err(textbox_error)?
+            .active_color(fmn_core::color::Srgb {
+                r: active_color[0],
+                g: active_color[1],
+                b: active_color[2],
+            })
+            .deactive_color(fmn_core::color::Srgb {
+                r: deactive_color[0],
+                g: deactive_color[1],
+                b: deactive_color[2],
+            })
             .initially_active(initially_active);
         if let Some(value) = replacement {
             textbox.set_value(value).map_err(textbox_error)?;

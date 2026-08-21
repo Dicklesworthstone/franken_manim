@@ -9332,17 +9332,6 @@ class Textbox(ControlMobject):
                 "unexpected keyword arguments: "
                 + ", ".join("box_kwargs." + name for name in box_unknown)
             )
-        if (
-            float(box_config.get("width", 2.0)) != 2.0
-            or float(box_config.get("height", 1.0)) != 1.0
-            or tuple(_color_to_rgb(box_config.get("fill_color", _WHITE)))
-            != tuple(_color_to_rgb(_WHITE))
-            or float(box_config.get("fill_opacity", 1.0)) != 1.0
-        ):
-            raise NotImplementedError(
-                "Textbox custom box_kwargs are not routed to the native builder"
-            )
-
         text_config = dict(text_kwargs)
         text_unknown = sorted(set(text_config) - {"color"})
         if text_unknown:
@@ -9350,29 +9339,11 @@ class Textbox(ControlMobject):
                 "unexpected keyword arguments: "
                 + ", ".join("text_kwargs." + name for name in text_unknown)
             )
-        if tuple(_color_to_rgb(text_config.get("color", _BLUE))) != tuple(
-            _color_to_rgb(_BLUE)
-        ):
-            raise NotImplementedError(
-                "Textbox custom text_kwargs.color is not routed to the native builder"
-            )
-        if float(text_buff) != 0.25:
-            raise NotImplementedError(
-                "Textbox text_buff is not routed to the native builder"
-            )
-        if tuple(_color_to_rgb(active_color)) != tuple(_color_to_rgb(_BLUE)):
-            raise NotImplementedError(
-                "Textbox active_color is not routed to the native builder"
-            )
-        if tuple(_color_to_rgb(deactive_color)) != tuple(_color_to_rgb(_RED)):
-            raise NotImplementedError(
-                "Textbox deactive_color is not routed to the native builder"
-            )
 
         self.value_type = _np.dtype(value_type).type
         self.box_kwargs = box_config
         self.text_kwargs = text_config
-        self.text_buff = 0.25
+        self.text_buff = float(text_buff)
         self.isInitiallyActive = bool(isInitiallyActive)
         self.active_color = active_color
         self.deactive_color = deactive_color
@@ -9385,11 +9356,23 @@ class Textbox(ControlMobject):
         self.text.add_updater(lambda mob: mob.move_to(self.box))
 
     def _native_textbox_parts(self, current, replacement):
+        box_config = self.box_kwargs
+        text_config = self.text_kwargs
         specs = self._build_textbox(
             _native_shell_factory,
             current,
             replacement,
             self.isActive,
+            (
+                float(box_config.get("width", 2.0)),
+                float(box_config.get("height", 1.0)),
+                tuple(_color_to_rgb(box_config.get("fill_color", _WHITE))),
+                float(box_config.get("fill_opacity", 1.0)),
+            ),
+            tuple(_color_to_rgb(text_config.get("color", _BLUE))),
+            float(self.text_buff),
+            tuple(_color_to_rgb(self.active_color)),
+            tuple(_color_to_rgb(self.deactive_color)),
         )
         parts = []
         for shell, child_specs in specs:

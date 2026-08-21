@@ -1450,6 +1450,8 @@ pub struct Textbox {
     value: String,
     box_width: f64,
     box_height: f64,
+    box_fill: Srgb,
+    box_fill_opacity: f64,
     text_color: Srgb,
     text_buff: f64,
     font_size: f64,
@@ -1472,6 +1474,8 @@ impl Textbox {
             value: value.to_string(),
             box_width: 2.0,
             box_height: 1.0,
+            box_fill: DEFAULT_MOBJECT_COLOR,
+            box_fill_opacity: 1.0,
             text_color: fmn_core::constants::BLUE,
             text_buff: MED_SMALL_BUFF,
             font_size: crate::text::DEFAULT_FONT_SIZE,
@@ -1491,6 +1495,63 @@ impl Textbox {
     #[must_use]
     pub fn initially_active(mut self, active: bool) -> Self {
         self.active = active;
+        self.rect = self.build_rect();
+        self
+    }
+
+    /// Box size (`box_kwargs["width"]` / `["height"]`).
+    ///
+    /// # Errors
+    /// [`TextMobjectError`] if the fitted text fails to re-typeset.
+    pub fn box_size(mut self, width: f64, height: f64) -> Result<Self, TextMobjectError> {
+        self.box_width = width;
+        self.box_height = height;
+        self.rect = self.build_rect();
+        self.update_text()?;
+        Ok(self)
+    }
+
+    /// Box fill (`box_kwargs["fill_color"]` / `["fill_opacity"]`).
+    #[must_use]
+    pub fn box_fill(mut self, color: Srgb, opacity: f64) -> Self {
+        self.box_fill = color;
+        self.box_fill_opacity = opacity;
+        self.rect = self.build_rect();
+        self
+    }
+
+    /// Text colour (`text_kwargs["color"]`).
+    ///
+    /// # Errors
+    /// [`TextMobjectError`] if the coloured text fails to re-typeset.
+    pub fn text_color(mut self, color: Srgb) -> Result<Self, TextMobjectError> {
+        self.text_color = color;
+        self.update_text()?;
+        Ok(self)
+    }
+
+    /// Padding between text and box edge (`text_buff`).
+    ///
+    /// # Errors
+    /// [`TextMobjectError`] if the fitted text fails to re-typeset.
+    pub fn text_buff(mut self, buff: f64) -> Result<Self, TextMobjectError> {
+        self.text_buff = buff;
+        self.update_text()?;
+        Ok(self)
+    }
+
+    /// Active frame colour (`active_color`).
+    #[must_use]
+    pub fn active_color(mut self, color: Srgb) -> Self {
+        self.active_color = color;
+        self.rect = self.build_rect();
+        self
+    }
+
+    /// Inactive frame colour (`deactive_color`).
+    #[must_use]
+    pub fn deactive_color(mut self, color: Srgb) -> Self {
+        self.deactive_color = color;
         self.rect = self.build_rect();
         self
     }
@@ -1555,11 +1616,11 @@ impl Textbox {
         Rectangle::new()
             .width(self.box_width)
             .height(self.box_height)
-            .style(Style::default().fill(DEFAULT_MOBJECT_COLOR, 1.0).stroke(
-                frame,
-                Style::default().stroke_width,
-                1.0,
-            ))
+            .style(
+                Style::default()
+                    .fill(self.box_fill, self.box_fill_opacity)
+                    .stroke(frame, Style::default().stroke_width, 1.0),
+            )
             .build()
             .expect("an unrounded text box cannot request arc components")
     }
@@ -2533,6 +2594,31 @@ mod tests {
         );
         // Text colour from text_kwargs.
         assert_eq!(textbox.text().style().fill_color, fmn_core::constants::BLUE);
+    }
+
+    #[test]
+    fn textbox_custom_box_text_and_frame_kwargs() {
+        let book = Rc::new(book());
+        let mut textbox = Textbox::new(Rc::clone(&book), "hi")
+            .expect("text typesets")
+            .box_size(3.0, 1.5)
+            .expect("resized text typesets")
+            .box_fill(GREEN, 0.4)
+            .text_color(RED)
+            .expect("coloured text typesets")
+            .text_buff(0.1)
+            .expect("padded text typesets")
+            .active_color(WHITE)
+            .deactive_color(GREEN);
+        assert!((textbox.rect().length_over_dim(0) - 3.0).abs() < 1e-9);
+        assert!((textbox.rect().length_over_dim(1) - 1.5).abs() < 1e-9);
+        assert_eq!(textbox.rect().style().fill_color, GREEN);
+        assert_eq!(textbox.rect().style().fill_opacity, 0.4);
+        assert_eq!(textbox.rect().style().stroke_color, GREEN);
+        assert_eq!(textbox.text().style().fill_color, RED);
+        textbox.set_active(true);
+        assert_eq!(textbox.rect().style().stroke_color, WHITE);
+        assert_eq!(textbox.rect().style().fill_color, GREEN);
     }
 
     // -------------------------------------------------------- ControlPanel
