@@ -3237,10 +3237,14 @@ impl BridgeMobject {
         green: f64,
         blue: f64,
         alpha: f64,
+        rect_width: f64,
+        rect_height: f64,
         sliders_buff: f64,
         apply_value: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         let mut sliders = fmn_library::ColorSliders::new()
+            .map_err(native_error)?
+            .rect_size(rect_width, rect_height)
             .map_err(native_error)?
             .sliders_buff(sliders_buff);
         if apply_value {

@@ -10701,13 +10701,14 @@ class ColorSliders(Group):
                 "unexpected keyword arguments: "
                 + ", ".join("rect_kwargs." + name for name in rect_unknown)
             )
-        if (
-            float(rect_config.get("width", 2.0)) != 2.0
-            or float(rect_config.get("height", 0.5)) != 0.5
-            or float(rect_config.get("stroke_opacity", 1.0)) != 1.0
-        ):
+        rect_width = float(rect_config.get("width", 2.0))
+        rect_height = float(rect_config.get("height", 0.5))
+        rect_config["width"] = rect_width
+        rect_config["height"] = rect_height
+        if float(rect_config.get("stroke_opacity", 1.0)) != 1.0:
             raise NotImplementedError(
-                "ColorSliders rect_kwargs are not routed to the native builder"
+                "ColorSliders rect_kwargs.stroke_opacity is not routed to "
+                "the native builder"
             )
         grid_config = dict(background_grid_kwargs)
         grid_unknown = sorted(
@@ -10766,6 +10767,8 @@ class ColorSliders(Group):
         specs = self._build_color_sliders(
             _native_shell_factory,
             *components,
+            float(self.rect_kwargs.get("width", 2.0)),
+            float(self.rect_kwargs.get("height", 0.5)),
             self.sliders_buff,
             bool(apply_value),
         )

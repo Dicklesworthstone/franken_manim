@@ -3868,6 +3868,26 @@ assert np.isclose(
     0.5,
 )
 
+custom_rect_color_sliders = interactive.ColorSliders(
+    rect_kwargs=dict(width=1.0, height=0.25)
+)
+assert np.isclose(
+    custom_rect_color_sliders.selected_color_box.get_width(),
+    1.0,
+    atol=1e-3,
+)
+assert np.isclose(
+    custom_rect_color_sliders.selected_color_box.get_height(),
+    0.25,
+    atol=1e-3,
+)
+try:
+    interactive.ColorSliders(rect_kwargs=dict(bogus=1))
+except TypeError as error:
+    assert "bogus" in str(error)
+else:
+    raise AssertionError("ColorSliders silently discarded rect_kwargs.bogus")
+
 custom_color_sliders = interactive.ColorSliders(
     default_rgb_value=64,
     default_a_value=0.4,

@@ -1322,8 +1322,19 @@ impl ColorSliders {
             sliders_buff: fmn_core::constants::MED_LARGE_BUFF,
             color_box: VMobject::new(),
         };
-        group.color_box = group.build_color_box();
+        group.color_box = group.build_color_box()?;
         Ok(group)
+    }
+
+    /// Swatch rectangle size (`rect_kwargs["width"]` / `["height"]`).
+    ///
+    /// # Errors
+    /// [`SliderError::Geometry`] if the rectangle refuses either dimension.
+    pub fn rect_size(mut self, width: f64, height: f64) -> Result<Self, SliderError> {
+        self.rect_width = width;
+        self.rect_height = height;
+        self.color_box = self.build_color_box()?;
+        Ok(self)
     }
 
     /// The slider spacing (`sliders_buff=MED_LARGE_BUFF`).
@@ -1345,7 +1356,7 @@ impl ColorSliders {
         candidate.sliders[1].set_value(g)?;
         candidate.sliders[2].set_value(b)?;
         candidate.sliders[3].set_value(a)?;
-        candidate.color_box = candidate.build_color_box();
+        candidate.color_box = candidate.build_color_box()?;
         *self = candidate;
         Ok(())
     }
@@ -1443,8 +1454,8 @@ impl ColorSliders {
         .moved_to(ORIGIN)
     }
 
-    fn build_color_box(&self) -> VMobject {
-        Rectangle::new()
+    fn build_color_box(&self) -> Result<VMobject, SliderError> {
+        Ok(Rectangle::new()
             .width(self.rect_width)
             .height(self.rect_height)
             .style(
@@ -1452,8 +1463,7 @@ impl ColorSliders {
                     .stroke(WHITE, Style::default().stroke_width, 1.0)
                     .fill(self.picked_color(), self.picked_opacity()),
             )
-            .build()
-            .expect("an unrounded color box cannot request arc components")
+            .build()?)
     }
 }
 
