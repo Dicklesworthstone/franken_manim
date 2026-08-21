@@ -8286,6 +8286,40 @@ assert np.allclose(
     atol=1e-6,
 )
 
+default_line3d = three_dimensions.Line3D(manimlib.LEFT, manimlib.RIGHT)
+assert default_line3d.n_records() == 21 * 25
+
+back_line3d = three_dimensions.Line3D(
+    manimlib.DOWN,
+    manimlib.UP,
+    resolution=(3, 3),
+    z_index=-1,
+)
+front_line3d = three_dimensions.Line3D(
+    manimlib.DOWN,
+    manimlib.UP,
+    resolution=(3, 3),
+    z_index=1,
+)
+line3d_order_scene = Scene().add(front_line3d, back_line3d)
+assert line3d_order_scene.get_mobjects() == [back_line3d, front_line3d]
+
+failed_line3d = three_dimensions.Line3D.__new__(three_dimensions.Line3D)
+try:
+    three_dimensions.Line3D.__init__(
+        failed_line3d,
+        manimlib.LEFT,
+        manimlib.RIGHT,
+        bogus=True,
+    )
+except NotImplementedError as error:
+    assert str(error) == (
+        "Line3D() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Line3D keyword reached the native builder")
+assert not hasattr(failed_line3d, "submobjects")
+
 disk3d = three_dimensions.Disk3D(radius=2.0, resolution=(2, 5))
 assert disk3d.n_records() == 10
 assert np.allclose(disk3d.uv_func(0.5, 0.0), [0.5, 0.0, 0.0])

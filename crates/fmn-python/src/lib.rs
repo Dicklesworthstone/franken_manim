@@ -3926,6 +3926,7 @@ impl BridgeMobject {
         preferred_creation_axis: usize,
         epsilon: f64,
         normal_nudge: f64,
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
         let line = fmn_library::Line3D::new(start, end)
             .width(width)
@@ -3934,8 +3935,10 @@ impl BridgeMobject {
             .resolution(resolution.0, resolution.1)
             .preferred_creation_axis(preferred_creation_axis)
             .epsilon(epsilon)
-            .normal_nudge(normal_nudge);
-        install_native_tree(slf, factory, line.build())
+            .normal_nudge(normal_nudge)
+            .build()
+            .with_z_index(z_index);
+        install_native_tree(slf, factory, line)
     }
 
     /// `Disk3D(radius, ...)` over Atlas's native polar surface grid.
