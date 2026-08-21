@@ -1164,19 +1164,37 @@ fn spec(program: &str, argv: &[&str]) -> ProcessSpec {
     }
 }
 
-/// Absolute path of a coreutils helper for the spawn tests. Usr-merged Linux
-/// keeps them all in `/usr/bin`; macOS still ships `echo`, `sleep`, and `cat`
-/// in `/bin`. The exact-image runner takes only absolute paths by design, so
-/// resolve the first candidate that exists on this host.
-#[cfg(all(feature = "exact-process", unix))]
+/// Deterministic absolute path of a host utility used by the spawn tests.
+///
+/// Certified Linux uses the usr-merged `/usr/bin` paths. Certified macOS
+/// keeps `echo`, `cat`, and `sleep` in `/bin`, while the remaining fixtures
+/// live in `/usr/bin`. The exact-image runner still receives only an absolute
+/// native-image path and an argument vector; no shell or `PATH` lookup occurs.
+#[cfg(all(feature = "exact-process", target_os = "linux"))]
+fn host_bin(name: &str) -> String {
+    format!("/usr/bin/{name}")
+}
+
+#[cfg(all(feature = "exact-process", target_os = "macos"))]
+fn host_bin(name: &str) -> String {
+    let directory = match name {
+        "cat" | "echo" | "sleep" => "/bin",
+        _ => "/usr/bin",
+    };
+    format!("{directory}/{name}")
+}
+
+#[cfg(all(
+    feature = "exact-process",
+    unix,
+    not(any(target_os = "linux", target_os = "macos"))
+))]
 fn host_bin(name: &str) -> String {
     let candidates = [format!("/usr/bin/{name}"), format!("/bin/{name}")];
-    for candidate in &candidates {
-        if PathBuf::from(candidate).exists() {
-            return candidate.clone();
-        }
-    }
-    panic!("no {name} in /usr/bin or /bin on this host");
+    candidates
+        .into_iter()
+        .find(|candidate| PathBuf::from(candidate).exists())
+        .unwrap_or_else(|| format!("/nonexistent/fmn-platform-{name}"))
 }
 
 #[cfg(all(feature = "exact-process", unix))]
