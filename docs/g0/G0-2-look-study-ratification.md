@@ -29,11 +29,12 @@ separate so they can disagree:
 Where they agree, the number is settled. Where they disagreed, the disagreement
 was the finding — see L2 and L5.
 
-**The rendered evidence.** `docs/g0/g0-2-renders/` holds five panels at the
+**The rendered evidence.** `docs/g0/g0-2-renders/` holds all six panels at the
 capture resolution, in the *same pixel coordinates* as the Reference stills:
 `gradient_fills` from production Lumen, three settled panels from the compact
-analytic calibration fixture, and `lighting_3d` from Lumen's integrated 3D
-path. They are produced by `g0_2_look` in `spikes/g0-8-accelerator`. The
+analytic calibration fixture, `lighting_3d` from Lumen's integrated 3D
+path, and `text_sample` from Scribe (fmn-text over the bundled faces) through
+production Lumen. They are produced by `g0_2_look` in `spikes/g0-8-accelerator`. The
 Reference stills stay private (§15.3); ours are our own primitives and are
 committed.
 
@@ -388,6 +389,7 @@ Verdicts in §16.3's vocabulary:
 | `glow` | **at-least-as-good** | Falloff character matches (L7). Registration is close, not exact — our disc reads slightly larger, since `GlowDot`'s `radius` parameter and the visible extent are not the same quantity. |
 | `gradient_fills` | **different-but-fine (Behavior-Noted)** | This now runs through production Lumen's §10.2 field. The Reference's hard **diagonal seam** comes from per-vertex colour interpolated across its triangle fan; ours is the smooth, true-arclength boundary ramp extended by mean value coordinates. Gradient direction, opacity, stroke ramp, and capture registration agree. The smoother, subdivision-stable field is the deliberate BN-06 behavior fm-5oi landed. G1 PASS 2026-08-20: visual side-by-side by `GreenPeak` under ADR-0018; no regression candidate. |
 | `lighting_3d` | **at-least-as-good** | The integrated Lumen path uses the exact capture inputs: `Sphere(radius=2)`, the Reference's `(101, 51)` UV grid and parameterization, BLUE_E, and `frame.reorient(20, 70)`. Silhouette, light direction, and retained Gouraud shading coincide closely. Whole-frame normalized RMSE is **0.00212857** and normalized SSIM distortion is **0.000145104**; these are smoke alarms, not gates. |
+| `text_sample` | **different-but-fine** (Behavior-Noted, ratification pending) | The capture scene rebuilt on Scribe: `Text(…, font_size=60)` over the italic `Text(…, font_size=32)`, body `next_to(title, DOWN, buff=0.5)`, group centred, laid out by fmn-text over the bundled Computer Modern regular + italic faces and rendered by production Lumen. The face itself is the deliberate D-08/BN-05 divergence — the capture went through Pango to the host's default (a mono face on the capture box); ours is the sovereign bundled default, identical on every machine. What must correspond, and does: centring and `next_to` spacing, the 60/32 size ratio, the regular/italic contrast (true italic faces, not a shear), the em dash, and the AA edge character. Whole-frame normalized RMSE is **0.08914188** — it sees the intentional font change, so it is registered as a smoke alarm only. |
 
 The production gradient panel is reproduced with:
 
@@ -416,9 +418,21 @@ cargo run --release \
 Its Rgba16F framebuffer SHA-256 is
 `b36e4b44bf35c23e78b7ae3fc251c510b2bf0048e8e3b586f4fd14bc278c4f44`.
 
-Two honest limits on this gallery. **It covers five of the six captured
-scenes** — `text_sample` still needs Scribe; rendering a stand-in would compare
-nothing. And **registration is close, not pixel-exact** for the four analytic
+The text panel (fm-gfn) is reproduced with:
+
+```bash
+cargo run --release \
+  --manifest-path spikes/g0-8-accelerator/Cargo.toml \
+  --bin g0_2_look -- docs/g0/g0-2-renders --text-only
+```
+
+Its Rgba16F framebuffer SHA-256 is
+`30cd1e3b370cff79c758470bed88422a3b85353fe71eace4d895f45d82469897`;
+the committed canonical PNG SHA-256 is
+`8f175ae968fcc0aeaa30e1595b492b9d24d5d59d287362efb2346fc7c0fec143`.
+
+One honest limit on this gallery, now that all six captured scenes are
+rendered: **registration is close, not pixel-exact** for the four analytic
 panels: they are placed from bounding boxes measured off the captures, which
 include stroke extent, so shapes can sit a few pixels off. This is an aesthetic
 comparison, never a pixel gate (D-16), and a few pixels of placement does not

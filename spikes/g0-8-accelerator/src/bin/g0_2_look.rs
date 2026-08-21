@@ -16,7 +16,7 @@
 //! that evidence — the part a human reviewer signs off on (R2).
 //!
 //! ```text
-//! cargo run --release --bin g0_2_look [-- <output-dir> [--gradient-only|--lighting-only]]
+//! cargo run --release --bin g0_2_look [-- <output-dir> [--gradient-only|--lighting-only|--text-only]]
 //! ```
 
 use fmn_core::color::Srgb;

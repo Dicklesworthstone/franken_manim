@@ -32,6 +32,8 @@ fmn-frame = { path = "../../crates/fmn-frame" }
 fmn-codec = { path = "../../crates/fmn-codec" }
 fmn-mobject = { path = "../../crates/fmn-mobject" }
 fmn-render = { path = "../../crates/fmn-render" }
+fmn-text = { path = "../../crates/fmn-text" }
+fmn-library = { path = "../../crates/fmn-library" }
 ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "5dbcc1d2c2a857f3ead07138055c3451b8094438" }
 
 [patch.crates-io]
