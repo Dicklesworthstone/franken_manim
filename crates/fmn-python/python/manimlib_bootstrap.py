@@ -10797,6 +10797,11 @@ class ApplyMethod(Transform):
 
 class ApplyPointwiseFunction(ApplyMethod):
     def __init__(self, function, mobject, run_time=3.0, **kwargs):
+        if not callable(function):
+            raise TypeError(
+                "ApplyPointwiseFunction function must be callable; got "
+                + type(function).__name__
+            )
         super().__init__(mobject.apply_function, function, run_time=run_time, **kwargs)
 
 

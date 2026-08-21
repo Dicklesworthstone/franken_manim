@@ -4125,7 +4125,9 @@ assert manimlib.ApplyComplexFunction.__bases__ == (manimlib.ApplyMethod,)
 
 pointwise_source = geometry.Rectangle(width=1.0, height=0.5)
 pointwise_animation = manimlib.ApplyPointwiseFunction(
-    lambda point: point + np.array([1.0, -0.5, 0.0]),
+    lambda point: np.array(
+        [2.0 * point[0] + 1.0, point[1] - 0.5, point[2]]
+    ),
     pointwise_source,
 )
 assert pointwise_animation.run_time == 3.0
@@ -4135,6 +4137,16 @@ Scene().play(
     rate_func=manimlib.linear,
 )
 assert np.allclose(pointwise_source.get_center(), [1.0, -0.5, 0.0])
+assert np.isclose(pointwise_source.get_width(), 2.0)
+
+try:
+    manimlib.ApplyPointwiseFunction(None, geometry.Rectangle())
+except TypeError as error:
+    assert str(error) == (
+        "ApplyPointwiseFunction function must be callable; got NoneType"
+    )
+else:
+    raise AssertionError("ApplyPointwiseFunction accepted a non-callable function")
 
 center_source = geometry.Rectangle(width=1.0, height=0.5)
 center_animation = manimlib.ApplyPointwiseFunctionToCenter(
