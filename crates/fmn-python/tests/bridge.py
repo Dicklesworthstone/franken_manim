@@ -8857,3 +8857,89 @@ def verify_portal_console_scene():
 
 
 verify_portal_console_scene()
+
+
+# ---------------------------------------------------------------- SVGMobject
+# fm-5wq.4.50 (G2 criterion 4): user SVG files load through Chisel's hardened
+# document processor into a real native VMobject family — never a placeholder
+# — and every rejected document is a *named* error.
+
+svg_fixture = pathlib.Path(__file__).with_name("chisel_sample.svg")
+svg_mob = manimlib.SVGMobject(str(svg_fixture))
+# One pointful child per rendered shape, in document order.
+assert len(svg_mob.submobjects) == 3
+assert all(child.has_points() for child in svg_mob.submobjects)
+assert all(child.get_num_points() > 0 for child in svg_mob.submobjects)
+# The Reference's post-passes: centred, height-normalized to 2.0.
+assert abs(svg_mob.get_height() - 2.0) < 1e-9
+assert np.allclose(svg_mob.get_center(), [0.0, 0.0, 0.0], atol=1e-9)
+svg_circle, svg_rect, svg_path = svg_mob.submobjects
+# Document styles survive resolution: the circle child fills, the rect child
+# does not, and the half-opacity path keeps its cascaded fill opacity.
+assert svg_circle.get_fill_opacity() == 1.0
+assert svg_rect.get_fill_opacity() == 0.0
+assert abs(svg_path.get_fill_opacity() - 0.5) < 1e-12
+# The Reference's constructor default stroke_width=0.0 overrides the
+# document's strokes; stroke_width=None preserves them instead.
+assert svg_rect.get_stroke_width() == 0.0
+svg_kept = manimlib.SVGMobject(str(svg_fixture), stroke_width=None)
+assert svg_kept.submobjects[1].get_stroke_width() == 2.0
+# The y-flip: the path hugs the top of the document, so after SVG y-down
+# becomes scene y-up it sits above the vertically centred circle.
+assert svg_path.get_center()[1] > svg_circle.get_center()[1]
+# The circle stays left of the rect (x is untouched by the flip).
+assert svg_circle.get_center()[0] < svg_rect.get_center()[0]
+
+# A Scene can play an animation on the loaded family.
+svg_scene = Scene()
+svg_scene.play(manimlib.FadeIn(svg_mob), run_time=2.0 / 30.0)
+assert svg_mob in svg_scene.mobjects
+
+# svg_string is the same native path without a file.
+svg_inline = manimlib.SVGMobject(
+    svg_string='<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+    '<rect x="1" y="1" width="8" height="8" fill="#FFFFFF"/></svg>'
+)
+assert len(svg_inline.submobjects) == 1
+assert svg_inline.submobjects[0].has_points()
+
+# Named refusals, never hangs or garbage.
+try:
+    manimlib.SVGMobject(svg_string="<svg><rect")
+except ValueError as error:
+    assert "line 1" in str(error)
+else:
+    raise AssertionError("malformed SVG did not refuse")
+
+try:
+    manimlib.SVGMobject(
+        svg_string='<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "aaaa">]>'
+        "<svg>&a;</svg>"
+    )
+except ValueError as error:
+    assert "DOCTYPE is refused" in str(error)
+else:
+    raise AssertionError("DOCTYPE entity bomb did not refuse by name")
+
+try:
+    manimlib.SVGMobject(
+        svg_string="<svg>" + "<g>" * 64 + "</g>" * 64 + "</svg>"
+    )
+except ValueError as error:
+    assert "nesting depth" in str(error)
+else:
+    raise AssertionError("nesting bomb did not refuse by name")
+
+try:
+    manimlib.SVGMobject(str(svg_fixture.with_name("no-such-file.svg")))
+except OSError as error:
+    assert "no-such-file.svg" in str(error)
+else:
+    raise AssertionError("a missing SVG file did not refuse")
+
+try:
+    manimlib.SVGMobject()
+except Exception as error:
+    assert "file_name or svg_string" in str(error)
+else:
+    raise AssertionError("an empty SVGMobject() did not refuse")
