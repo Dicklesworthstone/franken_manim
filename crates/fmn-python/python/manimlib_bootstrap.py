@@ -7510,10 +7510,18 @@ class StreamLines(VGroup):
                 padded[index] = float(coords[index])
             return tuple(padded)
 
-        ranges = [
-            tuple(float(value) for value in row[:3])
-            for row in coordinate_system.get_all_ranges()
-        ]
+        # A coordinate system may spell a range as (min, max) — NumberPlane
+        # keeps the caller's 2-vectors verbatim — while the native stream
+        # builder wants the full (min, max, step) row. The pad is the
+        # axis's default unit STEP (the NumberLine default), never a fake
+        # z-axis; a malformed shorter row stays the native builder's own
+        # named refusal.
+        ranges = []
+        for row in coordinate_system.get_all_ranges():
+            values = [float(value) for value in row[:3]]
+            if len(values) == 2:
+                values.append(1.0)
+            ranges.append(tuple(values))
         # Detached construction rides the standard portal scene seed (0);
         # certified seed plumbing follows the scene-owned construction seam.
         specs, virtual_times, rng_draws = self._build_stream_lines(
