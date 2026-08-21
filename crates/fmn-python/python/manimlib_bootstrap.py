@@ -8840,11 +8840,15 @@ class Scene(_SceneCore):
             ):
                 # Cut T3: the camera lerp rides the same segment; its
                 # state lives in the engine camera core, not records.
-                if camera_pair is not None:
-                    raise NotImplementedError(
-                        "one camera-frame builder per play; merge the "
-                        "reorient chain into a single .animate"
-                    )
+                #
+                # fm-5wq.4.93: several camera-frame builders in one play
+                # merge exactly the Reference's way. Same-mobject
+                # transforms interpolate in play order, so the later one
+                # overwrites the earlier every frame — and each builder's
+                # generate_target starts from the live frame, so the last
+                # builder's target already IS the play-order outcome. One
+                # engine lerp to that target reproduces it; no second
+                # camera clock exists or is needed.
                 camera_pair = (proto.mobject._core, proto.mobject.target._core)
                 continue
             if isinstance(proto, Animation) and not getattr(

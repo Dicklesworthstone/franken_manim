@@ -11463,3 +11463,44 @@ except NotImplementedError as error:
     assert "persistent-updater seam" in str(error), error
 else:
     raise AssertionError("the arc-path fallback did not refuse")
+
+
+# ------------------------------ camera-frame builders merge per play
+# fm-5wq.4.93: several camera-frame builders in one Scene.play merge with
+# the Reference's play-order semantics — the last builder's target wins
+# every frame, and one engine lerp reproduces it.
+
+merge_cam_scene = Scene()
+merge_cam_frame = merge_cam_scene.frame
+merge_cam_scene.play(
+    merge_cam_frame.animate.shift([1.0, 0.0, 0.0]),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(merge_cam_frame.get_center(), [1.0, 0.0, 0.0])
+
+# Two builders in one play: play-order last-wins, exactly the Reference's
+# same-mobject transform overwrite.
+merge_cam_scene.play(
+    merge_cam_frame.animate.reorient(20, 60, 0),
+    merge_cam_frame.animate.reorient(6, 84, 0),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.isclose(merge_cam_frame.get_theta(), 6 * manimlib.DEG, atol=1e-12)
+assert np.isclose(merge_cam_frame.get_phi(), 84 * manimlib.DEG, atol=1e-12)
+
+# A non-CameraFrame camera pair is a named TypeError at the play seam.
+try:
+    merge_cam_scene._play_animations(
+        [],
+        [],
+        (geometry.Rectangle(width=1.0, height=1.0), None),
+        None,
+        None,
+        None,
+    )
+except TypeError:
+    pass
+else:
+    raise AssertionError("_play_animations accepted a non-CameraFrame pair")
