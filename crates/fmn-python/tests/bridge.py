@@ -11215,3 +11215,41 @@ missing = manimlib.Tex("a =", "1.00").make_number_changeable("9.99")
 assert isinstance(missing, VMobject) and len(missing.submobjects) == 0
 past = manimlib.Tex("b =", "1.00").make_number_changeable("1.00", index=5)
 assert isinstance(past, VMobject) and len(past.submobjects) == 0
+
+# fm-5wq.4.86: TracingTail's function half — a point-returning callable is
+# a TracedPath with the tail's finite window and (0,3)/(0,1) tapers, grown
+# by the same verbatim update_path in the Python-updater window; the
+# mobject half keeps the native tracer untouched.
+tail_probe_state = {"x": 0.0}
+
+
+def _tail_probe_point():
+    return (tail_probe_state["x"], 0.0, 0.0)
+
+
+func_tail = manimlib.TracingTail(_tail_probe_point, time_traced=0.5)
+func_tail_scene = InteractiveScene()
+func_tail_scene.add(func_tail)
+tail_probe_state["x"] = 1.0
+func_tail_scene.wait(2.0 / 30.0)
+assert func_tail.get_num_points() > 0
+assert np.allclose(func_tail.get_points()[:, 1:], 0.0, atol=1e-9)
+func_tail_widths = np.asarray(
+    func_tail.data["stroke_width"], dtype=float
+).reshape(-1)
+assert func_tail_widths[0] < func_tail_widths[-1]
+
+# The mobject-traced native path still constructs against a bound target.
+tail_traced_dot = manimlib.Dot()
+func_tail_scene.add(tail_traced_dot)
+mobject_tail = manimlib.TracingTail(tail_traced_dot)
+assert mobject_tail.get_num_points() > 0
+
+# Named negative: neither a Mobject nor a callable.
+try:
+    manimlib.TracingTail(None)
+except TypeError as error:
+    assert "Mobject or a point-returning" in str(error), error
+    assert "NoneType" in str(error), error
+else:
+    raise AssertionError("TracingTail accepted None")

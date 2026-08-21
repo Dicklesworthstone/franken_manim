@@ -8204,21 +8204,43 @@ class TracingTail(VMobject):
         _refuse_unrouted(
             "TracingTail()", [(name, True) for name in sorted(kwargs)]
         )
-        if not isinstance(mobject_or_func, _BridgeMobject):
-            raise NotImplementedError(
-                "function-traced tails await the native point-function "
-                "tracer; pass the traced mobject itself"
-            )
-        if not mobject_or_func._is_bound():
-            raise NotImplementedError(
-                "TracingTail traces a scene-bound mobject; add it to the "
-                "Scene before tracing (fm-p107)"
+        if not isinstance(mobject_or_func, _BridgeMobject) and not callable(
+            mobject_or_func
+        ):
+            raise TypeError(
+                "TracingTail traces a Mobject or a point-returning "
+                "callable; got " + type(mobject_or_func).__name__
             )
 
         def taper(value):
             if hasattr(value, "__len__"):
                 return [float(v) for v in value]
             return [float(value), float(value)]
+
+        if not isinstance(mobject_or_func, _BridgeMobject):
+            # changing.py:151's other half (fm-5wq.4.86): a point function
+            # is a TracedPath with the tail's finite window and tapers,
+            # grown in the released Python-updater window — the same
+            # verbatim update_path the TracedPath bind (fm-5wq.4.67) runs.
+            VMobject.__init__(self)
+            self.traced_point_func = mobject_or_func
+            self.stroke_config = dict(
+                color=stroke_color if stroke_color is not None else "#FFFFFF",
+                width=taper(stroke_width),
+                opacity=taper(stroke_opacity),
+            )
+            self.time_traced = float(time_traced)
+            self.time = 0.0
+            self.traced_points = []
+            self.add_updater(
+                lambda mob, dt: TracedPath.update_path(mob, dt)
+            )
+            return
+        if not mobject_or_func._is_bound():
+            raise NotImplementedError(
+                "TracingTail traces a scene-bound mobject; add it to the "
+                "Scene before tracing (fm-p107)"
+            )
 
         _install_live_state(self)
         self._init_native_tracer(
