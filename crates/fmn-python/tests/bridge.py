@@ -2503,6 +2503,9 @@ assert list(motion.submobjects) == [motion_source]
 assert motion.name == "draggable-circle"
 assert len(motion_source.updaters) == 1
 assert motion_source.updaters[0](motion_source) is None
+assert str(inspect.signature(interactive.MotionMobject.mob_on_mouse_drag)) == (
+    "(self, mob, event_data)"
+)
 
 try:
     interactive.MotionMobject(object())
@@ -2511,13 +2514,13 @@ except AssertionError:
 else:
     raise AssertionError("MotionMobject accepted a non-Mobject child")
 
-try:
-    motion.mob_on_mouse_drag(motion_source, {"point": np.zeros(3)})
-except NotImplementedError as error:
-    assert "MotionMobject.mob_on_mouse_drag" in str(error), error
-    assert "semantic binding has not landed" in str(error), error
-else:
-    raise AssertionError("MotionMobject fabricated an unbound drag gateway")
+drag_point = np.array([1.25, -0.5, 0.0])
+assert motion.mob_on_mouse_drag(
+    motion_source,
+    {"point": drag_point},
+) is False
+assert np.allclose(motion_source.get_center(), drag_point)
+assert motion.mobject is motion_source
 
 # Button uses Atlas's native arbitrary-mobject wrapper while preserving the
 # Reference's original child and callback identities. Click dispatch remains

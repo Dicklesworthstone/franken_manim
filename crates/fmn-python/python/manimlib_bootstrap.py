@@ -9265,8 +9265,8 @@ class MotionMobject(Mobject):
     """A draggable wrapper whose composition comes from Atlas's native
     ``MotionMobject`` builder.
 
-    The separately owned event gateway has not landed, so schema installation
-    deliberately retains the precise ``mob_on_mouse_drag`` capability refusal.
+    Event registration remains separately owned, but the Reference's drag
+    callback itself routes through the native Mobject movement surface.
     Constructor identity, grouping, and the Reference's no-op updater are real.
     """
 
@@ -9280,6 +9280,10 @@ class MotionMobject(Mobject):
         self.mobject = mobject
         self.mobject.add_updater(lambda mob: None)
         self.add(mobject)
+
+    def mob_on_mouse_drag(self, mob, event_data):
+        mob.move_to(event_data["point"])
+        return False
 
 
 class Button(Mobject):
