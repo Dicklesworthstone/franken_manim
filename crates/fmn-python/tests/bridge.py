@@ -1374,6 +1374,35 @@ assert all(
     for after, before in zip(family_roots_after, family_roots_before)
 )
 
+# fm-5wq.4.87: documented wait controls backed by the native runtime route
+# through the portal. The stop predicate observes post-frame scene time and
+# deliberately shortens the native wait after the frame where it turns true.
+stopped_wait_scene = Scene()
+stop_condition_times = []
+
+
+def stop_after_two_wait_frames():
+    stop_condition_times.append(stopped_wait_scene.get_time())
+    return len(stop_condition_times) == 2
+
+
+stopped_wait_scene.wait(1.0, stop_condition=stop_after_two_wait_frames)
+assert len(stop_condition_times) == 2
+assert math.isclose(stop_condition_times[0], 1.0 / 30.0)
+assert math.isclose(stop_condition_times[1], 2.0 / 30.0)
+assert math.isclose(stopped_wait_scene.get_time(), 2.0 / 30.0)
+
+presenter_bypass_scene = Scene()
+presenter_bypass_scene.wait(1.0 / 30.0, ignore_presenter_mode=True)
+assert math.isclose(presenter_bypass_scene.get_time(), 1.0 / 30.0)
+
+try:
+    Scene().wait(1.0, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == "Scene.wait unsupported keyword(s): bogus"
+else:
+    raise AssertionError("Scene.wait accepted unsupported keyword bogus")
+
 copy_source = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
 )

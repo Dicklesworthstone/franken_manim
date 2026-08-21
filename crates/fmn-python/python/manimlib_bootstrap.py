@@ -8880,12 +8880,23 @@ class Scene(_SceneCore):
         )
 
     def wait(self, duration=None, **kwargs):
+        stop_condition = kwargs.pop("stop_condition", None)
+        ignore_presenter_mode = bool(kwargs.pop("ignore_presenter_mode", False))
         if kwargs:
             raise NotImplementedError(
-                "Scene.wait keyword(s) not yet routed: "
+                "Scene.wait unsupported keyword(s): "
                 + ", ".join(sorted(kwargs))
             )
-        self._wait(None if duration is None else float(duration))
+        if stop_condition is not None and not callable(stop_condition):
+            raise TypeError(
+                "Scene.wait stop_condition must be callable or None; got "
+                + type(stop_condition).__name__
+            )
+        self._wait(
+            None if duration is None else float(duration),
+            stop_condition,
+            ignore_presenter_mode,
+        )
 
     def add_sound(
         self,

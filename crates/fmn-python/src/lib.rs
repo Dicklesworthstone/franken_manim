@@ -6865,20 +6865,32 @@ impl PyScene {
         Ok(PyFieldProbe { values })
     }
 
-    /// `Scene.wait(duration)` over the native wait segment. An active portal
-    /// render generation captures every immutable frame through Lumen + Reel;
-    /// ordinary lifecycle probes keep the same sink with output disabled.
-    #[pyo3(signature = (duration = None))]
-    fn _wait(slf: &Bound<'_, Self>, duration: Option<f64>) -> PyResult<()> {
+    /// `Scene.wait(duration, stop_condition=..., ignore_presenter_mode=...)`
+    /// over the native wait segment. An active portal render generation
+    /// captures every immutable frame through Lumen + Reel; ordinary lifecycle
+    /// probes keep the same sink with output disabled.
+    #[pyo3(signature = (duration = None, stop_condition = None, ignore_presenter_mode = false))]
+    fn _wait(
+        slf: &Bound<'_, Self>,
+        duration: Option<f64>,
+        stop_condition: Option<&Bound<'_, PyAny>>,
+        ignore_presenter_mode: bool,
+    ) -> PyResult<()> {
         let engine = Rc::clone(&slf.borrow().engine);
-        if !has_python_updaters(slf)? {
+        let has_python_updaters = has_python_updaters(slf)?;
+        if !has_python_updaters && stop_condition.is_none() {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&slf.borrow().render),
                 ..PortalSceneSink::default()
             };
-            return engine
-                .borrow_mut()
-                .wait(duration, &mut sink)
+            let result = if ignore_presenter_mode {
+                engine
+                    .borrow_mut()
+                    .wait_ignoring_presenter(duration, &mut sink)
+            } else {
+                engine.borrow_mut().wait(duration, &mut sink)
+            };
+            return result
                 .map(|_| ())
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()));
         }
@@ -6886,7 +6898,9 @@ impl PyScene {
         // The Reference performs one zero-dt Scene.update_mobjects pass
         // before planning wait frames. Run the Python half while unborrowed;
         // begin_stepped_wait immediately follows with the native half.
-        run_python_updaters(slf, 0.0)?;
+        if has_python_updaters {
+            run_python_updaters(slf, 0.0)?;
+        }
         let mut sink = PortalSceneSink {
             render: Arc::clone(&slf.borrow().render),
             ..PortalSceneSink::default()
@@ -6904,7 +6918,11 @@ impl PyScene {
                 let Some(release) = release else {
                     break;
                 };
-                let python_ns = run_python_updaters(slf, release.dt)?;
+                let python_ns = if has_python_updaters {
+                    run_python_updaters(slf, release.dt)?
+                } else {
+                    0
+                };
                 let native_start = Instant::now();
                 engine
                     .borrow_mut()
@@ -6913,6 +6931,15 @@ impl PyScene {
                 let native_ns =
                     u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 crossing::record_phase(python_ns, native_ns);
+                // The Reference checks after emitting the frame where the
+                // predicate turns true. Keep the Scene borrow released so a
+                // Python condition may safely inspect portal state.
+                if let Some(condition) = stop_condition {
+                    crossing::record(CrossingClass::Other);
+                    if condition.call0()?.is_truthy()? {
+                        break;
+                    }
+                }
             }
             Ok(())
         })();
