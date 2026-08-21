@@ -2879,6 +2879,32 @@ assert grouped_selection not in group_scene.selection
 assert left_selected in group_scene.mobjects
 assert right_selected in group_scene.mobjects
 
+# fm-5wq.4: nudge_selection shifts the live native selection Group with the
+# Reference step size and tenfold large-nudge modifier.
+assert InteractiveScene.selection_nudge_size == 0.05
+assert str(inspect.signature(InteractiveScene.nudge_selection)) == (
+    "(self, vect, large=False)"
+)
+nudge_selection_scene = InteractiveScene()
+nudge_selection_scene.setup()
+nudge_selection_circle = manimlib.Circle()
+nudge_selection_scene.add(nudge_selection_circle)
+nudge_selection_scene.add_to_selection(nudge_selection_circle)
+nudge_selection_origin = nudge_selection_circle.get_center().copy()
+assert nudge_selection_scene.nudge_selection(manimlib.RIGHT) is None
+assert np.allclose(
+    nudge_selection_circle.get_center(),
+    nudge_selection_origin + 0.05 * manimlib.RIGHT,
+)
+assert nudge_selection_scene.nudge_selection(manimlib.UP, large=True) is None
+assert np.allclose(
+    nudge_selection_circle.get_center(),
+    nudge_selection_origin + 0.05 * manimlib.RIGHT + 0.5 * manimlib.UP,
+)
+empty_nudge_selection_scene = InteractiveScene()
+empty_nudge_selection_scene.setup()
+assert empty_nudge_selection_scene.nudge_selection(manimlib.RIGHT) is None
+
 # fm-5wq.4: toggle_selection_mode flips select_top_level_mobs, then
 # refresh_selection_scope rewrites the live selection Group between scene
 # roots and pointed family members. Search-set regeneration rides the same
