@@ -10135,6 +10135,54 @@ class Transform(_NativeAnimation):
         self.target_mobject = self.create_target()
         return self.target_mobject
 
+    def create_starting_mobject(self):
+        return self.mobject.copy()
+
+    def begin(self):
+        # fm-5wq.4.91: the Python updater-driving fallback (never touched
+        # by native Scene.play, which builds Choreo segments instead).
+        if self.time_span is not None:
+            self.run_time = max(float(self.time_span[1]), self.run_time)
+        self.target_mobject = self.create_target()
+        self.starting_mobject = self.create_starting_mobject()
+        self.target_copy = self.target_mobject.copy()
+        self.interpolate(0.0)
+
+    def interpolate_mobject(self, alpha):
+        # Straight-path, same-structure record lerp only: family alignment
+        # and arc paths are native Transform machinery, so those cases
+        # refuse by the missing seam's name instead of drifting.
+        if self.path_arc != 0.0:
+            raise NotImplementedError(
+                "Python-driven Transform interpolation with a path arc "
+                "awaits Choreo's persistent-updater seam"
+            )
+        rated = self.rate_func(self.time_spanned_alpha(float(alpha)))
+        subs = self.mobject.family_members_with_points()
+        starts = self.starting_mobject.family_members_with_points()
+        targets = self.target_copy.family_members_with_points()
+        if len(subs) != len(starts) or len(subs) != len(targets):
+            raise NotImplementedError(
+                "Python-driven Transform interpolation across differing "
+                "family structures awaits Choreo's persistent-updater seam"
+            )
+        for sub, start, target in zip(subs, starts, targets):
+            live, from_data, to_data = sub.data, start.data, target.data
+            if (
+                len(live) != len(from_data)
+                or len(live) != len(to_data)
+                or live.dtype != from_data.dtype
+                or live.dtype != to_data.dtype
+            ):
+                raise NotImplementedError(
+                    "Python-driven Transform interpolation across differing "
+                    "record shapes awaits Choreo's persistent-updater seam"
+                )
+            for name in live.dtype.names:
+                live[name][:] = (1.0 - rated) * from_data[name] + (
+                    rated * to_data[name]
+                )
+
 
 class Fade(Transform):
     """fading.py's shared base at the pin (fm-5wq.4.75): a Transform that
@@ -10168,6 +10216,18 @@ class Fade(Transform):
 class FadeIn(Fade):
     _native_kind = "fade_in"
 
+    # fading.py:41 — the Python updater-driving halves (fm-5wq.4.91);
+    # native Scene.play keeps the fade_in kind and never calls these.
+    def create_target(self):
+        return self.mobject.copy()
+
+    def create_starting_mobject(self):
+        start = super().create_starting_mobject()
+        start.set_opacity(0)
+        start.scale(1.0 / self.scale_factor)
+        start.shift([-value for value in self.shift_vect])
+        return start
+
 
 class FadeOut(Fade):
     _native_kind = "fade_out"
@@ -10182,6 +10242,15 @@ class FadeOut(Fade):
             ],
         )
         super().__init__(mobject, shift=shift, scale=scale, **kwargs)
+        # fading.py:76: finish() restores the pre-fade state.
+        self.final_alpha_value = 0.0
+
+    def create_target(self):
+        result = self.mobject.copy()
+        result.set_opacity(0)
+        result.shift(self.shift_vect)
+        result.scale(self.scale_factor)
+        return result
 
 
 class FadeInFromLarge(FadeIn):
@@ -13096,9 +13165,15 @@ def _install_mobject_functions():
     def turn_animation_into_updater(animation, cycle=False, **kwargs):
         # mobject_update_utils.py:83 over Python-driven animations: the
         # updater re-applies the animation's own interpolate each frame.
-        # A native-segment spec class has no per-frame Python interpolate
-        # to drive — its frames live in Choreo segments — so it refuses by
-        # name rather than silently holding still (fm-5wq.4.69).
+        # The Transform family carries a straight-path record-lerp
+        # fallback for exactly this driver (fm-5wq.4.91); a spec class
+        # with no per-frame Python interpolate at all still refuses by
+        # the missing seam's name rather than silently holding still.
+        if not isinstance(animation, Animation):
+            raise TypeError(
+                "turn_animation_into_updater requires an Animation; got "
+                + type(animation).__name__
+            )
         if (
             type(animation).interpolate_mobject
             is Animation.interpolate_mobject

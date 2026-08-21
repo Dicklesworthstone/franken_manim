@@ -10552,7 +10552,7 @@ else:
 
 try:
     update_utils.turn_animation_into_updater(
-        manimlib.FadeIn(geometry.Rectangle(width=1.0, height=1.0))
+        manimlib.ShowCreation(geometry.Rectangle(width=1.0, height=1.0))
     )
 except NotImplementedError as error:
     assert "persistent-updater seam" in str(error)
@@ -11399,3 +11399,67 @@ except TypeError as error:
     assert "real or complex number" in str(error)
 else:
     raise AssertionError("set_value accepted a string")
+
+# fm-5wq.4.91: turn_animation_into_updater over native-kind classes — the
+# Transform family now carries a straight-path same-structure record-lerp
+# Python fallback, so FadeOut/Transform drive as live updaters; alignment
+# and arc-path cases still refuse by the Choreo seam's name. (The FadeIn
+# gate stanza above moved to ShowCreation, which stays seam-refused.)
+try:
+    update_utils.turn_animation_into_updater(None)
+except TypeError as error:
+    assert "requires an Animation" in str(error), error
+    assert "NoneType" in str(error), error
+else:
+    raise AssertionError("turn_animation_into_updater accepted None")
+
+fade_updater_dot = manimlib.Dot()
+fade_updater_dot.set_fill(manimlib.BLUE, opacity=1.0)
+fade_updater_scene = InteractiveScene()
+fade_updater_scene.add(fade_updater_dot)
+update_utils.turn_animation_into_updater(
+    manimlib.FadeOut(fade_updater_dot),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+fade_updater_scene.wait(2.0 / 30.0)
+fade_mid_alpha = float(fade_updater_dot.data["fill_rgba"][0, 3])
+assert 0.0 < fade_mid_alpha < 1.0, fade_mid_alpha
+fade_updater_scene.wait(3.0 / 30.0)
+# FadeOut's final_alpha_value is 0 (fading.py:76): finish restores, and
+# the exhausted updater detaches.
+assert np.allclose(fade_updater_dot.data["fill_rgba"][:, 3], 1.0)
+assert not fade_updater_dot.updaters
+
+transform_updater_square = manimlib.Square(side_length=1.0)
+transform_updater_target = manimlib.Square(side_length=1.0).shift(
+    (1.0, 0.0, 0.0)
+)
+fade_updater_scene.add(transform_updater_square)
+update_utils.turn_animation_into_updater(
+    manimlib.Transform(transform_updater_square, transform_updater_target),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+fade_updater_scene.wait(2.0 / 30.0)
+transform_mid_x = float(transform_updater_square.get_center()[0])
+assert 0.0 < transform_mid_x < 1.0, transform_mid_x
+fade_updater_scene.wait(3.0 / 30.0)
+assert np.allclose(
+    transform_updater_square.get_center(), [1.0, 0.0, 0.0], atol=1e-9
+)
+
+# Arc paths stay native machinery: the fallback refuses by the seam's name
+# at begin() rather than drifting a straight lerp under an arc request.
+try:
+    update_utils.turn_animation_into_updater(
+        manimlib.Transform(
+            manimlib.Dot(),
+            manimlib.Dot().shift((1.0, 0.0, 0.0)),
+            path_arc=1.0,
+        )
+    )
+except NotImplementedError as error:
+    assert "persistent-updater seam" in str(error), error
+else:
+    raise AssertionError("the arc-path fallback did not refuse")
