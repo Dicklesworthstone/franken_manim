@@ -3014,44 +3014,6 @@ assert np.allclose(
     + 10.0 * InteractiveScene.selection_nudge_size * manimlib.UP,
 )
 
-# fm-5wq.4: InteractiveScene checkpoints exclude transient interaction
-# overlays and restore the native selection highlight exactly once at root 0.
-assert str(inspect.signature(InteractiveScene.get_state)) == "(self)"
-assert str(inspect.signature(InteractiveScene.restore_state)) == (
-    "(self, scene_state)"
-)
-interactive_state_scene = InteractiveScene()
-interactive_state_scene.setup()
-interactive_state_user = manimlib.Circle()
-interactive_state_scene.add(interactive_state_user)
-interactive_state_origin = interactive_state_user.get_center().copy()
-interactive_state = interactive_state_scene.get_state()
-assert (
-    interactive_state_scene.selection_highlight
-    not in interactive_state.mobjects_to_copies
-)
-assert (
-    interactive_state_scene.selection_rectangle
-    not in interactive_state.mobjects_to_copies
-)
-assert (
-    interactive_state_scene.crosshair
-    not in interactive_state.mobjects_to_copies
-)
-assert interactive_state_user in interactive_state.mobjects_to_copies
-interactive_state_user.shift(manimlib.RIGHT)
-assert interactive_state_scene.restore_state(interactive_state) is None
-assert np.allclose(interactive_state_user.get_center(), interactive_state_origin)
-assert interactive_state_user in interactive_state_scene.mobjects
-assert interactive_state_scene.selection_highlight in interactive_state_scene.mobjects
-assert interactive_state_scene.mobjects[0] is interactive_state_scene.selection_highlight
-assert (
-    interactive_state_scene.mobjects.count(
-        interactive_state_scene.selection_highlight
-    )
-    == 1
-)
-
 # fm-5wq.4: free-axis grabbing preserves the mouse-to-selection offset and
 # moves the native selection Group as one unit without requiring pyglet.
 assert str(inspect.signature(InteractiveScene.prepare_grab)) == "(self)"
@@ -3084,71 +3046,6 @@ assert np.allclose(
     empty_grab_scene.mouse_to_selection,
     [1.0, 0.0, 0.0],
 )
-
-# fm-5wq.4: resize preparation records native selection geometry while the
-# separately owned pyglet-keyed resize handler remains outside this slice.
-assert str(inspect.signature(InteractiveScene.prepare_resizing)) == (
-    "(self, about_corner=False)"
-)
-resize_scene = InteractiveScene()
-resize_scene.setup()
-resize_square = manimlib.Square()
-resize_scene.add(resize_square)
-resize_scene.add_to_selection(resize_square)
-resize_scene.mouse_point.move_to(resize_square.get_right())
-assert resize_scene.prepare_resizing() is None
-assert np.allclose(
-    resize_scene.scale_about_point,
-    resize_square.get_center(),
-)
-assert np.allclose(resize_scene.scale_ref_width, resize_square.get_width())
-assert np.allclose(resize_scene.scale_ref_height, resize_square.get_height())
-resize_scene.prepare_resizing(about_corner=True)
-assert np.allclose(
-    resize_scene.scale_about_point,
-    resize_scene.selection.get_corner(
-        resize_square.get_center() - resize_scene.mouse_point.get_center()
-    ),
-)
-assert not np.allclose(
-    resize_scene.scale_about_point,
-    resize_square.get_center(),
-)
-assert str(inspect.signature(InteractiveScene.handle_resizing)) == (
-    "(self, point)"
-)
-unprepared_resize = InteractiveScene()
-unprepared_resize.setup()
-assert unprepared_resize.handle_resizing([1.0, 0.0, 0.0]) is None
-resize_center = resize_square.get_center().copy()
-resize_width = float(resize_square.get_width())
-resize_scene.mouse_point.move_to(resize_center + manimlib.RIGHT)
-assert resize_scene.prepare_resizing() is None
-assert resize_scene.handle_resizing(resize_center + 2.0 * manimlib.RIGHT) is None
-assert np.isclose(resize_square.get_width(), 2.0 * resize_width)
-assert np.allclose(resize_square.get_center(), resize_center)
-
-# fm-5wq.4: toggle_color_palette mounts setup's native palette VGroup through
-# Scene add/remove only while something is selected, and the palette stays
-# unselectable — never in the regenerated search set.
-assert str(inspect.signature(InteractiveScene.toggle_color_palette)) == (
-    "(self)"
-)
-palette_scene = InteractiveScene()
-palette_scene.setup()
-assert palette_scene.toggle_color_palette() is None
-assert palette_scene.color_palette not in palette_scene.mobjects
-palette_circle = manimlib.Circle()
-palette_scene.add(palette_circle)
-palette_scene.add_to_selection(palette_circle)
-assert palette_scene.toggle_color_palette() is None
-assert palette_scene.color_palette in palette_scene.mobjects
-assert (
-    palette_scene.color_palette
-    not in palette_scene.get_selection_search_set()
-)
-assert palette_scene.toggle_color_palette() is None
-assert palette_scene.color_palette not in palette_scene.mobjects
 
 
 # The schema-generated import topology and exact-name aliases are present.

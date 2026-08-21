@@ -12377,7 +12377,6 @@ class InteractiveScene(Scene):
             self.selection_rectangle,
             self.crosshair,
             self.information_label,
-            self.color_palette,
             self.camera.frame,
         ]
         self.select_top_level_mobs = True
@@ -12385,21 +12384,6 @@ class InteractiveScene(Scene):
         self.is_selecting = False
         self.is_grabbing = False
         self.add(self.selection_highlight)
-
-    def get_state(self):
-        return SceneState(
-            self,
-            ignore=[
-                self.selection_highlight,
-                self.selection_rectangle,
-                self.crosshair,
-            ],
-        )
-
-    def restore_state(self, scene_state):
-        super().restore_state(scene_state)
-        self.add(self.selection_highlight)
-        self.bring_to_back(self.selection_highlight)
 
     def regenerate_selection_search_set(self):
         selectable = [
@@ -12487,50 +12471,6 @@ class InteractiveScene(Scene):
         self.selection.move_to(
             _np.array(_vec3(point)) - self.mouse_to_selection
         )
-
-    def prepare_resizing(self, about_corner=False):
-        center = self.selection.get_center()
-        mouse_point = self.mouse_point.get_center()
-        if about_corner:
-            self.scale_about_point = self.selection.get_corner(
-                center - mouse_point
-            )
-        else:
-            self.scale_about_point = center
-        self.scale_ref_vect = mouse_point - self.scale_about_point
-        self.scale_ref_width = self.selection.get_width()
-        self.scale_ref_height = self.selection.get_height()
-
-    def handle_resizing(self, point):
-        if not hasattr(self, "scale_about_point"):
-            return
-        if getattr(self, "window", None) is not None:
-            raise NotImplementedError(
-                "InteractiveScene ctrl-stretch resize requires a host "
-                "window key-state adapter"
-            )
-        vect = _np.array(_vec3(point)) - self.scale_about_point
-        ref = _np.linalg.norm(self.scale_ref_vect)
-        if ref == 0.0:
-            return
-        scalar = _np.linalg.norm(vect) / ref
-        self.selection.set_width(
-            scalar * self.scale_ref_width,
-            about_point=self.scale_about_point,
-        )
-
-    def toggle_color_palette(self):
-        if len(self.selection) == 0:
-            return
-        if self.color_palette not in self.mobjects:
-            # Reference calls Scene.save_state before mounting the palette;
-            # the portal Scene has no undo stack yet, so skip until it lands.
-            save_state = getattr(self, "save_state", None)
-            if callable(save_state):
-                save_state()
-            self.add(self.color_palette)
-        else:
-            self.remove(self.color_palette)
 
     def group_selection(self):
         group = self.get_group(*self.selection)
