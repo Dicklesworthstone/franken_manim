@@ -8284,6 +8284,37 @@ Scene()
 assert python_random == [manimlib.random.random() for _ in range(3)]
 assert np.allclose(numpy_random, np.random.random(3))
 
+# fm-5wq.4: random_seed rides kwargs over the class attribute (the base
+# class carries no random_seed attribute; the constructor's getattr
+# default is 0). An explicit seed re-seeds both RNG modules at every
+# construct; random_seed=None skips seeding entirely, preserving the live
+# streams mid-sequence.
+assert not hasattr(scene_module.Scene, "random_seed")
+assert Scene().random_seed == 0
+seeded_scene = Scene(random_seed=123)
+assert seeded_scene.random_seed == 123
+seeded_python_draws = [manimlib.random.random() for _ in range(2)]
+seeded_numpy_first = float(np.random.random())
+unseeded_scene = Scene(random_seed=None)
+assert unseeded_scene.random_seed is None
+seeded_numpy_second = float(np.random.random())
+reseeded_scene = Scene(random_seed=123)
+assert reseeded_scene.random_seed == 123
+assert seeded_python_draws == [manimlib.random.random() for _ in range(2)]
+assert np.isclose(float(np.random.random()), seeded_numpy_first)
+# The None construct did not reset numpy: the second draw continued the
+# 123 stream exactly where the first left off.
+assert np.isclose(float(np.random.random()), seeded_numpy_second)
+
+
+class _SeededScene(Scene):
+    random_seed = 7
+
+
+assert _SeededScene().random_seed == 7
+assert _SeededScene(random_seed=11).random_seed == 11
+Scene()  # restore the default seed-0 streams for later pins
+
 # Custom callbacks can use the RecordBuffer-backed point-cloud and point
 # matching surface without falling back to schema placeholders.
 dot_cloud = manimlib.GlowDot([1.0, 2.0, 0.0], opacity=0.75)
