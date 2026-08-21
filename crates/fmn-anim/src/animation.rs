@@ -378,6 +378,10 @@ pub enum AnimError {
     /// word groups (fm-5wq.4.54) — an empty string mobject has no words
     /// to add, and revealing nothing must be named, never a silent no-op.
     NoWordGroups,
+    /// `AddTextLetterByLetter` was handed a grouped parent with no
+    /// span-map letter groups (fm-5wq.4.59) — a string mobject with no
+    /// glyphs has no letters to add; named, never a silent no-op.
+    NoLetterGroups,
     /// A `Timeline` seek named a frame outside the compiled schedule
     /// (§9.4). Frames are 1-based and on-grid — there is no off-grid seek,
     /// for the same reason there is no off-grid sample (D-18).
@@ -433,6 +437,11 @@ impl std::fmt::Display for AnimError {
             Self::NoWordGroups => write!(
                 f,
                 "AddTextWordByWord requires span-map word groups; the string mobject produced none"
+            ),
+            Self::NoLetterGroups => write!(
+                f,
+                "AddTextLetterByLetter requires span-map letter groups; \
+                 the string mobject produced none"
             ),
             Self::SeekOutOfRange { frame, total } => {
                 write!(

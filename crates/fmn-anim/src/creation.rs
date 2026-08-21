@@ -795,3 +795,42 @@ pub fn add_text_word_by_word(
     anim.state.config.run_time = run_time;
     Ok(anim)
 }
+
+/// `AddTextLetterByLetter` (fm-5wq.4.59): the letter-granularity sibling
+/// of [`add_text_word_by_word`] — `ShowIncreasingSubsets` over a grouped
+/// parent whose children are the span-map letter groups (one non-whitespace
+/// glyph each, in reading order), linear rate, and a negative `run_time`
+/// sentinel recomputed as `time_per_char * n_letters`.
+///
+/// Provenance note: the pinned Reference's `creation.py` has no
+/// letter-granularity class — this is compatibility surface for the wider
+/// manim ecosystem's spelling, built from the same native span maps and
+/// reveal mechanism as the word-granularity Reference class, so the two
+/// stay one mechanism with two grain sizes.
+///
+/// # Errors
+/// [`AnimError::StaleHandle`] on a dead group handle;
+/// [`AnimError::NoLetterGroups`] when the grouped parent has no children —
+/// a string mobject with no glyphs has no letters to add, refused by name
+/// instead of playing a degenerate zero-letter reveal.
+pub fn add_text_letter_by_letter(
+    stage: &Stage,
+    grouped: Mob,
+    time_per_char: f64,
+    run_time: f64,
+) -> Result<ShowIncreasingSubsets, AnimError> {
+    let mut anim = show_increasing_subsets(stage, grouped)?;
+    if anim.all_submobs.is_empty() {
+        return Err(AnimError::NoLetterGroups);
+    }
+    anim.state.config.name = "AddTextLetterByLetter".to_owned();
+    anim.state.config.rate_func = RateFunc::linear();
+    #[allow(clippy::cast_precision_loss)]
+    let run_time = if run_time < 0.0 {
+        time_per_char * anim.all_submobs.len() as f64
+    } else {
+        run_time
+    };
+    anim.state.config.run_time = run_time;
+    Ok(anim)
+}
