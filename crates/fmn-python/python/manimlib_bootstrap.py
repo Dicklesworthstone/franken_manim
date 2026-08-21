@@ -2333,6 +2333,17 @@ class EventDispatcher:
         return int(symbol) in self.pressed_keys
 
 
+def _event_dispatcher():
+    """The process-wide dispatcher installed by the schema surface."""
+
+    return _sys.modules["manimlib.event_handler"].EVENT_DISPATCHER
+
+
+def _scene_event_stopped(event_type, **event_data):
+    propagate = _event_dispatcher().dispatch(event_type, **event_data)
+    return propagate is not None and propagate is False
+
+
 class VMobject(Mobject):
     pre_function_handle_to_anchor_scale_factor = 0.01
     make_smooth_after_applying_functions = False
@@ -11597,6 +11608,11 @@ class ThreeDCamera(Camera):
 
 
 class Scene(_SceneCore):
+    pan_sensitivity = 0.5
+    scroll_sensitivity = 20
+    drag_to_pan = True
+    max_num_saved_states = 50
+
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
@@ -11619,6 +11635,18 @@ class Scene(_SceneCore):
         self.undo_stack = []
         self.redo_stack = []
         self.id_to_mobject_map = {}
+        self.pan_sensitivity = float(
+            kwargs.get("pan_sensitivity", type(self).pan_sensitivity)
+        )
+        self.scroll_sensitivity = float(
+            kwargs.get("scroll_sensitivity", type(self).scroll_sensitivity)
+        )
+        self.drag_to_pan = bool(
+            kwargs.get("drag_to_pan", type(self).drag_to_pan)
+        )
+        self.max_num_saved_states = int(
+            kwargs.get("max_num_saved_states", type(self).max_num_saved_states)
+        )
         # Reference Scene.__init__ keeps the pointer as two live Point
         # mobjects on the scene itself, and they are the same Point class
         # EventDispatcher constructs (dispatch() moves the drag point for
@@ -11631,6 +11659,12 @@ class Scene(_SceneCore):
         # hover point along with it.
         self.mouse_point = Point()
         self.mouse_drag_point = Point()
+        # Host window is Studio-owned. Pointer/scroll/key chords below stay
+        # live without one; pan_3d/pan key-state is skipped until a host
+        # adapter is bound.
+        self.window = kwargs.get("window")
+        self.hold_on_wait = bool(kwargs.get("presenter_mode", False))
+        self.quit_interaction = False
 
     @property
     def frame(self):
@@ -12014,6 +12048,8 @@ class Scene(_SceneCore):
 
     def save_state(self):
         self.undo_stack.append(self.get_state())
+        if len(self.undo_stack) > self.max_num_saved_states:
+            self.undo_stack.pop(0)
         return self
 
     def undo(self):
@@ -12041,6 +12077,112 @@ class Scene(_SceneCore):
             raise TypeError("restore_state expects a SceneState")
         scene_state.restore_scene(self)
         return self
+
+    def get_window(self):
+        return getattr(self, "window", None)
+
+    def on_mouse_motion(self, point, d_point):
+        # Host-free hover: the live Point moves even without a pyglet window.
+        # pan_3d / pan need a host key-state adapter and are skipped until
+        # Studio binds one (the Reference asserts window is not None).
+        self.mouse_point.move_to(point)
+        if _scene_event_stopped(
+            EventType.MouseMotionEvent, point=point, d_point=d_point
+        ):
+            return
+        window = self.get_window()
+        if window is None:
+            return
+        keys = _pinned_manim_config().key_bindings
+        frame = self.frame
+        if window.is_key_pressed(ord(keys.pan_3d)):
+            ff_d_point = frame.to_fixed_frame_point(d_point, relative=True)
+            ff_d_point = ff_d_point * self.pan_sensitivity
+            frame.increment_theta(-ff_d_point[0])
+            frame.increment_phi(ff_d_point[1])
+        elif window.is_key_pressed(ord(keys.pan)):
+            frame.shift(-d_point)
+
+    def on_mouse_drag(self, point, d_point, buttons, modifiers):
+        self.mouse_drag_point.move_to(point)
+        if self.drag_to_pan:
+            self.frame.shift(-d_point)
+        if _scene_event_stopped(
+            EventType.MouseDragEvent,
+            point=point,
+            d_point=d_point,
+            buttons=buttons,
+            modifiers=modifiers,
+        ):
+            return
+
+    def on_mouse_press(self, point, button, mods):
+        self.mouse_drag_point.move_to(point)
+        _scene_event_stopped(
+            EventType.MousePressEvent, point=point, button=button, mods=mods
+        )
+
+    def on_mouse_release(self, point, button, mods):
+        _scene_event_stopped(
+            EventType.MouseReleaseEvent, point=point, button=button, mods=mods
+        )
+
+    def on_mouse_scroll(self, point, offset, x_pixel_offset, y_pixel_offset):
+        if _scene_event_stopped(
+            EventType.MouseScrollEvent, point=point, offset=offset
+        ):
+            return
+        del x_pixel_offset
+        height = self.camera.get_pixel_height()
+        if height == 0:
+            return
+        rel_offset = float(y_pixel_offset) / float(height)
+        self.frame.scale(
+            1 - self.scroll_sensitivity * rel_offset,
+            about_point=point,
+        )
+
+    def on_key_release(self, symbol, modifiers):
+        _scene_event_stopped(
+            EventType.KeyReleaseEvent, symbol=symbol, modifiers=modifiers
+        )
+
+    def on_key_press(self, symbol, modifiers):
+        try:
+            char = chr(int(symbol))
+        except (OverflowError, ValueError, TypeError):
+            return
+        if _scene_event_stopped(
+            EventType.KeyPressEvent, symbol=symbol, modifiers=modifiers
+        ):
+            return
+        keys = _pinned_manim_config().key_bindings
+        ctrl = int(modifiers) & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)
+        shift = int(modifiers) & _PYGLET_MOD_SHIFT
+        if char == keys.reset:
+            self.play(self.camera.frame.animate.to_default_state())
+        elif char == "z" and ctrl and shift:
+            # D5: the Reference tests ctrl-z before ctrl-shift-z, so redo
+            # is unreachable. Check shift first, matching ungroup.
+            self.redo()
+        elif char == "z" and ctrl:
+            self.undo()
+        elif char == keys.quit and ctrl:
+            self.quit_interaction = True
+        elif char == " " or int(symbol) == _PYGLET_RIGHT:
+            self.hold_on_wait = False
+
+    def on_resize(self, width, height):
+        del width, height
+
+    def on_show(self):
+        pass
+
+    def on_hide(self):
+        pass
+
+    def on_close(self):
+        pass
 
 
 def _mobject_looks_identical(mobject, other):
@@ -12125,7 +12267,11 @@ _PYGLET_MOD_SHIFT = 1
 _PYGLET_MOD_CTRL = 2
 _PYGLET_MOD_COMMAND = 64
 _PYGLET_BACKSPACE = 0xFF08
-_PYGLET_ARROW_SYMBOLS = (0xFF51, 0xFF52, 0xFF53, 0xFF54)
+_PYGLET_LEFT = 0xFF51
+_PYGLET_UP = 0xFF52
+_PYGLET_RIGHT = 0xFF53
+_PYGLET_DOWN = 0xFF54
+_PYGLET_ARROW_SYMBOLS = (_PYGLET_LEFT, _PYGLET_UP, _PYGLET_RIGHT, _PYGLET_DOWN)
 
 
 class ThreeDScene(Scene):

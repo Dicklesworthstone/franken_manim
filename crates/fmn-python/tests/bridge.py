@@ -1487,6 +1487,71 @@ assert (
     undo_overlay_scene.selection_highlight in undo_overlay_scene.mobjects
 )
 
+# fm-5wq.4: Scene's host-interaction defaults remain available without
+# pyglet. Constructor overrides are live, save_state evicts the oldest
+# checkpoint at the Reference cap, and Atlas's native CameraFrame owns zoom.
+assert scene_module.Scene.pan_sensitivity == 0.5
+assert scene_module.Scene.scroll_sensitivity == 20
+assert scene_module.Scene.drag_to_pan is True
+assert scene_module.Scene.max_num_saved_states == 50
+hostless_scene = Scene()
+assert hostless_scene.window is None
+assert hostless_scene.hold_on_wait is False
+assert Scene(presenter_mode=True).hold_on_wait is True
+host_window = object()
+configured_scene = Scene(
+    window=host_window,
+    pan_sensitivity=0.25,
+    scroll_sensitivity=10,
+    drag_to_pan=False,
+    max_num_saved_states=2,
+)
+assert configured_scene.window is host_window
+assert configured_scene.pan_sensitivity == 0.25
+assert configured_scene.scroll_sensitivity == 10.0
+assert configured_scene.drag_to_pan is False
+configured_scene.save_state()
+oldest_state = configured_scene.undo_stack[0]
+configured_scene.save_state()
+configured_scene.save_state()
+assert len(configured_scene.undo_stack) == 2
+assert oldest_state not in configured_scene.undo_stack
+assert str(inspect.signature(scene_module.Scene.on_mouse_motion)) == (
+    "(self, point, d_point)"
+)
+assert str(inspect.signature(scene_module.Scene.on_mouse_scroll)) == (
+    "(self, point, offset, x_pixel_offset, y_pixel_offset)"
+)
+hostless_frame_center = hostless_scene.frame.get_center().copy()
+hostless_scene.on_mouse_motion(manimlib.RIGHT, manimlib.UP)
+assert np.allclose(hostless_scene.mouse_point.get_center(), manimlib.RIGHT)
+assert np.allclose(hostless_scene.frame.get_center(), hostless_frame_center)
+scroll_width = hostless_scene.frame.get_width()
+scroll_factor = 1.0 - (
+    hostless_scene.scroll_sensitivity / hostless_scene.camera.get_pixel_height()
+)
+hostless_scene.on_mouse_scroll(manimlib.ORIGIN, (0, 1), 0, 1)
+assert np.isclose(hostless_scene.frame.get_width(), scroll_width * scroll_factor)
+event_listener_module = importlib.import_module(
+    "manimlib.event_handler.event_listner"
+)
+global_dispatcher = importlib.import_module(
+    "manimlib.event_handler"
+).EVENT_DISPATCHER
+stop_scroll_mobject = manimlib.Dot()
+stop_scroll_listener = event_listener_module.EventListener(
+    stop_scroll_mobject,
+    manimlib.EventType.MouseScrollEvent,
+    lambda _mobject, _event_data: False,
+)
+global_dispatcher.add_listener(stop_scroll_listener)
+stopped_scroll_width = hostless_scene.frame.get_width()
+try:
+    hostless_scene.on_mouse_scroll(manimlib.ORIGIN, (0, 1), 0, 1)
+finally:
+    global_dispatcher.remove_listner(stop_scroll_listener)
+assert np.isclose(hostless_scene.frame.get_width(), stopped_scroll_width)
+
 # fm-5wq.4: Scene.redo mirrors undo — it pops redo_stack back through
 # restore_state while pushing the live state onto undo_stack; an empty
 # redo_stack is a no-op.
