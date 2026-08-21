@@ -4910,11 +4910,19 @@ class ThreeDAxes(Axes):
         depth=None,
         **kwargs,
     ):
-        if z_normal is not None:
-            raise NotImplementedError(
-                "ThreeDAxes(z_normal=...) is not yet routed to the native "
-                "builder; the default DOWN normal works"
-            )
+        if z_normal is None:
+            z_normal_vect = None
+        else:
+            # planes.rs: the normal reorients the z-axis tick construction
+            # by angle_of_vector(z_normal) about OUT; the axis line itself
+            # stays along z (the Reference's exact behaviour).
+            try:
+                z_normal_vect = tuple(float(v) for v in _vec3(z_normal))
+            except (TypeError, ValueError, IndexError) as error:
+                raise TypeError(
+                    "ThreeDAxes z_normal must be a 3-vector; got "
+                    + repr(z_normal)
+                ) from error
         axis_config = kwargs.pop("axis_config", None)
         x_axis_config = kwargs.pop("x_axis_config", None)
         y_axis_config = kwargs.pop("y_axis_config", None)
@@ -4952,6 +4960,7 @@ class ThreeDAxes(Axes):
             self._axes_params[5],
             self._axes_params[6],
             None if depth is None else float(depth),
+            z_normal_vect,
             self._axes_params[7],
         )
         _hang_native_children(self, specs)

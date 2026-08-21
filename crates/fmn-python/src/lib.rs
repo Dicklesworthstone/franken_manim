@@ -4969,6 +4969,7 @@ impl BridgeMobject {
         height: Option<f64>,
         width: Option<f64>,
         depth: Option<f64>,
+        z_normal: Option<[f64; 3]>,
         unit_size: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let mut axes = fmn_library::ThreeDAxes::new()
@@ -4988,6 +4989,9 @@ impl BridgeMobject {
         }
         if let Some(depth) = depth {
             axes = axes.depth(depth);
+        }
+        if let Some(normal) = z_normal {
+            axes = axes.z_normal(normal);
         }
         let built = with_font_book(|book| axes.build(book).map_err(native_error))?;
         install_native_tree(slf, factory, built.into_vmob())
