@@ -11598,6 +11598,7 @@ class Scene(_SceneCore):
         self.num_plays = 0
         self.undo_stack = []
         self.redo_stack = []
+        self.id_to_mobject_map = {}
         # Reference Scene.__init__ keeps the pointer as two live Point
         # mobjects on the scene itself, and they are the same Point class
         # EventDispatcher constructs (dispatch() moves the drag point for
@@ -11683,6 +11684,35 @@ class Scene(_SceneCore):
         if all(isinstance(mobject, VMobject) for mobject in mobjects):
             return VGroup(*mobjects)
         return Group(*mobjects)
+
+    def add(self, *mobjects):
+        result = super().add(*mobjects)
+        mapping = getattr(self, "id_to_mobject_map", None)
+        if mapping is None:
+            mapping = {}
+            self.id_to_mobject_map = mapping
+        for mobject in mobjects:
+            for member in mobject.get_family():
+                mapping[id(member)] = member
+        return result
+
+    def id_to_mobject(self, id_value):
+        return self.id_to_mobject_map.get(id_value)
+
+    def ids_to_group(self, *id_values):
+        return self.get_group(
+            *(
+                mobject
+                for mobject in (self.id_to_mobject(id_value) for id_value in id_values)
+                if mobject is not None
+            )
+        )
+
+    def i2m(self, id_value):
+        return self.id_to_mobject(id_value)
+
+    def i2g(self, *id_values):
+        return self.ids_to_group(*id_values)
 
     def point_to_mobject(self, point, search_set=None, buff=0):
         if search_set is None:
@@ -12216,6 +12246,17 @@ class InteractiveScene(Scene):
             self.toggle_color_palette()
         elif char == keys.information and (modifiers & all_mods) == 0:
             self.display_information()
+        elif char == "g" and (
+            modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)
+        ) and (modifiers & _PYGLET_MOD_SHIFT):
+            self.ungroup_selection()
+        elif char == "g" and (modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)):
+            self.group_selection()
+        elif char == "t" and (modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)):
+            self.toggle_selection_mode()
+        elif char == "a" and (modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)):
+            self.clear_selection()
+            self.add_to_selection(*self.mobjects)
         elif int(symbol) == _PYGLET_BACKSPACE:
             self.delete_selection()
         elif int(symbol) in _PYGLET_ARROW_SYMBOLS:

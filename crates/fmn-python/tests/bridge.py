@@ -3385,6 +3385,39 @@ assert key_scene.is_grabbing is False
 assert key_scene.on_key_release(ord("s"), 0) is None
 assert key_scene.is_selecting is False
 
+# fm-5wq.4: Scene.add populates id_to_mobject_map; ctrl/cmd-g groups the
+# live selection and ctrl/cmd-shift-g ungroups, correcting the Reference's
+# unreachable ungroup branch that tested ctrl-g first.
+assert str(inspect.signature(Scene.id_to_mobject)) == "(self, id_value)"
+assert str(inspect.signature(Scene.ids_to_group)) == "(self, *id_values)"
+assert str(inspect.signature(Scene.i2m)) == "(self, id_value)"
+assert str(inspect.signature(Scene.i2g)) == "(self, *id_values)"
+id_scene = Scene()
+id_circle = manimlib.Circle()
+id_square = manimlib.Square()
+id_scene.add(id_circle, id_square)
+assert id_scene.id_to_mobject(id(id_circle)) is id_circle
+assert id_scene.i2m(id(id_square)) is id_square
+assert id_scene.id_to_mobject(0) is None
+id_group = id_scene.ids_to_group(id(id_circle), id(id_square))
+assert isinstance(id_group, manimlib.VGroup)
+assert list(id_group) == [id_circle, id_square]
+assert list(id_scene.i2g(id(id_circle))) == [id_circle]
+
+group_key_scene = InteractiveScene()
+group_key_scene.setup()
+group_left = manimlib.Circle().shift([-1.0, 0.0, 0.0])
+group_right = manimlib.Square().shift([1.0, 0.0, 0.0])
+group_key_scene.add(group_left, group_right)
+group_key_scene.add_to_selection(group_left, group_right)
+assert group_key_scene.on_key_press(ord("g"), 2) is None  # pyglet MOD_CTRL
+assert len(group_key_scene.selection) == 1
+grouped = group_key_scene.selection[0]
+assert isinstance(grouped, manimlib.VGroup)
+assert list(grouped) == [group_left, group_right]
+assert group_key_scene.on_key_press(ord("g"), 2 | 1) is None  # CTRL|SHIFT
+assert list(group_key_scene.selection) == [group_left, group_right]
+
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
 assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
