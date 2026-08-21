@@ -10915,6 +10915,13 @@ class Textbox(ControlMobject):
         )
         self.text.become(candidate)
 
+    def box_on_mouse_press(self, mob, event_data):
+        del mob, event_data
+        self.isActive = not self.isActive
+        box, _ = self._native_textbox_parts(self._textbox_value, None)
+        self.box.become(box)
+        return False
+
 
 class ControlPanel(Group):
     """Atlas's native GREY_C panel, opener tab, and controls column."""
@@ -11101,19 +11108,37 @@ class ControlPanel(Group):
         for control, target in zip(controls, targets):
             control.shift(target.get_center() - control.get_center())
 
-    def add_controls(self, *new_controls):
-        self.controls.add(*new_controls)
+    def move_panel_and_controls_to_panel_opener(self):
         self._layout_controls_against_opener()
+
+    def add_controls(self, *new_controls):
+        if not all(isinstance(control, ControlMobject) for control in new_controls):
+            raise TypeError(
+                "ControlPanel controls must be ControlMobject instances"
+            )
+        self.controls.add(*new_controls)
+        self.move_panel_and_controls_to_panel_opener()
 
     def remove_controls(self, *controls_to_remove):
         self.controls.remove(*controls_to_remove)
-        self._layout_controls_against_opener()
+        self.move_panel_and_controls_to_panel_opener()
 
     def open_panel(self):
         return self._rebuild_control_panel(open=True)
 
     def close_panel(self):
         return self._rebuild_control_panel(open=False)
+
+    def panel_opener_on_mouse_drag(self, mob, event_data):
+        del mob
+        self.panel_opener.match_y(event_data["point"])
+        self.move_panel_and_controls_to_panel_opener()
+        return False
+
+    def panel_on_mouse_scroll(self, mob, event_data):
+        del mob
+        self.controls.set_y(self.controls.get_y() + 10.0 * event_data["offset"][1])
+        return False
 
 
 class CameraFrame(Mobject):

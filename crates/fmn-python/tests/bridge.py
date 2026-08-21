@@ -2937,13 +2937,26 @@ else:
     raise AssertionError("Textbox silently discarded an unknown option")
 assert not hasattr(failed_textbox, "submobjects")
 
-try:
-    textbox.box_on_mouse_press(textbox.box, {"point": np.zeros(3)})
-except NotImplementedError as error:
-    assert "Textbox.box_on_mouse_press" in str(error), error
-    assert "semantic binding has not landed" in str(error), error
-else:
-    raise AssertionError("Textbox fabricated an unbound mouse-press gateway")
+assert str(inspect.signature(interactive.Textbox.box_on_mouse_press)) == (
+    "(self, mob, event_data)"
+)
+textbox_box = textbox.box
+textbox_text = textbox.text
+assert textbox.isActive is True
+assert textbox.box.get_stroke_color() == manimlib.BLUE
+assert textbox.box_on_mouse_press(
+    textbox.box, {"point": np.zeros(3)}
+) is False
+assert textbox.isActive is False
+assert textbox.box is textbox_box
+assert textbox.text is textbox_text
+assert textbox.get_value() == "committed"
+assert textbox.box.get_stroke_color() == manimlib.RED
+assert textbox.box_on_mouse_press(
+    textbox.box, {"point": np.zeros(3)}
+) is False
+assert textbox.isActive is True
+assert textbox.box.get_stroke_color() == manimlib.BLUE
 
 styled_textbox = interactive.Textbox(
     "hi",
@@ -3071,6 +3084,56 @@ assert np.isclose(
     + manimlib.MED_SMALL_BUFF,
     atol=1e-6,
 )
+assert str(
+    inspect.signature(
+        interactive.ControlPanel.move_panel_and_controls_to_panel_opener
+    )
+) == "(self)"
+assert str(
+    inspect.signature(interactive.ControlPanel.panel_opener_on_mouse_drag)
+) == "(self, mob, event_data)"
+assert str(
+    inspect.signature(interactive.ControlPanel.panel_on_mouse_scroll)
+) == "(self, mob, event_data)"
+drag_y = control_panel.panel_opener.get_y() - 1.25
+assert control_panel.panel_opener_on_mouse_drag(
+    control_panel.panel_opener,
+    {"point": np.array([0.0, drag_y, 0.0])},
+) is False
+assert control_panel.panel is panel_identity
+assert control_panel.panel_opener is opener_identity
+assert control_panel.controls is controls_identity
+assert np.isclose(control_panel.panel_opener.get_y(), drag_y, atol=1e-6)
+assert np.isclose(
+    control_panel.panel.get_bottom()[1],
+    control_panel.panel_opener.submobjects[0].get_top()[1],
+    atol=1e-6,
+)
+assert np.isclose(
+    control_panel.controls.get_bottom()[1],
+    control_panel.panel_opener.submobjects[0].get_top()[1]
+    + manimlib.MED_SMALL_BUFF,
+    atol=1e-6,
+)
+controls_y = control_panel.controls.get_y()
+assert control_panel.panel_on_mouse_scroll(
+    control_panel.panel,
+    {"offset": np.array([0.0, 0.2, 0.0])},
+) is False
+assert control_panel.controls is controls_identity
+assert np.isclose(control_panel.controls.get_y(), controls_y + 2.0, atol=1e-6)
+try:
+    control_panel.add_controls(geometry.Circle())
+except TypeError as error:
+    assert str(error) == (
+        "ControlPanel controls must be ControlMobject instances"
+    )
+else:
+    raise AssertionError("ControlPanel.add_controls accepted a non-control")
+assert list(control_panel.controls.submobjects) == [
+    panel_checkbox,
+    panel_textbox,
+]
 
 try:
     interactive.ControlPanel(geometry.Circle())
