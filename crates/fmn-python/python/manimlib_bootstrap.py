@@ -14353,6 +14353,36 @@ _UnavailablePygletWindow.__qualname__ = "PygletWindow"
 _UnavailablePygletWindow.__module__ = "manimlib.window"
 
 
+class Window(_UnavailablePygletWindow):
+    """Reference pyglet/moderngl_window surface.
+
+    Construction is import-compatible and names the Studio window owner.
+    GUI methods stay schema placeholders until Studio binds a host window.
+    """
+
+    cursor = True
+    fullscreen = False
+    gl_version = (3, 3)
+    resizable = True
+    vsync = True
+
+    def __init__(
+        self,
+        scene=None,
+        position_string="UR",
+        monitor_index=1,
+        full_screen=False,
+        size=None,
+        position=None,
+        samples=0,
+    ):
+        del scene, position_string, monitor_index, full_screen, size, position, samples
+        raise _CapabilityError(
+            "the Reference window gateway is unavailable; "
+            "FrankenManim Studio owns interactive windows"
+        )
+
+
 def _constant_expression(detail, env):
     """Evaluate only the closed expression grammar used by schema constants.
 
@@ -14969,6 +14999,7 @@ def _install_schema_surface():
             "InteractiveSceneEmbed",
         ): InteractiveSceneEmbed,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
+        ("manimlib.window", "Window"): Window,
         ("manimlib.animation.animation", "Animation"): Animation,
     }
     pyglet_module = _ensure_module("manimlib.window")

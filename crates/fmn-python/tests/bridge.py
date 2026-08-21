@@ -10727,7 +10727,8 @@ for refused_module, refused_name in (
         raise AssertionError(
             f"Reference renderer leak {refused_module}.{refused_name} became live"
         )
-pyglet_window = importlib.import_module("manimlib.window").PygletWindow
+window_mod = importlib.import_module("manimlib.window")
+pyglet_window = window_mod.PygletWindow
 assert isinstance(pyglet_window, type)
 try:
     pyglet_window()
@@ -10738,6 +10739,35 @@ except bridge_errors.CapabilityError as error:
     )
 else:
     raise AssertionError("the Reference PygletWindow gateway became live")
+assert window_mod.Window.__bases__ == (window_mod.PygletWindow,)
+assert str(inspect.signature(window_mod.Window)) == (
+    "(scene=None, position_string='UR', monitor_index=1, "
+    "full_screen=False, size=None, position=None, samples=0)"
+)
+assert window_mod.Window.cursor is True
+assert window_mod.Window.fullscreen is False
+assert window_mod.Window.gl_version == (3, 3)
+assert window_mod.Window.resizable is True
+assert window_mod.Window.vsync is True
+try:
+    window_mod.Window()
+except bridge_errors.CapabilityError as error:
+    assert str(error) == (
+        "the Reference window gateway is unavailable; "
+        "FrankenManim Studio owns interactive windows"
+    )
+else:
+    raise AssertionError("the Reference Window gateway became live")
+failed_window = window_mod.Window.__new__(window_mod.Window)
+try:
+    window_mod.Window.__init__(failed_window, Scene())
+except bridge_errors.CapabilityError as error:
+    assert str(error) == (
+        "the Reference window gateway is unavailable; "
+        "FrankenManim Studio owns interactive windows"
+    )
+else:
+    raise AssertionError("Window accepted a Scene without a Studio host")
 assert not any(
     name == root or name.startswith(root + ".")
     for name in sys.modules
