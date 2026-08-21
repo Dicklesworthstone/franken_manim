@@ -42,6 +42,7 @@ fmd-math.workspace = true
 # against the pinned parser's actual bundled faces — the same bytes the
 # engine ships, so the manifest's hashes are the input closure's identity.
 fmd-font.workspace = true
+fnp-io.workspace = true
 
 [dev-dependencies]
 # W10 e2e CLI scenarios drive fmn_cli's in-process runner (fm-fjq; dev-only,

@@ -15,20 +15,43 @@
 //! is capped, dimension counts are capped, and every size computation is
 //! checked arithmetic.
 //!
-//! The governed closure (D1) is why this is owned: fnp-io is the designated
-//! provider once the FrankenSuite is consumable from SUITE.lock, and this
-//! module's surface is kept small so that migration (tracked as its own bead)
-//! is a swap of internals, not a test rewrite.
+//! **The format is fnp-io's; the subset is this module's** (fm-sum). The
+//! document parser and the header encoder are `fnp_io::read_npy_bytes` /
+//! `fnp_io::write_npy_bytes` — the designated provider now that the
+//! FrankenSuite is consumable from SUITE.lock (D1). There is exactly one npy
+//! parser in the workspace, and it is not this one. What stays here is the
+//! *policy*: the version whitelist, the dtype whitelist, C order, the
+//! dimensionality cap, and the named [`NpyError`] vocabulary the Gauntlet
+//! reports with.
+//!
+//! Two acceptance behaviours moved with the parser, and both loosen what a
+//! *malformed* header may contain (well-formed `np.save` output is unaffected,
+//! and `tests/npy_interchange.rs` keeps `write_npy(read_npy(bytes)) == bytes`
+//! the law):
+//!
+//! - unknown dictionary keys are ignored by fnp-io rather than refused by
+//!   name;
+//! - redundant separators inside the shape tuple (`(1,,2)`) are skipped
+//!   rather than refused.
+//!
+//! One diagnostic narrowed: fnp-io's payload verdict is exact but carries no
+//! counts, so a shape/payload disagreement on *read* now surfaces as
+//! [`NpyError::Truncated`] rather than [`NpyError::DataLength`].
+//! [`NpyArray::new`] still reports `DataLength` with both counts, which is
+//! where callers construct arrays. Recovering it on the read path needs an
+//! upstream fnp-io change (counts in `ReadPayloadIncomplete`, or a
+//! header-only parse entry point).
 
 use std::fmt;
 
 /// Hard cap on the declared header length. numpy v1.0 headers are u16-sized
-/// anyway; v2.0 declares u32 and this cap is what keeps that honest.
-const MAX_HEADER_LEN: usize = 64 * 1024;
+/// anyway; v2.0 declares u32 and this cap is what keeps that honest. Bound to
+/// fnp-io's own budget so the two can never drift apart.
+const MAX_HEADER_LEN: usize = fnp_io::MAX_HEADER_BYTES;
 /// Hard cap on dimensionality; fixture arrays are 1-D or 2-D in practice.
+/// Narrower than fnp-io's rank budget on purpose — this is the interchange
+/// subset, not the format.
 const MAX_DIMS: usize = 8;
-/// The six-byte magic every `.npy` file starts with.
-const MAGIC: &[u8; 6] = b"\x93NUMPY";
 
 /// The element type of an interchange array.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -288,15 +311,67 @@ fn element_count(shape: &[usize]) -> Result<usize, NpyError> {
         .ok_or(NpyError::Overflow)
 }
 
-/// Decode a `.npy` document from `bytes`.
+/// Map the interchange subset onto fnp-io's dtype model.
+impl From<DType> for fnp_io::IOSupportedDType {
+    fn from(dtype: DType) -> Self {
+        match dtype {
+            DType::F64 => Self::F64,
+            DType::F32 => Self::F32,
+            DType::I64 => Self::I64,
+        }
+    }
+}
+
+impl DType {
+    /// The interchange subset's whitelist, applied to whatever fnp-io decoded.
+    /// Everything fnp-io understands but this module does not accept is named
+    /// by its descr, not silently widened.
+    fn from_io(dtype: fnp_io::IOSupportedDType) -> Result<Self, NpyError> {
+        match dtype {
+            fnp_io::IOSupportedDType::F64 => Ok(Self::F64),
+            fnp_io::IOSupportedDType::F32 => Ok(Self::F32),
+            fnp_io::IOSupportedDType::I64 => Ok(Self::I64),
+            other => Err(NpyError::UnsupportedDescr {
+                descr: other.descr(),
+            }),
+        }
+    }
+}
+
+/// fnp-io's verdict in this module's vocabulary.
 ///
-/// # Errors
-/// A precise [`NpyError`] naming the first thing wrong with the document.
-pub fn read_npy(bytes: &[u8]) -> Result<NpyArray, NpyError> {
+/// The framing errors ([`NpyError::BadMagic`], [`NpyError::UnsupportedVersion`],
+/// [`NpyError::HeaderTooLarge`]) are decided by [`read_npy`] before delegating,
+/// so they never arrive here.
+fn map_io_error(error: fnp_io::IOError) -> NpyError {
+    match error {
+        fnp_io::IOError::MagicInvalid => NpyError::BadMagic,
+        fnp_io::IOError::DTypeDescriptorInvalid => NpyError::Header {
+            detail: "descr is not a NumPy dtype descriptor".to_string(),
+        },
+        // fnp-io's payload verdict is exact ("payload bytes must exactly match
+        // expected shape/dtype footprint") but carries no counts, so the read
+        // path can no longer name expected/actual the way `NpyArray::new`
+        // still does. See the module docs.
+        fnp_io::IOError::ReadPayloadIncomplete(_) => NpyError::Truncated { reading: "payload" },
+        other => NpyError::Header {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// Read this module's framing policy off the preamble: the magic, the format
+/// version whitelist, and the declared header length against the cap.
+///
+/// This is deliberately *not* a second parser — it decodes no dictionary and
+/// no shape. It exists because the interchange subset admits a narrower set of
+/// versions than fnp-io does (which also reads 3.0), and because §16.5 wants
+/// the header bound named before anything is decoded.
+fn read_framing(bytes: &[u8]) -> Result<(), NpyError> {
     let magic = bytes
         .first_chunk::<6>()
         .ok_or(NpyError::Truncated { reading: "magic" })?;
-    if magic != MAGIC {
+    if magic != &fnp_io::NPY_MAGIC_PREFIX {
         return Err(NpyError::BadMagic);
     }
     let &[major, minor] = bytes
@@ -306,19 +381,19 @@ pub fn read_npy(bytes: &[u8]) -> Result<NpyArray, NpyError> {
         // get(6..8) yields exactly two bytes; keep the reader panic-free anyway.
         return Err(NpyError::Truncated { reading: "version" });
     };
-    let (header_len, header_start): (usize, usize) = match (major, minor) {
+    let header_len = match (major, minor) {
         (1, 0) => {
             let len = bytes.get(8..10).ok_or(NpyError::Truncated {
                 reading: "header length",
             })?;
-            (usize::from(u16::from_le_bytes([len[0], len[1]])), 10)
+            usize::from(u16::from_le_bytes([len[0], len[1]]))
         }
         (2, 0) => {
             let len = bytes.get(8..12).ok_or(NpyError::Truncated {
                 reading: "header length",
             })?;
             let len = u32::from_le_bytes([len[0], len[1], len[2], len[3]]);
-            (usize::try_from(len).map_err(|_| NpyError::Overflow)?, 12)
+            usize::try_from(len).map_err(|_| NpyError::Overflow)?
         }
         _ => return Err(NpyError::UnsupportedVersion { major, minor }),
     };
@@ -328,41 +403,32 @@ pub fn read_npy(bytes: &[u8]) -> Result<NpyArray, NpyError> {
             max: MAX_HEADER_LEN,
         });
     }
-    let header_end = header_start
-        .checked_add(header_len)
-        .ok_or(NpyError::Overflow)?;
-    let header = bytes
-        .get(header_start..header_end)
-        .ok_or(NpyError::Truncated { reading: "header" })?;
-    if !header.is_ascii() {
-        return Err(NpyError::Header {
-            detail: "header is not ASCII".to_string(),
-        });
-    }
-    let header = std::str::from_utf8(header).map_err(|_| NpyError::Header {
-        detail: "header is not ASCII".to_string(),
-    })?;
-    let (descr, fortran, shape) = parse_header_dict(header)?;
-    if fortran {
+    Ok(())
+}
+
+/// Decode a `.npy` document from `bytes`.
+///
+/// The document is parsed by fnp-io; this function owns the interchange
+/// subset's policy on top of it — version whitelist, C order, the `<f8`/`<f4`/
+/// `<i8` dtype whitelist, the dimensionality cap, and the exact element count.
+///
+/// # Errors
+/// A precise [`NpyError`] naming the first thing wrong with the document.
+pub fn read_npy(bytes: &[u8]) -> Result<NpyArray, NpyError> {
+    read_framing(bytes)?;
+    let decoded = fnp_io::read_npy_bytes(bytes, false).map_err(map_io_error)?;
+    if decoded.header.fortran_order {
         return Err(NpyError::FortranOrder);
     }
-    let dtype = match descr.as_str() {
-        "<f8" => DType::F64,
-        "<f4" => DType::F32,
-        "<i8" => DType::I64,
-        _ => return Err(NpyError::UnsupportedDescr { descr }),
-    };
+    let dtype = DType::from_io(decoded.header.descr)?;
+    let shape = decoded.header.shape;
+    // The dimensionality cap is this module's, not fnp-io's (which admits 32).
+    // fnp-io has already bounded the header itself, so the shape vector it
+    // hands back is bounded by that budget before this refuses it.
     let count = element_count(&shape)?;
-    let payload_len = count.checked_mul(dtype.size()).ok_or(NpyError::Overflow)?;
-    let payload = bytes
-        .get(header_end..)
-        .ok_or(NpyError::Truncated { reading: "payload" })?;
-    if payload.len() != payload_len {
-        return Err(NpyError::DataLength {
-            expected: count,
-            actual: payload.len() / dtype.size(),
-        });
-    }
+    let payload: &[u8] = &decoded.payload;
+    // fnp-io validated `payload.len() == count * item_size` before returning.
+    debug_assert_eq!(payload.len(), count * dtype.size());
     let data = match dtype {
         DType::F64 => {
             let (chunks, _rem) = payload.as_chunks::<8>();
@@ -381,198 +447,72 @@ pub fn read_npy(bytes: &[u8]) -> Result<NpyArray, NpyError> {
 }
 
 /// Encode `array` as a `.npy` v1.0 document, byte-compatible with what
-/// `np.save` produces for the same array (numpy's key order, spacing, and
-/// 64-byte header padding are reproduced exactly, so round-trips through
-/// Python tooling are byte-stable).
+/// `np.save` produces for the same array.
+///
+/// The bytes come from fnp-io's writer, whose header encoding — numpy's key
+/// order, spacing, `, }` terminator, and 64-byte alignment padding — is the
+/// same construction this module used to perform itself; `tests/npy_interchange.rs`
+/// keeps `write_npy(read_npy(bytes)) == bytes` the law against real `np.save`
+/// output.
+///
+/// # Panics
+/// If `array`'s shape and payload disagree. [`NpyArray::new`] proves they
+/// agree; the fields are public, so a hand-built `NpyArray` can violate it,
+/// and this refuses to emit a corrupt document rather than emitting one
+/// silently.
 #[must_use]
 pub fn write_npy(array: &NpyArray) -> Vec<u8> {
     let dtype = array.data.dtype();
-    let shape_repr = match array.shape.as_slice() {
-        [n] => format!("({n},)"),
-        dims => {
-            let inner: Vec<String> = dims.iter().map(ToString::to_string).collect();
-            format!("({})", inner.join(", "))
-        }
-    };
-    let dict = format!(
-        "{{'descr': '{}', 'fortran_order': False, 'shape': {}, }}",
-        dtype.descr(),
-        shape_repr
-    );
-    // Pad with spaces so magic(6) + version(2) + len(2) + header is a
-    // multiple of 64, with the final header byte a newline (numpy's rule).
-    let unpadded = 10 + dict.len() + 1;
-    let padding = (64 - unpadded % 64) % 64;
-    let header_len = dict.len() + padding + 1;
-    let mut out = Vec::with_capacity(10 + header_len + array.data.len() * dtype.size());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&[1, 0]);
-    // header_len is bounded by the dict repr of at most MAX_DIMS dimensions
-    // plus 64 bytes of padding (< 300), so the u16 cast cannot truncate.
-    #[allow(clippy::cast_possible_truncation)]
-    out.extend_from_slice(&(header_len as u16).to_le_bytes());
-    out.extend_from_slice(dict.as_bytes());
-    out.resize(out.len() + padding, b' ');
-    out.push(b'\n');
+    let mut payload = Vec::with_capacity(array.data.len() * dtype.size());
     match &array.data {
         NpyData::F64(v) => {
             for x in v {
-                out.extend_from_slice(&x.to_le_bytes());
+                payload.extend_from_slice(&x.to_le_bytes());
             }
         }
         NpyData::F32(v) => {
             for x in v {
-                out.extend_from_slice(&x.to_le_bytes());
+                payload.extend_from_slice(&x.to_le_bytes());
             }
         }
         NpyData::I64(v) => {
             for x in v {
-                out.extend_from_slice(&x.to_le_bytes());
+                payload.extend_from_slice(&x.to_le_bytes());
             }
         }
     }
-    out
+    let header = fnp_io::NpyHeader {
+        shape: array.shape.clone(),
+        fortran_order: false,
+        descr: dtype.into(),
+    };
+    fnp_io::write_npy_bytes(&header, &payload, false)
+        .expect("NpyArray::new proves the shape and payload agree for a non-object dtype")
 }
-
-/// Parse the header dict: exactly the keys `descr` (string), `fortran_order`
-/// (True/False), and `shape` (tuple of non-negative integers), in any order,
-/// with unknown keys rejected by name.
-fn parse_header_dict(header: &str) -> Result<(String, bool, Vec<usize>), NpyError> {
-    let s = header.trim();
-    let inner = s
-        .strip_prefix('{')
-        .and_then(|t| t.strip_suffix('}'))
-        .ok_or_else(|| NpyError::Header {
-            detail: "header is not a dict literal".to_string(),
-        })?;
-    let mut descr: Option<String> = None;
-    let mut fortran: Option<bool> = None;
-    let mut shape: Option<Vec<usize>> = None;
-    let mut rest = inner.trim();
-    while !rest.is_empty() {
-        // Key: a single-quoted identifier.
-        let after_quote = rest.strip_prefix('\'').ok_or_else(|| NpyError::Header {
-            detail: format!("expected quoted key at {rest:?}"),
-        })?;
-        let (key, after_key) = after_quote
-            .split_once('\'')
-            .ok_or_else(|| NpyError::Header {
-                detail: "unterminated key quote".to_string(),
-            })?;
-        let after_colon =
-            after_key
-                .trim_start()
-                .strip_prefix(':')
-                .ok_or_else(|| NpyError::Header {
-                    detail: format!("expected ':' after key {key:?}"),
-                })?;
-        let value = after_colon.trim_start();
-        rest = match key {
-            "descr" => {
-                let after = value.strip_prefix('\'').ok_or_else(|| NpyError::Header {
-                    detail: "descr is not a string".to_string(),
-                })?;
-                let (v, tail) = after.split_once('\'').ok_or_else(|| NpyError::Header {
-                    detail: "unterminated descr".to_string(),
-                })?;
-                if descr.replace(v.to_string()).is_some() {
-                    return Err(NpyError::Header {
-                        detail: "duplicate descr".to_string(),
-                    });
-                }
-                tail
-            }
-            "fortran_order" => {
-                let (v, tail) = if let Some(t) = value.strip_prefix("False") {
-                    (false, t)
-                } else if let Some(t) = value.strip_prefix("True") {
-                    (true, t)
-                } else {
-                    return Err(NpyError::Header {
-                        detail: "fortran_order is not True/False".to_string(),
-                    });
-                };
-                if fortran.replace(v).is_some() {
-                    return Err(NpyError::Header {
-                        detail: "duplicate fortran_order".to_string(),
-                    });
-                }
-                tail
-            }
-            "shape" => {
-                let after = value.strip_prefix('(').ok_or_else(|| NpyError::Header {
-                    detail: "shape is not a tuple".to_string(),
-                })?;
-                let (tuple, tail) = after.split_once(')').ok_or_else(|| NpyError::Header {
-                    detail: "unterminated shape tuple".to_string(),
-                })?;
-                let mut dims = Vec::with_capacity(MAX_DIMS);
-                let mut parts = tuple.split(',').peekable();
-                while let Some(part) = parts.next() {
-                    let part = part.trim();
-                    if part.is_empty() {
-                        if parts.peek().is_none() && !dims.is_empty() {
-                            continue; // trailing comma in (n,)
-                        }
-                        return Err(NpyError::Header {
-                            detail: "shape tuple contains an empty dimension".to_string(),
-                        });
-                    }
-                    if dims.len() == MAX_DIMS {
-                        let remaining = parts.filter(|part| !part.trim().is_empty()).count();
-                        return Err(NpyError::TooManyDims {
-                            dims: MAX_DIMS.saturating_add(1).saturating_add(remaining),
-                            max: MAX_DIMS,
-                        });
-                    }
-                    dims.push(part.parse::<usize>().map_err(|_| NpyError::Header {
-                        detail: format!("bad shape dimension {part:?}"),
-                    })?);
-                }
-                if dims.len() == 1 && !tuple.contains(',') {
-                    return Err(NpyError::Header {
-                        detail: "one-dimensional shape tuple requires a trailing comma".to_string(),
-                    });
-                }
-                if shape.replace(dims).is_some() {
-                    return Err(NpyError::Header {
-                        detail: "duplicate shape".to_string(),
-                    });
-                }
-                tail
-            }
-            other => {
-                return Err(NpyError::Header {
-                    detail: format!("unknown header key {other:?}"),
-                });
-            }
-        };
-        // Consume one separating comma (and surrounding space), if present.
-        rest = rest.trim_start();
-        if let Some(t) = rest.strip_prefix(',') {
-            rest = t.trim_start();
-        } else if !rest.is_empty() {
-            return Err(NpyError::Header {
-                detail: format!("expected ',' between entries at {rest:?}"),
-            });
-        }
-    }
-    match (descr, fortran, shape) {
-        (Some(d), Some(f), Some(s)) => Ok((d, f, s)),
-        (d, f, s) => Err(NpyError::Header {
-            detail: format!(
-                "missing keys: descr={} fortran_order={} shape={}",
-                d.is_some(),
-                f.is_some(),
-                s.is_some()
-            ),
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a v1.0 document around an arbitrary header dict. Test-only
+    /// construction so the reader under test does all the parsing.
+    fn doc(dict: &str, payload: &[u8]) -> Vec<u8> {
+        let unpadded = 10 + dict.len() + 1;
+        let padding = (64 - unpadded % 64) % 64;
+        let header_len = dict.len() + padding + 1;
+        let mut out = Vec::new();
+        out.extend_from_slice(&fnp_io::NPY_MAGIC_PREFIX);
+        out.extend_from_slice(&[1, 0]);
+        out.extend_from_slice(
+            &u16::try_from(header_len)
+                .expect("test header fits u16")
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(dict.as_bytes());
+        out.resize(out.len() + padding, b' ');
+        out.push(b'\n');
+        out.extend_from_slice(payload);
+        out
+    }
 
     #[test]
     fn round_trip_f64_2d() {
@@ -582,8 +522,9 @@ mod tests {
         )
         .unwrap();
         let bytes = write_npy(&a);
-        // Header block is 64-byte aligned and v1.0.
-        assert_eq!(&bytes[..6], MAGIC);
+        // Header block is 64-byte aligned and v1.0 — fnp-io's writer reproduces
+        // the same construction this module used to perform itself.
+        assert_eq!(&bytes[..6], &fnp_io::NPY_MAGIC_PREFIX);
         assert_eq!(&bytes[6..8], &[1, 0]);
         let hlen = usize::from(u16::from_le_bytes([bytes[8], bytes[9]]));
         assert_eq!((10 + hlen) % 64, 0);
@@ -606,36 +547,103 @@ mod tests {
         }
     }
 
+    /// The exact byte sequence numpy's own writer emits for the canonical
+    /// header — the construction `tests/npy_interchange.rs` locks against real
+    /// `np.save` output, asserted here at the unit level so a drift in fnp-io's
+    /// encoder is named here first.
     #[test]
-    fn header_parses_in_any_key_order() {
-        let (d, f, s) =
-            parse_header_dict("{'shape': (4, 3), 'fortran_order': False, 'descr': '<f4'}").unwrap();
-        assert_eq!((d.as_str(), f, s), ("<f4", false, vec![4, 3]));
+    fn header_bytes_are_numpys_canonical_form() {
+        let a = NpyArray::new(vec![2, 3], NpyData::F64(vec![0.0; 6])).unwrap();
+        let bytes = write_npy(&a);
+        let hlen = usize::from(u16::from_le_bytes([bytes[8], bytes[9]]));
+        let header = std::str::from_utf8(&bytes[10..10 + hlen]).unwrap();
+        assert_eq!(
+            header.trim_end(),
+            "{'descr': '<f8', 'fortran_order': False, 'shape': (2, 3), }"
+        );
+        let one = write_npy(&NpyArray::new(vec![1], NpyData::F32(vec![0.0])).unwrap());
+        let hlen = usize::from(u16::from_le_bytes([one[8], one[9]]));
+        assert_eq!(
+            std::str::from_utf8(&one[10..10 + hlen]).unwrap().trim_end(),
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (1,), }"
+        );
+    }
+
+    #[test]
+    fn header_keys_parse_in_any_order() {
+        let bytes = doc(
+            "{'shape': (4, 3), 'fortran_order': False, 'descr': '<f4'}",
+            &vec![0u8; 4 * 3 * 4],
+        );
+        let array = read_npy(&bytes).expect("key order is not significant");
+        assert_eq!(array.shape, vec![4, 3]);
+        assert_eq!(array.data.dtype(), DType::F32);
     }
 
     #[test]
     fn named_errors_for_bad_documents() {
         assert_eq!(read_npy(b"not npy").unwrap_err(), NpyError::BadMagic);
+
+        // A short payload is refused. fnp-io's verdict is exact but carries no
+        // counts, so this surfaces as Truncated rather than DataLength.
         let a = NpyArray::new(vec![1], NpyData::F64(vec![1.0])).unwrap();
         let mut bytes = write_npy(&a);
-        // Truncate the payload: precise DataLength error.
         bytes.truncate(bytes.len() - 4);
-        assert!(matches!(
-            read_npy(&bytes).unwrap_err(),
-            NpyError::DataLength { expected: 1, .. }
-        ));
-        // Fortran order is refused by name.
-        let hdr = "{'descr': '<f8', 'fortran_order': True, 'shape': (1,)}";
         assert_eq!(
-            parse_header_dict(hdr).map(|t| t.1),
-            Ok(true),
-            "parser reads it; read_npy refuses it"
+            read_npy(&bytes).unwrap_err(),
+            NpyError::Truncated { reading: "payload" }
         );
-        // Unknown keys are refused by name.
-        assert!(matches!(
-            parse_header_dict("{'descr': '<f8', 'fortran_order': False, 'shape': (1,), 'x': 1}"),
-            Err(NpyError::Header { .. })
-        ));
+
+        // Fortran order is refused by name: fnp-io parses it, this module's
+        // policy declines it.
+        let fortran = doc(
+            "{'descr': '<f8', 'fortran_order': True, 'shape': (1,), }",
+            &[0u8; 8],
+        );
+        assert_eq!(read_npy(&fortran).unwrap_err(), NpyError::FortranOrder);
+
+        // A dtype fnp-io understands but the interchange subset does not is
+        // named by its descr.
+        let narrow = doc(
+            "{'descr': '<i4', 'fortran_order': False, 'shape': (1,), }",
+            &[0u8; 4],
+        );
+        assert_eq!(
+            read_npy(&narrow).unwrap_err(),
+            NpyError::UnsupportedDescr {
+                descr: "<i4".to_string()
+            }
+        );
+    }
+
+    /// This module's version whitelist is narrower than fnp-io's, which also
+    /// reads 3.0. The framing check is what keeps it narrow.
+    #[test]
+    fn version_whitelist_is_this_modules() {
+        let mut v3 = Vec::from(fnp_io::NPY_MAGIC_PREFIX);
+        v3.extend_from_slice(&[3, 0]);
+        v3.extend_from_slice(&64u32.to_le_bytes());
+        assert_eq!(
+            read_npy(&v3).unwrap_err(),
+            NpyError::UnsupportedVersion { major: 3, minor: 0 }
+        );
+    }
+
+    /// §16.5: the declared header length is named against the cap before any
+    /// dictionary is decoded.
+    #[test]
+    fn oversized_header_declaration_is_capped_by_name() {
+        let mut huge = Vec::from(fnp_io::NPY_MAGIC_PREFIX);
+        huge.extend_from_slice(&[2, 0]);
+        let declared = u32::try_from(MAX_HEADER_LEN + 1).unwrap();
+        huge.extend_from_slice(&declared.to_le_bytes());
+        assert_eq!(
+            read_npy(&huge).unwrap_err(),
+            NpyError::HeaderTooLarge {
+                len: MAX_HEADER_LEN + 1,
+                max: MAX_HEADER_LEN
+            }
+        );
     }
 
     #[test]
@@ -660,16 +668,21 @@ mod tests {
         ));
     }
 
+    /// The dimensionality cap is this module's own (8), applied to whatever
+    /// fnp-io hands back. Beyond fnp-io's own rank budget the shared parser
+    /// refuses first, which is a `Header` diagnostic rather than this one.
     #[test]
-    fn dimension_cap_is_enforced_during_header_parsing() {
-        let mut shape = "1,".repeat(4_095);
-        shape.push('1');
-        let header = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({shape}), }}");
-        let error = parse_header_dict(&header).expect_err("4,096 dimensions exceed the cap");
+    fn dimension_cap_is_this_modules_policy() {
+        let nine = "1, ".repeat(8) + "1";
+        let bytes = doc(
+            &format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({nine}), }}"),
+            &[0u8; 8],
+        );
+        let error = read_npy(&bytes).expect_err("nine dimensions exceed this module's cap");
         assert_eq!(
             error,
             NpyError::TooManyDims {
-                dims: 4_096,
+                dims: 9,
                 max: MAX_DIMS
             }
         );
@@ -677,22 +690,55 @@ mod tests {
             error.to_string().len() < 128,
             "dimension-cap diagnostic must stay bounded: {error}"
         );
+
+        let far_past = "1, ".repeat(64) + "1";
+        let bytes = doc(
+            &format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({far_past}), }}"),
+            &[0u8; 8],
+        );
+        assert!(matches!(
+            read_npy(&bytes).unwrap_err(),
+            NpyError::Header { .. }
+        ));
     }
 
+    /// The two acceptance behaviours that moved to the shared parser, pinned
+    /// so the loosening stays visible and any future drift is caught here.
+    /// Neither affects well-formed `np.save` output.
     #[test]
-    fn malformed_shape_tuple_separators_are_refused() {
-        for shape in ["", ",1", "1,,2", "1,,", "1"] {
-            let header =
-                format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({shape}), }}");
-            assert!(
-                matches!(parse_header_dict(&header), Err(NpyError::Header { .. })),
-                "malformed shape tuple ({shape}) must be refused"
-            );
-        }
+    fn shared_parser_acceptance_is_pinned() {
+        // Unknown keys are ignored rather than refused by name.
+        let extra_key = doc(
+            "{'descr': '<f8', 'fortran_order': False, 'shape': (1,), 'x': 1, }",
+            &[0u8; 8],
+        );
+        assert_eq!(
+            read_npy(&extra_key)
+                .expect("fnp-io ignores unknown keys")
+                .shape,
+            vec![1]
+        );
 
-        let (_, _, shape) =
-            parse_header_dict("{'descr': '<f8', 'fortran_order': False, 'shape': (1,), }")
-                .expect("canonical one-dimensional tuple parses");
-        assert_eq!(shape, vec![1]);
+        // Redundant shape separators are skipped rather than refused.
+        let doubled = doc(
+            "{'descr': '<f8', 'fortran_order': False, 'shape': (1,,2), }",
+            &[0u8; 16],
+        );
+        assert_eq!(
+            read_npy(&doubled)
+                .expect("fnp-io skips empty shape parts")
+                .shape,
+            vec![1, 2]
+        );
+
+        // A singleton tuple still requires its trailing comma.
+        let bare = doc(
+            "{'descr': '<f8', 'fortran_order': False, 'shape': (1), }",
+            &[0u8; 8],
+        );
+        assert!(matches!(
+            read_npy(&bare).unwrap_err(),
+            NpyError::Header { .. }
+        ));
     }
 }
