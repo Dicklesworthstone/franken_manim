@@ -12440,3 +12440,35 @@ except TypeError as error:
     assert "NoneType" in str(error), error
 else:
     raise AssertionError("ShowCreationThenFadeOut accepted None")
+
+# fm-5wq.4.108: Matrix.element_to_mobject complex entries route through
+# DecimalNumber — the fm-5wq.4.80 degenerate reductions render natively,
+# a general complex entry inherits BN-08's named refusal, and nothing
+# falls through to Tex(str(...))'s "(1+2j)" spelling.
+complex_entry_matrix = matrix_module.Matrix([[1.0]])
+complex_entry_real = complex_entry_matrix.element_to_mobject(complex(1, 0))
+assert isinstance(complex_entry_real, manimlib.DecimalNumber)
+assert complex_entry_real.get_value() == complex(1, 0)
+assert any(child.has_points() for child in complex_entry_real.submobjects)
+
+complex_entry_imag = complex_entry_matrix.element_to_mobject(complex(0, 2))
+assert isinstance(complex_entry_imag, manimlib.DecimalNumber)
+assert complex_entry_imag.get_value() == complex(0, 2)
+assert any(child.has_points() for child in complex_entry_imag.submobjects)
+
+try:
+    complex_entry_matrix.element_to_mobject(complex(1, 2))
+except NotImplementedError as error:
+    assert "BN-08" in str(error), error
+else:
+    raise AssertionError(
+        "a general complex matrix entry was rendered silently"
+    )
+
+# The non-Matrix negative stays the existing named TypeError.
+try:
+    matrix_module.Matrix.element_to_mobject("not-a-matrix", complex(1, 0))
+except TypeError as error:
+    assert "requires a Matrix instance" in str(error), error
+else:
+    raise AssertionError("element_to_mobject accepted a non-Matrix self")

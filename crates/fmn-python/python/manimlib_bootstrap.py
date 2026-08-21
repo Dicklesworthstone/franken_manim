@@ -6320,6 +6320,18 @@ class Matrix(VMobject):
         if isinstance(element, VMobject):
             return element
         style = dict(self._matrix_entry_style)
+        if isinstance(element, (complex, _np.complexfloating)):
+            # matrix.py routes complex entries through DecimalNumber
+            # (fm-5wq.4.108): the degenerate-component reductions ride the
+            # native formatter (fm-5wq.4.80), and a general complex entry
+            # inherits BN-08's named refusal from DecimalNumber itself —
+            # never Tex(str(...))'s silent "(1+2j)" fallthrough.
+            return DecimalNumber(
+                complex(element),
+                num_decimal_places=self._matrix_decimal_places,
+                font_size=self._matrix_entry_font_size,
+                **style,
+            )
         if isinstance(element, (float, _np.floating)) and not isinstance(
             element, bool
         ):
