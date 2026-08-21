@@ -2636,6 +2636,7 @@ assert delete_a not in delete_scene.selection
 assert len(delete_scene.selection) == 0
 assert delete_b in delete_scene.mobjects
 assert delete_scene.delete_selection() is None
+assert len(delete_scene.selection) == 0
 assert delete_b in delete_scene.mobjects
 
 # fm-5wq.4: toggle_selection_mode flips the selection scope through the native
