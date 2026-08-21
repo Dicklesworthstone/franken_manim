@@ -1515,6 +1515,10 @@ mod tests {
         assert!(close(camera.frame().width(), FRAME_WIDTH));
         assert!(close(camera.frame().height(), FRAME_WIDTH * 3.0 / 4.0));
         assert!(close(camera.frame().aspect_ratio(), 4.0 / 3.0));
+        assert!(close(
+            camera.frame().width() / camera.frame().height(),
+            f64::from(camera.pixel_width()) / f64::from(camera.pixel_height()),
+        ));
         assert!(camera.revision() > revision);
     }
 
