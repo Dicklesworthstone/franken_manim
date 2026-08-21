@@ -2523,8 +2523,8 @@ assert np.allclose(motion_source.get_center(), drag_point)
 assert motion.mobject is motion_source
 
 # Button uses Atlas's native arbitrary-mobject wrapper while preserving the
-# Reference's original child and callback identities. Click dispatch remains
-# the separately owned, precisely named event capability gap.
+# Reference's original child and callback identities. mob_on_mouse_press
+# forwards the pressed child to on_click and returns False.
 clicks = []
 button_source = geometry.Circle(radius=0.3)
 button_callback = lambda mob: clicks.append(mob)
@@ -2542,6 +2542,12 @@ assert button.on_click is button_callback
 assert list(button.submobjects) == [button_source]
 assert button.name == "native-button"
 assert clicks == []
+assert button.mob_on_mouse_press(
+    button_source,
+    {"point": np.zeros(3)},
+) is False
+assert clicks == [button_source]
+assert button.mobject is button_source
 
 try:
     interactive.Button(object(), button_callback)
@@ -2549,14 +2555,6 @@ except AssertionError:
     pass
 else:
     raise AssertionError("Button accepted a non-Mobject child")
-
-try:
-    button.mob_on_mouse_press(button_source, {"point": np.zeros(3)})
-except NotImplementedError as error:
-    assert "Button.mob_on_mouse_press" in str(error), error
-    assert "semantic binding has not landed" in str(error), error
-else:
-    raise AssertionError("Button fabricated an unbound mouse-press gateway")
 
 # Checkbox keeps the schema's tracker lineage while Atlas owns the box and
 # the state-dependent checkmark/cross geometry.

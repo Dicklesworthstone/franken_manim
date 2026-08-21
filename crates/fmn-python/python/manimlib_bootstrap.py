@@ -9290,9 +9290,9 @@ class Button(Mobject):
     """Reference-compatible clickable composition over Atlas's native
     arbitrary-mobject button builder.
 
-    Event dispatch remains separately owned, so schema installation keeps the
-    precise ``mob_on_mouse_press`` capability refusal while construction,
-    identity, and callback storage are real.
+    ``mob_on_mouse_press`` is the Reference click gateway: it forwards the
+    pressed child to the stored ``on_click`` callback and returns False.
+    Studio listener registration remains separately owned.
     """
 
     def __init__(self, mobject, on_click, **kwargs):
@@ -9305,6 +9305,11 @@ class Button(Mobject):
         self.on_click = on_click
         self.mobject = mobject
         self.add(mobject)
+
+    def mob_on_mouse_press(self, mob, event_data):
+        del event_data
+        self.on_click(mob)
+        return False
 
 
 class Surface(Mobject):
