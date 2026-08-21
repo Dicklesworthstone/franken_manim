@@ -4204,7 +4204,10 @@ custom_speedometer = drawings.Speedometer(
 )
 assert custom_speedometer.num_ticks == 4
 assert len(custom_speedometer.submobjects) == 2 + 2 * 4
-assert np.isclose(custom_speedometer.needle.get_width(), 0.2)
+# arc_angle=pi rotates the needle by π/2, so the AABB swaps the
+# stretch_to_fit_width/height extents.
+assert np.isclose(custom_speedometer.needle.get_width(), 0.5, atol=1e-6)
+assert np.isclose(custom_speedometer.needle.get_height(), 0.2, atol=1e-6)
 assert custom_speedometer.needle.get_fill_color() == manimlib.RED
 try:
     drawings.Speedometer(num_ticks=0)
