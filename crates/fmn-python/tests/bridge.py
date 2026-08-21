@@ -2619,6 +2619,49 @@ assert interaction_group in interaction_scene.unselectables
 assert interaction_left in interaction_scene.unselectables
 assert interaction_right in interaction_scene.unselectables
 
+# fm-5wq.4: delete_selection routes selected scene members through native
+# remove, then clears the live native Group without disturbing bystanders.
+assert str(inspect.signature(InteractiveScene.delete_selection)) == "(self)"
+delete_scene = InteractiveScene()
+delete_scene.setup()
+delete_a = manimlib.Circle()
+delete_b = manimlib.Circle()
+delete_scene.add(delete_a, delete_b)
+delete_scene.add_to_selection(delete_a)
+assert delete_a in delete_scene.selection
+assert delete_a in delete_scene.mobjects
+assert delete_scene.delete_selection() is None
+assert delete_a not in delete_scene.mobjects
+assert delete_a not in delete_scene.selection
+assert len(delete_scene.selection) == 0
+assert delete_b in delete_scene.mobjects
+assert delete_scene.delete_selection() is None
+assert delete_b in delete_scene.mobjects
+
+# fm-5wq.4: toggle_selection_mode flips the selection scope through the native
+# family walk and regenerates the top-level vs pointful-member search set.
+assert str(inspect.signature(InteractiveScene.toggle_selection_mode)) == (
+    "(self)"
+)
+assert str(inspect.signature(InteractiveScene.refresh_selection_scope)) == (
+    "(self)"
+)
+toggle_scene = InteractiveScene()
+toggle_scene.setup()
+assert toggle_scene.select_top_level_mobs is True
+toggle_parent = manimlib.VGroup(manimlib.Circle(), manimlib.Circle())
+toggle_scene.add(toggle_parent)
+assert toggle_parent in toggle_scene.get_selection_search_set()
+toggle_scene.toggle_selection_mode()
+assert toggle_scene.select_top_level_mobs is False
+toggle_search_set = toggle_scene.get_selection_search_set()
+assert all(
+    member in toggle_search_set
+    for member in toggle_parent.family_members_with_points()
+)
+toggle_scene.toggle_selection_mode()
+assert toggle_scene.select_top_level_mobs is True
+
 interactive_scene.add_to_selection(circle_for_select)
 assert list(interactive_scene.selection.submobjects) == [circle_for_select]
 interactive_scene.clear_selection()
@@ -2674,6 +2717,40 @@ assert all(
     mobject not in setup_scene.unselectables
     for mobject in selection_search_set
 )
+
+# fm-5wq.4: information display mounts and unmounts setup's native
+# DecimalNumber/VGroup overlay without making it selectable.
+assert str(inspect.signature(InteractiveScene.display_information)) == (
+    "(self, show=True)"
+)
+information_scene = InteractiveScene()
+information_scene.setup()
+assert information_scene.information_label not in information_scene.mobjects
+information_scene.display_information()
+assert information_scene.information_label in information_scene.mobjects
+assert (
+    information_scene.information_label
+    not in information_scene.get_selection_search_set()
+)
+information_loc_label, information_time_label = (
+    information_scene.information_label.submobjects
+)
+assert isinstance(information_loc_label, manimlib.VGroup)
+assert all(
+    isinstance(part, manimlib.DecimalNumber)
+    for part in information_loc_label.submobjects
+)
+assert isinstance(information_time_label, manimlib.DecimalNumber)
+assert np.isclose(information_time_label.get_value(), 0.0)
+assert information_loc_label.is_fixed_in_frame()
+assert information_time_label.is_fixed_in_frame()
+assert all(
+    part.get_fill_color() == manimlib.GREY_C
+    for part in information_loc_label.submobjects
+)
+assert information_time_label.get_fill_color() == manimlib.GREY_C
+information_scene.display_information(False)
+assert information_scene.information_label not in information_scene.mobjects
 
 # fm-5wq.4: the Reference keeps the pointer as two live Point mobjects on the
 # Scene itself. Before this binding they were simply absent, and
@@ -2798,6 +2875,39 @@ assert list(group_scene.selection) == [left_selected, right_selected]
 assert grouped_selection not in group_scene.selection
 assert left_selected in group_scene.mobjects
 assert right_selected in group_scene.mobjects
+
+# fm-5wq.4: toggle_selection_mode flips select_top_level_mobs, then
+# refresh_selection_scope rewrites the live selection Group between scene
+# roots and pointed family members. Search-set regeneration rides the same
+# call so piece-mode hit testing sees the expanded family.
+assert str(inspect.signature(InteractiveScene.toggle_selection_mode)) == (
+    "(self)"
+)
+assert str(inspect.signature(InteractiveScene.refresh_selection_scope)) == (
+    "(self)"
+)
+scope_scene = InteractiveScene()
+scope_scene.setup()
+scope_child_a = manimlib.Circle()
+scope_child_b = manimlib.Square()
+scope_parent = manimlib.VGroup(scope_child_a, scope_child_b)
+scope_scene.add(scope_parent)
+scope_scene.add_to_selection(scope_parent)
+assert scope_scene.select_top_level_mobs is True
+assert list(scope_scene.selection) == [scope_parent]
+assert scope_parent in scope_scene.get_selection_search_set()
+assert scope_child_a not in scope_scene.get_selection_search_set()
+assert scope_scene.toggle_selection_mode() is None
+assert scope_scene.select_top_level_mobs is False
+assert list(scope_scene.selection) == [scope_child_a, scope_child_b]
+assert scope_parent not in scope_scene.selection
+assert scope_child_a in scope_scene.get_selection_search_set()
+assert scope_child_b in scope_scene.get_selection_search_set()
+assert scope_scene.toggle_selection_mode() is None
+assert scope_scene.select_top_level_mobs is True
+assert list(scope_scene.selection) == [scope_parent]
+assert scope_parent in scope_scene.get_selection_search_set()
+assert scope_child_a not in scope_scene.get_selection_search_set()
 
 
 # The schema-generated import topology and exact-name aliases are present.

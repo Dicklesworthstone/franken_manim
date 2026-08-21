@@ -12139,6 +12139,33 @@ class InteractiveScene(Scene):
             ]
         self.regenerate_selection_search_set()
 
+    def toggle_selection_mode(self):
+        self.select_top_level_mobs = not self.select_top_level_mobs
+        self.refresh_selection_scope()
+        self.regenerate_selection_search_set()
+
+    def refresh_selection_scope(self):
+        selection = getattr(self, "selection", None)
+        if selection is None:
+            selection = Group()
+            self.selection = selection
+        curr = list(selection)
+        if self.select_top_level_mobs:
+            selection.set_submobjects([
+                mob for mob in self.mobjects
+                if any(sm in mob.get_family() for sm in curr)
+            ])
+            selection.refresh_bounding_box(recurse_down=True)
+        else:
+            # Reference extract_mobject_family_members(curr, exclude_pointless=True)
+            # is the deduplicated pointful family walk over the current selection.
+            members = []
+            for mob in curr:
+                for member in mob.family_members_with_points():
+                    if member not in members:
+                        members.append(member)
+            selection.set_submobjects(members)
+
     def get_crosshair(self):
         lines = VMobject().replicate(2)
         lines[0].set_points([_LEFT, _ORIGIN, _RIGHT])
@@ -12229,6 +12256,12 @@ class InteractiveScene(Scene):
         time_label.fix_in_frame()
         time_label.add_updater(lambda mob, dt=0: mob.increment_value(dt))
         return VGroup(loc_label, time_label)
+
+    def display_information(self, show=True):
+        if show:
+            self.add(self.information_label)
+        else:
+            self.remove(self.information_label)
 
     def get_highlight(self, mobject):
         if (
@@ -12325,6 +12358,10 @@ class InteractiveScene(Scene):
                     pass
             mob.refresh_bounding_box()
         selection.set_submobjects([])
+
+    def delete_selection(self):
+        self.remove(*self.selection)
+        self.clear_selection()
 
     def setup(self):
         self.selection = Group()
