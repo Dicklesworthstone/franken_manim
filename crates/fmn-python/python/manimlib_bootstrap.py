@@ -4661,6 +4661,127 @@ class UnitInterval(NumberLine):
         )
 
 
+class Slider(VGroup):
+    """The exported tracker slider over Atlas's one native builder."""
+
+    def __init__(
+        self,
+        value_tracker,
+        x_range=(-5, 5),
+        var_name=None,
+        width=3,
+        unit_size=1,
+        arrow_width=0.15,
+        arrow_length=0.15,
+        arrow_color=_YELLOW,
+        font_size=24,
+        label_buff=0.1,
+        num_decimal_places=2,
+        tick_size=0.05,
+        number_line_config=dict(),
+        arrow_tip_config=dict(),
+        decimal_config=dict(),
+        angle=0,
+        label_direction=None,
+        add_tick_labels=True,
+        tick_label_font_size=16,
+    ):
+        if not isinstance(value_tracker, ValueTracker):
+            raise TypeError("Slider value_tracker must be a ValueTracker")
+        line_config = dict(number_line_config)
+        tip_config = dict(arrow_tip_config)
+        x_range = line_config.pop("x_range", x_range)
+        width = line_config.pop("width", width)
+        tick_size = line_config.pop("tick_size", tick_size)
+        arrow_width = tip_config.pop("width", arrow_width)
+        arrow_length = tip_config.pop("length", arrow_length)
+        arrow_color = tip_config.pop("fill_color", arrow_color)
+        _refuse_unrouted(
+            "Slider()",
+            [(f"number_line_config.{name}", True) for name in line_config]
+            + [(f"arrow_tip_config.{name}", True) for name in tip_config],
+        )
+        parts = tuple(float(value) for value in x_range)
+        if len(parts) != 2:
+            raise ValueError("Slider x_range must contain exactly two values")
+        if var_name is not None and not isinstance(var_name, str):
+            raise TypeError("Slider var_name must be a string or None")
+        if int(num_decimal_places) < 0:
+            raise ValueError("Slider num_decimal_places must be non-negative")
+        # The pinned Reference accepts decimal_config but never reads it.
+        self.decimal_config = dict(decimal_config)
+        self.value_tracker = value_tracker
+        self.x_range = parts
+        self.var_name = var_name
+        self.unit_size = float(unit_size)
+        self.angle = float(angle)
+        if label_direction is None:
+            label_direction = _np.round(
+                [-_math.sin(self.angle), _math.cos(self.angle), 0.0], 2
+            )
+        else:
+            label_direction = _vec3(label_direction)
+
+        _install_live_state(self)
+        specs = self._build_slider(
+            _native_shell_factory,
+            float(value_tracker.get_value()),
+            parts,
+            var_name,
+            float(width),
+            self.unit_size,
+            float(arrow_width),
+            float(arrow_length),
+            arrow_color,
+            float(font_size),
+            float(label_buff),
+            int(num_decimal_places),
+            float(tick_size),
+            self.angle,
+            label_direction,
+            bool(add_tick_labels),
+            float(tick_label_font_size),
+        )
+        _hang_native_children(self, specs)
+        if len(self.submobjects) != 3:
+            raise RuntimeError(
+                "native Slider family contract drift: expected 3 children, got "
+                + str(len(self.submobjects))
+            )
+        number_line, tip, label = self.submobjects
+        number_line.__class__ = NumberLine
+        number_line.x_range = (*parts, 1.0)
+        number_line.x_min, number_line.x_max, number_line.x_step = number_line.x_range
+        number_line._number_line_params = (
+            number_line.x_range,
+            dict(width=float(width), tick_size=float(tick_size)),
+        )
+        tip.__class__ = ArrowTip
+        decimal = label if var_name is None else label.submobjects[1]
+        _decorate_matrix_decimal_entry(
+            decimal,
+            float(value_tracker.get_value()),
+            float(font_size),
+            int(num_decimal_places),
+            {},
+        )
+        get_value = value_tracker.get_value
+        tip.add_updater(
+            lambda mob: mob.move_to(
+                number_line.n2p(get_value()), -label_direction
+            )
+        )
+        decimal.add_updater(lambda mob: mob.set_value(get_value()))
+        label.add_updater(
+            lambda mob: mob.next_to(tip, label_direction, float(label_buff))
+        )
+        self.number_line = number_line
+        self.tip = tip
+        self.label = label
+        self.decimal = decimal
+        self.set_stroke(behind=True)
+
+
 class CoordinateSystem:
     """The Reference's coordinate-system mixin over live axis geometry.
 
@@ -12712,6 +12833,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Vector"): Vector,
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
         ("manimlib.mobject.number_line", "UnitInterval"): UnitInterval,
+        ("manimlib.mobject.number_line", "Slider"): Slider,
         ("manimlib.mobject.coordinate_systems", "CoordinateSystem"): CoordinateSystem,
         ("manimlib.mobject.coordinate_systems", "Axes"): Axes,
         ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,

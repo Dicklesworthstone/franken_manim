@@ -8007,6 +8007,74 @@ precise_labels = precise_label_line.add_numbers(
 assert precise_labels.get_width() > integer_labels.get_width()
 assert precise_label_line.numbers is precise_labels
 
+# Slider is an authored portal class over Atlas's existing slider builder,
+# not the schema-generated constructor refusal. The builder owns the initial
+# family and layout; the portal binds those parts to the live ValueTracker.
+number_line_module = importlib.import_module("manimlib.mobject.number_line")
+assert number_line_module.Slider.__bases__ == (manimlib.VGroup,)
+slider_signature = inspect.signature(number_line_module.Slider)
+assert tuple(slider_signature.parameters) == (
+    "value_tracker",
+    "x_range",
+    "var_name",
+    "width",
+    "unit_size",
+    "arrow_width",
+    "arrow_length",
+    "arrow_color",
+    "font_size",
+    "label_buff",
+    "num_decimal_places",
+    "tick_size",
+    "number_line_config",
+    "arrow_tip_config",
+    "decimal_config",
+    "angle",
+    "label_direction",
+    "add_tick_labels",
+    "tick_label_font_size",
+)
+slider_tracker = manimlib.ValueTracker(0.25)
+slider = number_line_module.Slider(
+    slider_tracker,
+    x_range=(-1.0, 1.0),
+    var_name="x",
+    width=4.0,
+    add_tick_labels=False,
+)
+assert len(slider) == 3
+assert slider[0] is slider.number_line
+assert slider[1] is slider.tip
+assert slider[2] is slider.label
+assert isinstance(slider.number_line, manimlib.NumberLine)
+assert isinstance(slider.tip, manimlib.ArrowTip)
+assert isinstance(slider.decimal, manimlib.DecimalNumber)
+assert np.isclose(slider.decimal.get_value(), 0.25)
+assert np.allclose(
+    slider.tip.get_center(), slider.number_line.n2p(0.25), atol=1e-6
+)
+slider_tracker.set_value(0.75)
+slider.update(0.0)
+assert np.isclose(slider.decimal.get_value(), 0.75)
+assert np.allclose(
+    slider.tip.get_center(), slider.number_line.n2p(0.75), atol=1e-6
+)
+failed_slider = number_line_module.Slider.__new__(number_line_module.Slider)
+try:
+    number_line_module.Slider.__init__(
+        failed_slider,
+        slider_tracker,
+        number_line_config={"unsupported": True},
+    )
+except NotImplementedError as error:
+    assert str(error) == (
+        "Slider() keyword(s) not yet routed to the native builder: "
+        "number_line_config.unsupported"
+    )
+else:
+    raise AssertionError("Slider silently dropped an unsupported line option")
+assert not hasattr(failed_slider, "submobjects")
+
 refusing_label_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0))
 refusing_label_children = len(refusing_label_line.submobjects)
 try:

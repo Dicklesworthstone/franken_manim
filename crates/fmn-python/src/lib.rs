@@ -5003,6 +5003,52 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built.into_vmob())
     }
 
+    /// `Slider(value_tracker, ...)` over Atlas's native static composition.
+    /// Python installs the tracker-driven tip/decimal/label updaters after
+    /// this builder returns; all geometry and initial layout stay native.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_slider<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        value: f64,
+        x_range: [f64; 2],
+        var_name: Option<&str>,
+        width: f64,
+        _unit_size: f64,
+        arrow_width: f64,
+        arrow_length: f64,
+        arrow_color: &Bound<'py, PyAny>,
+        font_size: f64,
+        label_buff: f64,
+        num_decimal_places: usize,
+        tick_size: f64,
+        angle: f64,
+        label_direction: Option<[f64; 3]>,
+        add_tick_labels: bool,
+        tick_label_font_size: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut slider = fmn_library::Slider::new(value)
+            .x_range(x_range)
+            .width(width)
+            .arrow_size(arrow_width, arrow_length)
+            .arrow_color(srgb_from_py(arrow_color)?)
+            .font_size(font_size)
+            .label_buff(label_buff)
+            .num_decimal_places(num_decimal_places)
+            .tick_size(tick_size)
+            .angle(angle)
+            .add_tick_labels(add_tick_labels)
+            .tick_label_font_size(tick_label_font_size);
+        if let Some(name) = var_name {
+            slider = slider.var_name(name);
+        }
+        if let Some(direction) = label_direction {
+            slider = slider.label_direction(direction);
+        }
+        let built = with_font_book(|book| slider.build(book).map_err(native_error))?;
+        install_native_tree(slf, factory, built)
+    }
+
     /// `Axes(...)` over the coords shelf; children are `[x_axis, y_axis]`.
     #[allow(clippy::too_many_arguments)]
     fn _build_axes<'py>(
