@@ -35,6 +35,7 @@ kept in lockstep by the script's inventory check). One still per scene.
 | `glow` | GlowDot falloff at three radii/colors | **captured** |
 | `lighting_3d` | 3D sphere under the Reference lighting model, oblique camera | **captured** |
 | `text_sample` | Pango text rendering (regular + italic) for the native-text comparison | **captured** |
+| `math_formula` | Euler's identity for the native fmd-math comparison | **missing — not present in the 2026-07-25 capture set or its `PROVENANCE.json`; no aesthetic verdict is possible until a private Reference capture is supplied** |
 
 ## Capture record
 

@@ -45,7 +45,9 @@
 //!    each captured Reference image (`gallery/reference_captures/`, private
 //!    per §15.3) with its committed FrankenManim render
 //!    (`docs/g0/g0-2-renders/`), the current verdict, and the change that
-//!    last moved it. The review tooling is three functions:
+//!    last moved it. A row may carry the explicit
+//!    `reference-capture-missing` refusal until its private capture exists;
+//!    this is not an aesthetic verdict. The review tooling is three functions:
 //!    [`render_pairs`] resolves a manifest against a checkout (a missing
 //!    committed render is an error; an absent private capture only mutes the
 //!    smoke alarm), [`GalleryManifest::record_verdict`] moves one panel's
@@ -205,12 +207,18 @@ pub struct ErrorPercentiles {
     pub max: f64,
 }
 
-/// §16.3's verdict vocabulary for one gallery pair. The ordering is a
-/// severity order: `AtLeastAsGood < DifferentButFine < Regression`.
+/// §16.3's verdict vocabulary for one gallery pair, plus the explicit
+/// `ReferenceCaptureMissing` refusal used when no comparison pixels exist.
+/// Among reviewed panels the ordering is a severity order:
+/// `AtLeastAsGood < DifferentButFine < Regression`.
 /// `DifferentButFine` is always Behavior-Noted — the `changed` field of its
 /// manifest row names the BN note or ratification that carries the behavior.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Verdict {
+    /// No captured Reference image exists, so assigning an aesthetic verdict
+    /// would fabricate evidence. This is an evidence-gap refusal, not a
+    /// human review result and not part of the severity order.
+    ReferenceCaptureMissing,
     /// The FrankenManim panel is at least as good as the Reference capture.
     AtLeastAsGood,
     /// The panels differ in a way that is fine *and written down* (a
@@ -226,6 +234,7 @@ impl Verdict {
     #[must_use]
     pub fn token(self) -> &'static str {
         match self {
+            Self::ReferenceCaptureMissing => "reference-capture-missing",
             Self::AtLeastAsGood => "at-least-as-good",
             Self::DifferentButFine => "different-but-fine",
             Self::Regression => "regression",
@@ -236,6 +245,7 @@ impl Verdict {
     #[must_use]
     pub fn from_token(token: &str) -> Option<Self> {
         match token {
+            "reference-capture-missing" => Some(Self::ReferenceCaptureMissing),
             "at-least-as-good" => Some(Self::AtLeastAsGood),
             "different-but-fine" => Some(Self::DifferentButFine),
             "regression" => Some(Self::Regression),
@@ -260,7 +270,7 @@ pub struct GalleryRow {
     pub reference: String,
     /// Repo-relative path of the committed FrankenManim render.
     pub render: String,
-    /// The current human verdict.
+    /// The current human verdict, or the explicit missing-capture refusal.
     pub verdict: Verdict,
     /// Free-text record of the change that last moved the verdict (no tabs
     /// or newlines; by convention `bead date: reason`).
@@ -1041,7 +1051,9 @@ impl GalleryManifest {
 
     /// The panels whose verdict *worsened* relative to an earlier manifest
     /// revision, sorted by panel. Worsened means strictly higher on the
-    /// severity order `AtLeastAsGood < DifferentButFine < Regression`; a
+    /// severity order `AtLeastAsGood < DifferentButFine < Regression`; the
+    /// `ReferenceCaptureMissing` refusal is incomparable and therefore never
+    /// a regression. A
     /// panel that did not exist in `earlier` counts only when it enters at
     /// `Regression` (a new `DifferentButFine` panel is a review item, not a
     /// regression).
@@ -1055,11 +1067,17 @@ impl GalleryManifest {
         let mut changes = Vec::new();
         for row in &self.rows {
             match old.get(row.panel.as_str()) {
-                Some(&from) if row.verdict > from => changes.push(VerdictChange {
-                    panel: row.panel.clone(),
-                    from: Some(from),
-                    to: row.verdict,
-                }),
+                Some(&from)
+                    if from != Verdict::ReferenceCaptureMissing
+                        && row.verdict != Verdict::ReferenceCaptureMissing
+                        && row.verdict > from =>
+                {
+                    changes.push(VerdictChange {
+                        panel: row.panel.clone(),
+                        from: Some(from),
+                        to: row.verdict,
+                    });
+                }
                 // ubs:ignore — enum equality on the verdict vocabulary, never a secret.
                 None if row.verdict == Verdict::Regression => changes.push(VerdictChange {
                     panel: row.panel.clone(),

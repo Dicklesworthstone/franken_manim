@@ -16,13 +16,16 @@
 //! that evidence — the part a human reviewer signs off on (R2).
 //!
 //! ```text
-//! cargo run --release --bin g0_2_look [-- <output-dir> [--gradient-only|--lighting-only|--text-only]]
+//! cargo run --release --bin g0_2_look [-- <output-dir> [--gradient-only|--lighting-only|--text-only|--math-only]]
 //! ```
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLUE_E, DOWN, GREEN, ORIGIN, PURPLE, RED, TEAL, YELLOW};
 use fmn_frame::{FrameBuffer, PixelFormat};
 use fmn_geom::QuadPath;
+use fmn_library::text::Text;
+use fmn_library::vmobject::{VMobject, v_group};
+use fmn_library::{Tex, TexEngine};
 use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{FrameConfig, FrameJob};
@@ -32,8 +35,6 @@ use fmn_render::{
     CameraConfig, CameraFrame, SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDCamera, ThreeDDraw,
     ThreeDJob,
 };
-use fmn_library::text::Text;
-use fmn_library::vmobject::v_group;
 use fmn_spike_accelerator::cpu::{self, Surface};
 use fmn_spike_accelerator::scene::{self, CalibrationPanel};
 use fmn_text::FontBook;
@@ -52,14 +53,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lighting_only = modes.iter().any(|argument| argument == "--lighting-only");
     let gradient_only = modes.iter().any(|argument| argument == "--gradient-only");
     let text_only = modes.iter().any(|argument| argument == "--text-only");
-    if [lighting_only, gradient_only, text_only]
+    let math_only = modes.iter().any(|argument| argument == "--math-only");
+    if [lighting_only, gradient_only, text_only, math_only]
         .iter()
         .filter(|only| **only)
         .count()
         > 1
     {
         return Err(
-            "--gradient-only, --lighting-only, and --text-only are mutually exclusive".into(),
+            "--gradient-only, --lighting-only, --text-only, and --math-only are mutually exclusive"
+                .into(),
         );
     }
     let dir = std::path::Path::new(&dir);
@@ -69,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {WIDTH}x{HEIGHT}, tile {TILE}, aa_width 1.5 px (VMobject default)");
     println!();
 
-    if !lighting_only && !text_only {
+    if !lighting_only && !text_only && !math_only {
         for panel in CalibrationPanel::ALL {
             if gradient_only && panel != CalibrationPanel::GradientFills {
                 continue;
@@ -100,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !gradient_only && !text_only {
+    if !gradient_only && !text_only && !math_only {
         let lighting = render_lighting_3d()?;
         write_frame_png(dir, "fmn-lighting-3d.png", &lighting)?;
         println!(
@@ -110,13 +113,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    if !gradient_only && !lighting_only {
+    if !gradient_only && !lighting_only && !math_only {
         let text = render_text_sample()?;
         write_frame_png(dir, "fmn-text-sample.png", &text)?;
         println!(
             "    {:<20} Scribe over CM    {}",
             "text_sample",
             describe_frame(&text),
+        );
+    }
+
+    if !gradient_only && !lighting_only && !text_only {
+        let math = render_math_formula()?;
+        write_frame_png(dir, "fmn-math-formula.png", &math)?;
+        println!(
+            "    {:<20} fmd-math + Lumen  {}",
+            "math_formula",
+            describe_frame(&math),
         );
     }
 
@@ -135,10 +148,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// font; ours is the sovereign bundled default, so the comparison is layout,
 /// weight, slant, and AA character — never glyph identity.
 fn render_text_sample() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
-    /// The capture camera's mapping at 1920×1080: `FRAME_HEIGHT = 8` scene
-    /// units over 1080 rows (the same 135 px/unit the G0-2 note records).
-    const PX_PER_UNIT: f64 = 135.0;
-
     let book = FontBook::bundled()?;
     let title = Text::new("FrankenManim look study")
         .font_size(60.0)
@@ -153,6 +162,30 @@ fn render_text_sample() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
         .vmob
         .next_to(&title, DOWN, 0.5, ORIGIN);
     let group = v_group([title, body]);
+    render_centered_vmob(group)
+}
+
+/// The `math_formula` panel (fm-gjl7): Euler's identity laid out by the
+/// bundled fmd-math engine, converted to a native `Tex` VMobject, and drawn
+/// by production Lumen. This is deliberately the same path scene math uses;
+/// no LaTeX, dvisvgm, SVG import, or comparison-image synthesis is involved.
+fn render_math_formula() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
+    let engine = TexEngine::new("fmd-math/pack/default", None)?;
+    let formula = Tex::new(r"e^{i\pi} + 1 = 0")
+        .display()
+        .font_size(96.0)
+        .build(&engine)?
+        .vmob;
+    render_centered_vmob(formula)
+}
+
+/// Centre scene-space geometry on the capture grid and render it through the
+/// production retained Lumen plan used by the text and math panels.
+fn render_centered_vmob(group: VMobject) -> Result<FrameBuffer, Box<dyn std::error::Error>> {
+    /// The capture camera's mapping at 1920×1080: `FRAME_HEIGHT = 8` scene
+    /// units over 1080 rows (the same 135 px/unit the G0-2 note records).
+    const PX_PER_UNIT: f64 = 135.0;
+
     let center = group.center_point();
     // Bake the capture camera into the geometry — centre the group, then map
     // scene units onto the capture pixel grid with y flipped into rows — so

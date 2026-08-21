@@ -308,11 +308,12 @@ fn committed_manifest_parses_and_round_trips_byte_for_byte() {
     let path = committed_manifest_path();
     let text = std::fs::read_to_string(&path).expect("committed manifest");
     let manifest = GalleryManifest::parse(&text).expect("the committed manifest parses");
+    assert_eq!(manifest.revision, 2, "the committed manifest revision");
     assert_eq!(
-        manifest.revision, 1,
-        "the seeded manifest starts at revision 1"
+        manifest.rows.len(),
+        7,
+        "seven panels have committed renders"
     );
-    assert_eq!(manifest.rows.len(), 5, "five panels have committed renders");
     assert_eq!(
         manifest.to_text().expect("canonical manifest serializes"),
         text,
@@ -330,6 +331,7 @@ fn committed_manifest_parses_and_round_trips_byte_for_byte() {
     assert_eq!(verdict("glow"), Verdict::AtLeastAsGood);
     assert_eq!(verdict("gradient_fills"), Verdict::DifferentButFine);
     assert_eq!(verdict("lighting_3d"), Verdict::AtLeastAsGood);
+    assert_eq!(verdict("math_formula"), Verdict::ReferenceCaptureMissing);
 }
 
 #[test]
@@ -755,8 +757,8 @@ fn smoke_alarm_over_the_real_pairs() {
     let pairs = render_pairs(&manifest, &repo_root()).expect("no missing committed renders");
     assert_eq!(
         pairs.len(),
-        5,
-        "the manifest covers exactly the five committed panels"
+        7,
+        "the manifest covers exactly the seven committed panels"
     );
 
     let measurable: Vec<_> = pairs.iter().filter(|p| p.reference_present).collect();
