@@ -11219,6 +11219,11 @@ def get_indent(code_lines, line_number):
     return line[: len(line) - len(line.lstrip())]
 
 
+# BlankScene is not a manimlib root export, so the post-install
+# namespace cleanup deletes that name from these functions' globals.
+_BLANK_SCENE = BlankScene
+
+
 def is_child_scene(obj, module):
     if module is None or not _inspect.isclass(obj):
         return False
@@ -11227,7 +11232,7 @@ def is_child_scene(obj, module):
             return False
     except TypeError:
         return False
-    if obj in (Scene, InteractiveScene, ThreeDScene, BlankScene):
+    if obj in (Scene, InteractiveScene, ThreeDScene, _BLANK_SCENE):
         return False
     module_name = getattr(module, "__name__", "")
     if not module_name:
