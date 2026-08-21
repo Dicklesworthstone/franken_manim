@@ -5450,6 +5450,48 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built.vmob)
     }
 
+    /// `MobjectMatrix(group, ...)` over Atlas's extent-driven native grid.
+    /// The bootstrap applies the resulting affine placement to the original
+    /// Python entries, preserving their identities and complete record data.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_mobject_matrix<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        extents: Vec<([f64; 3], [f64; 3])>,
+        n_rows: usize,
+        n_cols: usize,
+        v_buff: f64,
+        h_buff: f64,
+        bracket_h_buff: f64,
+        bracket_v_buff: f64,
+        height: f64,
+        element_alignment_corner: [f64; 3],
+        ellipses_row: Option<isize>,
+        ellipses_col: Option<isize>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let entries = extents
+            .into_iter()
+            .map(|extent| matcher_extent_vmobject(Some(extent)))
+            .collect();
+        let mut builder = fmn_library::MobjectMatrix::new(entries)
+            .n_rows(n_rows)
+            .n_cols(n_cols)
+            .v_buff(v_buff)
+            .h_buff(h_buff)
+            .bracket_h_buff(bracket_h_buff)
+            .bracket_v_buff(bracket_v_buff)
+            .height(height)
+            .element_alignment_corner(element_alignment_corner);
+        if let Some(row) = ellipses_row {
+            builder = builder.ellipses_row(row);
+        }
+        if let Some(column) = ellipses_col {
+            builder = builder.ellipses_col(column);
+        }
+        let built = with_tex_engine(|engine| builder.build(engine).map_err(native_error))?;
+        install_native_tree(slf, factory, built.vmob)
+    }
+
     /// `Text(...)` over the Scribe bridge: one glyph per child from the
     /// bundled FontBook, decorations trailing.
     #[allow(clippy::too_many_arguments)]

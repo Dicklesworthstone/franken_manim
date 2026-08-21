@@ -6628,6 +6628,123 @@ class TexMatrix(Matrix):
         )
 
 
+class MobjectMatrix(Matrix):
+    """Atlas's native matrix layout applied to caller-owned VMobjects."""
+
+    def __init__(
+        self,
+        group,
+        n_rows=None,
+        n_cols=None,
+        height=4.0,
+        element_alignment_corner=_ORIGIN,
+        **config,
+    ):
+        if not isinstance(group, VGroup):
+            raise TypeError("MobjectMatrix group must be a VGroup")
+        entries = list(group)
+        count = len(entries)
+        if n_rows is not None:
+            n_rows = _operator.index(n_rows)
+        if n_cols is not None:
+            n_cols = _operator.index(n_cols)
+        if n_rows is None:
+            n_rows = int(_math.sqrt(count)) if n_cols is None else count // n_cols
+        if n_cols is None:
+            n_cols = count // n_rows
+        if n_rows <= 0 or n_cols <= 0:
+            raise ValueError("MobjectMatrix dimensions must be positive")
+        required = n_rows * n_cols
+        if required > _MAX_MATRIX_ENTRIES:
+            raise ValueError(
+                f"matrix entries require {required} items, above the declared "
+                f"limit of {_MAX_MATRIX_ENTRIES}"
+            )
+        if count < required:
+            raise Exception(
+                "Input to MobjectMatrix must have at least n_rows * n_cols entries"
+            )
+
+        common = _matrix_common_config(config)
+        common["height"] = float(height)
+        common["element_alignment_corner"] = _vec3(element_alignment_corner)
+        used_entries = entries[:required]
+        extents = []
+        for entry in used_entries:
+            box = entry.get_bounding_box()
+            extents.append((_vec3(box[0]), _vec3(box[2])))
+
+        _install_live_state(self)
+        specs = self._build_mobject_matrix(
+            _native_shell_factory,
+            extents,
+            n_rows,
+            n_cols,
+            common["v_buff"],
+            common["h_buff"],
+            common["bracket_h_buff"],
+            common["bracket_v_buff"],
+            common["height"],
+            common["element_alignment_corner"],
+            common["ellipses_row"],
+            common["ellipses_col"],
+        )
+        _hang_native_children(self, specs)
+        if len(self.submobjects) != required + 2:
+            raise RuntimeError(
+                "native MobjectMatrix family contract drift: "
+                f"expected {required + 2} children, got {len(self.submobjects)}"
+            )
+        targets = list(self.submobjects[:required])
+        brackets = list(self.submobjects[required:])
+        ellipse_indices = _matrix_ellipsis_indices(
+            n_rows,
+            n_cols,
+            common["ellipses_row"],
+            common["ellipses_col"],
+        )
+        for index, (entry, target) in enumerate(zip(used_entries, targets)):
+            if index in ellipse_indices:
+                entry.become(target)
+                continue
+            lengths = [entry.length_over_dim(dim) for dim in range(3)]
+            scale_dim = max(range(3), key=lengths.__getitem__)
+            if lengths[scale_dim] > 0:
+                entry.scale(
+                    target.length_over_dim(scale_dim) / lengths[scale_dim]
+                )
+            entry.shift(target.get_center() - entry.get_center())
+        self.set_submobjects([*used_entries, *brackets])
+        self.group = group
+        self.mob_matrix = [
+            used_entries[row * n_cols : (row + 1) * n_cols]
+            for row in range(n_rows)
+        ]
+        self.rows = VGroup(*(VGroup(*row) for row in self.mob_matrix))
+        self.columns = VGroup(
+            *(
+                VGroup(*(row[column] for row in self.mob_matrix))
+                for column in range(n_cols)
+            )
+        )
+        self.brackets = brackets
+        self.ellipses = [used_entries[index] for index in ellipse_indices]
+        self.elements = [
+            entry
+            for index, entry in enumerate(used_entries)
+            if index not in ellipse_indices
+        ]
+        self._matrix_kind = "mobject"
+        self._matrix_shape = (n_rows, n_cols)
+        self._matrix_entry_font_size = 48.0
+        self._matrix_decimal_places = 2
+        self._matrix_entry_style = {}
+
+    def element_to_mobject(self, element, **config):
+        del config
+        return element
+
+
 class TexTextFromPresetString(TexText):
     """The Reference preset-string base over the native Scribe TexText.
 
@@ -12807,6 +12924,7 @@ def _install_schema_surface():
         ("manimlib.mobject.matrix", "DecimalMatrix"): DecimalMatrix,
         ("manimlib.mobject.matrix", "IntegerMatrix"): IntegerMatrix,
         ("manimlib.mobject.matrix", "TexMatrix"): TexMatrix,
+        ("manimlib.mobject.matrix", "MobjectMatrix"): MobjectMatrix,
         ("manimlib.mobject.types.dot_cloud", "DotCloud"): DotCloud,
         ("manimlib.mobject.types.dot_cloud", "TrueDot"): TrueDot,
         ("manimlib.mobject.types.dot_cloud", "GlowDots"): GlowDots,

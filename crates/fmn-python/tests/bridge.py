@@ -9250,6 +9250,79 @@ assert all(
     for member in entry.family_members_with_points()
 )
 
+mobject_entries = [
+    geometry.Circle(radius=0.2),
+    geometry.Square(side_length=0.5),
+    geometry.Rectangle(width=0.7, height=0.3),
+    geometry.Circle(radius=0.35),
+]
+leftover_mobject_entry = geometry.Square(side_length=0.25)
+mobject_matrix = matrix_module.MobjectMatrix(
+    manimlib.VGroup(*mobject_entries, leftover_mobject_entry),
+    n_rows=2,
+    n_cols=2,
+    height=1.75,
+)
+assert all(
+    actual is original
+    for actual, original in zip(
+        [entry for row in mobject_matrix.mob_matrix for entry in row],
+        mobject_entries,
+    )
+)
+assert all(
+    child is original
+    for child, original in zip(mobject_matrix.submobjects[:4], mobject_entries)
+)
+assert mobject_matrix.mob_matrix[0][0].get_center()[0] < (
+    mobject_matrix.mob_matrix[0][1].get_center()[0]
+)
+assert mobject_matrix.mob_matrix[0][0].get_center()[1] > (
+    mobject_matrix.mob_matrix[1][0].get_center()[1]
+)
+assert mobject_matrix.get_height() <= 1.75 + 1e-6
+assert all(
+    child is not leftover_mobject_entry for child in mobject_matrix.submobjects
+)
+assert mobject_matrix.element_to_mobject(leftover_mobject_entry) is (
+    leftover_mobject_entry
+)
+
+failed_mobject_matrix = matrix_module.MobjectMatrix.__new__(
+    matrix_module.MobjectMatrix
+)
+try:
+    matrix_module.MobjectMatrix.__init__(
+        failed_mobject_matrix,
+        manimlib.VGroup(geometry.Circle()),
+        n_rows=2,
+        n_cols=2,
+    )
+except Exception as error:
+    assert str(error) == (
+        "Input to MobjectMatrix must have at least n_rows * n_cols entries"
+    )
+else:
+    raise AssertionError("MobjectMatrix accepted too few entries")
+assert not hasattr(failed_mobject_matrix, "submobjects")
+
+failed_mobject_matrix_kwarg = matrix_module.MobjectMatrix.__new__(
+    matrix_module.MobjectMatrix
+)
+try:
+    matrix_module.MobjectMatrix.__init__(
+        failed_mobject_matrix_kwarg,
+        manimlib.VGroup(geometry.Circle()),
+        n_rows=1,
+        n_cols=1,
+        unsupported=True,
+    )
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("MobjectMatrix silently discarded an unknown option")
+assert not hasattr(failed_mobject_matrix_kwarg, "submobjects")
+
 for invalid_matrix, expected_text in [
     ([], "at least one row"),
     ([[1], [2, 3]], "ragged matrix"),
