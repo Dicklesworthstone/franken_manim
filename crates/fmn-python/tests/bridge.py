@@ -2571,6 +2571,7 @@ assert interactive_scene.crosshair is not interactive_scene.color_palette
 assert interactive_scene.get_selection_search_set() == []
 circle_for_select = manimlib.Circle()
 interactive_scene.add(circle_for_select)
+interactive_scene.regenerate_selection_search_set()
 assert circle_for_select in interactive_scene.get_selection_search_set()
 interactive_scene.add_to_selection(circle_for_select)
 assert list(interactive_scene.selection.submobjects) == [circle_for_select]
@@ -2598,6 +2599,35 @@ selection_highlight = interactive_scene.get_selection_highlight()
 assert isinstance(selection_highlight, manimlib.Group)
 assert selection_highlight.tracked_mobjects == []
 assert len(selection_highlight.updaters) == 1
+
+# fm-5wq.4: InteractiveScene.setup owns the Reference selection identities
+# over the portal's native Group/VMobject surfaces.
+assert str(inspect.signature(InteractiveScene.setup)) == "(self)"
+setup_scene = InteractiveScene()
+setup_scene.setup()
+assert isinstance(setup_scene.selection, manimlib.Group)
+assert len(setup_scene.selection.submobjects) == 0
+assert isinstance(setup_scene.selection_highlight, manimlib.Group)
+assert type(setup_scene.selection_highlight) is type(
+    setup_scene.get_selection_highlight()
+)
+assert isinstance(setup_scene.selection_rectangle, manimlib.Rectangle)
+assert isinstance(setup_scene.crosshair, manimlib.VGroup)
+assert isinstance(setup_scene.information_label, manimlib.VGroup)
+assert isinstance(setup_scene.color_palette, manimlib.VGroup)
+assert setup_scene.select_top_level_mobs is True
+assert setup_scene.is_selecting is False
+assert setup_scene.is_grabbing is False
+assert setup_scene.selection in setup_scene.unselectables
+assert setup_scene.camera.frame in setup_scene.unselectables
+assert setup_scene.selection_highlight in setup_scene.mobjects
+assert hasattr(setup_scene, "regenerate_selection_search_set")
+selection_search_set = setup_scene.get_selection_search_set()
+assert isinstance(selection_search_set, list)
+assert all(
+    mobject not in setup_scene.unselectables
+    for mobject in selection_search_set
+)
 
 # fm-5wq.4: the Reference keeps the pointer as two live Point mobjects on the
 # Scene itself. Before this binding they were simply absent, and

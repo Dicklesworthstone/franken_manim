@@ -12304,14 +12304,17 @@ class InteractiveScene(Scene):
             self.camera.frame,
         ]
         self.select_top_level_mobs = True
+        self.regenerate_selection_search_set()
         self.is_selecting = False
         self.is_grabbing = False
         self.add(self.selection_highlight)
-        self.regenerate_selection_search_set()
 
     def regenerate_selection_search_set(self):
-        unselectables = getattr(self, "unselectables", ())
-        selectable = [mob for mob in self.mobjects if mob not in unselectables]
+        selectable = [
+            mobject
+            for mobject in self.mobjects
+            if mobject not in self.unselectables
+        ]
         if self.select_top_level_mobs:
             self.selection_search_set = selectable
         else:
@@ -12322,19 +12325,7 @@ class InteractiveScene(Scene):
             ]
 
     def get_selection_search_set(self):
-        return getattr(self, "selection_search_set", [])
-
-    def add(self, *mobjects):
-        result = super().add(*mobjects)
-        if getattr(self, "unselectables", None) is not None:
-            self.regenerate_selection_search_set()
-        return result
-
-    def remove(self, *mobjects):
-        result = super().remove(*mobjects)
-        if getattr(self, "unselectables", None) is not None:
-            self.regenerate_selection_search_set()
-        return result
+        return self.selection_search_set
 
 
 class BlankScene(InteractiveScene):
