@@ -3037,7 +3037,9 @@ impl BridgeMobject {
         box_height: f64,
         fill_opacity: f64,
         checkmark_color: [f64; 3],
+        checkmark_stroke_width: f64,
         cross_color: [f64; 3],
+        cross_stroke_width: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let mut composition = fmn_mobject::Mobject::from(
             fmn_library::Checkbox::new(value)
@@ -3049,11 +3051,13 @@ impl BridgeMobject {
                     g: checkmark_color[1],
                     b: checkmark_color[2],
                 })
+                .checkmark_stroke_width(checkmark_stroke_width)
                 .cross_color(fmn_core::color::Srgb {
                     r: cross_color[0],
                     g: cross_color[1],
                     b: cross_color[2],
                 })
+                .cross_stroke_width(cross_stroke_width)
                 .composition(),
         );
         let children = std::mem::take(&mut composition.submobjects);

@@ -2414,6 +2414,18 @@ opaque_checkbox.toggle_value()
 assert opaque_checkbox.box is opaque_box
 assert np.isclose(opaque_checkbox.box.get_fill_opacity(), 0.35)
 
+stroked_checkbox = interactive.Checkbox(
+    True,
+    checkmark_kwargs=dict(stroke_color=manimlib.GREEN, stroke_width=3.0),
+    cross_kwargs=dict(stroke_color=manimlib.RED, stroke_width=4.0),
+)
+assert np.isclose(stroked_checkbox.box_content.get_stroke_width(), 3.0)
+stroked_content = stroked_checkbox.box_content
+stroked_checkbox.toggle_value()
+assert stroked_checkbox.box_content is stroked_content
+assert np.isclose(stroked_checkbox.box_content.get_stroke_width(), 4.0)
+assert stroked_checkbox.box_content.get_fill_color() == manimlib.RED
+
 # EnableDisableButton is a one-box native control on the same real tracker
 # base. Construction preserves the Reference's default-white quirk; the first
 # state change routes through Atlas and colors the stable box proxy.

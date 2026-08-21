@@ -8927,14 +8927,6 @@ class Checkbox(ControlMobject):
             raise TypeError(
                 "unexpected keyword arguments: " + ", ".join(nested_unknown)
             )
-        if float(check_config.get("stroke_width", 6)) != 6.0:
-            raise NotImplementedError(
-                "Checkbox checkmark_kwargs.stroke_width is not routed to the native builder"
-            )
-        if float(cross_config.get("stroke_width", 6)) != 6.0:
-            raise NotImplementedError(
-                "Checkbox cross_kwargs.stroke_width is not routed to the native builder"
-            )
 
         self.value_type = _np.dtype(value_type).type
         self.rect_kwargs = rect_config
@@ -8946,7 +8938,9 @@ class Checkbox(ControlMobject):
             box_height,
             fill_opacity,
             tuple(_color_to_rgb(check_config.get("stroke_color", _GREEN))),
+            float(check_config.get("stroke_width", 6)),
             tuple(_color_to_rgb(cross_config.get("stroke_color", _RED))),
+            float(cross_config.get("stroke_width", 6)),
         )
         box, content = self._native_checkbox_parts(value)
         super().__init__(value, box, content)

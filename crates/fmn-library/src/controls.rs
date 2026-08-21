@@ -551,7 +551,9 @@ pub struct Checkbox {
     box_height: f64,
     fill_opacity: f64,
     checkmark_color: Srgb,
+    checkmark_stroke_width: f64,
     cross_color: Srgb,
+    cross_stroke_width: f64,
     content_scale: f64,
     rect: VMobject,
     content: VMobject,
@@ -568,7 +570,9 @@ impl Checkbox {
             box_height: 0.5,
             fill_opacity: 0.0,
             checkmark_color: GREEN,
+            checkmark_stroke_width: 0.0,
             cross_color: RED,
+            cross_stroke_width: 0.0,
             content_scale: 0.5,
             rect: VMobject::new(),
             content: VMobject::new(),
@@ -612,10 +616,28 @@ impl Checkbox {
         self
     }
 
+    /// Checkmark stroke width (`checkmark_kwargs["stroke_width"]`).
+    /// Native construction keeps `0` (BN-08 filled silhouettes); the
+    /// portal default `6` is the Reference TeX-dingbat stroke.
+    #[must_use]
+    pub fn checkmark_stroke_width(mut self, width: f64) -> Self {
+        self.checkmark_stroke_width = width;
+        self.content = self.build_content();
+        self
+    }
+
     /// Cross colour (`cross_kwargs` stroke RED).
     #[must_use]
     pub fn cross_color(mut self, color: Srgb) -> Self {
         self.cross_color = color;
+        self.content = self.build_content();
+        self
+    }
+
+    /// Cross stroke width (`cross_kwargs["stroke_width"]`).
+    #[must_use]
+    pub fn cross_stroke_width(mut self, width: f64) -> Self {
+        self.cross_stroke_width = width;
         self.content = self.build_content();
         self
     }
@@ -669,6 +691,11 @@ impl Checkbox {
     /// `get_checkmark` / `get_cross`: the unit-box mark stretched onto the
     /// box, scaled by 0.5, centred on the box.
     fn build_content(&self) -> VMobject {
+        let (color, width) = if self.value {
+            (self.checkmark_color, self.checkmark_stroke_width)
+        } else {
+            (self.cross_color, self.cross_stroke_width)
+        };
         let mark = if self.value {
             checkmark(self.checkmark_color)
         } else {
@@ -678,6 +705,7 @@ impl Checkbox {
             .with_height(self.box_height, true)
             .scaled_about(self.content_scale, ORIGIN)
             .moved_to(self.rect.center_point())
+            .map_style(|style| style.stroke(color, width, 1.0).fill(color, 1.0))
     }
 }
 
@@ -2115,6 +2143,7 @@ mod tests {
 
         // Checked: GREEN checkmark, half the box's size, centred on it.
         assert_eq!(checkbox.content().style().fill_color, GREEN);
+        assert_eq!(checkbox.content().style().stroke_width, 0.0);
         assert!((checkbox.content().length_over_dim(0) - 0.25).abs() < 1e-9);
         assert!((checkbox.content().length_over_dim(1) - 0.25).abs() < 1e-9);
         assert_vec3_close(
@@ -2133,6 +2162,14 @@ mod tests {
         checkbox.toggle_value();
         assert!(checkbox.value());
         assert_eq!(checkbox.content().style().fill_color, GREEN);
+
+        let mut stroked = Checkbox::new(true)
+            .checkmark_stroke_width(3.0)
+            .cross_stroke_width(4.0);
+        assert_eq!(stroked.content().style().stroke_width, 3.0);
+        stroked.toggle_value();
+        assert_eq!(stroked.content().style().stroke_width, 4.0);
+        assert_eq!(stroked.content().style().fill_color, RED);
     }
 
     // --------------------------------------------------- LinearNumberSlider
