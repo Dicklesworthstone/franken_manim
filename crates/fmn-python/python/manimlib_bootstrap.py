@@ -8325,11 +8325,15 @@ class TracingTail(VMobject):
         stroke_color=None,
         stroke_width=(0, 3),
         stroke_opacity=(0, 1),
+        time_per_anchor=1.0 / 15,
         **kwargs,
     ):
-        _refuse_unrouted(
-            "TracingTail()", [(name, True) for name in sorted(kwargs)]
-        )
+        # fm-5wq.4.123: the schema's kwargs chain (TracingTail → TracedPath
+        # → VMobject) carries time_per_anchor and VMobject style keys;
+        # unknown keys stay named TypeErrors via the style preflight.
+        style_kwargs = dict(kwargs)
+        _preflight_vmobject_style_kwargs(style_kwargs)
+        self.time_per_anchor = float(time_per_anchor)
         if not isinstance(mobject_or_func, _BridgeMobject) and not callable(
             mobject_or_func
         ):
@@ -8348,7 +8352,9 @@ class TracingTail(VMobject):
             # is a TracedPath with the tail's finite window and tapers,
             # grown in the released Python-updater window — the same
             # verbatim update_path the TracedPath bind (fm-5wq.4.67) runs.
-            VMobject.__init__(self)
+            # time_per_anchor stays stored-but-inert exactly as TracedPath
+            # keeps it at the pin (update_path never consults it).
+            VMobject.__init__(self, **style_kwargs)
             self.traced_point_func = mobject_or_func
             self.stroke_config = dict(
                 color=stroke_color if stroke_color is not None else "#FFFFFF",
@@ -8368,6 +8374,13 @@ class TracingTail(VMobject):
                 "Scene before tracing (fm-p107)"
             )
 
+        if self.time_per_anchor != 1.0 / 15:
+            # The native tail's prefill cadence is fixed at the Reference
+            # default; a custom cadence has no native setter yet.
+            raise NotImplementedError(
+                "TracingTail time_per_anchor is not yet routed to the "
+                "native tracer's prefill; the 1/15 default works"
+            )
         _install_live_state(self)
         self._init_native_tracer(
             mobject_or_func._scene,
@@ -8377,6 +8390,8 @@ class TracingTail(VMobject):
             taper(stroke_width),
             taper(stroke_opacity),
         )
+        if style_kwargs:
+            _apply_vmobject_style_kwargs(self, style_kwargs)
 
 
 class ValueTracker(Mobject):

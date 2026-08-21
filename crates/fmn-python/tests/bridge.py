@@ -12472,3 +12472,38 @@ except TypeError as error:
     assert "requires a Matrix instance" in str(error), error
 else:
     raise AssertionError("element_to_mobject accepted a non-Matrix self")
+
+# fm-5wq.4.123: TracingTail's leftover constructor kwargs — the schema's
+# TracedPath chain carries time_per_anchor (stored-but-inert at the pin,
+# exactly like TracedPath's own) and VMobject style keys; the native
+# tail's fixed prefill cadence refuses a custom value by name, and
+# unknown keys stay named TypeErrors.
+tail_kw_func = manimlib.TracingTail(
+    lambda: (0.0, 0.0, 0.0),
+    time_per_anchor=1.0 / 30,
+    fill_opacity=0.0,
+)
+assert tail_kw_func.time_per_anchor == 1.0 / 30
+
+tail_kw_scene = InteractiveScene()
+tail_kw_dot = manimlib.Dot()
+tail_kw_scene.add(tail_kw_dot)
+tail_kw_native = manimlib.TracingTail(tail_kw_dot, fill_opacity=0.0)
+assert tail_kw_native.time_per_anchor == 1.0 / 15
+assert tail_kw_native.get_num_points() > 0
+
+try:
+    manimlib.TracingTail(tail_kw_dot, time_per_anchor=1.0 / 30)
+except NotImplementedError as error:
+    assert "time_per_anchor is not yet routed" in str(error), error
+else:
+    raise AssertionError(
+        "the native tail accepted an unrouted prefill cadence"
+    )
+
+try:
+    manimlib.TracingTail(tail_kw_dot, wobble=3)
+except TypeError as error:
+    assert "wobble" in str(error), error
+else:
+    raise AssertionError("TracingTail accepted an unknown kwarg")
