@@ -11976,6 +11976,16 @@ class Scene(_SceneCore):
         self.redo_stack.append(self.get_state())
         self.restore_state(self.undo_stack.pop())
 
+    def redo(self):
+        # Reference Scene.redo (scene.py): undo's mirror — push the live
+        # state onto undo_stack, pop redo_stack into restore_state; an
+        # empty stack is a no-op. refresh_static_mobjects() is skipped for
+        # the same missing-portal-surface reason as in undo.
+        if not self.redo_stack:
+            return
+        self.undo_stack.append(self.get_state())
+        self.restore_state(self.redo_stack.pop())
+
     def restore_state(self, scene_state):
         if not isinstance(scene_state, SceneState):
             raise TypeError("restore_state expects a SceneState")

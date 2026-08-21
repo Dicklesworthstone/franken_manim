@@ -1487,6 +1487,27 @@ assert (
     undo_overlay_scene.selection_highlight in undo_overlay_scene.mobjects
 )
 
+# fm-5wq.4: Scene.redo mirrors undo — it pops redo_stack back through
+# restore_state while pushing the live state onto undo_stack; an empty
+# redo_stack is a no-op.
+assert str(inspect.signature(scene_module.Scene.redo)) == "(self)"
+redo_scene = Scene()
+assert redo_scene.redo() is None
+assert redo_scene.undo_stack == []
+assert redo_scene.redo_stack == []
+redo_circle = manimlib.Circle()
+redo_scene.add(redo_circle)
+redo_saved_center = redo_circle.get_center().copy()
+redo_scene.save_state()
+redo_circle.shift([2.0, 1.0, 0.0])
+redo_moved_center = redo_circle.get_center().copy()
+assert redo_scene.undo() is None
+assert np.allclose(redo_circle.get_center(), redo_saved_center)
+assert redo_scene.redo() is None
+assert np.allclose(redo_circle.get_center(), redo_moved_center)
+assert len(redo_scene.undo_stack) == 1
+assert redo_scene.redo_stack == []
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
