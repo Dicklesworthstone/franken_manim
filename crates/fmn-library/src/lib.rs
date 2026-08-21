@@ -97,6 +97,7 @@ pub mod poly;
 pub mod solids;
 pub mod special_tex;
 pub mod style;
+pub mod svg;
 pub mod tex;
 pub mod text;
 pub mod tip;
@@ -155,6 +156,7 @@ pub use solids::{
 };
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
+pub use svg::svg_document_mobject;
 pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
