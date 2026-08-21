@@ -8603,7 +8603,62 @@ class _NativeAnimation(Animation):
         return getattr(self, self._target_attr) if self._target_attr else None
 
 
-class ShowCreation(_NativeAnimation):
+class ShowPartial(_NativeAnimation, _abc.ABC):
+    """The abstract partial-reveal mechanism (creation.py:25): a concrete
+    subclass supplies ``get_bounds``.  The two native bounds vocabularies —
+    creation's ``(0, alpha)`` (creation.py:52) and indication.py:179's
+    sliding passing-flash window — are recognized by sampling the
+    subclass's rule; any other rule refuses precisely at play."""
+
+    _native_kind = "show_partial"
+    _BOUNDS_PROBES = (0.125, 0.375, 0.625, 0.875)
+
+    def __init__(self, mobject, should_match_start=False, **kwargs):
+        if not isinstance(mobject, (VMobject, Surface)):
+            raise TypeError(
+                type(self).__name__
+                + " requires a VMobject or Surface family; "
+                + type(mobject).__name__
+                + " has no pointwise_become_partial plane"
+            )
+        super().__init__(mobject, **kwargs)
+        # Stored-but-never-read in the pinned Reference (creation.py:30);
+        # kept as inert constructor surface, matching the native shelf.
+        self.should_match_start = bool(should_match_start)
+
+    @_abc.abstractmethod
+    def get_bounds(self, alpha):
+        raise NotImplementedError
+
+    def _native_params(self):
+        probes = self._BOUNDS_PROBES
+        bounds = [
+            tuple(float(value) for value in self.get_bounds(alpha))
+            for alpha in probes
+        ]
+        if all(
+            abs(lower) <= 1e-12 and abs(upper - alpha) <= 1e-12
+            for (lower, upper), alpha in zip(bounds, probes)
+        ):
+            return {"bounds_kind": "creation"}
+        # The sliding window: upper = alpha * (1 + tw), lower = upper - tw,
+        # both clipped to [0, 1]; tw solves from the first (uncapped) probe.
+        time_width = bounds[0][1] / probes[0] - 1.0
+        if time_width > 0.0 and all(
+            abs(lower - max(alpha * (1.0 + time_width) - time_width, 0.0))
+            <= 1e-9
+            and abs(upper - min(alpha * (1.0 + time_width), 1.0)) <= 1e-9
+            for (lower, upper), alpha in zip(bounds, probes)
+        ):
+            return {"bounds_kind": "passing_flash", "time_width": time_width}
+        raise NotImplementedError(
+            type(self).__name__
+            + ".get_bounds is not a native reveal rule (creation or "
+            "passing-flash bounds)"
+        )
+
+
+class ShowCreation(ShowPartial):
     _native_kind = "show_creation"
 
     def __init__(self, mobject, lag_ratio=1.0, **kwargs):
@@ -8615,6 +8670,10 @@ class ShowCreation(_NativeAnimation):
         ):
             self._native_kind = "show_surface_creation"
 
+    def get_bounds(self, alpha):
+        # creation.py:52
+        return (0.0, alpha)
+
     def _native_params(self):
         if self._native_kind != "show_surface_creation":
             return {}
@@ -8624,7 +8683,7 @@ class ShowCreation(_NativeAnimation):
         }
 
 
-class Uncreate(_NativeAnimation):
+class Uncreate(ShowCreation):
     _native_kind = "uncreate"
 
     def __init__(self, mobject, **kwargs):
@@ -8645,7 +8704,47 @@ class Uncreate(_NativeAnimation):
         }
 
 
-class Write(_NativeAnimation):
+class DrawBorderThenFill(_NativeAnimation):
+    """creation.py:75 — reveal a stroke outline over the first half, then
+    cross-fade outline → start over the second (native
+    fmn-anim::DrawBorderThenFill owns the mechanism)."""
+
+    _native_kind = "draw_border_then_fill"
+
+    def __init__(
+        self,
+        vmobject,
+        run_time=2.0,
+        rate_func=None,
+        stroke_width=2.0,
+        stroke_color=None,
+        draw_border_animation_config=None,
+        fill_animation_config=None,
+        **kwargs,
+    ):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError(
+                "DrawBorderThenFill requires a VMobject; "
+                + type(vmobject).__name__
+                + " has no border/fill planes (creation.py:88)"
+            )
+        super().__init__(
+            vmobject, run_time=run_time, rate_func=rate_func, **kwargs
+        )
+        self.stroke_width = float(stroke_width)
+        self.stroke_color = stroke_color
+        # Stored-but-never-read in the pinned Reference; inert surface.
+        self.draw_border_animation_config = draw_border_animation_config or {}
+        self.fill_animation_config = fill_animation_config or {}
+
+    def _native_params(self):
+        params = {"stroke_width": self.stroke_width}
+        if self.stroke_color is not None:
+            params["stroke_color"] = tuple(_color_to_rgb(self.stroke_color))
+        return params
+
+
+class Write(DrawBorderThenFill):
     _native_kind = "write"
 
     def __init__(
@@ -8663,9 +8762,9 @@ class Write(_NativeAnimation):
             run_time=None if run_time == -1 else run_time,
             lag_ratio=None if lag_ratio == -1 else lag_ratio,
             rate_func=rate_func,
+            stroke_color=stroke_color,
             **kwargs,
         )
-        self.stroke_color = stroke_color
 
     def _native_params(self):
         if self.stroke_color is None:
@@ -9966,8 +10065,13 @@ def _install_schema_surface():
         ("manimlib.mobject.value_tracker", "ValueTracker"): ValueTracker,
         ("manimlib.mobject.value_tracker", "ExponentialValueTracker"): ExponentialValueTracker,
         ("manimlib.mobject.value_tracker", "ComplexValueTracker"): ComplexValueTracker,
+        ("manimlib.animation.creation", "ShowPartial"): ShowPartial,
         ("manimlib.animation.creation", "ShowCreation"): ShowCreation,
         ("manimlib.animation.creation", "Uncreate"): Uncreate,
+        (
+            "manimlib.animation.creation",
+            "DrawBorderThenFill",
+        ): DrawBorderThenFill,
         ("manimlib.animation.creation", "Write"): Write,
         ("manimlib.animation.fading", "FadeIn"): FadeIn,
         ("manimlib.animation.fading", "FadeOut"): FadeOut,

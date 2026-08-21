@@ -9027,3 +9027,145 @@ except (AssertionError, AttributeError):
     pass
 else:
     raise AssertionError("CountInFrom accepted a non-DecimalNumber")
+
+# fm-5wq.4.53: DrawBorderThenFill and ShowPartial are native animations, not
+# schema placeholders.  Bases follow the schema rows exactly.
+creation = importlib.import_module("manimlib.animation.creation")
+assert creation.ShowCreation.__bases__ == (creation.ShowPartial,)
+assert creation.Uncreate.__bases__ == (creation.ShowCreation,)
+assert creation.Write.__bases__ == (creation.DrawBorderThenFill,)
+assert issubclass(creation.ShowPartial, Animation)
+assert issubclass(creation.ShowPartial, abc.ABC)
+
+# The mechanism is abstract (creation.py:25): direct instantiation refuses.
+try:
+    creation.ShowPartial(manimlib.Square())
+except TypeError as error:
+    assert "abstract" in str(error), error
+else:
+    raise AssertionError("ShowPartial() must refuse direct instantiation")
+
+# Non-VMobject targets are named errors, never silent skips.
+try:
+    creation.DrawBorderThenFill(Mobject())
+except TypeError as error:
+    assert "DrawBorderThenFill" in str(error), error
+    assert "Mobject" in str(error), error
+else:
+    raise AssertionError("DrawBorderThenFill accepted a non-VMobject")
+
+
+class _CreationBoundsReveal(creation.ShowPartial):
+    def get_bounds(self, alpha):
+        return (0.0, alpha)
+
+
+try:
+    _CreationBoundsReveal(Mobject())
+except TypeError as error:
+    assert "pointwise_become_partial" in str(error), error
+else:
+    raise AssertionError("ShowPartial subclass accepted a non-VMobject")
+
+# ShowPartial classifies a subclass's get_bounds into the two native reveal
+# vocabularies and respects the resulting bounds.
+assert _CreationBoundsReveal(manimlib.Square())._native_params() == {
+    "bounds_kind": "creation"
+}
+
+
+class _SlidingWindowReveal(creation.ShowPartial):
+    def get_bounds(self, alpha):
+        upper = alpha * 1.25
+        return (max(upper - 0.25, 0.0), min(upper, 1.0))
+
+
+sliding_params = _SlidingWindowReveal(manimlib.Square())._native_params()
+assert sliding_params["bounds_kind"] == "passing_flash"
+assert abs(sliding_params["time_width"] - 0.25) < 1e-9
+
+
+class _SkewedReveal(creation.ShowPartial):
+    def get_bounds(self, alpha):
+        return (alpha / 2.0, alpha)
+
+
+try:
+    _SkewedReveal(manimlib.Square())._native_params()
+except NotImplementedError as error:
+    assert "native reveal rule" in str(error), error
+else:
+    raise AssertionError("a non-native get_bounds rule must refuse precisely")
+
+# A subclass-defined creation window plays through the native segment: with a
+# constant rate the end state is exactly pointwise_become_partial(start, 0, r).
+partial_scene = InteractiveScene()
+partial_square = manimlib.Square(side_length=2.0)
+partial_square.set_stroke(manimlib.WHITE, width=4.0)
+partial_reference = partial_square.copy()
+partial_expected = partial_square.copy()
+partial_expected.pointwise_become_partial(partial_reference, 0.0, 0.5)
+partial_scene.add(partial_square)
+partial_scene.play(
+    _CreationBoundsReveal(partial_square, rate_func=lambda t: 0.5),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(partial_square.get_points(), partial_expected.get_points())
+assert not np.allclose(
+    partial_square.get_points(), partial_reference.get_points()
+)
+
+# DrawBorderThenFill crosses the native segment: a constant rate in the first
+# half leaves the border-only outline (fill opacity 0, configured stroke), one
+# in the second half leaves the outline→start cross-fade midpoint, and a full
+# run restores the start data exactly (creation.py:122).
+dbtf_scene = InteractiveScene()
+
+
+def _dbtf_square():
+    square = manimlib.Square(side_length=2.0)
+    square.set_fill(manimlib.BLUE, opacity=1.0)
+    square.set_stroke(manimlib.WHITE, width=4.0)
+    return square
+
+
+border_square = _dbtf_square()
+dbtf_scene.add(border_square)
+dbtf_scene.play(
+    creation.DrawBorderThenFill(
+        border_square, stroke_color=manimlib.RED, rate_func=lambda t: 0.25
+    ),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(border_square.data["fill_rgba"][:, 3], 0.0)
+assert np.allclose(border_square.data["stroke_width"], 2.0)
+assert np.allclose(
+    border_square.data["stroke_rgba"][:, :3],
+    manimlib.color_to_rgb(manimlib.RED),
+)
+
+fade_square = _dbtf_square()
+dbtf_scene.add(fade_square)
+dbtf_scene.play(
+    creation.DrawBorderThenFill(fade_square, rate_func=lambda t: 0.75),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(fade_square.data["fill_rgba"][:, 3], 0.5)
+assert np.allclose(fade_square.data["stroke_width"], 3.0)
+
+full_square = _dbtf_square()
+dbtf_scene.add(full_square)
+dbtf_scene.play(
+    creation.DrawBorderThenFill(full_square), run_time=2.0 / 30.0
+)
+assert np.allclose(full_square.data["fill_rgba"][:, 3], 1.0)
+assert np.allclose(full_square.data["stroke_width"], 4.0)
+
+# Write keeps its DrawBorderThenFill inheritance surface: the -1 sentinels
+# leave native family-derived timing in charge and stroke_width stays off the
+# write spec (the native parameterization owns it).
+write_probe = creation.Write(_dbtf_square())
+assert isinstance(write_probe, creation.DrawBorderThenFill)
+assert write_probe.run_time is None
+assert write_probe.lag_ratio is None
+assert write_probe._native_params() == {}

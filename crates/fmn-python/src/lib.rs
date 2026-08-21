@@ -6774,6 +6774,8 @@ struct AnimSpec {
     path_arc: f64,
     path_arc_axis: [f64; 3],
     stroke_color: Option<[f64; 3]>,
+    stroke_width: Option<f64>,
+    bounds_kind: String,
     point: [f64; 3],
     point_color: Option<[f64; 3]>,
     color: Option<[f64; 3]>,
@@ -6895,6 +6897,14 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .get_item("stroke_color")?
             .map(|value| value.extract())
             .transpose()?,
+        stroke_width: params
+            .get_item("stroke_width")?
+            .map(|value| value.extract())
+            .transpose()?,
+        bounds_kind: match params.get_item("bounds_kind")? {
+            Some(value) => value.extract()?,
+            None => String::new(),
+        },
         point: get3("point", [0.0; 3])?,
         point_color: params
             .get_item("point_color")?
@@ -7046,6 +7056,35 @@ fn build_native_animation(
                 write = write.with_stroke_color(Some(rgb));
             }
             Box::new(write)
+        }
+        "draw_border_then_fill" => {
+            let mut border = fmn_anim::DrawBorderThenFill::new(need_mob(spec.mob)?);
+            if let Some(width) = spec.stroke_width {
+                border = border.with_stroke_width(width);
+            }
+            if let Some(rgb) = spec.stroke_color {
+                #[allow(clippy::cast_possible_truncation)]
+                let rgb = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32];
+                border = border.with_stroke_color(Some(rgb));
+            }
+            Box::new(border)
+        }
+        "show_partial" => {
+            // The two Reference bounds vocabularies; the bootstrap
+            // classifies a subclass's `get_bounds` into one of them and
+            // refuses anything else before the spec is built.
+            let bounds = match spec.bounds_kind.as_str() {
+                "creation" => fmn_anim::RevealBounds::Creation,
+                "passing_flash" => fmn_anim::RevealBounds::PassingFlash {
+                    time_width: spec.time_width,
+                },
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "ShowPartial bounds rule `{other}` is not a native reveal rule"
+                    )));
+                }
+            };
+            Box::new(fmn_anim::ShowPartial::new(need_mob(spec.mob)?, bounds))
         }
         "rotate" => {
             let mut rotating = fmn_anim::rotate(need_mob(spec.mob)?, spec.angle)
