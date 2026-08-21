@@ -582,8 +582,10 @@ fn put_entry(w: &mut Writer, entry: &SnapshotEntry) -> Result<(), SerialError> {
 /// The tag carries durable class configuration — `Line`'s `path_arc`
 /// outlives every transform — so dropping it on a round trip would change
 /// meaning, not just performance. Encoded as a discriminant plus its
-/// payload, followed by the point revision its geometry was true at
-/// (`u64::MAX` standing for "none", which only `General` uses).
+/// payload, followed by whether its geometry hint is live (`0` for live,
+/// `u64::MAX` for absent). The process-local RecordBuffer revision number is
+/// deliberately not durable semantic state; decode rebinds a live marker to
+/// the reconstructed buffer's current `point` revision.
 fn put_shape(w: &mut Writer, slot: &ShapeSlot) -> Result<(), SerialError> {
     let put_point = |w: &mut Writer, p: Vec3| {
         w.put_f64(p[0]).put_f64(p[1]).put_f64(p[2]);
@@ -647,7 +649,11 @@ fn put_shape(w: &mut Writer, slot: &ShapeSlot) -> Result<(), SerialError> {
             w.put_f64(width).put_f64(height).put_f64(corner_radius);
         }
     }
-    w.put_u64(slot.point_revision.unwrap_or(u64::MAX));
+    w.put_u64(if slot.point_revision.is_some() {
+        0
+    } else {
+        u64::MAX
+    });
     Ok(())
 }
 
@@ -1254,11 +1260,14 @@ impl Snapshot {
                 };
                 // Schema minor 1.1 appended the shape tag; a 1.0 stream
                 // simply has no shape, which is what General means.
-                let shape = if r.version().1 >= 1 {
+                let mut shape = if r.version().1 >= 1 {
                     get_shape(&mut r)?
                 } else {
                     ShapeSlot::default()
                 };
+                if shape.point_revision.is_some() {
+                    shape.point_revision = buffer.field_revision("point");
+                }
                 // Minor 1.2 appended the scene-sort key (§8.5).
                 let z_index = if r.version().1 >= 2 { r.get_i32()? } else { 0 };
                 Some(SnapshotEntry {

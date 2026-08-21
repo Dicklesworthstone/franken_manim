@@ -7718,11 +7718,26 @@ impl PyScene {
     /// arena snapshot before the runtime reapplies its clock, RNG, play
     /// count, roots, records, and family graph.
     fn _restore_checkpoint_bytes(&self, bytes: Vec<u8>) -> PyResult<()> {
-        self.engine
-            .borrow_mut()
+        let mut engine = self.engine.borrow_mut();
+        engine
             .restore_state_bytes(&bytes)
-            .map(|_| ())
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let restored = engine
+            .state_bytes()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        if restored != bytes {
+            let first_difference = restored
+                .iter()
+                .zip(&bytes)
+                .position(|(restored, captured)| restored != captured)
+                .unwrap_or_else(|| restored.len().min(bytes.len()));
+            return Err(PyRuntimeError::new_err(format!(
+                "native checkpoint restore did not round-trip: captured_len={}, restored_len={}, first_difference={first_difference}",
+                bytes.len(),
+                restored.len(),
+            )));
+        }
+        Ok(())
     }
 }
 
