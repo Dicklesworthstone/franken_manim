@@ -7134,6 +7134,9 @@ fn build_native_animation(
         ),
         "v_fade_in" => Box::new(fmn_anim::v_fade_in(need_mob(spec.mob)?)),
         "v_fade_out" => Box::new(fmn_anim::v_fade_out(need_mob(spec.mob)?)),
+        "v_fade_in_then_out" => {
+            Box::new(fmn_anim::v_fade_in_then_out(need_mob(spec.mob)?))
+        }
         "show_creation" => Box::new(fmn_anim::show_creation(need_mob(spec.mob)?)),
         "show_surface_creation" => Box::new(fmn_anim::show_surface_creation(
             need_mob(spec.mob)?,
@@ -7367,6 +7370,14 @@ fn build_native_animation(
         "fade_transform" => Box::new(
             fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
                 .map_err(anim_error)?,
+        ),
+        "fade_transform_pieces" => Box::new(
+            fmn_anim::fade_transform_pieces(
+                stage,
+                need_mob(spec.mob)?,
+                need_target(spec.target)?,
+            )
+            .map_err(anim_error)?,
         ),
         "restore" => {
             let mut restore = fmn_anim::restore(stage, need_mob(spec.mob)?).map_err(anim_error)?;

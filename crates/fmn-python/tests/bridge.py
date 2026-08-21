@@ -3186,6 +3186,79 @@ except ValueError as error:
 else:
     raise AssertionError("SpinInFromNothing accepted a pointless VMobject")
 
+# The remaining fading compatibility spellings are real Choreo-backed
+# classes. FadeInFromLarge is the historical large-start convenience over
+# FadeIn's native scale contract; FadeTransformPieces selects the native
+# family-alignment variant; VFadeInThenOut selects its native opacity curve.
+fading = importlib.import_module("manimlib.animation.fading")
+assert fading.FadeInFromLarge.__bases__ == (fading.FadeIn,)
+assert fading.FadeTransformPieces.__bases__ == (fading.FadeTransform,)
+assert fading.VFadeInThenOut.__bases__ == (fading.VFadeIn,)
+assert str(inspect.signature(fading.FadeInFromLarge)) == (
+    "(mobject, scale_factor=2, **kwargs)"
+)
+
+large_fade_mobject = geometry.Rectangle(width=2.0, height=1.0)
+large_fade_widths = []
+large_fade_mobject.add_updater(
+    lambda mob: large_fade_widths.append(mob.get_width()), call=False
+)
+Scene().play(
+    fading.FadeInFromLarge(
+        large_fade_mobject,
+        scale_factor=2.0,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert min(large_fade_widths) < large_fade_widths[-1]
+assert np.isclose(large_fade_mobject.get_width(), 2.0)
+
+pieces_source = geometry.Rectangle(width=2.0, height=1.0).shift(manimlib.LEFT)
+pieces_target = geometry.Circle(radius=0.75).shift(manimlib.RIGHT)
+pieces_scene = Scene()
+pieces_scene.play(
+    fading.FadeTransformPieces(
+        pieces_source,
+        pieces_target,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert pieces_target in pieces_scene.get_mobjects()
+assert pieces_source not in pieces_scene.get_mobjects()
+
+for source, target, error_type, message in (
+    (
+        manimlib.Mobject(),
+        geometry.Circle(),
+        TypeError,
+        "FadeTransformPieces requires a non-empty VMobject pair; source is Mobject",
+    ),
+    (
+        VMobject(),
+        geometry.Circle(),
+        ValueError,
+        "FadeTransformPieces requires a non-empty VMobject pair; source has no points",
+    ),
+):
+    try:
+        fading.FadeTransformPieces(source, target)
+    except error_type as error:
+        assert str(error) == message
+    else:
+        raise AssertionError("FadeTransformPieces accepted an invalid pair")
+
+vfade_cycle = geometry.Circle(fill_opacity=0.8)
+vfade_opacities = []
+vfade_cycle.add_updater(
+    lambda mob: vfade_opacities.append(mob.get_fill_opacity()), call=False
+)
+Scene().play(
+    fading.VFadeInThenOut(vfade_cycle, run_time=2.0 / 30.0)
+)
+assert max(vfade_opacities) > min(vfade_opacities)
+
 # The mechanism-pure indication shelf is routed to Choreo.  These are live
 # Scene.play checks: each animation must cross the native segment boundary and
 # expose the intermediate state its mechanism owns, not merely construct.

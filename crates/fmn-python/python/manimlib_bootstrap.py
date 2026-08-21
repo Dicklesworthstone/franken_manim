@@ -9151,6 +9151,18 @@ class FadeOut(FadeIn):
         super().__init__(mobject, shift=shift, scale=scale, **kwargs)
 
 
+class FadeInFromLarge(FadeIn):
+    """Compatibility spelling for a fade from an enlarged start state."""
+
+    def __init__(self, mobject, scale_factor=2, **kwargs):
+        self.scale_factor = float(scale_factor)
+        if not _math.isfinite(self.scale_factor) or self.scale_factor <= 0:
+            raise ValueError(
+                "FadeInFromLarge scale_factor must be positive and finite"
+            )
+        super().__init__(mobject, scale=1.0 / self.scale_factor, **kwargs)
+
+
 class VFadeIn(_NativeAnimation):
     _native_kind = "v_fade_in"
 
@@ -9174,6 +9186,27 @@ class VFadeOut(_NativeAnimation):
             ],
         )
         super().__init__(vmobject, **kwargs)
+
+
+class VFadeInThenOut(VFadeIn):
+    _native_kind = "v_fade_in_then_out"
+
+    def __init__(
+        self,
+        vmobject,
+        rate_func=_there_and_back_rate,
+        remover=True,
+        final_alpha_value=0.5,
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "VFadeInThenOut()",
+            [
+                ("remover", remover is not True),
+                ("final_alpha_value", final_alpha_value != 0.5),
+            ],
+        )
+        super().__init__(vmobject, rate_func=rate_func, **kwargs)
 
 
 class Rotating(Animation):
@@ -10043,6 +10076,27 @@ class FadeTransform(_NativeAnimation):
         )
         super().__init__(mobject, **kwargs)
         self.target_mobject = target_mobject
+
+
+class FadeTransformPieces(FadeTransform):
+    _native_kind = "fade_transform_pieces"
+
+    def __init__(self, mobject, target_mobject, **kwargs):
+        for role, value in (("source", mobject), ("target", target_mobject)):
+            if not isinstance(value, VMobject):
+                raise TypeError(
+                    "FadeTransformPieces requires a non-empty VMobject pair; "
+                    + role
+                    + " is "
+                    + type(value).__name__
+                )
+            if not value.family_members_with_points():
+                raise ValueError(
+                    "FadeTransformPieces requires a non-empty VMobject pair; "
+                    + role
+                    + " has no points"
+                )
+        super().__init__(mobject, target_mobject, **kwargs)
 
 
 class TransformMatchingParts(_NativeAnimation):
@@ -11137,9 +11191,15 @@ def _install_schema_surface():
         ): ShowSubmobjectsOneByOne,
         ("manimlib.animation.fading", "FadeIn"): FadeIn,
         ("manimlib.animation.fading", "FadeOut"): FadeOut,
+        ("manimlib.animation.fading", "FadeInFromLarge"): FadeInFromLarge,
         ("manimlib.animation.fading", "VFadeIn"): VFadeIn,
         ("manimlib.animation.fading", "VFadeOut"): VFadeOut,
+        ("manimlib.animation.fading", "VFadeInThenOut"): VFadeInThenOut,
         ("manimlib.animation.fading", "FadeTransform"): FadeTransform,
+        (
+            "manimlib.animation.fading",
+            "FadeTransformPieces",
+        ): FadeTransformPieces,
         ("manimlib.animation.fading", "FadeInFromPoint"): FadeInFromPoint,
         ("manimlib.animation.fading", "FadeOutToPoint"): FadeOutToPoint,
         ("manimlib.animation.composition", "AnimationGroup"): AnimationGroup,
