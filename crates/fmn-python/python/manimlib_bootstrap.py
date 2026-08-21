@@ -11829,20 +11829,56 @@ class Flash(AnimationGroup):
                     "Flash " + name + " must be non-negative and finite"
                 )
         self.lines = self.create_lines()
-        if self._flash_target is not None:
-            # Each line becomes a scene root through the native Flash
-            # composition. One member therefore owns the single live updater
-            # that moves the detached Python VGroup as a radial unit after
-            # interpolation and before capture.
-            self.lines[0].add_updater(
-                lambda _line: self.lines.move_to(self._flash_target),
-                call=False,
-            )
         super().__init__(
             *self.create_line_anims(),
             run_time=run_time,
             **kwargs,
         )
+        if self._flash_target is not None:
+            # fm-5wq.4.78: the Mobject-point case is Python-driven end to
+            # end — the same architecture whose co-play pin runs green for
+            # FocusOn (fm-5wq.4.77): the instance drops its native kind and
+            # rides the 4.97 python-callback slot, so each release-window
+            # frame re-applies every line's passing-flash window from its
+            # begin copy and re-centres the radial group on the target's
+            # CURRENT centre. The numeric-point case keeps the native
+            # flash composition untouched.
+            self._native_kind = None
+            self.mobject = self.lines
+            self.remover = True
+
+    # The Python-driven follow lifecycle (only the Mobject-point case is
+    # ever driven; the numeric case plays natively and never calls these).
+    _FLASH_WINDOW_TIME_WIDTH = 2.0  # ShowCreationThenDestruction's default
+
+    def begin(self):
+        if self._flash_target is None:
+            return Animation.begin(self)
+        self._follow_sources = [line.copy() for line in self.lines]
+        self.interpolate(0.0)
+        return self
+
+    def interpolate_mobject(self, alpha):
+        if self._flash_target is None:
+            # Numeric points animate through the native flash composition;
+            # a Python drive of that case (turn_animation_into_updater)
+            # refuses by name rather than silently holding still.
+            raise NotImplementedError(
+                "Flash with a numeric point animates through the native "
+                "flash composition; Python-driven interpolation serves "
+                "only the Mobject-follow case"
+            )
+        rated = self.rate_func(self.time_spanned_alpha(float(alpha)))
+        # RevealBounds::PassingFlash, formula for formula (indication.py:179):
+        # the lower bound derives from the UNCAPPED upper, so the window
+        # closes to zero width at alpha 1 instead of leaving a sliver.
+        time_width = self._FLASH_WINDOW_TIME_WIDTH
+        raw_upper = rated * (1.0 + time_width)
+        lower = max(raw_upper - time_width, 0.0)
+        upper = min(raw_upper, 1.0)
+        for line, source in zip(self.lines, self._follow_sources):
+            line.pointwise_become_partial(source, lower, upper)
+        self.lines.move_to(self._flash_target)
 
     def create_lines(self):
         lines = VGroup()
