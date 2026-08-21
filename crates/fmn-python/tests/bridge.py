@@ -4574,6 +4574,19 @@ assert np.isclose(
     0.25,
     atol=1e-3,
 )
+assert np.isclose(color_sliders.selected_color_box.get_stroke_opacity(), 1.0)
+custom_rect_stroke = interactive.ColorSliders(
+    rect_kwargs=dict(width=2.0, height=0.5, stroke_opacity=0.3)
+)
+assert np.isclose(
+    custom_rect_stroke.selected_color_box.get_stroke_opacity(),
+    0.3,
+)
+custom_rect_stroke.set_value(64.0, 128.0, 255.0, 0.5)
+assert np.isclose(
+    custom_rect_stroke.selected_color_box.get_stroke_opacity(),
+    0.3,
+)
 try:
     interactive.ColorSliders(rect_kwargs=dict(bogus=1))
 except TypeError as error:

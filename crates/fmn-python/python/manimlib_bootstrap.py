@@ -10791,13 +10791,10 @@ class ColorSliders(Group):
             )
         rect_width = float(rect_config.get("width", 2.0))
         rect_height = float(rect_config.get("height", 0.5))
+        rect_stroke_opacity = float(rect_config.get("stroke_opacity", 1.0))
         rect_config["width"] = rect_width
         rect_config["height"] = rect_height
-        if float(rect_config.get("stroke_opacity", 1.0)) != 1.0:
-            raise NotImplementedError(
-                "ColorSliders rect_kwargs.stroke_opacity is not routed to "
-                "the native builder"
-            )
+        rect_config["stroke_opacity"] = rect_stroke_opacity
         grid_config = dict(background_grid_kwargs)
         grid_unknown = sorted(
             set(grid_config) - {"colors", "single_square_len"}
@@ -10877,6 +10874,9 @@ class ColorSliders(Group):
             )
         for slider in parts[1].submobjects:
             slider.value_type = self._slider_value_type
+        parts[0].submobjects[1].set_stroke(
+            opacity=float(self.rect_kwargs.get("stroke_opacity", 1.0))
+        )
         return parts[0], parts[1], tuple(float(value) for value in native_components)
 
     def get_value(self):
