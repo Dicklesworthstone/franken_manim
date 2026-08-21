@@ -7928,10 +7928,6 @@ class Prismify(VGroup3D):
     def __init__(self, vmobject, depth=1.0, direction=_IN, **kwargs):
         if not isinstance(vmobject, VMobject):
             raise TypeError("Prismify source must be a VMobject")
-        if vmobject.submobjects:
-            raise NotImplementedError(
-                "Prismify over a VMobject family awaits native family-value extraction"
-            )
         direction = tuple(float(value) for value in _vec3(direction))
         if not _math.isfinite(float(depth)) or not all(
             _math.isfinite(value) for value in direction
@@ -7941,15 +7937,39 @@ class Prismify(VGroup3D):
             "Prismify()", kwargs, (0.2, 0.2, 0.2)
         )
         _install_live_state(self)
-        specs = self._build_prismify(
-            _native_shell_factory,
-            vmobject,
-            float(depth),
-            direction,
-        )
-        _hang_native_children(self, specs)
-        for piece in self.submobjects:
-            piece.match_style(vmobject)
+        if vmobject.submobjects:
+            # One native extrusion per pointful family member, in family
+            # order (fm-5wq.4.81); each piece matches its own source's
+            # style, the Reference's per-child reading of match_style.
+            family_sources = [
+                member
+                for member in vmobject.family_members_with_points()
+                if isinstance(member, VMobject)
+            ]
+            if not family_sources:
+                raise ValueError(
+                    "Prismify family has no pointful VMobject members to "
+                    "extrude"
+                )
+            specs = self._build_prismify_family(
+                _native_shell_factory,
+                vmobject,
+                float(depth),
+                direction,
+            )
+            _hang_native_children(self, specs)
+            for piece, family_source in zip(self.submobjects, family_sources):
+                piece.match_style(family_source)
+        else:
+            specs = self._build_prismify(
+                _native_shell_factory,
+                vmobject,
+                float(depth),
+                direction,
+            )
+            _hang_native_children(self, specs)
+            for piece in self.submobjects:
+                piece.match_style(vmobject)
         _apply_vmobject_style_kwargs(self, style, recurse=False)
         _apply_vgroup3d_config(self, depth_test, shading, joint_type)
 

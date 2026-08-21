@@ -10875,3 +10875,49 @@ except TypeError as error:
     assert "requires a StreamLines instance" in str(error), error
 else:
     raise AssertionError("AnimatedStreamLines accepted a bare VGroup")
+
+# fm-5wq.4.81: Prismify over a VMobject family — one native extrusion tree
+# per pointful member, in family order, each matching its own source style.
+prism_family_square = manimlib.Square(side_length=1.0).move_to((-1.5, 0.0, 0.0))
+prism_family_square.set_stroke(manimlib.RED, width=3.0)
+prism_family_triangle = manimlib.Triangle().move_to((1.5, 0.0, 0.0))
+prism_family_triangle.set_stroke(manimlib.BLUE, width=3.0)
+prism_family = manimlib.Prismify(
+    manimlib.VGroup(prism_family_square, prism_family_triangle),
+    depth=0.5,
+)
+assert len(prism_family.submobjects) == 2
+assert all(
+    len(piece.family_members_with_points()) > 0
+    for piece in prism_family.submobjects
+)
+# Each extrusion spans its source's footprint plus the depth extrusion.
+assert prism_family.submobjects[0].get_depth() > 0.0
+assert np.allclose(
+    prism_family.submobjects[0].get_center()[:2],
+    prism_family_square.get_center()[:2],
+    atol=1e-6,
+)
+assert np.allclose(
+    prism_family.submobjects[1].get_center()[:2],
+    prism_family_triangle.get_center()[:2],
+    atol=1e-6,
+)
+
+# The single-VMobject path is untouched, and the negatives stay named.
+prism_single = manimlib.Prismify(manimlib.Square(side_length=1.0), depth=0.5)
+assert len(prism_single.family_members_with_points()) > 0
+
+try:
+    manimlib.Prismify(None)
+except TypeError as error:
+    assert "Prismify source must be a VMobject" in str(error), error
+else:
+    raise AssertionError("Prismify accepted None")
+
+try:
+    manimlib.Prismify(manimlib.VGroup(VMobject()))
+except ValueError as error:
+    assert "no pointful VMobject members" in str(error), error
+else:
+    raise AssertionError("Prismify accepted a point-less family")
