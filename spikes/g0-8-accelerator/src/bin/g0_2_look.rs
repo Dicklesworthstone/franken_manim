@@ -20,7 +20,7 @@
 //! ```
 
 use fmn_core::color::Srgb;
-use fmn_core::constants::{BLUE_E, GREEN, PURPLE, RED, TEAL, YELLOW};
+use fmn_core::constants::{BLUE_E, DOWN, GREEN, ORIGIN, PURPLE, RED, TEAL, YELLOW};
 use fmn_frame::{FrameBuffer, PixelFormat};
 use fmn_geom::QuadPath;
 use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
@@ -32,8 +32,11 @@ use fmn_render::{
     CameraConfig, CameraFrame, SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDCamera, ThreeDDraw,
     ThreeDJob,
 };
+use fmn_library::text::Text;
+use fmn_library::vmobject::v_group;
 use fmn_spike_accelerator::cpu::{self, Surface};
 use fmn_spike_accelerator::scene::{self, CalibrationPanel};
+use fmn_text::FontBook;
 
 /// Capture resolution. The Reference stills are 1920x1080 and the panel
 /// geometry is measured in those pixels, so anything else would defeat the
@@ -48,8 +51,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let modes = args.collect::<Vec<_>>();
     let lighting_only = modes.iter().any(|argument| argument == "--lighting-only");
     let gradient_only = modes.iter().any(|argument| argument == "--gradient-only");
-    if lighting_only && gradient_only {
-        return Err("--gradient-only and --lighting-only are mutually exclusive".into());
+    let text_only = modes.iter().any(|argument| argument == "--text-only");
+    if [lighting_only, gradient_only, text_only]
+        .iter()
+        .filter(|only| **only)
+        .count()
+        > 1
+    {
+        return Err(
+            "--gradient-only, --lighting-only, and --text-only are mutually exclusive".into(),
+        );
     }
     let dir = std::path::Path::new(&dir);
     std::fs::create_dir_all(dir)?;
@@ -58,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {WIDTH}x{HEIGHT}, tile {TILE}, aa_width 1.5 px (VMobject default)");
     println!();
 
-    if !lighting_only {
+    if !lighting_only && !text_only {
         for panel in CalibrationPanel::ALL {
             if gradient_only && panel != CalibrationPanel::GradientFills {
                 continue;
@@ -89,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !gradient_only {
+    if !gradient_only && !text_only {
         let lighting = render_lighting_3d()?;
         write_frame_png(dir, "fmn-lighting-3d.png", &lighting)?;
         println!(
@@ -99,9 +110,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if !gradient_only && !lighting_only {
+        let text = render_text_sample()?;
+        write_frame_png(dir, "fmn-text-sample.png", &text)?;
+        println!(
+            "    {:<20} Scribe over CM    {}",
+            "text_sample",
+            describe_frame(&text),
+        );
+    }
+
     println!();
     println!("Compare against gallery/reference_captures/<id>.png (same pixel grid).");
     Ok(())
+}
+
+/// The `text_sample` panel (fm-gfn): the Reference capture scene rebuilt on
+/// Scribe — `Text("FrankenManim look study", font_size=60)` over
+/// `Text("the same feel, cleaner — measured, then kept", font_size=32,
+/// slant=ITALIC)`, body `next_to(title, DOWN, buff=0.5)`, the group centred —
+/// laid out by fmn-text over the bundled Computer Modern faces (regular +
+/// italic) and rendered by production Lumen. The face itself is the deliberate
+/// D-08/BN-05 divergence: the Reference's panel went through Pango to a host
+/// font; ours is the sovereign bundled default, so the comparison is layout,
+/// weight, slant, and AA character — never glyph identity.
+fn render_text_sample() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
+    /// The capture camera's mapping at 1920×1080: `FRAME_HEIGHT = 8` scene
+    /// units over 1080 rows (the same 135 px/unit the G0-2 note records).
+    const PX_PER_UNIT: f64 = 135.0;
+
+    let book = FontBook::bundled()?;
+    let title = Text::new("FrankenManim look study")
+        .font_size(60.0)
+        .build(&book)?
+        .vmob;
+    let body_text = "the same feel, cleaner — measured, then kept";
+    let italic: [(&str, bool); 1] = [(body_text, true)];
+    let body = Text::new(body_text)
+        .font_size(32.0)
+        .t2s(&italic)
+        .build(&book)?
+        .vmob
+        .next_to(&title, DOWN, 0.5, ORIGIN);
+    let group = v_group([title, body]);
+    let center = group.center_point();
+    // Bake the capture camera into the geometry — centre the group, then map
+    // scene units onto the capture pixel grid with y flipped into rows — so
+    // the identity ScreenMap below keeps the registration this study depends
+    // on. Widths convert through the same camera (×135 under the one
+    // width-unit conversion), or the 0.5-unit fill border would vanish.
+    let group = group
+        .shifted([-center[0], -center[1], -center[2]])
+        .map_points(|p| {
+            [
+                f64::from(WIDTH) / 2.0 + PX_PER_UNIT * p[0],
+                f64::from(HEIGHT) / 2.0 - PX_PER_UNIT * p[1],
+                0.0,
+            ]
+        })
+        .map_style_deep(|style| {
+            let mut style = style;
+            style.stroke_width *= PX_PER_UNIT;
+            style.fill_border_width *= PX_PER_UNIT;
+            style
+        });
+
+    let mut stage = Stage::new();
+    let mob = stage.add(group);
+    stage.add_to_scene(mob)?;
+
+    let config = FrameConfig::new(
+        Viewport {
+            width: WIDTH,
+            height: HEIGHT,
+        },
+        ScreenMap {
+            scale: 1.0,
+            origin: [0.0, 0.0],
+        },
+        Srgb::from_rgb8(0x33, 0x33, 0x33).to_linear(1.0),
+    );
+    let mut plan = RenderPlan::new();
+    plan.sync(&stage, 0)?;
+    let mono = MonoTable::build(&plan, config.map)?;
+    let mut binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map)?;
+    binning.prune_occluded(&plan)?;
+    Ok(FrameJob::new(&plan, &mono, &binning, config)?.render(4)?)
 }
 
 fn render_gradient_fills() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
@@ -157,7 +251,7 @@ fn render_gradient_fills() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
     );
     let mut plan = RenderPlan::new();
     plan.sync(&stage, 0)?;
-    let mono = MonoTable::build(&plan, config.map);
+    let mono = MonoTable::build(&plan, config.map)?;
     let mut binning = Binning::build(&plan, config.viewport, Tiling::default(), config.map)?;
     binning.prune_occluded(&plan)?;
     Ok(FrameJob::new(&plan, &mono, &binning, config)?.render(4)?)
@@ -184,7 +278,7 @@ fn gradient_mobject(
     path: &QuadPath,
     style: GradientStyle,
 ) -> Result<Mobject, Box<dyn std::error::Error>> {
-    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), path.points().len());
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), path.points().len())?;
     let fill = srgb_record(style.fill.0, style.fill.2);
     let stroke = srgb_record(style.stroke.0, style.stroke.3);
     for (index, point) in path.points().iter().enumerate() {
