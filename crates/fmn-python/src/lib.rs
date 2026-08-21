@@ -7105,6 +7105,8 @@ struct AnimSpec {
     mobs: Vec<Mob>,
     pairs: Vec<(Mob, Mob)>,
     int_round: String,
+    stretch: Option<bool>,
+    dim_to_match: Option<usize>,
     point: [f64; 3],
     point_color: Option<[f64; 3]>,
     color: Option<[f64; 3]>,
@@ -7259,6 +7261,14 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             Some(value) => value.extract()?,
             None => String::new(),
         },
+        stretch: params
+            .get_item("stretch")?
+            .map(|value| value.extract())
+            .transpose()?,
+        dim_to_match: params
+            .get_item("dim_to_match")?
+            .map(|value| value.extract())
+            .transpose()?,
         point: get3("point", [0.0; 3])?,
         point_color: params
             .get_item("point_color")?
@@ -7693,10 +7703,19 @@ fn build_native_animation(
             spec.direction,
             spec.amplitude,
         )),
-        "fade_transform" => Box::new(
-            fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
-                .map_err(anim_error)?,
-        ),
+        "fade_transform" => {
+            // fm-5wq.4.98: stretch/dim_to_match ride the native builders.
+            let mut fade =
+                fmn_anim::fade_transform(stage, need_mob(spec.mob)?, need_target(spec.target)?)
+                    .map_err(anim_error)?;
+            if let Some(stretch) = spec.stretch {
+                fade = fade.with_stretch(stretch);
+            }
+            if let Some(dim) = spec.dim_to_match {
+                fade = fade.with_dim_to_match(dim);
+            }
+            Box::new(fade)
+        }
         "fade_transform_pieces" => Box::new(
             fmn_anim::fade_transform_pieces(
                 stage,

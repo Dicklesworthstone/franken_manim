@@ -11711,3 +11711,62 @@ except NotImplementedError as error:
     assert "remover" in str(error), error
 else:
     raise AssertionError("Uncreate accepted remover=False")
+
+
+# ------------------------------------ FadeTransform leftover kwargs
+# fm-5wq.4.98: stretch and dim_to_match route to the native builder's own
+# knobs; the unrouted refusal retires.
+
+ft_scene = Scene()
+ft_source = geometry.Rectangle(width=2.0, height=0.5)
+ft_target = geometry.Rectangle(width=0.5, height=2.0)
+ft_target.shift([1.0, 0.5, 0.0])
+ft_scene.add(ft_source)
+ft_default = manimlib.FadeTransform(ft_source, ft_target, run_time=2.0 / 30.0)
+assert ft_default._native_params() == {"stretch": True, "dim_to_match": 1}
+ft_scene.play(ft_default, run_time=2.0 / 30.0)
+assert any(
+    ft_target in mob.get_family() for mob in ft_scene.mobjects
+) or ft_target in ft_scene.mobjects
+
+# Non-default values are carried in the built spec and play cleanly.
+ft2_scene = Scene()
+ft2_source = geometry.Rectangle(width=2.0, height=0.5)
+ft2_target = geometry.Rectangle(width=0.5, height=2.0)
+ft2_scene.add(ft2_source)
+ft_tuned = manimlib.FadeTransform(
+    ft2_source, ft2_target, stretch=False, dim_to_match=0, run_time=2.0 / 30.0
+)
+assert ft_tuned._native_params() == {"stretch": False, "dim_to_match": 0}
+ft2_scene.play(ft_tuned, run_time=2.0 / 30.0)
+
+# Named refusals: a non-Mobject endpoint, an out-of-range dimension, and
+# the pieces path still refusing non-default knobs by keyword name.
+try:
+    manimlib.FadeTransform(None, geometry.Rectangle(width=1.0, height=1.0))
+except TypeError as error:
+    assert "source Mobject and a target Mobject" in str(error)
+else:
+    raise AssertionError("FadeTransform accepted None")
+
+try:
+    manimlib.FadeTransform(
+        geometry.Rectangle(width=1.0, height=1.0),
+        geometry.Rectangle(width=1.0, height=1.0),
+        dim_to_match=7,
+    )
+except ValueError as error:
+    assert "dim_to_match must be 0, 1, or 2" in str(error)
+else:
+    raise AssertionError("FadeTransform accepted dim_to_match=7")
+
+try:
+    manimlib.FadeTransformPieces(
+        geometry.Rectangle(width=1.0, height=1.0),
+        geometry.Rectangle(width=1.0, height=1.0),
+        stretch=False,
+    )
+except NotImplementedError as error:
+    assert "stretch" in str(error)
+else:
+    raise AssertionError("FadeTransformPieces silently dropped stretch")

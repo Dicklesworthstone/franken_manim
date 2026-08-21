@@ -10973,18 +10973,48 @@ class FadeTransform(_NativeAnimation):
     _target_attr = "target_mobject"
 
     def __init__(self, mobject, target_mobject, stretch=True, dim_to_match=1, **kwargs):
-        _refuse_unrouted(
-            "FadeTransform()",
-            [("stretch", stretch is not True), ("dim_to_match", dim_to_match != 1)],
-        )
+        # fm-5wq.4.98: stretch and dim_to_match route to the native
+        # builder's own knobs (fading.py:91 semantics); the unrouted
+        # refusal retires. A non-Mobject endpoint refuses by name here
+        # instead of failing anonymously at spec build.
+        if not isinstance(mobject, _BridgeMobject) or not isinstance(
+            target_mobject, _BridgeMobject
+        ):
+            raise TypeError(
+                "FadeTransform requires a source Mobject and a target "
+                "Mobject; got "
+                + type(mobject).__name__
+                + " and "
+                + type(target_mobject).__name__
+            )
         super().__init__(mobject, **kwargs)
         self.target_mobject = target_mobject
+        self.stretch = bool(stretch)
+        self.dim_to_match = int(dim_to_match)
+        if self.dim_to_match not in (0, 1, 2):
+            raise ValueError(
+                "FadeTransform dim_to_match must be 0, 1, or 2; got "
+                + repr(dim_to_match)
+            )
+
+    def _native_params(self):
+        return {"stretch": self.stretch, "dim_to_match": self.dim_to_match}
 
 
 class FadeTransformPieces(FadeTransform):
     _native_kind = "fade_transform_pieces"
 
     def __init__(self, mobject, target_mobject, **kwargs):
+        # The per-piece native path does not consume stretch/dim_to_match
+        # yet; refuse non-defaults by the unrouted-keyword name rather
+        # than silently dropping them (fm-5wq.4.98).
+        _refuse_unrouted(
+            "FadeTransformPieces()",
+            [
+                ("stretch", kwargs.get("stretch", True) is not True),
+                ("dim_to_match", kwargs.get("dim_to_match", 1) != 1),
+            ],
+        )
         for role, value in (("source", mobject), ("target", target_mobject)):
             if not isinstance(value, VMobject):
                 raise TypeError(
