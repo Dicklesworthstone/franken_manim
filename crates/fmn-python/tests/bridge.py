@@ -1814,6 +1814,7 @@ assert Scene().show_animation_progress is False
 assert Scene(show_animation_progress=True).show_animation_progress is True
 assert Scene(show_animation_progress="yes").show_animation_progress is True
 assert Scene(show_animation_progress="").show_animation_progress is False
+assert Scene(show_animation_progress=None).show_animation_progress is False
 
 # fm-5wq.4: temp_skip/temp_progress_bar are host-free context managers;
 # temp_record names the missing file-writer insert seam; temp_config_change
