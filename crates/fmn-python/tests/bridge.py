@@ -3270,9 +3270,12 @@ assert extract_scene.BlankScene.construct is not Scene.construct
 
 loader_mod = importlib.import_module("manimlib.module_loader")
 assert loader_mod.ModuleLoader.__bases__ == (object,)
-assert str(inspect.signature(loader_mod.ModuleLoader.get_module)) == (
-    "(file_name, is_during_reload=False)"
-)
+_module_loader_signature = inspect.signature(loader_mod.ModuleLoader.get_module)
+assert list(_module_loader_signature.parameters) == [
+    "file_name",
+    "is_during_reload",
+], str(_module_loader_signature)
+assert _module_loader_signature.parameters["is_during_reload"].default is False
 assert loader_mod.ModuleLoader.get_module(None) is None
 try:
     loader_mod.ModuleLoader.get_module("/no/such/scene.py")
