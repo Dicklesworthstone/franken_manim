@@ -78,9 +78,9 @@ pub use composition::{
     lagged_start, lagged_start_map,
 };
 pub use creation::{
-    DrawBorderThenFill, IntRound, RevealBounds, ShowIncreasingSubsets, ShowPartial, show_creation,
-    show_increasing_subsets, show_passing_flash, show_submobjects_one_by_one,
-    show_surface_creation, uncreate, uncreate_surface, write,
+    DrawBorderThenFill, IntRound, RevealBounds, ShowIncreasingSubsets, ShowPartial,
+    add_text_word_by_word, show_creation, show_increasing_subsets, show_passing_flash,
+    show_submobjects_one_by_one, show_surface_creation, uncreate, uncreate_surface, write,
 };
 pub use fading::{
     FadeTransform, VFade, fade_in, fade_in_from_point, fade_out, fade_out_to_point, fade_transform,
@@ -96,8 +96,9 @@ pub use frame::{
 };
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{
-    INDICATION_YELLOW, VShowPassingFlash, WiggleOutThenIn, apply_wave, indicate,
-    show_creation_then_destruction, turn_inside_out,
+    INDICATION_YELLOW, VShowPassingFlash, WiggleOutThenIn, apply_wave, circle_indicate, flash,
+    focus_on, indicate, show_creation_then_destruction, show_creation_then_fade_out,
+    turn_inside_out,
 };
 pub use ladder::{DeclaredOp, DeclaredUpdater, LadderError, sawtooth, triangle};
 pub use movement::{Homotopy, MoveAlongPath, PhaseFlow, complex_homotopy, smoothed_homotopy};

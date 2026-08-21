@@ -34,9 +34,14 @@
 //!   `np.round` is banker's rounding (`round_ties_even`); `np.ceil` is
 //!   ceiling — [`IntRound`] keeps both as data.
 //!
-//! `AddTextWordByWord` (creation.py:210) is deliberately absent: it
-//! consumes `StringMobject.build_groups()` word boundaries, which arrive
-//! with W6's span maps — the seam the fm-cye bead note records.
+//! - [`add_text_word_by_word`] (creation.py:210, fm-5wq.4.54):
+//!   `ShowIncreasingSubsets` re-parameterized over span-map word groups —
+//!   the caller (the portal's `StringMobject` surface) has already grouped
+//!   the glyph children into word groups by native source spans, so the
+//!   grouped parent's children ARE the words. Linear rate, and the
+//!   Reference's `run_time < 0` sentinel recomputes
+//!   `time_per_word * n_words`. A parent with no word groups is
+//!   [`AnimError::NoWordGroups`] — named, never a silent no-op.
 
 use fmn_core::rate;
 use fmn_mobject::{Mob, Stage, StageError};
@@ -750,5 +755,43 @@ pub fn show_submobjects_one_by_one(
     anim.state.config.name = "ShowSubmobjectsOneByOne".to_owned();
     anim.int_round = IntRound::Ceil;
     anim.one_by_one = true;
+    Ok(anim)
+}
+
+/// `AddTextWordByWord` (creation.py:210): `ShowIncreasingSubsets` over a
+/// grouped parent whose children are the span-map word groups, with the
+/// Reference's parameterization — `rate_func=linear`, and a negative
+/// `run_time` (the Reference's `-1.0` default sentinel) recomputed as
+/// `time_per_word * n_words`.
+///
+/// Word grouping itself is the caller's: the portal's `StringMobject`
+/// surface partitions the glyph children into word groups by their native
+/// source spans (`build_groups()`' boundaries) and hands the grouped
+/// parent here. This constructor owns the reveal semantics only.
+///
+/// # Errors
+/// [`AnimError::StaleHandle`] on a dead group handle;
+/// [`AnimError::NoWordGroups`] when the grouped parent has no children —
+/// an empty string mobject has no words to add, and the Reference's
+/// `run_time = 0.2 * 0` degenerate play is refused by name instead.
+pub fn add_text_word_by_word(
+    stage: &Stage,
+    grouped: Mob,
+    time_per_word: f64,
+    run_time: f64,
+) -> Result<ShowIncreasingSubsets, AnimError> {
+    let mut anim = show_increasing_subsets(stage, grouped)?;
+    if anim.all_submobs.is_empty() {
+        return Err(AnimError::NoWordGroups);
+    }
+    anim.state.config.name = "AddTextWordByWord".to_owned();
+    anim.state.config.rate_func = RateFunc::linear();
+    #[allow(clippy::cast_precision_loss)]
+    let run_time = if run_time < 0.0 {
+        time_per_word * anim.all_submobs.len() as f64
+    } else {
+        run_time
+    };
+    anim.state.config.run_time = run_time;
     Ok(anim)
 }

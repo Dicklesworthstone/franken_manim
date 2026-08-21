@@ -352,3 +352,69 @@ fn one_by_one_uses_ceiling_and_reference_indexing() {
     anim.interpolate(&mut stage, 1.0);
     assert_eq!(stage.get(root).unwrap().submobjects(), &children[1..2]);
 }
+
+// ---------------------------------------------------- AddTextWordByWord
+
+#[test]
+fn add_text_word_by_word_reveals_word_groups_in_order() {
+    // fm-5wq.4.54: three "word groups" (each a group of glyph children the
+    // caller partitioned by span maps) appear in order under linear rate.
+    let mut stage = Stage::new();
+    let grouped = stage.add(Mobject::new());
+    let words: Vec<Mob> = (0..3)
+        .map(|_| {
+            let word = stage.add(Mobject::new());
+            let glyph = line5(&mut stage);
+            stage.attach(word, glyph).unwrap();
+            word
+        })
+        .collect();
+    for &word in &words {
+        stage.attach(grouped, word).unwrap();
+    }
+    let mut anim = fmn_anim::add_text_word_by_word(&stage, grouped, 0.2, -1.0).unwrap();
+    // The Reference's parameterization: linear rate, 0.2 s per word.
+    assert_eq!(anim.state().config.name, "AddTextWordByWord");
+    assert!((anim.state().config.run_time - 0.6).abs() < 1e-12);
+    assert_eq!(anim.state().config.rate_func.eval(0.25), 0.25);
+    anim.begin(&mut stage).unwrap();
+    assert!(stage.get(grouped).unwrap().submobjects().is_empty());
+    // Banker's rounding of raw alpha, exactly ShowIncreasingSubsets:
+    // round(0.4·3) = 1 word, round(0.9·3) = 3 words.
+    anim.interpolate(&mut stage, 0.4);
+    assert_eq!(stage.get(grouped).unwrap().submobjects(), &words[..1]);
+    anim.interpolate(&mut stage, 0.9);
+    assert_eq!(stage.get(grouped).unwrap().submobjects(), &words[..]);
+    anim.finish(&mut stage);
+    assert_eq!(stage.get(grouped).unwrap().submobjects(), &words[..]);
+}
+
+#[test]
+fn add_text_word_by_word_keeps_explicit_run_time() {
+    let mut stage = Stage::new();
+    let grouped = stage.add(Mobject::new());
+    let word = line5(&mut stage);
+    stage.attach(grouped, word).unwrap();
+    let anim = fmn_anim::add_text_word_by_word(&stage, grouped, 0.2, 1.5).unwrap();
+    // A non-negative run_time is the caller's, not the sentinel recompute.
+    assert!((anim.state().config.run_time - 1.5).abs() < 1e-12);
+}
+
+#[test]
+fn add_text_word_by_word_refuses_empty_and_stale() {
+    let mut stage = Stage::new();
+    let empty = stage.add(Mobject::new());
+    // No word groups: named refusal, never a degenerate zero-word play.
+    match fmn_anim::add_text_word_by_word(&stage, empty, 0.2, -1.0) {
+        Err(fmn_anim::animation::AnimError::NoWordGroups) => {}
+        other => panic!("expected NoWordGroups, got {other:?}"),
+    }
+    let stale = {
+        let mut scratch = Stage::new();
+        scratch.add(Mobject::new())
+    };
+    assert!(matches!(
+        fmn_anim::add_text_word_by_word(&stage, stale, 0.2, -1.0),
+        Err(fmn_anim::animation::AnimError::StaleHandle(_))
+    ));
+}

@@ -374,6 +374,10 @@ pub enum AnimError {
     /// asserts. An empty composition has no timeline to derive, so it is
     /// refused by name at construction.
     EmptyComposition,
+    /// `AddTextWordByWord` was handed a grouped parent with no span-map
+    /// word groups (fm-5wq.4.54) — an empty string mobject has no words
+    /// to add, and revealing nothing must be named, never a silent no-op.
+    NoWordGroups,
     /// A `Timeline` seek named a frame outside the compiled schedule
     /// (§9.4). Frames are 1-based and on-grid — there is no off-grid seek,
     /// for the same reason there is no off-grid sample (D-18).
@@ -426,6 +430,10 @@ impl std::fmt::Display for AnimError {
             Self::EmptyComposition => {
                 write!(f, "a composition needs at least one animation")
             }
+            Self::NoWordGroups => write!(
+                f,
+                "AddTextWordByWord requires span-map word groups; the string mobject produced none"
+            ),
             Self::SeekOutOfRange { frame, total } => {
                 write!(
                     f,
