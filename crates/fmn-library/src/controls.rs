@@ -1535,6 +1535,15 @@ pub struct ControlPanel {
     controls: Vec<VMobject>,
     opener_text: String,
     opener_font_size: f64,
+    panel_width: f64,
+    panel_height: f64,
+    panel_fill: Srgb,
+    panel_fill_opacity: f64,
+    panel_stroke_width: f64,
+    opener_width: f64,
+    opener_height: f64,
+    opener_fill: Srgb,
+    opener_fill_opacity: f64,
 }
 
 impl ControlPanel {
@@ -1547,6 +1556,15 @@ impl ControlPanel {
             controls: controls.into_iter().collect(),
             opener_text: "Control Panel".to_string(),
             opener_font_size: 20.0,
+            panel_width: FRAME_WIDTH / 4.0,
+            panel_height: MED_SMALL_BUFF + FRAME_HEIGHT,
+            panel_fill: GREY_C,
+            panel_fill_opacity: 1.0,
+            panel_stroke_width: 0.0,
+            opener_width: FRAME_WIDTH / 8.0,
+            opener_height: 0.5,
+            opener_fill: GREY_C,
+            opener_fill_opacity: 1.0,
         }
     }
 
@@ -1564,25 +1582,80 @@ impl ControlPanel {
         self
     }
 
+    /// Panel width (`panel_kwargs["width"]`).
+    #[must_use]
+    pub fn panel_width(mut self, width: f64) -> Self {
+        self.panel_width = width;
+        self
+    }
+
+    /// Panel height (`panel_kwargs["height"]`).
+    #[must_use]
+    pub fn panel_height(mut self, height: f64) -> Self {
+        self.panel_height = height;
+        self
+    }
+
+    /// Panel fill (`panel_kwargs["fill_color"]` / `["fill_opacity"]`).
+    #[must_use]
+    pub fn panel_fill(mut self, color: Srgb, opacity: f64) -> Self {
+        self.panel_fill = color;
+        self.panel_fill_opacity = opacity;
+        self
+    }
+
+    /// Panel stroke width (`panel_kwargs["stroke_width"]`).
+    #[must_use]
+    pub fn panel_stroke_width(mut self, width: f64) -> Self {
+        self.panel_stroke_width = width;
+        self
+    }
+
+    /// Opener tab width (`opener_kwargs["width"]`).
+    #[must_use]
+    pub fn opener_width(mut self, width: f64) -> Self {
+        self.opener_width = width;
+        self
+    }
+
+    /// Opener tab height (`opener_kwargs["height"]`).
+    #[must_use]
+    pub fn opener_height(mut self, height: f64) -> Self {
+        self.opener_height = height;
+        self
+    }
+
+    /// Opener fill (`opener_kwargs["fill_color"]` / `["fill_opacity"]`).
+    #[must_use]
+    pub fn opener_fill(mut self, color: Srgb, opacity: f64) -> Self {
+        self.opener_fill = color;
+        self.opener_fill_opacity = opacity;
+        self
+    }
+
     /// Build the panel.
     ///
     /// # Errors
     /// [`TextMobjectError`] if the opener text fails to typeset.
     pub fn build(&self, book: &FontBook) -> Result<ControlPanelMobject, TextMobjectError> {
-        let panel_height = MED_SMALL_BUFF + FRAME_HEIGHT;
+        let panel_height = self.panel_height;
         let panel = Rectangle::new()
-            .width(FRAME_WIDTH / 4.0)
+            .width(self.panel_width)
             .height(panel_height)
-            .style(Style::default().fill(GREY_C, 1.0).stroke(GREY_C, 0.0, 1.0))
+            .style(
+                Style::default()
+                    .fill(self.panel_fill, self.panel_fill_opacity)
+                    .stroke(GREY_C, self.panel_stroke_width, 1.0),
+            )
             .build()
             .expect("an unrounded control panel cannot request arc components");
         // to_corner(UP + LEFT, buff=0), then shift up by the panel height.
         let panel = to_corner(panel, [LEFT[0], UP[1], 0.0], 0.0).shifted([0.0, panel_height, 0.0]);
 
         let opener_rect = Rectangle::new()
-            .width(FRAME_WIDTH / 8.0)
-            .height(0.5)
-            .style(Style::default().fill(GREY_C, 1.0))
+            .width(self.opener_width)
+            .height(self.opener_height)
+            .style(Style::default().fill(self.opener_fill, self.opener_fill_opacity))
             .build()
             .expect("an unrounded opener cannot request arc components");
         let info_text = Text::new(&self.opener_text)
@@ -2415,7 +2488,12 @@ mod tests {
         assert!((panel.panel().length_over_dim(0) - FRAME_WIDTH / 4.0).abs() < 1e-9);
         assert!((panel.panel().length_over_dim(1) - (MED_SMALL_BUFF + FRAME_HEIGHT)).abs() < 1e-9);
         assert_eq!(panel.panel().style().fill_color, GREY_C);
+        assert_eq!(panel.panel().style().fill_opacity, 1.0);
         assert_eq!(panel.panel().style().stroke_width, 0.0);
+        assert!((panel.opener_rect().length_over_dim(0) - FRAME_WIDTH / 8.0).abs() < 1e-9);
+        assert!((panel.opener_rect().length_over_dim(1) - 0.5).abs() < 1e-9);
+        assert_eq!(panel.opener_rect().style().fill_color, GREY_C);
+        assert_eq!(panel.opener_rect().style().fill_opacity, 1.0);
 
         // After move_panel_and_controls_to_panel_opener the panel sits
         // directly on the opener (buff 0)…
@@ -2471,6 +2549,30 @@ mod tests {
         assert_eq!(panel.controls().children().len(), 2);
         panel.remove_controls(&[0]);
         assert_eq!(panel.controls().children().len(), 1);
+    }
+
+    #[test]
+    fn control_panel_custom_panel_and_opener_kwargs() {
+        let book = book();
+        let panel = ControlPanel::new([])
+            .panel_width(3.0)
+            .panel_height(2.0)
+            .panel_fill(RED, 0.4)
+            .panel_stroke_width(2.0)
+            .opener_width(1.5)
+            .opener_height(0.75)
+            .opener_fill(GREEN, 0.8)
+            .build(&book)
+            .expect("opener text typesets");
+        assert!((panel.panel().length_over_dim(0) - 3.0).abs() < 1e-9);
+        assert!((panel.panel().length_over_dim(1) - 2.0).abs() < 1e-9);
+        assert_eq!(panel.panel().style().fill_color, RED);
+        assert_eq!(panel.panel().style().fill_opacity, 0.4);
+        assert_eq!(panel.panel().style().stroke_width, 2.0);
+        assert!((panel.opener_rect().length_over_dim(0) - 1.5).abs() < 1e-9);
+        assert!((panel.opener_rect().length_over_dim(1) - 0.75).abs() < 1e-9);
+        assert_eq!(panel.opener_rect().style().fill_color, GREEN);
+        assert_eq!(panel.opener_rect().style().fill_opacity, 0.8);
     }
 
     // --------------------------------------------- tracker integration

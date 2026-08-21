@@ -9490,19 +9490,6 @@ class ControlPanel(Group):
                 "unexpected keyword arguments: "
                 + ", ".join("panel_kwargs." + name for name in panel_unknown)
             )
-        if (
-            float(panel_config.get("width", _FRAME_SHAPE[0] / 4.0))
-            != _FRAME_SHAPE[0] / 4.0
-            or float(panel_config.get("height", _MED_SMALL_BUFF + _FRAME_HEIGHT))
-            != _MED_SMALL_BUFF + _FRAME_HEIGHT
-            or tuple(_color_to_rgb(panel_config.get("fill_color", _GREY_C)))
-            != tuple(_color_to_rgb(_GREY_C))
-            or float(panel_config.get("fill_opacity", 1.0)) != 1.0
-            or float(panel_config.get("stroke_width", 0.0)) != 0.0
-        ):
-            raise NotImplementedError(
-                "ControlPanel panel_kwargs are not routed to the native builder"
-            )
 
         opener_config = dict(opener_kwargs)
         opener_unknown = sorted(
@@ -9512,17 +9499,6 @@ class ControlPanel(Group):
             raise TypeError(
                 "unexpected keyword arguments: "
                 + ", ".join("opener_kwargs." + name for name in opener_unknown)
-            )
-        if (
-            float(opener_config.get("width", _FRAME_SHAPE[0] / 8.0))
-            != _FRAME_SHAPE[0] / 8.0
-            or float(opener_config.get("height", 0.5)) != 0.5
-            or tuple(_color_to_rgb(opener_config.get("fill_color", _GREY_C)))
-            != tuple(_color_to_rgb(_GREY_C))
-            or float(opener_config.get("fill_opacity", 1.0)) != 1.0
-        ):
-            raise NotImplementedError(
-                "ControlPanel opener_kwargs are not routed to the native builder"
             )
 
         text_config = dict(opener_text_kwargs)
@@ -9562,12 +9538,27 @@ class ControlPanel(Group):
         for control in controls:
             box = control.get_bounding_box()
             control_extents.append((_vec3(box[0]), _vec3(box[2])))
+        panel_config = self.panel_kwargs
+        opener_config = self.opener_kwargs
         specs = self._build_control_panel(
             _native_shell_factory,
             control_extents,
             opener_text,
             opener_font_size,
             bool(open),
+            (
+                float(panel_config.get("width", _FRAME_SHAPE[0] / 4.0)),
+                float(panel_config.get("height", _MED_SMALL_BUFF + _FRAME_HEIGHT)),
+                tuple(_color_to_rgb(panel_config.get("fill_color", _GREY_C))),
+                float(panel_config.get("fill_opacity", 1.0)),
+                float(panel_config.get("stroke_width", 0.0)),
+            ),
+            (
+                float(opener_config.get("width", _FRAME_SHAPE[0] / 8.0)),
+                float(opener_config.get("height", 0.5)),
+                tuple(_color_to_rgb(opener_config.get("fill_color", _GREY_C))),
+                float(opener_config.get("fill_opacity", 1.0)),
+            ),
         )
         parts = []
         for shell, child_specs in specs:

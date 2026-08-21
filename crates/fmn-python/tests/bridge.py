@@ -2786,6 +2786,55 @@ else:
     raise AssertionError("ControlPanel silently discarded an unknown option")
 assert not hasattr(failed_control_panel, "submobjects")
 
+# panel_kwargs / opener_kwargs ride Atlas's native panel and opener builders
+# through construction and the open/close rebuild, so custom size and fill
+# survive the same become() identity path as the default GREY_C panel.
+styled_panel_checkbox = interactive.Checkbox(True)
+styled_control_panel = interactive.ControlPanel(
+    styled_panel_checkbox,
+    panel_kwargs=dict(
+        width=3.0,
+        height=2.0,
+        fill_color=manimlib.BLUE,
+        fill_opacity=0.4,
+        stroke_width=2.0,
+    ),
+    opener_kwargs=dict(
+        width=1.5,
+        height=0.75,
+        fill_color=manimlib.GREEN,
+        fill_opacity=0.8,
+    ),
+)
+assert np.isclose(styled_control_panel.panel.get_width(), 3.0)
+assert np.isclose(styled_control_panel.panel.get_height(), 2.0)
+assert styled_control_panel.panel.get_fill_color() == manimlib.BLUE
+assert np.isclose(styled_control_panel.panel.get_fill_opacity(), 0.4)
+assert np.isclose(styled_control_panel.panel.get_stroke_width(), 2.0)
+styled_opener_rect = styled_control_panel.panel_opener.submobjects[0]
+assert np.isclose(styled_opener_rect.get_width(), 1.5)
+assert np.isclose(styled_opener_rect.get_height(), 0.75)
+assert styled_opener_rect.get_fill_color() == manimlib.GREEN
+assert np.isclose(styled_opener_rect.get_fill_opacity(), 0.8)
+styled_panel_identity = styled_control_panel.panel
+styled_opener_identity = styled_control_panel.panel_opener
+styled_control_panel.open_panel()
+assert styled_control_panel.panel is styled_panel_identity
+assert styled_control_panel.panel_opener is styled_opener_identity
+assert np.isclose(styled_control_panel.panel.get_width(), 3.0)
+assert styled_control_panel.panel.get_fill_color() == manimlib.BLUE
+assert np.isclose(
+    styled_control_panel.panel_opener.submobjects[0].get_width(),
+    1.5,
+)
+assert styled_control_panel.panel_opener.submobjects[0].get_fill_color() == (
+    manimlib.GREEN
+)
+styled_control_panel.close_panel()
+assert styled_control_panel.panel is styled_panel_identity
+assert np.isclose(styled_control_panel.panel.get_height(), 2.0)
+assert np.isclose(styled_control_panel.panel.get_fill_opacity(), 0.4)
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.

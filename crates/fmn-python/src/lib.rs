@@ -3120,8 +3120,7 @@ impl BridgeMobject {
         bar_height: f64,
         handle_color: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
-        let mut slider =
-            fmn_library::LinearNumberSlider::new(value).map_err(native_error)?;
+        let mut slider = fmn_library::LinearNumberSlider::new(value).map_err(native_error)?;
         if min_value > 10.0 {
             slider = slider
                 .max_value(max_value)
@@ -3220,6 +3219,9 @@ impl BridgeMobject {
     /// `ControlPanel(*controls)` over Atlas's native panel, opener tab, and
     /// controls column. The Python root is a `Group`; these three children
     /// keep stable shell identities across open/close rebuilds.
+    /// `panel` is `(width, height, fill_rgb, fill_opacity, stroke_width)`;
+    /// `opener` is `(width, height, fill_rgb, fill_opacity)`.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn _build_control_panel<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -3227,7 +3229,11 @@ impl BridgeMobject {
         opener_text: &str,
         opener_font_size: f64,
         open: bool,
+        panel: (f64, f64, [f64; 3], f64, f64),
+        opener: (f64, f64, [f64; 3], f64),
     ) -> PyResult<Bound<'py, PyList>> {
+        let (panel_width, panel_height, panel_fill, panel_fill_opacity, panel_stroke_width) = panel;
+        let (opener_width, opener_height, opener_fill, opener_fill_opacity) = opener;
         let controls = control_extents
             .into_iter()
             .map(|extent| matcher_extent_vmobject(Some(extent)));
@@ -3235,6 +3241,27 @@ impl BridgeMobject {
             let mut panel = fmn_library::ControlPanel::new(controls)
                 .opener_text(opener_text)
                 .opener_font_size(opener_font_size)
+                .panel_width(panel_width)
+                .panel_height(panel_height)
+                .panel_fill(
+                    fmn_core::color::Srgb {
+                        r: panel_fill[0],
+                        g: panel_fill[1],
+                        b: panel_fill[2],
+                    },
+                    panel_fill_opacity,
+                )
+                .panel_stroke_width(panel_stroke_width)
+                .opener_width(opener_width)
+                .opener_height(opener_height)
+                .opener_fill(
+                    fmn_core::color::Srgb {
+                        r: opener_fill[0],
+                        g: opener_fill[1],
+                        b: opener_fill[2],
+                    },
+                    opener_fill_opacity,
+                )
                 .build(book)
                 .map_err(native_error)?;
             if open {
@@ -3272,9 +3299,8 @@ impl BridgeMobject {
                 .into_iter()
                 .map(|extent| matcher_extent_vmobject(Some(extent))),
         );
-        let (panel, controls) = fmn_library::ControlPanelMobject::layout_against_opener(
-            panel, &opener, controls,
-        );
+        let (panel, controls) =
+            fmn_library::ControlPanelMobject::layout_against_opener(panel, &opener, controls);
         native_shell_specs(slf.py(), factory, vec![panel.into(), controls.into()])
     }
 
@@ -4109,9 +4135,10 @@ impl BridgeMobject {
                 "Prismify family has no pointful members to extrude",
             ));
         }
-        let mut root = fmn_mobject::Mobject::from(fmn_library::vmobject::v_group(
-            std::iter::empty::<fmn_library::VMobject>(),
-        ));
+        let mut root =
+            fmn_mobject::Mobject::from(fmn_library::vmobject::v_group(std::iter::empty::<
+                fmn_library::VMobject,
+            >()));
         for points in point_sets {
             let prism = fmn_library::Prismify::new(fmn_library::VMobject::from_points(points))
                 .depth(depth)
@@ -4818,11 +4845,7 @@ impl BridgeMobject {
         let built = built.map_err(|error| {
             PyValueError::new_err(format!("StreamLines integration refused: {error}"))
         })?;
-        let virtual_times: Vec<f64> = built
-            .lines()
-            .iter()
-            .map(|line| line.virtual_time)
-            .collect();
+        let virtual_times: Vec<f64> = built.lines().iter().map(|line| line.virtual_time).collect();
         let rng_draws = built.rng_draws();
         let tree = fmn_mobject::Mobject::from(built.vmob().clone());
         let specs = install_native_tree(slf, factory, tree)?;
@@ -4913,9 +4936,7 @@ impl BridgeMobject {
     ) -> PyResult<Bound<'py, PyList>> {
         let surface = match source_kind {
             "sphere" => fmn_library::Sphere::new(source_radius).build(),
-            "torus" => {
-                fmn_library::Torus::new(source_radius, source_minor_radius).build()
-            }
+            "torus" => fmn_library::Torus::new(source_radius, source_minor_radius).build(),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "SurfaceMesh over `{other}` awaits its native rebuild \
@@ -7216,8 +7237,7 @@ impl PyScene {
                             let Some(animation) = animation else {
                                 break;
                             };
-                            let Some(callback) =
-                                callbacks[animation.animation_index].as_ref()
+                            let Some(callback) = callbacks[animation.animation_index].as_ref()
                             else {
                                 // A native-kind animation in a mixed play:
                                 // its interpolate already ran natively in
@@ -7839,9 +7859,7 @@ fn build_native_animation(
             for member in spec.members {
                 members.push(build_native_animation(stage, member)?);
             }
-            Box::new(
-                fmn_anim::flash(stage, members, spec.group_lag).map_err(anim_error)?,
-            )
+            Box::new(fmn_anim::flash(stage, members, spec.group_lag).map_err(anim_error)?)
         }
         "show_creation_then_fade_out" => {
             let mut members = Vec::with_capacity(spec.members.len());
@@ -7849,13 +7867,8 @@ fn build_native_animation(
                 members.push(build_native_animation(stage, member)?);
             }
             Box::new(
-                fmn_anim::show_creation_then_fade_out(
-                    stage,
-                    members,
-                    spec.group_lag,
-                    spec.remover,
-                )
-                .map_err(anim_error)?,
+                fmn_anim::show_creation_then_fade_out(stage, members, spec.group_lag, spec.remover)
+                    .map_err(anim_error)?,
             )
         }
         "broadcast"
@@ -7869,19 +7882,14 @@ fn build_native_animation(
             let name = match spec.kind.as_str() {
                 "broadcast" => "Broadcast",
                 "flashy_fade_in" => "FlashyFadeIn",
-                "show_creation_then_destruction_around" => {
-                    "ShowCreationThenDestructionAround"
-                }
+                "show_creation_then_destruction_around" => "ShowCreationThenDestructionAround",
                 "show_creation_then_fade_around" => "ShowCreationThenFadeAround",
                 _ => unreachable!(),
             };
-            let mut group = fmn_anim::AnimationGroup::with_lag_ratio(
-                stage,
-                members,
-                spec.group_lag,
-            )
-            .map_err(anim_error)?
-            .with_name(name);
+            let mut group =
+                fmn_anim::AnimationGroup::with_lag_ratio(stage, members, spec.group_lag)
+                    .map_err(anim_error)?
+                    .with_name(name);
             fmn_anim::Animation::state_mut(&mut group).config.remover = spec.remover;
             Box::new(group)
         }
@@ -7939,9 +7947,7 @@ fn build_native_animation(
         ),
         "v_fade_in" => Box::new(fmn_anim::v_fade_in(need_mob(spec.mob)?)),
         "v_fade_out" => Box::new(fmn_anim::v_fade_out(need_mob(spec.mob)?)),
-        "v_fade_in_then_out" => {
-            Box::new(fmn_anim::v_fade_in_then_out(need_mob(spec.mob)?))
-        }
+        "v_fade_in_then_out" => Box::new(fmn_anim::v_fade_in_then_out(need_mob(spec.mob)?)),
         "show_creation" => Box::new(fmn_anim::show_creation(need_mob(spec.mob)?)),
         "show_surface_creation" => Box::new(fmn_anim::show_surface_creation(
             need_mob(spec.mob)?,
@@ -8052,8 +8058,8 @@ fn build_native_animation(
             } else {
                 "CyclicReplace"
             };
-            let transforms = fmn_anim::cyclic_replace(stage, &spec.mobs, spec.path_arc)
-                .map_err(anim_error)?;
+            let transforms =
+                fmn_anim::cyclic_replace(stage, &spec.mobs, spec.path_arc).map_err(anim_error)?;
             let members: Vec<Box<dyn fmn_anim::Animation>> = transforms
                 .into_iter()
                 .map(|mut transform| {
@@ -8128,7 +8134,7 @@ fn build_native_animation(
                 .map(|rgb| [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32]);
             Box::new(
                 fmn_anim::indicate(stage, need_mob(spec.mob)?, spec.scale_factor, color)
-                .map_err(anim_error)?,
+                    .map_err(anim_error)?,
             )
         }
         "circle_indicate" => Box::new(fmn_anim::circle_indicate(
@@ -8186,21 +8192,15 @@ fn build_native_animation(
             Box::new(fade)
         }
         "fade_transform_pieces" => Box::new(
-            fmn_anim::fade_transform_pieces(
-                stage,
-                need_mob(spec.mob)?,
-                need_target(spec.target)?,
-            )
-            .map_err(anim_error)?,
+            fmn_anim::fade_transform_pieces(stage, need_mob(spec.mob)?, need_target(spec.target)?)
+                .map_err(anim_error)?,
         ),
         "restore" => {
             let mut restore = fmn_anim::restore(stage, need_mob(spec.mob)?).map_err(anim_error)?;
             if spec.path_arc != 0.0 {
                 restore = restore.with_path_arc(spec.path_arc, spec.path_arc_axis);
             }
-            fmn_anim::Animation::state_mut(&mut restore)
-                .config
-                .remover = spec.remover;
+            fmn_anim::Animation::state_mut(&mut restore).config.remover = spec.remover;
             Box::new(restore)
         }
         other => {
