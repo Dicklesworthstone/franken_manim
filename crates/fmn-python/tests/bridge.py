@@ -1841,10 +1841,13 @@ frame_probe = manimlib.Circle()
 frame_probe.add_updater(lambda mob, dt: frame_ticks.append(dt))
 frame_scene.add(frame_probe)
 assert frame_scene.should_update_mobjects() is True
+assert frame_scene.increment_time(0.25) is None
+assert np.isclose(frame_scene.get_time(), 0.75)
+assert frame_ticks == []
 assert frame_scene.update_mobjects(0.25) is None
 assert frame_ticks == [0.25]
 assert frame_scene.update_frame(0.125) is None
-assert np.isclose(frame_scene.get_time(), 0.625)
+assert np.isclose(frame_scene.get_time(), 0.875)
 assert frame_ticks == [0.25, 0.125]
 skip_frame = Scene(skip_animations=True)
 assert skip_frame.update_frame(0.25) is None
