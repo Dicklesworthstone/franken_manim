@@ -16403,6 +16403,58 @@ except TypeError:
 else:
     raise AssertionError("_play_animations accepted a non-CameraFrame pair")
 
+# fm-5wq.4: an explicit top-level Transform whose mobject is the camera
+# frame rides the same engine camera track as frame.animate. Nesting one
+# inside a composition still refuses, and a Python-callback animation of
+# the frame names the missing camera-track callback seam.
+explicit_cam_scene = Scene()
+explicit_cam_frame = explicit_cam_scene.frame
+explicit_cam_start_center = explicit_cam_frame.get_center().copy()
+explicit_cam_start_width = float(explicit_cam_frame.get_width())
+explicit_cam_target = explicit_cam_frame.copy()
+explicit_cam_target.shift([1.0, 0.5, 0.0])
+explicit_cam_target.scale(2.0)
+explicit_cam_scene.play(
+    manimlib.Transform(explicit_cam_frame, explicit_cam_target),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(
+    explicit_cam_frame.get_center(),
+    explicit_cam_start_center + [1.0, 0.5, 0.0],
+)
+assert np.isclose(
+    explicit_cam_frame.get_width(), explicit_cam_start_width * 2.0
+)
+try:
+    explicit_cam_scene.play(
+        manimlib.AnimationGroup(
+            manimlib.Transform(explicit_cam_frame, explicit_cam_frame.copy())
+        ),
+        run_time=1.0 / 30.0,
+    )
+except NotImplementedError as error:
+    assert "cannot nest inside a composition" in str(error), error
+else:
+    raise AssertionError("a nested camera-frame transform did not refuse")
+
+
+class _CallbackFrameAnimation(Animation):
+    def interpolate_mobject(self, alpha):
+        return None
+
+
+try:
+    explicit_cam_scene.play(
+        _CallbackFrameAnimation(explicit_cam_frame, run_time=1.0 / 30.0)
+    )
+except NotImplementedError as error:
+    assert "camera track" in str(error), error
+else:
+    raise AssertionError(
+        "a python-callback camera-frame animation did not refuse"
+    )
+
 
 # ------------------------------------------------ LaggedStartMap
 # fm-5wq.4.95: one member animation per family child through the native

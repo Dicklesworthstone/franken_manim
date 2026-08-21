@@ -12010,6 +12010,32 @@ class Scene(_SceneCore):
                 # camera clock exists or is needed.
                 camera_pair = (proto.mobject._core, proto.mobject.target._core)
                 continue
+            if (
+                isinstance(proto, Animation)
+                and getattr(proto, "_native_kind", None)
+                and not isinstance(proto, AnimationGroup)
+                and isinstance(proto.mobject, CameraFrame)
+            ):
+                # An explicit top-level native animation of the frame rides
+                # the same camera track as frame.animate: one engine lerp
+                # from the live frame core to the target core. Transform is
+                # the pose-complete mapping; other native kinds keep a
+                # precise refusal rather than faking a record lerp on a
+                # non-Stage mobject.
+                if proto._native_kind == "transform":
+                    target = proto._native_target()
+                    if isinstance(target, CameraFrame):
+                        camera_pair = (proto.mobject._core, target._core)
+                        continue
+                    raise NotImplementedError(
+                        "Transform of the camera frame must target a "
+                        "CameraFrame to ride the camera track"
+                    )
+                raise NotImplementedError(
+                    "explicit " + type(proto).__name__ + " of the camera "
+                    "frame has no camera-track mapping yet; use "
+                    "frame.animate or Transform onto a CameraFrame target"
+                )
             if isinstance(proto, Animation) and not getattr(
                 proto, "_native_kind", None
             ):
