@@ -4875,11 +4875,6 @@ class Axes(VGroup, CoordinateSystem):
                 "add_coordinate_labels() got unexpected keyword arguments: "
                 + ", ".join(sorted(kwargs))
             )
-        if font_size is not None:
-            raise NotImplementedError(
-                "Axes.add_coordinate_labels(font_size=...) awaits the "
-                "numbers-shelf font-size passthrough; the default size works"
-            )
         (x_range, y_range, axis_config, x_axis_config, y_axis_config, _h, _w, unit) = (
             self._axes_params
         )
@@ -4897,6 +4892,7 @@ class Axes(VGroup, CoordinateSystem):
             None if x_values is None else [float(v) for v in x_values],
             None if y_values is None else [float(v) for v in y_values],
             [float(v) for v in excluding],
+            None if font_size is None else float(font_size),
         )
         _hang_native_children(self.x_axis, x_specs)
         _hang_native_children(self.y_axis, y_specs)
@@ -5014,6 +5010,31 @@ class NumberPlane(Axes):
             None if width is None else float(width),
             float(unit_size),
         )
+        # Axes.add_coordinate_labels rebuilds only the two native axes.
+        # Preserve NumberPlane's class defaults in that shared shell path,
+        # then layer the caller's ordinary axis configs over them in the
+        # same order as the native NumberPlane builder.
+        label_axis_config = {
+            "color": _WHITE,
+            "stroke_width": 2.0,
+            "include_ticks": False,
+            "include_tip": False,
+            "line_to_number_buff": _SMALL_BUFF,
+            "line_to_number_direction": _DL,
+        }
+        label_axis_config.update(self._plane_params[2])
+        label_y_axis_config = {"line_to_number_direction": _DL}
+        label_y_axis_config.update(self._plane_params[4])
+        self._axes_params = (
+            self._plane_params[0],
+            self._plane_params[1],
+            label_axis_config,
+            self._plane_params[3],
+            label_y_axis_config,
+            self._plane_params[8],
+            self._plane_params[9],
+            self._plane_params[10],
+        )
         specs = self._native_plane_specs()
         _hang_native_children(self, specs)
         self.faded_lines, self.background_lines, self.x_axis, self.y_axis = (
@@ -5043,10 +5064,24 @@ class NumberPlane(Axes):
         )
 
     def add_coordinate_labels(self, x_values=None, y_values=None, excluding=(0,), **kwargs):
-        del x_values, y_values, excluding, kwargs
-        raise NotImplementedError(
-            "NumberPlane.add_coordinate_labels awaits the merged "
-            "plane-axis-config rebuild; ComplexPlane's labeler is native"
+        if not isinstance(self, NumberPlane):
+            raise TypeError(
+                "NumberPlane.add_coordinate_labels requires a NumberPlane; got "
+                + type(self).__name__
+            )
+        try:
+            excluding = tuple(float(value) for value in excluding)
+        except (TypeError, ValueError) as error:
+            raise TypeError(
+                "NumberPlane.add_coordinate_labels excluding must be an "
+                "iterable of real numbers"
+            ) from error
+        return Axes.add_coordinate_labels(
+            self,
+            x_values=x_values,
+            y_values=y_values,
+            excluding=excluding,
+            **kwargs,
         )
 
 

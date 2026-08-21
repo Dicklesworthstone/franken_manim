@@ -4948,6 +4948,7 @@ impl BridgeMobject {
             height,
             width,
             unit_size,
+            None,
         )?;
         let built = with_font_book(|book| axes.build(book).map_err(native_error))?;
         install_native_tree(slf, factory, built.into_vmob())
@@ -5437,6 +5438,7 @@ impl BridgeMobject {
         x_values: Option<Vec<f64>>,
         y_values: Option<Vec<f64>>,
         excluding: Vec<f64>,
+        font_size: Option<f64>,
     ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyList>)> {
         let axes = axes_builder(
             range3(x_range)?,
@@ -5447,6 +5449,7 @@ impl BridgeMobject {
             Some(current_height),
             Some(current_width),
             unit_size,
+            font_size,
         )?;
         let mut built = with_font_book(|book| axes.build(book).map_err(native_error))?;
         let before_x = built.x_axis().vmob().children().len();
@@ -8196,13 +8199,22 @@ fn axes_builder(
     height: Option<f64>,
     width: Option<f64>,
     unit_size: f64,
+    number_font_size: Option<f64>,
 ) -> PyResult<fmn_library::Axes> {
+    let mut axis_config = axis_config_from(axis_config)?;
+    let mut x_axis_config = axis_config_from(x_axis_config)?;
+    let mut y_axis_config = axis_config_from(y_axis_config)?;
+    if let Some(font_size) = number_font_size {
+        axis_config.number_font_size = Some(font_size);
+        x_axis_config.number_font_size = Some(font_size);
+        y_axis_config.number_font_size = Some(font_size);
+    }
     let mut axes = fmn_library::Axes::new()
         .x_range(x_range)
         .y_range(y_range)
-        .axis_config(axis_config_from(axis_config)?)
-        .x_axis_config(axis_config_from(x_axis_config)?)
-        .y_axis_config(axis_config_from(y_axis_config)?)
+        .axis_config(axis_config)
+        .x_axis_config(x_axis_config)
+        .y_axis_config(y_axis_config)
         .unit_size(unit_size);
     if let Some(height) = height {
         axes = axes.height(height);

@@ -7705,6 +7705,53 @@ assert graph_axes.get_x_axis() is graph_axes.x_axis
 assert graph_axes.get_y_axis() is graph_axes.y_axis
 assert np.allclose(graph_axes.get_origin(), graph_axes.c2p(0.0, 0.0))
 assert np.allclose(graph_axes.p2c(graph_axes.c2p(0.5, 0.25)), [0.5, 0.25])
+
+# NumberPlane shares Axes' native decimal-label shells while retaining the
+# plane-specific axis defaults used to place labels below-left of each axis.
+label_plane = manimlib.NumberPlane(
+    x_range=(-2.0, 3.0, 1.0),
+    y_range=(-1.0, 2.0, 1.0),
+    width=4.0,
+    height=2.0,
+)
+label_counts_before = (
+    len(label_plane.x_axis.submobjects),
+    len(label_plane.y_axis.submobjects),
+)
+assert label_plane.add_coordinate_labels() is label_plane
+assert len(label_plane.x_axis.submobjects) == label_counts_before[0] + 1
+assert len(label_plane.y_axis.submobjects) == label_counts_before[1] + 1
+plane_label_members = [
+    member
+    for axis in (label_plane.x_axis, label_plane.y_axis)
+    for member in axis.submobjects[-1].family_members_with_points()
+]
+assert plane_label_members
+assert any(member.get_width() > 0.0 for member in plane_label_members)
+assert any(member.get_height() > 0.0 for member in plane_label_members)
+
+# The native DecimalNumber shelf accepts font_size, so Axes forwards it.
+small_label_axes = manimlib.Axes(
+    x_range=(-1.0, 2.0, 1.0), y_range=(-1.0, 2.0, 1.0)
+).add_coordinate_labels(font_size=18)
+large_label_axes = manimlib.Axes(
+    x_range=(-1.0, 2.0, 1.0), y_range=(-1.0, 2.0, 1.0)
+).add_coordinate_labels(font_size=36)
+assert (
+    large_label_axes.x_axis.submobjects[-1].get_height()
+    > small_label_axes.x_axis.submobjects[-1].get_height()
+)
+
+try:
+    manimlib.NumberPlane().add_coordinate_labels(excluding=object())
+except TypeError as error:
+    assert str(error) == (
+        "NumberPlane.add_coordinate_labels excluding must be an iterable "
+        "of real numbers"
+    )
+else:
+    raise AssertionError("NumberPlane.add_coordinate_labels accepted bad excluding")
+
 sampled_xs = []
 
 
