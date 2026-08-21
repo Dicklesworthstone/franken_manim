@@ -2855,6 +2855,12 @@ mod tests {
     }
 
     #[test]
+    fn traced_path_stores_custom_time_per_anchor() {
+        let traced = TracedPath::new().with_time_per_anchor(1.0 / 30.0);
+        assert_eq!(traced.time_per_anchor, 1.0 / 30.0);
+    }
+
+    #[test]
     fn tracing_tail_prefills_and_demotes() {
         let mut stage = Stage::new();
         let cursor = stage.add(VMobject::from_points(vec![[2.0, 1.0, 0.0]]));
@@ -2892,7 +2898,7 @@ mod tests {
             .get_points(custom_tail)
             .unwrap_or_else(|| std::panic::panic_any("custom tail points"));
         assert_eq!(custom_points.len(), 59);
-        for cadence in [0.0, -1.0, f64::NAN] {
+        for cadence in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(matches!(
                 TracingTail::new().with_time_per_anchor(cadence),
                 Err(FieldError::NonFiniteControl { .. })
