@@ -11334,6 +11334,44 @@ def get_scenes_to_render(all_scene_classes, scene_config, run_config):
 
 _scene_from_class = scene_from_class
 _note_missing_scenes = note_missing_scenes
+_get_indent = get_indent
+
+
+def insert_embed_line_to_module(module, run_config):
+    if not isinstance(run_config, dict):
+        raise TypeError("insert_embed_line_to_module run_config must be a dict")
+    embed_line = run_config.get("embed_line")
+    if embed_line is None:
+        return module
+    file_name = getattr(module, "__file__", None)
+    if not file_name:
+        raise TypeError("insert_embed_line_to_module module must have __file__")
+    path = _pathlib.Path(file_name)
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    index = int(embed_line) - 1
+    if index < 0 or index > len(lines):
+        raise ValueError(
+            f"insert_embed_line_to_module embed_line {embed_line} is out of range"
+        )
+    indent_source = lines[index] if index < len(lines) else ""
+    indent = _get_indent([indent_source], 0)
+    lines.insert(index, indent + "self.embed()\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    return _MODULE_LOADER.get_module(str(path), is_during_reload=True)
+
+
+def compute_total_frames(scene_class, scene_config):
+    if not isinstance(scene_config, dict):
+        raise TypeError("compute_total_frames scene_config must be a dict")
+    kwargs = dict(scene_config)
+    kwargs["skip_animations"] = True
+    scene = _scene_from_class(scene_class, kwargs, {})
+    scene.run()
+    fps = 30.0
+    camera = getattr(scene, "camera", None)
+    if camera is not None:
+        fps = float(getattr(camera, "frame_rate", fps) or fps)
+    return int(scene.get_time() * fps)
 
 
 class CheckpointManager:
@@ -15417,6 +15455,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.brace", "LineBrace"): LineBrace,
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.scene", "SceneState"): SceneState,
+        ("manimlib.scene.scene", "EndScene"): _EndScene,
         ("manimlib.scene.scene", "ThreeDScene"): ThreeDScene,
         ("manimlib.scene.scene_embed", "CheckpointManager"): CheckpointManager,
         (
@@ -15463,6 +15502,11 @@ def _install_schema_surface():
         ("manimlib.extract_scene", "note_missing_scenes"): note_missing_scenes,
         ("manimlib.extract_scene", "prompt_user_for_choice"): prompt_user_for_choice,
         ("manimlib.extract_scene", "get_scenes_to_render"): get_scenes_to_render,
+        (
+            "manimlib.extract_scene",
+            "insert_embed_line_to_module",
+        ): insert_embed_line_to_module,
+        ("manimlib.extract_scene", "compute_total_frames"): compute_total_frames,
     }
     for (module_name, name), function in special_functions.items():
         function.__module__ = module_name

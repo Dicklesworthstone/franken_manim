@@ -3330,12 +3330,15 @@ with tempfile.NamedTemporaryFile(
         "class Also(InteractiveScene):\n"
         "    def construct(self):\n"
         "        pass\n"
+        "class Waiter(Scene):\n"
+        "    def construct(self):\n"
+        "        self.wait(1)\n"
     )
     extract_path = handle.name
 try:
     extracted = extract_scene.get_module({"file_name": extract_path})
     classes = extract_scene.get_scene_classes(extracted)
-    assert [cls.__name__ for cls in classes] == ["Demo", "Also"]
+    assert [cls.__name__ for cls in classes] == ["Demo", "Also", "Waiter"]
     assert all(extract_scene.is_child_scene(cls, extracted) for cls in classes)
     assert extract_scene.is_child_scene(extracted.Scene, extracted) is False
     demo = extract_scene.scene_from_class(extracted.Demo, {}, {})
@@ -3348,7 +3351,11 @@ try:
     written = extract_scene.get_scenes_to_render(
         classes, {}, {"write_all": True}
     )
-    assert [type(scene).__name__ for scene in written] == ["Demo", "Also"]
+    assert [type(scene).__name__ for scene in written] == [
+        "Demo",
+        "Also",
+        "Waiter",
+    ]
     lone = extract_scene.get_scenes_to_render([extracted.Demo], {}, {})
     assert len(lone) == 1
     assert isinstance(lone[0], extracted.Demo)
@@ -3375,8 +3382,41 @@ try:
         )
     else:
         raise AssertionError("scene_from_class accepted a non-Scene")
+    assert extract_scene.compute_total_frames(extracted.Demo, {}) == 0
+    assert extract_scene.compute_total_frames(extracted.Waiter, {}) == 30
+    patched = extract_scene.insert_embed_line_to_module(
+        extracted, {"embed_line": 4}
+    )
+    patched_source = pathlib.Path(extract_path).read_text(encoding="utf-8")
+    assert "self.embed()" in patched_source
+    assert patched is not extracted
+    assert extract_scene.insert_embed_line_to_module(patched, {}) is patched
+    try:
+        extract_scene.insert_embed_line_to_module(patched, {"embed_line": 0})
+    except ValueError as error:
+        assert "out of range" in str(error)
+    else:
+        raise AssertionError("embed_line 0 was accepted")
 finally:
     pathlib.Path(extract_path).unlink(missing_ok=True)
+
+scene_module = importlib.import_module("manimlib.scene.scene")
+assert scene_module.EndScene.__bases__ == (Exception,)
+assert manimlib.EndScene is scene_module.EndScene
+try:
+    raise scene_module.EndScene("stop scene")
+except scene_module.EndScene as error:
+    assert error.args == ("stop scene",)
+    assert str(error) == "stop scene"
+else:
+    raise AssertionError("EndScene did not preserve Exception raise semantics")
+try:
+    Scene()._end_scene()
+except scene_module.EndScene as error:
+    assert error.args == ("scene ended",)
+    assert str(error) == "scene ended"
+else:
+    raise AssertionError("native Scene.end did not raise EndScene")
 
 # The next honest native constructor is legacy SingleStringTex over Scribe's
 # existing fmn-library Tex builder.
