@@ -6074,6 +6074,10 @@ def _decorate_matrix_decimal_entry(entry, value, font_size, places, style):
     entry.number = float(value)
     entry.font_size = font_size
     entry.edge_to_fix = _np.array(_LEFT)
+    # fm-5wq.4.80's complex-mode flags, which __init__ normally sets: a
+    # reclassed native shell is a real value display, always in real mode.
+    entry.hide_zero_components_on_complex = True
+    entry._complex_imag_mode = False
     entry._decimal_params = (
         places,
         0,
@@ -6771,6 +6775,13 @@ class DecimalNumber(VMobject):
     representation must re-split its glyph children anyway, which IS a
     rebuild — the native shelf's live glyph-recycling `set_value` is the
     upgrade path once live-state cores land (fm-p107)."""
+
+    # Class-level defaults for the fm-5wq.4.80 complex-mode flags, so a
+    # construction path that bypasses __init__ (reclassed native shells,
+    # e.g. Matrix's decorated entries) can never hit AttributeError in
+    # _reduced_build_value — a real display in real mode is the default.
+    hide_zero_components_on_complex = True
+    _complex_imag_mode = False
 
     def __init__(
         self,
