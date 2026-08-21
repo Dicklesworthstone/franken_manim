@@ -1447,7 +1447,23 @@ ignored = scene_module.SceneState(state_scene, ignore=[state_circle])
 assert list(ignored.mobjects_to_copies) == [state_square]
 state_scene.restore_state(captured)
 assert np.allclose(state_square.get_center(), origin)
-assert state_scene.get_mobjects() == [state_square, state_circle]
+restored_state_roots = state_scene.get_mobjects()
+print(
+    "SceneState restored roots:",
+    len(restored_state_roots),
+    [
+        (
+            id(root),
+            type(root).__name__,
+            root is state_square,
+            root is state_circle,
+        )
+        for root in restored_state_roots
+    ],
+    "expected:",
+    [(id(state_square), "Square"), (id(state_circle), "Circle")],
+)
+assert restored_state_roots == [state_square, state_circle]
 assert state_scene._checkpoint_bytes() == captured._checkpoint
 failed_state = scene_module.SceneState.__new__(scene_module.SceneState)
 try:
@@ -10586,6 +10602,48 @@ assert issubclass(manimlib.Group, Mobject)
 assert issubclass(manimlib.VGroup, Mobject)
 assert issubclass(manimlib.Axes, manimlib.VGroup)
 assert issubclass(manimlib.EventType, enum.Enum)
+assert manimlib.EventType.KeyPressEvent.value == "key_press_event"
+event_handler = importlib.import_module("manimlib.event_handler")
+event_dispatcher_mod = importlib.import_module(
+    "manimlib.event_handler.event_dispatcher"
+)
+event_listener_mod = importlib.import_module(
+    "manimlib.event_handler.event_listner"
+)
+assert isinstance(event_handler.EVENT_DISPATCHER, event_dispatcher_mod.EventDispatcher)
+assert str(inspect.signature(event_listener_mod.EventListener)) == (
+    "(mobject, event_type, event_callback)"
+)
+event_dot = geometry.Dot()
+event_seen = []
+
+def _on_press(mobject, event_data):
+    event_seen.append((mobject, dict(event_data)))
+
+press_listener = event_listener_mod.EventListener(
+    event_dot, manimlib.EventType.MousePressEvent, _on_press
+)
+dispatcher = event_dispatcher_mod.EventDispatcher()
+dispatcher.add_listner(press_listener)
+assert dispatcher.get_listners_count() == 1
+assert dispatcher.add_listener is dispatcher.add_listner
+dispatcher.dispatch(
+    manimlib.EventType.MousePressEvent, point=manimlib.RIGHT
+)
+assert event_seen[0][0] is event_dot
+assert np.allclose(dispatcher.get_mouse_point().get_center(), manimlib.RIGHT)
+dispatcher.dispatch(manimlib.EventType.KeyPressEvent, symbol=32)
+assert dispatcher.is_key_pressed(32)
+dispatcher.remove_listner(press_listener)
+assert dispatcher.get_listners_count() == 0
+try:
+    event_listener_mod.EventListener(
+        object(), manimlib.EventType.MousePressEvent, _on_press
+    )
+except TypeError as error:
+    assert str(error) == "EventListener mobject must be a Mobject"
+else:
+    raise AssertionError("EventListener accepted a non-Mobject")
 assert issubclass(manimlib.EndScene, Exception)
 assert manimlib.np is np
 

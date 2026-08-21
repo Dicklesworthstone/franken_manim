@@ -2212,6 +2212,85 @@ class Point(Mobject):
         return self
 
 
+class EventType(_enum.Enum):
+    """The Reference's event-handler token set."""
+
+    MouseMotionEvent = "mouse_motion_event"
+    MouseDragEvent = "mouse_drag_event"
+    MousePressEvent = "mouse_press_event"
+    MouseReleaseEvent = "mouse_release_event"
+    MouseScrollEvent = "mouse_scroll_event"
+    KeyPressEvent = "key_press_event"
+    KeyReleaseEvent = "key_release_event"
+
+
+class EventListener:
+    """A mobject callback registered with an EventDispatcher."""
+
+    def __init__(self, mobject, event_type, event_callback):
+        if not isinstance(mobject, Mobject):
+            raise TypeError("EventListener mobject must be a Mobject")
+        if not callable(event_callback):
+            raise TypeError("EventListener event_callback must be callable")
+        self.mobject = mobject
+        self.event_type = event_type
+        self.callback = event_callback
+
+
+class EventDispatcher:
+    """In-process event fan-out; Studio owns the window, this owns listeners."""
+
+    def __init__(self):
+        self.event_listners = {event_type: [] for event_type in EventType}
+        self.mouse_point = Point()
+        self.mouse_drag_point = Point()
+        self.pressed_keys = set()
+
+    def add_listner(self, event_listner):
+        if not isinstance(event_listner, EventListener):
+            raise TypeError("add_listner expects an EventListener")
+        bucket = self.event_listners.setdefault(event_listner.event_type, [])
+        if event_listner not in bucket:
+            bucket.append(event_listner)
+
+    def remove_listner(self, event_listner):
+        bucket = self.event_listners.get(event_listner.event_type)
+        if not bucket:
+            return
+        self.event_listners[event_listner.event_type] = [
+            item for item in bucket if item is not event_listner
+        ]
+
+    def dispatch(self, event_type, **event_data):
+        point = event_data.get("point")
+        if point is not None:
+            if event_type == EventType.MouseDragEvent:
+                self.mouse_drag_point.move_to(point)
+            else:
+                self.mouse_point.move_to(point)
+        symbol = event_data.get("symbol")
+        if event_type == EventType.KeyPressEvent and symbol is not None:
+            self.pressed_keys.add(int(symbol))
+        elif event_type == EventType.KeyReleaseEvent and symbol is not None:
+            self.pressed_keys.discard(int(symbol))
+        for listener in list(self.event_listners.get(event_type, ())):
+            if listener.callback(listener.mobject, event_data) is False:
+                return False
+        return None
+
+    def get_listners_count(self):
+        return sum(len(bucket) for bucket in self.event_listners.values())
+
+    def get_mouse_point(self):
+        return self.mouse_point
+
+    def get_mouse_drag_point(self):
+        return self.mouse_drag_point
+
+    def is_key_pressed(self, symbol):
+        return int(symbol) in self.pressed_keys
+
+
 class VMobject(Mobject):
     pre_function_handle_to_anchor_scale_factor = 0.01
     make_smooth_after_applying_functions = False
@@ -10968,9 +11047,12 @@ class SceneState:
             mobject.become(copy, match_updaters=True)
             for mobject, copy in self.mobjects_to_copies.items()
         ]
-        scene.clear()
-        if restored:
-            scene.add(*restored)
+        if scene is self._scene and self._checkpoint is not None:
+            scene._reseat_engine_roots(*restored)
+        else:
+            scene.clear()
+            if restored:
+                scene.add(*restored)
         scene.num_plays = self.num_plays
 
 
@@ -14401,6 +14483,12 @@ def _install_schema_surface():
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
         ("manimlib.mobject.mobject", "Group"): Group,
         ("manimlib.mobject.mobject", "Point"): Point,
+        ("manimlib.event_handler.event_type", "EventType"): EventType,
+        ("manimlib.event_handler.event_listner", "EventListener"): EventListener,
+        (
+            "manimlib.event_handler.event_dispatcher",
+            "EventDispatcher",
+        ): EventDispatcher,
         ("manimlib.mobject.interactive", "MotionMobject"): MotionMobject,
         ("manimlib.mobject.interactive", "Button"): Button,
         ("manimlib.mobject.interactive", "ControlMobject"): ControlMobject,
@@ -14748,6 +14836,7 @@ def _install_schema_surface():
         cls.__module__ = module_name
         setattr(_ensure_module(module_name), name, cls)
         classes_by_name.setdefault(name, cls)
+    _ensure_module("manimlib.event_handler").EVENT_DISPATCHER = EventDispatcher()
 
     special_functions = {
         (
