@@ -17921,6 +17921,35 @@ assert not np.isclose(
     pixel_size_default_scene.camera.get_pixel_size(),
 )
 
+# fm-5wq.4: refresh_uniforms reads get_pixel_size live at call time — the
+# camera_config resolution lands in uniforms['pixel_size'], the dict is a
+# snapshot that goes stale across reset_pixel_shape (Reference contract),
+# and the next refresh_uniforms picks up the live shape.
+uniform_size_camera = pixel_size_config_scene.camera
+assert uniform_size_camera.refresh_uniforms() is None
+assert np.isclose(
+    uniform_size_camera.uniforms["pixel_size"],
+    uniform_size_camera.get_frame_width() / 640.0,
+)
+size_before_reset = uniform_size_camera.uniforms["pixel_size"]
+uniform_size_camera.reset_pixel_shape(320, 180)
+assert np.isclose(
+    uniform_size_camera.uniforms["pixel_size"], size_before_reset
+)
+assert not np.isclose(
+    uniform_size_camera.uniforms["pixel_size"],
+    uniform_size_camera.get_pixel_size(),
+)
+assert uniform_size_camera.refresh_uniforms() is None
+assert np.isclose(
+    uniform_size_camera.uniforms["pixel_size"],
+    uniform_size_camera.get_pixel_size(),
+)
+assert np.isclose(
+    uniform_size_camera.uniforms["pixel_size"],
+    uniform_size_camera.get_frame_width() / 320.0,
+)
+
 # fm-5wq.4: Scene.file_writer_config is the remaining constructor seam
 # that builds SceneFileWriter — class default_file_writer_config, then
 # constructor file_writer_config. Construction records knobs; movie
