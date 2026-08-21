@@ -10863,14 +10863,16 @@ def _mobject_looks_identical(mobject, other):
 
 
 class SceneState:
-    """A captured draw-list of mobject copies, restored through become()."""
+    """Reference identities over Proscenium's canonical native checkpoint."""
 
     def __init__(self, scene, ignore=None):
         if not isinstance(scene, Scene):
             raise TypeError("SceneState scene must be a Scene")
+        self._scene = scene
         self.time = scene.get_time()
         self.num_plays = int(getattr(scene, "num_plays", 0))
         skip = set() if ignore is None else set(ignore)
+        self._checkpoint = None if skip else bytes(scene._checkpoint_bytes())
         last = {}
         if getattr(scene, "undo_stack", None):
             last = scene.undo_stack[-1].mobjects_to_copies
@@ -10906,6 +10908,10 @@ class SceneState:
     def restore_scene(self, scene):
         if not isinstance(scene, Scene):
             raise TypeError("restore_scene expects a Scene")
+        if scene is self._scene and self._checkpoint is not None:
+            scene._restore_checkpoint_bytes(self._checkpoint)
+            scene.num_plays = self.num_plays
+            return
         restored = [
             mobject.become(copy, match_updaters=True)
             for mobject, copy in self.mobjects_to_copies.items()
@@ -10913,6 +10919,7 @@ class SceneState:
         scene.clear()
         if restored:
             scene.add(*restored)
+        scene.num_plays = self.num_plays
 
 
 class ThreeDScene(Scene):

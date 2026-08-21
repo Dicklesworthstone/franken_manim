@@ -1437,6 +1437,7 @@ state_scene.add(state_square, state_circle)
 origin = state_square.get_center().copy()
 captured = state_scene.get_state()
 assert isinstance(captured, scene_module.SceneState)
+assert captured._checkpoint == state_scene._checkpoint_bytes()
 assert list(captured.mobjects_to_copies) == [state_square, state_circle]
 assert captured.n_changes(captured) == 0
 state_square.shift(manimlib.RIGHT)
@@ -1446,6 +1447,7 @@ assert list(ignored.mobjects_to_copies) == [state_square]
 state_scene.restore_state(captured)
 assert np.allclose(state_square.get_center(), origin)
 assert state_scene.get_mobjects() == [state_square, state_circle]
+assert state_scene._checkpoint_bytes() == captured._checkpoint
 failed_state = scene_module.SceneState.__new__(scene_module.SceneState)
 try:
     scene_module.SceneState.__init__(failed_state, manimlib.Square())

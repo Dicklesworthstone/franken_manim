@@ -7646,6 +7646,18 @@ impl PyScene {
             .state_bytes()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
+
+    /// Restore the canonical SceneState document captured by
+    /// `_checkpoint_bytes`. Durable decode validates the envelope and nested
+    /// arena snapshot before the runtime reapplies its clock, RNG, play
+    /// count, roots, records, and family graph.
+    fn _restore_checkpoint_bytes(&self, bytes: Vec<u8>) -> PyResult<()> {
+        self.engine
+            .borrow_mut()
+            .restore_state_bytes(&bytes)
+            .map(|_| ())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
 }
 
 /// The engine's named rate-function catalog (fmn-core's single-argument
