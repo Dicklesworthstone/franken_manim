@@ -11219,9 +11219,11 @@ def get_indent(code_lines, line_number):
     return line[: len(line) - len(line.lstrip())]
 
 
-# BlankScene is not a manimlib root export, so the post-install
-# namespace cleanup deletes that name from these functions' globals.
+# BlankScene and ModuleLoader are not manimlib root exports, so the
+# post-install namespace cleanup deletes those names from these
+# functions' globals.
 _BLANK_SCENE = BlankScene
+_MODULE_LOADER = ModuleLoader
 
 
 def is_child_scene(obj, module):
@@ -11256,7 +11258,7 @@ def get_module(run_config):
     file_name = run_config.get("file_name")
     if file_name is None:
         file_name = run_config.get("module")
-    return ModuleLoader.get_module(
+    return _MODULE_LOADER.get_module(
         file_name,
         is_during_reload=bool(run_config.get("is_during_reload", False)),
     )
