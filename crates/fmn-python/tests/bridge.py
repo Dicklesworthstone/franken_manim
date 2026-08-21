@@ -8136,6 +8136,25 @@ assert np.allclose(
     atol=1e-6,
 )
 
+default_cylinder = three_dimensions.Cylinder()
+assert default_cylinder.n_records() == 101 * 11
+
+back_cylinder = three_dimensions.Cylinder(resolution=(3, 3), z_index=-1)
+front_cylinder = three_dimensions.Cylinder(resolution=(3, 3), z_index=1)
+cylinder_order_scene = Scene().add(front_cylinder, back_cylinder)
+assert cylinder_order_scene.get_mobjects() == [back_cylinder, front_cylinder]
+
+failed_cylinder = three_dimensions.Cylinder.__new__(three_dimensions.Cylinder)
+try:
+    three_dimensions.Cylinder.__init__(failed_cylinder, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Cylinder() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Cylinder keyword reached the native builder")
+assert not hasattr(failed_cylinder, "submobjects")
+
 assert three_dimensions.Torus.__bases__ == (manimlib.Surface,)
 assert three_dimensions.Cone.__bases__ == (three_dimensions.Cylinder,)
 assert three_dimensions.Line3D.__bases__ == (three_dimensions.Cylinder,)

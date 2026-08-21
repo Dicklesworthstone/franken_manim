@@ -3840,6 +3840,7 @@ impl BridgeMobject {
         preferred_creation_axis: usize,
         epsilon: f64,
         normal_nudge: f64,
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
         let cylinder = fmn_library::Cylinder::new(height, radius)
             .axis(axis)
@@ -3848,8 +3849,10 @@ impl BridgeMobject {
             .resolution(resolution.0, resolution.1)
             .preferred_creation_axis(preferred_creation_axis)
             .epsilon(epsilon)
-            .normal_nudge(normal_nudge);
-        install_native_tree(slf, factory, cylinder.build())
+            .normal_nudge(normal_nudge)
+            .build()
+            .with_z_index(z_index);
+        install_native_tree(slf, factory, cylinder)
     }
 
     /// `Torus(r1, r2, ...)` over Atlas's native UV-grid sampler.

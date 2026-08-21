@@ -7795,6 +7795,7 @@ class Cylinder(Surface):
         preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
+        z_index = int(kwargs.pop("z_index", 0))
         _refuse_unrouted("Cylinder()", [(name, True) for name in sorted(kwargs)])
         _install_live_state(self)
         self.height = float(height)
@@ -7817,6 +7818,7 @@ class Cylinder(Surface):
             self.preferred_creation_axis,
             self.epsilon,
             self.normal_nudge,
+            z_index,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
