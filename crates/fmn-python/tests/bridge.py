@@ -3959,18 +3959,13 @@ except ValueError as error:
 else:
     raise AssertionError("Flash accepted num_lines=0")
 
-for moving_target_type, moving_target in (
-    (indication.FocusOn, geometry.Square()),
-):
-    try:
-        moving_target_type(moving_target)
-    except NotImplementedError as error:
-        assert f"manimlib.animation.indication.{moving_target_type.__name__}" in str(error)
-        assert "updater seam" in str(error)
-    else:
-        raise AssertionError(
-            f"{moving_target_type.__name__} silently froze a moving Mobject target"
-        )
+# fm-5wq.4.77: FocusOn Mobject targets follow live now — construction
+# succeeds, samples the target's current centre, and hangs the follow
+# updater on the shrinking dot; the old updater-seam refusal is retired
+# (the play-level tracking pin lives with the FocusOn block below).
+focus_follow_probe = indication.FocusOn(geometry.Square())
+assert np.allclose(focus_follow_probe.focus_point, [0.0, 0.0, 0.0])
+assert focus_follow_probe._focus_target is not None
 
 # Specialized Broadcast and the final composition-backed indication leaves
 # are ordinary native compositions: LaggedStart/Restore for expanding rings,
