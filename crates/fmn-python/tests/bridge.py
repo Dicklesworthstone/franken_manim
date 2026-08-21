@@ -3418,6 +3418,31 @@ assert list(grouped) == [group_left, group_right]
 assert group_key_scene.on_key_press(ord("g"), 2 | 1) is None  # CTRL|SHIFT
 assert list(group_key_scene.selection) == [group_left, group_right]
 
+# fm-5wq.4: ctrl/cmd-a selects every scene root except unselectables;
+# ctrl/cmd-t flips select_top_level_mobs through refresh_selection_scope.
+select_all_scene = InteractiveScene()
+select_all_scene.setup()
+select_all_a = manimlib.Circle()
+select_all_b = manimlib.Square()
+select_all_scene.add(select_all_a, select_all_b)
+assert select_all_scene.on_key_press(ord("a"), 2) is None
+assert select_all_a in select_all_scene.selection
+assert select_all_b in select_all_scene.selection
+assert select_all_scene.selection_highlight not in select_all_scene.selection
+assert select_all_scene.select_top_level_mobs is True
+assert select_all_scene.on_key_press(ord("t"), 2) is None
+assert select_all_scene.select_top_level_mobs is False
+assert select_all_scene.on_key_press(ord("t"), 2) is None
+assert select_all_scene.select_top_level_mobs is True
+interactive_keys = importlib.import_module("manimlib.scene.interactive_scene")
+assert interactive_keys.SELECT_KEY == "s"
+assert interactive_keys.UNSELECT_KEY == "u"
+assert interactive_keys.GRAB_KEYS == ["g", "h", "v", "z"]
+assert manimlib.SELECT_KEY == "s"
+assert manimlib.COLOR_KEY == "c"
+assert manimlib.ALL_MODIFIERS == (2 | 64 | 1)
+assert manimlib.ARROW_SYMBOLS == [0xFF51, 0xFF52, 0xFF53, 0xFF54]
+
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
 assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
@@ -3848,6 +3873,40 @@ assert list(color_sliders.sliders.submobjects) == [
 ]
 assert all(len(slider.submobjects) == 3 for slider in color_sliders.sliders)
 assert np.allclose(color_sliders.get_value(), [1.0, 1.0, 1.0, 1.0])
+
+custom_grid_color_sliders = interactive.ColorSliders(
+    background_grid_kwargs=dict(
+        single_square_len=0.2,
+        colors=[manimlib.RED, manimlib.BLUE],
+    )
+)
+custom_grid_squares = list(custom_grid_color_sliders.background.submobjects)
+assert len(custom_grid_squares) == 2 * 11
+assert np.isclose(
+    custom_grid_color_sliders.background.get_width(),
+    custom_grid_color_sliders.selected_color_box.get_width(),
+    atol=1e-3,
+)
+assert np.isclose(
+    custom_grid_squares[0].get_width(),
+    custom_grid_color_sliders.background.get_width() / 11.0,
+    atol=1e-3,
+)
+assert custom_grid_squares[0].get_fill_color() == manimlib.RED
+assert custom_grid_squares[1].get_fill_color() == manimlib.BLUE
+try:
+    interactive.ColorSliders(background_grid_kwargs=dict(bogus=1))
+except TypeError as error:
+    assert "background_grid_kwargs.bogus" in str(error)
+else:
+    raise AssertionError(
+        "ColorSliders silently discarded background_grid_kwargs.bogus"
+    )
+default_grid_squares = list(color_sliders.background.submobjects)
+assert len(default_grid_squares) == 5 * 21
+assert color_sliders.background_grid_kwargs["single_square_len"] == 0.1
+assert default_grid_squares[0].get_fill_color() == manimlib.GREY_A
+assert default_grid_squares[1].get_fill_color() == manimlib.GREY_C
 
 swatch_identity = color_sliders.swatch
 sliders_identity = color_sliders.sliders

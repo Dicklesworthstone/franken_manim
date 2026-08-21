@@ -10725,17 +10725,13 @@ class ColorSliders(Group):
             tuple(_color_to_rgb(color))
             for color in grid_config.get("colors", [_GREY_A, _GREY_C])
         ]
-        if grid_colors != [
-            tuple(_color_to_rgb(_GREY_A)),
-            tuple(_color_to_rgb(_GREY_C)),
-        ] or float(grid_config.get("single_square_len", 0.1)) != 0.1:
-            raise NotImplementedError(
-                "ColorSliders background_grid_kwargs are not routed to the native builder"
-            )
+        single_square_len = float(grid_config.get("single_square_len", 0.1))
+        grid_config["single_square_len"] = single_square_len
 
         self.sliders_kwargs = dict(sliders_kwargs)
         self.rect_kwargs = rect_config
         self.background_grid_kwargs = grid_config
+        self._background_grid_colors = grid_colors
         self.sliders_buff = float(sliders_buff)
         self.default_rgb_value = float(default_rgb_value)
         self.default_a_value = float(default_a_value)
@@ -10769,6 +10765,8 @@ class ColorSliders(Group):
             *components,
             float(self.rect_kwargs.get("width", 2.0)),
             float(self.rect_kwargs.get("height", 0.5)),
+            self._background_grid_colors,
+            float(self.background_grid_kwargs.get("single_square_len", 0.1)),
             self.sliders_buff,
             bool(apply_value),
         )
@@ -17362,6 +17360,44 @@ def _install_schema_surface():
             setattr(root, name, getattr(module, name))
 
     InteractiveScene.palette_colors = getattr(root, "MANIM_COLORS", None)
+    keys = _pinned_manim_config().key_bindings
+    interactive_mod = _sys.modules["manimlib.scene.interactive_scene"]
+    interactive_mod.SELECT_KEY = keys.select
+    interactive_mod.UNSELECT_KEY = keys.unselect
+    interactive_mod.GRAB_KEY = keys.grab
+    interactive_mod.X_GRAB_KEY = keys.x_grab
+    interactive_mod.Y_GRAB_KEY = keys.y_grab
+    interactive_mod.Z_GRAB_KEY = keys.z_grab
+    interactive_mod.GRAB_KEYS = [
+        keys.grab,
+        keys.x_grab,
+        keys.y_grab,
+        keys.z_grab,
+    ]
+    interactive_mod.RESIZE_KEY = keys.resize
+    interactive_mod.COLOR_KEY = keys.color
+    interactive_mod.INFORMATION_KEY = keys.information
+    interactive_mod.CURSOR_KEY = keys.cursor
+    interactive_mod.ALL_MODIFIERS = (
+        _PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND | _PYGLET_MOD_SHIFT
+    )
+    interactive_mod.ARROW_SYMBOLS = list(_PYGLET_ARROW_SYMBOLS)
+    for _key_name in (
+        "SELECT_KEY",
+        "UNSELECT_KEY",
+        "GRAB_KEY",
+        "X_GRAB_KEY",
+        "Y_GRAB_KEY",
+        "Z_GRAB_KEY",
+        "GRAB_KEYS",
+        "RESIZE_KEY",
+        "COLOR_KEY",
+        "INFORMATION_KEY",
+        "CURSOR_KEY",
+        "ALL_MODIFIERS",
+        "ARROW_SYMBOLS",
+    ):
+        setattr(root, _key_name, getattr(interactive_mod, _key_name))
 
     root.__reference_commit__ = (
         "6199a00d4c1b1127ebe45cb629c3f22538b10e13"
