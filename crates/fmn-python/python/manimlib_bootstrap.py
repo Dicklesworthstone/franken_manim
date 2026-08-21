@@ -9426,6 +9426,12 @@ class Restore(_NativeAnimation):
         path_func=None,
         **kwargs,
     ):
+        # The Reference's Restore consumes mobject.saved_state at
+        # construction; a never-saved mobject fails here with the exact
+        # Mobject.restore() exception rather than deep in the native
+        # segment (fm-5wq.4.70).
+        if getattr(mobject, "saved_state", None) is None:
+            raise Exception("Trying to restore without having saved")
         _refuse_unrouted("Restore()", [("path_func", path_func is not None)])
         super().__init__(mobject, **kwargs)
         self.path_arc = float(path_arc)

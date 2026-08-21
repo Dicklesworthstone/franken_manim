@@ -10375,3 +10375,39 @@ else:
     raise AssertionError(
         "turn_animation_into_updater accepted a native-segment class"
     )
+
+# fm-5wq.4.70: audit of the transform leftovers. Restore/ScaleInPlace/
+# ShrinkToCenter/FadeToColor/ApplyPointwiseFunctionToCenter were already
+# bound and play above; the one real hole was the Restore ANIMATION, which
+# accepted a never-saved mobject and deferred the refusal to the native
+# segment — it now refuses at construction with the Reference's exact
+# Mobject.restore() exception.
+try:
+    manimlib.Restore(manimlib.Dot())
+except Exception as error:
+    assert type(error) is Exception, error
+    assert str(error) == "Trying to restore without having saved"
+else:
+    raise AssertionError("Restore accepted a mobject without saved state")
+
+# Cheap re-anchors of this bead's positive halves through Scene.play.
+restore_anchor = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+restore_anchor.save_state()
+restore_anchor.move_to((0.0, 2.0, 0.0))
+restore_anchor_scene = InteractiveScene()
+restore_anchor_scene.add(restore_anchor)
+restore_anchor_scene.play(
+    manimlib.Restore(restore_anchor),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(restore_anchor.get_center(), [1.0, 0.0, 0.0], atol=1e-9)
+
+scale_anchor = manimlib.Square(side_length=1.0)
+restore_anchor_scene.add(scale_anchor)
+restore_anchor_scene.play(
+    manimlib.ScaleInPlace(scale_anchor, 2.0),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert math.isclose(scale_anchor.get_width(), 2.0, rel_tol=0.0, abs_tol=1e-9)
