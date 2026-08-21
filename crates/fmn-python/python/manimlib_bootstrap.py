@@ -9450,6 +9450,170 @@ class Textbox(ControlMobject):
         self.text.become(candidate)
 
 
+class ControlPanel(Group):
+    """Atlas's native GREY_C panel, opener tab, and controls column."""
+
+    def __init__(
+        self,
+        *controls,
+        panel_kwargs=dict(
+            width=_FRAME_SHAPE[0] / 4.0,
+            height=_MED_SMALL_BUFF + _FRAME_HEIGHT,
+            fill_color=_GREY_C,
+            fill_opacity=1.0,
+            stroke_width=0.0,
+        ),
+        opener_kwargs=dict(
+            width=_FRAME_SHAPE[0] / 8.0,
+            height=0.5,
+            fill_color=_GREY_C,
+            fill_opacity=1.0,
+        ),
+        opener_text_kwargs=dict(text="Control Panel", font_size=20),
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not all(isinstance(control, ControlMobject) for control in controls):
+            raise TypeError(
+                "ControlPanel controls must be ControlMobject instances"
+            )
+
+        panel_config = dict(panel_kwargs)
+        panel_unknown = sorted(
+            set(panel_config)
+            - {"width", "height", "fill_color", "fill_opacity", "stroke_width"}
+        )
+        if panel_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("panel_kwargs." + name for name in panel_unknown)
+            )
+        if (
+            float(panel_config.get("width", _FRAME_SHAPE[0] / 4.0))
+            != _FRAME_SHAPE[0] / 4.0
+            or float(panel_config.get("height", _MED_SMALL_BUFF + _FRAME_HEIGHT))
+            != _MED_SMALL_BUFF + _FRAME_HEIGHT
+            or tuple(_color_to_rgb(panel_config.get("fill_color", _GREY_C)))
+            != tuple(_color_to_rgb(_GREY_C))
+            or float(panel_config.get("fill_opacity", 1.0)) != 1.0
+            or float(panel_config.get("stroke_width", 0.0)) != 0.0
+        ):
+            raise NotImplementedError(
+                "ControlPanel panel_kwargs are not routed to the native builder"
+            )
+
+        opener_config = dict(opener_kwargs)
+        opener_unknown = sorted(
+            set(opener_config) - {"width", "height", "fill_color", "fill_opacity"}
+        )
+        if opener_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("opener_kwargs." + name for name in opener_unknown)
+            )
+        if (
+            float(opener_config.get("width", _FRAME_SHAPE[0] / 8.0))
+            != _FRAME_SHAPE[0] / 8.0
+            or float(opener_config.get("height", 0.5)) != 0.5
+            or tuple(_color_to_rgb(opener_config.get("fill_color", _GREY_C)))
+            != tuple(_color_to_rgb(_GREY_C))
+            or float(opener_config.get("fill_opacity", 1.0)) != 1.0
+        ):
+            raise NotImplementedError(
+                "ControlPanel opener_kwargs are not routed to the native builder"
+            )
+
+        text_config = dict(opener_text_kwargs)
+        text_unknown = sorted(set(text_config) - {"text", "font_size"})
+        if text_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("opener_text_kwargs." + name for name in text_unknown)
+            )
+        opener_text = str(text_config.get("text", "Control Panel"))
+        opener_font_size = float(text_config.get("font_size", 20))
+
+        self.panel_kwargs = panel_config
+        self.opener_kwargs = opener_config
+        self.opener_text_kwargs = text_config
+        self._control_panel_open = False
+        panel, opener, controls_group = self._native_control_panel_parts(
+            opener_text,
+            opener_font_size,
+            controls,
+            open=False,
+        )
+        super().__init__(panel, opener, controls_group)
+        self.panel = panel
+        self.panel_opener = opener
+        self.controls = controls_group
+
+    def _native_control_panel_parts(
+        self,
+        opener_text,
+        opener_font_size,
+        controls,
+        *,
+        open,
+    ):
+        control_extents = []
+        for control in controls:
+            box = control.get_bounding_box()
+            control_extents.append((_vec3(box[0]), _vec3(box[2])))
+        specs = self._build_control_panel(
+            _native_shell_factory,
+            control_extents,
+            opener_text,
+            opener_font_size,
+            bool(open),
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if (
+            len(parts) != 3
+            or len(parts[1].submobjects) != 2
+        ):
+            raise RuntimeError(
+                "native ControlPanel family contract drift: expected "
+                "panel + opener + controls"
+            )
+        targets = list(parts[2].submobjects)
+        if len(targets) != len(controls):
+            raise RuntimeError(
+                "native ControlPanel controls contract drift: "
+                f"expected {len(controls)} controls, got {len(targets)}"
+            )
+        for control, target in zip(controls, targets):
+            control.shift(target.get_center() - control.get_center())
+        parts[2].set_submobjects(controls)
+        return parts
+
+    def _rebuild_control_panel(self, *, open):
+        text_config = self.opener_text_kwargs
+        panel, opener, controls_group = self._native_control_panel_parts(
+            str(text_config.get("text", "Control Panel")),
+            float(text_config.get("font_size", 20)),
+            tuple(self.controls.submobjects),
+            open=open,
+        )
+        self.panel.become(panel)
+        self.panel_opener.become(opener)
+        del controls_group
+        self._control_panel_open = bool(open)
+        return self
+
+    def open_panel(self):
+        return self._rebuild_control_panel(open=True)
+
+    def close_panel(self):
+        return self._rebuild_control_panel(open=False)
+
+
 class CameraFrame(Mobject):
     """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
     real Mobject whose authoritative state lives in one engine
@@ -13473,6 +13637,7 @@ def _install_schema_surface():
         ): LinearNumberSlider,
         ("manimlib.mobject.interactive", "ColorSliders"): ColorSliders,
         ("manimlib.mobject.interactive", "Textbox"): Textbox,
+        ("manimlib.mobject.interactive", "ControlPanel"): ControlPanel,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (

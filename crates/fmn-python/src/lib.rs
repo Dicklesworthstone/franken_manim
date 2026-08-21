@@ -3217,6 +3217,44 @@ impl BridgeMobject {
         native_shell_specs(slf.py(), factory, children)
     }
 
+    /// `ControlPanel(*controls)` over Atlas's native panel, opener tab, and
+    /// controls column. The Python root is a `Group`; these three children
+    /// keep stable shell identities across open/close rebuilds.
+    fn _build_control_panel<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        control_extents: Vec<([f64; 3], [f64; 3])>,
+        opener_text: &str,
+        opener_font_size: f64,
+        open: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let controls = control_extents
+            .into_iter()
+            .map(|extent| matcher_extent_vmobject(Some(extent)));
+        let built = with_font_book(|book| {
+            let mut panel = fmn_library::ControlPanel::new(controls)
+                .opener_text(opener_text)
+                .opener_font_size(opener_font_size)
+                .build(book)
+                .map_err(native_error)?;
+            if open {
+                panel.open_panel();
+            } else {
+                panel.close_panel();
+            }
+            Ok(panel)
+        })?;
+        let mut composition = fmn_mobject::Mobject::from(built.composition());
+        let children = std::mem::take(&mut composition.submobjects);
+        if children.len() != 3 {
+            return Err(PyRuntimeError::new_err(format!(
+                "native ControlPanel family contract drift: expected 3 children, got {}",
+                children.len()
+            )));
+        }
+        native_shell_specs(slf.py(), factory, children)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the

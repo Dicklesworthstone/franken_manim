@@ -2661,6 +2661,82 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Textbox fabricated an unbound mouse-press gateway")
 
+# ControlPanel is the remaining interactive Group: Atlas ingests the complete
+# variadic control list, lays out native extent targets, and the portal grafts
+# the original control proxies into that native controls column.
+panel_checkbox = interactive.Checkbox(True)
+panel_toggle = interactive.EnableDisableButton(False)
+control_panel = interactive.ControlPanel(panel_checkbox, panel_toggle)
+assert interactive.ControlPanel.__bases__ == (manimlib.Group,)
+assert interactive.ControlMobject not in interactive.ControlPanel.__mro__
+assert list(control_panel.submobjects) == [
+    control_panel.panel,
+    control_panel.panel_opener,
+    control_panel.controls,
+]
+assert len(control_panel.panel_opener.submobjects) == 2
+assert list(control_panel.controls.submobjects) == [
+    panel_checkbox,
+    panel_toggle,
+]
+assert control_panel.controls.submobjects[0] is panel_checkbox
+assert control_panel.controls.submobjects[1] is panel_toggle
+assert panel_checkbox.get_center()[1] > panel_toggle.get_center()[1]
+assert np.isclose(
+    control_panel.panel.get_width(),
+    manimlib.FRAME_WIDTH / 4.0,
+)
+assert np.isclose(
+    control_panel.panel_opener.get_width(),
+    manimlib.FRAME_WIDTH / 8.0,
+)
+
+panel_identity = control_panel.panel
+opener_identity = control_panel.panel_opener
+controls_identity = control_panel.controls
+control_panel.open_panel()
+assert control_panel.panel is panel_identity
+assert control_panel.panel_opener is opener_identity
+assert control_panel.controls is controls_identity
+assert list(control_panel.controls.submobjects) == [
+    panel_checkbox,
+    panel_toggle,
+]
+assert np.isclose(
+    control_panel.panel_opener.get_bottom()[1],
+    -manimlib.FRAME_Y_RADIUS,
+    atol=1e-6,
+)
+control_panel.close_panel()
+assert np.isclose(
+    control_panel.panel_opener.get_top()[1],
+    manimlib.FRAME_Y_RADIUS,
+    atol=1e-6,
+)
+
+try:
+    interactive.ControlPanel(geometry.Circle())
+except TypeError as error:
+    assert str(error) == (
+        "ControlPanel controls must be ControlMobject instances"
+    )
+else:
+    raise AssertionError("ControlPanel accepted a non-control child")
+
+failed_control_panel = interactive.ControlPanel.__new__(
+    interactive.ControlPanel
+)
+try:
+    interactive.ControlPanel.__init__(
+        failed_control_panel,
+        unsupported=True,
+    )
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("ControlPanel silently discarded an unknown option")
+assert not hasattr(failed_control_panel, "submobjects")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.
