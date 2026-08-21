@@ -10726,16 +10726,35 @@ assert all(
     for leaf in t2c_tex.get_part_by_tex("y")
 )
 
-# A Scene can play a fade on the isolated span's group node.
+# A Scene can play a fade on the isolated span's group node. The native
+# finish contract is the Reference's restore-then-remove (fading.py:76):
+# fade_out finishes at final_alpha_value = 0 and restores the records, so
+# the honest observable is the mid-play probe — the leaf's fill alpha
+# drops through exactly 0.5 to exactly 0.0 under a linear two-frame play.
 iso_scene = Scene()
 iso_scene.add(iso_tex)
 iso_faded_leaf = iso_x_part[0]
+iso_fade_probe = manimlib.Dot().move_to((3.0, 0.0, 0.0))
+iso_scene.add(iso_fade_probe)
+iso_fade_alphas = []
+
+
+def _iso_fade_capture(mobject, dt):
+    del mobject
+    if dt > 0:
+        iso_fade_alphas.append(float(iso_faded_leaf.data["fill_rgba"][0, 3]))
+
+
+iso_fade_probe.add_updater(_iso_fade_capture)
 iso_scene.play(
     manimlib.FadeOut(iso_tex[0]),
-    run_time=1.0 / 30.0,
+    run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(iso_faded_leaf.data["fill_rgba"][:, 3], 0.0)
+iso_fade_probe.remove_updater(_iso_fade_capture)
+assert len(iso_fade_alphas) == 2, iso_fade_alphas
+assert math.isclose(iso_fade_alphas[0], 0.5, rel_tol=0.0, abs_tol=1e-9)
+assert math.isclose(iso_fade_alphas[1], 0.0, rel_tol=0.0, abs_tol=1e-9)
 
 # An isolate occurrence that resolves to no span-map primitive is a named
 # error, never a silent no-op selection; an isolate entry with no occurrence
