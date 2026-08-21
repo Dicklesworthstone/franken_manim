@@ -2628,6 +2628,20 @@ empty_underline = shape_matchers.Underline(Mobject())
 assert not empty_cross.family_members_with_points()
 assert not empty_underline.family_members_with_points()
 
+curved_underline = shape_matchers.Underline(
+    native_match_target, path_arc=math.pi / 3.0
+)
+assert np.isclose(curved_underline.path_arc, math.pi / 3.0)
+assert curved_underline.get_arc_length() > curved_underline.get_length()
+assert not np.isclose(
+    curved_underline.point_from_proportion(0.5)[1],
+    curved_underline.get_start()[1],
+)
+curved_underline_widths = curved_underline.get_stroke_widths()
+assert np.isclose(curved_underline_widths[0], 0.0)
+assert np.isclose(curved_underline_widths[-1], 0.0)
+assert np.isclose(curved_underline_widths.max(), 3.0)
+
 bound_matcher_scene = Scene()
 bound_match_target = geometry.Rectangle(width=1.5, height=0.75)
 bound_matcher_scene.add(bound_match_target)
@@ -2649,6 +2663,13 @@ for constructor, message in (
     else:
         raise AssertionError(f"{constructor.__name__} accepted a non-Mobject target")
 
+try:
+    shape_matchers.Underline(None)
+except TypeError as error:
+    assert str(error) == "Underline expects a Mobject"
+else:
+    raise AssertionError("Underline accepted None")
+
 for name, kwargs in (
     ("buff", {"buff": float("nan")}),
     ("stretch_factor", {"stretch_factor": float("inf")}),
@@ -2660,13 +2681,6 @@ for name, kwargs in (
         assert "finite" in str(error)
     else:
         raise AssertionError(f"Underline accepted a non-finite {name}")
-
-try:
-    shape_matchers.Underline(native_match_target, path_arc=0.5)
-except NotImplementedError as error:
-    assert "path_arc" in str(error)
-else:
-    raise AssertionError("Underline silently ignored a curved path request")
 
 # Checkmark and Exmark keep the Reference preset-string inheritance and one
 # selectable glyph-family shape, but their visible contours are Atlas's

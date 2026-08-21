@@ -6613,7 +6613,6 @@ class Underline(Line):
         if not isinstance(mobject, _BridgeMobject):
             raise TypeError("Underline expects a Mobject")
         path_arc = float(kwargs.pop("path_arc", 0.0))
-        _refuse_unrouted("Underline()", [("path_arc", path_arc != 0.0)])
         _install_live_state(self)
         self.path_arc = 0.0
         self.buff = float(buff)
@@ -6627,6 +6626,8 @@ class Underline(Line):
             float(stretch_factor),
         )
         _hang_native_children(self, specs)
+        if path_arc != 0.0:
+            self.set_path_arc(path_arc)
         _apply_vmobject_style_kwargs(self, kwargs)
         self.set_stroke(stroke_color, width=stroke_width)
 
