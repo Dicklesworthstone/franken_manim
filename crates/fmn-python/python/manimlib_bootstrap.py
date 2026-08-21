@@ -7764,6 +7764,8 @@ class Torus(Surface):
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+        self._solid_params = ("torus", self.r1, self.r2)
+        self._solid_native_height = self.get_height()
 
     def uv_func(self, u, v):
         return _np.array(
@@ -8235,11 +8237,14 @@ class SurfaceMesh(VGroup):
                 + type(uv_surface).__name__
                 + " does not carry solid params yet"
             )
+        source_kind = params[0]
+        source_minor_radius = float(params[2]) if source_kind == "torus" else 0.0
         _install_live_state(self)
         specs = self._build_surface_mesh(
             _native_shell_factory,
-            params[0],
+            source_kind,
             float(params[1]),
+            source_minor_radius,
             (int(resolution[0]), int(resolution[1])),
             float(normal_nudge),
             float(stroke_width),
@@ -8248,7 +8253,9 @@ class SurfaceMesh(VGroup):
         _hang_native_children(self, specs)
         # Re-seat onto the source's CURRENT geometry (the rebuild is at
         # native scale/origin) — exact for uniform rescales and moves.
-        native_height = 2.0 * float(params[1])
+        native_height = getattr(
+            uv_surface, "_solid_native_height", 2.0 * float(params[1])
+        )
         current_height = uv_surface.get_height()
         if current_height > 0 and abs(current_height - native_height) > 1e-12:
             self.scale(current_height / native_height)

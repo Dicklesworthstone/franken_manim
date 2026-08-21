@@ -4559,6 +4559,7 @@ impl BridgeMobject {
         factory: &Bound<'py, PyAny>,
         source_kind: &str,
         source_radius: f64,
+        source_minor_radius: f64,
         resolution: (usize, usize),
         normal_nudge: f64,
         stroke_width: f64,
@@ -4566,6 +4567,9 @@ impl BridgeMobject {
     ) -> PyResult<Bound<'py, PyList>> {
         let surface = match source_kind {
             "sphere" => fmn_library::Sphere::new(source_radius).build(),
+            "torus" => {
+                fmn_library::Torus::new(source_radius, source_minor_radius).build()
+            }
             other => {
                 return Err(PyValueError::new_err(format!(
                     "SurfaceMesh over `{other}` awaits its native rebuild \

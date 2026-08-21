@@ -8182,6 +8182,29 @@ assert np.isclose(torus.get_opacity(), 0.6)
 assert np.allclose(torus.uniforms["shading"], [0.1, 0.2, 0.3])
 assert torus.uniforms["depth_test"] is False
 
+sphere_mesh = three_dimensions.SurfaceMesh(sphere, resolution=(4, 3))
+assert len(sphere_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in sphere_mesh)
+
+torus_mesh = three_dimensions.SurfaceMesh(torus, resolution=(4, 3))
+assert len(torus_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in torus_mesh)
+
+for unsupported_surface in (None, VMobject()):
+    try:
+        three_dimensions.SurfaceMesh(unsupported_surface)
+    except NotImplementedError as error:
+        assert str(error) == (
+            "SurfaceMesh needs a native-rebuildable source surface "
+            "(Sphere is native); "
+            + type(unsupported_surface).__name__
+            + " does not carry solid params yet"
+        )
+    else:
+        raise AssertionError(
+            "SurfaceMesh accepted a source without native solid params"
+        )
+
 cone = three_dimensions.Cone(
     resolution=(5, 3),
     height=3.0,
