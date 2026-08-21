@@ -5043,7 +5043,7 @@ impl BridgeMobject {
             }
             // VERBATIM: fmd-math's named-construct refusal is the ratchet's
             // input; never wrap it in a generic message.
-            .map_err(native_error)
+            .map_err(tex_error)
         })?;
         let spans: Vec<(usize, usize)> = built
             .typeset
@@ -8031,6 +8031,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add("_ForeignStageError", py.get_type::<ForeignStageError>())?;
     module.add("_FamilyCycleError", py.get_type::<FamilyCycleError>())?;
     module.add("_CapabilityError", py.get_type::<CapabilityError>())?;
+    module.add("_TexError", py.get_type::<TexError>())?;
     module.add("__engine__", "FrankenManim")?;
     module.add(
         "__thread_policy__",

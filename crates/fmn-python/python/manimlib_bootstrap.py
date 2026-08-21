@@ -82,6 +82,10 @@ def _there_and_back_rate(t):
     new_t = 2 * t if t < 0.5 else 2 * (1 - t)
     return _smooth_rate(new_t)
 
+
+_there_and_back_rate.__name__ = "there_and_back"
+_there_and_back_rate.__qualname__ = "there_and_back"
+
 # The Reference leaks its OpenGL/window implementation modules into ordinary
 # Python namespaces.  Those names remain part of the compatibility surface,
 # but importing their host packages would initialize a second renderer (and
@@ -9125,6 +9129,91 @@ class FadeTransform(_NativeAnimation):
         self.target_mobject = target_mobject
 
 
+class TransformMatchingStrings(_NativeAnimation):
+    """Match native string primitives by their source-span identity."""
+
+    _native_kind = "transform_matching_tex"
+    _target_attr = "target_mobject"
+
+    def __init__(
+        self,
+        source,
+        target,
+        matched_keys=(),
+        key_map=None,
+        matched_pairs=(),
+        run_time=2,
+        lag_ratio=0,
+        **kwargs,
+    ):
+        if not isinstance(source, StringMobject) or not isinstance(
+            target, StringMobject
+        ):
+            raise TypeError(
+                "TransformMatchingStrings expects two StringMobject instances"
+            )
+        if not source._string_sub_spans or not target._string_sub_spans:
+            raise _TexError(
+                "TransformMatchingTex requires non-empty native span maps"
+            )
+        if matched_pairs:
+            raise NotImplementedError(
+                "TransformMatchingTex matched_pairs awaits the explicit-pair "
+                "native key override"
+            )
+        self.target_mobject = target
+        self.matched_keys = tuple(matched_keys)
+        self.key_map = dict(key_map or {})
+        super().__init__(
+            source,
+            run_time=run_time,
+            lag_ratio=lag_ratio,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _native_span_keys(mobject):
+        encoded = mobject.get_string().encode("utf-8")
+        keys = []
+        for ordinal, (start, end) in enumerate(mobject._string_sub_spans):
+            if not 0 <= start < end <= len(encoded):
+                raise _TexError(
+                    "TransformMatchingTex received an invalid native span"
+                )
+            try:
+                key = encoded[start:end].decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise _TexError(
+                    "TransformMatchingTex native span split a UTF-8 code point"
+                ) from error
+            keys.append((mobject._string_submobject(ordinal), key))
+        return keys
+
+    def _native_params(self):
+        source_keys = self._native_span_keys(self.mobject)
+        target_keys = self._native_span_keys(self.target_mobject)
+        if self.matched_keys:
+            admitted = set(self.matched_keys)
+            source_keys = [
+                (part, key if key in admitted else f"source-only:{index}:{key}")
+                for index, (part, key) in enumerate(source_keys)
+            ]
+            target_keys = [
+                (part, key if key in admitted else f"target-only:{index}:{key}")
+                for index, (part, key) in enumerate(target_keys)
+            ]
+        if self.key_map:
+            reverse = {target: source for source, target in self.key_map.items()}
+            target_keys = [
+                (part, reverse.get(key, key)) for part, key in target_keys
+            ]
+        return {"source_keys": source_keys, "target_keys": target_keys}
+
+
+class TransformMatchingTex(TransformMatchingStrings):
+    pass
+
+
 class FadeInFromPoint(_NativeAnimation):
     # Reference fading.py:71 — routed to the native fade_in_from_point,
     # which encodes the same shift/scale composition.
@@ -9803,6 +9892,14 @@ def _install_schema_surface():
         ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
         ("manimlib.animation.transform", "Restore"): Restore,
+        (
+            "manimlib.animation.transform_matching_parts",
+            "TransformMatchingStrings",
+        ): TransformMatchingStrings,
+        (
+            "manimlib.animation.transform_matching_parts",
+            "TransformMatchingTex",
+        ): TransformMatchingTex,
         ("manimlib.mobject.svg.brace", "Brace"): Brace,
         ("manimlib.mobject.svg.brace", "BraceLabel"): BraceLabel,
         ("manimlib.mobject.svg.brace", "BraceText"): BraceText,
@@ -9987,6 +10084,7 @@ def _install_schema_surface():
     exception_module.ForeignStageError = _ForeignStageError
     exception_module.FamilyCycleError = _FamilyCycleError
     exception_module.CapabilityError = _CapabilityError
+    exception_module.TexError = _TexError
     _sys.modules["manimlib.exceptions"] = exception_module
     root._exceptions = exception_module
 

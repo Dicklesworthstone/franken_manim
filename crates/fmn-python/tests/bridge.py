@@ -3146,6 +3146,173 @@ except ValueError as error:
 else:
     raise AssertionError("GrowArrow accepted a pointless mobject")
 
+# The mechanism-pure indication shelf is routed to Choreo.  These are live
+# Scene.play checks: each animation must cross the native segment boundary and
+# expose the intermediate state its mechanism owns, not merely construct.
+indication = importlib.import_module("manimlib.animation.indication")
+assert indication.Indicate.__bases__ == (manimlib.Transform,)
+assert indication.TurnInsideOut.__bases__ == (manimlib.Transform,)
+assert indication.WiggleOutThenIn.__bases__ == (manimlib.Animation,)
+assert indication.VShowPassingFlash.__bases__ == (manimlib.Animation,)
+assert indication.ShowCreationThenDestruction.__bases__ == (
+    indication.ShowPassingFlash,
+)
+indicate_signature = inspect.signature(indication.Indicate)
+assert tuple(indicate_signature.parameters) == (
+    "mobject",
+    "scale_factor",
+    "color",
+    "rate_func",
+    "kwargs",
+)
+assert indicate_signature.parameters["scale_factor"].default == 1.2
+assert indicate_signature.parameters["color"].default == manimlib.YELLOW
+assert indicate_signature.parameters["rate_func"].default is manimlib.there_and_back
+assert str(inspect.signature(indication.TurnInsideOut)) == (
+    "(mobject, path_arc=1.5707963267948966, **kwargs)"
+)
+assert tuple(inspect.signature(indication.WiggleOutThenIn).parameters) == (
+    "mobject",
+    "scale_value",
+    "rotation_angle",
+    "n_wiggles",
+    "scale_about_point",
+    "rotate_about_point",
+    "run_time",
+    "kwargs",
+)
+
+indicate_mobject = geometry.Rectangle(width=2.0, height=1.0).set_color(
+    manimlib.BLUE
+)
+indicate_start_width = indicate_mobject.get_width()
+indicate_samples = []
+indicate_mobject.add_updater(
+    lambda mob: indicate_samples.append((mob.get_width(), mob.get_color())),
+    call=False,
+)
+Scene().play(
+    indication.Indicate(indicate_mobject, run_time=2.0 / 30.0)
+)
+assert max(width for width, _color in indicate_samples) > indicate_start_width
+assert any(color == manimlib.YELLOW for _width, color in indicate_samples)
+assert np.isclose(indicate_mobject.get_width(), indicate_start_width)
+assert indicate_mobject.get_color() == manimlib.BLUE
+
+wiggle_mobject = geometry.Rectangle(width=2.0, height=1.0)
+wiggle_start_width = wiggle_mobject.get_width()
+wiggle_samples = []
+wiggle_mobject.add_updater(
+    lambda mob: wiggle_samples.append(mob.get_width()), call=False
+)
+Scene().play(
+    indication.WiggleOutThenIn(
+        wiggle_mobject,
+        scale_value=1.25,
+        rotation_angle=0.0,
+        scale_about_point=manimlib.ORIGIN,
+        rotate_about_point=manimlib.ORIGIN,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert max(wiggle_samples) > wiggle_start_width
+assert np.isclose(wiggle_mobject.get_width(), wiggle_start_width)
+
+inside_out_mobject = geometry.Polygon(
+    manimlib.LEFT,
+    manimlib.UP,
+    manimlib.RIGHT,
+)
+inside_out_start = inside_out_mobject.get_points().copy()
+Scene().play(
+    indication.TurnInsideOut(
+        inside_out_mobject,
+        path_arc=0.0,
+        run_time=1.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert np.array_equal(inside_out_mobject.get_points(), inside_out_start[::-1])
+
+vflash_scene = Scene()
+vflash_mobject = geometry.Line(manimlib.LEFT, manimlib.RIGHT).set_stroke(
+    width=6.0
+)
+vflash_start_widths = vflash_mobject.get_stroke_widths().copy()
+vflash_samples = []
+vflash_mobject.add_updater(
+    lambda mob: vflash_samples.append(mob.get_stroke_widths().copy()),
+    call=False,
+)
+vflash_scene.play(
+    indication.VShowPassingFlash(
+        vflash_mobject,
+        time_width=0.6,
+        taper_width=0.1,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert any(not np.allclose(widths, vflash_start_widths) for widths in vflash_samples)
+assert np.allclose(vflash_mobject.get_stroke_widths(), vflash_start_widths)
+assert vflash_mobject not in vflash_scene.get_mobjects()
+
+destruction_scene = Scene()
+destruction_mobject = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
+destruction_scene.play(
+    indication.ShowCreationThenDestruction(
+        destruction_mobject,
+        time_width=1.5,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert destruction_mobject not in destruction_scene.get_mobjects()
+
+wave_mobject = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
+wave_start = wave_mobject.get_points().copy()
+wave_samples = []
+wave_mobject.add_updater(
+    lambda mob: wave_samples.append(mob.get_points().copy()), call=False
+)
+Scene().play(
+    indication.ApplyWave(
+        wave_mobject,
+        direction=manimlib.UP,
+        amplitude=0.4,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert any(np.max(points[:, 1] - wave_start[:, 1]) > 0.0 for points in wave_samples)
+assert np.allclose(wave_mobject.get_points(), wave_start)
+
+indication_composition_scene = Scene()
+composition_indicate = geometry.Square().shift(manimlib.LEFT)
+composition_wiggle = geometry.Square().shift(manimlib.RIGHT)
+indication_composition_scene.play(
+    manimlib.AnimationGroup(
+        indication.Indicate(composition_indicate),
+        indication.WiggleOutThenIn(
+            composition_wiggle,
+            rotation_angle=0.0,
+        ),
+    ),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(composition_indicate.get_center(), manimlib.LEFT)
+assert np.allclose(composition_wiggle.get_center(), manimlib.RIGHT)
+
+try:
+    indication.FlashAround(geometry.Square())
+except NotImplementedError as error:
+    assert "manimlib.animation.indication.FlashAround" in str(error)
+    assert "constructor semantics" in str(error)
+else:
+    raise AssertionError("FlashAround silently bypassed its geometry dependency")
+
 # Restore is a Transform onto Marionette's saved-state copy, so its standard
 # path-arc parameters route through the same native path function.
 restore_scene = Scene()
@@ -5348,6 +5515,50 @@ assert native_brace_text.submobjects == [
     native_brace_text.brace,
     native_brace_text.label,
 ]
+
+# TransformMatchingTex consumes the source identities carried by Scribe's
+# native span map. Equal `x` spans pair even though their byte offsets differ;
+# the `+`/`-` leftovers remain distinct and therefore take the native fades.
+matching_module = importlib.import_module(
+    "manimlib.animation.transform_matching_parts"
+)
+assert matching_module.TransformMatchingTex.__bases__ == (
+    matching_module.TransformMatchingStrings,
+)
+matching_source = manimlib.Tex("x + y").shift(manimlib.LEFT)
+matching_target = manimlib.Tex("z - x").shift(manimlib.RIGHT)
+matching_animation = matching_module.TransformMatchingTex(
+    matching_source,
+    matching_target,
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+matching_params = matching_animation._native_params()
+source_x = next(part for part, key in matching_params["source_keys"] if key == "x")
+target_x = next(part for part, key in matching_params["target_keys"] if key == "x")
+assert source_x is not target_x
+assert any(key == "+" for _, key in matching_params["source_keys"])
+assert any(key == "-" for _, key in matching_params["target_keys"])
+matching_scene = Scene()
+matching_scene.play(matching_animation)
+assert np.allclose(source_x.get_center(), target_x.get_center())
+
+try:
+    manimlib.Tex(r"\dx")
+except bridge_errors.TexError as error:
+    assert r"`\dx` is not yet supported" in str(error)
+else:
+    raise AssertionError("unsupported TeX did not raise the named TexError")
+
+empty_span_source = manimlib.Tex("x")
+empty_span_source._string_sub_spans = []
+try:
+    matching_module.TransformMatchingTex(empty_span_source, manimlib.Tex("x"))
+except bridge_errors.TexError as error:
+    assert "non-empty native span maps" in str(error)
+else:
+    raise AssertionError("TransformMatchingTex accepted an empty span map")
+
 try:
     brace_module.BraceLabel(object(), "invalid target")
 except TypeError:
