@@ -3063,6 +3063,48 @@ impl BridgeMobject {
         native_shell_specs(slf.py(), factory, children)
     }
 
+    /// `EnableDisableButton(value)` over Atlas's native one-box bool
+    /// control. The Python root remains the live `ValueTracker`; `colored`
+    /// distinguishes Reference construction (default white) from a later
+    /// `set_value_anim` update (GREEN/RED).
+    #[allow(clippy::too_many_arguments)]
+    fn _build_enable_disable_button<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        value: bool,
+        colored: bool,
+        width: f64,
+        height: f64,
+        enable_color: [f64; 3],
+        disable_color: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut control = fmn_library::EnableDisableButton::new(value)
+            .width(width)
+            .height(height)
+            .enable_color(fmn_core::color::Srgb {
+                r: enable_color[0],
+                g: enable_color[1],
+                b: enable_color[2],
+            })
+            .disable_color(fmn_core::color::Srgb {
+                r: disable_color[0],
+                g: disable_color[1],
+                b: disable_color[2],
+            });
+        if colored {
+            control.set_value(value);
+        }
+        let mut composition = fmn_mobject::Mobject::from(control.composition());
+        let children = std::mem::take(&mut composition.submobjects);
+        if children.len() != 1 {
+            return Err(PyRuntimeError::new_err(format!(
+                "native EnableDisableButton family contract drift: expected 1 child, got {}",
+                children.len()
+            )));
+        }
+        native_shell_specs(slf.py(), factory, children)
+    }
+
     /// `LinearNumberSlider(...)` over Atlas's native rounded bar, handle,
     /// and invisible-axis builder. The Python `ControlMobject` root remains
     /// the live tracker while these native parts become its children.

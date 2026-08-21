@@ -8984,6 +8984,86 @@ class Checkbox(ControlMobject):
         self.set_value(not bool(self.get_value()))
 
 
+class EnableDisableButton(ControlMobject):
+    """Atlas's native enabled/disabled box over a live bool tracker."""
+
+    def __init__(
+        self,
+        value=True,
+        value_type=_np.dtype(bool),
+        rect_kwargs=dict(width=0.5, height=0.5, fill_opacity=1.0),
+        enable_color=_GREEN,
+        disable_color=_RED,
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not isinstance(value, bool):
+            raise AssertionError("EnableDisableButton value must be bool")
+
+        rect_config = dict(rect_kwargs)
+        rect_unknown = sorted(
+            set(rect_config) - {"width", "height", "fill_opacity"}
+        )
+        if rect_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("rect_kwargs." + name for name in rect_unknown)
+            )
+        width = float(rect_config.get("width", 0.5))
+        height = float(rect_config.get("height", 0.5))
+        fill_opacity = float(rect_config.get("fill_opacity", 1.0))
+        if fill_opacity != 1.0:
+            raise NotImplementedError(
+                "EnableDisableButton rect_kwargs.fill_opacity is not routed "
+                "to the native builder"
+            )
+
+        self.value_type = _np.dtype(value_type).type
+        self.rect_kwargs = rect_config
+        self.enable_color = enable_color
+        self.disable_color = disable_color
+        self._enable_disable_native_config = (
+            width,
+            height,
+            tuple(_color_to_rgb(enable_color)),
+            tuple(_color_to_rgb(disable_color)),
+        )
+        (box,) = self._native_enable_disable_parts(value, colored=False)
+        super().__init__(value, box)
+        self.box = box
+
+    def _native_enable_disable_parts(self, value, *, colored):
+        specs = self._build_enable_disable_button(
+            _native_shell_factory,
+            bool(value),
+            bool(colored),
+            *self._enable_disable_native_config,
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if len(parts) != 1:
+            raise RuntimeError(
+                "native EnableDisableButton family contract drift: expected box"
+            )
+        return parts
+
+    def assert_value(self, value):
+        if not isinstance(value, bool):
+            raise AssertionError("EnableDisableButton value must be bool")
+
+    def set_value_anim(self, value):
+        (box,) = self._native_enable_disable_parts(value, colored=True)
+        self.box.become(box)
+
+    def toggle_value(self):
+        self.set_value(not bool(self.get_value()))
+
+
 class LinearNumberSlider(ControlMobject):
     """Atlas's native linear-number control over a live value tracker."""
 
@@ -13103,6 +13183,10 @@ def _install_schema_surface():
         ("manimlib.mobject.interactive", "Button"): Button,
         ("manimlib.mobject.interactive", "ControlMobject"): ControlMobject,
         ("manimlib.mobject.interactive", "Checkbox"): Checkbox,
+        (
+            "manimlib.mobject.interactive",
+            "EnableDisableButton",
+        ): EnableDisableButton,
         (
             "manimlib.mobject.interactive",
             "LinearNumberSlider",

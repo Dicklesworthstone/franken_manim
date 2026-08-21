@@ -2404,6 +2404,65 @@ else:
     raise AssertionError("Checkbox silently discarded an unknown option")
 assert not hasattr(failed_checkbox, "submobjects")
 
+# EnableDisableButton is a one-box native control on the same real tracker
+# base. Construction preserves the Reference's default-white quirk; the first
+# state change routes through Atlas and colors the stable box proxy.
+enabled_button = interactive.EnableDisableButton(True)
+disabled_button = interactive.EnableDisableButton(False)
+assert interactive.EnableDisableButton.__bases__ == (
+    interactive.ControlMobject,
+)
+assert interactive.ControlMobject in interactive.EnableDisableButton.__mro__
+assert manimlib.ValueTracker in interactive.EnableDisableButton.__mro__
+assert bool(enabled_button.get_value()) is True
+assert bool(disabled_button.get_value()) is False
+assert list(enabled_button.submobjects) == [enabled_button.box]
+assert list(disabled_button.submobjects) == [disabled_button.box]
+assert enabled_button.box.get_fill_color() == manimlib.WHITE
+assert disabled_button.box.get_fill_color() == manimlib.WHITE
+
+enabled_box = enabled_button.box
+enabled_button.toggle_value()
+assert bool(enabled_button.get_value()) is False
+assert enabled_button.box is enabled_box
+assert enabled_button.box.get_fill_color() == manimlib.RED
+enabled_button.set_value(True)
+assert bool(enabled_button.get_value()) is True
+assert enabled_button.box is enabled_box
+assert enabled_button.box.get_fill_color() == manimlib.GREEN
+try:
+    enabled_button.set_value(1)
+except AssertionError as error:
+    assert str(error) == "EnableDisableButton value must be bool"
+else:
+    raise AssertionError("EnableDisableButton accepted a non-bool value")
+
+try:
+    enabled_button.on_mouse_press(enabled_button, {"point": np.zeros(3)})
+except NotImplementedError as error:
+    assert "EnableDisableButton.on_mouse_press" in str(error), error
+    assert "semantic binding has not landed" in str(error), error
+else:
+    raise AssertionError(
+        "EnableDisableButton fabricated an unbound mouse-press gateway"
+    )
+
+failed_enable_disable = interactive.EnableDisableButton.__new__(
+    interactive.EnableDisableButton
+)
+try:
+    interactive.EnableDisableButton.__init__(
+        failed_enable_disable,
+        unsupported=True,
+    )
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError(
+        "EnableDisableButton silently discarded an unknown option"
+    )
+assert not hasattr(failed_enable_disable, "submobjects")
+
 # LinearNumberSlider is a distinct interactive control from number_line.Slider.
 # Atlas owns its bar/handle/axis geometry; the portal keeps the tracker root,
 # Reference construction-time midpoint quirk, kwargs, and named drag gap.
