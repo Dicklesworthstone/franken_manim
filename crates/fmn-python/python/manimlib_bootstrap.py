@@ -11733,6 +11733,8 @@ class Scene(_SceneCore):
     drag_to_pan = True
     max_num_saved_states = 50
     default_wait_time = 1.0
+    default_camera_config = dict()
+    samples = 0
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -11806,6 +11808,19 @@ class Scene(_SceneCore):
             kwargs.get("default_wait_time", type(self).default_wait_time)
         )
         self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", False))
+        # Reference Scene.__init__ merge: class default_camera_config, then
+        # the constructor camera_config. Camera construction stays lazy so
+        # a refused Camera seam (window, background_image, …) names itself
+        # on first camera access rather than at Scene().
+        camera_config = kwargs.get("camera_config", None)
+        if camera_config is None:
+            self.camera_config = dict(type(self).default_camera_config)
+        elif not isinstance(camera_config, dict):
+            raise TypeError("Scene camera_config must be a dict")
+        else:
+            merged = dict(type(self).default_camera_config)
+            merged.update(camera_config)
+            self.camera_config = merged
 
     @property
     def frame(self):
@@ -11828,10 +11843,14 @@ class Scene(_SceneCore):
     @property
     def camera(self):
         # Scene and Camera share one live CameraFrame identity, matching the
-        # Reference while capture configuration is built by Lumen.
+        # Reference while capture configuration is built by Lumen. samples
+        # ride the Scene.samples default unless camera_config names it.
         camera = self.__dict__.get("_camera")
         if camera is None:
-            camera = Camera()
+            config = dict(self.camera_config)
+            if "samples" not in config:
+                config["samples"] = int(getattr(self, "samples", 0))
+            camera = Camera(**config)
             camera.frame = self.frame
             self.__dict__["_camera"] = camera
         return camera
@@ -12748,15 +12767,6 @@ class ThreeDScene(Scene):
         super().__init__(*args, **kwargs)
         self.frame.reorient(*self.default_frame_orientation)
         self.frame.make_orientation_default()
-
-    @property
-    def camera(self):
-        camera = self.__dict__.get("_camera")
-        if camera is None:
-            camera = Camera(samples=int(self.samples))
-            camera.frame = self.frame
-            self.__dict__["_camera"] = camera
-        return camera
 
     def add(self, *mobjects, set_depth_test=True, perp_stroke=True):
         for mobject in mobjects:

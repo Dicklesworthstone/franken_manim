@@ -17737,3 +17737,59 @@ aspect_camera.frame._core.set_shape((10.0, 10.0))
 assert aspect_camera.resize_frame_shape(fixed_dimension=True) is None
 assert np.isclose(aspect_camera.get_frame_height(), 10.0)
 assert np.isclose(aspect_camera.get_frame_width(), 10.0 * 4.0 / 3.0)
+
+# fm-5wq.4: Scene.camera_config is the remaining constructor seam that
+# builds Lumen's Camera — class default_camera_config, constructor
+# camera_config, and Scene.samples (ThreeDScene still defaults to 4).
+assert scene_module.Scene.default_camera_config == {}
+assert scene_module.Scene.samples == 0
+assert scene_module.ThreeDScene.samples == 4
+assert Scene().camera_config == {}
+assert Scene().camera.samples == 0
+config_scene = Scene(camera_config=dict(resolution=(640, 360), fps=24))
+assert config_scene.camera_config["resolution"] == (640, 360)
+assert config_scene.camera.get_pixel_shape() == (640, 360)
+assert config_scene.camera.fps == 24
+assert config_scene.camera.frame is config_scene.frame
+assert config_scene.camera is config_scene.camera
+
+
+class _ConfiguredCameraScene(Scene):
+    default_camera_config = dict(resolution=(320, 180), samples=2)
+
+
+configured_camera_scene = _ConfiguredCameraScene()
+assert configured_camera_scene.camera.get_pixel_shape() == (320, 180)
+assert configured_camera_scene.camera.samples == 2
+# Constructor camera_config overlays the class default per-key.
+overlay_camera_scene = _ConfiguredCameraScene(camera_config=dict(fps=12))
+assert overlay_camera_scene.camera.get_pixel_shape() == (320, 180)
+assert overlay_camera_scene.camera.fps == 12
+assert overlay_camera_scene.camera.samples == 2
+
+three_d_config_scene = scene_module.ThreeDScene(
+    camera_config=dict(resolution=(800, 400))
+)
+assert three_d_config_scene.camera.samples == 4
+assert three_d_config_scene.camera.get_pixel_shape() == (800, 400)
+
+try:
+    Scene(camera_config="nope")
+except TypeError as error:
+    assert str(error) == "Scene camera_config must be a dict"
+else:
+    raise AssertionError("Scene accepted a non-dict camera_config")
+
+# Unrouted Camera constructor kwargs still name the seam on first access.
+refused_image_scene = Scene(camera_config=dict(background_image="image.png"))
+try:
+    refused_image_scene.camera
+except NotImplementedError as error:
+    assert str(error) == (
+        "Camera() keyword(s) not yet routed to the native builder: "
+        "background_image"
+    )
+else:
+    raise AssertionError(
+        "Scene camera_config silently accepted background_image"
+    )
