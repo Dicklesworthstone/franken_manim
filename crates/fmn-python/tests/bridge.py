@@ -2987,17 +2987,20 @@ assert growing.GrowFromPoint.__bases__ == (manimlib.Transform,)
 assert growing.GrowFromCenter.__bases__ == (growing.GrowFromPoint,)
 assert growing.GrowFromEdge.__bases__ == (growing.GrowFromPoint,)
 assert growing.GrowArrow.__bases__ == (growing.GrowFromPoint,)
+assert growing.SpinInFromNothing.__bases__ == (growing.GrowFromCenter,)
 growing_call_shapes = {
     growing.GrowFromPoint: "(mobject, point, point_color=None, **kwargs)",
     growing.GrowFromCenter: "(mobject, **kwargs)",
     growing.GrowFromEdge: "(mobject, edge, **kwargs)",
     growing.GrowArrow: "(arrow, **kwargs)",
+    growing.SpinInFromNothing: "(mobject, **kwargs)",
     growing.GrowFromPoint.__init__: (
         "(self, mobject, point, point_color=None, **kwargs)"
     ),
     growing.GrowFromCenter.__init__: "(self, mobject, **kwargs)",
     growing.GrowFromEdge.__init__: "(self, mobject, edge, **kwargs)",
     growing.GrowArrow.__init__: "(self, arrow, **kwargs)",
+    growing.SpinInFromNothing.__init__: "(self, mobject, **kwargs)",
     growing.GrowFromPoint.create_target: "(self)",
     growing.GrowFromPoint.create_starting_mobject: "(self)",
 }
@@ -3120,6 +3123,25 @@ assert np.allclose(grow_arrow_samples[0], grow_arrow_anchor + manimlib.UP)
 assert np.allclose(grow_arrow_samples[1], grow_arrow_anchor + 2.0 * manimlib.UP)
 assert np.allclose(grow_arrow_samples[2], grow_arrow_samples[1])
 
+spin_source = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
+spin_target_points = spin_source.get_points().copy()
+spin_samples = []
+spin_source.add_updater(
+    lambda mob: spin_samples.append(mob.get_points().copy()),
+    call=False,
+)
+spin = growing.SpinInFromNothing(spin_source)
+assert np.isclose(spin.path_arc, math.pi)
+Scene().play(
+    spin,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert len(spin_samples) == 3
+assert np.ptp(spin_samples[0][:, 0]) < np.ptp(spin_target_points[:, 0])
+assert np.ptp(spin_samples[0][:, 1]) > 0.0
+assert np.allclose(spin_samples[-1], spin_target_points)
+
 composition_scene = Scene()
 composition_point = geometry.Square().shift(manimlib.LEFT)
 composition_edge = geometry.Rectangle(width=1.5, height=0.5).shift(
@@ -3145,6 +3167,24 @@ except ValueError as error:
     assert str(error) == "Cannot get points of Mobject with no points"
 else:
     raise AssertionError("GrowArrow accepted a pointless mobject")
+
+try:
+    growing.SpinInFromNothing(manimlib.Mobject())
+except TypeError as error:
+    assert str(error) == (
+        "SpinInFromNothing requires a VMobject with points; got Mobject"
+    )
+else:
+    raise AssertionError("SpinInFromNothing accepted a non-VMobject")
+
+try:
+    growing.SpinInFromNothing(VMobject())
+except ValueError as error:
+    assert str(error) == (
+        "SpinInFromNothing requires a VMobject with points; target is empty"
+    )
+else:
+    raise AssertionError("SpinInFromNothing accepted a pointless VMobject")
 
 # The mechanism-pure indication shelf is routed to Choreo.  These are live
 # Scene.play checks: each animation must cross the native segment boundary and

@@ -7250,7 +7250,11 @@ fn build_native_animation(
             }
             Box::new(rotating)
         }
-        "grow_from_point" | "grow_from_center" | "grow_from_edge" | "grow_arrow" => {
+        "grow_from_point"
+        | "grow_from_center"
+        | "grow_from_edge"
+        | "grow_arrow"
+        | "spin_in_from_nothing" => {
             #[allow(clippy::cast_possible_truncation)]
             let point_color = spec
                 .point_color
@@ -7265,6 +7269,7 @@ fn build_native_animation(
                 "grow_from_center" => "GrowFromCenter",
                 "grow_from_edge" => "GrowFromEdge",
                 "grow_arrow" => "GrowArrow",
+                "spin_in_from_nothing" => "SpinInFromNothing",
                 _ => "GrowFromPoint",
             }
             .to_owned();

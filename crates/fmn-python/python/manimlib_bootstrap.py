@@ -9512,6 +9512,25 @@ class GrowArrow(GrowFromPoint):
         super().__init__(arrow, arrow.get_start(), **kwargs)
 
 
+class SpinInFromNothing(GrowFromCenter):
+    """Historical grow-from-center spelling with a half-turn arc path."""
+
+    _native_kind = "spin_in_from_nothing"
+
+    def __init__(self, mobject, **kwargs):
+        if not isinstance(mobject, VMobject):
+            raise TypeError(
+                "SpinInFromNothing requires a VMobject with points; got "
+                + type(mobject).__name__
+            )
+        if not mobject.family_members_with_points():
+            raise ValueError(
+                "SpinInFromNothing requires a VMobject with points; target is empty"
+            )
+        kwargs.setdefault("path_arc", _math.pi)
+        super().__init__(mobject, **kwargs)
+
+
 class FocusOn(Transform):
     _native_kind = "focus_on"
 
@@ -11078,6 +11097,10 @@ def _install_schema_surface():
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
         ("manimlib.animation.growing", "GrowFromEdge"): GrowFromEdge,
         ("manimlib.animation.growing", "GrowArrow"): GrowArrow,
+        (
+            "manimlib.animation.growing",
+            "SpinInFromNothing",
+        ): SpinInFromNothing,
         ("manimlib.animation.indication", "Indicate"): Indicate,
         ("manimlib.animation.indication", "TurnInsideOut"): TurnInsideOut,
         ("manimlib.animation.indication", "WiggleOutThenIn"): WiggleOutThenIn,
