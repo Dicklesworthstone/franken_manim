@@ -11553,3 +11553,58 @@ except TypeError:
     pass
 else:
     raise AssertionError("_play_animations accepted a non-CameraFrame pair")
+
+
+# ------------------------------------------------ LaggedStartMap
+# fm-5wq.4.95: one member animation per family child through the native
+# lagged_start composition.
+
+lsm_scene = Scene()
+lsm_first = geometry.Rectangle(width=0.5, height=0.5)
+lsm_second = geometry.Rectangle(width=0.7, height=0.7)
+lsm_second.shift([1.5, 0.0, 0.0])
+lsm_group = manimlib.VGroup(lsm_first, lsm_second)
+lsm_scene.add(lsm_group)
+assert np.allclose(lsm_first.data["stroke_rgba"][:, 3], 1.0)
+lsm_anim = manimlib.LaggedStartMap(
+    manimlib.FadeOut, lsm_group, run_time=2.0 / 30.0
+)
+assert len(lsm_anim.animations) == 2
+assert all(
+    isinstance(member, manimlib.FadeOut) for member in lsm_anim.animations
+)
+lsm_scene.play(lsm_anim, run_time=2.0 / 30.0)
+# Both children faded out through the lagged composition.
+assert np.allclose(lsm_first.data["stroke_rgba"][:, 3], 0.0)
+assert np.allclose(lsm_second.data["stroke_rgba"][:, 3], 0.0)
+
+# Mapped kwargs reach every member; lag_ratio stays the group's.
+lsm_shifted = manimlib.LaggedStartMap(
+    manimlib.FadeIn,
+    manimlib.VGroup(
+        geometry.Rectangle(width=0.5, height=0.5),
+        geometry.Rectangle(width=0.6, height=0.6),
+    ),
+    shift=[0.0, 1.0, 0.0],
+    lag_ratio=0.25,
+)
+assert lsm_shifted.lag_ratio == 0.25
+assert all(
+    np.allclose(member.shift_vect, [0.0, 1.0, 0.0])
+    for member in lsm_shifted.animations
+)
+
+# Named refusals: a non-callable constructor and a non-Mobject family.
+try:
+    manimlib.LaggedStartMap(None, lsm_group)
+except TypeError as error:
+    assert "animation constructor" in str(error)
+else:
+    raise AssertionError("LaggedStartMap accepted None")
+
+try:
+    manimlib.LaggedStartMap(manimlib.FadeOut, [1, 2, 3])
+except TypeError as error:
+    assert "Mobject family" in str(error)
+else:
+    raise AssertionError("LaggedStartMap accepted a non-Mobject family")

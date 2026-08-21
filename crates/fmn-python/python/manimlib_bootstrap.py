@@ -11633,7 +11633,20 @@ class ShowCreationThenFadeAround(AnimationOnSurroundingRectangle):
 
 class LaggedStartMap(LaggedStart):
     def __init__(self, anim_func, group, run_time=2.0, lag_ratio=0.05, **kwargs):
-        # Reference composition.py:166 verbatim: one animation per member.
+        # Reference composition.py:166 verbatim: one animation per member,
+        # through the native lagged_start composition. Named refusals for
+        # a non-callable constructor and a non-Mobject family beat the
+        # Reference's bare mid-map crashes (fm-5wq.4.95).
+        if not callable(anim_func):
+            raise TypeError(
+                "LaggedStartMap requires an animation constructor to map; "
+                "got " + type(anim_func).__name__
+            )
+        if not isinstance(group, Mobject):
+            raise TypeError(
+                "LaggedStartMap requires a Mobject family to map over; "
+                "got " + type(group).__name__
+            )
         anim_kwargs = dict(kwargs)
         anim_kwargs.pop("lag_ratio", None)
         super().__init__(
