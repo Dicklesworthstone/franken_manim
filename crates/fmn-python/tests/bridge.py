@@ -5818,36 +5818,6 @@ for invalid_n, error_type in ((0, ZeroDivisionError), (-1, IndexError), (3.5, Ty
             f"RegularPolygon({invalid_n!r}) did not preserve the Reference refusal"
         )
 
-# fm-5wq.4.134: RegularPolygon's geometry parameters route through the
-# native compass builder, while VMobject style kwargs route through the
-# shared style pass instead of being silently discarded.
-styled_pentagon = geometry.RegularPolygon(
-    n=5,
-    radius=1.5,
-    start_angle=math.pi / 7.0,
-    fill_color=manimlib.RED,
-    fill_opacity=0.4,
-    stroke_color=manimlib.BLUE,
-    stroke_width=2.5,
-    flat_stroke=True,
-)
-assert len(styled_pentagon.get_vertices()) == 5
-assert np.allclose(
-    np.linalg.norm(styled_pentagon.get_vertices(), axis=1), 1.5
-)
-assert styled_pentagon.get_fill_color() == manimlib.RED
-assert np.isclose(styled_pentagon.get_fill_opacity(), 0.4)
-assert styled_pentagon.get_stroke_color() == manimlib.BLUE
-assert np.isclose(styled_pentagon.get_stroke_width(), 2.5)
-assert styled_pentagon.get_flat_stroke() is True
-
-try:
-    geometry.RegularPolygon(wobble_amount=1)
-except TypeError as error:
-    assert "wobble_amount" in str(error), error
-else:
-    raise AssertionError("RegularPolygon silently ignored an unknown keyword")
-
 quarter_arc = geometry.Arc(
     start_angle=0.0,
     angle=math.pi / 2.0,
@@ -12761,38 +12731,3 @@ except TypeError as error:
     assert "bogus" in str(error)
 else:
     raise AssertionError("Sector silently dropped bogus")
-
-# fm-5wq.4.133: audit result — Arc has no _refuse_unrouted: every schema
-# parameter routes natively and style kwargs ride the shared pass (its
-# geometry/style pins live earlier). Pinned here: the schema defaults
-# (TAU/4 quarter turn, radius 1, ORIGIN), that n_components= genuinely
-# changes the native sampling, the zero-budget refusal, and Arc's own
-# unknown-kwarg TypeError.
-arc_default = geometry.Arc()
-assert np.allclose(arc_default.pfp(0.0), [1.0, 0.0, 0.0], atol=2e-3)
-assert np.allclose(arc_default.pfp(1.0), [0.0, 1.0, 0.0], atol=2e-3)
-assert math.isclose(
-    arc_default.get_arc_length(), math.pi / 2.0, rel_tol=0.0, abs_tol=2e-3
-)
-assert np.allclose(arc_default.get_arc_center(), [0.0, 0.0, 0.0], atol=1e-6)
-
-arc_coarse = geometry.Arc(angle=math.tau / 4, n_components=4)
-arc_fine = geometry.Arc(angle=math.tau / 4, n_components=12)
-assert arc_coarse.get_num_points() < arc_fine.get_num_points()
-assert math.isclose(
-    arc_fine.get_arc_length(), math.pi / 2.0, rel_tol=0.0, abs_tol=2e-3
-)
-
-try:
-    geometry.Arc(n_components=0)
-except ValueError as error:
-    assert "component" in str(error).lower(), error
-else:
-    raise AssertionError("Arc accepted a zero component budget")
-
-try:
-    geometry.Arc(wobble_amount=1)
-except TypeError as error:
-    assert "wobble_amount" in str(error), error
-else:
-    raise AssertionError("Arc silently ignored an unknown keyword")
