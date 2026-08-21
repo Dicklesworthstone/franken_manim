@@ -3981,6 +3981,23 @@ impl BridgeMobject {
         install_native_tree(slf, factory, image)
     }
 
+    /// `ThreeDModel(obj_file, height)`: Atlas owns the bounded OBJ-subset
+    /// parser, normal resolution, centering, height normalization, and the
+    /// lit triangle-mesh records. The public Reference object is a Group, so
+    /// the native mesh is returned as its one Surface child rather than
+    /// installing point records on the group shell itself.
+    fn _build_three_d_model<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        payload: &Bound<'py, PyBytes>,
+        height: f64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let model = fmn_library::ThreeDModel::from_obj(payload.as_bytes())
+            .map_err(native_error)?
+            .with_height(height);
+        native_shell_specs(slf.py(), factory, vec![model.into()])
+    }
+
     /// Sample the durable image attached to this entry using the Reference's
     /// axis-aligned family-box convention. Placement is baked first, so the
     /// result observes live shifts/scales exactly as ordinary point reads do.

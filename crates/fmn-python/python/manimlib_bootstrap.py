@@ -8011,6 +8011,23 @@ def _native_surface_shell_factory():
     return shell
 
 
+class ThreeDModel(Group):
+    """Atlas's owned OBJ-subset reader under the Reference Group surface."""
+
+    def __init__(self, obj_file: str, height=3):
+        super().__init__()
+        path = _pathlib.Path(obj_file)
+        payload = path.read_bytes()
+        specs = self._build_three_d_model(
+            _native_surface_shell_factory,
+            payload,
+            float(height),
+        )
+        _hang_native_children(self, specs)
+        self.obj_file = str(path)
+        self.height = float(height)
+
+
 class ParametricSurface(Surface):
     def __init__(self, uv_func, u_range=(0, 1), v_range=(0, 1), **kwargs):
         color = kwargs.pop("color", None)
@@ -13757,6 +13774,7 @@ def _install_schema_surface():
         ("manimlib.mobject.types.surface", "Surface"): Surface,
         ("manimlib.mobject.types.surface", "SGroup"): SGroup,
         ("manimlib.mobject.types.surface", "ParametricSurface"): ParametricSurface,
+        ("manimlib.mobject.types.surface", "ThreeDModel"): ThreeDModel,
         ("manimlib.mobject.three_dimensions", "Sphere"): Sphere,
         ("manimlib.mobject.three_dimensions", "Torus"): Torus,
         ("manimlib.mobject.three_dimensions", "Cylinder"): Cylinder,

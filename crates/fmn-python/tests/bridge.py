@@ -2955,6 +2955,53 @@ else:
     raise AssertionError("PGroup accepted a non-PMobject child")
 assert not hasattr(failed_pgroup, "submobjects")
 
+# ThreeDModel is the next Atlas-backed schema refusal after PGroup. The public
+# object keeps the Reference's heterogeneous Group MRO while Atlas parses the
+# OBJ, resolves normals, normalizes height, and emits its real Surface child.
+surface_types = importlib.import_module("manimlib.mobject.types.surface")
+assert surface_types.ThreeDModel.__bases__ == (manimlib.Group,)
+assert str(inspect.signature(surface_types.ThreeDModel)) == (
+    "(obj_file: str, height=3)"
+)
+obj_root = pathlib.Path(tempfile.mkdtemp(prefix="fmn-three-d-model-"))
+obj_path = obj_root / "tetrahedron.obj"
+obj_path.write_text(
+    "v 0 1 0\n"
+    "v -1 -1 1\n"
+    "v 1 -1 1\n"
+    "v 0 -1 -1\n"
+    "vn 0 1 0\n"
+    "vn -1 -1 1\n"
+    "vn 1 -1 1\n"
+    "vn 0 -1 -1\n"
+    "f 1//1 2//2 3//3\n"
+    "f 1//1 4//4 2//2\n"
+    "f 1//1 3//3 4//4\n"
+    "f 2//2 4//4 3//3\n",
+    encoding="utf-8",
+)
+native_three_d_model = surface_types.ThreeDModel(str(obj_path), height=2.5)
+assert native_three_d_model.obj_file == str(obj_path)
+assert np.isclose(native_three_d_model.height, 2.5)
+assert len(native_three_d_model.submobjects) == 1
+native_model_mesh = native_three_d_model.submobjects[0]
+assert isinstance(native_model_mesh, surface_types.Surface)
+assert native_model_mesh.data.dtype.names == (
+    "point",
+    "d_normal_point",
+    "rgba",
+)
+assert native_model_mesh.get_num_points() == 12
+assert np.isclose(native_model_mesh.get_height(), 2.5)
+assert np.allclose(native_model_mesh.get_center(), manimlib.ORIGIN, atol=1e-6)
+assert native_model_mesh.uniforms["depth_test"] is True
+assert np.allclose(native_model_mesh.get_shading(), [0.3, 0.2, 0.4])
+assert native_model_mesh._is_bound() is False
+native_model_scene = Scene()
+native_model_scene.add(native_three_d_model)
+assert native_three_d_model._is_bound()
+assert native_model_mesh._is_bound()
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.
@@ -10679,6 +10726,33 @@ def verify_portal_console_scene():
     assert sum(
         tuple(row[offset : offset + 3]) != (51, 51, 51)
         for row in surface_rows
+        for offset in range(0, len(row), 4)
+    ) >= 32
+
+    # The public ThreeDModel Group carries Atlas's triangle mesh through Scene
+    # adoption into production Lumen/Reel pixels; constructor-only success is
+    # not accepted as a close for this schema row.
+    model_destination = output_root / "three-d-model.png"
+    model_render_scene = InteractiveScene()
+    model_render_scene._begin_png(
+        str(model_destination), 160, 90, 30, 1, 0
+    )
+    rendered_model = native_three_d_model.copy().scale(1.8)
+    model_render_scene.add(rendered_model)
+    model_receipt = model_render_scene._finish_render(
+        model_render_scene.frame._core,
+        model_render_scene.camera.light_source.get_center(),
+    )
+    assert pathlib.Path(model_receipt[0]) == model_destination
+    assert model_receipt[1] == 1
+    assert model_receipt[2] == model_destination.stat().st_size
+    assert len(model_receipt[3]) == 64
+    assert model_receipt[4].split(":")[0] == "fast-cpu"
+    model_width, model_height, model_rows = png_rgba8_rows(model_destination)
+    assert (model_width, model_height) == (160, 90)
+    assert sum(
+        tuple(row[offset : offset + 3]) != (51, 51, 51)
+        for row in model_rows
         for offset in range(0, len(row), 4)
     ) >= 32
 
