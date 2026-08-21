@@ -12372,12 +12372,12 @@ class Scene(_SceneCore):
             frame.increment_theta(-ff_d_point[0])
             frame.increment_phi(ff_d_point[1])
         elif window.is_key_pressed(ord(keys.pan)):
-            frame.shift(-d_point)
+            frame.shift(-_np.asarray(d_point, dtype=float))
 
     def on_mouse_drag(self, point, d_point, buttons, modifiers):
         self.mouse_drag_point.move_to(point)
         if self.drag_to_pan:
-            self.frame.shift(-d_point)
+            self.frame.shift(-_np.asarray(d_point, dtype=float))
         if _scene_event_stopped(
             EventType.MouseDragEvent,
             point=point,
