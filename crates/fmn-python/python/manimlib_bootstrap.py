@@ -6985,6 +6985,144 @@ class LineBrace(Brace):
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
+class SingleStringTex(SVGMobject):
+    """The legacy one-string TeX leaf over Scribe's native layout."""
+
+    height = None
+
+    def __init__(
+        self,
+        tex_string,
+        height=None,
+        fill_color=_WHITE,
+        fill_opacity=1.0,
+        stroke_width=0,
+        svg_default={"fill_color": _WHITE},
+        path_string_config={},
+        font_size=48,
+        alignment=r"\centering",
+        math_mode=True,
+        organize_left_to_right=False,
+        template="",
+        additional_preamble="",
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "SingleStringTex()",
+            [
+                ("alignment", alignment != r"\centering"),
+                ("template", template != ""),
+                ("additional_preamble", additional_preamble != ""),
+            ],
+        )
+        style = dict(kwargs)
+        style.update(
+            fill_color=fill_color,
+            fill_opacity=fill_opacity,
+            stroke_width=stroke_width,
+        )
+        _preflight_vmobject_style_kwargs(style)
+        _install_live_state(self)
+        self.tex_string = str(tex_string)
+        self.svg_default = dict(svg_default)
+        self.path_string_config = dict(path_string_config)
+        self.font_size = font_size
+        self.alignment = alignment
+        self.math_mode = bool(math_mode)
+        self.organize_left_to_right = bool(organize_left_to_right)
+        self.template = template
+        self.additional_preamble = additional_preamble
+        source = self.get_modified_expression(self.tex_string)
+        specs = self._build_tex(
+            _native_shell_factory,
+            [source],
+            "",
+            not self.math_mode,
+            float(font_size),
+            None,
+            False,
+        )
+        _hang_native_children(self, specs)
+        _apply_vmobject_style_kwargs(self, style)
+        if height is not None:
+            self.set_height(float(height))
+        if self.organize_left_to_right:
+            self.sort(lambda point: point[0])
+
+    @property
+    def hash_seed(self):
+        return (
+            type(self).__name__,
+            self.svg_default,
+            self.path_string_config,
+            self.tex_string,
+            self.alignment,
+            self.math_mode,
+            self.template,
+            self.additional_preamble,
+        )
+
+    def get_tex(self):
+        return self.tex_string
+
+    def get_modified_expression(self, tex_string):
+        return self.modify_special_strings(str(tex_string).strip())
+
+    def modify_special_strings(self, tex):
+        tex = str(tex).strip()
+        if tex in {r"\over", r"\overline", r"\sqrt", r"\sqrt{"} or tex.endswith(
+            ("_", "^", "dot")
+        ):
+            tex += r"{\quad}"
+        if tex == r"\overset":
+            tex += r"{\quad}{\quad}"
+        if tex == r"\substack":
+            tex = r"\quad"
+        if not tex:
+            tex = r"\quad"
+        if tex.startswith(r"\\"):
+            tex = tex.replace(r"\\", r"\quad\\")
+        tex = self.balance_braces(tex)
+        for marker in (r"\left", r"\right"):
+            count = sum(
+                bool(suffix) and suffix[0] in "(){}[]|.\\"
+                for suffix in tex.split(marker)[1:]
+            )
+            if marker == r"\left":
+                left_count = count
+            else:
+                right_count = count
+        if left_count != right_count:
+            tex = tex.replace(r"\left", r"\big").replace(r"\right", r"\big")
+        begin = r"\begin{array}" in tex
+        end = r"\end{array}" in tex
+        return "" if begin != end else tex
+
+    def balance_braces(self, tex):
+        unclosed = 0
+        for index, char in enumerate(tex):
+            if index > 0 and tex[index - 1] == "\\":
+                continue
+            if char == "{":
+                unclosed += 1
+            elif char == "}":
+                if unclosed == 0:
+                    tex = "{" + tex
+                else:
+                    unclosed -= 1
+        return tex + unclosed * "}"
+
+    def get_tex_file_body(self, tex_string):
+        expression = self.get_modified_expression(tex_string)
+        if self.math_mode:
+            expression = "\\begin{align*}\n" + expression + "\n\\end{align*}"
+        return self.alignment + "\n" + expression
+
+    def organize_submobjects_left_to_right(self):
+        self.sort(lambda point: point[0])
+        return self
+
+
 class OldTex(Tex):
     """The Reference's legacy Tex interface (old_tex_mobject.py at the
     pin): joins `tex_strings` with `arg_separator` and typesets in math
@@ -13837,6 +13975,10 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.text_mobject", "Text"): Text,
         ("manimlib.mobject.svg.tex_mobject", "Tex"): Tex,
         ("manimlib.mobject.svg.tex_mobject", "TexText"): TexText,
+        (
+            "manimlib.mobject.svg.old_tex_mobject",
+            "SingleStringTex",
+        ): SingleStringTex,
         ("manimlib.mobject.svg.old_tex_mobject", "OldTex"): OldTex,
         ("manimlib.mobject.svg.old_tex_mobject", "OldTexText"): OldTexText,
         ("manimlib.mobject.changing", "TracingTail"): TracingTail,

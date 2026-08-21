@@ -3002,6 +3002,73 @@ native_model_scene.add(native_three_d_model)
 assert native_three_d_model._is_bound()
 assert native_model_mesh._is_bound()
 
+# TexturedSurface remains refused until Marionette can retain its light/dark
+# texture pair without changing the surface grid into an ImageQuad. The next
+# honest native constructor is legacy SingleStringTex over Scribe's existing
+# fmn-library Tex builder.
+old_tex_mobjects = importlib.import_module(
+    "manimlib.mobject.svg.old_tex_mobject"
+)
+assert old_tex_mobjects.SingleStringTex.__bases__ == (manimlib.SVGMobject,)
+assert str(inspect.signature(old_tex_mobjects.SingleStringTex)) == (
+    "(tex_string, height=None, fill_color='#FFFFFF', fill_opacity=1.0, "
+    "stroke_width=0, svg_default={'fill_color': '#FFFFFF'}, "
+    "path_string_config={}, font_size=48, alignment='\\\\centering', "
+    "math_mode=True, organize_left_to_right=False, template='', "
+    "additional_preamble='', **kwargs)"
+)
+single_tex = old_tex_mobjects.SingleStringTex(
+    r"x^2",
+    fill_color=manimlib.GREEN,
+    fill_opacity=0.6,
+    stroke_width=1.25,
+    font_size=36,
+)
+assert single_tex.get_tex() == r"x^2"
+assert single_tex.font_size == 36
+assert single_tex.math_mode is True
+assert len(single_tex.submobjects) > 0
+assert single_tex.get_fill_color() == manimlib.GREEN
+assert np.isclose(single_tex.get_fill_opacity(), 0.6)
+assert np.isclose(single_tex.get_stroke_width(), 1.25)
+assert all(child._is_bound() is False for child in single_tex.submobjects)
+single_tex_scene = Scene()
+single_tex_scene.add(single_tex)
+assert single_tex._is_bound()
+assert all(child._is_bound() for child in single_tex.submobjects)
+
+single_text = old_tex_mobjects.SingleStringTex(
+    "native",
+    math_mode=False,
+    height=0.75,
+    organize_left_to_right=True,
+)
+assert single_text.math_mode is False
+assert np.isclose(single_text.get_height(), 0.75)
+assert np.all(
+    np.diff([child.get_center()[0] for child in single_text.submobjects]) >= 0
+)
+assert single_text.get_modified_expression("") == r"\quad"
+assert single_text.get_modified_expression("x_{") == "x_{}"
+
+failed_single_tex = old_tex_mobjects.SingleStringTex.__new__(
+    old_tex_mobjects.SingleStringTex
+)
+try:
+    old_tex_mobjects.SingleStringTex.__init__(
+        failed_single_tex,
+        "x",
+        template="external-latex-template",
+    )
+except NotImplementedError as error:
+    assert str(error) == (
+        "SingleStringTex() keyword(s) not yet routed to the native builder: "
+        "template"
+    )
+else:
+    raise AssertionError("SingleStringTex accepted an external template")
+assert not hasattr(failed_single_tex, "submobjects")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.
