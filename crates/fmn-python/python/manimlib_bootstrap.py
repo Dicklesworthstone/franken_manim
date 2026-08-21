@@ -2554,6 +2554,11 @@ class VMobject(Mobject):
     def get_subpaths(self):
         return self.get_subpaths_from_points(self.get_points())
 
+    def get_points_without_null_curves(self, atol=1e-9):
+        return _np.array(
+            self._get_points_without_null_curves(float(atol)), dtype=float
+        )
+
     def insert_n_curves_to_point_list(self, n, points):
         return _np.array(
             self._insert_n_curves_to_point_list(

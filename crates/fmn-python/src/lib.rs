@@ -2468,6 +2468,19 @@ impl BridgeMobject {
         Ok(path.points().to_vec())
     }
 
+    /// Return this VMobject's native shared-anchor points with curves whose
+    /// handle and end anchor are both within `atol` of the start removed.
+    /// Chisel owns the path invariant and the null-curve predicate; the
+    /// Python layer only materializes the returned rows as a NumPy array.
+    fn _get_points_without_null_curves(
+        slf: &Bound<'_, Self>,
+        atol: f64,
+    ) -> PyResult<Vec<[f64; 3]>> {
+        crossing::record(CrossingClass::Other);
+        let path = configured_quad_path(slf)?;
+        Ok(path.points_without_null_curves(atol))
+    }
+
     /// Revalidate a Python-authored VMobject point run and refresh the native
     /// shared-anchor metadata through Marionette's one `Stage::set_points`
     /// path.  The Python layer owns Reference record-resize semantics; this
