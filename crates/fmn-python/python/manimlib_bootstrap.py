@@ -10944,12 +10944,33 @@ class ApplyMatrix(ApplyPointwiseFunction):
 
 class ApplyComplexFunction(ApplyMethod):
     def __init__(self, function, mobject, **kwargs):
+        # fm-5wq.4.104: the class already rides the ApplyMethod/Transform
+        # native kinds; what was missing were the named refusals in front
+        # of the Reference's bare probe crashes (function(1+0j) at
+        # construction derives path_arc, transform.py:308).
+        if not callable(function):
+            raise TypeError(
+                "ApplyComplexFunction requires a callable complex "
+                "function; got " + type(function).__name__
+            )
+        if not isinstance(mobject, Mobject):
+            raise TypeError(
+                "ApplyComplexFunction requires a Mobject; got "
+                + type(mobject).__name__
+            )
         self.function = function
-        kwargs["path_arc"] = float(_np.log(function(complex(1))).imag)
+        try:
+            probe = complex(function(complex(1)))
+        except (TypeError, ValueError) as error:
+            raise TypeError(
+                "ApplyComplexFunction's function must map complex to "
+                "complex; probing f(1+0j) failed: " + str(error)
+            ) from error
+        kwargs["path_arc"] = float(_np.log(probe).imag)
         super().__init__(mobject.apply_complex_function, function, **kwargs)
 
     def init_path_func(self):
-        self.path_arc = float(_np.log(self.function(complex(1))).imag)
+        self.path_arc = float(_np.log(complex(self.function(complex(1)))).imag)
 
 
 class MoveToTarget(Transform):
@@ -11585,6 +11606,13 @@ class ShowCreationThenFadeOut(Succession):
     _native_kind = "show_creation_then_fade_out"
 
     def __init__(self, mobject, remover=True, **kwargs):
+        # fm-5wq.4.103: name the composite in the refusal instead of
+        # letting the ShowCreation member's error speak for it.
+        if not isinstance(mobject, (VMobject, Surface)):
+            raise TypeError(
+                "ShowCreationThenFadeOut requires a VMobject or Surface "
+                "family; got " + type(mobject).__name__
+            )
         self.remover = bool(remover)
         super().__init__(
             ShowCreation(mobject),

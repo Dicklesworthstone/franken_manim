@@ -11800,6 +11800,45 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Uncreate accepted remover=False")
 
+# fm-5wq.4.97: one Scene.play mixing a native-kind animation with a
+# Python-authored one — the per-animation release loop yields every
+# boundary in index order, so the Python member interleaves with the
+# native segment instead of refusing.
+mix_faded_dot = manimlib.Dot()
+mix_moved_dot = manimlib.Dot()
+mix_scene = InteractiveScene()
+mix_scene.add(mix_faded_dot, mix_moved_dot)
+mix_update_calls = []
+
+
+def _mix_nudge(mobject):
+    mix_update_calls.append(True)
+    mobject.shift((0.05, 0.0, 0.0))
+
+
+mix_scene.play(
+    manimlib.FadeOut(mix_faded_dot),
+    manimlib.UpdateFromFunc(mix_moved_dot, _mix_nudge),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+# The native member completed: FadeOut removed its dot from the scene.
+assert mix_faded_dot not in mix_scene.get_mobjects()
+# The Python member ran per frame and its mutations landed.
+assert mix_update_calls
+assert float(mix_moved_dot.get_center()[0]) > 0.0
+
+# A non-Animation play member stays the existing named refusal.
+try:
+    mix_scene.play("nope")
+except NotImplementedError as error:
+    assert "mobject.animate builders and the bound Animation classes" in str(
+        error
+    ), error
+    assert "str" in str(error), error
+else:
+    raise AssertionError("Scene.play accepted a non-Animation member")
+
 
 # ------------------------------------ FadeTransform leftover kwargs
 # fm-5wq.4.98: stretch and dim_to_match route to the native builder's own
@@ -11858,45 +11897,6 @@ except NotImplementedError as error:
     assert "stretch" in str(error)
 else:
     raise AssertionError("FadeTransformPieces silently dropped stretch")
-
-# fm-5wq.4.97: one Scene.play mixing a native-kind animation with a
-# Python-authored one — the per-animation release loop yields every
-# boundary in index order, so the Python member interleaves with the
-# native segment instead of refusing.
-mix_faded_dot = manimlib.Dot()
-mix_moved_dot = manimlib.Dot()
-mix_scene = InteractiveScene()
-mix_scene.add(mix_faded_dot, mix_moved_dot)
-mix_update_calls = []
-
-
-def _mix_nudge(mobject):
-    mix_update_calls.append(True)
-    mobject.shift((0.05, 0.0, 0.0))
-
-
-mix_scene.play(
-    manimlib.FadeOut(mix_faded_dot),
-    manimlib.UpdateFromFunc(mix_moved_dot, _mix_nudge),
-    run_time=2.0 / 30.0,
-    rate_func=manimlib.linear,
-)
-# The native member completed: FadeOut removed its dot from the scene.
-assert mix_faded_dot not in mix_scene.get_mobjects()
-# The Python member ran per frame and its mutations landed.
-assert mix_update_calls
-assert float(mix_moved_dot.get_center()[0]) > 0.0
-
-# A non-Animation play member stays the existing named refusal.
-try:
-    mix_scene.play("nope")
-except NotImplementedError as error:
-    assert "mobject.animate builders and the bound Animation classes" in str(
-        error
-    ), error
-    assert "str" in str(error), error
-else:
-    raise AssertionError("Scene.play accepted a non-Animation member")
 
 # fm-5wq.4.99: .animate anim args — path_arc/path_arc_axis ride the native
 # transform's arc surface; anything else stays a refusal naming the key.
@@ -11980,3 +11980,88 @@ except Exception as error:
     assert "Trying to restore without having saved" in str(error)
 else:
     raise AssertionError("Restore accepted a never-saved mobject")
+
+
+# ----------------------------------------- ApplyComplexFunction leftover
+# fm-5wq.4.104: plays through the ApplyMethod/Transform native kinds; the
+# probe-derived path_arc is the Reference's log(f(1)).imag.
+
+acf_scene = Scene()
+acf_square = geometry.Square(side_length=1.0)
+acf_square.shift([1.0, 0.5, 0.0])
+acf_scene.add(acf_square)
+acf_anim = manimlib.ApplyComplexFunction(lambda z: 1j * z, acf_square)
+# Rotation by i: path_arc = log(i).imag = pi/2.
+assert np.isclose(acf_anim.path_arc, math.pi / 2)
+acf_before = acf_square.get_center().copy()
+acf_scene.play(acf_anim, run_time=2.0 / 30.0)
+# z -> iz rotates the plane a quarter turn: (x, y) lands on (-y, x).
+assert np.allclose(
+    acf_square.get_center(),
+    [-acf_before[1], acf_before[0], 0.0],
+    atol=1e-6,
+)
+
+# Named refusals: a non-callable, a non-Mobject, and a non-complex map.
+try:
+    manimlib.ApplyComplexFunction(None, geometry.Square(side_length=1.0))
+except TypeError as error:
+    assert "callable complex function" in str(error)
+else:
+    raise AssertionError("ApplyComplexFunction accepted None")
+
+try:
+    manimlib.ApplyComplexFunction(lambda z: z, "not a mobject")
+except TypeError as error:
+    assert "requires a Mobject" in str(error)
+else:
+    raise AssertionError("ApplyComplexFunction accepted a non-Mobject")
+
+try:
+    manimlib.ApplyComplexFunction(
+        lambda z: "not complex", geometry.Square(side_length=1.0)
+    )
+except TypeError as error:
+    assert "map complex to complex" in str(error)
+else:
+    raise AssertionError("ApplyComplexFunction accepted a non-complex map")
+
+# fm-5wq.4.103: ShowCreationThenFadeOut — constant-rate probes freeze each
+# half of the native show_creation_then_fade_out composition (Succession
+# window [0, 0.5] creates, [0.5, 1] fades; the end-state removal is pinned
+# earlier), and the None refusal names the composite class.
+sctfo_scene = InteractiveScene()
+sctfo_create_square = manimlib.Square(side_length=1.0)
+sctfo_create_square.set_stroke(manimlib.WHITE, width=4.0)
+sctfo_create_reference = sctfo_create_square.copy()
+sctfo_create_expected = sctfo_create_square.copy()
+sctfo_create_expected.pointwise_become_partial(
+    sctfo_create_reference, 0.0, 0.5
+)
+sctfo_scene.add(sctfo_create_square)
+sctfo_scene.play(
+    indication_module.ShowCreationThenFadeOut(sctfo_create_square),
+    run_time=2.0 / 30.0,
+    rate_func=lambda t: 0.25,
+)
+assert np.allclose(
+    sctfo_create_square.get_points(), sctfo_create_expected.get_points()
+)
+
+sctfo_fade_square = manimlib.Square(side_length=1.0)
+sctfo_fade_square.set_stroke(manimlib.WHITE, width=4.0, opacity=1.0)
+sctfo_scene.add(sctfo_fade_square)
+sctfo_scene.play(
+    indication_module.ShowCreationThenFadeOut(sctfo_fade_square),
+    run_time=2.0 / 30.0,
+    rate_func=lambda t: 0.75,
+)
+assert np.allclose(sctfo_fade_square.data["stroke_rgba"][:, 3], 0.5, atol=1e-9)
+
+try:
+    indication_module.ShowCreationThenFadeOut(None)
+except TypeError as error:
+    assert "ShowCreationThenFadeOut requires a VMobject" in str(error), error
+    assert "NoneType" in str(error), error
+else:
+    raise AssertionError("ShowCreationThenFadeOut accepted None")
