@@ -7135,6 +7135,11 @@ impl PyScene {
         self.engine.borrow().stage().time()
     }
 
+    fn increment_time(&self, dt: f64) {
+        crossing::record(CrossingClass::Other);
+        self.engine.borrow_mut().stage_mut().increment_time(dt);
+    }
+
     #[pyo3(signature = (sound_file, time_offset=0.0, gain=None, gain_to_background=None))]
     fn _add_sound(
         &self,

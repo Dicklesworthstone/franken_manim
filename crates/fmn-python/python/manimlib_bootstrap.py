@@ -11675,6 +11675,9 @@ class Scene(_SceneCore):
         self.show_animation_progress = bool(
             kwargs.get("show_animation_progress", False)
         )
+        self.always_update_mobjects = bool(
+            kwargs.get("always_update_mobjects", False)
+        )
 
     @property
     def frame(self):
@@ -12271,6 +12274,53 @@ class Scene(_SceneCore):
                 "FrankenManim Studio owns interactive windows"
             )
         self.hold_on_wait = True
+
+    def increment_time(self, dt):
+        super().increment_time(float(dt))
+
+    def update_mobjects(self, dt):
+        dt = float(dt)
+        for mobject in list(self.mobjects):
+            mobject.update(dt)
+
+    def should_update_mobjects(self):
+        return bool(self.always_update_mobjects) or any(
+            bool(getattr(mobject, "updaters", ())) for mobject in self.mobjects
+        )
+
+    def update_frame(self, dt=0, force_draw=False):
+        dt = float(dt)
+        self.increment_time(dt)
+        self.update_mobjects(dt)
+        if self.skip_animations and not force_draw:
+            return
+        if self.is_window_closing():
+            raise _EndScene("window closing")
+        if self.get_window() is not None:
+            raise _CapabilityError(
+                "Scene.update_frame windowed capture requires a host window; "
+                "FrankenManim Studio owns interactive windows"
+            )
+
+    def emit_frame(self):
+        if self.skip_animations:
+            return
+        raise _CapabilityError(
+            "Scene.emit_frame requires a file writer; "
+            "the portal's native encoder owns recording"
+        )
+
+    def get_image(self):
+        raise _CapabilityError(
+            "Scene.get_image requires a Lumen capture generation; "
+            "call Scene.run/render for native PNG output"
+        )
+
+    def show(self):
+        self.update_frame(force_draw=True)
+        raise _CapabilityError(
+            "Scene.show requires a host image viewer"
+        )
 
     @_contextlib.contextmanager
     def temp_skip(self):

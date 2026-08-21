@@ -503,6 +503,13 @@ impl Stage {
         self.time = time;
     }
 
+    /// Advance the scene-time mirror without running updaters. The
+    /// Reference's `Scene.increment_time` is this bump; `Stage::update`
+    /// still does bump-then-updaters for the combined frame step.
+    pub fn increment_time(&mut self, dt: f64) {
+        self.time += dt;
+    }
+
     /// The process-local stage mint the persistence layer re-binds decoded
     /// handles to (§8.7). Never serialized.
     pub(crate) fn stage_id(&self) -> u64 {

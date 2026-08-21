@@ -1814,6 +1814,68 @@ else:
     raise AssertionError("temp_config_change(record=True) faked a recording")
 assert temp_scene.skip_animations is False
 
+# fm-5wq.4: host-free frame helpers bump the engine clock and Python
+# updaters without a pyglet window; capture/show/emit name the missing
+# Lumen/file-writer/host-viewer seams.
+assert str(inspect.signature(scene_module.Scene.increment_time)) == "(self, dt)"
+assert str(inspect.signature(scene_module.Scene.update_mobjects)) == "(self, dt)"
+assert str(inspect.signature(scene_module.Scene.should_update_mobjects)) == (
+    "(self)"
+)
+assert str(inspect.signature(scene_module.Scene.update_frame)) == (
+    "(self, dt=0, force_draw=False)"
+)
+assert str(inspect.signature(scene_module.Scene.emit_frame)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.get_image)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.show)) == "(self)"
+frame_scene = Scene()
+assert frame_scene.always_update_mobjects is False
+assert frame_scene.should_update_mobjects() is False
+assert frame_scene.get_time() == 0.0
+assert frame_scene.increment_time(0.0) is None
+assert frame_scene.get_time() == 0.0
+assert frame_scene.increment_time(0.5) is None
+assert np.isclose(frame_scene.get_time(), 0.5)
+frame_ticks = []
+frame_probe = manimlib.Circle()
+frame_probe.add_updater(lambda mob, dt: frame_ticks.append(dt))
+frame_scene.add(frame_probe)
+assert frame_scene.should_update_mobjects() is True
+assert frame_scene.update_mobjects(0.25) is None
+assert frame_ticks == [0.25]
+assert frame_scene.update_frame(0.125) is None
+assert np.isclose(frame_scene.get_time(), 0.625)
+assert frame_ticks == [0.25, 0.125]
+skip_frame = Scene(skip_animations=True)
+assert skip_frame.update_frame(0.25) is None
+assert np.isclose(skip_frame.get_time(), 0.25)
+assert skip_frame.emit_frame() is None
+try:
+    frame_scene.emit_frame()
+except bridge_errors.CapabilityError as error:
+    assert "file writer" in str(error).lower()
+else:
+    raise AssertionError("emit_frame faked a file-writer frame")
+try:
+    frame_scene.get_image()
+except bridge_errors.CapabilityError as error:
+    assert "capture" in str(error).lower()
+else:
+    raise AssertionError("get_image faked a Lumen capture")
+try:
+    frame_scene.show()
+except bridge_errors.CapabilityError as error:
+    assert "viewer" in str(error).lower()
+else:
+    raise AssertionError("show faked a host image viewer")
+windowed_frame = Scene(window=object())
+try:
+    windowed_frame.update_frame(force_draw=True)
+except bridge_errors.CapabilityError as error:
+    assert "Studio owns interactive windows" in str(error)
+else:
+    raise AssertionError("update_frame entered a host capture loop")
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
@@ -1903,6 +1965,18 @@ except Exception as error:
     assert "Studio owns interactive windows" in str(error)
 else:
     raise AssertionError("enable_gui did not refuse the pyglet GUI hook")
+for embed_refusal, fragment in (
+    ("ensure_frame_update_post_cell", "Studio owns interactive windows"),
+    ("ensure_flash_on_error", "Studio owns interactive windows"),
+    ("auto_reload", "IPython embed loop"),
+    ("reload_scene", "IPython embed loop"),
+):
+    try:
+        getattr(embedded, embed_refusal)()
+    except bridge_errors.CapabilityError as error:
+        assert fragment in str(error)
+    else:
+        raise AssertionError(f"{embed_refusal} did not refuse the host embed")
 failed_embed = embed_module.InteractiveSceneEmbed.__new__(
     embed_module.InteractiveSceneEmbed
 )
@@ -3828,6 +3902,18 @@ for clipboard_key in ("v", "x"):
         )
     assert list(color_key_scene.selection) == selection_before_refusal
     assert color_key_circle in color_key_scene.mobjects
+try:
+    color_key_scene.on_key_press(ord("d"), 1)  # SHIFT-d frame
+except bridge_errors.CapabilityError as error:
+    assert "clipboard" in str(error).lower()
+else:
+    raise AssertionError("shift-d faked a clipboard transfer")
+try:
+    color_key_scene.on_key_press(ord("c"), 1)  # SHIFT-c cursor
+except bridge_errors.CapabilityError as error:
+    assert "clipboard" in str(error).lower()
+else:
+    raise AssertionError("shift-c faked a clipboard transfer")
 
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
