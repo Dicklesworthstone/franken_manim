@@ -4345,10 +4345,21 @@ Scene().play(
 assert np.allclose(matrix_source.get_center(), manimlib.UP)
 try:
     manimlib.ApplyMatrix([[1.0]], geometry.Square())
-except Exception as error:
-    assert str(error) == "Matrix has bad dimensions"
+except ValueError as error:
+    assert str(error) == (
+        "ApplyMatrix matrix must have shape (2, 2) or (3, 3); got (1, 1)"
+    )
 else:
     raise AssertionError("ApplyMatrix accepted a matrix with bad dimensions")
+
+try:
+    manimlib.ApplyMatrix([[1.0], [2.0, 3.0]], geometry.Square())
+except TypeError as error:
+    assert str(error) == (
+        "ApplyMatrix matrix must be a rectangular 2x2 or 3x3 array"
+    )
+else:
+    raise AssertionError("ApplyMatrix accepted a ragged matrix")
 
 complex_source = geometry.Rectangle(width=1.0, height=0.5).shift(manimlib.RIGHT)
 complex_animation = manimlib.ApplyComplexFunction(lambda value: 1j * value, complex_source)

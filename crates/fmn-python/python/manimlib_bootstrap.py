@@ -10941,13 +10941,21 @@ class ApplyMatrix(ApplyPointwiseFunction):
         super().__init__(func, mobject, **kwargs)
 
     def initialize_matrix(self, matrix):
-        matrix = _np.array(matrix)
+        try:
+            matrix = _np.array(matrix)
+        except (TypeError, ValueError) as error:
+            raise TypeError(
+                "ApplyMatrix matrix must be a rectangular 2x2 or 3x3 array"
+            ) from error
         if matrix.shape == (2, 2):
             new_matrix = _np.identity(3)
             new_matrix[:2, :2] = matrix
             matrix = new_matrix
         elif matrix.shape != (3, 3):
-            raise Exception("Matrix has bad dimensions")
+            raise ValueError(
+                "ApplyMatrix matrix must have shape (2, 2) or (3, 3); "
+                f"got {matrix.shape}"
+            )
         return matrix
 
 
