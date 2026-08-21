@@ -7051,21 +7051,21 @@ impl PyScene {
         Self::_engine_roots(slf)
     }
 
-    /// Replace the engine root batch with these already-bound proxies and
-    /// reassert their exact handle-to-Python identity mapping. SceneState
-    /// restoration uses this after native checkpoint decode and `become()`
-    /// so `_engine_roots()` cannot surface copied proxy shells.
+    /// Reassert the exact handle-to-Python identity mapping for an already
+    /// restored engine root batch. This deliberately performs no Stage write:
+    /// SceneState's canonical checkpoint bytes must survive proxy reseating.
     #[pyo3(signature = (*mobjects))]
     fn _reseat_engine_roots(
         slf: &Bound<'_, Self>,
         mobjects: &Bound<'_, PyTuple>,
     ) -> PyResult<()> {
         let handles = scene_proxy_handles(slf, mobjects)?;
-        slf.borrow()
-            .engine
-            .borrow_mut()
-            .remove_all_except(&handles)
-            .map_err(native_error)?;
+        let roots = slf.borrow().engine.borrow().stage().roots().to_vec();
+        if handles != roots {
+            return Err(PyRuntimeError::new_err(
+                "captured SceneState proxies do not match restored engine roots",
+            ));
+        }
         for (handle, proxy) in handles.into_iter().zip(mobjects.iter()) {
             register_proxy(slf.py(), slf, handle, &proxy)?;
         }
