@@ -17869,3 +17869,29 @@ except TypeError as error:
     assert str(error) == "Scene camera_config must be a dict"
 else:
     raise AssertionError("Scene accepted an integer camera_config")
+
+# fm-5wq.4: get_pixel_size reaches through Scene.camera_config — a
+# configured resolution divides the live frame width by ITS pixel width,
+# and the default Scene keeps Camera's 1920-wide default.
+pixel_size_config_scene = Scene(camera_config=dict(resolution=(640, 360)))
+assert pixel_size_config_scene.camera.get_pixel_shape() == (640, 360)
+assert np.isclose(
+    pixel_size_config_scene.camera.get_pixel_size(),
+    pixel_size_config_scene.camera.get_frame_width() / 640.0,
+)
+pixel_size_default_scene = Scene()
+assert pixel_size_default_scene.camera.get_pixel_width() == 1920
+assert np.isclose(
+    pixel_size_default_scene.camera.get_pixel_size(),
+    pixel_size_default_scene.camera.get_frame_width() / 1920.0,
+)
+# Same frame width (both 16:9), a third of the pixels — three times the
+# pixel size; the two scenes disagree, so the config observably matters.
+assert np.isclose(
+    pixel_size_config_scene.camera.get_pixel_size(),
+    3.0 * pixel_size_default_scene.camera.get_pixel_size(),
+)
+assert not np.isclose(
+    pixel_size_config_scene.camera.get_pixel_size(),
+    pixel_size_default_scene.camera.get_pixel_size(),
+)
