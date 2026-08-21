@@ -10432,6 +10432,13 @@ class Camera:
         )
 
 
+class ThreeDCamera(Camera):
+    """Camera with Lumen's Reference four-sample constructor default."""
+
+    def __init__(self, samples=4, **kwargs):
+        super().__init__(samples=samples, **kwargs)
+
+
 class Scene(_SceneCore):
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -14193,6 +14200,7 @@ def _install_schema_surface():
         ): StringMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
         ("manimlib.camera.camera", "Camera"): Camera,
+        ("manimlib.camera.camera", "ThreeDCamera"): ThreeDCamera,
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
         (
             "manimlib.mobject.types.vectorized_mobject",

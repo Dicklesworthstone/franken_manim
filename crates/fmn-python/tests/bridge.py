@@ -1363,6 +1363,38 @@ else:
     raise AssertionError("Camera accepted the unrouted background image seam")
 assert not hasattr(failed_camera, "_core")
 
+# ThreeDCamera is Camera with the Reference four-sample default, still built
+# by Lumen's native CameraConfig path.
+assert camera_module.ThreeDCamera.__bases__ == (camera_module.Camera,)
+assert str(inspect.signature(camera_module.ThreeDCamera)) == (
+    "(self, samples=4, **kwargs)"
+)
+default_three_d_camera = camera_module.ThreeDCamera()
+assert default_three_d_camera.samples == 4
+assert isinstance(default_three_d_camera, camera_module.Camera)
+explicit_three_d_camera = camera_module.ThreeDCamera(
+    samples=8,
+    resolution=(640, 320),
+)
+assert explicit_three_d_camera.samples == 8
+assert explicit_three_d_camera.get_pixel_shape() == (640, 320)
+failed_three_d_camera = camera_module.ThreeDCamera.__new__(
+    camera_module.ThreeDCamera
+)
+try:
+    camera_module.ThreeDCamera.__init__(
+        failed_three_d_camera,
+        background_image="image.png",
+    )
+except NotImplementedError as error:
+    assert str(error) == (
+        "Camera() keyword(s) not yet routed to the native builder: "
+        "background_image"
+    )
+else:
+    raise AssertionError("ThreeDCamera accepted the unrouted background image seam")
+assert not hasattr(failed_three_d_camera, "_core")
+
 live_box = manimlib.Square()
 live_box_before = live_box.get_bounding_box().copy()
 live_box.get_points()[:, 0] += 2.0
