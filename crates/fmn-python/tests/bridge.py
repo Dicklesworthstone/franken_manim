@@ -10514,6 +10514,69 @@ except TypeError as error:
 else:
     raise AssertionError("AnimatedBoundary accepted a non-VMobject")
 
+
+# -------------------------- TransformMatchingStrings matched_pairs override
+# fm-5wq.4.76: explicit pairs claim their parts with a unique shared native
+# key BEFORE the matching-blocks pass, so a user pair beats what blocks
+# would otherwise choose.
+
+pairs_source = manimlib.Text("ab")
+pairs_target = manimlib.Text("ab")
+# Cross-pair the source 'a' onto the target 'b': blocks alone would pair
+# a->a and b->b, so landing on b's position proves the override claimed
+# first.
+pairs_anim = matching_module.TransformMatchingStrings(
+    pairs_source,
+    pairs_target,
+    matched_pairs=[(pairs_source[0], pairs_target[1])],
+    run_time=2.0 / 30.0,
+)
+pairs_params = pairs_anim._native_params()
+pairs_source_keys = dict(
+    (id(part), key) for part, key in pairs_params["source_keys"]
+)
+pairs_target_keys = dict(
+    (id(part), key) for part, key in pairs_params["target_keys"]
+)
+assert pairs_source_keys[id(pairs_source[0])] == "matched-pair:0"
+assert pairs_target_keys[id(pairs_target[1])] == "matched-pair:0"
+
+pairs_scene = Scene()
+pairs_scene.add(pairs_source)
+pairs_scene.play(pairs_anim)
+# The claimed source glyph landed on its paired target part.
+assert np.allclose(
+    pairs_source[0].get_center(), pairs_target[1].get_center(), atol=1e-6
+)
+
+# Named refusals: a non-Mobject pair member is a TypeError (not the old
+# NotImplementedError), and a pair member outside the family refuses by
+# name at spec build.
+try:
+    matching_module.TransformMatchingStrings(
+        manimlib.Text("ab"),
+        manimlib.Text("ba"),
+        matched_pairs=[(pairs_source[0], "not a mobject")],
+    )
+except TypeError as error:
+    assert "matched_pairs must pair Mobjects" in str(error)
+else:
+    raise AssertionError("matched_pairs accepted a non-Mobject")
+
+foreign_pair_anim = matching_module.TransformMatchingStrings(
+    manimlib.Text("cd"),
+    manimlib.Text("dc"),
+    matched_pairs=[
+        (geometry.Rectangle(width=0.5, height=0.5), pairs_target[0])
+    ],
+)
+try:
+    foreign_pair_anim._native_params()
+except ValueError as error:
+    assert "not a live span-map part" in str(error)
+else:
+    raise AssertionError("matched_pairs accepted a foreign part")
+
 # fm-5wq.4.75: the fading base class per the pinned schema — Fade(Transform)
 # stores shift/scale; FadeIn/FadeOut are its concrete subclasses. The
 # Reference's bare Fade has no target and dies at begin; the portal
