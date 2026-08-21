@@ -4676,7 +4676,7 @@ impl BridgeMobject {
         .map_err(stage_error)
     }
 
-    /// `DashedLine(start, end, dash_length, positive_space_ratio)`.
+    /// `DashedLine(start, end, dash_length, positive_space_ratio, buff)`.
     #[allow(clippy::too_many_arguments)]
     fn _build_dashed_line<'py>(
         slf: &Bound<'py, Self>,
@@ -4685,11 +4685,13 @@ impl BridgeMobject {
         end: [f64; 3],
         dash_length: f64,
         positive_space_ratio: f64,
+        buff: f64,
         path_arc: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let built = fmn_library::line::DashedLine::new(start, end)
             .dash_length(dash_length)
             .positive_space_ratio(positive_space_ratio)
+            .buff(buff)
             .path_arc(path_arc)
             .build()
             .map_err(native_error)?;

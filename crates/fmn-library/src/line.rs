@@ -255,6 +255,13 @@ impl DashedLine {
         self
     }
 
+    /// Distance trimmed from each end, along the source path.
+    #[must_use]
+    pub fn buff(mut self, buff: f64) -> Self {
+        self.line = self.line.buff(buff);
+        self
+    }
+
     /// Bend the segment.
     #[must_use]
     pub fn path_arc(mut self, path_arc: f64) -> Self {

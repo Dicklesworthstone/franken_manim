@@ -4266,12 +4266,17 @@ class DashedLine(Line):
         positive_space_ratio=0.5,
         **kwargs,
     ):
-        buff = kwargs.pop("buff", 0.0)
+        buff = float(kwargs.pop("buff", 0.0))
         path_arc = kwargs.pop("path_arc", 0.0)
-        _refuse_unrouted("DashedLine()", [("buff", bool(buff))])
+        unknown = sorted(
+            set(kwargs) - _NATIVE_VMOBJECT_STYLE_KEYS - {"shading"}
+        )
+        _refuse_unrouted(
+            "DashedLine()", [(name, True) for name in unknown]
+        )
         _install_live_state(self)
         self.path_arc = float(path_arc)
-        self.buff = 0.0
+        self.buff = buff
         self.set_start_and_end_attrs(start, end)
         specs = self._build_dashed_line(
             _native_shell_factory,
@@ -4279,6 +4284,7 @@ class DashedLine(Line):
             _vec3(self.end),
             float(dash_length),
             float(positive_space_ratio),
+            self.buff,
             self.path_arc,
         )
         _hang_native_children(self, specs)

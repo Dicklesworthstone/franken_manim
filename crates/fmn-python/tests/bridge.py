@@ -5394,6 +5394,37 @@ else:
 # `become` must keep the Python proxy family and Marionette family aligned
 # when a live redraw changes a generated child's multiplicity.  This is the
 # exact varying-dash-count shape exercised by MaxProcess's always_redraw line.
+default_dashes = geometry.DashedLine()
+assert default_dashes.submobjects
+
+unbuffered_dashes = geometry.DashedLine(
+    [0.0, 0.0, 0.0],
+    [4.0, 0.0, 0.0],
+    dash_length=0.12,
+)
+buffered_dashes = geometry.DashedLine(
+    [0.0, 0.0, 0.0],
+    [4.0, 0.0, 0.0],
+    buff=0.5,
+    dash_length=0.12,
+)
+assert math.isclose(buffered_dashes.buff, 0.5)
+assert np.allclose(buffered_dashes.get_start(), [0.5, 0.0, 0.0])
+assert buffered_dashes.get_length() < unbuffered_dashes.get_length()
+assert buffered_dashes.get_end()[0] < unbuffered_dashes.get_end()[0]
+
+failed_dashes = geometry.DashedLine.__new__(geometry.DashedLine)
+try:
+    geometry.DashedLine.__init__(failed_dashes, leftover_dash_option=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "DashedLine() keyword(s) not yet routed to the native builder: "
+        "leftover_dash_option"
+    )
+else:
+    raise AssertionError("an unrouted DashedLine keyword reached the native builder")
+assert not hasattr(failed_dashes, "submobjects")
+
 many_dashes = geometry.DashedLine(
     [0.0, 0.0, 0.0], [4.0, 0.0, 0.0], dash_length=0.12
 )
