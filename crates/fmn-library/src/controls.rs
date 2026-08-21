@@ -2712,6 +2712,87 @@ mod tests {
     }
 
     #[test]
+    fn color_slider_overrides_snap_rgb_but_keep_alpha_step() {
+        let mut sliders = ColorSliders::new()
+            .expect("locked sliders are valid")
+            .slider_overrides(
+                None,
+                None,
+                Some(2.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("shared RGB step is valid");
+        assert_eq!(sliders.sliders()[0].step, 2.0);
+        assert_eq!(sliders.sliders()[3].step, 0.04);
+
+        sliders
+            .set_value(63.0, 63.0, 63.0, 0.53)
+            .expect("finite component values");
+        assert_eq!(sliders.sliders()[0].value(), 62.0);
+        assert_eq!(sliders.sliders()[1].value(), 62.0);
+        assert_eq!(sliders.sliders()[2].value(), 62.0);
+        assert_eq!(sliders.sliders()[3].value(), 0.53);
+    }
+
+    #[test]
+    fn color_slider_overrides_apply_shared_range_and_clamp_values() {
+        let mut sliders = ColorSliders::new()
+            .expect("locked sliders are valid")
+            .slider_overrides(
+                Some(0.0),
+                Some(1.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("shared unit range is valid");
+        assert_eq!(sliders.sliders()[0].min(), 0.0);
+        assert_eq!(sliders.sliders()[0].max(), 1.0);
+
+        sliders
+            .set_value(2.0, 2.0, 2.0, 2.0)
+            .expect("component values clamp into the configured range");
+        assert_eq!(
+            sliders.value(),
+            [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn color_slider_overrides_refuse_invalid_steps() {
+        for step in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                ColorSliders::new()
+                    .expect("locked sliders are valid")
+                    .slider_overrides(
+                        None,
+                        None,
+                        Some(step),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                Err(SliderError::InvalidStep)
+            ));
+        }
+    }
+
+    #[test]
     fn color_slider_updates_are_atomic_on_invalid_component_values() {
         let mut sliders = ColorSliders::new().expect("locked sliders are valid");
         let before = sliders.value();
