@@ -2590,6 +2590,35 @@ assert all(
     mobject not in selection_search_set
     for mobject in interactive_scene.unselectables
 )
+
+# fm-5wq.4: interaction exclusion follows native family membership and keeps
+# the live selection search set synchronized after every disable/enable.
+assert str(inspect.signature(InteractiveScene.disable_interaction)) == (
+    "(self, *mobjects)"
+)
+assert str(inspect.signature(InteractiveScene.enable_interaction)) == (
+    "(self, *mobjects)"
+)
+interaction_scene = InteractiveScene()
+interaction_scene.setup()
+interaction_source = manimlib.Circle()
+interaction_scene.add(interaction_source)
+assert interaction_source in interaction_scene.get_selection_search_set()
+interaction_scene.disable_interaction(interaction_source)
+assert interaction_source in interaction_scene.unselectables
+assert interaction_source not in interaction_scene.get_selection_search_set()
+interaction_scene.add_to_selection(interaction_source)
+assert interaction_source not in interaction_scene.selection
+interaction_scene.enable_interaction(interaction_source)
+assert interaction_source in interaction_scene.get_selection_search_set()
+interaction_left = manimlib.Circle()
+interaction_right = manimlib.Square()
+interaction_group = manimlib.Group(interaction_left, interaction_right)
+interaction_scene.disable_interaction(interaction_group)
+assert interaction_group in interaction_scene.unselectables
+assert interaction_left in interaction_scene.unselectables
+assert interaction_right in interaction_scene.unselectables
+
 interactive_scene.add_to_selection(circle_for_select)
 assert list(interactive_scene.selection.submobjects) == [circle_for_select]
 interactive_scene.clear_selection()

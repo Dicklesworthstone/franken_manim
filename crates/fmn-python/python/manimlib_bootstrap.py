@@ -12116,6 +12116,29 @@ class InteractiveScene(Scene):
         if getattr(self, "unselectables", None) is not None:
             self.regenerate_selection_search_set()
 
+    def disable_interaction(self, *mobjects):
+        unselectables = getattr(self, "unselectables", None)
+        if unselectables is None:
+            unselectables = []
+            self.unselectables = unselectables
+        for mobject in mobjects:
+            for member in mobject.get_family():
+                if member not in unselectables:
+                    unselectables.append(member)
+        self.regenerate_selection_search_set()
+
+    def enable_interaction(self, *mobjects):
+        unselectables = getattr(self, "unselectables", None)
+        if unselectables is None:
+            unselectables = []
+            self.unselectables = unselectables
+        for mobject in mobjects:
+            family = mobject.get_family()
+            unselectables[:] = [
+                member for member in unselectables if member not in family
+            ]
+        self.regenerate_selection_search_set()
+
     def get_crosshair(self):
         lines = VMobject().replicate(2)
         lines[0].set_points([_LEFT, _ORIGIN, _RIGHT])
