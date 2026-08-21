@@ -2834,6 +2834,13 @@ styled_control_panel.close_panel()
 assert styled_control_panel.panel is styled_panel_identity
 assert np.isclose(styled_control_panel.panel.get_height(), 2.0)
 assert np.isclose(styled_control_panel.panel.get_fill_opacity(), 0.4)
+assert styled_control_panel.add_controls(
+    interactive.EnableDisableButton(True)
+) is None
+assert styled_control_panel.panel is styled_panel_identity
+assert np.isclose(styled_control_panel.panel.get_width(), 3.0)
+assert styled_control_panel.panel.get_fill_color() == manimlib.BLUE
+assert np.isclose(styled_control_panel.panel.get_fill_opacity(), 0.4)
 
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the

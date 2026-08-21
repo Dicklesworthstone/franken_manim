@@ -9627,7 +9627,8 @@ class ControlPanel(Group):
                 "native ControlPanel controls contract drift: "
                 f"expected {len(controls)} controls, got {len(targets)}"
             )
-        self.panel.become(panel_target)
+        # Matcher targets are unstyled extents; shift keeps panel_kwargs.
+        self.panel.shift(panel_target.get_center() - self.panel.get_center())
         for control, target in zip(controls, targets):
             control.shift(target.get_center() - control.get_center())
 
