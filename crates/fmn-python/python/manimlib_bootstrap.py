@@ -10045,6 +10045,69 @@ class FadeTransform(_NativeAnimation):
         self.target_mobject = target_mobject
 
 
+class TransformMatchingParts(_NativeAnimation):
+    """transform_matching_parts.py:21 through the native shape matcher
+    (fm-5wq.4.68): user matched_pairs claim first, then the same-shape
+    product over the remaining pieces, then directional fades for the
+    leftovers — all built natively, no Python mid-segment."""
+
+    _native_kind = "transform_matching_parts"
+    _target_attr = "target_mobject"
+
+    def __init__(
+        self,
+        source,
+        target,
+        matched_pairs=(),
+        match_animation=Transform,
+        mismatch_animation=Transform,
+        run_time=2,
+        lag_ratio=0,
+        **kwargs,
+    ):
+        if not isinstance(source, Mobject) or not isinstance(target, Mobject):
+            raise TypeError(
+                type(self).__name__ + " expects two Mobject families"
+            )
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [
+                ("match_animation", match_animation is not Transform),
+                ("mismatch_animation", mismatch_animation is not Transform),
+            ],
+        )
+        pairs = [tuple(pair) for pair in matched_pairs]
+        if not all(
+            len(pair) == 2
+            and isinstance(pair[0], Mobject)
+            and isinstance(pair[1], Mobject)
+            for pair in pairs
+        ):
+            raise TypeError(
+                type(self).__name__ + " matched_pairs must pair Mobjects"
+            )
+        if (
+            not source.family_members_with_points()
+            or not target.family_members_with_points()
+        ):
+            raise ValueError(
+                type(self).__name__
+                + " requires point-bearing families on both sides"
+            )
+        self.target_mobject = target
+        self.matched_pairs = pairs
+        super().__init__(
+            source, run_time=run_time, lag_ratio=lag_ratio, **kwargs
+        )
+
+    def _native_params(self):
+        return {"matched_pairs": self.matched_pairs}
+
+
+class TransformMatchingShapes(TransformMatchingParts):
+    _native_kind = "transform_matching_shapes"
+
+
 class TransformMatchingStrings(_NativeAnimation):
     """Match native string primitives by their source-span identity.
 
@@ -11159,6 +11222,14 @@ def _install_schema_surface():
         ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
         ("manimlib.animation.transform", "Restore"): Restore,
+        (
+            "manimlib.animation.transform_matching_parts",
+            "TransformMatchingParts",
+        ): TransformMatchingParts,
+        (
+            "manimlib.animation.transform_matching_parts",
+            "TransformMatchingShapes",
+        ): TransformMatchingShapes,
         (
             "manimlib.animation.transform_matching_parts",
             "TransformMatchingStrings",

@@ -10133,3 +10133,83 @@ except NotImplementedError as error:
     assert "path_func" in str(error), error
 else:
     raise AssertionError("Transform accepted an unrouted path function")
+
+# fm-5wq.4.68: TransformMatchingParts / TransformMatchingShapes ride the
+# native shape matcher — user pairs claim first, the same-shape product
+# second, directional fades for the leftovers.
+assert matching_module.TransformMatchingShapes.__bases__ == (
+    matching_module.TransformMatchingParts,
+)
+assert matching_module.TransformMatchingParts._native_kind == (
+    "transform_matching_parts"
+)
+assert matching_module.TransformMatchingShapes._native_kind == (
+    "transform_matching_shapes"
+)
+
+# Shapes: the identical square pairs by shape and lands on its partner;
+# the circle has no same-shape partner and takes the fade path.
+shapes_scene = InteractiveScene()
+shapes_square = manimlib.Square(side_length=1.0).move_to((-2.0, 0.0, 0.0))
+shapes_circle = manimlib.Circle(radius=0.4).move_to((-2.0, 1.0, 0.0))
+shapes_source = manimlib.VGroup(shapes_square, shapes_circle)
+shapes_target_square = manimlib.Square(side_length=1.0).move_to((2.0, 0.0, 0.0))
+shapes_target_triangle = manimlib.Triangle().move_to((2.0, 1.0, 0.0))
+shapes_target = manimlib.VGroup(shapes_target_square, shapes_target_triangle)
+shapes_scene.add(shapes_source)
+shapes_scene.play(
+    matching_module.TransformMatchingShapes(shapes_source, shapes_target),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(shapes_square.get_center(), [2.0, 0.0, 0.0], atol=1e-9)
+
+# Parts: an explicit matched pair claims the circle onto the triangle, and
+# the square still auto-matches through the shape product.
+parts_scene = InteractiveScene()
+parts_square = manimlib.Square(side_length=1.0).move_to((-2.0, 0.0, 0.0))
+parts_circle = manimlib.Circle(radius=0.4).move_to((-2.0, 1.0, 0.0))
+parts_source = manimlib.VGroup(parts_square, parts_circle)
+parts_target_square = manimlib.Square(side_length=1.0).move_to((2.0, 0.0, 0.0))
+parts_target_triangle = manimlib.Triangle().move_to((2.0, 1.0, 0.0))
+parts_target = manimlib.VGroup(parts_target_square, parts_target_triangle)
+parts_scene.add(parts_source)
+parts_scene.play(
+    matching_module.TransformMatchingParts(
+        parts_source,
+        parts_target,
+        matched_pairs=[(parts_circle, parts_target_triangle)],
+    ),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(parts_circle.get_center(), [2.0, 1.0, 0.0], atol=1e-9)
+assert np.allclose(parts_square.get_center(), [2.0, 0.0, 0.0], atol=1e-9)
+
+# Point-less or non-Mobject sides are named errors, never silent groups.
+try:
+    matching_module.TransformMatchingParts(manimlib.VGroup(), manimlib.VGroup())
+except ValueError as error:
+    assert "point-bearing families" in str(error), error
+else:
+    raise AssertionError("TransformMatchingParts accepted empty families")
+
+try:
+    matching_module.TransformMatchingParts(manimlib.Square(), "target")
+except TypeError as error:
+    assert "expects two Mobject families" in str(error), error
+else:
+    raise AssertionError("TransformMatchingParts accepted a non-Mobject")
+
+try:
+    matching_module.TransformMatchingParts(
+        manimlib.Square(),
+        manimlib.Square(),
+        matched_pairs=[(manimlib.Square(), "not-a-mobject")],
+    )
+except TypeError as error:
+    assert "matched_pairs must pair Mobjects" in str(error), error
+else:
+    raise AssertionError("TransformMatchingParts accepted a malformed pair")
+
+

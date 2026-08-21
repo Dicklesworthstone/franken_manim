@@ -6777,6 +6777,7 @@ struct AnimSpec {
     stroke_width: Option<f64>,
     bounds_kind: String,
     mobs: Vec<Mob>,
+    pairs: Vec<(Mob, Mob)>,
     int_round: String,
     point: [f64; 3],
     point_color: Option<[f64; 3]>,
@@ -6917,6 +6918,17 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
                 .collect::<PyResult<Vec<_>>>()?,
             None => Vec::new(),
         },
+        pairs: match params.get_item("matched_pairs")? {
+            Some(values) => values
+                .try_iter()?
+                .map(|item| {
+                    let (a, b): (Bound<'_, BridgeMobject>, Bound<'_, BridgeMobject>) =
+                        item?.extract()?;
+                    Ok((resolve(&a)?, resolve(&b)?))
+                })
+                .collect::<PyResult<Vec<_>>>()?,
+            None => Vec::new(),
+        },
         int_round: match params.get_item("int_round")? {
             Some(value) => value.extract()?,
             None => String::new(),
@@ -6987,6 +6999,8 @@ fn build_native_animation(
             | "show_creation_then_fade_around"
             | "show_creation_then_fade_out"
             | "succession"
+            | "transform_matching_parts"
+            | "transform_matching_shapes"
             | "transform_matching_strings"
             | "transform_matching_tex"
     );
@@ -7205,6 +7219,25 @@ fn build_native_animation(
             need_mob(spec.mob)?,
             need_target(spec.target)?,
         )),
+        "transform_matching_parts" | "transform_matching_shapes" => {
+            let members = fmn_anim::transform_matching_parts(
+                stage,
+                need_mob(spec.mob)?,
+                need_target(spec.target)?,
+                &spec.pairs,
+            )
+            .map_err(anim_error)?;
+            let name = if spec.kind == "transform_matching_shapes" {
+                "TransformMatchingShapes"
+            } else {
+                "TransformMatchingParts"
+            };
+            Box::new(
+                fmn_anim::AnimationGroup::new(stage, members)
+                    .map_err(anim_error)?
+                    .with_name(name),
+            )
+        }
         "cyclic_replace" | "swap" => {
             let name = if spec.kind == "swap" {
                 "Swap"
