@@ -2727,6 +2727,7 @@ assert str(inspect.signature(InteractiveScene.display_information)) == (
 information_scene = InteractiveScene()
 information_scene.setup()
 assert information_scene.information_label not in information_scene.mobjects
+assert information_scene.information_label in information_scene.unselectables
 information_scene.display_information()
 assert information_scene.information_label in information_scene.mobjects
 assert (
@@ -2737,6 +2738,7 @@ information_loc_label, information_time_label = (
     information_scene.information_label.submobjects
 )
 assert isinstance(information_loc_label, manimlib.VGroup)
+assert len(information_loc_label.submobjects) == 3
 assert all(
     isinstance(part, manimlib.DecimalNumber)
     for part in information_loc_label.submobjects
