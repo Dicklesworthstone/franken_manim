@@ -3900,6 +3900,13 @@ circle_scene.play(circle_indication, rate_func=manimlib.linear)
 assert circle_target in circle_scene.get_mobjects()
 assert circle_indication.mobject not in circle_scene.get_mobjects()
 
+try:
+    indication.CircleIndicate(None)
+except TypeError as error:
+    assert str(error) == "CircleIndicate expects a Mobject; got NoneType"
+else:
+    raise AssertionError("CircleIndicate accepted None")
+
 fade_scene = Scene()
 fade_mobject = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
 fade_scene.play(

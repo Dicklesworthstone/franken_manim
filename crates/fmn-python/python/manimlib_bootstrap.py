@@ -10754,6 +10754,11 @@ class CircleIndicate(Transform):
         remover=True,
         **kwargs,
     ):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError(
+                "CircleIndicate expects a Mobject; got "
+                + type(mobject).__name__
+            )
         self.scale_factor = float(scale_factor)
         if not _math.isfinite(self.scale_factor) or self.scale_factor <= 0:
             raise ValueError("CircleIndicate scale_factor must be positive and finite")
@@ -12621,6 +12626,7 @@ def _install_schema_surface():
         ("manimlib.animation.indication", "FocusOn"): FocusOn,
         ("manimlib.animation.indication", "Indicate"): Indicate,
         ("manimlib.animation.indication", "Flash"): Flash,
+        ("manimlib.animation.indication", "CircleIndicate"): CircleIndicate,
         ("manimlib.animation.indication", "TurnInsideOut"): TurnInsideOut,
         ("manimlib.animation.indication", "WiggleOutThenIn"): WiggleOutThenIn,
         ("manimlib.animation.indication", "ShowPassingFlash"): ShowPassingFlash,
