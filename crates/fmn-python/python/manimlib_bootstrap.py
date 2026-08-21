@@ -8698,6 +8698,13 @@ class Line3D(Cylinder):
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+        self._solid_params = (
+            "cylinder",
+            self.height,
+            self.radius,
+            tuple(float(component) for component in self.axis),
+        )
+        self._solid_native_height = self.get_height()
 
 
 class Disk3D(Surface):
@@ -8785,6 +8792,8 @@ class Square3D(Surface):
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+        self._solid_params = ("square", self.side_length)
+        self._solid_native_height = self.get_height()
 
     def uv_func(self, u, v):
         return _np.array(self._square3d_uv(float(u), float(v)))

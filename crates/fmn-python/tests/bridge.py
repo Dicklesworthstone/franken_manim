@@ -9497,6 +9497,9 @@ line3d = three_dimensions.Line3D(
     width=0.4,
     resolution=(5, 3),
 )
+line3d_mesh = three_dimensions.SurfaceMesh(line3d, resolution=(4, 3))
+assert len(line3d_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in line3d_mesh)
 assert line3d.n_records() == 15
 assert np.isclose(line3d.height, 4.0)
 assert np.isclose(line3d.radius, 0.2)
@@ -9579,6 +9582,9 @@ square3d = three_dimensions.Square3D(
     v_range=(-1.0, 1.0),
     resolution=(3, 2),
 )
+square_mesh = three_dimensions.SurfaceMesh(square3d, resolution=(4, 3))
+assert len(square_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in square_mesh)
 assert square3d.n_records() == 6
 assert np.allclose(square3d.uv_func(-2.0, 1.0), [-2.0, 1.0, 0.0])
 assert np.allclose(

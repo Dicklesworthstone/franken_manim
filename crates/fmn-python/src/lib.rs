@@ -5062,6 +5062,7 @@ impl BridgeMobject {
                 .axis(source_axis)
                 .build(),
             "disk" => fmn_library::Disk3D::new(source_radius).build(),
+            "square" => fmn_library::Square3D::new(source_radius).build(),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "SurfaceMesh over `{other}` awaits its native rebuild \
