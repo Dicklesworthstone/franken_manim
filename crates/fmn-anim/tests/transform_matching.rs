@@ -3,7 +3,7 @@
 //! fade-out/fade-in leftovers), and the null-piece guards — against
 //! transform_matching_parts.py at the pin.
 
-use fmn_anim::{has_same_shape_as, transform_matching_parts};
+use fmn_anim::{has_same_shape_as, transform_matching_keys, transform_matching_parts};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -121,4 +121,46 @@ fn empty_sides_produce_no_null_animations() {
     let target = stage.add(Mobject::new());
     let anims = transform_matching_parts(&mut stage, source, target, &[]).unwrap();
     assert!(anims.is_empty());
+}
+
+#[test]
+fn native_span_keys_match_stably_without_shape_assignment() {
+    let mut stage = Stage::new();
+    let source = stage.add(Mobject::new());
+    let source_x0 = vee(&mut stage, 0.0);
+    let source_plus = bump(&mut stage, 3.0);
+    let source_x1 = vee(&mut stage, 6.0);
+    stage.attach(source, source_x0).unwrap();
+    stage.attach(source, source_plus).unwrap();
+    stage.attach(source, source_x1).unwrap();
+
+    let target = stage.add(Mobject::new());
+    let target_x = bump(&mut stage, 10.0); // deliberately a different shape
+    let target_minus = vee(&mut stage, 13.0);
+    stage.attach(target, target_x).unwrap();
+    stage.attach(target, target_minus).unwrap();
+
+    let source_parts = vec![
+        (source_x0, "x".to_owned()),
+        (source_plus, "+".to_owned()),
+        (source_x1, "x".to_owned()),
+    ];
+    let target_parts = vec![
+        (target_x, "x".to_owned()),
+        (target_minus, "-".to_owned()),
+    ];
+    let anims = transform_matching_keys(
+        &mut stage,
+        source,
+        target,
+        &source_parts,
+        &target_parts,
+    )
+    .unwrap();
+    let names: Vec<&str> = anims
+        .iter()
+        .map(|animation| animation.state().config.name.as_str())
+        .collect();
+    assert_eq!(names, ["Transform", "FadeOutToPoint", "FadeOutToPoint", "FadeInFromPoint"]);
+    assert_eq!(anims[0].state().mobject(), source_x0);
 }

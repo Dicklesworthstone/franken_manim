@@ -18,12 +18,10 @@
 //! - `TransformMatchingShapes` is the Reference's literal alias — same
 //!   function, same defaults.
 //!
-//! `TransformMatchingStrings`/`TransformMatchingTex` are deliberately
-//! absent: their `matching_blocks` walks `StringMobject` symbol
-//! substrings, which exist only once W6's span maps land (D-09: spans
-//! come from native layout provenance; the fsci assignment matcher lives
-//! with the string plane's shape matching, not here). The seam is
-//! recorded on the fm-cye bead.
+//! [`transform_matching_keys`] is the string/Tex seam. Scribe supplies one
+//! semantic key per pointful native-span primitive; Choreo pairs equal keys
+//! in stable occurrence order and fades the leftovers. It never shape-matches
+//! Tex and never reconstructs provenance from rendered geometry (D-09).
 
 use fmn_mobject::{Mob, Stage};
 
@@ -180,6 +178,69 @@ pub fn transform_matching_parts(
     let source_center = stage.get_center(source);
     for piece in target_pieces {
         anims.push(Box::new(fade_in_from_point(stage, piece, source_center)?));
+    }
+    Ok(anims)
+}
+
+/// Match Scribe primitives by native source-span identity.
+///
+/// Equal keys are paired in stable source/target occurrence order. A target
+/// occurrence is claimed at most once; unpaired source and target primitives
+/// use the same directional fades as [`transform_matching_parts`]. The keys
+/// are intentionally opaque to Choreo: `fmn-tex` owns their provenance and
+/// the portal merely carries that already-native identity across the crate
+/// boundary.
+///
+/// # Errors
+/// [`AnimError::StaleHandle`] when either root or any keyed primitive is not
+/// live in `stage`, or [`AnimError::Stage`] from a fade constructor.
+pub fn transform_matching_keys(
+    stage: &mut Stage,
+    source: Mob,
+    target: Mob,
+    source_parts: &[(Mob, String)],
+    target_parts: &[(Mob, String)],
+) -> Result<Vec<Box<dyn Animation>>, AnimError> {
+    for mob in std::iter::once(source)
+        .chain(std::iter::once(target))
+        .chain(source_parts.iter().map(|(mob, _)| *mob))
+        .chain(target_parts.iter().map(|(mob, _)| *mob))
+    {
+        if !stage.contains(mob) {
+            return Err(AnimError::StaleHandle(mob));
+        }
+    }
+
+    let mut target_claimed = vec![false; target_parts.len()];
+    let mut source_unmatched = Vec::new();
+    let mut anims: Vec<Box<dyn Animation>> = Vec::new();
+    for (source_mob, source_key) in source_parts {
+        let target_index = target_parts
+            .iter()
+            .enumerate()
+            .position(|(index, (_, target_key))| {
+                !target_claimed[index] && source_key == target_key
+            });
+        if let Some(index) = target_index {
+            target_claimed[index] = true;
+            anims.push(Box::new(Transform::new(
+                *source_mob,
+                target_parts[index].0,
+            )));
+        } else {
+            source_unmatched.push(*source_mob);
+        }
+    }
+
+    let target_center = stage.get_center(target);
+    for mob in source_unmatched {
+        anims.push(Box::new(fade_out_to_point(stage, mob, target_center)?));
+    }
+    let source_center = stage.get_center(source);
+    for (index, (mob, _)) in target_parts.iter().enumerate() {
+        if !target_claimed[index] {
+            anims.push(Box::new(fade_in_from_point(stage, *mob, source_center)?));
+        }
     }
     Ok(anims)
 }

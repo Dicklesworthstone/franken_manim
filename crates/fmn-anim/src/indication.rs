@@ -141,6 +141,20 @@ impl WiggleOutThenIn {
         self
     }
 
+    /// Fix the swell pivot instead of using the restored family centre.
+    #[must_use]
+    pub fn with_scale_about_point(mut self, point: Vec3) -> Self {
+        self.scale_about_point = Some(point);
+        self
+    }
+
+    /// Fix the rocking pivot instead of using the restored family centre.
+    #[must_use]
+    pub fn with_rotate_about_point(mut self, point: Vec3) -> Self {
+        self.rotate_about_point = Some(point);
+        self
+    }
+
     /// Replace the animation config.
     #[must_use]
     pub fn with_config(mut self, config: AnimConfig) -> Self {

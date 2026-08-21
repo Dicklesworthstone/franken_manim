@@ -116,5 +116,7 @@ pub use transform::{
     move_to_target, replacement_transform, restore, scale_in_place, shrink_to_center, swap,
     transform_from_copy,
 };
-pub use transform_matching::{has_same_shape_as, transform_matching_parts};
+pub use transform_matching::{
+    has_same_shape_as, transform_matching_keys, transform_matching_parts,
+};
 pub use update::{MaintainPositionRelativeTo, UpdateFromFunc};
