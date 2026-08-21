@@ -8567,6 +8567,154 @@ class UpdateFromAlphaFunc(Animation):
         self.update_function(self.mobject, true_alpha)
 
 
+class AnimatedBoundary(VGroup):
+    """mobject/changing.py:18 (fm-5wq.4.67): two stroke copies of the
+    outlined VMobject cycle a growing/fading boundary through the live
+    updater seam — verbatim Reference mechanics over the portal's
+    `pointwise_become_partial` and stroke surfaces."""
+
+    def __init__(
+        self,
+        vmobject,
+        colors=None,
+        max_stroke_width=3.0,
+        cycle_rate=0.5,
+        back_and_forth=True,
+        draw_rate_func=_smooth_rate,
+        fade_rate_func=_smooth_rate,
+        **kwargs,
+    ):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError(
+                "AnimatedBoundary requires a VMobject to outline; got "
+                + type(vmobject).__name__
+            )
+        super().__init__(**kwargs)
+        self.vmobject = vmobject
+        # The Reference's default cycle: BLUE_D, BLUE_B, BLUE_E, GREY_BROWN.
+        self.colors = (
+            list(colors)
+            if colors is not None
+            else [_BLUE_D, "#9CDCEB", _BLUE_E, "#736357"]
+        )
+        self.max_stroke_width = max_stroke_width
+        self.cycle_rate = cycle_rate
+        self.back_and_forth = back_and_forth
+        self.draw_rate_func = draw_rate_func
+        self.fade_rate_func = fade_rate_func
+        self.boundary_copies = [
+            vmobject.copy().set_style(stroke_width=0, fill_opacity=0)
+            for _ in range(2)
+        ]
+        self.add(*self.boundary_copies)
+        self.total_time = 0.0
+        self.add_updater(lambda m, dt: self.update_boundary_copies(dt))
+
+    def update_boundary_copies(self, dt):
+        # changing.py:52, verbatim: an altered-rate clock drives the
+        # grow/fade pair through the color cycle.
+        time = self.total_time * self.cycle_rate
+        growing, fading = self.boundary_copies
+        colors = self.colors
+        msw = self.max_stroke_width
+        vmobject = self.vmobject
+
+        index = int(time % len(colors))
+        alpha = time % 1
+        draw_alpha = self.draw_rate_func(alpha)
+        fade_alpha = self.fade_rate_func(alpha)
+
+        if self.back_and_forth and int(time) % 2 == 1:
+            bounds = (1 - draw_alpha, 1)
+        else:
+            bounds = (0, draw_alpha)
+        self.full_family_become_partial(growing, vmobject, *bounds)
+        growing.set_stroke(colors[index], width=msw)
+
+        if time >= 1:
+            self.full_family_become_partial(fading, vmobject, 0, 1)
+            fading.set_stroke(
+                color=colors[index - 1], width=(1 - fade_alpha) * msw
+            )
+
+        self.total_time += dt
+        return self
+
+    def full_family_become_partial(self, mob1, mob2, a, b):
+        family1 = mob1.family_members_with_points()
+        family2 = mob2.family_members_with_points()
+        for sm1, sm2 in zip(family1, family2):
+            sm1.pointwise_become_partial(sm2, a, b)
+        return self
+
+
+class TracedPath(VMobject):
+    """mobject/changing.py:98 (fm-5wq.4.67): a live path grown from a
+    traced-point callable every frame, verbatim over the portal's
+    smooth-points and stroke surfaces. A non-callable trace source is a
+    named refusal instead of the Reference's mid-play crash."""
+
+    def __init__(
+        self,
+        traced_point_func,
+        time_traced=None,
+        time_per_anchor=1.0 / 15,
+        stroke_color=None,
+        stroke_width=2.0,
+        stroke_opacity=1.0,
+        **kwargs,
+    ):
+        if not callable(traced_point_func):
+            raise TypeError(
+                "TracedPath requires a callable returning the traced "
+                "point; got " + type(traced_point_func).__name__
+            )
+        self.stroke_config = dict(
+            color=stroke_color if stroke_color is not None else "#FFFFFF",
+            width=stroke_width,
+            opacity=stroke_opacity,
+        )
+        super().__init__(**kwargs)
+        self.traced_point_func = traced_point_func
+        self.time_traced = (
+            float(time_traced) if time_traced is not None else _np.inf
+        )
+        self.time_per_anchor = time_per_anchor
+        self.time = 0.0
+        self.traced_points = []
+        self.add_updater(lambda m, dt: m.update_path(dt))
+
+    def update_path(self, dt):
+        # changing.py:122, verbatim (including the finite-window resample
+        # and the every-now-and-then list refresh).
+        if dt == 0:
+            return self
+        point = _np.array(self.traced_point_func(), dtype=float).copy()
+        self.traced_points.append(point)
+
+        if self.time_traced < _np.inf:
+            n_relevant_points = int(self.time_traced / dt + 0.5)
+            n_tps = len(self.traced_points)
+            if n_tps < n_relevant_points:
+                points = self.traced_points + [point] * (
+                    n_relevant_points - n_tps
+                )
+            else:
+                points = self.traced_points[n_tps - n_relevant_points:]
+            if n_tps > 10 * n_relevant_points:
+                self.traced_points = self.traced_points[-n_relevant_points:]
+        else:
+            points = self.traced_points
+
+        if points:
+            self.set_points_smoothly(points)
+
+        self.set_stroke(**self.stroke_config)
+
+        self.time += dt
+        return self
+
+
 class ChangeSpeed(Animation):
     """ManimCE's `animation/speed.py` time remap — not a pinned-Reference
     class. The native seam it needs (a Choreo child-segment clock remap
@@ -11097,6 +11245,8 @@ def _install_schema_surface():
         ): MaintainPositionRelativeTo,
         ("manimlib.animation.speed", "ChangeSpeed"): ChangeSpeed,
         ("manimlib.animation.specialized", "Delay"): Delay,
+        ("manimlib.mobject.changing", "AnimatedBoundary"): AnimatedBoundary,
+        ("manimlib.mobject.changing", "TracedPath"): TracedPath,
         ("manimlib.animation.numbers", "ChangingDecimal"): ChangingDecimal,
         ("manimlib.animation.numbers", "ChangeDecimalToValue"): ChangeDecimalToValue,
         ("manimlib.animation.numbers", "CountInFrom"): CountInFrom,

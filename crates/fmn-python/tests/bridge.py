@@ -10411,3 +10411,50 @@ restore_anchor_scene.play(
     rate_func=manimlib.linear,
 )
 assert math.isclose(scale_anchor.get_width(), 2.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+# ----------------------------------------- TracedPath / AnimatedBoundary
+# fm-5wq.4.67: the updater-backed changing mobjects over the live seam.
+
+changing_module = importlib.import_module("manimlib.mobject.changing")
+
+# TracedPath grows a pointful path from a moving mobject across frames.
+traced_mover = geometry.Rectangle(width=0.4, height=0.4)
+traced_path = changing_module.TracedPath(traced_mover.get_center)
+traced_scene = Scene()
+traced_scene.add(traced_mover, traced_path)
+traced_scene.play(
+    traced_mover.animate.shift([1.5, 0.75, 0.0]), run_time=3.0 / 30.0
+)
+assert traced_path.has_points()
+assert traced_path.get_num_points() > 0
+assert len(traced_path.traced_points) >= 3
+# The last traced point is where the mover ended up.
+assert np.allclose(traced_path.traced_points[-1], traced_mover.get_center())
+
+# AnimatedBoundary constructs its two cycling stroke copies and survives
+# frames advancing.
+boundary_target = geometry.Rectangle(width=1.2, height=0.8)
+boundary = changing_module.AnimatedBoundary(boundary_target)
+assert len(boundary.boundary_copies) == 2
+boundary_scene = Scene()
+boundary_scene.add(boundary_target, boundary)
+boundary_scene.play(specialized_animation.Delay(run_time=2.0 / 30.0))
+boundary_growing = boundary.boundary_copies[0]
+assert boundary_growing.has_points()
+assert boundary.total_time > 0.0
+
+# Named refusals: a non-callable trace source, a non-VMobject boundary.
+try:
+    changing_module.TracedPath(None)
+except TypeError as error:
+    assert "requires a callable" in str(error)
+else:
+    raise AssertionError("TracedPath accepted None")
+
+try:
+    changing_module.AnimatedBoundary("not a vmobject")
+except TypeError as error:
+    assert "requires a VMobject" in str(error)
+else:
+    raise AssertionError("AnimatedBoundary accepted a non-VMobject")
