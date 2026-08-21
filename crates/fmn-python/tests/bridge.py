@@ -10921,3 +10921,58 @@ except ValueError as error:
     assert "no pointful VMobject members" in str(error), error
 else:
     raise AssertionError("Prismify accepted a point-less family")
+
+
+# ------------------------------------------ DecimalNumber complex values
+# fm-5wq.4.80: the Reference's hide_zero_components_on_complex reductions
+# ride the native f64 formatter exactly; the general complex formatter is
+# BN-08's deliberate native exclusion and refuses by that name.
+
+# A zero-real complex renders natively as the imaginary component + "i".
+imag_number = manimlib.DecimalNumber(complex(0, 2))
+assert imag_number.get_value() == complex(0, 2)
+assert len(imag_number.submobjects) > 0
+assert any(child.has_points() for child in imag_number.submobjects)
+
+# set_value to another pure-imaginary value updates in place.
+imag_number.set_value(complex(0, -3.5))
+assert imag_number.get_value() == complex(0, -3.5)
+assert any(child.has_points() for child in imag_number.submobjects)
+
+# A zero-imag complex reduces to the plain real path.
+real_ish = manimlib.DecimalNumber(complex(3, 0))
+assert real_ish.get_value() == complex(3, 0)
+assert any(child.has_points() for child in real_ish.submobjects)
+real_ish.set_value(4.0)
+assert real_ish.get_value() == 4.0
+
+# The general complex formatter is the named BN-08 refusal.
+try:
+    manimlib.DecimalNumber(complex(1, 2))
+except NotImplementedError as error:
+    assert "BN-08" in str(error)
+else:
+    raise AssertionError("DecimalNumber accepted a general complex value")
+
+# Mode switches refuse by name rather than rendering a wrong display.
+try:
+    imag_number.set_value(1.0)
+except NotImplementedError as error:
+    assert "imaginary display" in str(error)
+else:
+    raise AssertionError("an imaginary DecimalNumber switched to real")
+
+# Named errors for non-finite and non-numeric values.
+try:
+    manimlib.DecimalNumber(float("nan"))
+except ValueError as error:
+    assert "finite value" in str(error)
+else:
+    raise AssertionError("DecimalNumber accepted nan")
+
+try:
+    manimlib.DecimalNumber("seven")
+except TypeError as error:
+    assert "real or complex number" in str(error)
+else:
+    raise AssertionError("DecimalNumber accepted a string")

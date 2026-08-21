@@ -6626,17 +6626,35 @@ class DecimalNumber(VMobject):
         text_config=None,
         **kwargs,
     ):
-        del hide_zero_components_on_complex  # only observable for complex
-        if isinstance(number, complex):
-            raise NotImplementedError(
-                "DecimalNumber over complex values awaits the native "
-                "complex-formatting path; real values are native"
-            )
         _refuse_unrouted(
             "DecimalNumber()", [("text_config", bool(text_config))]
         )
         _install_live_state(self)
-        self.number = float(number)
+        # fm-5wq.4.80: the Reference's hide_zero_components_on_complex
+        # reductions are pure component selection, so they ride the native
+        # f64 formatter exactly — a zero-imag complex is the real path, a
+        # zero-real complex is the imaginary component with the "i" unit
+        # glyph. The general complex formatter is BN-08's deliberate
+        # native exclusion and refuses by that name in
+        # _reduced_build_value.
+        self.hide_zero_components_on_complex = bool(
+            hide_zero_components_on_complex
+        )
+        self._complex_imag_mode = (
+            isinstance(number, complex)
+            and self.hide_zero_components_on_complex
+            and number.real == 0
+            and number.imag != 0
+        )
+        if self._complex_imag_mode:
+            if unit is not None:
+                raise NotImplementedError(
+                    "DecimalNumber imaginary values with a unit await the "
+                    "native complex formatter (BN-08 excludes it)"
+                )
+            unit = "i"
+        build_value = self._reduced_build_value(number)
+        self.number = number if isinstance(number, complex) else build_value
         self.font_size = float(font_size)
         self.edge_to_fix = _np.array(_vec3(edge_to_fix))
         self._decimal_params = (
@@ -6656,10 +6674,58 @@ class DecimalNumber(VMobject):
             float(fill_border_width),
         )
         specs = self._build_decimal_number(
-            _native_shell_factory, self.number, *self._decimal_params
+            _native_shell_factory, build_value, *self._decimal_params
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
+
+    def _reduced_build_value(self, value):
+        """Map a value onto the native f64 formatter (fm-5wq.4.80). The
+        hide-zero complex reductions are exact; everything else refuses by
+        the name of what is actually missing or wrong."""
+        if isinstance(value, complex):
+            hide = self.hide_zero_components_on_complex
+            if hide and value.imag == 0:
+                if self._complex_imag_mode:
+                    raise NotImplementedError(
+                        "DecimalNumber cannot switch an imaginary display "
+                        "to a real value; the native complex formatter is "
+                        "deliberately absent (BN-08)"
+                    )
+                reduced = float(value.real)
+            elif hide and value.real == 0:
+                if not self._complex_imag_mode:
+                    raise NotImplementedError(
+                        "DecimalNumber cannot switch a real display to an "
+                        "imaginary value; the native complex formatter is "
+                        "deliberately absent (BN-08)"
+                    )
+                reduced = float(value.imag)
+            else:
+                raise NotImplementedError(
+                    "DecimalNumber over a general complex value awaits "
+                    "the native complex formatter; fmn-library's numbers "
+                    "shelf deliberately formats f64 only (BN-08)"
+                )
+        else:
+            try:
+                reduced = float(value)
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    "DecimalNumber requires a real or complex number; "
+                    "got " + type(value).__name__
+                ) from error
+            if self._complex_imag_mode:
+                raise NotImplementedError(
+                    "DecimalNumber cannot switch an imaginary display to "
+                    "a real value; the native complex formatter is "
+                    "deliberately absent (BN-08)"
+                )
+        if not _math.isfinite(reduced):
+            raise ValueError(
+                "DecimalNumber requires a finite value; got " + repr(value)
+            )
+        return reduced
 
     def get_value(self):
         return self.number
@@ -6671,7 +6737,8 @@ class DecimalNumber(VMobject):
         # scratch nursery and set_submobjects adopts them — the same
         # adoption-on-attach seam Scene-bound families already use — so a
         # bound number mutates in place, digit-count changes included.
-        number = float(number)
+        original = number
+        number = self._reduced_build_value(number)
         move_to_point = self.get_edge_center(self.edge_to_fix)
         donor = next(
             (sm for sm in self.submobjects if sm.has_points()), None
@@ -6694,7 +6761,7 @@ class DecimalNumber(VMobject):
         self.move_to(move_to_point, self.edge_to_fix)
         if style is not None:
             self.set_style(**style)
-        self.number = number
+        self.number = original if isinstance(original, complex) else number
         return self
 
     def _handle_scale_side_effects(self, scale_factor):

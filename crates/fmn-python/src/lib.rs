@@ -3759,44 +3759,6 @@ impl BridgeMobject {
         install_native_tree(slf, factory, prism)
     }
 
-    /// `Prismify` over a VMobject FAMILY (fm-5wq.4.81): one native
-    /// extrusion tree per pointful family member, in family order, hung
-    /// under one group root — the same builder, composed per child.
-    fn _build_prismify_family<'py>(
-        slf: &Bound<'py, Self>,
-        factory: &Bound<'py, PyAny>,
-        source: &Bound<'_, BridgeMobject>,
-        depth: f64,
-        direction: [f64; 3],
-    ) -> PyResult<Bound<'py, PyList>> {
-        let point_sets: Vec<_> = with_stage(source, |stage, mob| {
-            stage
-                .family(mob)
-                .into_iter()
-                .filter_map(|member| {
-                    stage
-                        .get_points(member)
-                        .filter(|points| !points.is_empty())
-                })
-                .collect()
-        })?;
-        if point_sets.is_empty() {
-            return Err(PyValueError::new_err(
-                "Prismify family has no pointful members to extrude",
-            ));
-        }
-        let mut root = fmn_mobject::Mobject::from(fmn_library::vmobject::v_group(
-            std::iter::empty::<fmn_library::VMobject>(),
-        ));
-        for points in point_sets {
-            let prism = fmn_library::Prismify::new(fmn_library::VMobject::from_points(points))
-                .depth(depth)
-                .direction(direction);
-            root.submobjects.push(prism.into());
-        }
-        install_native_tree(slf, factory, root)
-    }
-
     /// `Sphere(radius, ...)` over the solids shelf: the Reference's UV
     /// grid with radial true normals.
     #[allow(clippy::too_many_arguments)]
