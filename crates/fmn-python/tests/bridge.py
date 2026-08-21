@@ -11125,3 +11125,50 @@ except AssertionError:
     pass
 else:
     raise AssertionError("AddTextWordByWord accepted a non-StringMobject")
+
+# fm-5wq.4.84: ThreeDAxes z_normal routes onto the native builder's normal
+# seam. The normal reorients the z-axis tick construction (planes.rs: the
+# axis line itself stays along z, the Reference's exact behaviour).
+znormal_default_axes = manimlib.ThreeDAxes()
+znormal_out_axes = manimlib.ThreeDAxes(z_normal=manimlib.OUT)
+znormal_down_axes = manimlib.ThreeDAxes(z_normal=manimlib.DOWN)
+
+
+def _znormal_axis_points(axes):
+    return np.concatenate(
+        [
+            member.get_points()
+            for member in axes.z_axis.family_members_with_points()
+        ]
+    )
+
+
+def _znormal_axis_spans(axes):
+    points = _znormal_axis_points(axes)
+    return points.max(axis=0) - points.min(axis=0)
+
+
+# The axis extends along z for every normal (the normal reorients ticks,
+# never the axis itself)...
+for _znormal_probe in (znormal_default_axes, znormal_out_axes):
+    _znormal_spans = _znormal_axis_spans(_znormal_probe)
+    assert _znormal_spans[2] > _znormal_spans[0]
+    assert _znormal_spans[2] > _znormal_spans[1]
+# ...the DOWN normal is exactly the default...
+assert np.array_equal(
+    _znormal_axis_points(znormal_down_axes),
+    _znormal_axis_points(znormal_default_axes),
+)
+# ...and a different normal reorients the tick construction.
+znormal_out_points = _znormal_axis_points(znormal_out_axes)
+znormal_default_points = _znormal_axis_points(znormal_default_axes)
+assert znormal_out_points.shape != znormal_default_points.shape or not (
+    np.allclose(znormal_out_points, znormal_default_points)
+)
+
+try:
+    manimlib.ThreeDAxes(z_normal="nope")
+except TypeError as error:
+    assert "z_normal must be a 3-vector" in str(error), error
+else:
+    raise AssertionError("ThreeDAxes accepted a non-vector z_normal")
