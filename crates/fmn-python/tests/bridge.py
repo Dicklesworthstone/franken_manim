@@ -1763,6 +1763,14 @@ assert Scene(preview_while_skipping="yes").preview_while_skipping is True
 assert Scene(preview_while_skipping=0).preview_while_skipping is False
 assert Scene(preview_while_skipping=1).preview_while_skipping is True
 
+# fm-5wq.4: Scene.__init__ captures its raw constructor arguments verbatim
+# as args/kwargs (the Reference reuses them for scene re-instantiation).
+assert Scene().args == ()
+assert isinstance(Scene().kwargs, dict)
+capture_scene = Scene(1, 2, skip_animations=True)
+assert capture_scene.args == (1, 2)
+assert capture_scene.kwargs["skip_animations"] is True
+
 # fm-5wq.4: start_at_animation_number skips until post_play's num_plays
 # increment reaches it; the next pre_play's update_skipping_status then
 # releases the skip. The Reference captures original_skipping_status
@@ -5197,6 +5205,32 @@ else:
     raise AssertionError(
         "ControlPanel silently accepted unknown opener_text_kwargs"
     )
+
+# opener_text_kwargs colour rides Atlas Text (color, fill_color wins).
+colored_opener_panel = interactive.ControlPanel(
+    interactive.Checkbox(True),
+    opener_text_kwargs=dict(text="Settings", font_size=32, color=manimlib.RED),
+)
+assert colored_opener_panel.panel_opener.submobjects[1].get_fill_color() == (
+    manimlib.RED
+)
+fill_opener_panel = interactive.ControlPanel(
+    interactive.Checkbox(True),
+    opener_text_kwargs=dict(
+        text="Settings",
+        color=manimlib.RED,
+        fill_color=manimlib.BLUE,
+    ),
+)
+assert fill_opener_panel.panel_opener.submobjects[1].get_fill_color() == (
+    manimlib.BLUE
+)
+colored_opener_identity = colored_opener_panel.panel_opener
+colored_opener_text = colored_opener_panel.panel_opener.submobjects[1]
+colored_opener_panel.open_panel()
+assert colored_opener_panel.panel_opener is colored_opener_identity
+assert colored_opener_panel.panel_opener.submobjects[1] is colored_opener_text
+assert colored_opener_text.get_fill_color() == manimlib.RED
 
 # Remaining Rectangle constructor keys on panel_kwargs / opener_kwargs ride
 # Atlas stroke colour/width/opacity. add_controls/remove_controls keep the
