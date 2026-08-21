@@ -11172,3 +11172,46 @@ except TypeError as error:
     assert "z_normal must be a 3-vector" in str(error), error
 else:
     raise AssertionError("ThreeDAxes accepted a non-vector z_normal")
+
+
+# --------------------------- Tex.make_number_changeable nested part groups
+# fm-5wq.4.85: a nested (multi-part) Tex replaces the selected number span
+# with a live DecimalNumber inside its owning part — the part structure
+# survives and later glyphs in the part re-index.
+
+nested_changeable_tex = manimlib.Tex("y =", "0.50 x")
+assert any(len(path) == 2 for path in nested_changeable_tex._string_sub_paths)
+nested_part_count = len(nested_changeable_tex.submobjects)
+nested_decimal = nested_changeable_tex.make_number_changeable("0.50")
+assert isinstance(nested_decimal, manimlib.DecimalNumber)
+# The root part list is untouched and the decimal lives inside a part.
+assert len(nested_changeable_tex.submobjects) == nested_part_count
+assert any(
+    nested_decimal in part.submobjects
+    for part in nested_changeable_tex.submobjects
+)
+# Every surviving path is still two-level and in-range for its part.
+assert all(
+    len(path) == 2
+    and path[1]
+    < len(nested_changeable_tex.submobjects[path[0]].submobjects)
+    for path in nested_changeable_tex._string_sub_paths
+)
+# set_value updates the shown digits through Scene.play.
+nested_change_scene = Scene()
+nested_change_scene.add(nested_changeable_tex)
+nested_change_scene.play(
+    numbers_animation.ChangeDecimalToValue(
+        nested_decimal, 2.75, run_time=2.0 / 30.0
+    )
+)
+assert math.isclose(nested_decimal.get_value(), 2.75)
+assert any(child.has_points() for child in nested_decimal.submobjects)
+
+# The Reference's empty-result contract holds on nested families too: an
+# unknown substring and an index past the last occurrence both return an
+# empty VMobject, never a crash.
+missing = manimlib.Tex("a =", "1.00").make_number_changeable("9.99")
+assert isinstance(missing, VMobject) and len(missing.submobjects) == 0
+past = manimlib.Tex("b =", "1.00").make_number_changeable("1.00", index=5)
+assert isinstance(past, VMobject) and len(past.submobjects) == 0

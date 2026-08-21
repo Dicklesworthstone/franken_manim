@@ -5689,15 +5689,31 @@ class Tex(StringMobject):
         if not occurrences or index >= len(occurrences):
             return VMobject()
         selected = occurrences if replace_all else [occurrences[index]]
-        if any(
-            len(self._string_sub_paths[ordinal]) != 1
-            for ordinals in selected
-            for ordinal in ordinals
+        # fm-5wq.4.85: two-level families (multi-part Tex, sub-paths
+        # [part, glyph]) replace inside the owning part, keeping the part
+        # structure. What is genuinely missing refuses by name: deeper or
+        # mixed nesting, and a number whose glyphs cross a part boundary.
+        nested = any(len(path) != 1 for path in self._string_sub_paths)
+        if nested and not all(
+            len(path) == 2 for path in self._string_sub_paths
         ):
             raise NotImplementedError(
-                "Tex.make_number_changeable across nested part groups awaits "
-                "the grouped-span replacement seam"
+                "Tex.make_number_changeable over glyph families nested "
+                "deeper than one part level awaits a general grouped-span "
+                "replacement seam"
             )
+        if nested:
+            for ordinals in selected:
+                touched = {
+                    self._string_sub_paths[ordinal][0]
+                    for ordinal in ordinals
+                }
+                if len(touched) != 1:
+                    raise NotImplementedError(
+                        "Tex.make_number_changeable across part "
+                        "boundaries awaits the grouped-span replacement "
+                        "seam"
+                    )
 
         if "num_decimal_places" not in config:
             config["num_decimal_places"] = (
@@ -5713,30 +5729,62 @@ class Tex(StringMobject):
 
         by_first = {ordinals[0]: (set(ordinals), decimal) for ordinals, decimal in replacements}
         removed = {ordinal for ordinals, _ in replacements for ordinal in ordinals[1:]}
-        children = []
-        spans = []
-        paths = []
-        for ordinal, span in enumerate(self._string_sub_spans):
-            replacement = by_first.get(ordinal)
-            if replacement is not None:
-                selected_ordinals, decimal = replacement
-                children.append(decimal)
-                spans.append(
-                    (
-                        min(self._string_sub_spans[item][0] for item in selected_ordinals),
-                        max(self._string_sub_spans[item][1] for item in selected_ordinals),
+        if nested:
+            # Rebuild inside each owning part: replaced runs collapse to
+            # their DecimalNumber, later glyphs in the same part re-index,
+            # and the root's part list never changes.
+            parts = list(self.submobjects)
+            part_children = {index: [] for index in range(len(parts))}
+            spans = []
+            paths = []
+            for ordinal, span in enumerate(self._string_sub_spans):
+                part_index = self._string_sub_paths[ordinal][0]
+                bucket = part_children[part_index]
+                replacement = by_first.get(ordinal)
+                if replacement is not None:
+                    selected_ordinals, decimal = replacement
+                    bucket.append(decimal)
+                    spans.append(
+                        (
+                            min(self._string_sub_spans[item][0] for item in selected_ordinals),
+                            max(self._string_sub_spans[item][1] for item in selected_ordinals),
+                        )
                     )
-                )
-                paths.append([len(children) - 1])
-            elif ordinal not in removed:
-                children.append(self._string_submobject(ordinal))
-                spans.append(span)
-                paths.append([len(children) - 1])
-        self.set_submobjects(children)
-        self._string_sub_spans = spans
-        self._string_sub_paths = paths
+                    paths.append([part_index, len(bucket) - 1])
+                elif ordinal not in removed:
+                    bucket.append(self._string_submobject(ordinal))
+                    spans.append(span)
+                    paths.append([part_index, len(bucket) - 1])
+            for part_index, part in enumerate(parts):
+                part.set_submobjects(part_children[part_index])
+            self._string_sub_spans = spans
+            self._string_sub_paths = paths
+        else:
+            children = []
+            spans = []
+            paths = []
+            for ordinal, span in enumerate(self._string_sub_spans):
+                replacement = by_first.get(ordinal)
+                if replacement is not None:
+                    selected_ordinals, decimal = replacement
+                    children.append(decimal)
+                    spans.append(
+                        (
+                            min(self._string_sub_spans[item][0] for item in selected_ordinals),
+                            max(self._string_sub_spans[item][1] for item in selected_ordinals),
+                        )
+                    )
+                    paths.append([len(children) - 1])
+                elif ordinal not in removed:
+                    children.append(self._string_submobject(ordinal))
+                    spans.append(span)
+                    paths.append([len(children) - 1])
+            self.set_submobjects(children)
+            self._string_sub_spans = spans
+            self._string_sub_paths = paths
         self.tex_string = self.tex_string.replace(substr, "\\decimalmob", len(replacements))
-        self.tex_strings = [self.tex_string]
+        if not nested:
+            self.tex_strings = [self.tex_string]
         self.string = self.tex_string
         decimal_mobs = [decimal for _, decimal in replacements]
         return VGroup(*decimal_mobs) if replace_all else decimal_mobs[0]
