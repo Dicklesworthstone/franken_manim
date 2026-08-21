@@ -103,18 +103,18 @@ use fmn_core::constants::{
 };
 use fmn_core::types::Vec3;
 use fmn_geom::GeomError;
-use fmn_mobject::stage::{Mob, Stage};
 use fmn_mobject::Mobject;
+use fmn_mobject::stage::{Mob, Stage};
 use fmn_text::FontBook;
 
 use crate::arc::Circle;
 use crate::line::Line;
-use crate::matchers::{checkmark, exmark, SurroundingRectangle};
+use crate::matchers::{SurroundingRectangle, checkmark, exmark};
 use crate::numbers::DecimalNumber;
 use crate::poly::Rectangle;
 use crate::style::Style;
-use crate::text::{text_style, Text, TextMobjectError};
-use crate::vmobject::{v_group, VMobject};
+use crate::text::{Text, TextMobjectError, text_style};
+use crate::vmobject::{VMobject, v_group};
 
 // ---------------------------------------------------------------------------
 // ControlMobject's Stage side: the tracker binding
@@ -514,11 +514,7 @@ impl EnableDisableButton {
 
 impl ScalarControl for EnableDisableButton {
     fn scalar_value(&self) -> f64 {
-        if self.value {
-            1.0
-        } else {
-            0.0
-        }
+        if self.value { 1.0 } else { 0.0 }
     }
 
     fn at_value(&self, value: f64) -> Self {
@@ -715,11 +711,7 @@ impl Checkbox {
 
 impl ScalarControl for Checkbox {
     fn scalar_value(&self) -> f64 {
-        if self.value {
-            1.0
-        } else {
-            0.0
-        }
+        if self.value { 1.0 } else { 0.0 }
     }
 
     fn at_value(&self, value: f64) -> Self {
@@ -1840,6 +1832,7 @@ pub struct ControlPanel {
     controls: Vec<VMobject>,
     opener_text: String,
     opener_font_size: f64,
+    opener_text_color: Srgb,
     panel_width: f64,
     panel_height: f64,
     panel_fill: Srgb,
@@ -1866,6 +1859,7 @@ impl ControlPanel {
             controls: controls.into_iter().collect(),
             opener_text: "Control Panel".to_string(),
             opener_font_size: 20.0,
+            opener_text_color: DEFAULT_MOBJECT_COLOR,
             panel_width: FRAME_WIDTH / 4.0,
             panel_height: MED_SMALL_BUFF + FRAME_HEIGHT,
             panel_fill: GREY_C,
@@ -1894,6 +1888,14 @@ impl ControlPanel {
     #[must_use]
     pub fn opener_font_size(mut self, font_size: f64) -> Self {
         self.opener_font_size = font_size;
+        self
+    }
+
+    /// The opener label's colour (`opener_text_kwargs["color"]` /
+    /// `["fill_color"]`).
+    #[must_use]
+    pub fn opener_text_color(mut self, color: Srgb) -> Self {
+        self.opener_text_color = color;
         self
     }
 
@@ -2007,6 +2009,7 @@ impl ControlPanel {
             .expect("an unrounded opener cannot request arc components");
         let info_text = Text::new(&self.opener_text)
             .font_size(self.opener_font_size)
+            .style(text_style().color(self.opener_text_color))
             .build(book)?
             .vmob
             .moved_to(opener_rect.center_point());
@@ -2642,11 +2645,13 @@ mod tests {
                 .expect("zero-span ranges are defined"),
             5.0
         );
-        assert!(slider
-            .handle()
-            .center_point()
-            .into_iter()
-            .all(f64::is_finite));
+        assert!(
+            slider
+                .handle()
+                .center_point()
+                .into_iter()
+                .all(f64::is_finite)
+        );
     }
 
     #[test]
@@ -3116,6 +3121,7 @@ mod tests {
             .opener_height(0.75)
             .opener_fill(GREEN, 0.8)
             .opener_stroke(GREY_A, 1.5, 0.25)
+            .opener_text_color(RED)
             .build(&book)
             .expect("opener text typesets");
         assert!((panel.panel().length_over_dim(0) - 3.0).abs() < 1e-9);
@@ -3132,6 +3138,7 @@ mod tests {
         assert_eq!(panel.opener_rect().style().stroke_color, GREY_A);
         assert_eq!(panel.opener_rect().style().stroke_width, 1.5);
         assert_eq!(panel.opener_rect().style().stroke_opacity, 0.25);
+        assert_eq!(panel.info_text().style().fill_color, RED);
     }
 
     // --------------------------------------------- tracker integration

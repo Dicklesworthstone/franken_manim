@@ -3394,6 +3394,7 @@ impl BridgeMobject {
         control_extents: Vec<([f64; 3], [f64; 3])>,
         opener_text: &str,
         opener_font_size: f64,
+        opener_text_color: [f64; 3],
         open: bool,
         panel: (f64, f64, [f64; 3], f64, [f64; 3], f64, f64),
         opener: (f64, f64, [f64; 3], f64, [f64; 3], f64, f64),
@@ -3423,6 +3424,11 @@ impl BridgeMobject {
             let mut panel = fmn_library::ControlPanel::new(controls)
                 .opener_text(opener_text)
                 .opener_font_size(opener_font_size)
+                .opener_text_color(fmn_core::color::Srgb {
+                    r: opener_text_color[0],
+                    g: opener_text_color[1],
+                    b: opener_text_color[2],
+                })
                 .panel_width(panel_width)
                 .panel_height(panel_height)
                 .panel_fill(

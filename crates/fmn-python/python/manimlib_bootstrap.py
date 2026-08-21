@@ -11149,7 +11149,9 @@ class ControlPanel(Group):
             )
 
         text_config = dict(opener_text_kwargs)
-        text_unknown = sorted(set(text_config) - {"text", "font_size"})
+        text_unknown = sorted(
+            set(text_config) - {"text", "font_size", "color", "fill_color"}
+        )
         if text_unknown:
             raise TypeError(
                 "unexpected keyword arguments: "
@@ -11187,11 +11189,20 @@ class ControlPanel(Group):
             control_extents.append((_vec3(box[0]), _vec3(box[2])))
         panel_config = self.panel_kwargs
         opener_config = self.opener_kwargs
+        text_config = self.opener_text_kwargs
+        opener_text_color = tuple(
+            _color_to_rgb(
+                text_config.get(
+                    "fill_color", text_config.get("color", _WHITE)
+                )
+            )
+        )
         specs = self._build_control_panel(
             _native_shell_factory,
             control_extents,
             opener_text,
             opener_font_size,
+            opener_text_color,
             bool(open),
             (
                 float(panel_config.get("width", _FRAME_SHAPE[0] / 4.0)),
@@ -12888,6 +12899,22 @@ class InteractiveScene(Scene):
             raise TypeError("InteractiveScene crosshair_style must be a dict")
         else:
             self.crosshair_style = dict(style)
+        for config_name in (
+            "corner_dot_config",
+            "cursor_location_config",
+            "time_label_config",
+        ):
+            config = kwargs.get(config_name, None)
+            if config is None:
+                setattr(
+                    self, config_name, dict(getattr(type(self), config_name))
+                )
+            elif not isinstance(config, dict):
+                raise TypeError(
+                    "InteractiveScene " + config_name + " must be a dict"
+                )
+            else:
+                setattr(self, config_name, dict(config))
 
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)

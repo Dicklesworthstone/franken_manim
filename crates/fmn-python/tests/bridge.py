@@ -1428,6 +1428,14 @@ assert np.allclose(
     three_d_scene.frame.get_euler_angles()[:2],
     np.deg2rad([-30.0, 70.0]),
 )
+
+class FlatThreeDScene(scene_module.ThreeDScene):
+    default_frame_orientation = (0, 0)
+
+
+flat_three_d_scene = FlatThreeDScene()
+assert np.isclose(flat_three_d_scene.frame.get_theta(), 0.0)
+assert np.isclose(flat_three_d_scene.frame.get_phi(), 0.0)
 depth_circle = manimlib.Circle()
 three_d_scene.add(depth_circle)
 assert depth_circle.uniforms["depth_test"] is True
@@ -18179,3 +18187,57 @@ except TypeError as error:
     assert str(error) == "InteractiveScene crosshair_style must be a dict"
 else:
     raise AssertionError("InteractiveScene accepted a non-dict crosshair_style")
+
+# fm-5wq.4: the three overlay dicts follow the same pattern — copy the
+# class default when omitted (never aliasing it), store a copy of an
+# explicit dict, and name the key on a non-dict.
+default_config_interactive = InteractiveScene()
+assert (
+    default_config_interactive.corner_dot_config
+    == InteractiveScene.corner_dot_config
+)
+assert (
+    default_config_interactive.corner_dot_config
+    is not InteractiveScene.corner_dot_config
+)
+assert (
+    default_config_interactive.cursor_location_config
+    == InteractiveScene.cursor_location_config
+)
+assert (
+    default_config_interactive.time_label_config
+    == InteractiveScene.time_label_config
+)
+configured_interactive = InteractiveScene(
+    corner_dot_config=dict(color=manimlib.RED, radius=0.1, glow_factor=1.0),
+    cursor_location_config=dict(
+        font_size=30, fill_color=manimlib.BLUE, num_decimal_places=2
+    ),
+    time_label_config=dict(
+        font_size=18, fill_color=manimlib.RED, num_decimal_places=0
+    ),
+)
+assert configured_interactive.corner_dot_config == dict(
+    color=manimlib.RED, radius=0.1, glow_factor=1.0
+)
+assert configured_interactive.cursor_location_config == dict(
+    font_size=30, fill_color=manimlib.BLUE, num_decimal_places=2
+)
+assert configured_interactive.time_label_config == dict(
+    font_size=18, fill_color=manimlib.RED, num_decimal_places=0
+)
+for overlay_config_name in (
+    "corner_dot_config",
+    "cursor_location_config",
+    "time_label_config",
+):
+    try:
+        InteractiveScene(**{overlay_config_name: "nope"})
+    except TypeError as error:
+        assert str(error) == (
+            "InteractiveScene " + overlay_config_name + " must be a dict"
+        )
+    else:
+        raise AssertionError(
+            "InteractiveScene accepted a non-dict " + overlay_config_name
+        )
