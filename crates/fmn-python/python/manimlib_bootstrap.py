@@ -9609,6 +9609,48 @@ class ControlPanel(Group):
         self._control_panel_open = bool(open)
         return self
 
+    def _layout_controls_against_opener(self):
+        panel_box = self.panel.get_bounding_box()
+        opener_box = self.panel_opener.submobjects[0].get_bounding_box()
+        control_extents = []
+        controls = tuple(self.controls.submobjects)
+        for control in controls:
+            box = control.get_bounding_box()
+            control_extents.append((_vec3(box[0]), _vec3(box[2])))
+        specs = self._layout_control_panel_against_opener(
+            _native_shell_factory,
+            (_vec3(panel_box[0]), _vec3(panel_box[2])),
+            (_vec3(opener_box[0]), _vec3(opener_box[2])),
+            control_extents,
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if len(parts) != 2:
+            raise RuntimeError(
+                "native ControlPanel layout contract drift: expected "
+                "panel + controls"
+            )
+        panel_target, controls_target = parts
+        targets = list(controls_target.submobjects)
+        if len(targets) != len(controls):
+            raise RuntimeError(
+                "native ControlPanel controls contract drift: "
+                f"expected {len(controls)} controls, got {len(targets)}"
+            )
+        self.panel.become(panel_target)
+        for control, target in zip(controls, targets):
+            control.shift(target.get_center() - control.get_center())
+
+    def add_controls(self, *new_controls):
+        self.controls.add(*new_controls)
+        self._layout_controls_against_opener()
+
+    def remove_controls(self, *controls_to_remove):
+        self.controls.remove(*controls_to_remove)
+        self._layout_controls_against_opener()
+
     def open_panel(self):
         return self._rebuild_control_panel(open=True)
 

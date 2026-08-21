@@ -2714,6 +2714,55 @@ assert np.isclose(
     atol=1e-6,
 )
 
+# The variadic mutation methods preserve the live panel/opener/controls shells
+# while Atlas's ControlPanelMobject::layout_against_opener supplies every new
+# target. Like the Reference, these mutators return None.
+assert str(inspect.signature(interactive.ControlPanel.add_controls)) == (
+    "(self, *new_controls)"
+)
+assert str(inspect.signature(interactive.ControlPanel.remove_controls)) == (
+    "(self, *controls_to_remove)"
+)
+control_panel.open_panel()
+panel_textbox = interactive.Textbox("native")
+assert control_panel.add_controls(panel_textbox) is None
+assert control_panel.panel is panel_identity
+assert control_panel.panel_opener is opener_identity
+assert control_panel.controls is controls_identity
+assert list(control_panel.controls.submobjects) == [
+    panel_checkbox,
+    panel_toggle,
+    panel_textbox,
+]
+assert control_panel.controls.submobjects[2] is panel_textbox
+assert np.isclose(
+    control_panel.panel.get_bottom()[1],
+    control_panel.panel_opener.submobjects[0].get_top()[1],
+    atol=1e-6,
+)
+assert np.isclose(
+    control_panel.controls.get_bottom()[1],
+    control_panel.panel_opener.submobjects[0].get_top()[1]
+    + manimlib.MED_SMALL_BUFF,
+    atol=1e-6,
+)
+assert control_panel.remove_controls(panel_toggle) is None
+assert control_panel.panel is panel_identity
+assert control_panel.panel_opener is opener_identity
+assert control_panel.controls is controls_identity
+assert list(control_panel.controls.submobjects) == [
+    panel_checkbox,
+    panel_textbox,
+]
+assert control_panel.controls.submobjects[0] is panel_checkbox
+assert control_panel.controls.submobjects[1] is panel_textbox
+assert np.isclose(
+    control_panel.controls.get_bottom()[1],
+    control_panel.panel_opener.submobjects[0].get_top()[1]
+    + manimlib.MED_SMALL_BUFF,
+    atol=1e-6,
+)
+
 try:
     interactive.ControlPanel(geometry.Circle())
 except TypeError as error:

@@ -3255,6 +3255,29 @@ impl BridgeMobject {
         native_shell_specs(slf.py(), factory, children)
     }
 
+    /// Re-layout a live portal `ControlPanel` after its controls family
+    /// changes. Atlas owns the panel/opener geometry law; Python only grafts
+    /// the original control proxies onto the returned native targets.
+    fn _layout_control_panel_against_opener<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        panel_extent: ([f64; 3], [f64; 3]),
+        opener_extent: ([f64; 3], [f64; 3]),
+        control_extents: Vec<([f64; 3], [f64; 3])>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let panel = matcher_extent_vmobject(Some(panel_extent));
+        let opener = matcher_extent_vmobject(Some(opener_extent));
+        let controls = fmn_library::VMobject::new().with_children(
+            control_extents
+                .into_iter()
+                .map(|extent| matcher_extent_vmobject(Some(extent))),
+        );
+        let (panel, controls) = fmn_library::ControlPanelMobject::layout_against_opener(
+            panel, &opener, controls,
+        );
+        native_shell_specs(slf.py(), factory, vec![panel.into(), controls.into()])
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the
