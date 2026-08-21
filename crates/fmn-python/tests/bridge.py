@@ -1367,7 +1367,7 @@ assert not hasattr(failed_camera, "_core")
 # by Lumen's native CameraConfig path.
 assert camera_module.ThreeDCamera.__bases__ == (camera_module.Camera,)
 assert str(inspect.signature(camera_module.ThreeDCamera)) == (
-    "(self, samples=4, **kwargs)"
+    "(samples=4, **kwargs)"
 )
 default_three_d_camera = camera_module.ThreeDCamera()
 assert default_three_d_camera.samples == 4
