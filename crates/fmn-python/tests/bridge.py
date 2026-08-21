@@ -8362,6 +8362,25 @@ assert np.allclose(
     atol=1e-6,
 )
 
+default_square3d = three_dimensions.Square3D()
+assert default_square3d.n_records() == 2 * 2
+
+back_square3d = three_dimensions.Square3D(z_index=-1)
+front_square3d = three_dimensions.Square3D(z_index=1)
+square3d_order_scene = Scene().add(front_square3d, back_square3d)
+assert square3d_order_scene.get_mobjects() == [back_square3d, front_square3d]
+
+failed_square3d = three_dimensions.Square3D.__new__(three_dimensions.Square3D)
+try:
+    three_dimensions.Square3D.__init__(failed_square3d, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Square3D() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Square3D keyword reached the native builder")
+assert not hasattr(failed_square3d, "submobjects")
+
 solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
 assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
 
