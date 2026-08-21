@@ -7688,6 +7688,9 @@ class Sphere(Surface):
         opacity = kwargs.pop("opacity", None)
         shading = kwargs.pop("shading", None)
         depth_test = kwargs.pop("depth_test", True)
+        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
         _refuse_unrouted("Sphere()", [(name, True) for name in sorted(kwargs)])
         _install_live_state(self)
         self.radius = float(radius)
@@ -7696,7 +7699,9 @@ class Sphere(Surface):
         self.u_range = tuple(u_range)
         self.v_range = tuple(v_range)
         self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = 1
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
         self._solid_params = ("sphere", self.radius)
         specs = self._build_sphere(
             _native_surface_shell_factory,
@@ -7706,6 +7711,9 @@ class Sphere(Surface):
             self.resolution,
             self.true_normals,
             self.clockwise,
+            self.preferred_creation_axis,
+            self.epsilon,
+            self.normal_nudge,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)

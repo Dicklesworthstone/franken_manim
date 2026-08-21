@@ -8065,9 +8065,38 @@ assert smooth_child.make_smooth(approx=False) is smooth_child
 assert smooth_child.has_points()
 
 three_dimensions = importlib.import_module("manimlib.mobject.three_dimensions")
-sphere = three_dimensions.Sphere(radius=2.0, clockwise=True, resolution=(5, 3))
+sphere = three_dimensions.Sphere(
+    radius=2.0,
+    clockwise=True,
+    resolution=(5, 3),
+    preferred_creation_axis=0,
+    epsilon=0.02,
+    normal_nudge=0.25,
+)
+assert sphere.n_records() == 15
+assert sphere.preferred_creation_axis == 0
+assert np.isclose(sphere.epsilon, 0.02)
+assert np.isclose(sphere.normal_nudge, 0.25)
+assert np.allclose(
+    np.linalg.norm(
+        sphere.data["d_normal_point"] - sphere.data["point"], axis=1
+    ),
+    0.25,
+    atol=1e-6,
+)
 assert np.allclose(sphere.uv_func(0.0, 0.0), [0.0, 0.0, -2.0])
 assert np.allclose(sphere.uv_func(0.0, math.pi / 2.0), [2.0, 0.0, 0.0])
+
+failed_sphere = three_dimensions.Sphere.__new__(three_dimensions.Sphere)
+try:
+    three_dimensions.Sphere.__init__(failed_sphere, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Sphere() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Sphere keyword reached the native builder")
+assert not hasattr(failed_sphere, "submobjects")
 
 # Atlas owns the complete parametric solid shelf. Every authored portal class
 # preserves the pinned MRO/signature while construction and public uv_func

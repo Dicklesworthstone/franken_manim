@@ -3809,13 +3809,19 @@ impl BridgeMobject {
         resolution: (usize, usize),
         true_normals: bool,
         clockwise: bool,
+        preferred_creation_axis: usize,
+        epsilon: f64,
+        normal_nudge: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let sphere = fmn_library::Sphere::new(radius)
             .u_range(u_range.0, u_range.1)
             .v_range(v_range.0, v_range.1)
             .resolution(resolution.0, resolution.1)
             .true_normals(true_normals)
-            .clockwise(clockwise);
+            .clockwise(clockwise)
+            .preferred_creation_axis(preferred_creation_axis)
+            .epsilon(epsilon)
+            .normal_nudge(normal_nudge);
         install_native_tree(slf, factory, sphere.build())
     }
 
