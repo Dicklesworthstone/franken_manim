@@ -4346,6 +4346,28 @@ right_thought = drawings.ThoughtBubble(
 )
 assert right_thought.circle_radii == [0.08, 0.12, 0.16]
 assert right_thought.direction[0] > 0
+
+assert drawings.DoubleSpeechBubble.__bases__ == (drawings.Bubble,)
+assert list(inspect.signature(drawings.DoubleSpeechBubble).parameters) == [
+    "content",
+    "buff",
+    "filler_shape",
+    "stem_height_to_bubble_height",
+    "stem_top_x_props",
+    "kwargs",
+]
+double_speech = drawings.DoubleSpeechBubble()
+assert double_speech.body is double_speech.submobjects[0]
+assert double_speech.content is double_speech.submobjects[1]
+assert np.isclose(double_speech.content.get_width(), 2.0, atol=1e-5)
+assert np.isclose(double_speech.content.get_height(), 1.0, atol=1e-5)
+assert np.isclose(double_speech.stem_height_to_bubble_height, 0.5)
+assert double_speech.stem_top_x_props == ((0.15, 0.25), (0.75, 0.85))
+assert double_speech.body.has_points()
+assert double_speech.body.get_bottom()[1] < double_speech.content.get_bottom()[1]
+assert double_speech.body.get_fill_color() == manimlib.BLACK
+assert np.isclose(double_speech.body.get_fill_opacity(), 0.8)
+assert double_speech.body.get_stroke_color() == manimlib.WHITE
 try:
     drawings.Bubble()
 except NotImplementedError as error:

@@ -7716,6 +7716,48 @@ class ThoughtBubble(Bubble):
         return result
 
 
+class DoubleSpeechBubble(Bubble):
+    """Rounded rectangle plus two stems over native Union geometry."""
+
+    def __init__(
+        self,
+        content=None,
+        buff=_MED_SMALL_BUFF,
+        filler_shape=(2.0, 1.0),
+        stem_height_to_bubble_height=0.5,
+        stem_top_x_props=((0.15, 0.25), (0.75, 0.85)),
+        **kwargs,
+    ):
+        self.stem_height_to_bubble_height = float(stem_height_to_bubble_height)
+        self.stem_top_x_props = tuple(
+            tuple(props) for props in stem_top_x_props
+        )
+        super().__init__(content, buff, filler_shape, **kwargs)
+
+    def get_body(self, content, direction, buff):
+        rect = SurroundingRectangle(content, buff=buff)
+        rect.round_corners()
+        lp = rect.get_corner(_DL)
+        rp = rect.get_corner(_RIGHT + _DOWN)
+        stem_height = self.stem_height_to_bubble_height * rect.get_height()
+        stems = [
+            Polygon(
+                _interpolate(lp, rp, low_prop),
+                _interpolate(lp, rp, high_prop),
+                _interpolate(lp, rp, tip_prop) + stem_height * _DOWN,
+            )
+            for (low_prop, high_prop), tip_prop in zip(
+                self.stem_top_x_props,
+                (0.0, 1.0),
+            )
+        ]
+        result = Union(rect, *stems)
+        result.insert_n_curves(20)
+        if direction[0] > 0:
+            result.flip()
+        return result
+
+
 class Piano(VGroup):
     """White/black keys over native Rectangle and Difference geometry."""
 
@@ -15900,6 +15942,10 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "SpeechBubble"): SpeechBubble,
         ("manimlib.mobject.svg.drawings", "Piano"): Piano,
         ("manimlib.mobject.svg.drawings", "ThoughtBubble"): ThoughtBubble,
+        (
+            "manimlib.mobject.svg.drawings",
+            "DoubleSpeechBubble",
+        ): DoubleSpeechBubble,
         ("manimlib.mobject.svg.drawings", "Laptop"): Laptop,
         ("manimlib.mobject.svg.drawings", "Piano3D"): Piano3D,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
