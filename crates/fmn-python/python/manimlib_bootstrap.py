@@ -10872,7 +10872,6 @@ class SceneState:
         self.time = scene.get_time()
         self.num_plays = int(getattr(scene, "num_plays", 0))
         skip = set() if ignore is None else set(ignore)
-        self._checkpoint = None if skip else bytes(scene._checkpoint_bytes())
         last = {}
         if getattr(scene, "undo_stack", None):
             last = scene.undo_stack[-1].mobjects_to_copies
@@ -10886,6 +10885,11 @@ class SceneState:
             else:
                 copies[mobject] = mobject.copy()
         self.mobjects_to_copies = copies
+        # Bound mobject.copy() allocates the copied family in the native Stage.
+        # Capture only after that identity map is complete so the checkpoint
+        # is byte-identical to the next read of an otherwise unchanged scene.
+        # An explicitly empty ignore collection still captures native state.
+        self._checkpoint = None if skip else bytes(scene._checkpoint_bytes())
 
     def mobjects_match(self, state):
         if not isinstance(state, SceneState):

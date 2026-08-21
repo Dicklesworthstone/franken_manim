@@ -1438,6 +1438,7 @@ origin = state_square.get_center().copy()
 captured = state_scene.get_state()
 assert isinstance(captured, scene_module.SceneState)
 assert captured._checkpoint == state_scene._checkpoint_bytes()
+assert scene_module.SceneState(state_scene, ignore=[])._checkpoint is not None
 assert list(captured.mobjects_to_copies) == [state_square, state_circle]
 assert captured.n_changes(captured) == 0
 state_square.shift(manimlib.RIGHT)
