@@ -6947,7 +6947,12 @@ class DecimalNumber(VMobject):
             self.set_submobjects(list(scratch.submobjects))
         self.move_to(move_to_point, self.edge_to_fix)
         if style is not None:
-            self.set_style(**style)
+            # fm-5wq.4.92: the donor style is a GLYPH's; restyle the glyph
+            # children only, so the root's background-rectangle records
+            # keep their camera-background paint. A rect-less number is
+            # unchanged (its root carries no records to spare).
+            for child in self.submobjects:
+                child.set_style(**style)
         self.number = original if isinstance(original, complex) else number
         return self
 

@@ -4682,7 +4682,20 @@ impl BridgeMobject {
             decimal = decimal.color(srgb_from_py(color)?);
         }
         let built = with_font_book(|book| decimal.build(book).map_err(native_error))?;
-        install_native_tree(slf, factory, built.into_vmob())
+        let mut tree = fmn_mobject::Mobject::from(built.into_vmob());
+        if include_background_rectangle && !tree.submobjects.is_empty() {
+            // fm-5wq.4.92: the PORTAL contract hoists the background
+            // rectangle onto the ROOT's own records (so set_value's
+            // become seam can rebuild root records in place across digit
+            // count changes); the native builder keeps the Reference's
+            // child-0 shape for the Rust front door.
+            let rect = tree.submobjects.remove(0);
+            let glyphs = std::mem::take(&mut tree.submobjects);
+            let mut root = rect;
+            root.submobjects = glyphs;
+            return install_native_tree(slf, factory, root);
+        }
+        install_native_tree(slf, factory, tree)
     }
 
     /// `Elbow(width, angle)` over Atlas's native corner-mark builder.
