@@ -8182,6 +8182,14 @@ assert np.isclose(torus.get_opacity(), 0.6)
 assert np.allclose(torus.uniforms["shading"], [0.1, 0.2, 0.3])
 assert torus.uniforms["depth_test"] is False
 
+default_torus = three_dimensions.Torus()
+assert default_torus.n_records() == 101 * 101
+
+back_torus = three_dimensions.Torus(resolution=(3, 3), z_index=-1)
+front_torus = three_dimensions.Torus(resolution=(3, 3), z_index=1)
+torus_order_scene = Scene().add(front_torus, back_torus)
+assert torus_order_scene.get_mobjects() == [back_torus, front_torus]
+
 sphere_mesh = three_dimensions.SurfaceMesh(sphere, resolution=(4, 3))
 assert len(sphere_mesh.submobjects) == 7
 assert all(isinstance(line, VMobject) and line.has_points() for line in sphere_mesh)
@@ -8819,11 +8827,10 @@ else:
 
 failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
-    three_dimensions.Torus.__init__(failed_torus, unrouted_option=True)
+    three_dimensions.Torus.__init__(failed_torus, bogus=True)
 except NotImplementedError as error:
     assert str(error) == (
-        "Torus() keyword(s) not yet routed to the native builder: "
-        "unrouted_option"
+        "Torus() keyword(s) not yet routed to the native builder: bogus"
     )
 else:
     raise AssertionError("an unrouted Torus keyword reached the native builder")

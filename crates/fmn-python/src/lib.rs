@@ -3865,6 +3865,7 @@ impl BridgeMobject {
         preferred_creation_axis: usize,
         epsilon: f64,
         normal_nudge: f64,
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
         let torus = fmn_library::Torus::new(r1, r2)
             .u_range(u_range.0, u_range.1)
@@ -3872,8 +3873,10 @@ impl BridgeMobject {
             .resolution(resolution.0, resolution.1)
             .preferred_creation_axis(preferred_creation_axis)
             .epsilon(epsilon)
-            .normal_nudge(normal_nudge);
-        install_native_tree(slf, factory, torus.build())
+            .normal_nudge(normal_nudge)
+            .build()
+            .with_z_index(z_index);
+        install_native_tree(slf, factory, torus)
     }
 
     /// `Cone(height, radius, axis, ...)` over Atlas's native tapered
