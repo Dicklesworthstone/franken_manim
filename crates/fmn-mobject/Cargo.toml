@@ -11,6 +11,8 @@ fmn-dmath.workspace = true
 fmn-core.workspace = true
 fmn-geom.workspace = true
 fmn-hash.workspace = true
+fnp-dtype.workspace = true
+fnp-ndarray.workspace = true
 
 [lints]
 workspace = true

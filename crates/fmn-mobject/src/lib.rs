@@ -31,6 +31,7 @@ pub mod animate;
 pub mod bbox;
 pub mod dynamics;
 pub mod mobject;
+pub mod numpy;
 pub mod order;
 pub mod persist;
 pub mod placement;
@@ -47,6 +48,9 @@ pub use dynamics::{Tracker, TrackerKind};
 pub use mobject::{
     ImageColorSpace, ImagePixelFormat, ImageResource, ImageResourceError, ImageSampler, ImageWrap,
     Mobject, RenderPrimitive,
+};
+pub use numpy::{
+    ExportError, LANE_BYTES, LANE_DTYPE, RecordArray, RecordArrayMut, RecordDType,
 };
 pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{

@@ -45,6 +45,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use fnp_ndarray::NdLayout;
+
+use crate::numpy::{
+    ArrayDesc, ExportError, RecordArray, RecordArrayMut, RecordDType, field_layout, whole_layout,
+};
+
 /// Errors from record sizing (fm-vek.2). Every construction and resize
 /// path proves its lane and byte counts with checked arithmetic *before*
 /// allocating or mutating, and refuses with these typed errors instead of
@@ -717,6 +723,14 @@ impl RecordBuffer {
         self.storage = fresh;
     }
 
+    /// This buffer's record layout as a NumPy structured dtype, in fnp's
+    /// structured-record vocabulary (fm-n1b). Available without exporting a
+    /// view: the dtype is a property of the schema, not of any generation.
+    #[must_use]
+    pub fn numpy_dtype(&self) -> RecordDType {
+        RecordDType::of(&self.schema)
+    }
+
     // -------------------------------------------------------------- views
 
     /// Export a live whole-buffer view — where fmn-python's zero-copy NumPy
@@ -933,6 +947,88 @@ impl RecordView {
         };
         self.storage.mark_written(field_index, index, index);
         true
+    }
+
+    // --------------------------------------------- fnp NumPy export (fm-n1b)
+
+    /// This view's record layout as a NumPy structured dtype.
+    ///
+    /// Pinned with the generation: it stays valid — and stays the dtype the
+    /// exported array was built against — after the originating buffer
+    /// resizes away underneath (V3).
+    #[must_use]
+    pub fn numpy_dtype(&self) -> RecordDType {
+        RecordDType::of(&self.schema)
+    }
+
+    /// The dtype and fnp layout this view exports, before borrowing the cells.
+    fn numpy_desc(&self, writable: bool) -> Result<ArrayDesc, ExportError> {
+        let dtype = RecordDType::of(&self.schema);
+        let record_bytes = dtype.itemsize();
+        let (layout, base_offset, scope) = match self.field {
+            None => (whole_layout(self.len, record_bytes, writable)?, 0, None),
+            Some(index) => {
+                let spec = &self.schema.fields()[index];
+                let offset = dtype
+                    .byte_offset(&spec.name)
+                    .expect("the dtype describes every schema field");
+                let layout =
+                    field_layout(self.len, record_bytes, offset, spec.width, writable)?;
+                (layout, offset, Some(spec.name.clone()))
+            }
+        };
+        Ok(ArrayDesc {
+            dtype,
+            layout,
+            base_offset,
+            scope,
+            len: self.len,
+        })
+    }
+
+    /// The fnp layout of this view's export: `(len,)` of whole records for a
+    /// whole-buffer view, `(len, width)` of lanes for a field-scoped one.
+    /// The layout's `writeable` flag mirrors the view's own.
+    ///
+    /// # Errors
+    /// [`ExportError::Shape`] when fnp refuses the shape/stride combination —
+    /// a field-less schema's zero itemsize, or an unrepresentable span.
+    pub fn numpy_layout(&self) -> Result<NdLayout, ExportError> {
+        Ok(self.numpy_desc(self.writable)?.layout)
+    }
+
+    /// Alias this view's pinned generation as a read-only NumPy-shaped array.
+    ///
+    /// Zero-copy: the returned array borrows the generation's own cells, and
+    /// its `data_ptr()` equals [`RecordView::foreign_data_ptr`]. It holds the
+    /// generation's read lock, so engine writes block until it is dropped.
+    ///
+    /// # Errors
+    /// [`ExportError::Shape`] as for [`RecordView::numpy_layout`].
+    pub fn as_numpy(&self) -> Result<RecordArray<'_>, ExportError> {
+        let desc = self.numpy_desc(false)?;
+        let cells = self.storage.cells.read().expect("storage lock poisoned");
+        Ok(RecordArray::new(cells, desc))
+    }
+
+    /// Alias this view's pinned generation as a writable NumPy-shaped array.
+    ///
+    /// Writes through it are foreign writes (V4): they mutate the engine's
+    /// cells in place without advancing a revision, exactly as a NumPy
+    /// assignment would. Observers refresh from
+    /// [`RecordBuffer::writable_view_affects`] while the view lives, and the
+    /// view's `Drop` bumps every field it exposed.
+    ///
+    /// # Errors
+    /// [`ExportError::ReadOnly`] when the view was exported read-only;
+    /// [`ExportError::Shape`] as for [`RecordView::numpy_layout`].
+    pub fn as_numpy_mut(&self) -> Result<RecordArrayMut<'_>, ExportError> {
+        if !self.writable {
+            return Err(ExportError::ReadOnly);
+        }
+        let desc = self.numpy_desc(true)?;
+        let cells = self.storage.cells.write().expect("storage lock poisoned");
+        Ok(RecordArrayMut::new(cells, desc))
     }
 
     /// Model a write performed directly through foreign zero-copy memory.

@@ -147,6 +147,19 @@ glam	0.31.1	crates-io	556f6b2ea90b8d15a74e0e7bb41671c9bdf38cd9f78c284d750b9ce58a
 glam	0.32.1	crates-io	f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0	-	MIT OR Apache-2.0	no	no	no	no	expansion	runtime	nalgebra's optional convert-glam032 bridge — locked by the pinned fsci-integrate resolution's feature surface, the feature itself never enabled	fm	with-frankenscipy-pin
 num-bigint	0.4.8	crates-io	c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367	-	MIT OR Apache-2.0	no	no	no	no	expansion	runtime	optional bigint substrate of num-rational/pyo3 — locked by the pinned fsci-integrate resolution's feature surface, the feature itself never enabled	fm	with-frankenscipy-pin
 
+# --- franken_numpy closure: the §8.2 zero-copy NumPy export (fm-n1b, W3) ---
+# Marionette's structured export is fnp-described and Marionette-owned: the
+# dtype comes from fnp-dtype (StructuredField byte offsets), the view legality
+# from fnp-ndarray (NdLayout shape/stride/writeability), and the bytes never
+# leave the RecordBuffer's pinned storage generation. fnp's own columnar
+# StructuredStorage is deliberately NOT consumed — building one would be the
+# copy-out the zero-copy contract refuses. Every fnp-* rev must equal the
+# SUITE.lock franken_numpy pin (governed_closure enforces).
+fnp-dtype	0.2.0	git+franken_numpy@SUITE.lock	-	-	MIT+rider	no	no	no	no	forbid	runtime	§8.2 (fm-n1b): the structured-record dtype model — DType/StructuredField supply RecordDType's field offsets and itemsize for the zero-copy export; rev must equal the SUITE.lock franken_numpy pin	fm	suite-lock-ritual
+fnp-ndarray	0.2.0	git+franken_numpy@SUITE.lock	-	-	MIT+rider	no	no	no	no	forbid	runtime	§8.2 (fm-n1b): the NdLayout stride engine — shape/stride/writeability and as_strided view legality for whole-record and field-scoped exports; data-ownership-free, so it describes foreign memory natively; same SUITE.lock franken_numpy pin	fm	suite-lock-ritual
+half	2.7.1	crates-io	6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b	alloc,default,std	MIT OR Apache-2.0	no	no	no	no	expansion	runtime	fnp-dtype's f16/bf16 scalar support through the pinned franken_numpy gateway	fm	with-franken-numpy-pin
+crunchy	0.2.4	crates-io	460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5	default,limit_128	MIT	yes	no	no	no	expansion	runtime	half's loop-unrolling macro generator through the pinned franken_numpy gateway	fm	with-franken-numpy-pin
+
 # --- asupersync closure: exact-image runtime (fm-x4pp) + LabRuntime dev (fm-3df) ---
 aead	0.6.1	crates-io	1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99	alloc,getrandom,rand_core	MIT OR Apache-2.0	no	no	no	no	expansion	runtime	fm-x4pp exact-image host process primitive; production closure, also used by fm-3df LabRuntime tests	fm	with-asupersync-pin
 aes	0.9.1	crates-io	f1fc76eaeac4c9164506c466d4ffdd8ec9d0c5bf57ee97177c4d8eceb3a0e138	-	MIT OR Apache-2.0	no	no	no	no	expansion	runtime	fm-x4pp exact-image host process primitive; production closure, also used by fm-3df LabRuntime tests	fm	with-asupersync-pin
