@@ -8339,6 +8339,9 @@ class Scene(_SceneCore):
                 target = proto._native_target()
                 if target is not None and not target._is_bound():
                     self._adopt(target)
+                for extra in getattr(proto, "_native_extra_mobjects", ()):
+                    if not extra._is_bound():
+                        self.add(extra)
                 return (
                     proto._native_kind,
                     mobject,
@@ -9412,7 +9415,18 @@ class Transform(_NativeAnimation):
         path_func=None,
         **kwargs,
     ):
-        _refuse_unrouted("Transform()", [("path_func", path_func is not None)])
+        # The portal's own arc factories (utils.paths) carry their scalar
+        # arc as metadata, so clockwise_path()/counterclockwise_path()/
+        # path_along_arc(θ) route onto the native path_arc surface
+        # (fm-5wq.4.63); an arbitrary user path function stays a precise
+        # refusal — Choreo never samples Python mid-segment.
+        if path_func is not None:
+            routed_arc = getattr(path_func, "_fmn_path_arc", None)
+            if routed_arc is None:
+                _refuse_unrouted("Transform()", [("path_func", True)])
+            path_arc = float(routed_arc)
+            path_arc_axis = getattr(path_func, "_fmn_path_axis", path_arc_axis)
+        self.path_func = path_func
         super().__init__(mobject, **kwargs)
         if target_mobject is None and not self._allows_deferred_target():
             raise NotImplementedError(
@@ -9967,6 +9981,36 @@ class TransformFromCopy(Transform):
 
     def __init__(self, mobject, target_mobject, **kwargs):
         super().__init__(mobject, target_mobject, **kwargs)
+
+
+class CyclicReplace(Transform):
+    """transform.py:316 through native per-mobject arc transforms
+    (fm-5wq.4.63): each mobject rides a path-arc Transform onto the next
+    mobject's center, cyclically."""
+
+    _native_kind = "cyclic_replace"
+    _target_attr = None
+
+    def __init__(self, *mobjects, path_arc=0.5 * _math.pi, **kwargs):
+        if len(mobjects) < 2:
+            raise ValueError(
+                type(self).__name__
+                + " needs at least two mobjects to cycle; got "
+                + str(len(mobjects))
+            )
+        if not all(isinstance(mobject, Mobject) for mobject in mobjects):
+            raise TypeError(type(self).__name__ + " cycles Mobjects only")
+        _NativeAnimation.__init__(self, mobjects[0], **kwargs)
+        self.mobjects = list(mobjects)
+        self.path_arc = float(path_arc)
+        self._native_extra_mobjects = tuple(self.mobjects[1:])
+
+    def _native_params(self):
+        return {"mobs": self.mobjects, "path_arc": self.path_arc}
+
+
+class Swap(CyclicReplace):
+    _native_kind = "swap"
 
 
 class FadeTransform(_NativeAnimation):
@@ -11068,6 +11112,8 @@ def _install_schema_surface():
         ("manimlib.animation.indication", "ApplyWave"): ApplyWave,
         ("manimlib.animation.specialized", "Broadcast"): Broadcast,
         ("manimlib.animation.transform", "Transform"): Transform,
+        ("manimlib.animation.transform", "CyclicReplace"): CyclicReplace,
+        ("manimlib.animation.transform", "Swap"): Swap,
         ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,
         (
             "manimlib.animation.transform",
@@ -11766,6 +11812,12 @@ def _install_path_functions():
     def straight_path(start_points, end_points, alpha):
         return _interpolate(start_points, end_points, alpha)
 
+    # Scalar-arc factories carry their arc as metadata so Transform's
+    # path_func= surface can route them onto the native path_arc plane
+    # (fm-5wq.4.63) instead of refusing.
+    straight_path._fmn_path_arc = 0.0
+    straight_path._fmn_path_axis = tuple(float(v) for v in _OUT)
+
     def path_along_arc(arc_angle, axis=_OUT):
         if isinstance(arc_angle, (float, int)) and abs(arc_angle) < straight_path_threshold:
             return straight_path
@@ -11808,6 +11860,9 @@ def _install_path_functions():
                 + _np.sin(alpha * theta) * center_to_perpendicular
             )
 
+        if isinstance(arc_angle, (float, int)):
+            path._fmn_path_arc = float(arc_angle)
+            path._fmn_path_axis = tuple(float(value) for value in unit_axis)
         return path
 
     def clockwise_path():

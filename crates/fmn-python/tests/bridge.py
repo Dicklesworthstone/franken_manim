@@ -10013,3 +10013,83 @@ except ValueError as error:
     assert "finite non-negative duration" in str(error)
 else:
     raise AssertionError("Delay accepted a negative run_time")
+
+# fm-5wq.4.63: CyclicReplace / Swap ride native per-mobject arc transforms,
+# and the portal's scalar-arc path factories route Transform's path_func=
+# surface onto the native path_arc plane.
+transform_module = importlib.import_module("manimlib.animation.transform")
+assert transform_module.Swap.__bases__ == (transform_module.CyclicReplace,)
+assert transform_module.CyclicReplace.__bases__ == (transform_module.Transform,)
+
+cyclic_scene = InteractiveScene()
+cyclic_a = manimlib.Dot().move_to((-1.0, 0.0, 0.0))
+cyclic_b = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+cyclic_c = manimlib.Dot().move_to((0.0, 1.0, 0.0))
+cyclic_scene.add(cyclic_a, cyclic_b, cyclic_c)
+cyclic_scene.play(
+    transform_module.CyclicReplace(cyclic_a, cyclic_b, cyclic_c),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(cyclic_a.get_center(), [1.0, 0.0, 0.0], atol=1e-9)
+assert np.allclose(cyclic_b.get_center(), [0.0, 1.0, 0.0], atol=1e-9)
+assert np.allclose(cyclic_c.get_center(), [-1.0, 0.0, 0.0], atol=1e-9)
+
+swap_scene = InteractiveScene()
+swap_a = manimlib.Dot().move_to((-1.0, 0.0, 0.0))
+swap_b = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+swap_scene.add(swap_a)
+# swap_b is deliberately not added: the extra-mobject hook adds it at play.
+swap_scene.play(
+    transform_module.Swap(swap_a, swap_b),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(swap_a.get_center(), [1.0, 0.0, 0.0], atol=1e-9)
+assert np.allclose(swap_b.get_center(), [-1.0, 0.0, 0.0], atol=1e-9)
+
+# A single mobject or an empty call cannot cycle: named errors.
+for cyclic_bad_args in [(), (manimlib.Dot(),)]:
+    try:
+        transform_module.CyclicReplace(*cyclic_bad_args)
+    except ValueError as error:
+        assert "at least two mobjects to cycle" in str(error), error
+    else:
+        raise AssertionError("CyclicReplace accepted fewer than two mobjects")
+
+# clockwise_path()/counterclockwise_path() carry their scalar arc onto the
+# native path_arc surface; the halfway probe of a clockwise transform from
+# (1, 0) to (-1, 0) dips to (0, -1) — the arc, not the chord.
+arc_probe = transform_module.Transform(
+    manimlib.Dot(), manimlib.Dot(), path_func=manimlib.clockwise_path()
+)
+assert math.isclose(arc_probe.path_arc, -math.pi)
+assert transform_module.Transform(
+    manimlib.Dot(), manimlib.Dot(), path_func=manimlib.counterclockwise_path()
+).path_arc == math.pi
+
+arc_scene = InteractiveScene()
+arc_dot = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+arc_target = manimlib.Dot().move_to((-1.0, 0.0, 0.0))
+arc_scene.add(arc_dot)
+arc_scene.play(
+    transform_module.Transform(
+        arc_dot,
+        arc_target,
+        path_func=manimlib.clockwise_path(),
+        rate_func=lambda t: 0.5,
+    ),
+    run_time=1.0 / 30.0,
+)
+assert np.allclose(arc_dot.get_center(), [0.0, -1.0, 0.0], atol=1e-6)
+
+# An arbitrary user path function keeps the precise refusal (no silent
+# straight-line substitution).
+try:
+    transform_module.Transform(
+        manimlib.Dot(), manimlib.Dot(), path_func=lambda s, e, alpha: s
+    )
+except NotImplementedError as error:
+    assert "path_func" in str(error), error
+else:
+    raise AssertionError("Transform accepted an unrouted path function")

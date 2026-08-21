@@ -6776,6 +6776,7 @@ struct AnimSpec {
     stroke_color: Option<[f64; 3]>,
     stroke_width: Option<f64>,
     bounds_kind: String,
+    mobs: Vec<Mob>,
     int_round: String,
     point: [f64; 3],
     point_color: Option<[f64; 3]>,
@@ -6906,6 +6907,16 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             Some(value) => value.extract()?,
             None => String::new(),
         },
+        mobs: match params.get_item("mobs")? {
+            Some(values) => values
+                .try_iter()?
+                .map(|item| {
+                    let proxy: Bound<'_, BridgeMobject> = item?.extract()?;
+                    resolve(&proxy)
+                })
+                .collect::<PyResult<Vec<_>>>()?,
+            None => Vec::new(),
+        },
         int_round: match params.get_item("int_round")? {
             Some(value) => value.extract()?,
             None => String::new(),
@@ -6967,6 +6978,8 @@ fn build_native_animation(
         spec.kind.as_str(),
         "animation_group"
             | "broadcast"
+            | "cyclic_replace"
+            | "swap"
             | "flash"
             | "flashy_fade_in"
             | "lagged_start"
@@ -7192,6 +7205,27 @@ fn build_native_animation(
             need_mob(spec.mob)?,
             need_target(spec.target)?,
         )),
+        "cyclic_replace" | "swap" => {
+            let name = if spec.kind == "swap" {
+                "Swap"
+            } else {
+                "CyclicReplace"
+            };
+            let transforms = fmn_anim::cyclic_replace(stage, &spec.mobs, spec.path_arc)
+                .map_err(anim_error)?;
+            let members: Vec<Box<dyn fmn_anim::Animation>> = transforms
+                .into_iter()
+                .map(|mut transform| {
+                    fmn_anim::Animation::state_mut(&mut transform).config.name = name.to_owned();
+                    Box::new(transform) as Box<dyn fmn_anim::Animation>
+                })
+                .collect();
+            Box::new(
+                fmn_anim::AnimationGroup::new(stage, members)
+                    .map_err(anim_error)?
+                    .with_name(name),
+            )
+        }
         "rotate" => {
             let mut rotating = fmn_anim::rotate(need_mob(spec.mob)?, spec.angle)
                 .with_axis(spec.axis)
