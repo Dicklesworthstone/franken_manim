@@ -8719,10 +8719,11 @@ class SurfaceMesh(VGroup):
         joint_type="no_joint",
         **kwargs,
     ):
+        if joint_type not in VMobject.joint_type_map:
+            raise KeyError(joint_type)
         _refuse_unrouted(
             "SurfaceMesh()",
-            [("joint_type", joint_type != "no_joint")]
-            + [(name, True) for name in sorted(kwargs)],
+            [(name, True) for name in sorted(kwargs)],
         )
         params = getattr(uv_surface, "_solid_params", None)
         if params is None:
@@ -8744,6 +8745,8 @@ class SurfaceMesh(VGroup):
             float(normal_nudge),
             float(stroke_width),
             stroke_color,
+            bool(depth_test),
+            float(VMobject.joint_type_map[joint_type]),
         )
         _hang_native_children(self, specs)
         # Re-seat onto the source's CURRENT geometry (the rebuild is at
@@ -8757,6 +8760,9 @@ class SurfaceMesh(VGroup):
         self.move_to(uv_surface.get_center())
         if depth_test:
             self.apply_depth_test()
+        else:
+            self.deactivate_depth_test()
+        self.set_joint_type(joint_type)
 
 
 class TracingTail(VMobject):

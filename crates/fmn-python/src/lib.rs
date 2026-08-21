@@ -5018,6 +5018,8 @@ impl BridgeMobject {
         normal_nudge: f64,
         stroke_width: f64,
         stroke_color: Option<&Bound<'py, PyAny>>,
+        depth_test: bool,
+        joint_code: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let surface = match source_kind {
             "sphere" => fmn_library::Sphere::new(source_radius).build(),
@@ -5032,7 +5034,9 @@ impl BridgeMobject {
         let mut mesh = fmn_library::SurfaceMesh::new(surface)
             .resolution(resolution.0, resolution.1)
             .normal_nudge(normal_nudge)
-            .stroke_width(stroke_width);
+            .stroke_width(stroke_width)
+            .depth_test(depth_test)
+            .joint_type(fmn_mobject::JointType::from_code(joint_code));
         if let Some(color) = stroke_color {
             mesh = mesh.stroke_color(srgb_from_py(color)?);
         }

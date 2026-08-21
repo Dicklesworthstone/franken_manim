@@ -9130,6 +9130,17 @@ assert torus_order_scene.get_mobjects() == [back_torus, front_torus]
 sphere_mesh = three_dimensions.SurfaceMesh(sphere, resolution=(4, 3))
 assert len(sphere_mesh.submobjects) == 7
 assert all(isinstance(line, VMobject) and line.has_points() for line in sphere_mesh)
+assert sphere_mesh.get_joint_type() == VMobject.joint_type_map["no_joint"]
+
+bevel_mesh = three_dimensions.SurfaceMesh(
+    sphere, resolution=(4, 3), joint_type="bevel", depth_test=False
+)
+assert bevel_mesh.get_joint_type() == VMobject.joint_type_map["bevel"]
+assert bevel_mesh.uniforms["depth_test"] is False
+assert all(
+    line.get_joint_type() == VMobject.joint_type_map["bevel"]
+    for line in bevel_mesh.submobjects
+)
 
 torus_mesh = three_dimensions.SurfaceMesh(torus, resolution=(4, 3))
 assert len(torus_mesh.submobjects) == 7
