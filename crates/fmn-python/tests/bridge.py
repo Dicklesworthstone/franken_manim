@@ -8943,3 +8943,87 @@ except Exception as error:
     assert "file_name or svg_string" in str(error)
 else:
     raise AssertionError("an empty SVGMobject() did not refuse")
+
+
+# ------------------------------------------------- decimal number animations
+# fm-5wq.4.55: ChangingDecimal / ChangeDecimalToValue / CountInFrom drive
+# DecimalNumber.set_value every frame through Scene.play.
+
+numbers_animation = importlib.import_module("manimlib.animation.numbers")
+
+# ChangingDecimal feeds the raw time-spanned alpha (the Reference bypasses
+# rate_func here) and the displayed number tracks the update callable.
+changing_scene = Scene()
+changing_decimal = manimlib.DecimalNumber(0.0)
+changing_scene.add(changing_decimal)
+changing_alphas = []
+changing_scene.play(
+    numbers_animation.ChangingDecimal(
+        changing_decimal,
+        lambda a: (changing_alphas.append(a), 10.0 * a)[-1],
+        run_time=2.0 / 30.0,
+    )
+)
+assert changing_alphas[0] == 0.0
+assert changing_alphas[-1] == 1.0
+assert any(0.0 < a < 1.0 for a in changing_alphas)
+assert changing_decimal.get_value() == 10.0
+
+# ChangeDecimalToValue runs the linear track from the displayed number; a
+# same-play probe observes the on-screen value moving mid-flight.
+change_scene = Scene()
+change_decimal = manimlib.DecimalNumber(3.0)
+change_scene.add(change_decimal)
+change_probe = geometry.Rectangle(width=1.0, height=1.0)
+change_seen = []
+change_scene.play(
+    numbers_animation.ChangeDecimalToValue(
+        change_decimal, 8.0, run_time=2.0 / 30.0
+    ),
+    update_animation.UpdateFromFunc(
+        change_probe,
+        lambda mob: change_seen.append(change_decimal.get_value()),
+    ),
+    run_time=2.0 / 30.0,
+)
+assert abs(change_decimal.get_value() - 8.0) < 1e-12
+assert change_decimal.number == 8.0
+assert len(set(change_seen)) > 1, change_seen
+assert any(3.0 <= value < 8.0 for value in change_seen), change_seen
+
+# CountInFrom counts from the source up to the number already displayed.
+count_scene = Scene()
+count_decimal = manimlib.DecimalNumber(5.0)
+count_scene.add(count_decimal)
+count_probe = geometry.Rectangle(width=1.0, height=1.0)
+count_seen = []
+count_scene.play(
+    numbers_animation.CountInFrom(count_decimal, 0),
+    update_animation.UpdateFromFunc(
+        count_probe,
+        lambda mob: count_seen.append(count_decimal.get_value()),
+    ),
+    run_time=2.0 / 30.0,
+)
+assert abs(count_decimal.get_value() - 5.0) < 1e-12
+assert any(value < 5.0 for value in count_seen), count_seen
+
+# The Reference's exact refusal: a non-DecimalNumber target is the bare
+# isinstance assertion.
+try:
+    numbers_animation.ChangingDecimal(
+        geometry.Rectangle(width=1.0, height=1.0), lambda a: a
+    )
+except AssertionError:
+    pass
+else:
+    raise AssertionError("ChangingDecimal accepted a non-DecimalNumber")
+
+try:
+    numbers_animation.CountInFrom(
+        geometry.Rectangle(width=1.0, height=1.0), 0
+    )
+except (AssertionError, AttributeError):
+    pass
+else:
+    raise AssertionError("CountInFrom accepted a non-DecimalNumber")

@@ -8506,6 +8506,62 @@ class UpdateFromAlphaFunc(Animation):
         self.update_function(self.mobject, true_alpha)
 
 
+class ChangingDecimal(Animation):
+    """The Reference's update mechanism pointed at `DecimalNumber.set_value`
+    (fm-5wq.4.55, animation/numbers.py): each frame feeds the time-spanned
+    alpha to the update callable and rebuilds the displayed number natively.
+
+    The Reference's `interpolate_mobject` bypasses `get_sub_alpha`, so
+    `rate_func` deliberately does not shape the value track — kept exactly.
+    """
+
+    def __init__(
+        self,
+        decimal_mob,
+        number_update_func,
+        suspend_mobject_updating=False,
+        **kwargs,
+    ):
+        # The Reference's exact refusal for a non-DecimalNumber target.
+        assert isinstance(decimal_mob, DecimalNumber)
+        self.number_update_func = number_update_func
+        super().__init__(
+            decimal_mob,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
+        )
+        self.mobject = decimal_mob
+
+    def interpolate_mobject(self, alpha):
+        true_alpha = self.time_spanned_alpha(float(alpha))
+        self.mobject.set_value(self.number_update_func(true_alpha))
+
+
+class ChangeDecimalToValue(ChangingDecimal):
+    """Linear track from the current displayed number to `target_number`."""
+
+    def __init__(self, decimal_mob, target_number, **kwargs):
+        start_number = decimal_mob.number
+        super().__init__(
+            decimal_mob,
+            lambda a: start_number + (target_number - start_number) * a,
+            **kwargs,
+        )
+
+
+class CountInFrom(ChangingDecimal):
+    """Count from `source_number` up to the number already displayed."""
+
+    def __init__(self, decimal_mob, source_number=0, **kwargs):
+        start_number = decimal_mob.get_value()
+        super().__init__(
+            decimal_mob,
+            lambda a: source_number
+            + (start_number - source_number) * min(max(a, 0), 1),
+            **kwargs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Explicit animation classes (fm-d3gt): thin specs over fmn-anim's native
 # five-mechanisms shelf. Scene.play builds one native segment animation per
@@ -9833,6 +9889,9 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
+        ("manimlib.animation.numbers", "ChangingDecimal"): ChangingDecimal,
+        ("manimlib.animation.numbers", "ChangeDecimalToValue"): ChangeDecimalToValue,
+        ("manimlib.animation.numbers", "CountInFrom"): CountInFrom,
         ("manimlib.mobject.geometry", "TipableVMobject"): TipableVMobject,
         ("manimlib.mobject.geometry", "Arc"): Arc,
         ("manimlib.mobject.geometry", "ArcBetweenPoints"): ArcBetweenPoints,
