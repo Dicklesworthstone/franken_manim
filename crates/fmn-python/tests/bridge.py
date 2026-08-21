@@ -9596,3 +9596,58 @@ except ValueError as error:
     assert "the group is empty" in str(error)
 else:
     raise AssertionError("ShowSubmobjectsOneByOne accepted an empty family")
+
+# fm-5wq.4.65: isolate= and tex_to_color_map= ride the native span map — the
+# isolated pieces become their own submobject groups (source-identity
+# partition, no labelled second render), and constructor color maps land on
+# exactly the mapped spans.
+iso_tex = manimlib.Tex("x^2 + y^2", isolate=["x", "y"])
+assert iso_tex.get_string() == "x^2 + y^2"
+assert len(iso_tex.submobjects) == 4
+iso_x_part = iso_tex.get_part_by_tex("x")
+iso_y_part = iso_tex.get_part_by_tex("y")
+assert len(iso_x_part) == 1 and len(iso_y_part) == 1
+
+# The isolated span is independently colorable through its own group node.
+iso_tex[0].set_color(manimlib.YELLOW)
+assert all(leaf.get_fill_color() == manimlib.YELLOW for leaf in iso_x_part)
+assert all(leaf.get_fill_color() != manimlib.YELLOW for leaf in iso_y_part)
+iso_tex.set_color_by_tex("y", manimlib.RED)
+assert all(leaf.get_fill_color() == manimlib.RED for leaf in iso_y_part)
+assert all(leaf.get_fill_color() == manimlib.YELLOW for leaf in iso_x_part)
+
+# Constructor tex_to_color_map routes over the same span map.
+t2c_tex = manimlib.Tex("x^2 + y^2", tex_to_color_map={"x": manimlib.RED})
+assert all(
+    leaf.get_fill_color() == manimlib.RED
+    for leaf in t2c_tex.get_part_by_tex("x")
+)
+assert all(
+    leaf.get_fill_color() != manimlib.RED
+    for leaf in t2c_tex.get_part_by_tex("y")
+)
+
+# A Scene can play a fade on the isolated span's group node.
+iso_scene = Scene()
+iso_scene.add(iso_tex)
+iso_faded_leaf = iso_x_part[0]
+iso_scene.play(
+    manimlib.FadeOut(iso_tex[0]),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(iso_faded_leaf.data["fill_rgba"][:, 3], 0.0)
+
+# An isolate occurrence that resolves to no span-map primitive is a named
+# error, never a silent no-op selection; an isolate entry with no occurrence
+# at all stays tolerated (the Reference's behavior, pinned above for the
+# multi-part "=" case).
+try:
+    manimlib.Tex("x^2 + y^2", isolate=[" "])
+except bridge_errors.TexError as error:
+    assert "is not in the native span map" in str(error), error
+else:
+    raise AssertionError("isolate of an unmapped substring did not raise")
+
+iso_absent_tex = manimlib.Tex("x^2 + y^2", isolate=["z"])
+assert len(iso_absent_tex.get_parts_by_tex("z")) == 0

@@ -5526,18 +5526,75 @@ class Tex(StringMobject):
         self.font_size = float(font_size)
         # Multiple parts regroup glyph children per part via the typeset's
         # native source spans — the Reference's SingleStringTex structure.
+        # `isolate=` partitions a single-part source the same way, and
+        # `tex_to_color_map` string keys ride the native t2c surface; both
+        # consume the span map, never a labelled second render.
+        build_parts, build_separator = self._isolate_segments(separator)
+        native_t2c = {
+            key: value for key, value in color_map.items() if isinstance(key, str)
+        }
         specs = self._build_tex(
             _native_shell_factory,
-            self.tex_strings,
-            separator,
+            build_parts,
+            build_separator,
             bool(self._native_text_mode),
             self.font_size,
-            None,
+            native_t2c or None,
             bool(self._native_group_single_part),
         )
         _hang_native_children(self, specs)
+        self._validate_isolate_spans()
         _apply_vmobject_style_kwargs(self, kwargs)
         self.set_color_by_tex_to_color_map(color_map)
+
+    def _isolate_segments(self, separator):
+        """Partition a single-part source at `isolate=` occurrence
+        boundaries (source identity over the native span map), so each
+        isolated piece becomes its own submobject group.  Multi-part
+        construction already owns its part grouping and is left as-is."""
+        if len(self.tex_strings) != 1 or not self.isolate:
+            return self.tex_strings, separator
+        cuts = {0, len(self.string)}
+        for start, end in self.find_spans_by_selector(self.isolate):
+            if start != end:
+                cuts.update((start, end))
+        ordered = sorted(cuts)
+        segments = [
+            self.string[start:end] for start, end in zip(ordered, ordered[1:])
+        ]
+        merged = []
+        for segment in segments:
+            if merged and (not segment.strip() or not merged[-1].strip()):
+                merged[-1] += segment
+            else:
+                merged.append(segment)
+        if len(merged) <= 1:
+            return self.tex_strings, separator
+        return merged, ""
+
+    def _validate_isolate_spans(self):
+        """A present isolate occurrence that resolves to no span-map
+        primitive is a named error, never a silent no-op selection."""
+        entries = self.isolate
+        if not entries:
+            return
+        if isinstance(entries, (str, _re.Pattern, tuple)):
+            entries = [entries]
+        for entry in entries:
+            for span in self.find_spans_by_selector(entry):
+                if span[0] == span[1]:
+                    continue
+                start, end = self._byte_span(span)
+                if not any(
+                    start <= sub_start and sub_end <= end
+                    for sub_start, sub_end in self._string_sub_spans
+                ):
+                    raise _TexError(
+                        "isolate "
+                        + repr(self.string[span[0] : span[1]])
+                        + " is not in the native span map of "
+                        + repr(self.string)
+                    )
 
     def get_parts_by_tex(self, selector):
         return self.select_parts(selector)
