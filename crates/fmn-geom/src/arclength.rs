@@ -312,7 +312,7 @@ impl QuadPath {
                 None
             };
         }
-        let (n, residue) = bezier::integer_interpolate(0, num_curves as i64, alpha);
+        let (n, residue) = bezier::integer_interpolate(0, num_curves as i64, alpha).ok()?;
         self.nth_curve_point(n.max(0) as usize, residue)
     }
 }

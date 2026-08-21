@@ -901,18 +901,16 @@ impl QuadPath {
     /// along `[start, end)` at `alpha`, plus the fractional residue toward
     /// the next index. `alpha >= 1` pins to `(end - 1, 1.0)`; `alpha <= 0`
     /// to `(start, 0.0)` — the Reference's exact clamping.
-    #[must_use]
-    pub fn integer_interpolate(start: i64, end: i64, alpha: f64) -> (i64, f64) {
-        if alpha >= 1.0 {
-            return (end - 1, 1.0);
-        }
-        if alpha <= 0.0 {
-            return (start, 0.0);
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let value = (start as f64 + alpha * (end - start) as f64).floor() as i64;
-        let residue = ((end - start) as f64 * alpha).rem_euclid(1.0);
-        (value, residue)
+    ///
+    /// # Errors
+    /// Delegates the authoritative range and finite-alpha validation to
+    /// [`bezier::integer_interpolate`].
+    pub fn integer_interpolate(
+        start: i64,
+        end: i64,
+        alpha: f64,
+    ) -> Result<(i64, f64), bezier::IntegerInterpolationError> {
+        bezier::integer_interpolate(start, end, alpha)
     }
 
     /// The pure-geometry core of `pointwise_become_partial`
@@ -939,8 +937,8 @@ impl QuadPath {
             return None;
         }
         let end = i64::try_from(num_curves).ok()?;
-        let (lower_index, lower_residue) = Self::integer_interpolate(0, end, a);
-        let (upper_index, upper_residue) = Self::integer_interpolate(0, end, b);
+        let (lower_index, lower_residue) = Self::integer_interpolate(0, end, a).ok()?;
+        let (upper_index, upper_residue) = Self::integer_interpolate(0, end, b).ok()?;
         #[allow(clippy::cast_sign_loss)]
         let (lower_index, upper_index) = (lower_index as usize, upper_index as usize);
         let i1 = 2 * lower_index;

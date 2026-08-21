@@ -156,20 +156,80 @@ pub fn arc_n_components(angle: f64) -> Result<usize, GeomError> {
     Ok(n)
 }
 
-/// `integer_interpolate`: an integer in `[start, end]` plus the residue
-/// toward the next one, with the Reference's exact clamping.
-#[must_use]
-pub fn integer_interpolate(start: i64, end: i64, alpha: f64) -> (i64, f64) {
+/// A refusal from [`integer_interpolate`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IntegerInterpolationError {
+    /// A half-open integer range must contain at least one sample.
+    InvalidRange {
+        /// Inclusive lower bound.
+        start: i64,
+        /// Exclusive upper bound.
+        end: i64,
+    },
+    /// NaN and infinities have no ordered position to clamp.
+    NonFiniteAlpha {
+        /// The rejected interpolant.
+        alpha: f64,
+    },
+}
+
+impl core::fmt::Display for IntegerInterpolationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::InvalidRange { start, end } => write!(
+                f,
+                "integer interpolation needs a nonempty half-open range (got {start}..{end})"
+            ),
+            Self::NonFiniteAlpha { alpha } => {
+                write!(
+                    f,
+                    "integer interpolation alpha must be finite (got {alpha})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for IntegerInterpolationError {}
+
+/// `integer_interpolate`: an integer in `[start, end)` plus the residue
+/// toward the next one. Finite alpha outside `[0, 1]` keeps the
+/// Reference's exact endpoint clamping; an empty/reversed range or a
+/// non-finite alpha refuses before arithmetic.
+///
+/// The span is formed in `f64`, never by subtracting signed endpoints, so
+/// the complete `i64::MIN..i64::MAX` domain cannot overflow before
+/// conversion. The interior result is clamped back to the validated
+/// half-open range to absorb endpoint rounding at spans wider than f64's
+/// exact-integer range.
+///
+/// # Errors
+/// [`IntegerInterpolationError::InvalidRange`] when `start >= end`, or
+/// [`IntegerInterpolationError::NonFiniteAlpha`] for NaN/infinite alpha.
+pub fn integer_interpolate(
+    start: i64,
+    end: i64,
+    alpha: f64,
+) -> Result<(i64, f64), IntegerInterpolationError> {
+    if start >= end {
+        return Err(IntegerInterpolationError::InvalidRange { start, end });
+    }
+    if !alpha.is_finite() {
+        return Err(IntegerInterpolationError::NonFiniteAlpha { alpha });
+    }
     if alpha >= 1.0 {
-        return (end - 1, 1.0);
+        return Ok((end - 1, 1.0));
     }
     if alpha <= 0.0 {
-        return (start, 0.0);
+        return Ok((start, 0.0));
     }
-    let interpolated = (1.0 - alpha) * start as f64 + alpha * end as f64;
-    let value = interpolated as i64;
-    let residue = ((end - start) as f64 * alpha).rem_euclid(1.0);
-    (value, residue)
+    let span = end as f64 - start as f64;
+    let offset = alpha * span;
+    let value = (start as f64 + offset).floor() as i128;
+    let value = value.clamp(i128::from(start), i128::from(end) - 1);
+    #[allow(clippy::cast_possible_truncation)]
+    let value = value as i64;
+    Ok((value, offset.rem_euclid(1.0)))
 }
 
 #[cfg(test)]
@@ -269,11 +329,30 @@ mod tests {
     }
 
     #[test]
-    fn integer_interpolate_matches_reference_docstring() {
-        let (value, residue) = integer_interpolate(0, 10, 0.46);
+    fn integer_interpolate_hardens_boundaries_and_keeps_reference_clamping() {
+        let (value, residue) = integer_interpolate(0, 10, 0.46).expect("valid interpolation");
         assert_eq!(value, 4);
         assert!((residue - 0.6).abs() < 1e-12);
-        assert_eq!(integer_interpolate(0, 10, 1.5), (9, 1.0));
-        assert_eq!(integer_interpolate(0, 10, -0.5), (0, 0.0));
+        assert_eq!(integer_interpolate(0, 10, 1.5), Ok((9, 1.0)));
+        assert_eq!(integer_interpolate(0, 10, -0.5), Ok((0, 0.0)));
+        assert_eq!(
+            integer_interpolate(4, 4, 0.5),
+            Err(IntegerInterpolationError::InvalidRange { start: 4, end: 4 })
+        );
+        assert_eq!(
+            integer_interpolate(5, 4, 0.5),
+            Err(IntegerInterpolationError::InvalidRange { start: 5, end: 4 })
+        );
+        assert!(matches!(
+            integer_interpolate(0, 10, f64::NAN),
+            Err(IntegerInterpolationError::NonFiniteAlpha { alpha }) if alpha.is_nan()
+        ));
+        for alpha in [f64::NEG_INFINITY, f64::INFINITY] {
+            assert_eq!(
+                integer_interpolate(0, 10, alpha),
+                Err(IntegerInterpolationError::NonFiniteAlpha { alpha })
+            );
+        }
+        assert_eq!(integer_interpolate(i64::MIN, i64::MAX, 0.5), Ok((0, 0.0)));
     }
 }
