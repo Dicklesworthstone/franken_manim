@@ -7691,6 +7691,8 @@ class ParametricSurface(Surface):
         depth_test = kwargs.pop("depth_test", True)
         resolution = kwargs.pop("resolution", (101, 101))
         preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
+        epsilon = kwargs.pop("epsilon", 0.001)
+        normal_nudge = kwargs.pop("normal_nudge", 0.001)
         _refuse_unrouted(
             "ParametricSurface()", [(name, True) for name in sorted(kwargs)]
         )
@@ -7699,12 +7701,16 @@ class ParametricSurface(Surface):
         self.v_range = tuple(v_range)
         self.resolution = (int(resolution[0]), int(resolution[1]))
         self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
         specs = self._build_parametric_surface(
             _native_surface_shell_factory,
             uv_func,
             (float(u_range[0]), float(u_range[1])),
             (float(v_range[0]), float(v_range[1])),
             self.resolution,
+            self.epsilon,
+            self.normal_nudge,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)

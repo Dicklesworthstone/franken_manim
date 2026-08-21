@@ -4075,6 +4075,8 @@ impl BridgeMobject {
         u_range: (f64, f64),
         v_range: (f64, f64),
         resolution: (usize, usize),
+        epsilon: f64,
+        normal_nudge: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let func = uv_func.clone().unbind();
         let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
@@ -4107,6 +4109,8 @@ impl BridgeMobject {
         .u_range(u_range.0, u_range.1)
         .v_range(v_range.0, v_range.1)
         .resolution(resolution.0, resolution.1)
+        .epsilon(epsilon)
+        .normal_nudge(normal_nudge)
         .build();
         if let Some(error) = error_cell.borrow_mut().take() {
             return Err(error);
