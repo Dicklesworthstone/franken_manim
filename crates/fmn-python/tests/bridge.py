@@ -4127,6 +4127,39 @@ assert len(clock.submobjects[1].submobjects) == 12
 tall_clock = drawings.Clock(hour_hand_height=0.4, minute_hand_height=0.8)
 assert np.isclose(tall_clock.hour_hand.get_length(), 0.4)
 assert np.isclose(tall_clock.minute_hand.get_length(), 0.8)
+assert drawings.ClockPassesTime.__bases__ == (manimlib.AnimationGroup,)
+assert list(inspect.signature(drawings.ClockPassesTime).parameters) == [
+    "clock",
+    "run_time",
+    "hours_passed",
+    "rate_func",
+    "kwargs",
+]
+clock_passes = drawings.ClockPassesTime(
+    clock, run_time=0.1, hours_passed=3.0
+)
+assert clock_passes.clock is clock
+assert clock_passes.group is clock
+assert clock_passes.rate_func is manimlib.linear
+assert len(clock_passes.animations) == 2
+assert all(isinstance(anim, manimlib.Rotating) for anim in clock_passes.animations)
+assert np.isclose(clock_passes.animations[0].angle, -math.pi / 2)
+assert np.isclose(clock_passes.animations[1].angle, -6 * math.pi)
+clock_scene = Scene()
+clock_scene.add(clock)
+clock_scene.play(clock_passes)
+hour_direction = clock.hour_hand.get_end() - clock.hour_hand.get_start()
+minute_direction = clock.minute_hand.get_end() - clock.minute_hand.get_start()
+hour_direction /= np.linalg.norm(hour_direction)
+minute_direction /= np.linalg.norm(minute_direction)
+assert np.allclose(hour_direction, manimlib.RIGHT, atol=1e-6)
+assert np.allclose(minute_direction, manimlib.UP, atol=1e-6)
+try:
+    drawings.ClockPassesTime(manimlib.Circle())
+except TypeError as error:
+    assert str(error) == "ClockPassesTime clock must be a Clock"
+else:
+    raise AssertionError("ClockPassesTime accepted a non-Clock mobject")
 
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary

@@ -14066,6 +14066,32 @@ class AnimationGroup(_NativeAnimation):
         self.animations = list(animations)
 
 
+class ClockPassesTime(AnimationGroup):
+    """Rotate a native Clock's two hands through one native composition."""
+
+    def __init__(
+        self,
+        clock,
+        run_time=5.0,
+        hours_passed=12.0,
+        rate_func=_linear_rate,
+        **kwargs,
+    ):
+        if not isinstance(clock, Clock):
+            raise TypeError("ClockPassesTime clock must be a Clock")
+        hour_radians = -float(hours_passed) * _math.tau / 12.0
+        rotation = dict(axis=_OUT, about_point=clock.get_center())
+        super().__init__(
+            Rotating(clock.hour_hand, angle=hour_radians, **rotation),
+            Rotating(clock.minute_hand, angle=12.0 * hour_radians, **rotation),
+            run_time=float(run_time),
+            rate_func=rate_func,
+            **kwargs,
+        )
+        self.clock = clock
+        self.group = clock
+
+
 class LaggedStart(AnimationGroup):
     _native_kind = "lagged_start"
     _default_lag_ratio = 0.05
@@ -15260,6 +15286,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Checkmark"): Checkmark,
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.mobject.svg.drawings", "Clock"): Clock,
+        ("manimlib.mobject.svg.drawings", "ClockPassesTime"): ClockPassesTime,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (
