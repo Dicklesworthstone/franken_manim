@@ -3004,6 +3004,27 @@ impl BridgeMobject {
         install_native_tree(slf, factory, root)
     }
 
+    /// `Button(mobject, on_click)` over Atlas's native arbitrary-mobject
+    /// button builder. The builder establishes the wrapper root; Python then
+    /// retains the caller's original proxy as the sole Reference child.
+    fn _build_button<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        source: &Bound<'_, BridgeMobject>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let points = with_stage(source, |stage, mob| {
+            stage.get_points(mob).unwrap_or_default()
+        })?;
+        let built = with_font_book(|book| {
+            fmn_library::Button::of(fmn_library::VMobject::from_points(points))
+                .build(book)
+                .map_err(native_error)
+        })?;
+        let mut root = fmn_mobject::Mobject::from(built);
+        root.submobjects.clear();
+        install_native_tree(slf, factory, root)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the

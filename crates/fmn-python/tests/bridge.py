@@ -2312,6 +2312,42 @@ except NotImplementedError as error:
 else:
     raise AssertionError("MotionMobject fabricated an unbound drag gateway")
 
+# Button uses Atlas's native arbitrary-mobject wrapper while preserving the
+# Reference's original child and callback identities. Click dispatch remains
+# the separately owned, precisely named event capability gap.
+clicks = []
+button_source = geometry.Circle(radius=0.3)
+button_callback = lambda mob: clicks.append(mob)
+button = interactive.Button(
+    button_source,
+    button_callback,
+    name="native-button",
+)
+assert interactive.Button.__bases__ == (Mobject,)
+assert str(inspect.signature(interactive.Button)) == (
+    "(mobject, on_click, **kwargs)"
+)
+assert button.mobject is button_source
+assert button.on_click is button_callback
+assert list(button.submobjects) == [button_source]
+assert button.name == "native-button"
+assert clicks == []
+
+try:
+    interactive.Button(object(), button_callback)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("Button accepted a non-Mobject child")
+
+try:
+    button.mob_on_mouse_press(button_source, {"point": np.zeros(3)})
+except NotImplementedError as error:
+    assert "Button.mob_on_mouse_press" in str(error), error
+    assert "semantic binding has not landed" in str(error), error
+else:
+    raise AssertionError("Button fabricated an unbound mouse-press gateway")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.

@@ -7926,6 +7926,27 @@ class MotionMobject(Mobject):
         self.add(mobject)
 
 
+class Button(Mobject):
+    """Reference-compatible clickable composition over Atlas's native
+    arbitrary-mobject button builder.
+
+    Event dispatch remains separately owned, so schema installation keeps the
+    precise ``mob_on_mouse_press`` capability refusal while construction,
+    identity, and callback storage are real.
+    """
+
+    def __init__(self, mobject, on_click, **kwargs):
+        assert isinstance(mobject, Mobject)
+        _install_live_state(self)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        specs = self._build_button(_native_shell_factory, mobject)
+        _hang_native_children(self, specs)
+        self.on_click = on_click
+        self.mobject = mobject
+        self.add(mobject)
+
+
 class Surface(Mobject):
     """The Surface-family MRO anchor (Reference Surface(Mobject), NOT a
     VMobject — VGroup's only-VMobjects refusal stays correct for it).
@@ -12833,6 +12854,7 @@ def _install_schema_surface():
         ("manimlib.mobject.mobject", "Group"): Group,
         ("manimlib.mobject.mobject", "Point"): Point,
         ("manimlib.mobject.interactive", "MotionMobject"): MotionMobject,
+        ("manimlib.mobject.interactive", "Button"): Button,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (
