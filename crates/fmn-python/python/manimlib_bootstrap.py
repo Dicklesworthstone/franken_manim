@@ -9400,10 +9400,7 @@ class Textbox(ControlMobject):
         self.isActive = self.isInitiallyActive
         self._textbox_value = value
         box, text = self._native_textbox_parts(value, None)
-        _install_live_state(self)
-        self.add(box, text)
-        self.add_updater(lambda mob: None)
-        self.fix_in_frame()
+        super().__init__(0.0, box, text)
         self.box = box
         self.text = text
         self.text.add_updater(lambda mob: mob.move_to(self.box))
