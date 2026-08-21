@@ -11608,3 +11608,62 @@ except TypeError as error:
     assert "Mobject family" in str(error)
 else:
     raise AssertionError("LaggedStartMap accepted a non-Mobject family")
+
+# fm-5wq.4.94: the Uncreate leftover — the full creation.py:56 signature is
+# spelled (its own schema defaults were previously refused as unrouted
+# kwargs), and the reversal plays through the native uncreate kind.
+uncreate_signature = inspect.signature(creation.Uncreate)
+assert tuple(uncreate_signature.parameters) == (
+    "mobject",
+    "rate_func",
+    "remover",
+    "should_match_start",
+    "kwargs",
+)
+uncreate_probe = creation.Uncreate(
+    manimlib.Square(side_length=1.0),
+    remover=True,
+    should_match_start=True,
+)
+assert uncreate_probe.should_match_start is True
+
+# A constant-rate probe freezes the reversed reveal mid-window: the end
+# state is exactly pointwise_become_partial(start, 0, r).
+uncreate_scene = InteractiveScene()
+uncreate_square = manimlib.Square(side_length=1.0)
+uncreate_square.set_stroke(manimlib.WHITE, width=4.0)
+uncreate_reference = uncreate_square.copy()
+uncreate_expected = uncreate_square.copy()
+uncreate_expected.pointwise_become_partial(uncreate_reference, 0.0, 0.5)
+uncreate_scene.add(uncreate_square)
+uncreate_scene.play(
+    creation.Uncreate(uncreate_square, rate_func=lambda t: 0.5),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(
+    uncreate_square.get_points(), uncreate_expected.get_points()
+)
+
+# The default run is a remover: the line leaves the scene.
+uncreate_gone_square = manimlib.Square(side_length=1.0)
+uncreate_scene.add(uncreate_gone_square)
+uncreate_scene.play(
+    creation.Uncreate(uncreate_gone_square), run_time=2.0 / 30.0
+)
+assert uncreate_gone_square not in uncreate_scene.get_mobjects()
+
+# Named negatives: a non-VMobject target and a non-True remover.
+try:
+    creation.Uncreate(None)
+except TypeError as error:
+    assert "requires a VMobject or Surface family" in str(error), error
+    assert "NoneType" in str(error), error
+else:
+    raise AssertionError("Uncreate accepted None")
+
+try:
+    creation.Uncreate(manimlib.Square(), remover=False)
+except NotImplementedError as error:
+    assert "remover" in str(error), error
+else:
+    raise AssertionError("Uncreate accepted remover=False")

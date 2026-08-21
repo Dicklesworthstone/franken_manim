@@ -9664,10 +9664,27 @@ class ShowCreation(ShowPartial):
 
 
 class Uncreate(ShowCreation):
+    # creation.py:56's full signature (fm-5wq.4.94): rate_func=None keeps
+    # the native smooth(1 − t) default, remover is structurally True in
+    # the native uncreate kind (False refuses by name), and the inert
+    # should_match_start surface passes through to ShowPartial.
     _native_kind = "uncreate"
 
-    def __init__(self, mobject, **kwargs):
-        super().__init__(mobject, **kwargs)
+    def __init__(
+        self,
+        mobject,
+        rate_func=None,
+        remover=True,
+        should_match_start=True,
+        **kwargs,
+    ):
+        _refuse_unrouted("Uncreate()", [("remover", remover is not True)])
+        super().__init__(
+            mobject,
+            rate_func=rate_func,
+            should_match_start=should_match_start,
+            **kwargs,
+        )
         if (
             isinstance(mobject, Surface)
             and hasattr(mobject, "resolution")
