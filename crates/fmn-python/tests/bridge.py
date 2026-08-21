@@ -3241,6 +3241,16 @@ assert recolor_scene.color_palette not in recolor_scene.mobjects
 assert str(inspect.signature(InteractiveScene.on_mouse_motion)) == (
     "(self, point, d_point)"
 )
+pre_setup_motion_scene = InteractiveScene()
+assert pre_setup_motion_scene.on_mouse_motion(
+    [-1.0, 0.5, 0.0],
+    [0.0, 0.0, 0.0],
+) is None
+assert np.allclose(
+    pre_setup_motion_scene.mouse_point.get_center(),
+    [-1.0, 0.5, 0.0],
+)
+assert not hasattr(pre_setup_motion_scene, "crosshair")
 motion_scene = InteractiveScene()
 motion_scene.setup()
 assert motion_scene.on_mouse_motion([1.0, 2.0, 0.0], [0.0, 0.0, 0.0]) is None
