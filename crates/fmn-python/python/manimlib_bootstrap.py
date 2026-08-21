@@ -4767,9 +4767,7 @@ class Slider(VGroup):
         )
         get_value = value_tracker.get_value
         tip.add_updater(
-            lambda mob: mob.move_to(
-                number_line.n2p(get_value()), -label_direction
-            )
+            lambda mob: mob.move_to(number_line.n2p(get_value()))
         )
         decimal.add_updater(lambda mob: mob.set_value(get_value()))
         label.add_updater(
