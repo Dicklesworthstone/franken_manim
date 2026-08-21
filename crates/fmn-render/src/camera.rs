@@ -1501,6 +1501,37 @@ mod tests {
     }
 
     #[test]
+    fn set_pixel_shape_updates_resolution_frame_aspect_and_revision() {
+        let mut camera = Camera::default();
+        assert_eq!(camera.pixel_shape(), (1920, 1080));
+        let revision = camera.revision();
+
+        camera
+            .set_pixel_shape(640, 480)
+            .expect("nonzero pixel shape");
+
+        assert_eq!(camera.pixel_width(), 640);
+        assert_eq!(camera.pixel_height(), 480);
+        assert!(close(camera.frame().width(), FRAME_WIDTH));
+        assert!(close(camera.frame().height(), FRAME_WIDTH * 3.0 / 4.0));
+        assert!(close(camera.frame().aspect_ratio(), 4.0 / 3.0));
+        assert!(camera.revision() > revision);
+    }
+
+    #[test]
+    fn set_pixel_shape_refuses_zero_dimensions() {
+        let mut camera = Camera::default();
+        assert_eq!(
+            camera.set_pixel_shape(0, 480),
+            Err(CameraError::ZeroDimension)
+        );
+        assert_eq!(
+            camera.set_pixel_shape(640, 0),
+            Err(CameraError::ZeroDimension)
+        );
+    }
+
+    #[test]
     fn invalid_camera_configuration_is_named() {
         assert_eq!(
             Camera::new(CameraConfig {
