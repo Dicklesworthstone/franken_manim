@@ -12541,6 +12541,14 @@ octahedron_module = importlib.import_module(
     "manimlib.mobject.three_dimensions"
 )
 assert not hasattr(octahedron_module, "Octahedron")
+try:
+    from manimlib import Octahedron as _unexpected_octahedron
+except ImportError:
+    pass
+else:
+    raise AssertionError(
+        f"unsupported Octahedron leaked into manimlib: {_unexpected_octahedron!r}"
+    )
 
 
 # --------------------------------------- DashedVMobject leftover kwargs
