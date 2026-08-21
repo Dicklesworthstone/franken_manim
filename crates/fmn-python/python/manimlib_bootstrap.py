@@ -9297,7 +9297,9 @@ class ColorSliders(Group):
             components,
             apply_value=True,
         )
-        self.swatch.become(swatch)
+        next_background, next_color_box = swatch.submobjects
+        self.background.become(next_background)
+        self.selected_color_box.become(next_color_box)
         self.sliders.become(sliders)
         self._color_slider_components = components
 
