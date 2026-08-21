@@ -1752,6 +1752,31 @@ forced_skip = Scene(skip_animations=True)
 assert forced_skip.skip_animations is True
 assert forced_skip.original_skipping_status is True
 assert Scene(start_at_animation_number=2).skip_animations is True
+
+# fm-5wq.4: start_at_animation_number skips until post_play's num_plays
+# increment reaches it; the next pre_play's update_skipping_status then
+# releases the skip. The Reference captures original_skipping_status
+# BEFORE the start-at forcing (False here), which is what lets
+# stop_skipping fire at the release point — no second counter exists.
+start_release_scene = Scene(start_at_animation_number=2)
+assert start_release_scene.skip_animations is True
+assert start_release_scene.original_skipping_status is False
+assert start_release_scene.num_plays == 0
+assert start_release_scene.pre_play() is None
+assert start_release_scene.skip_animations is True
+assert start_release_scene.post_play() is None
+assert start_release_scene.num_plays == 1
+start_release_scene.pre_play()
+assert start_release_scene.skip_animations is True
+start_release_scene.post_play()
+assert start_release_scene.num_plays == 2
+start_release_scene.pre_play()
+assert start_release_scene.skip_animations is False
+assert np.isclose(
+    start_release_scene.skip_time, start_release_scene.get_time()
+)
+start_release_scene.post_play()
+assert start_release_scene.num_plays == 3
 assert skip_scene.hold_on_wait is False
 assert skip_scene.hold_loop() is None
 assert skip_scene.hold_on_wait is True
