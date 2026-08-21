@@ -10010,6 +10010,166 @@ class ShowCreationThenFadeOut(Succession):
         return {"remover": self.remover}
 
 
+class _BroadcastRestore(Restore):
+    """Restore one Broadcast ring and apply the outer remover contract."""
+
+    def __init__(self, mobject, remover=True, **kwargs):
+        self.remover = bool(remover)
+        super().__init__(mobject, **kwargs)
+
+    def _native_params(self):
+        params = super()._native_params()
+        params["remover"] = self.remover
+        return params
+
+
+class Broadcast(LaggedStart):
+    _native_kind = "broadcast"
+
+    def __init__(
+        self,
+        focal_point,
+        small_radius=0.0,
+        big_radius=5.0,
+        n_circles=5,
+        start_stroke_width=8.0,
+        color=_WHITE,
+        run_time=3.0,
+        lag_ratio=0.2,
+        remover=True,
+        **kwargs,
+    ):
+        if isinstance(focal_point, _BridgeMobject):
+            self.focal_point = focal_point
+        else:
+            try:
+                self.focal_point = _np.array(_vec3(focal_point))
+            except (IndexError, KeyError, TypeError) as error:
+                raise TypeError(
+                    "manimlib.animation.specialized.Broadcast expects "
+                    "a Mobject or 3D point; got " + type(focal_point).__name__
+                ) from error
+        self.small_radius = float(small_radius)
+        self.big_radius = float(big_radius)
+        self.start_stroke_width = float(start_stroke_width)
+        try:
+            self.n_circles = _operator.index(n_circles)
+        except TypeError:
+            raise TypeError("Broadcast n_circles must be an integer") from None
+        if self.n_circles <= 0:
+            raise ValueError("Broadcast n_circles must be greater than zero")
+        for name, value in (
+            ("small_radius", self.small_radius),
+            ("big_radius", self.big_radius),
+            ("start_stroke_width", self.start_stroke_width),
+        ):
+            if not _math.isfinite(value) or value < 0:
+                raise ValueError(
+                    "Broadcast " + name + " must be non-negative and finite"
+                )
+        self.color = color
+        self.remover = bool(remover)
+        self.circles = VGroup()
+        for _ in range(self.n_circles):
+            circle = Circle(
+                radius=self.big_radius,
+                stroke_color=_BLACK,
+                stroke_width=0,
+            )
+            circle.add_updater(lambda ring: ring.move_to(self.focal_point))
+            circle.save_state()
+            circle.set_width(2.0 * self.small_radius)
+            circle.set_stroke(self.color, self.start_stroke_width)
+            self.circles.add(circle)
+        super().__init__(
+            *(
+                _BroadcastRestore(circle, remover=self.remover)
+                for circle in self.circles
+            ),
+            run_time=run_time,
+            lag_ratio=lag_ratio,
+            **kwargs,
+        )
+
+    def _native_params(self):
+        return {"remover": self.remover}
+
+
+class FlashyFadeIn(AnimationGroup):
+    _native_kind = "flashy_fade_in"
+
+    def __init__(
+        self,
+        vmobject,
+        stroke_width=2.0,
+        fade_lag=0.0,
+        time_width=1.0,
+        **kwargs,
+    ):
+        if not isinstance(vmobject, VMobject):
+            raise TypeError("FlashyFadeIn expects a VMobject")
+        self.stroke_width = float(stroke_width)
+        self.fade_lag = float(fade_lag)
+        self.time_width = float(time_width)
+        self.outline = vmobject.copy()
+        self.outline.set_fill(opacity=0)
+        self.outline.set_stroke(width=self.stroke_width, opacity=1)
+        rate_func = kwargs.get("rate_func", _smooth_rate)
+        fade_rate = _FMN_ROOT.squish_rate_func(
+            rate_func,
+            self.fade_lag,
+            1.0,
+        )
+        super().__init__(
+            FadeIn(vmobject, rate_func=fade_rate),
+            VShowPassingFlash(self.outline, time_width=self.time_width),
+            **kwargs,
+        )
+
+
+class AnimationOnSurroundingRectangle(AnimationGroup):
+    RectAnimationType = Animation
+
+    def __init__(
+        self,
+        mobject,
+        stroke_width=2.0,
+        stroke_color=_YELLOW,
+        buff=_SMALL_BUFF,
+        **kwargs,
+    ):
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError(
+                type(self).__name__ + " expects a Mobject to surround"
+            )
+        if self.RectAnimationType is Animation:
+            raise NotImplementedError(
+                "manimlib.animation.indication.AnimationOnSurroundingRectangle "
+                "has no native RectAnimationType; use a concrete subclass"
+            )
+        self.mobject_to_surround = mobject
+        self.rectangle = SurroundingRectangle(
+            mobject,
+            stroke_width=stroke_width,
+            stroke_color=stroke_color,
+            buff=buff,
+        )
+        self.rectangle.add_updater(
+            lambda rectangle: rectangle.move_to(self.mobject_to_surround)
+        )
+        super().__init__(self.RectAnimationType(self.rectangle, **kwargs))
+
+
+class ShowCreationThenDestructionAround(AnimationOnSurroundingRectangle):
+    _native_kind = "show_creation_then_destruction_around"
+    RectAnimationType = ShowCreationThenDestruction
+
+
+class ShowCreationThenFadeAround(AnimationOnSurroundingRectangle):
+    _native_kind = "show_creation_then_fade_around"
+    RectAnimationType = ShowCreationThenFadeOut
+
+
 class LaggedStartMap(LaggedStart):
     def __init__(self, anim_func, group, run_time=2.0, lag_ratio=0.05, **kwargs):
         # Reference composition.py:166 verbatim: one animation per member.
@@ -10632,7 +10792,21 @@ def _install_schema_surface():
             "manimlib.animation.indication",
             "ShowPassingFlashAround",
         ): ShowPassingFlashAround,
+        (
+            "manimlib.animation.indication",
+            "AnimationOnSurroundingRectangle",
+        ): AnimationOnSurroundingRectangle,
+        (
+            "manimlib.animation.indication",
+            "ShowCreationThenDestructionAround",
+        ): ShowCreationThenDestructionAround,
+        (
+            "manimlib.animation.indication",
+            "ShowCreationThenFadeAround",
+        ): ShowCreationThenFadeAround,
+        ("manimlib.animation.indication", "FlashyFadeIn"): FlashyFadeIn,
         ("manimlib.animation.indication", "ApplyWave"): ApplyWave,
+        ("manimlib.animation.specialized", "Broadcast"): Broadcast,
         ("manimlib.animation.transform", "Transform"): Transform,
         ("manimlib.animation.transform", "ApplyMethod"): ApplyMethod,
         (

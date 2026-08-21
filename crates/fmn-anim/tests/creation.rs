@@ -418,3 +418,53 @@ fn add_text_word_by_word_refuses_empty_and_stale() {
         Err(fmn_anim::animation::AnimError::StaleHandle(_))
     ));
 }
+
+// -------------------------------------------------- AddTextLetterByLetter
+
+#[test]
+fn add_text_letter_by_letter_reveals_letters_in_order() {
+    // fm-5wq.4.59: four letter groups (one glyph each) appear in order
+    // under linear rate; run_time derives from time_per_char.
+    let mut stage = Stage::new();
+    let grouped = stage.add(Mobject::new());
+    let letters: Vec<Mob> = (0..4)
+        .map(|_| {
+            let letter = stage.add(Mobject::new());
+            let glyph = line5(&mut stage);
+            stage.attach(letter, glyph).unwrap();
+            letter
+        })
+        .collect();
+    for &letter in &letters {
+        stage.attach(grouped, letter).unwrap();
+    }
+    let mut anim = fmn_anim::add_text_letter_by_letter(&stage, grouped, 0.1, -1.0).unwrap();
+    assert_eq!(anim.state().config.name, "AddTextLetterByLetter");
+    assert!((anim.state().config.run_time - 0.4).abs() < 1e-12);
+    assert_eq!(anim.state().config.rate_func.eval(0.75), 0.75);
+    anim.begin(&mut stage).unwrap();
+    assert!(stage.get(grouped).unwrap().submobjects().is_empty());
+    // Banker's rounding of raw alpha: round(0.3·4) = 1, round(0.6·4) = 2.
+    anim.interpolate(&mut stage, 0.3);
+    assert_eq!(stage.get(grouped).unwrap().submobjects(), &letters[..1]);
+    anim.interpolate(&mut stage, 0.6);
+    assert_eq!(stage.get(grouped).unwrap().submobjects(), &letters[..2]);
+    anim.finish(&mut stage);
+    assert_eq!(stage.get(grouped).unwrap().submobjects(), &letters[..]);
+}
+
+#[test]
+fn add_text_letter_by_letter_keeps_explicit_run_time_and_refuses_empty() {
+    let mut stage = Stage::new();
+    let grouped = stage.add(Mobject::new());
+    let letter = line5(&mut stage);
+    stage.attach(grouped, letter).unwrap();
+    let anim = fmn_anim::add_text_letter_by_letter(&stage, grouped, 0.1, 2.0).unwrap();
+    assert!((anim.state().config.run_time - 2.0).abs() < 1e-12);
+
+    let empty = stage.add(Mobject::new());
+    match fmn_anim::add_text_letter_by_letter(&stage, empty, 0.1, -1.0) {
+        Err(fmn_anim::animation::AnimError::NoLetterGroups) => {}
+        other => panic!("expected NoLetterGroups, got {other:?}"),
+    }
+}
