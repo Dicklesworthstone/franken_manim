@@ -4216,6 +4216,58 @@ except ValueError as error:
 else:
     raise AssertionError("Speedometer accepted zero num_ticks")
 
+assert drawings.DieFace.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.DieFace).parameters) == [
+    "value",
+    "side_length",
+    "corner_radius",
+    "stroke_color",
+    "stroke_width",
+    "fill_color",
+    "dot_radius",
+    "dot_color",
+    "dot_coalesce_factor",
+]
+die_five = drawings.DieFace(5)
+assert die_five.value == 5
+assert die_five.index == 5
+assert die_five.dots is die_five.submobjects[1]
+assert len(die_five.submobjects) == 2
+assert len(die_five.dots.submobjects) == 5
+assert np.isclose(die_five.submobjects[0].get_width(), 1.0, atol=1e-6)
+assert die_five.submobjects[0].get_fill_color() == manimlib.GREY_E
+assert die_five.submobjects[0].get_stroke_color() == manimlib.WHITE
+assert np.isclose(die_five.submobjects[0].get_fill_opacity(), 1.0)
+die_ace = drawings.DieFace(1)
+assert len(die_ace.dots.submobjects) == 1
+assert np.allclose(die_ace.dots[0].get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+styled_die = drawings.DieFace(
+    6,
+    side_length=2.0,
+    stroke_color=manimlib.RED,
+    fill_color=manimlib.BLUE,
+    dot_color=manimlib.YELLOW,
+    dot_radius=0.12,
+)
+assert styled_die.value == 6
+assert len(styled_die.dots.submobjects) == 6
+assert np.isclose(styled_die.submobjects[0].get_width(), 2.0, atol=1e-6)
+assert styled_die.submobjects[0].get_fill_color() == manimlib.BLUE
+assert styled_die.submobjects[0].get_stroke_color() == manimlib.RED
+assert styled_die.dots[0].get_fill_color() == manimlib.YELLOW
+try:
+    drawings.DieFace(0)
+except Exception as error:
+    assert str(error) == "DieFace only accepts integer inputs between 1 and 6"
+else:
+    raise AssertionError("DieFace accepted a pip count of 0")
+try:
+    drawings.DieFace(7)
+except Exception as error:
+    assert str(error) == "DieFace only accepts integer inputs between 1 and 6"
+else:
+    raise AssertionError("DieFace accepted a pip count of 7")
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.

@@ -7391,6 +7391,60 @@ class Speedometer(VMobject):
         return self.rotate_needle(target_angle - self.get_needle_angle())
 
 
+class DieFace(VGroup):
+    """Rounded square and pip dots over native Square/Dot geometry."""
+
+    def __init__(
+        self,
+        value,
+        side_length=1.0,
+        corner_radius=0.15,
+        stroke_color=_WHITE,
+        stroke_width=2.0,
+        fill_color=_GREY_E,
+        dot_radius=0.08,
+        dot_color=_WHITE,
+        dot_coalesce_factor=0.5,
+    ):
+        value = _operator.index(value)
+        if not (1 <= value <= 6):
+            raise Exception(
+                "DieFace only accepts integer inputs between 1 and 6"
+            )
+        dot = Dot(radius=float(dot_radius), fill_color=dot_color)
+        square = Square(
+            side_length=float(side_length),
+            stroke_color=stroke_color,
+            stroke_width=float(stroke_width),
+            fill_color=fill_color,
+            fill_opacity=1.0,
+        )
+        square.round_corners(float(corner_radius))
+        ul = _LEFT + _UP
+        ur = _RIGHT + _UP
+        dl = _LEFT + _DOWN
+        dr = _RIGHT + _DOWN
+        edge_group = [
+            (_ORIGIN,),
+            (ul, dr),
+            (ul, _ORIGIN, dr),
+            (ul, ur, dl, dr),
+            (ul, ur, _ORIGIN, dl, dr),
+            (ul, ur, _LEFT, _RIGHT, dl, dr),
+        ][value - 1]
+        arrangement = VGroup(
+            *(
+                dot.copy().move_to(square.get_bounding_box_point(vect))
+                for vect in edge_group
+            )
+        )
+        arrangement.space_out_submobjects(float(dot_coalesce_factor))
+        super().__init__(square, arrangement)
+        self.dots = arrangement
+        self.value = value
+        self.index = value
+
+
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
@@ -15379,6 +15433,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Clock"): Clock,
         ("manimlib.mobject.svg.drawings", "ClockPassesTime"): ClockPassesTime,
         ("manimlib.mobject.svg.drawings", "Speedometer"): Speedometer,
+        ("manimlib.mobject.svg.drawings", "DieFace"): DieFace,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (
