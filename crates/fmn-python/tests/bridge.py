@@ -3209,10 +3209,67 @@ native_model_scene.add(native_three_d_model)
 assert native_three_d_model._is_bound()
 assert native_model_mesh._is_bound()
 
-# TexturedSurface remains refused until Marionette can retain its light/dark
-# texture pair without changing the surface grid into an ImageQuad. The next
-# honest native constructor is legacy SingleStringTex over Scribe's existing
-# fmn-library Tex builder.
+# TexturedSurface/TexturedGeometry name the Marionette light/dark texture-pair
+# gap instead of inheriting Surface's incompatible defaults.
+surface_types = importlib.import_module("manimlib.mobject.types.surface")
+assert surface_types.TexturedSurface.__bases__ == (surface_types.Surface,)
+assert surface_types.TexturedGeometry.__bases__ == (surface_types.TexturedSurface,)
+assert list(inspect.signature(surface_types.TexturedSurface).parameters) == [
+    "uv_surface",
+    "image_file",
+    "dark_image_file",
+    "kwargs",
+]
+assert list(inspect.signature(surface_types.TexturedGeometry).parameters) == [
+    "geometry",
+    "texture_file",
+    "kwargs",
+]
+_textured_error = (
+    "TexturedSurface is unavailable until Marionette can retain a "
+    "light/dark texture pair without changing the surface grid into "
+    "an ImageQuad"
+)
+textured_uv = manimlib.Sphere()
+try:
+    surface_types.TexturedSurface(textured_uv, "light.png")
+except bridge_errors.CapabilityError as error:
+    assert str(error) == _textured_error
+else:
+    raise AssertionError("TexturedSurface constructed a texture pair")
+try:
+    surface_types.TexturedSurface(manimlib.Square(), "light.png")
+except TypeError as error:
+    assert str(error) == "TexturedSurface uv_surface must be a Surface"
+else:
+    raise AssertionError("TexturedSurface accepted a non-Surface")
+failed_textured = surface_types.TexturedSurface.__new__(
+    surface_types.TexturedSurface
+)
+try:
+    surface_types.TexturedSurface.__init__(
+        failed_textured, textured_uv, "light.png", unsupported=True
+    )
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("TexturedSurface silently discarded an unknown option")
+try:
+    surface_types.TexturedGeometry(object(), "tex.png")
+except bridge_errors.CapabilityError as error:
+    assert "light/dark texture pair" in str(error)
+else:
+    raise AssertionError("TexturedGeometry constructed a texture pair")
+
+extract_scene = importlib.import_module("manimlib.extract_scene")
+assert extract_scene.BlankScene.__bases__ == (InteractiveScene,)
+assert str(inspect.signature(extract_scene.BlankScene.construct)) == "(self)"
+blank_scene = extract_scene.BlankScene()
+assert isinstance(blank_scene, InteractiveScene)
+assert extract_scene.BlankScene.construct is not Scene.construct
+
+# The next honest native constructor is legacy SingleStringTex over Scribe's
+# existing fmn-library Tex builder.
 old_tex_mobjects = importlib.import_module(
     "manimlib.mobject.svg.old_tex_mobject"
 )

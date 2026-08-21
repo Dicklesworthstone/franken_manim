@@ -8570,6 +8570,49 @@ class SGroup(Surface):
     pass
 
 
+class TexturedSurface(Surface):
+    """Light/dark textured UV surface. Marionette cannot yet retain both
+    textures without collapsing the grid into an ImageQuad."""
+
+    shader_folder = "textured_surface"
+    data_dtype = [
+        ("point", _np.float32, (3,)),
+        ("d_normal_point", _np.float32, (3,)),
+        ("im_coords", _np.float32, (2,)),
+        ("opacity", _np.float32, (1,)),
+    ]
+
+    def __init__(self, uv_surface, image_file, dark_image_file=None, **kwargs):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not isinstance(uv_surface, Surface):
+            raise TypeError("TexturedSurface uv_surface must be a Surface")
+        del image_file, dark_image_file
+        raise _CapabilityError(
+            "TexturedSurface is unavailable until Marionette can retain a "
+            "light/dark texture pair without changing the surface grid into "
+            "an ImageQuad"
+        )
+
+
+class TexturedGeometry(TexturedSurface):
+    """Trimesh-backed textured surface. Same Marionette texture-pair gap."""
+
+    def __init__(self, geometry, texture_file, **kwargs):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        del geometry, texture_file
+        raise _CapabilityError(
+            "TexturedGeometry is unavailable until Marionette can retain a "
+            "light/dark texture pair without changing the surface grid into "
+            "an ImageQuad"
+        )
+
+
 def _native_surface_shell_factory():
     # Surface-family children are NOT VMobjects: their shells must carry
     # the Mobject-level color surface (rgba records), never stroke/fill.
@@ -11132,6 +11175,13 @@ class InteractiveScene(Scene):
 
     def checkpoint_paste(self):
         return _portal_checkpoint_paste(self)
+
+
+class BlankScene(InteractiveScene):
+    """extract_scene's empty InteractiveScene; construct enters embed."""
+
+    def construct(self):
+        self.embed()
 
 
 class CheckpointManager:
@@ -15017,6 +15067,8 @@ def _install_schema_surface():
         ("manimlib.mobject.types.surface", "SGroup"): SGroup,
         ("manimlib.mobject.types.surface", "ParametricSurface"): ParametricSurface,
         ("manimlib.mobject.types.surface", "ThreeDModel"): ThreeDModel,
+        ("manimlib.mobject.types.surface", "TexturedSurface"): TexturedSurface,
+        ("manimlib.mobject.types.surface", "TexturedGeometry"): TexturedGeometry,
         ("manimlib.mobject.three_dimensions", "Sphere"): Sphere,
         ("manimlib.mobject.three_dimensions", "Torus"): Torus,
         ("manimlib.mobject.three_dimensions", "Cylinder"): Cylinder,
@@ -15216,6 +15268,7 @@ def _install_schema_surface():
             "InteractiveSceneEmbed",
         ): InteractiveSceneEmbed,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
+        ("manimlib.extract_scene", "BlankScene"): BlankScene,
         ("manimlib.window", "Window"): Window,
         ("manimlib.scene.scene_file_writer", "SceneFileWriter"): SceneFileWriter,
         ("manimlib.shader_wrapper", "ShaderWrapper"): ShaderWrapper,
