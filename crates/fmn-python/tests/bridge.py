@@ -2799,6 +2799,24 @@ assert np.allclose(
     linear_handle.get_center(),
     linear_slider.slider_axis.get_end(),
 )
+assert str(
+    inspect.signature(interactive.LinearNumberSlider.get_value_from_point)
+) == "(self, point)"
+assert linear_slider.get_value_from_point(np.array([0.37, 1.0, 0.0])) == 6.5
+assert linear_slider.set_value(4.0) is linear_slider
+assert linear_slider.get_value() == np.float64(4.0)
+assert np.allclose(
+    linear_handle.get_center(),
+    linear_slider.slider_axis.point_from_proportion(0.4),
+)
+assert linear_slider.slider is linear_handle
+try:
+    linear_slider.set_value(11.0)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("LinearNumberSlider accepted a value above max")
+assert linear_slider.get_value() == np.float64(4.0)
 
 custom_linear = interactive.LinearNumberSlider(
     0.0,

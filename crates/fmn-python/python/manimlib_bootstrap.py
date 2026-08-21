@@ -10631,12 +10631,18 @@ class LinearNumberSlider(ControlMobject):
             setattr(self, key, item)
         self.bar, self.slider, self.slider_axis = parts
 
-    def slider_on_mouse_drag(self, mob, event_data):
-        del mob
+    def assert_value(self, value):
+        assert self.min_value <= value <= self.max_value
+
+    def set_value_anim(self, value):
+        proportion = (value - self.min_value) / (self.max_value - self.min_value)
+        self.slider.move_to(self.slider_axis.point_from_proportion(proportion))
+
+    def get_value_from_point(self, point):
         start, end = self.slider_axis.get_start_and_end()
         segment = end - start
         proportion = _np.dot(
-            _np.asarray(event_data["point"], dtype=float) - start,
+            _np.asarray(point, dtype=float) - start,
             segment,
         ) / _np.dot(segment, segment)
         proportion = min(1.0, max(0.0, float(proportion)))
@@ -10647,13 +10653,11 @@ class LinearNumberSlider(ControlMobject):
         boundary_tolerance = 1e-12 * max(1.0, abs(step_position))
         step_count = int(_math.ceil(step_position - boundary_tolerance))
         snapped = self.min_value + step_count * self.step
-        snapped_proportion = (snapped - self.min_value) / (
-            self.max_value - self.min_value
-        )
-        self.slider.move_to(
-            self.slider_axis.point_from_proportion(snapped_proportion)
-        )
-        ValueTracker.set_value(self, snapped)
+        return min(self.max_value, max(self.min_value, snapped))
+
+    def slider_on_mouse_drag(self, mob, event_data):
+        del mob
+        self.set_value(self.get_value_from_point(event_data["point"]))
         return False
 
 
