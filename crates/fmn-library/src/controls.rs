@@ -2247,6 +2247,23 @@ mod tests {
     }
 
     #[test]
+    fn enable_disable_button_uses_custom_colors_when_set_and_toggled() {
+        let enable_color = fmn_core::constants::BLUE;
+        let disable_color = fmn_core::constants::YELLOW;
+        let mut button = EnableDisableButton::new(true)
+            .enable_color(enable_color)
+            .disable_color(disable_color);
+        assert_eq!(button.rect().style().fill_color, WHITE);
+
+        button.set_value(true);
+        assert_eq!(button.rect().style().fill_color, enable_color);
+
+        button.toggle_value();
+        assert!(!button.value());
+        assert_eq!(button.rect().style().fill_color, disable_color);
+    }
+
+    #[test]
     fn enable_disable_button_custom_fill_opacity() {
         let mut button = EnableDisableButton::new(true).fill_opacity(0.4);
         assert_eq!(button.rect().style().fill_opacity, 0.4);
