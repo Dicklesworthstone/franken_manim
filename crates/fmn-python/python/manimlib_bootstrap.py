@@ -10745,9 +10745,17 @@ class ColorSliders(Group):
             )
         slider_config["rounded_rect_kwargs"] = slider_rect_config
         slider_config["circle_kwargs"] = slider_circle_config
-        self._slider_value_type = _np.dtype(
+        slider_value_dtype = _np.dtype(
             slider_config.get("value_type", _np.float64)
-        ).type
+        )
+        if not _np.issubdtype(slider_value_dtype, _np.number):
+            # Sliders are scalar lanes; a non-numeric value_type (object,
+            # str, ...) can never reach the native tracker.
+            raise TypeError(
+                "sliders_kwargs.value_type must be a numeric dtype; got "
+                + slider_value_dtype.name
+            )
+        self._slider_value_type = slider_value_dtype.type
         self._native_slider_config = (
             None
             if "min_value" not in slider_config

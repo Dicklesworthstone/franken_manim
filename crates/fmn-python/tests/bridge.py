@@ -4568,6 +4568,34 @@ else:
         "ColorSliders accepted an unordered min_value/max_value range"
     )
 
+# fm-5wq.4: sliders_kwargs.value_type coerces every set_value component
+# through the numpy scalar type before it reaches the native sliders —
+# int truncates (numpy int64 cast), including alpha. A non-numeric
+# value_type (object) and a non-dtype string are named TypeErrors at
+# construction, not hangs.
+int_color_sliders = interactive.ColorSliders(
+    sliders_kwargs=dict(value_type=int)
+)
+int_color_sliders.set_value(64.9, 128.2, 255.0, 0.9)
+assert np.allclose(
+    int_color_sliders.get_value(),
+    [64.0 / 255.0, 128.0 / 255.0, 1.0, 0.0],
+)
+try:
+    interactive.ColorSliders(sliders_kwargs=dict(value_type=object))
+except TypeError as error:
+    assert "value_type" in str(error), error
+else:
+    raise AssertionError(
+        "ColorSliders accepted a non-numeric value_type"
+    )
+try:
+    interactive.ColorSliders(sliders_kwargs=dict(value_type="bogus"))
+except TypeError as error:
+    assert "bogus" in str(error), error
+else:
+    raise AssertionError("ColorSliders accepted a non-dtype value_type")
+
 assert str(inspect.signature(interactive.ColorSliders.get_picked_color)) == (
     "(self)"
 )
