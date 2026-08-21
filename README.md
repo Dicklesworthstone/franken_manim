@@ -70,7 +70,11 @@ class SquareToCircle(Scene):
 ```
 
 ```bash
-fmn-python scene.py SquareToCircle -o                # renders and opens; no LaTeX installed, anywhere
+# Works today (v0.4.0 portal):
+fmn-python scene.py SquareToCircle --format png_sequence   # real rendered frames; no LaTeX installed, anywhere
+
+# 1.0 target — fails closed today with capability exit 4:
+fmn-python scene.py SquareToCircle -o                # renders and opens
 fmn-python scene.py SquareToCircle --reproducible    # certified: bit-identical frames on every machine
 ```
 
@@ -216,7 +220,7 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 
 ## The `fmn` CLI
 
-> The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema.
+> The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema. The first block below is what ships and works at v0.4.0; the second block is the 1.0 target contract and fails closed today.
 
 ```bash
 # The shipped native G1 corpus renders through the standalone CPython-free binary
@@ -236,7 +240,31 @@ fmn --reproducible --format png_sequence @builtin circle_shift.v1
 # Compiled FMTL/1 scenes use the same Lumen/Reel render path and fixed artifact fps
 fmn --format png_sequence demo/wasm/bundle.fmtl DemoTimeline
 
-# Python sources use the separately installed portal
+# Batch farms under asupersync, with budgets and per-scene manifests
+fmn batch --format png_sequence --video_dir ./media \
+  @builtin circle_shift.v1 rectangle_shift.v1
+
+# Capabilities: ffmpeg fingerprint + hardware encoders, fonts, cache, ExecutionPlan
+fmn doctor
+
+# Python sources use the separately installed portal — the v0.4.0 console surface
+# (see docs/dist/python_wheel.md for the exact contract):
+fmn-python --version
+fmn-python --list-scenes scene.py
+fmn-python --construct-only scene.py SquareToCircle        # lifecycle diagnostic; no pixels claimed
+fmn-python scene.py SquareToCircle --format png_sequence   # real Lumen/Reel frames, atomically published
+fmn-python scene.py SquareToCircle --format png            # atomic final-state still
+fmn-python scene.py SquareToCircle --format png_sequence \
+  --resolution 640x360 --fps 30 --threads 4 --video_dir ./media
+```
+
+The portal commands below are the **1.0 target contract**, not shipped behavior:
+today they fail closed with capability exit 4, because their input-closure,
+provenance, opener, output, or worker contracts have not landed
+([wheel policy](docs/dist/python_wheel.md)).
+
+```bash
+# 1.0 target — fail closed today (capability exit 4)
 fmn-python scene.py SquareToCircle -o                 # write and open
 fmn-python scene.py --write_all                       # every scene in the file
 fmn-python scene.py SquareToCircle -so                # skip to the end, show final frame
@@ -245,21 +273,13 @@ fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks
 # Certified determinism: the whole input closure content-hashed, bits promised
 fmn-python scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
 
-# Native outputs that need no ffmpeg at all
-fmn-python scene.py SquareToCircle --format png_sequence
+# Non-PNG native outputs through the portal
 fmn-python scene.py SquareToCircle --format gif
 fmn-python scene.py SquareToCircle --format y4m
 
 # Live iteration: supervisor + crash-isolated worker, checkpoint replay
 fmn-python scene.py SquareToCircle --autoreload
 fmn-python studio scene.py                     # browser Studio: scrub, inspect, overlays
-
-# Batch farms under asupersync, with budgets and per-scene manifests
-fmn batch --format png_sequence --video_dir ./media \
-  @builtin circle_shift.v1 rectangle_shift.v1
-
-# Capabilities: ffmpeg fingerprint + hardware encoders, fonts, cache, ExecutionPlan
-fmn doctor
 ```
 
 ## The browser demo (W5 wasm tier 1)
@@ -370,14 +390,24 @@ class Hello(Scene):
         self.wait()
 EOF
 
-# 2. Render it through the Python portal; no LaTeX is installed
+# 2. Render it through the Python portal; no LaTeX is installed (works today, v0.4.0)
+fmn-python hello.py Hello --format png_sequence --video_dir ./media
+
+# 3. Look at the frames it atomically published
+sha256sum ./media/**/*.png
+```
+
+The rest of the loop is the **1.0 target** and fails closed today with capability
+exit 4:
+
+```bash
+# Render and open
 fmn-python hello.py Hello -o
 
-# 3. Prove it's reproducible: same bytes on your laptop and your server
+# Prove it's reproducible: same bytes on your laptop and your server
 fmn-python hello.py Hello --reproducible
-sha256sum media/videos/hello/Hello/frames/*.png
 
-# 4. Iterate live with crash isolation and scrubbing
+# Iterate live with crash isolation and scrubbing
 fmn-python studio hello.py
 ```
 
