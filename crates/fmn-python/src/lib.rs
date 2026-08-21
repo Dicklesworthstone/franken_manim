@@ -3025,6 +3025,44 @@ impl BridgeMobject {
         install_native_tree(slf, factory, root)
     }
 
+    /// `Checkbox(value)` over Atlas's native bool-control composition.
+    /// The constructing Python proxy remains a live `ValueTracker`; Atlas
+    /// supplies its two visual children in Reference order: box, then mark.
+    fn _build_checkbox<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        value: bool,
+        box_width: f64,
+        box_height: f64,
+        checkmark_color: [f64; 3],
+        cross_color: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut composition = fmn_mobject::Mobject::from(
+            fmn_library::Checkbox::new(value)
+                .box_width(box_width)
+                .box_height(box_height)
+                .checkmark_color(fmn_core::color::Srgb {
+                    r: checkmark_color[0],
+                    g: checkmark_color[1],
+                    b: checkmark_color[2],
+                })
+                .cross_color(fmn_core::color::Srgb {
+                    r: cross_color[0],
+                    g: cross_color[1],
+                    b: cross_color[2],
+                })
+                .composition(),
+        );
+        let children = std::mem::take(&mut composition.submobjects);
+        if children.len() != 2 {
+            return Err(PyRuntimeError::new_err(format!(
+                "native Checkbox family contract drift: expected 2 children, got {}",
+                children.len()
+            )));
+        }
+        native_shell_specs(slf.py(), factory, children)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the

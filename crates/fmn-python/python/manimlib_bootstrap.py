@@ -8844,6 +8844,145 @@ class ComplexValueTracker(ValueTracker):
         return self
 
 
+class ControlMobject(ValueTracker):
+    """The interactive-control base as a live native value tracker.
+
+    Concrete controls own ``assert_value`` and ``set_value_anim``; this base
+    preserves the Reference's tracker-first MRO and fixed-frame composition.
+    """
+
+    def __init__(self, value, *mobjects, **kwargs):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not all(isinstance(mobject, Mobject) for mobject in mobjects):
+            raise TypeError("ControlMobject children must be Mobject instances")
+        _install_live_state(self)
+        self._init_value_tracker(0, float(value), 0.0)
+        self.add(*mobjects)
+        self.add_updater(lambda mob: None)
+        self.fix_in_frame()
+
+    def assert_value(self, value):
+        del value
+
+    def set_value_anim(self, value):
+        del value
+
+    def set_value(self, value):
+        self.assert_value(value)
+        self.set_value_anim(value)
+        return ValueTracker.set_value(self, value)
+
+
+class Checkbox(ControlMobject):
+    """Atlas's native checkbox composition over a live bool tracker."""
+
+    def __init__(
+        self,
+        value=True,
+        value_type=_np.dtype(bool),
+        rect_kwargs=dict(width=0.5, height=0.5, fill_opacity=0.0),
+        checkmark_kwargs=dict(stroke_color=_GREEN, stroke_width=6),
+        cross_kwargs=dict(stroke_color=_RED, stroke_width=6),
+        box_content_buff=0.1,
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if not isinstance(value, bool):
+            raise AssertionError("Checkbox value must be bool")
+
+        rect_config = dict(rect_kwargs)
+        rect_unknown = sorted(
+            set(rect_config) - {"width", "height", "fill_opacity"}
+        )
+        if rect_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("rect_kwargs." + name for name in rect_unknown)
+            )
+        box_width = float(rect_config.get("width", 0.5))
+        box_height = float(rect_config.get("height", 0.5))
+        fill_opacity = float(rect_config.get("fill_opacity", 0.0))
+        if fill_opacity != 0.0:
+            raise NotImplementedError(
+                "Checkbox rect_kwargs.fill_opacity is not routed to the native builder"
+            )
+
+        check_config = dict(checkmark_kwargs)
+        check_unknown = sorted(
+            set(check_config) - {"stroke_color", "stroke_width"}
+        )
+        cross_config = dict(cross_kwargs)
+        cross_unknown = sorted(
+            set(cross_config) - {"stroke_color", "stroke_width"}
+        )
+        nested_unknown = [
+            *("checkmark_kwargs." + name for name in check_unknown),
+            *("cross_kwargs." + name for name in cross_unknown),
+        ]
+        if nested_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(nested_unknown)
+            )
+        if float(check_config.get("stroke_width", 6)) != 6.0:
+            raise NotImplementedError(
+                "Checkbox checkmark_kwargs.stroke_width is not routed to the native builder"
+            )
+        if float(cross_config.get("stroke_width", 6)) != 6.0:
+            raise NotImplementedError(
+                "Checkbox cross_kwargs.stroke_width is not routed to the native builder"
+            )
+
+        self.value_type = _np.dtype(value_type).type
+        self.rect_kwargs = rect_config
+        self.checkmark_kwargs = check_config
+        self.cross_kwargs = cross_config
+        self.box_content_buff = float(box_content_buff)
+        self._checkbox_native_config = (
+            box_width,
+            box_height,
+            tuple(_color_to_rgb(check_config.get("stroke_color", _GREEN))),
+            tuple(_color_to_rgb(cross_config.get("stroke_color", _RED))),
+        )
+        box, content = self._native_checkbox_parts(value)
+        super().__init__(value, box, content)
+        self.box = box
+        self.box_content = content
+
+    def _native_checkbox_parts(self, value):
+        specs = self._build_checkbox(
+            _native_shell_factory,
+            bool(value),
+            *self._checkbox_native_config,
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if len(parts) != 2:
+            raise RuntimeError(
+                "native Checkbox family contract drift: expected box + content"
+            )
+        return parts
+
+    def assert_value(self, value):
+        if not isinstance(value, bool):
+            raise AssertionError("Checkbox value must be bool")
+
+    def set_value_anim(self, value):
+        box, content = self._native_checkbox_parts(value)
+        self.box.become(box)
+        self.box_content.become(content)
+
+    def toggle_value(self):
+        self.set_value(not bool(self.get_value()))
+
+
 class CameraFrame(Mobject):
     """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
     real Mobject whose authoritative state lives in one engine
@@ -12855,6 +12994,8 @@ def _install_schema_surface():
         ("manimlib.mobject.mobject", "Point"): Point,
         ("manimlib.mobject.interactive", "MotionMobject"): MotionMobject,
         ("manimlib.mobject.interactive", "Button"): Button,
+        ("manimlib.mobject.interactive", "ControlMobject"): ControlMobject,
+        ("manimlib.mobject.interactive", "Checkbox"): Checkbox,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (

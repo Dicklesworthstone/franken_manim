@@ -2348,6 +2348,62 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Button fabricated an unbound mouse-press gateway")
 
+# Checkbox keeps the schema's tracker lineage while Atlas owns the box and
+# the state-dependent checkmark/cross geometry.
+checkbox_true = interactive.Checkbox(True)
+checkbox_false = interactive.Checkbox(False)
+assert interactive.Checkbox.__bases__ == (interactive.ControlMobject,)
+assert interactive.ControlMobject.__bases__ == (manimlib.ValueTracker,)
+assert interactive.ControlMobject in interactive.Checkbox.__mro__
+assert manimlib.ValueTracker in interactive.Checkbox.__mro__
+assert bool(checkbox_true.get_value()) is True
+assert bool(checkbox_false.get_value()) is False
+assert list(checkbox_true.submobjects) == [
+    checkbox_true.box,
+    checkbox_true.box_content,
+]
+assert list(checkbox_false.submobjects) == [
+    checkbox_false.box,
+    checkbox_false.box_content,
+]
+checked_points = len(checkbox_true.box_content.get_points())
+crossed_points = len(checkbox_false.box_content.get_points())
+assert checked_points > 0
+assert crossed_points > checked_points
+
+true_content = checkbox_true.box_content
+checkbox_true.toggle_value()
+assert bool(checkbox_true.get_value()) is False
+assert checkbox_true.box_content is true_content
+assert len(checkbox_true.box_content.get_points()) == crossed_points
+checkbox_true.set_value(True)
+assert bool(checkbox_true.get_value()) is True
+assert checkbox_true.box_content is true_content
+assert len(checkbox_true.box_content.get_points()) == checked_points
+try:
+    checkbox_true.set_value(1)
+except AssertionError as error:
+    assert str(error) == "Checkbox value must be bool"
+else:
+    raise AssertionError("Checkbox accepted a non-bool value")
+
+try:
+    checkbox_true.on_mouse_press(checkbox_true, {"point": np.zeros(3)})
+except NotImplementedError as error:
+    assert "Checkbox.on_mouse_press" in str(error), error
+    assert "semantic binding has not landed" in str(error), error
+else:
+    raise AssertionError("Checkbox fabricated an unbound mouse-press gateway")
+
+failed_checkbox = interactive.Checkbox.__new__(interactive.Checkbox)
+try:
+    interactive.Checkbox.__init__(failed_checkbox, unsupported=True)
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("Checkbox silently discarded an unknown option")
+assert not hasattr(failed_checkbox, "submobjects")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.
