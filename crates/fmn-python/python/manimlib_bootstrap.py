@@ -6626,6 +6626,8 @@ class Underline(Line):
             float(stretch_factor),
         )
         _hang_native_children(self, specs)
+        # Atlas owns the extent-derived endpoints; inherited Line owns the
+        # native path_arc rebuild, so curvature does not rederive placement.
         if path_arc != 0.0:
             self.set_path_arc(path_arc)
         _apply_vmobject_style_kwargs(self, kwargs)
