@@ -9213,6 +9213,15 @@ torus_mesh = three_dimensions.SurfaceMesh(torus, resolution=(4, 3))
 assert len(torus_mesh.submobjects) == 7
 assert all(isinstance(line, VMobject) and line.has_points() for line in torus_mesh)
 
+cylinder_mesh_source = three_dimensions.Cylinder(
+    height=3.0, radius=1.0, axis=manimlib.RIGHT, resolution=(5, 3)
+)
+cylinder_mesh = three_dimensions.SurfaceMesh(
+    cylinder_mesh_source, resolution=(4, 3)
+)
+assert len(cylinder_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in cylinder_mesh)
+
 for unsupported_surface in (None, VMobject()):
     try:
         three_dimensions.SurfaceMesh(unsupported_surface)
