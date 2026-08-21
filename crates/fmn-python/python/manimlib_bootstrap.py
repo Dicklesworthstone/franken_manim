@@ -11665,6 +11665,12 @@ class Scene(_SceneCore):
         self.window = kwargs.get("window")
         self.hold_on_wait = bool(kwargs.get("presenter_mode", False))
         self.quit_interaction = False
+        self.skip_animations = bool(kwargs.get("skip_animations", False))
+        self.start_at_animation_number = kwargs.get("start_at_animation_number")
+        self.end_at_animation_number = kwargs.get("end_at_animation_number")
+        if self.start_at_animation_number is not None:
+            self.skip_animations = True
+        self.original_skipping_status = self.skip_animations
 
     @property
     def frame(self):
@@ -12227,6 +12233,40 @@ class Scene(_SceneCore):
             self.frame.set_euler_axes("zxy")
         else:
             raise Exception("Only `xz` and `xy` are valid floor planes")
+
+    def stop_skipping(self):
+        self.virtual_animation_start_time = self.get_time()
+        self.skip_animations = False
+
+    def force_skipping(self):
+        self.original_skipping_status = self.skip_animations
+        self.skip_animations = True
+        return self
+
+    def revert_to_original_skipping_status(self):
+        if hasattr(self, "original_skipping_status"):
+            self.skip_animations = self.original_skipping_status
+        return self
+
+    def update_skipping_status(self):
+        start = self.start_at_animation_number
+        if start is not None and self.num_plays == start:
+            self.skip_time = self.get_time()
+            if not self.original_skipping_status:
+                self.stop_skipping()
+        end = self.end_at_animation_number
+        if end is not None and self.num_plays >= end:
+            raise _EndScene("end_at_animation_number reached")
+
+    def hold_loop(self):
+        # Presenter hold waits on a host key (space/right). Without a window
+        # the loop cannot be released, so refuse instead of spinning.
+        if self.hold_on_wait:
+            raise _CapabilityError(
+                "Scene.hold_loop presenter wait requires a host window; "
+                "FrankenManim Studio owns interactive windows"
+            )
+        self.hold_on_wait = True
 
 
 def _mobject_looks_identical(mobject, other):

@@ -1728,6 +1728,49 @@ except bridge_errors.CapabilityError as error:
 else:
     raise AssertionError("embed launched a host IPython session")
 
+# fm-5wq.4: skip/hold flags are host-free. force_skipping/stop_skipping/
+# revert_to_original_skipping_status flip skip_animations; hold_loop is a
+# no-op unless presenter-mode already armed a wait that needs a window.
+assert str(inspect.signature(scene_module.Scene.force_skipping)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.stop_skipping)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.revert_to_original_skipping_status)) == (
+    "(self)"
+)
+assert str(inspect.signature(scene_module.Scene.hold_loop)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.update_skipping_status)) == (
+    "(self)"
+)
+skip_scene = Scene()
+assert skip_scene.skip_animations is False
+assert skip_scene.force_skipping() is skip_scene
+assert skip_scene.skip_animations is True
+assert skip_scene.stop_skipping() is None
+assert skip_scene.skip_animations is False
+assert skip_scene.revert_to_original_skipping_status() is skip_scene
+assert skip_scene.skip_animations is False
+forced_skip = Scene(skip_animations=True)
+assert forced_skip.skip_animations is True
+assert forced_skip.original_skipping_status is True
+assert Scene(start_at_animation_number=2).skip_animations is True
+assert skip_scene.hold_on_wait is False
+assert skip_scene.hold_loop() is None
+assert skip_scene.hold_on_wait is True
+try:
+    Scene(presenter_mode=True).hold_loop()
+except bridge_errors.CapabilityError as error:
+    assert "hold_loop" in str(error)
+    assert "Studio owns interactive windows" in str(error)
+else:
+    raise AssertionError("hold_loop spun without a host window")
+end_skip = Scene(end_at_animation_number=0)
+end_skip.num_plays = 0
+try:
+    end_skip.update_skipping_status()
+except scene_module.EndScene:
+    pass
+else:
+    raise AssertionError("update_skipping_status missed end_at_animation_number")
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
