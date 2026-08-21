@@ -2556,6 +2556,28 @@ assert loc_label.is_fixed_in_frame()
 assert time_label.is_fixed_in_frame()
 assert np.isclose(time_label.get_value(), 0.0)
 assert time_label.get_fill_color() == manimlib.GREY_C
+assert InteractiveScene.select_top_level_mobs is True
+assert str(inspect.signature(InteractiveScene.get_highlight)) == (
+    "(self, mobject)"
+)
+top_highlight = interactive_scene.get_highlight(corner_source)
+assert isinstance(top_highlight, manimlib.DotCloud)
+assert top_highlight.get_num_points() == 4
+cloud_highlight = interactive_scene.get_highlight(corner_dots)
+assert type(cloud_highlight) is manimlib.Mobject
+assert cloud_highlight.get_num_points() == 0
+interactive_scene.select_top_level_mobs = False
+piece_highlight = interactive_scene.get_highlight(corner_source)
+assert isinstance(piece_highlight, manimlib.VHighlight)
+assert len(piece_highlight.updaters) == 1
+interactive_scene.select_top_level_mobs = True
+assert str(inspect.signature(InteractiveScene.get_selection_highlight)) == (
+    "(self)"
+)
+selection_highlight = interactive_scene.get_selection_highlight()
+assert isinstance(selection_highlight, manimlib.Group)
+assert selection_highlight.tracked_mobjects == []
+assert len(selection_highlight.updaters) == 1
 
 
 # The schema-generated import topology and exact-name aliases are present.

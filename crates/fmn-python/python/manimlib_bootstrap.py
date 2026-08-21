@@ -12081,6 +12081,7 @@ class InteractiveScene(Scene):
         fill_color=_GREY_C,
         num_decimal_places=1,
     )
+    select_top_level_mobs = True
 
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
@@ -12178,6 +12179,40 @@ class InteractiveScene(Scene):
         time_label.fix_in_frame()
         time_label.add_updater(lambda mob, dt=0: mob.increment_value(dt))
         return VGroup(loc_label, time_label)
+
+    def get_highlight(self, mobject):
+        if (
+            isinstance(mobject, VMobject)
+            and mobject.has_points()
+            and not self.select_top_level_mobs
+        ):
+            length = max(mobject.get_height(), mobject.get_width())
+            result = VHighlight(
+                mobject,
+                max_stroke_addition=min(50.0 * length, 10.0),
+            )
+            result.add_updater(lambda mob: mob.replace(mobject, stretch=True))
+            return result
+        if isinstance(mobject, DotCloud):
+            return Mobject()
+        return self.get_corner_dots(mobject)
+
+    def get_selection_highlight(self):
+        result = Group()
+        result.tracked_mobjects = []
+        result.add_updater(self.update_selection_highlight)
+        return result
+
+    def update_selection_highlight(self, highlight):
+        selection = getattr(self, "selection", None)
+        if selection is None:
+            return
+        if set(highlight.tracked_mobjects) == set(selection):
+            return
+        highlight.tracked_mobjects = list(selection)
+        highlight.set_submobjects(
+            [self.get_highlight(mob) for mob in selection]
+        )
 
 
 class BlankScene(InteractiveScene):
