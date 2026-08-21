@@ -10654,24 +10654,17 @@ class FocusOn(Transform):
         **kwargs,
     ):
         if isinstance(focus_point, _BridgeMobject):
-            # fm-5wq.4.77: a Mobject focus point follows live. The native
-            # focus_on segment shrinks toward the construction-time
-            # centre; the scene-updater phase runs AFTER each frame's
-            # segment interpolation (the six-step order), so a follow
-            # updater on the shrinking dot re-centres it on the live
-            # target every frame — the Reference's move_to updater, on
-            # the on-screen dot instead of the detached target.
-            self._focus_target = focus_point
-            self.focus_point = _np.array(_vec3(focus_point.get_center()))
-        else:
-            self._focus_target = None
-            try:
-                self.focus_point = _np.array(_vec3(focus_point))
-            except Exception as error:
-                raise TypeError(
-                    "FocusOn focus_point must be a 3D point or a "
-                    "Mobject; got " + type(focus_point).__name__
-                ) from error
+            raise NotImplementedError(
+                "manimlib.animation.indication.FocusOn Mobject targets "
+                "require the animation-owned updater seam"
+            )
+        try:
+            self.focus_point = _np.array(_vec3(focus_point))
+        except Exception as error:
+            raise TypeError(
+                "FocusOn focus_point must be a 3D point or a "
+                "Mobject; got " + type(focus_point).__name__
+            ) from error
         self.opacity = float(opacity)
         self.color = color
         self.remover = bool(remover)
@@ -10681,10 +10674,6 @@ class FocusOn(Transform):
             run_time=run_time,
             **kwargs,
         )
-        if self._focus_target is not None:
-            self.mobject.add_updater(
-                lambda dot: dot.move_to(self._focus_target)
-            )
 
     def create_target(self):
         return Dot(
