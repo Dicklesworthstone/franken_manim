@@ -2606,7 +2606,7 @@ assert not hasattr(failed_color_sliders, "submobjects")
 textbox = interactive.Textbox("seed", isInitiallyActive=True)
 assert interactive.Textbox.__bases__ == (interactive.ControlMobject,)
 assert interactive.ControlMobject in interactive.Textbox.__mro__
-assert ValueTracker in interactive.Textbox.__mro__
+assert manimlib.ValueTracker in interactive.Textbox.__mro__
 assert list(textbox.submobjects) == [textbox.box, textbox.text]
 assert textbox.get_value() == "seed"
 assert textbox.isActive is True
