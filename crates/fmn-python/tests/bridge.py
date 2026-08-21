@@ -3051,6 +3051,14 @@ assert (
     )
     == 1
 )
+assert interactive_state_scene.restore_state(interactive_state) is None
+assert interactive_state_scene.mobjects[0] is interactive_state_scene.selection_highlight
+assert (
+    interactive_state_scene.mobjects.count(
+        interactive_state_scene.selection_highlight
+    )
+    == 1
+)
 
 # fm-5wq.4: free-axis grabbing preserves the mouse-to-selection offset and
 # moves the native selection Group as one unit without requiring pyglet.
