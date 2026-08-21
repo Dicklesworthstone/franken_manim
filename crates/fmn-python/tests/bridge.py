@@ -8600,6 +8600,30 @@ assert np.allclose(
     atol=1e-6,
 )
 
+default_dodecahedron = three_dimensions.Dodecahedron()
+assert len(default_dodecahedron.submobjects) == 12
+
+back_dodecahedron = three_dimensions.Dodecahedron(z_index=-1)
+front_dodecahedron = three_dimensions.Dodecahedron(z_index=1)
+dodecahedron_order_scene = Scene().add(front_dodecahedron, back_dodecahedron)
+assert dodecahedron_order_scene.get_mobjects() == [
+    back_dodecahedron,
+    front_dodecahedron,
+]
+
+failed_dodecahedron = three_dimensions.Dodecahedron.__new__(
+    three_dimensions.Dodecahedron
+)
+try:
+    three_dimensions.Dodecahedron.__init__(failed_dodecahedron, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Dodecahedron() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Dodecahedron keyword reached the native builder")
+assert not hasattr(failed_dodecahedron, "submobjects")
+
 prismify_source = manimlib.Polygon(
     [-0.5, -0.5, 0.0],
     [0.75, -0.5, 0.0],

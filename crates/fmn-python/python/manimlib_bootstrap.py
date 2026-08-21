@@ -8162,6 +8162,7 @@ class Dodecahedron(VGroup3D):
         shading=(0.2, 0.2, 0.2),
         **kwargs,
     ):
+        z_index = int(kwargs.pop("z_index", 0))
         style, depth_test, resolved_shading, joint_type = (
             _split_native_vgroup3d_kwargs(
                 "Dodecahedron()", kwargs, tuple(shading)
@@ -8175,6 +8176,7 @@ class Dodecahedron(VGroup3D):
             stroke_color,
             float(stroke_width),
             tuple(float(value) for value in resolved_shading),
+            z_index,
         )
         _hang_native_children(self, specs)
         style.setdefault("fill_color", fill_color)
