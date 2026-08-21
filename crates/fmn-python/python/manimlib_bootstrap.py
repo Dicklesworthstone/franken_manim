@@ -10159,7 +10159,17 @@ class Restore(_NativeAnimation):
         # segment (fm-5wq.4.70).
         if getattr(mobject, "saved_state", None) is None:
             raise Exception("Trying to restore without having saved")
-        _refuse_unrouted("Restore()", [("path_func", path_func is not None)])
+        # fm-5wq.4.102: the portal arc factories route onto the native
+        # restore path_arc surface exactly as Transform's do (fm-5wq.4.63);
+        # an arbitrary user path function stays a precise refusal — Choreo
+        # never samples Python mid-segment.
+        if path_func is not None:
+            routed_arc = getattr(path_func, "_fmn_path_arc", None)
+            if routed_arc is None:
+                _refuse_unrouted("Restore()", [("path_func", True)])
+            path_arc = float(routed_arc)
+            path_arc_axis = getattr(path_func, "_fmn_path_axis", path_arc_axis)
+        self.path_func = path_func
         super().__init__(mobject, **kwargs)
         self.path_arc = float(path_arc)
         self.path_arc_axis = _vec3(path_arc_axis)

@@ -11856,3 +11856,50 @@ except NotImplementedError as error:
     assert "anim arg `wobble_speed`" in str(error), error
 else:
     raise AssertionError("a bogus anim arg was silently dropped")
+
+
+# --------------------------------------- Restore leftover path_func
+# fm-5wq.4.102: the portal arc factories route onto the native restore
+# path_arc surface exactly as Transform's do; arbitrary user path
+# functions stay the precise unrouted refusal.
+
+restore_pf_scene = Scene()
+restore_pf_mover = geometry.Rectangle(width=0.6, height=0.6)
+restore_pf_scene.add(restore_pf_mover)
+restore_pf_mover.save_state()
+restore_pf_mover.shift([1.5, 0.0, 0.0])
+restore_pf_anim = manimlib.Restore(
+    restore_pf_mover, path_func=path_utils.clockwise_path()
+)
+# The factory's arc is observable in the native params.
+assert np.isclose(restore_pf_anim.path_arc, -math.pi)
+assert np.isclose(restore_pf_anim._native_params()["path_arc"], -math.pi)
+restore_pf_scene.play(restore_pf_anim, run_time=2.0 / 30.0)
+assert np.allclose(restore_pf_mover.get_center(), [0.0, 0.0, 0.0])
+
+# path_along_arc carries its angle and axis the same way.
+restore_pf_mover.save_state()
+restore_pf_mover.shift([0.0, 1.0, 0.0])
+arc_anim = manimlib.Restore(
+    restore_pf_mover, path_func=path_utils.path_along_arc(math.pi / 4)
+)
+assert np.isclose(arc_anim.path_arc, math.pi / 4)
+
+# An arbitrary user path function stays the named unrouted refusal.
+try:
+    manimlib.Restore(
+        restore_pf_mover,
+        path_func=lambda start, end, alpha: start,
+    )
+except NotImplementedError as error:
+    assert "path_func" in str(error)
+else:
+    raise AssertionError("Restore accepted an arbitrary path function")
+
+# A never-saved mobject stays the Reference's exact refusal.
+try:
+    manimlib.Restore(geometry.Rectangle(width=1.0, height=1.0))
+except Exception as error:
+    assert "Trying to restore without having saved" in str(error)
+else:
+    raise AssertionError("Restore accepted a never-saved mobject")
