@@ -7263,6 +7263,43 @@ class Exmark(TexTextFromPresetString):
         _init_native_drawn_mark(self, self._build_exmark, kwargs)
 
 
+class Clock(VGroup):
+    """Circle, hour ticks, and hands over native Line/Circle geometry."""
+
+    def __init__(
+        self,
+        stroke_color=_WHITE,
+        stroke_width=3.0,
+        hour_hand_height=0.3,
+        minute_hand_height=0.6,
+        tick_length=0.1,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        style = dict(
+            stroke_color=stroke_color,
+            stroke_width=float(stroke_width),
+            fill_opacity=0.0,
+        )
+        circle = Circle(radius=1.0, **style)
+        ticks = VGroup()
+        for hour in range(12):
+            angle = hour * _math.tau / 12.0
+            direction = _np.array(
+                [_math.sin(angle), _math.cos(angle), 0.0], dtype=float
+            )
+            ticks.add(
+                Line((1.0 - float(tick_length)) * direction, direction, **style)
+            )
+        self.hour_hand = Line(
+            _ORIGIN, float(hour_hand_height) * _UP, **style
+        )
+        self.minute_hand = Line(
+            _ORIGIN, float(minute_hand_height) * _UP, **style
+        )
+        self.add(circle, ticks, self.hour_hand, self.minute_hand)
+
+
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
@@ -15222,6 +15259,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.special_tex", "Title"): Title,
         ("manimlib.mobject.svg.drawings", "Checkmark"): Checkmark,
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
+        ("manimlib.mobject.svg.drawings", "Clock"): Clock,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (

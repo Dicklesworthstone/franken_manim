@@ -4108,6 +4108,26 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Checkmark silently accepted an external TeX template")
 
+assert drawings.Clock.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.Clock).parameters) == [
+    "stroke_color",
+    "stroke_width",
+    "hour_hand_height",
+    "minute_hand_height",
+    "tick_length",
+    "kwargs",
+]
+clock = drawings.Clock()
+assert len(clock.submobjects) == 4
+assert clock.hour_hand is clock.submobjects[2]
+assert clock.minute_hand is clock.submobjects[3]
+assert np.isclose(clock.hour_hand.get_length(), 0.3)
+assert np.isclose(clock.minute_hand.get_length(), 0.6)
+assert len(clock.submobjects[1].submobjects) == 12
+tall_clock = drawings.Clock(hour_hand_height=0.4, minute_hand_height=0.8)
+assert np.isclose(tall_clock.hour_hand.get_length(), 0.4)
+assert np.isclose(tall_clock.minute_hand.get_length(), 0.8)
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.
