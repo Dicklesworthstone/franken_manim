@@ -12214,6 +12214,59 @@ class InteractiveScene(Scene):
             [self.get_highlight(mob) for mob in selection]
         )
 
+    def add_to_selection(self, *mobjects):
+        selection = getattr(self, "selection", None)
+        if selection is None:
+            selection = Group()
+            self.selection = selection
+        unselectables = getattr(self, "unselectables", None)
+        if unselectables is None:
+            unselectables = []
+            self.unselectables = unselectables
+        mobs = [
+            mob
+            for mob in mobjects
+            if mob not in unselectables and mob not in selection
+        ]
+        if not mobs:
+            return
+        selection.add(*mobs)
+        for mob in mobs:
+            setter = getattr(mob, "set_animating_status", None)
+            if callable(setter):
+                setter(True)
+
+    def toggle_from_selection(self, *mobjects):
+        selection = getattr(self, "selection", None)
+        if selection is None:
+            selection = Group()
+            self.selection = selection
+        if getattr(self, "unselectables", None) is None:
+            self.unselectables = []
+        for mob in mobjects:
+            if mob in selection:
+                selection.remove(mob)
+                setter = getattr(mob, "set_animating_status", None)
+                if callable(setter):
+                    setter(False)
+                mob.refresh_bounding_box()
+            else:
+                self.add_to_selection(mob)
+
+    def clear_selection(self):
+        selection = getattr(self, "selection", None)
+        if selection is None:
+            selection = Group()
+            self.selection = selection
+        if getattr(self, "unselectables", None) is None:
+            self.unselectables = []
+        for mob in selection:
+            setter = getattr(mob, "set_animating_status", None)
+            if callable(setter):
+                setter(False)
+            mob.refresh_bounding_box()
+        selection.set_submobjects([])
+
 
 class BlankScene(InteractiveScene):
     """extract_scene's empty InteractiveScene; construct enters embed."""

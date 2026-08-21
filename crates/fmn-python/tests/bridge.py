@@ -2578,6 +2578,29 @@ selection_highlight = interactive_scene.get_selection_highlight()
 assert isinstance(selection_highlight, manimlib.Group)
 assert selection_highlight.tracked_mobjects == []
 assert len(selection_highlight.updaters) == 1
+assert str(inspect.signature(InteractiveScene.add_to_selection)) == (
+    "(self, *mobjects)"
+)
+assert str(inspect.signature(InteractiveScene.toggle_from_selection)) == (
+    "(self, *mobjects)"
+)
+assert str(inspect.signature(InteractiveScene.clear_selection)) == "(self)"
+selection_scene = InteractiveScene()
+selection_source = manimlib.Circle()
+selection_scene.add_to_selection(selection_source)
+assert selection_source in selection_scene.selection
+selection_scene.add_to_selection(selection_source)
+assert list(selection_scene.selection).count(selection_source) == 1
+selection_scene.toggle_from_selection(selection_source)
+assert selection_source not in selection_scene.selection
+selection_scene.toggle_from_selection(selection_source)
+assert selection_source in selection_scene.selection
+selection_scene.clear_selection()
+assert len(selection_scene.selection) == 0
+unselectable_source = manimlib.Circle()
+selection_scene.unselectables.append(unselectable_source)
+selection_scene.add_to_selection(unselectable_source)
+assert unselectable_source not in selection_scene.selection
 
 
 # The schema-generated import topology and exact-name aliases are present.
