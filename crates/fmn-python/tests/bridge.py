@@ -10213,3 +10213,92 @@ else:
     raise AssertionError("TransformMatchingParts accepted a malformed pair")
 
 
+# ---------------- always / f_always / always_redraw / turn_animation_into_updater
+# fm-5wq.4.69: the Reference's updater helpers over the live updater seam.
+
+update_utils = importlib.import_module("manimlib.mobject.mobject_update_utils")
+
+# always_redraw rebuilds from the callable every frame; the rebuilt mobject
+# tracks live scene state through become().
+redraw_source = geometry.Rectangle(width=1.0, height=1.0)
+redraw_calls = []
+
+
+def build_redraw_follower():
+    redraw_calls.append(True)
+    follower = geometry.Rectangle(width=0.25, height=0.25)
+    follower.move_to(redraw_source.get_center() + np.array([0.0, 1.0, 0.0]))
+    return follower
+
+
+redraw_follower = update_utils.always_redraw(build_redraw_follower)
+redraw_scene = Scene()
+redraw_scene.add(redraw_source, redraw_follower)
+redraw_scene.play(
+    redraw_source.animate.shift([1.5, 0.0, 0.0]), run_time=2.0 / 30.0
+)
+assert len(redraw_calls) >= 3, redraw_calls  # construction + per-frame redraws
+assert np.allclose(
+    redraw_follower.get_center(),
+    redraw_source.get_center() + np.array([0.0, 1.0, 0.0]),
+)
+
+# always(mob.move_to, other) keeps tracking across frames.
+always_target = geometry.Rectangle(width=1.0, height=1.0)
+always_chaser = geometry.Rectangle(width=0.3, height=0.3)
+always_chaser.shift([-2.0, 0.0, 0.0])
+returned = update_utils.always(always_chaser.move_to, always_target)
+assert returned is always_chaser
+always_scene = Scene()
+always_scene.add(always_target, always_chaser)
+always_scene.play(
+    always_target.animate.shift([0.0, -1.25, 0.0]), run_time=2.0 / 30.0
+)
+assert np.allclose(always_chaser.get_center(), always_target.get_center())
+
+# f_always: per-frame argument generators.
+f_target = geometry.Rectangle(width=1.0, height=1.0)
+f_chaser = geometry.Rectangle(width=0.3, height=0.3)
+update_utils.f_always(f_chaser.move_to, lambda: f_target.get_center())
+f_scene = Scene()
+f_scene.add(f_target, f_chaser)
+f_scene.play(f_target.animate.shift([0.75, 0.5, 0.0]), run_time=2.0 / 30.0)
+assert np.allclose(f_chaser.get_center(), f_target.get_center())
+
+# turn_animation_into_updater drives a Python animation to completion as a
+# persistent updater, then pops itself.
+turn_decimal = manimlib.DecimalNumber(0.0)
+turn_anim = numbers_animation.ChangeDecimalToValue(
+    turn_decimal, 5.0, run_time=2.0 / 30.0
+)
+update_utils.turn_animation_into_updater(turn_anim)
+turn_scene = Scene()
+turn_scene.add(turn_decimal)
+turn_scene.play(specialized_animation.Delay(run_time=4.0 / 30.0))
+assert abs(turn_decimal.get_value() - 5.0) < 1e-9
+
+# Named refusals.
+try:
+    update_utils.always_redraw(None)
+except TypeError as error:
+    assert "requires a callable" in str(error)
+else:
+    raise AssertionError("always_redraw accepted None")
+
+try:
+    update_utils.always(geometry.Rectangle(width=1.0, height=1.0))
+except AssertionError:
+    pass
+else:
+    raise AssertionError("always accepted a non-method")
+
+try:
+    update_utils.turn_animation_into_updater(
+        manimlib.FadeIn(geometry.Rectangle(width=1.0, height=1.0))
+    )
+except NotImplementedError as error:
+    assert "persistent-updater seam" in str(error)
+else:
+    raise AssertionError(
+        "turn_animation_into_updater accepted a native-segment class"
+    )

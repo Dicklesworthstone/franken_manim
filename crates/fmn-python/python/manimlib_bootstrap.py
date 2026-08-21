@@ -12003,11 +12003,108 @@ def _install_mobject_functions():
     over the bound surfaces."""
 
     def always_redraw(func, *args, **kwargs):
+        # A named refusal beats the bare "'NoneType' object is not
+        # callable" the Reference lets escape (fm-5wq.4.69).
+        if not callable(func):
+            raise TypeError(
+                "always_redraw requires a callable returning a Mobject; "
+                "got " + type(func).__name__
+            )
         mob = func(*args, **kwargs)
+        if not isinstance(mob, Mobject):
+            raise TypeError(
+                "always_redraw's callable must return a Mobject; got "
+                + type(mob).__name__
+            )
         mob.add_updater(lambda m: m.become(func(*args, **kwargs)))
         return mob
 
-    functions = {"always_redraw": always_redraw}
+    def assert_is_mobject_method(method):
+        # mobject_update_utils.py:20, verbatim (bare asserts included).
+        assert _inspect.ismethod(method)
+        mobject = method.__self__
+        assert isinstance(mobject, Mobject)
+
+    def always(method, *args, **kwargs):
+        # mobject_update_utils.py:26, verbatim over the live updater seam.
+        assert_is_mobject_method(method)
+        mobject = method.__self__
+        func = method.__func__
+        mobject.add_updater(lambda m: func(m, *args, **kwargs))
+        return mobject
+
+    def f_always(method, *arg_generators, **kwargs):
+        # mobject_update_utils.py:34: `always` with per-frame argument
+        # generators instead of fixed arguments.
+        assert_is_mobject_method(method)
+        mobject = method.__self__
+        func = method.__func__
+
+        def updater(mob):
+            args = [arg_generator() for arg_generator in arg_generators]
+            func(mob, *args, **kwargs)
+
+        mobject.add_updater(updater)
+        return mobject
+
+    def turn_animation_into_updater(animation, cycle=False, **kwargs):
+        # mobject_update_utils.py:83 over Python-driven animations: the
+        # updater re-applies the animation's own interpolate each frame.
+        # A native-segment spec class has no per-frame Python interpolate
+        # to drive — its frames live in Choreo segments — so it refuses by
+        # name rather than silently holding still (fm-5wq.4.69).
+        if (
+            type(animation).interpolate_mobject
+            is Animation.interpolate_mobject
+        ):
+            raise NotImplementedError(
+                "turn_animation_into_updater requires a Python-driven "
+                "animation (one implementing interpolate_mobject); "
+                "native-segment classes await Choreo's persistent-updater "
+                "seam"
+            )
+        run_time = kwargs.pop("run_time", None)
+        rate_func = kwargs.pop("rate_func", None)
+        lag_ratio = kwargs.pop("lag_ratio", None)
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if run_time is not None:
+            animation.run_time = float(run_time)
+        if rate_func is not None:
+            animation.rate_func = rate_func
+        if lag_ratio is not None:
+            animation.lag_ratio = float(lag_ratio)
+        mobject = animation.mobject
+        animation.suspend_mobject_updating = False
+        animation.begin()
+        animation.total_time = 0.0
+
+        def update(m, dt):
+            run_time = animation.run_time
+            time_ratio = animation.total_time / run_time
+            if cycle:
+                alpha = time_ratio % 1
+            else:
+                alpha = min(max(time_ratio, 0.0), 1.0)
+                if alpha >= 1:
+                    animation.finish()
+                    m.remove_updater(update)
+                    return
+            animation.interpolate(alpha)
+            animation.total_time += dt
+
+        mobject.add_updater(update)
+        return mobject
+
+    functions = {
+        "always_redraw": always_redraw,
+        "assert_is_mobject_method": assert_is_mobject_method,
+        "always": always,
+        "f_always": f_always,
+        "turn_animation_into_updater": turn_animation_into_updater,
+    }
     module = _ensure_module("manimlib.mobject.mobject_update_utils")
     for name, function in functions.items():
         setattr(module, name, function)
