@@ -2404,6 +2404,88 @@ else:
     raise AssertionError("Checkbox silently discarded an unknown option")
 assert not hasattr(failed_checkbox, "submobjects")
 
+# LinearNumberSlider is a distinct interactive control from number_line.Slider.
+# Atlas owns its bar/handle/axis geometry; the portal keeps the tracker root,
+# Reference construction-time midpoint quirk, kwargs, and named drag gap.
+linear_slider = interactive.LinearNumberSlider(
+    6.0,
+    min_value=0.0,
+    max_value=10.0,
+    step=0.5,
+    rounded_rect_kwargs={
+        "height": 0.1,
+        "width": 3.0,
+        "corner_radius": 0.0375,
+    },
+    circle_kwargs={
+        "radius": 0.1,
+        "stroke_color": manimlib.BLUE,
+        "fill_color": manimlib.BLUE,
+        "fill_opacity": 1.0,
+    },
+    name="native-linear-slider",
+)
+assert interactive.LinearNumberSlider.__bases__ == (
+    interactive.ControlMobject,
+)
+linear_signature = inspect.signature(interactive.LinearNumberSlider)
+assert list(linear_signature.parameters) == [
+    "value",
+    "value_type",
+    "min_value",
+    "max_value",
+    "step",
+    "rounded_rect_kwargs",
+    "circle_kwargs",
+    "kwargs",
+]
+assert (
+    linear_signature.parameters["kwargs"].kind
+    is inspect.Parameter.VAR_KEYWORD
+)
+assert linear_slider.get_value() == np.float64(6.0)
+assert linear_slider.min_value == 0.0
+assert linear_slider.max_value == 10.0
+assert linear_slider.step == 0.5
+assert list(linear_slider.submobjects) == [
+    linear_slider.bar,
+    linear_slider.slider,
+    linear_slider.slider_axis,
+]
+assert linear_slider.name == "native-linear-slider"
+assert linear_slider.is_fixed_in_frame()
+assert linear_slider.bar.is_fixed_in_frame()
+assert linear_slider.slider.is_fixed_in_frame()
+assert linear_slider.slider_axis.is_fixed_in_frame()
+assert np.allclose(linear_slider.slider.get_center(), [0.0, 0.0, 0.0])
+assert linear_slider.slider_axis.get_opacity() == 0.0
+
+try:
+    linear_slider.slider_on_mouse_drag(
+        linear_slider.slider,
+        {"point": np.zeros(3)},
+    )
+except NotImplementedError as error:
+    assert "LinearNumberSlider.slider_on_mouse_drag" in str(error), error
+    assert "semantic binding has not landed" in str(error), error
+else:
+    raise AssertionError("LinearNumberSlider fabricated an unbound drag gateway")
+
+try:
+    interactive.LinearNumberSlider(
+        circle_kwargs={
+            "radius": 0.2,
+            "stroke_color": manimlib.GREY_A,
+            "fill_color": manimlib.GREY_A,
+            "fill_opacity": 1.0,
+        }
+    )
+except NotImplementedError as error:
+    assert "circle_kwargs.radius" in str(error), error
+    assert "not routed to the native builder" in str(error), error
+else:
+    raise AssertionError("LinearNumberSlider silently ignored handle radius")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.

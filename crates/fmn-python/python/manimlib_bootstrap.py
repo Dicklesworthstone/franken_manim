@@ -54,6 +54,7 @@ _MED_SMALL_BUFF = 0.25
 _MED_LARGE_BUFF = 0.5
 _BLACK = "#000000"
 _WHITE = "#FFFFFF"
+_GREY_A = "#DDDDDD"
 _GREY_C = "#888888"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
@@ -8983,6 +8984,112 @@ class Checkbox(ControlMobject):
         self.set_value(not bool(self.get_value()))
 
 
+class LinearNumberSlider(ControlMobject):
+    """Atlas's native linear-number control over a live value tracker."""
+
+    def __init__(
+        self,
+        value=0,
+        value_type=_np.float64,
+        min_value=-10.0,
+        max_value=10.0,
+        step=1.0,
+        rounded_rect_kwargs=dict(
+            height=0.075,
+            width=2,
+            corner_radius=0.0375,
+        ),
+        circle_kwargs=dict(
+            radius=0.1,
+            stroke_color=_GREY_A,
+            fill_color=_GREY_A,
+            fill_opacity=1.0,
+        ),
+        **kwargs,
+    ):
+        rect_config = dict(rounded_rect_kwargs)
+        rect_unknown = sorted(
+            set(rect_config) - {"height", "width", "corner_radius"}
+        )
+        if rect_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join(
+                    "rounded_rect_kwargs." + name for name in rect_unknown
+                )
+            )
+        corner_radius = float(rect_config.get("corner_radius", 0.0375))
+        if corner_radius != 0.0375:
+            raise NotImplementedError(
+                "LinearNumberSlider rounded_rect_kwargs.corner_radius is not "
+                "routed to the native builder"
+            )
+
+        handle_config = dict(circle_kwargs)
+        handle_unknown = sorted(
+            set(handle_config)
+            - {"radius", "stroke_color", "fill_color", "fill_opacity"}
+        )
+        if handle_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join(
+                    "circle_kwargs." + name for name in handle_unknown
+                )
+            )
+        if float(handle_config.get("radius", 0.1)) != 0.1:
+            raise NotImplementedError(
+                "LinearNumberSlider circle_kwargs.radius is not routed to "
+                "the native builder"
+            )
+        if float(handle_config.get("fill_opacity", 1.0)) != 1.0:
+            raise NotImplementedError(
+                "LinearNumberSlider circle_kwargs.fill_opacity is not routed "
+                "to the native builder"
+            )
+        stroke_color = tuple(
+            _color_to_rgb(handle_config.get("stroke_color", _GREY_A))
+        )
+        fill_color = tuple(
+            _color_to_rgb(handle_config.get("fill_color", _GREY_A))
+        )
+        if stroke_color != fill_color:
+            raise NotImplementedError(
+                "LinearNumberSlider requires matching native handle stroke "
+                "and fill colors"
+            )
+
+        self.value_type = _np.dtype(value_type).type
+        self.min_value = float(min_value)
+        self.max_value = float(max_value)
+        self.step = float(step)
+        self.rounded_rect_kwargs = rect_config
+        self.circle_kwargs = handle_config
+        specs = self._build_linear_number_slider(
+            _native_shell_factory,
+            float(value),
+            self.min_value,
+            self.max_value,
+            self.step,
+            float(rect_config.get("width", 2.0)),
+            float(rect_config.get("height", 0.075)),
+            stroke_color,
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if len(parts) != 3:
+            raise RuntimeError(
+                "native LinearNumberSlider family contract drift: expected "
+                "bar + handle + axis"
+            )
+        super().__init__(value, *parts)
+        for key, item in kwargs.items():
+            setattr(self, key, item)
+        self.bar, self.slider, self.slider_axis = parts
+
+
 class CameraFrame(Mobject):
     """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
     real Mobject whose authoritative state lives in one engine
@@ -12996,6 +13103,10 @@ def _install_schema_surface():
         ("manimlib.mobject.interactive", "Button"): Button,
         ("manimlib.mobject.interactive", "ControlMobject"): ControlMobject,
         ("manimlib.mobject.interactive", "Checkbox"): Checkbox,
+        (
+            "manimlib.mobject.interactive",
+            "LinearNumberSlider",
+        ): LinearNumberSlider,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (

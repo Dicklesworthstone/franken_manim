@@ -3063,6 +3063,55 @@ impl BridgeMobject {
         native_shell_specs(slf.py(), factory, children)
     }
 
+    /// `LinearNumberSlider(...)` over Atlas's native rounded bar, handle,
+    /// and invisible-axis builder. The Python `ControlMobject` root remains
+    /// the live tracker while these native parts become its children.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_linear_number_slider<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        value: f64,
+        min_value: f64,
+        max_value: f64,
+        step: f64,
+        bar_width: f64,
+        bar_height: f64,
+        handle_color: [f64; 3],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut slider =
+            fmn_library::LinearNumberSlider::new(value).map_err(native_error)?;
+        if min_value > 10.0 {
+            slider = slider
+                .max_value(max_value)
+                .and_then(|slider| slider.min_value(min_value))
+                .map_err(native_error)?;
+        } else {
+            slider = slider
+                .min_value(min_value)
+                .and_then(|slider| slider.max_value(max_value))
+                .map_err(native_error)?;
+        }
+        slider = slider
+            .step(step)
+            .and_then(|slider| slider.bar_width(bar_width))
+            .and_then(|slider| slider.bar_height(bar_height))
+            .map_err(native_error)?
+            .handle_color(fmn_core::color::Srgb {
+                r: handle_color[0],
+                g: handle_color[1],
+                b: handle_color[2],
+            });
+        let mut composition = fmn_mobject::Mobject::from(slider.composition());
+        let children = std::mem::take(&mut composition.submobjects);
+        if children.len() != 3 {
+            return Err(PyRuntimeError::new_err(format!(
+                "native LinearNumberSlider family contract drift: expected 3 children, got {}",
+                children.len()
+            )));
+        }
+        native_shell_specs(slf.py(), factory, children)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the
