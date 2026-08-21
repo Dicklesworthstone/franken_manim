@@ -7149,6 +7149,10 @@ fn build_native_animation(
             };
             Box::new(fmn_anim::ShowPartial::new(need_mob(spec.mob)?, bounds))
         }
+        "move_along_path" => Box::new(fmn_anim::MoveAlongPath::new(
+            need_mob(spec.mob)?,
+            need_target(spec.target)?,
+        )),
         "rotate" => {
             let mut rotating = fmn_anim::rotate(need_mob(spec.mob)?, spec.angle)
                 .with_axis(spec.axis)

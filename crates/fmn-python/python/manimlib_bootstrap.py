@@ -9202,6 +9202,122 @@ class Rotate(Rotating):
         )
 
 
+class Homotopy(Animation):
+    """movement.py:17 through the Python-callback segment slot: the
+    (x, y, z, t) map is user Python, so it rides interpolate_mobject
+    per frame (the native fmn-anim Homotopy serves the Rust front
+    door's provable closures)."""
+
+    apply_function_config = dict()
+
+    def __init__(self, homotopy, mobject, run_time=3.0, **kwargs):
+        self.homotopy = homotopy
+        super().__init__(mobject, run_time=run_time, **kwargs)
+
+    def begin(self):
+        if self.time_span is not None:
+            self.run_time = max(float(self.time_span[1]), self.run_time)
+        self.starting_mobject = self.mobject.copy()
+        self.interpolate(0.0)
+
+    def function_at_time_t(self, t):
+        return lambda point: self.homotopy(point[0], point[1], point[2], t)
+
+    def interpolate_submobject(self, submob, start, alpha):
+        submob.match_points(start)
+        submob.apply_function(
+            self.function_at_time_t(alpha), **self.apply_function_config
+        )
+
+    def interpolate_mobject(self, alpha):
+        rated = self.rate_func(self.time_spanned_alpha(float(alpha)))
+        for submob, start in zip(
+            self.mobject.family_members_with_points(),
+            self.starting_mobject.family_members_with_points(),
+        ):
+            self.interpolate_submobject(submob, start, rated)
+
+
+class SmoothedVectorizedHomotopy(Homotopy):
+    apply_function_config = dict(make_smooth=True)
+
+
+class ComplexHomotopy(Homotopy):
+    def __init__(self, complex_homotopy, mobject, **kwargs):
+        def homotopy(x, y, z, t):
+            c = complex_homotopy(complex(x, y), t)
+            return (c.real, c.imag, z)
+
+        super().__init__(homotopy, mobject, **kwargs)
+
+
+class PhaseFlow(Animation):
+    """movement.py:75, ported verbatim: forward-Euler advection whose
+    state is path-dependent by design (the `last_alpha` memo), driven
+    through the Python-callback slot; the overridden interpolate never
+    consults rate_func or time_span (the linear default makes it moot)."""
+
+    def __init__(
+        self,
+        function,
+        mobject,
+        virtual_time=None,
+        suspend_mobject_updating=False,
+        rate_func=_linear_rate,
+        run_time=3.0,
+        **kwargs,
+    ):
+        self.function = function
+        self.virtual_time = virtual_time or run_time
+        super().__init__(
+            mobject,
+            run_time=run_time,
+            rate_func=rate_func,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
+        )
+
+    def interpolate_mobject(self, alpha):
+        alpha = float(alpha)
+        if hasattr(self, "last_alpha"):
+            dt = self.virtual_time * (alpha - self.last_alpha)
+            self.mobject.apply_function(
+                lambda point: point + dt * self.function(point)
+            )
+        self.last_alpha = alpha
+
+
+class MoveAlongPath(_NativeAnimation):
+    # BN-03: under the Reference's name, the native sampler takes the
+    # point by TRUE arc length (constant speed), and the rate function
+    # applies to the raw alpha exactly as movement.py:115's override does.
+    _native_kind = "move_along_path"
+    _target_attr = "path"
+
+    def __init__(self, mobject, path, suspend_mobject_updating=False, **kwargs):
+        if not isinstance(path, VMobject):
+            raise TypeError(
+                "MoveAlongPath requires a VMobject path; "
+                + type(path).__name__
+                + " has no curve to sample"
+            )
+        if not path.has_points():
+            raise ValueError(
+                "MoveAlongPath path has no points to move along"
+            )
+        super().__init__(
+            mobject,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
+        )
+        self.path = path
+
+    def interpolate_mobject(self, alpha):
+        # Python fallback mirroring the native rule (raw-alpha rate).
+        point = self.path.point_from_proportion(self.rate_func(float(alpha)))
+        self.mobject.move_to(point)
+
+
 class Restore(_NativeAnimation):
     _native_kind = "restore"
 
@@ -10839,6 +10955,14 @@ def _install_schema_surface():
         ("manimlib.animation.composition", "Succession"): Succession,
         ("manimlib.animation.rotation", "Rotate"): Rotate,
         ("manimlib.animation.rotation", "Rotating"): Rotating,
+        ("manimlib.animation.movement", "Homotopy"): Homotopy,
+        (
+            "manimlib.animation.movement",
+            "SmoothedVectorizedHomotopy",
+        ): SmoothedVectorizedHomotopy,
+        ("manimlib.animation.movement", "ComplexHomotopy"): ComplexHomotopy,
+        ("manimlib.animation.movement", "PhaseFlow"): PhaseFlow,
+        ("manimlib.animation.movement", "MoveAlongPath"): MoveAlongPath,
         ("manimlib.animation.growing", "GrowFromPoint"): GrowFromPoint,
         ("manimlib.animation.growing", "GrowFromCenter"): GrowFromCenter,
         ("manimlib.animation.growing", "GrowFromEdge"): GrowFromEdge,

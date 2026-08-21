@@ -9738,3 +9738,97 @@ except ValueError as error:
     assert "letter groups" in str(error)
 else:
     raise AssertionError("AddTextLetterByLetter accepted an empty string mobject")
+
+# fm-5wq.4.61: the movement family — Homotopy/ComplexHomotopy/PhaseFlow ride
+# the Python-callback segment slot (user Python maps), MoveAlongPath rides
+# the native true-arclength sampler (BN-03).
+movement = importlib.import_module("manimlib.animation.movement")
+assert movement.ComplexHomotopy.__bases__ == (movement.Homotopy,)
+assert movement.SmoothedVectorizedHomotopy.__bases__ == (movement.Homotopy,)
+assert movement.Homotopy.apply_function_config == {}
+assert movement.SmoothedVectorizedHomotopy.apply_function_config == {
+    "make_smooth": True
+}
+assert movement.MoveAlongPath._native_kind == "move_along_path"
+
+# MoveAlongPath: a dot played along a line ends at the path's end, and a
+# constant-rate probe sits at the true-arclength midpoint.
+map_scene = InteractiveScene()
+map_dot = manimlib.Dot()
+map_path = geometry.Line((-1.0, -1.0, 0.0), (1.0, 1.0, 0.0))
+map_scene.add(map_dot, map_path)
+map_scene.play(
+    movement.MoveAlongPath(map_dot, map_path),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(map_dot.get_center(), [1.0, 1.0, 0.0], atol=1e-9)
+map_scene.play(
+    movement.MoveAlongPath(map_dot, map_path, rate_func=lambda t: 0.5),
+    run_time=1.0 / 30.0,
+)
+assert np.allclose(map_dot.get_center(), [0.0, 0.0, 0.0], atol=1e-9)
+
+# Homotopy applies the (x, y, z, t) map at t = rated alpha, from a fresh
+# start-point restore each frame (no compounding).
+homotopy_scene = InteractiveScene()
+homotopy_square = manimlib.Square(side_length=1.0)
+homotopy_scene.add(homotopy_square)
+homotopy_start = homotopy_square.get_center().copy()
+homotopy_scene.play(
+    movement.Homotopy(
+        lambda x, y, z, t: (x + t, y, z), homotopy_square
+    ),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(
+    homotopy_square.get_center(), homotopy_start + [1.0, 0.0, 0.0], atol=1e-9
+)
+
+# ComplexHomotopy: the plane map (z, t) ↦ z·e^{iπt/2} carries (1, 0) to
+# (0, 1) with the z lane untouched.
+complex_scene = InteractiveScene()
+complex_dot = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+complex_scene.add(complex_dot)
+complex_scene.play(
+    movement.ComplexHomotopy(
+        lambda z, t: z
+        * complex(math.cos(t * math.pi / 2.0), math.sin(t * math.pi / 2.0)),
+        complex_dot,
+    ),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(complex_dot.get_center(), [0.0, 1.0, 0.0], atol=1e-9)
+
+# PhaseFlow: forward-Euler advection of a constant field integrates to
+# exactly virtual_time·field regardless of the step sequence.
+phase_scene = InteractiveScene()
+phase_dot = manimlib.Dot()
+phase_scene.add(phase_dot)
+phase_start = phase_dot.get_center().copy()
+phase_scene.play(
+    movement.PhaseFlow(
+        lambda p: np.array([1.0, 0.0, 0.0]), phase_dot, virtual_time=1.0
+    ),
+    run_time=2.0 / 30.0,
+)
+assert np.allclose(
+    phase_dot.get_center(), phase_start + [1.0, 0.0, 0.0], atol=1e-9
+)
+
+# A point-less path is a named error at construction, not a silent no-op.
+try:
+    movement.MoveAlongPath(manimlib.Dot(), VMobject())
+except ValueError as error:
+    assert "no points to move along" in str(error), error
+else:
+    raise AssertionError("MoveAlongPath accepted a point-less path")
+
+try:
+    movement.MoveAlongPath(manimlib.Dot(), Mobject())
+except TypeError as error:
+    assert "no curve to sample" in str(error), error
+else:
+    raise AssertionError("MoveAlongPath accepted a non-VMobject path")
