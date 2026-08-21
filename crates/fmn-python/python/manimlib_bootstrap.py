@@ -10688,7 +10688,26 @@ class ColorSliders(Group):
             raise TypeError(
                 "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
             )
-        if sliders_kwargs:
+        slider_config = dict(sliders_kwargs)
+        slider_unknown = sorted(
+            set(slider_config)
+            - {
+                "value_type",
+                "min_value",
+                "max_value",
+                "step",
+                "rounded_rect_kwargs",
+                "circle_kwargs",
+            }
+        )
+        if slider_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join(
+                    "sliders_kwargs." + name for name in slider_unknown
+                )
+            )
+        if slider_config:
             raise NotImplementedError(
                 "ColorSliders sliders_kwargs are not routed to the native builder"
             )
@@ -10728,7 +10747,7 @@ class ColorSliders(Group):
         single_square_len = float(grid_config.get("single_square_len", 0.1))
         grid_config["single_square_len"] = single_square_len
 
-        self.sliders_kwargs = dict(sliders_kwargs)
+        self.sliders_kwargs = slider_config
         self.rect_kwargs = rect_config
         self.background_grid_kwargs = grid_config
         self._background_grid_colors = grid_colors

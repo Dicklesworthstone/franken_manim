@@ -3939,6 +3939,8 @@ assert len(default_grid_squares) == 5 * 21
 assert color_sliders.background_grid_kwargs["single_square_len"] == 0.1
 assert default_grid_squares[0].get_fill_color() == manimlib.GREY_A
 assert default_grid_squares[1].get_fill_color() == manimlib.GREY_C
+empty_slider_config = interactive.ColorSliders(sliders_kwargs={})
+assert np.allclose(empty_slider_config.get_value(), [1.0, 1.0, 1.0, 1.0])
 try:
     interactive.ColorSliders(sliders_kwargs=dict(step=2.0))
 except NotImplementedError as error:
@@ -3947,6 +3949,12 @@ except NotImplementedError as error:
     )
 else:
     raise AssertionError("ColorSliders silently discarded sliders_kwargs")
+try:
+    interactive.ColorSliders(sliders_kwargs=dict(bogus=1))
+except TypeError as error:
+    assert "sliders_kwargs.bogus" in str(error)
+else:
+    raise AssertionError("ColorSliders silently discarded sliders_kwargs.bogus")
 
 swatch_identity = color_sliders.swatch
 sliders_identity = color_sliders.sliders
