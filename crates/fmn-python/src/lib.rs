@@ -50,7 +50,7 @@ use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::basic::CompareOp;
 use pyo3::create_exception;
 use pyo3::exceptions::{
-    PyBufferError, PyImportError, PyKeyError, PyNotImplementedError, PyOverflowError,
+    PyBufferError, PyImportError, PyKeyError, PyNotImplementedError, PyOSError, PyOverflowError,
     PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::ffi;
@@ -2962,6 +2962,48 @@ impl BridgeMobject {
             factory,
             fmn_library::vmobject::vectorized_point(location),
         )
+    }
+
+    /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
+    /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
+    /// is read natively under the processor's declared byte budget — the
+    /// size is checked against filesystem metadata *before* the read, so a
+    /// bomb file never allocates — and every processor refusal (bombs,
+    /// nesting, DOCTYPE, unsupported features, malformed XML) is fmn-geom's
+    /// typed `SvgError`, surfaced verbatim as the named Python error.
+    fn _build_svg_mobject<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        file_name: &str,
+        svg_string: Option<&str>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let limits = fmn_library::svg::SvgLimits::default();
+        let document = if let Some(text) = svg_string {
+            fmn_library::svg::SvgDocument::parse_with_limits(text.as_bytes(), &limits)
+                .map_err(native_error)?
+        } else {
+            let metadata = std::fs::metadata(file_name).map_err(|error| {
+                PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
+            })?;
+            if !metadata.is_file() {
+                return Err(PyOSError::new_err(format!(
+                    "SVGMobject source {file_name:?} is not a regular file"
+                )));
+            }
+            let bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            if bytes > limits.max_bytes {
+                return Err(native_error(fmn_library::svg::SvgError::TooLarge {
+                    bytes,
+                    limit: limits.max_bytes,
+                }));
+            }
+            let contents = std::fs::read(file_name).map_err(|error| {
+                PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
+            })?;
+            fmn_library::svg::SvgDocument::parse_with_limits(&contents, &limits)
+                .map_err(native_error)?
+        };
+        install_native_tree(slf, factory, fmn_library::svg_document_mobject(&document))
     }
 
     /// Split a source's live shared-anchor run with Atlas's
