@@ -7273,6 +7273,20 @@ class PMobject(Mobject):
         return points[int(float(alpha) * (len(points) - 1))]
 
 
+class PGroup(PMobject):
+    """The Reference's variadic PMobject-only family container."""
+
+    def __init__(self, *pmobs, **kwargs):
+        if not all(isinstance(mob, PMobject) for mob in pmobs):
+            raise Exception("All submobjects must be of type PMobject")
+        _install_live_state(self)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        specs = self._build_p_group(_native_shell_factory)
+        _hang_native_children(self, specs)
+        self.add(*pmobs)
+
+
 class DotCloud(PMobject):
     """The Reference's DotCloud over the pointcloud shelf: the native
     point/radius/rgba/glow_factor record schema (NOT a VMobject — the
@@ -13714,6 +13728,7 @@ def _install_schema_surface():
         ("manimlib.mobject.geometry", "Sector"): Sector,
         ("manimlib.mobject.geometry", "Annulus"): Annulus,
         ("manimlib.mobject.types.point_cloud_mobject", "PMobject"): PMobject,
+        ("manimlib.mobject.types.point_cloud_mobject", "PGroup"): PGroup,
         ("manimlib.mobject.numbers", "DecimalNumber"): DecimalNumber,
         ("manimlib.mobject.numbers", "Integer"): Integer,
         ("manimlib.mobject.matrix", "Matrix"): Matrix,

@@ -3922,6 +3922,16 @@ impl BridgeMobject {
         install_native_tree(slf, factory, built)
     }
 
+    /// `PGroup(*pmobs)` over Atlas's point-cloud family builder. The native
+    /// builder owns the root's PMobject record schema; Python grafts the
+    /// already-live child proxies afterward so their identities are kept.
+    fn _build_p_group<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        install_native_tree(slf, factory, fmn_library::p_group([]))
+    }
+
     /// `DotCloud(points, color, opacity, radius, glow_factor,
     /// anti_alias_width)` over the pointcloud shelf — the DotCloud record
     /// schema (`point`/`radius`/`rgba`/`glow_factor`), not a VMobject.

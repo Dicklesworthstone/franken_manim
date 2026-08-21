@@ -2914,6 +2914,47 @@ assert np.isclose(styled_control_panel.panel.get_width(), 3.0)
 assert styled_control_panel.panel.get_fill_color() == manimlib.BLUE
 assert np.isclose(styled_control_panel.panel.get_fill_opacity(), 0.4)
 
+# PGroup is Atlas's native point-cloud family root, with the original live
+# PMobject proxies grafted beneath it in Reference order.
+point_cloud_mobjects = importlib.import_module(
+    "manimlib.mobject.types.point_cloud_mobject"
+)
+assert point_cloud_mobjects.PGroup.__bases__ == (point_cloud_mobjects.PMobject,)
+assert str(inspect.signature(point_cloud_mobjects.PGroup)) == (
+    "(*pmobs, **kwargs)"
+)
+pgroup_left = manimlib.DotCloud([(-1.0, 0.0, 0.0)])
+pgroup_right = manimlib.DotCloud([(1.0, 0.0, 0.0)])
+pgroup = point_cloud_mobjects.PGroup(
+    pgroup_left,
+    pgroup_right,
+    pgroup_left,
+    marker="native",
+)
+assert list(pgroup.submobjects) == [pgroup_left, pgroup_right]
+assert pgroup.submobjects[0] is pgroup_left
+assert pgroup.submobjects[1] is pgroup_right
+assert pgroup.marker == "native"
+assert pgroup.get_num_points() == 0
+assert pgroup.data.dtype.names == ("point", "rgba")
+pgroup.shift(manimlib.UP)
+assert np.allclose(pgroup_left.get_center(), [-1.0, 1.0, 0.0])
+assert np.allclose(pgroup_right.get_center(), [1.0, 1.0, 0.0])
+
+failed_pgroup = point_cloud_mobjects.PGroup.__new__(
+    point_cloud_mobjects.PGroup
+)
+try:
+    point_cloud_mobjects.PGroup.__init__(
+        failed_pgroup,
+        geometry.Circle(),
+    )
+except Exception as error:
+    assert str(error) == "All submobjects must be of type PMobject"
+else:
+    raise AssertionError("PGroup accepted a non-PMobject child")
+assert not hasattr(failed_pgroup, "submobjects")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.
