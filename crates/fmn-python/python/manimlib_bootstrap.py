@@ -12156,6 +12156,19 @@ class InteractiveScene(Scene):
                 "host key-state adapter"
             )
 
+    def on_mouse_drag(self, point, d_point, buttons, modifiers):
+        base_handler = Scene.__dict__.get("on_mouse_drag")
+        if base_handler is not None and not getattr(
+            base_handler, "_fmn_schema_placeholder", False
+        ):
+            base_handler(self, point, d_point, buttons, modifiers)
+        else:
+            self.mouse_point.move_to(point)
+
+        crosshair = getattr(self, "crosshair", None)
+        if crosshair is not None:
+            crosshair.move_to(self.frame.to_fixed_frame_point(point))
+
     def add(self, *mobjects):
         super().add(*mobjects)
         if getattr(self, "unselectables", None) is not None:

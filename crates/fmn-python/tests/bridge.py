@@ -3303,6 +3303,30 @@ assert np.allclose(
     motion_start + [1.0, 1.0, 0.0],
 )
 
+# fm-5wq.4: mouse drag shares the native pointer and fixed-frame crosshair
+# path without requiring the Reference's pyglet Window.
+assert str(inspect.signature(InteractiveScene.on_mouse_drag)) == (
+    "(self, point, d_point, buttons, modifiers)"
+)
+drag_scene = InteractiveScene()
+drag_scene.setup()
+assert drag_scene.on_mouse_drag(
+    [1.0, 2.0, 0.0],
+    [0.0, 0.0, 0.0],
+    1,
+    0,
+) is None
+fixed_drag_point = drag_scene.frame.to_fixed_frame_point([1.0, 2.0, 0.0])
+assert np.allclose(
+    drag_scene.mouse_point.get_center(),
+    [1.0, 2.0, 0.0],
+)
+assert np.allclose(
+    drag_scene.crosshair.get_center()[:2],
+    fixed_drag_point[:2],
+    atol=1e-4,
+)
+
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
 assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
