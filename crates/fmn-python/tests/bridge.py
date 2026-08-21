@@ -4287,6 +4287,37 @@ assert dartboard.bullseye.get_fill_color() == manimlib.RED_E
 assert np.isclose(dartboard.submobjects[3].get_fill_opacity(), 1.0)
 assert np.isclose(dartboard.bullseye.get_stroke_width(), 0.0)
 
+assert drawings.Bubble.__bases__ == (manimlib.VGroup,)
+assert drawings.SpeechBubble.__bases__ == (drawings.Bubble,)
+assert list(inspect.signature(drawings.SpeechBubble).parameters) == [
+    "content",
+    "buff",
+    "filler_shape",
+    "stem_height_to_bubble_height",
+    "stem_top_x_props",
+    "kwargs",
+]
+speech = drawings.SpeechBubble()
+assert speech.body is speech.submobjects[0]
+assert speech.content is speech.submobjects[1]
+assert np.isclose(speech.content.get_width(), 2.0, atol=1e-5)
+assert np.isclose(speech.content.get_height(), 1.0, atol=1e-5)
+assert np.isclose(speech.content.get_fill_opacity(), 0.0)
+assert np.isclose(speech.content.get_stroke_width(), 0.0)
+assert speech.body.get_fill_color() == manimlib.BLACK
+assert np.isclose(speech.body.get_fill_opacity(), 0.8)
+assert speech.body.get_stroke_color() == manimlib.WHITE
+assert speech.get_tip()[1] < speech.content.get_bottom()[1]
+circle_content = manimlib.Circle(radius=0.4)
+circled = drawings.SpeechBubble(circle_content)
+assert circled.content is circle_content
+try:
+    drawings.Bubble()
+except NotImplementedError as error:
+    assert "Bubbles_speech.svg" in str(error)
+else:
+    raise AssertionError("Bubble constructed an SVG-file body")
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.

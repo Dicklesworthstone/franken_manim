@@ -7492,6 +7492,143 @@ class Dartboard(VGroup):
         self.set_width(2.0 * self.radius)
 
 
+class Bubble(VGroup):
+    """Speech/thought bubble family root. SVG-file bodies stay a named gap;
+    SpeechBubble supplies a native Union body."""
+
+    file_name = "Bubbles_speech.svg"
+    bubble_center_adjustment_factor = 0.125
+
+    def __init__(
+        self,
+        content=None,
+        buff=1.0,
+        filler_shape=(3.0, 2.0),
+        pin_point=None,
+        direction=_LEFT,
+        add_content=True,
+        fill_color=_BLACK,
+        fill_opacity=0.8,
+        stroke_color=_WHITE,
+        stroke_width=3.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.direction = _np.array(_vec3(direction), dtype=float)
+        if content is None:
+            content = Rectangle(*filler_shape)
+            content.set_fill(opacity=0)
+            content.set_stroke(width=0)
+        elif isinstance(content, str):
+            content = Text(content)
+        self.content = content
+        self.body = self.get_body(content, self.direction, float(buff))
+        self.body.set_fill(fill_color, fill_opacity)
+        self.body.set_stroke(stroke_color, stroke_width)
+        self.add(self.body)
+        if add_content:
+            self.add(self.content)
+        if pin_point is not None:
+            self.pin_to(pin_point)
+
+    def get_body(self, content, direction, buff):
+        del content, direction, buff
+        raise NotImplementedError(
+            "Bubble.get_body requires bundled SVG "
+            + repr(self.file_name)
+            + "; SpeechBubble supplies a native body"
+        )
+
+    def get_tip(self):
+        return self.get_corner(_DOWN + self.direction)
+
+    def get_bubble_center(self):
+        factor = self.bubble_center_adjustment_factor
+        return self.get_center() + factor * self.get_height() * _UP
+
+    def move_tip_to(self, point):
+        self.shift(_np.array(_vec3(point)) - self.get_tip())
+        return self
+
+    def flip(self, axis=_UP, only_body=True, **kwargs):
+        super().flip(axis=axis, **kwargs)
+        if only_body:
+            self.content.flip(axis=axis)
+        if abs(_vec3(axis)[1]) > 0:
+            self.direction = -_np.array(self.direction)
+        return self
+
+    def pin_to(self, mobject, auto_flip=False):
+        mob_center = mobject.get_center()
+        want_to_flip = _np.sign(mob_center[0]) != _np.sign(self.direction[0])
+        if want_to_flip and auto_flip:
+            self.flip()
+        boundary_point = mobject.get_bounding_box_point(_UP - self.direction)
+        vector_from_center = 1.0 * (boundary_point - mob_center)
+        self.move_tip_to(mob_center + vector_from_center)
+        return self
+
+    def position_mobject_inside(self, mobject, buff=_MED_LARGE_BUFF):
+        mobject.set_max_width(self.body.get_width() - 2 * float(buff))
+        mobject.set_max_height(self.body.get_height() / 1.5 - 2 * float(buff))
+        mobject.shift(self.get_bubble_center() - mobject.get_center())
+        return mobject
+
+    def add_content(self, mobject):
+        self.position_mobject_inside(mobject)
+        self.content = mobject
+        return self.content
+
+    def write(self, text):
+        self.add_content(Text(text))
+        return self
+
+    def resize_to_content(self, buff=1.0):
+        self.body.match_points(
+            self.get_body(self.content, self.direction, float(buff))
+        )
+        return self
+
+    def clear(self):
+        self.remove(self.content)
+        return self
+
+
+class SpeechBubble(Bubble):
+    """Rounded rectangle plus stem over native Union geometry."""
+
+    def __init__(
+        self,
+        content=None,
+        buff=_MED_SMALL_BUFF,
+        filler_shape=(2.0, 1.0),
+        stem_height_to_bubble_height=0.5,
+        stem_top_x_props=(0.2, 0.3),
+        **kwargs,
+    ):
+        self.stem_height_to_bubble_height = float(stem_height_to_bubble_height)
+        self.stem_top_x_props = tuple(stem_top_x_props)
+        super().__init__(content, buff, filler_shape, **kwargs)
+
+    def get_body(self, content, direction, buff):
+        rect = SurroundingRectangle(content, buff=buff)
+        rect.round_corners()
+        lp = rect.get_corner(_DL)
+        rp = rect.get_corner(_RIGHT + _DOWN)
+        stem_height = self.stem_height_to_bubble_height * rect.get_height()
+        low_prop, high_prop = self.stem_top_x_props
+        triangle = Polygon(
+            _interpolate(lp, rp, low_prop),
+            _interpolate(lp, rp, high_prop),
+            lp + stem_height * _DOWN,
+        )
+        result = Union(rect, triangle)
+        result.insert_n_curves(20)
+        if direction[0] > 0:
+            result.flip()
+        return result
+
+
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
