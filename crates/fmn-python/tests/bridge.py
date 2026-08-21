@@ -8805,14 +8805,15 @@ else:
     raise AssertionError("an unrouted VCube keyword reached the native builder")
 assert not hasattr(failed_vcube, "submobjects")
 
-try:
-    three_dimensions.Prismify(manimlib.VGroup(prismify_source))
-except NotImplementedError as error:
-    assert str(error) == (
-        "Prismify over a VMobject family awaits native family-value extraction"
-    )
-else:
-    raise AssertionError("Prismify silently discarded a source family")
+prismified_family = three_dimensions.Prismify(
+    manimlib.VGroup(prismify_source), depth=0.75, direction=manimlib.OUT
+)
+assert len(prismified_family.submobjects) == 1
+assert len(prismified_family.submobjects[0].submobjects) == 5
+assert np.allclose(
+    prismified_family.submobjects[0].submobjects[0].get_points(),
+    prismify_source_points,
+)
 
 # The two de-TeX'd special-text compositions are authored portal classes over
 # Atlas/Scribe, not import-only schema shells. Construction owns layout in

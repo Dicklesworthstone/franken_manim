@@ -3801,17 +3801,16 @@ impl BridgeMobject {
         depth: f64,
         direction: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
-        let point_sets: Vec<_> = with_stage(source, |stage, mob| {
-            stage
-                .family(mob)
-                .into_iter()
-                .filter_map(|member| {
-                    stage
-                        .get_points(member)
-                        .filter(|points| !points.is_empty())
-                })
-                .collect()
-        })?;
+        let mut point_sets = Vec::new();
+        for object in collect_proxy_graph(source.as_any())? {
+            let proxy = object.bind(source.py()).cast::<BridgeMobject>()?;
+            let points = with_stage(proxy, |stage, mob| {
+                stage.get_points(mob).unwrap_or_default()
+            })?;
+            if !points.is_empty() {
+                point_sets.push(points);
+            }
+        }
         if point_sets.is_empty() {
             return Err(PyValueError::new_err(
                 "Prismify family has no pointful members to extrude",
