@@ -14534,6 +14534,72 @@ class SceneFileWriter:
         )
 
 
+def _refuse_shader_wrapper():
+    raise _CapabilityError(
+        "the Reference OpenGL ShaderWrapper is excluded; "
+        "Lumen owns rasterization and custom GLSL is outside the "
+        "compatibility claim"
+    )
+
+
+class ShaderWrapper:
+    """Reference moderngl program wrapper. Construction names the Lumen owner."""
+
+    def __init__(
+        self,
+        ctx,
+        vert_data,
+        shader_folder=None,
+        mobject_uniforms=None,
+        texture_paths=None,
+        depth_test=False,
+        render_primitive=5,
+        code_replacements=None,
+    ):
+        del (
+            ctx,
+            vert_data,
+            shader_folder,
+            mobject_uniforms,
+            texture_paths,
+            depth_test,
+            render_primitive,
+            code_replacements,
+        )
+        _refuse_shader_wrapper()
+
+
+class VShaderWrapper(ShaderWrapper):
+    """Reference VMobject fill/stroke shader wrapper. Same Lumen exclusion."""
+
+    def __init__(
+        self,
+        ctx,
+        vert_data,
+        shader_folder=None,
+        mobject_uniforms=None,
+        texture_paths=None,
+        depth_test=False,
+        render_primitive=4,
+        code_replacements=None,
+        program_type=None,
+        stroke_behind=False,
+    ):
+        del (
+            ctx,
+            vert_data,
+            shader_folder,
+            mobject_uniforms,
+            texture_paths,
+            depth_test,
+            render_primitive,
+            code_replacements,
+            program_type,
+            stroke_behind,
+        )
+        _refuse_shader_wrapper()
+
+
 def _constant_expression(detail, env):
     """Evaluate only the closed expression grammar used by schema constants.
 
@@ -15152,6 +15218,8 @@ def _install_schema_surface():
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.window", "Window"): Window,
         ("manimlib.scene.scene_file_writer", "SceneFileWriter"): SceneFileWriter,
+        ("manimlib.shader_wrapper", "ShaderWrapper"): ShaderWrapper,
+        ("manimlib.shader_wrapper", "VShaderWrapper"): VShaderWrapper,
         ("manimlib.animation.animation", "Animation"): Animation,
     }
     pyglet_module = _ensure_module("manimlib.window")

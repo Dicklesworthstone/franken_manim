@@ -10837,6 +10837,56 @@ except TypeError as error:
     assert str(error) == "unexpected keyword arguments: unsupported"
 else:
     raise AssertionError("SceneFileWriter silently discarded an unknown option")
+
+shader_mod = importlib.import_module("manimlib.shader_wrapper")
+assert shader_mod.ShaderWrapper.__bases__ == (object,)
+assert shader_mod.VShaderWrapper.__bases__ == (shader_mod.ShaderWrapper,)
+assert list(inspect.signature(shader_mod.ShaderWrapper).parameters) == [
+    "ctx",
+    "vert_data",
+    "shader_folder",
+    "mobject_uniforms",
+    "texture_paths",
+    "depth_test",
+    "render_primitive",
+    "code_replacements",
+]
+assert list(inspect.signature(shader_mod.VShaderWrapper).parameters) == [
+    "ctx",
+    "vert_data",
+    "shader_folder",
+    "mobject_uniforms",
+    "texture_paths",
+    "depth_test",
+    "render_primitive",
+    "code_replacements",
+    "program_type",
+    "stroke_behind",
+]
+_shader_error = (
+    "the Reference OpenGL ShaderWrapper is excluded; "
+    "Lumen owns rasterization and custom GLSL is outside the "
+    "compatibility claim"
+)
+try:
+    shader_mod.ShaderWrapper(object(), np.zeros((0, 1)))
+except bridge_errors.CapabilityError as error:
+    assert str(error) == _shader_error
+else:
+    raise AssertionError("ShaderWrapper constructed an OpenGL program")
+try:
+    shader_mod.VShaderWrapper(object(), np.zeros((0, 1)), stroke_behind=True)
+except bridge_errors.CapabilityError as error:
+    assert str(error) == _shader_error
+else:
+    raise AssertionError("VShaderWrapper constructed an OpenGL program")
+failed_shader = shader_mod.ShaderWrapper.__new__(shader_mod.ShaderWrapper)
+try:
+    shader_mod.ShaderWrapper.__init__(failed_shader, object(), np.zeros((0, 1)))
+except bridge_errors.CapabilityError as error:
+    assert str(error) == _shader_error
+else:
+    raise AssertionError("ShaderWrapper.__init__ did not refuse a context")
 assert not any(
     name == root or name.startswith(root + ".")
     for name in sys.modules
