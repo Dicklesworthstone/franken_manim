@@ -4831,6 +4831,119 @@ class SampleSpace(Rectangle):
         self.default_label_scale_val = default_label_scale_val
 
 
+class BarChart(VGroup):
+    """The pinned probability chart composed from native Atlas primitives."""
+
+    def __init__(
+        self,
+        values,
+        height=4,
+        width=6,
+        n_ticks=4,
+        include_x_ticks=False,
+        tick_width=0.2,
+        tick_height=0.15,
+        label_y_axis=True,
+        y_axis_label_height=0.25,
+        max_value=1,
+        bar_colors=[_BLUE, _YELLOW],
+        bar_fill_opacity=0.8,
+        bar_stroke_width=3,
+        bar_names=[],
+        bar_label_scale_val=0.75,
+        **kwargs,
+    ):
+        values = tuple(values)
+        super().__init__(**kwargs)
+        self.height = height
+        self.width = width
+        self.n_ticks = n_ticks
+        self.include_x_ticks = include_x_ticks
+        self.tick_width = tick_width
+        self.tick_height = tick_height
+        self.label_y_axis = label_y_axis
+        self.y_axis_label_height = y_axis_label_height
+        self.max_value = max(values) if max_value is None else max_value
+        self.bar_colors = bar_colors
+        self.bar_fill_opacity = bar_fill_opacity
+        self.bar_stroke_width = bar_stroke_width
+        self.bar_names = bar_names
+        self.bar_label_scale_val = bar_label_scale_val
+        self.n_ticks_x = len(values)
+        self.add_axes()
+        self.add_bars(values)
+        self.center()
+
+    def add_axes(self):
+        x_axis = Line(self.tick_width * _LEFT / 2, self.width * _RIGHT)
+        y_axis = Line(_MED_LARGE_BUFF * _DOWN, self.height * _UP)
+        y_ticks = VGroup()
+        heights = _np.linspace(0, self.height, self.n_ticks + 1)
+        values = _np.linspace(0, self.max_value, self.n_ticks + 1)
+        for y, _value in zip(heights, values):
+            y_tick = Line(_LEFT, _RIGHT)
+            y_tick.set_width(self.tick_width)
+            y_tick.move_to(y * _UP)
+            y_ticks.add(y_tick)
+        y_axis.add(y_ticks)
+
+        if self.include_x_ticks is True:
+            x_ticks = VGroup()
+            widths = _np.linspace(0, self.width, self.n_ticks_x + 1)
+            for x in widths:
+                x_tick = Line(_UP, _DOWN)
+                x_tick.set_height(self.tick_height)
+                x_tick.move_to(x * _RIGHT)
+                x_ticks.add(x_tick)
+            x_axis.add(x_ticks)
+
+        self.add(x_axis, y_axis)
+        self.x_axis, self.y_axis = x_axis, y_axis
+        if self.label_y_axis:
+            labels = VGroup()
+            for y_tick, value in zip(y_ticks, values):
+                label = Tex(str(_np.round(value, 2)))
+                label.set_height(self.y_axis_label_height)
+                label.next_to(y_tick, _LEFT, _SMALL_BUFF)
+                labels.add(label)
+            self.y_axis_labels = labels
+            self.add(labels)
+
+    def add_bars(self, values):
+        buff = float(self.width) / (2 * len(values))
+        bars = VGroup()
+        for index, value in enumerate(values):
+            bar = Rectangle(
+                height=(value / self.max_value) * self.height,
+                width=buff,
+                stroke_width=self.bar_stroke_width,
+                fill_opacity=self.bar_fill_opacity,
+            )
+            bar.move_to(
+                (2 * index + 0.5) * buff * _RIGHT,
+                _DOWN + _LEFT * 5,
+            )
+            bars.add(bar)
+        bars.set_color_by_gradient(*self.bar_colors)
+
+        bar_labels = VGroup()
+        for bar, name in zip(bars, self.bar_names):
+            label = Tex(str(name))
+            label.scale(self.bar_label_scale_val)
+            label.next_to(bar, _DOWN, _SMALL_BUFF)
+            bar_labels.add(label)
+
+        self.add(bars, bar_labels)
+        self.bars = bars
+        self.bar_labels = bar_labels
+
+    def change_bar_values(self, values):
+        for bar, value in zip(self.bars, values):
+            bar_bottom = bar.get_bottom()
+            bar.stretch_to_fit_height((value / self.max_value) * self.height)
+            bar.move_to(bar_bottom, _DOWN)
+
+
 class CoordinateSystem:
     """The Reference's coordinate-system mixin over live axis geometry.
 
@@ -14093,6 +14206,7 @@ def _install_schema_surface():
         ("manimlib.mobject.number_line", "UnitInterval"): UnitInterval,
         ("manimlib.mobject.number_line", "Slider"): Slider,
         ("manimlib.mobject.probability", "SampleSpace"): SampleSpace,
+        ("manimlib.mobject.probability", "BarChart"): BarChart,
         ("manimlib.mobject.coordinate_systems", "CoordinateSystem"): CoordinateSystem,
         ("manimlib.mobject.coordinate_systems", "Axes"): Axes,
         ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,

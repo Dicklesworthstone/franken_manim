@@ -8979,6 +8979,61 @@ else:
     raise AssertionError("SampleSpace silently discarded an unknown option")
 assert not hasattr(failed_sample_space, "submobjects")
 
+# BarChart retires the probability module's remaining schema constructor
+# refusal by composing Atlas-native lines, rectangles, and Scribe labels.
+assert probability.BarChart.__bases__ == (manimlib.VGroup,)
+bar_chart_signature = inspect.signature(probability.BarChart)
+assert tuple(bar_chart_signature.parameters) == (
+    "values",
+    "height",
+    "width",
+    "n_ticks",
+    "include_x_ticks",
+    "tick_width",
+    "tick_height",
+    "label_y_axis",
+    "y_axis_label_height",
+    "max_value",
+    "bar_colors",
+    "bar_fill_opacity",
+    "bar_stroke_width",
+    "bar_names",
+    "bar_label_scale_val",
+    "kwargs",
+)
+bar_chart = probability.BarChart(
+    [0.25, 0.75],
+    height=2.0,
+    width=4.0,
+    n_ticks=2,
+    include_x_ticks=True,
+    bar_names=["A", "B"],
+)
+assert len(bar_chart.bars) == 2
+assert len(bar_chart.bar_labels) == 2
+assert len(bar_chart.y_axis_labels) == 3
+assert len(bar_chart.x_axis.submobjects[0]) == 3
+assert len(bar_chart.y_axis.submobjects[0]) == 3
+assert np.isclose(bar_chart.bars[0].get_width(), 1.0, atol=1e-6)
+assert np.isclose(bar_chart.bars[0].get_height(), 0.5, atol=1e-6)
+assert np.isclose(bar_chart.bars[1].get_height(), 1.5, atol=1e-6)
+assert bar_chart.bars[0].get_fill_color() == manimlib.BLUE
+assert bar_chart.bars[1].get_fill_color() == manimlib.YELLOW
+chart_bottoms = [bar.get_bottom().copy() for bar in bar_chart.bars]
+bar_chart.change_bar_values([0.5, 1.0])
+assert np.isclose(bar_chart.bars[0].get_height(), 1.0, atol=1e-6)
+assert np.isclose(bar_chart.bars[1].get_height(), 2.0, atol=1e-6)
+assert np.allclose(bar_chart.bars[0].get_bottom(), chart_bottoms[0])
+assert np.allclose(bar_chart.bars[1].get_bottom(), chart_bottoms[1])
+auto_max_chart = probability.BarChart(
+    [2.0, 4.0], max_value=None, label_y_axis=False
+)
+assert auto_max_chart.max_value == 4.0
+assert not hasattr(auto_max_chart, "y_axis_labels")
+bar_chart_scene = Scene()
+bar_chart_scene.add(bar_chart)
+assert bar_chart._is_bound()
+
 refusing_label_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0))
 refusing_label_children = len(refusing_label_line.submobjects)
 try:
