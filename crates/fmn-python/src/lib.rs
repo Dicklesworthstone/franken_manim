@@ -7051,6 +7051,27 @@ impl PyScene {
         Self::_engine_roots(slf)
     }
 
+    /// Replace the engine root batch with these already-bound proxies and
+    /// reassert their exact handle-to-Python identity mapping. SceneState
+    /// restoration uses this after native checkpoint decode and `become()`
+    /// so `_engine_roots()` cannot surface copied proxy shells.
+    #[pyo3(signature = (*mobjects))]
+    fn _reseat_engine_roots(
+        slf: &Bound<'_, Self>,
+        mobjects: &Bound<'_, PyTuple>,
+    ) -> PyResult<()> {
+        let handles = scene_proxy_handles(slf, mobjects)?;
+        slf.borrow()
+            .engine
+            .borrow_mut()
+            .remove_all_except(&handles)
+            .map_err(native_error)?;
+        for (handle, proxy) in handles.into_iter().zip(mobjects.iter()) {
+            register_proxy(slf.py(), slf, handle, &proxy)?;
+        }
+        Ok(())
+    }
+
     #[pyo3(signature = (*mobjects_to_keep))]
     fn remove_all_except<'py>(
         slf: &Bound<'py, Self>,
