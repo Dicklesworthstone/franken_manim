@@ -7489,7 +7489,7 @@ class Dartboard(VGroup):
         bullseyes[1].set_color(_RED_E)
         self.bullseye = bullseyes[1]
         self.add(*segments, *bullseyes)
-        self.scale(self.radius)
+        self.set_width(2.0 * self.radius)
 
 
 class Cross(VGroup):
@@ -15482,6 +15482,8 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Speedometer"): Speedometer,
         ("manimlib.mobject.svg.drawings", "DieFace"): DieFace,
         ("manimlib.mobject.svg.drawings", "Dartboard"): Dartboard,
+        ("manimlib.mobject.svg.drawings", "Bubble"): Bubble,
+        ("manimlib.mobject.svg.drawings", "SpeechBubble"): SpeechBubble,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (
