@@ -10787,3 +10787,91 @@ except TypeError as error:
     assert "3D point or a Mobject" in str(error)
 else:
     raise AssertionError("FocusOn accepted None")
+
+# fm-5wq.4.74: StreamLines over the one native RK45 integrator, and
+# AnimatedStreamLines as the reference gaussian flash sweep driven by a
+# Python dt-updater with substream-continuous lag draws.
+vector_field_module = importlib.import_module("manimlib.mobject.vector_field")
+assert vector_field_module.StreamLines.__bases__ == (manimlib.VGroup,)
+assert vector_field_module.AnimatedStreamLines.__bases__ == (manimlib.VGroup,)
+
+
+def _swirl_field(coords):
+    coords = np.asarray(coords, dtype=float)
+    return np.stack(
+        [-coords[:, 1], coords[:, 0], np.zeros(len(coords))], axis=1
+    )
+
+
+stream_plane = manimlib.NumberPlane(x_range=(-2, 2), y_range=(-2, 2))
+stream_lines = vector_field_module.StreamLines(
+    _swirl_field,
+    stream_plane,
+    density=0.5,
+    solution_time=1.0,
+    n_samples_per_line=6,
+)
+assert len(stream_lines.submobjects) > 0
+assert all(
+    line.get_num_points() > 0 for line in stream_lines.submobjects
+)
+assert len(stream_lines._stream_virtual_times) == len(stream_lines.submobjects)
+assert stream_lines._stream_rng_draws > 0
+
+# Determinism: the same construction yields byte-identical line points.
+stream_lines_again = vector_field_module.StreamLines(
+    _swirl_field,
+    stream_plane,
+    density=0.5,
+    solution_time=1.0,
+    n_samples_per_line=6,
+)
+assert len(stream_lines_again.submobjects) == len(stream_lines.submobjects)
+assert all(
+    np.array_equal(a.get_points(), b.get_points())
+    for a, b in zip(stream_lines.submobjects, stream_lines_again.submobjects)
+)
+
+# AnimatedStreamLines: construction snapshots tapered base profiles and the
+# substream-continuous lag times; a scene wait drives the gaussian sweep and
+# rewrites the stroke-width lanes.
+animated_stream = vector_field_module.AnimatedStreamLines(stream_lines)
+assert len(animated_stream._line_times) == len(stream_lines.submobjects)
+assert all(time <= 0.0 for time in animated_stream._line_times)
+stream_scene = InteractiveScene()
+stream_scene.add(animated_stream)
+stream_before = [
+    np.asarray(line.data["stroke_width"], dtype=float).copy()
+    for line in stream_lines.submobjects
+]
+stream_scene.wait(1.0 / 30.0)
+stream_after = [
+    np.asarray(line.data["stroke_width"], dtype=float)
+    for line in stream_lines.submobjects
+]
+assert any(
+    not np.allclose(before, after)
+    for before, after in zip(stream_before, stream_after)
+)
+
+# Named negatives: a non-callable field and a coordinate-system-less call.
+try:
+    vector_field_module.StreamLines(None, stream_plane)
+except TypeError as error:
+    assert "StreamLines func must be a callable" in str(error), error
+else:
+    raise AssertionError("StreamLines accepted a non-callable field")
+
+try:
+    vector_field_module.StreamLines(_swirl_field, None)
+except TypeError as error:
+    assert "requires a coordinate system" in str(error), error
+else:
+    raise AssertionError("StreamLines accepted a missing coordinate system")
+
+try:
+    vector_field_module.AnimatedStreamLines(manimlib.VGroup())
+except TypeError as error:
+    assert "requires a StreamLines instance" in str(error), error
+else:
+    raise AssertionError("AnimatedStreamLines accepted a bare VGroup")

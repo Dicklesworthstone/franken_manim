@@ -7154,6 +7154,226 @@ class TimeVaryingVectorField(VectorField):
         self.time += float(dt)
 
 
+class StreamLines(VGroup):
+    """Reference StreamLines over the ONE native RK45 integrator
+    (fm-5wq.4.74): the Python field callback and coordinate system are
+    consulted at construction only, seed jitter comes from the named
+    STREAM_LINES_SUBSTREAM, and each child is one integrated flow line
+    re-spaced by true arc length (BN-03)."""
+
+    def __init__(
+        self,
+        func,
+        coordinate_system,
+        density=1.0,
+        n_repeats=1,
+        noise_factor=None,
+        solution_time=3,
+        dt=0.05,
+        arc_len=3,
+        max_time_steps=200,
+        n_samples_per_line=10,
+        cutoff_norm=15,
+        stroke_width=1.0,
+        stroke_color=None,
+        stroke_opacity=1,
+        color_by_magnitude=True,
+        magnitude_range=(0, 2.0),
+        taper_stroke_width=False,
+        color_map="3b1b_colormap",
+        **kwargs,
+    ):
+        if not callable(func):
+            raise TypeError(
+                "StreamLines func must be a callable vector field; got "
+                + type(func).__name__
+            )
+        if not (
+            hasattr(coordinate_system, "c2p")
+            and hasattr(coordinate_system, "p2c")
+            and hasattr(coordinate_system, "get_all_ranges")
+        ):
+            raise TypeError(
+                "StreamLines requires a coordinate system with "
+                "c2p/p2c/get_all_ranges; got "
+                + type(coordinate_system).__name__
+            )
+        if color_map not in (None, "3b1b_colormap"):
+            raise NotImplementedError(
+                "StreamLines color_map requires a non-bundled matplotlib "
+                f"map: {color_map!r}; use the bundled 3b1b_colormap"
+            )
+        style_kwargs = dict(kwargs)
+        _preflight_vmobject_style_kwargs(style_kwargs)
+        _install_live_state(self)
+        self.func = func
+        self.coordinate_system = coordinate_system
+        self.density = float(density)
+        self.solution_time = float(solution_time)
+
+        def _field_rows(rows):
+            outputs = _vector_field_rows(
+                func(_np.asarray(rows, dtype=float)),
+                "StreamLines func output",
+            )
+            return [tuple(float(value) for value in row) for row in outputs]
+
+        def _adapter_c2p(coords):
+            point = _np.asarray(
+                coordinate_system.c2p(*coords), dtype=float
+            ).reshape(3)
+            return tuple(float(value) for value in point)
+
+        def _adapter_p2c(point):
+            coords = _np.asarray(
+                coordinate_system.p2c(_np.asarray(point, dtype=float)),
+                dtype=float,
+            ).reshape(-1)
+            padded = [0.0, 0.0, 0.0]
+            for index in range(min(3, len(coords))):
+                padded[index] = float(coords[index])
+            return tuple(padded)
+
+        ranges = [
+            tuple(float(value) for value in row[:3])
+            for row in coordinate_system.get_all_ranges()
+        ]
+        # Detached construction rides the standard portal scene seed (0);
+        # certified seed plumbing follows the scene-owned construction seam.
+        specs, virtual_times, rng_draws = self._build_stream_lines(
+            _native_shell_factory,
+            _field_rows,
+            _adapter_c2p,
+            _adapter_p2c,
+            ranges,
+            int(getattr(coordinate_system, "dimension", 2)),
+            0,
+            float(density),
+            int(n_repeats),
+            None if noise_factor is None else float(noise_factor),
+            float(solution_time),
+            float(dt),
+            float(arc_len),
+            int(max_time_steps),
+            int(n_samples_per_line),
+            float(cutoff_norm),
+            float(stroke_width),
+            stroke_color,
+            float(stroke_opacity),
+            bool(color_by_magnitude),
+            (float(magnitude_range[0]), float(magnitude_range[1])),
+            bool(taper_stroke_width),
+        )
+        _hang_native_children(self, specs)
+        self._stream_virtual_times = [float(t) for t in virtual_times]
+        self._stream_rng_draws = int(rng_draws)
+        _apply_vmobject_style_kwargs(self, style_kwargs)
+
+
+class AnimatedStreamLines(VGroup):
+    """vector_field.py:445 as a Python dt-updater over the native lines:
+    the per-line gaussian VShowPassingFlash sweep (σ = time_width/6, swept
+    −tw/2 → 1+tw/2, zeroed outside 3σ) modulates each line's end-tapered
+    base stroke profile, paced by virtual_time/rate_multiple and lagged by
+    the named substream's continuous U[0,1) draws — the exact formula the
+    native stage updater applies."""
+
+    _FLASH_TAPER_WIDTH = 0.05
+
+    def __init__(
+        self,
+        stream_lines,
+        lag_range=4,
+        rate_multiple=1.0,
+        line_anim_config=None,
+        **kwargs,
+    ):
+        if not isinstance(stream_lines, StreamLines):
+            raise TypeError(
+                "AnimatedStreamLines requires a StreamLines instance; got "
+                + type(stream_lines).__name__
+            )
+        config = dict(line_anim_config or {})
+        time_width = float(config.pop("time_width", 1.0))
+        rate_func = config.pop("rate_func", None)
+        _refuse_unrouted(
+            "AnimatedStreamLines()",
+            [(name, True) for name in sorted(config)]
+            + [
+                (
+                    "rate_func",
+                    rate_func is not None
+                    and getattr(rate_func, "__name__", "") != "linear",
+                )
+            ],
+        )
+        super().__init__(stream_lines)
+        _preflight_vmobject_style_kwargs(dict(kwargs))
+        self.stream_lines = stream_lines
+        self.lag_range = float(lag_range)
+        self.rate_multiple = float(rate_multiple)
+        self.time_width = time_width
+        lines = list(stream_lines.submobjects)
+        uniforms = _BridgeMobject._stream_line_lag_uniforms(
+            0, stream_lines._stream_rng_draws, len(lines)
+        )
+        self._line_times = [-self.lag_range * value for value in uniforms]
+        self._line_run_times = [
+            virtual_time / self.rate_multiple
+            for virtual_time in stream_lines._stream_virtual_times
+        ]
+        self._line_xs = []
+        self._line_base_profiles = []
+        taper = self._FLASH_TAPER_WIDTH
+
+        def taper_kernel(x):
+            if x < taper:
+                return x
+            if x > 1.0 - taper:
+                return 1.0 - x
+            return 1.0
+
+        for line in lines:
+            widths = _np.asarray(line.data["stroke_width"], dtype=float).reshape(-1)
+            count = len(widths)
+            xs = (
+                _np.arange(count, dtype=float) / (count - 1)
+                if count > 1
+                else _np.zeros(count)
+            )
+            kernel = _np.asarray([taper_kernel(x) for x in xs])
+            self._line_xs.append(xs)
+            self._line_base_profiles.append(widths * kernel)
+        self.add_updater(lambda mob, dt: mob.update(dt))
+
+    def update(self, dt=0):
+        sigma = self.time_width / 6.0
+        for index, line in enumerate(self.stream_lines.submobjects):
+            self._line_times[index] += float(dt)
+            run_time = self._line_run_times[index]
+            if not _math.isfinite(run_time) or run_time <= 0.0:
+                continue
+            adjusted = max(self._line_times[index], 0.0) % run_time
+            alpha = adjusted / run_time
+            mu = (1.0 - alpha) * (-self.time_width / 2.0) + alpha * (
+                1.0 + self.time_width / 2.0
+            )
+            base = self._line_base_profiles[index]
+            xs = self._line_xs[index]
+            if sigma <= 0.0:
+                widths = _np.zeros_like(base)
+            else:
+                z = (xs - mu) / sigma
+                widths = _np.where(
+                    _np.abs(xs - mu) > 3.0 * sigma,
+                    0.0,
+                    base * _np.exp(-0.5 * z * z),
+                )
+            column = line.data["stroke_width"]
+            column[:] = widths.reshape(column.shape)
+        return self
+
+
 class Surface(Mobject):
     """The Surface-family MRO anchor (Reference Surface(Mobject), NOT a
     VMobject — VGroup's only-VMobjects refusal stays correct for it).
@@ -11424,6 +11644,11 @@ def _install_schema_surface():
             "ImageMobject",
         ): ImageMobject,
         ("manimlib.mobject.vector_field", "VectorField"): VectorField,
+        ("manimlib.mobject.vector_field", "StreamLines"): StreamLines,
+        (
+            "manimlib.mobject.vector_field",
+            "AnimatedStreamLines",
+        ): AnimatedStreamLines,
         (
             "manimlib.mobject.vector_field",
             "TimeVaryingVectorField",

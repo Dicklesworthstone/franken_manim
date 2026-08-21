@@ -4278,6 +4278,183 @@ impl BridgeMobject {
         install_native_tree(slf, factory, tree)
     }
 
+    /// `StreamLines` (fm-5wq.4.74): run the ONE native RK45 stream-line
+    /// integrator over a construction-time Python field callback and a
+    /// Python coordinate-system adapter, then hang the built line family.
+    /// Returns `(shell_specs, virtual_times)` — one virtual time per line,
+    /// which `AnimatedStreamLines` paces its flash windows by.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_stream_lines<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        func: Py<PyAny>,
+        c2p: Py<PyAny>,
+        p2c: Py<PyAny>,
+        ranges: Vec<[f64; 3]>,
+        dimension: usize,
+        seed: u64,
+        density: f64,
+        n_repeats: usize,
+        noise_factor: Option<f64>,
+        solution_time: f64,
+        dt: f64,
+        arc_len: f64,
+        max_time_steps: usize,
+        n_samples_per_line: usize,
+        cutoff_norm: f64,
+        stroke_width: f64,
+        stroke_color: Option<&Bound<'py, PyAny>>,
+        stroke_opacity: f64,
+        color_by_magnitude: bool,
+        magnitude_range: (f64, f64),
+        taper_stroke_width: bool,
+    ) -> PyResult<(Bound<'py, PyList>, Vec<f64>, u64)> {
+        let py = slf.py();
+        let callback_error: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+
+        struct PyCoordinateSystem {
+            c2p: Py<PyAny>,
+            p2c: Py<PyAny>,
+            ranges: Vec<[f64; 3]>,
+            dimension: usize,
+            error: Arc<Mutex<Option<PyErr>>>,
+        }
+        impl fmn_library::coords::CoordinateSystem for PyCoordinateSystem {
+            fn c2p(&self, coords: &[f64]) -> fmn_core::types::Vec3 {
+                Python::attach(|py| {
+                    match self
+                        .c2p
+                        .bind(py)
+                        .call1((coords.to_vec(),))
+                        .and_then(|value| value.extract::<[f64; 3]>())
+                    {
+                        Ok(point) => point,
+                        Err(error) => {
+                            self.error.lock().unwrap().get_or_insert(error);
+                            [0.0; 3]
+                        }
+                    }
+                })
+            }
+            fn p2c(&self, point: fmn_core::types::Vec3) -> [f64; 3] {
+                Python::attach(|py| {
+                    match self
+                        .p2c
+                        .bind(py)
+                        .call1((point,))
+                        .and_then(|value| value.extract::<[f64; 3]>())
+                    {
+                        Ok(coords) => coords,
+                        Err(error) => {
+                            self.error.lock().unwrap().get_or_insert(error);
+                            [0.0; 3]
+                        }
+                    }
+                })
+            }
+            fn all_ranges(&self) -> Vec<[f64; 3]> {
+                self.ranges.clone()
+            }
+            fn dimension(&self) -> usize {
+                self.dimension
+            }
+        }
+
+        let adapter = PyCoordinateSystem {
+            c2p,
+            p2c,
+            ranges,
+            dimension,
+            error: Arc::clone(&callback_error),
+        };
+        let field_error = Arc::clone(&callback_error);
+        let field = move |rows: &[[f64; 3]]| -> Vec<[f64; 3]> {
+            Python::attach(|py| {
+                match func
+                    .bind(py)
+                    .call1((rows.to_vec(),))
+                    .and_then(|value| value.extract::<Vec<[f64; 3]>>())
+                {
+                    Ok(outputs) if outputs.len() == rows.len() => outputs,
+                    Ok(outputs) => {
+                        field_error.lock().unwrap().get_or_insert_with(|| {
+                            PyValueError::new_err(format!(
+                                "StreamLines func must return one vector per sample; \
+                                 got {} vectors for {} samples",
+                                outputs.len(),
+                                rows.len()
+                            ))
+                        });
+                        vec![[0.0; 3]; rows.len()]
+                    }
+                    Err(error) => {
+                        field_error.lock().unwrap().get_or_insert(error);
+                        vec![[0.0; 3]; rows.len()]
+                    }
+                }
+            })
+        };
+
+        let mut style = fmn_library::fields::StreamLineStyle::default();
+        style.stroke_width = stroke_width;
+        if let Some(color) = stroke_color {
+            style.stroke_color = srgb_from_py(color)?;
+        }
+        style.stroke_opacity = stroke_opacity;
+        style.color_by_magnitude = color_by_magnitude;
+        style.magnitude_range = magnitude_range;
+        style.taper_stroke_width = taper_stroke_width;
+
+        let rng = fmn_core::rng::RngRoot::from_seed(seed);
+        let mut builder = fmn_library::fields::StreamLines::new(field, adapter, &rng)
+            .with_density(density)
+            .with_n_repeats(n_repeats)
+            .with_solution_time(solution_time)
+            .with_dt(dt)
+            .with_arc_len(arc_len)
+            .with_max_time_steps(max_time_steps)
+            .with_samples_per_line(n_samples_per_line)
+            .with_cutoff_norm(cutoff_norm)
+            .with_style_config(style);
+        if let Some(noise) = noise_factor {
+            builder = builder.with_noise_factor(noise);
+        }
+        // VERBATIM refusal doctrine: the field error, if any, outranks the
+        // build result — a poisoned integration must never look successful.
+        let built = builder.build();
+        if let Some(error) = callback_error.lock().unwrap().take() {
+            return Err(error);
+        }
+        let built = built.map_err(|error| {
+            PyValueError::new_err(format!("StreamLines integration refused: {error}"))
+        })?;
+        let virtual_times: Vec<f64> = built
+            .lines()
+            .iter()
+            .map(|line| line.virtual_time)
+            .collect();
+        let rng_draws = built.rng_draws();
+        let tree = fmn_mobject::Mobject::from(built.vmob().clone());
+        let specs = install_native_tree(slf, factory, tree)?;
+        let _ = py;
+        Ok((specs, virtual_times, rng_draws))
+    }
+
+    /// `AnimatedStreamLines` lag times (vector_field.py:466): `count`
+    /// U[0,1) draws from the named stream-lines substream, advanced past
+    /// the seed jitter's `prior_draws` — the one continuous deterministic
+    /// sequence the native updater uses.
+    #[staticmethod]
+    fn _stream_line_lag_uniforms(seed: u64, prior_draws: u64, count: usize) -> Vec<f64> {
+        let rng = fmn_core::rng::RngRoot::from_seed(seed);
+        let substream = rng.substream(fmn_library::fields::STREAM_LINES_SUBSTREAM);
+        let mut sequential = substream.sequential();
+        for _ in 0..prior_draws {
+            let _ = sequential.next_f64();
+        }
+        (0..count).map(|_| sequential.next_f64()).collect()
+    }
+
     /// The finished Atlas implementation of the Reference's older
     /// `VectorField.get_sample_points` rectilinear helper.
     #[staticmethod]
