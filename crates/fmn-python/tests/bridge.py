@@ -12507,3 +12507,43 @@ except TypeError as error:
     assert "wobble" in str(error), error
 else:
     raise AssertionError("TracingTail accepted an unknown kwarg")
+
+
+# --------------------------------------- DashedVMobject leftover kwargs
+# fm-5wq.4.124: the **kwargs surface is the Reference's — style/config
+# keywords flow into VMobject.__init__, and the trailing match_style pass
+# deliberately overrides the paint channels with the source's (verbatim
+# vectorized_mobject.py ordering). Nothing refuses; this pins the flow.
+
+dvk_source = manimlib.Circle(radius=1.0, stroke_color=manimlib.BLUE)
+dvk = vectorized.DashedVMobject(
+    dvk_source,
+    num_dashes=6,
+    stroke_color=manimlib.RED,
+    stroke_behind=True,
+    flat_stroke=True,
+)
+assert len(dvk) == 6
+# Config kwargs survive; paint kwargs lose to the source, Reference-exact.
+assert dvk.stroke_behind is True
+assert dvk.flat_stroke is True
+assert dvk.get_stroke_color() == manimlib.BLUE
+
+# positive_space_ratio is observable: a fuller ratio draws longer dashes.
+dvk_full = vectorized.DashedVMobject(
+    dvk_source, num_dashes=6, positive_space_ratio=0.8
+)
+dvk_sparse = vectorized.DashedVMobject(
+    dvk_source, num_dashes=6, positive_space_ratio=0.2
+)
+assert (
+    dvk_full[0].get_arc_length() > 3.0 * dvk_sparse[0].get_arc_length()
+)
+
+# The named non-VMobject refusal stays.
+try:
+    vectorized.DashedVMobject("not a vmobject")
+except TypeError as error:
+    assert "expects a VMobject" in str(error)
+else:
+    raise AssertionError("DashedVMobject accepted a non-VMobject")
