@@ -55,7 +55,9 @@ _MED_LARGE_BUFF = 0.5
 _BLACK = "#000000"
 _WHITE = "#FFFFFF"
 _GREY_A = "#DDDDDD"
+_GREY_B = "#BBBBBB"
 _GREY_C = "#888888"
+_GREY_D = "#444444"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
 _RED = "#FC6255"
@@ -4790,6 +4792,32 @@ class Slider(VGroup):
         self.set_stroke(behind=True)
 
 
+class SampleSpace(Rectangle):
+    """The probability shelf's sample-space frame over native Rectangle."""
+
+    def __init__(
+        self,
+        width=3,
+        height=3,
+        fill_color=_GREY_D,
+        fill_opacity=1,
+        stroke_width=0.5,
+        stroke_color=_GREY_B,
+        default_label_scale_val=1,
+        **kwargs,
+    ):
+        super().__init__(
+            width,
+            height,
+            fill_color=fill_color,
+            fill_opacity=fill_opacity,
+            stroke_width=stroke_width,
+            stroke_color=stroke_color,
+            **kwargs,
+        )
+        self.default_label_scale_val = default_label_scale_val
+
+
 class CoordinateSystem:
     """The Reference's coordinate-system mixin over live axis geometry.
 
@@ -5400,6 +5428,60 @@ class SVGMobject(VMobject):
             self.set_height(height)
         if width is not None:
             self.set_width(width)
+
+
+class VMobjectFromSVGPath(VMobject):
+    """One svgelements-compatible path over Chisel's native SVG parser."""
+
+    def __init__(self, path_obj, **kwargs):
+        background_image_file = kwargs.pop("background_image_file", None)
+        long_lines = bool(kwargs.pop("long_lines", False))
+        joint_type = kwargs.pop("joint_type", "auto")
+        scale_stroke_with_zoom = bool(
+            kwargs.pop("scale_stroke_with_zoom", False)
+        )
+        use_simple_quadratic_approx = bool(
+            kwargs.pop("use_simple_quadratic_approx", False)
+        )
+        anti_alias_width = float(kwargs.pop("anti_alias_width", 1.5))
+        _refuse_unrouted(
+            "VMobjectFromSVGPath()",
+            [("background_image_file", background_image_file is not None)],
+        )
+        if joint_type not in self.joint_type_map:
+            raise ValueError(f"unknown VMobject joint type: {joint_type}")
+        style = dict(kwargs)
+        config = _pinned_manim_config().vmobject
+        color = style.get("color")
+        style.setdefault(
+            "fill_color", color if color is not None else config.default_fill_color
+        )
+        style.setdefault("fill_opacity", 0.0)
+        style.setdefault(
+            "stroke_color",
+            color if color is not None else config.default_stroke_color,
+        )
+        style.setdefault("stroke_opacity", 1.0)
+        style.setdefault("stroke_width", 4.0)
+        style.setdefault("fill_border_width", 0.0)
+        _preflight_vmobject_style_kwargs(style)
+        path_data = path_obj.d()
+        if not isinstance(path_data, str):
+            raise TypeError("VMobjectFromSVGPath path_obj.d() must return str")
+        _install_live_state(self)
+        self.transform_cache = None
+        self.path_obj = path_obj
+        self.long_lines = long_lines
+        self.joint_type = joint_type
+        self.scale_stroke_with_zoom = scale_stroke_with_zoom
+        self.use_simple_quadratic_approx = use_simple_quadratic_approx
+        self.anti_alias_width = anti_alias_width
+        specs = self._build_svg_path(_native_shell_factory, path_data)
+        _hang_native_children(self, specs)
+        self.set_joint_type(joint_type)
+        self.set_anti_alias_width(anti_alias_width)
+        self.uniforms["scale_stroke_with_zoom"] = scale_stroke_with_zoom
+        _apply_vmobject_style_kwargs(self, style)
 
 
 class StringMobject(SVGMobject, _abc.ABC):
@@ -13944,6 +14026,10 @@ def _install_schema_surface():
             "manimlib.mobject.types.image_mobject",
             "ImageMobject",
         ): ImageMobject,
+        (
+            "manimlib.mobject.svg.svg_mobject",
+            "VMobjectFromSVGPath",
+        ): VMobjectFromSVGPath,
         ("manimlib.mobject.vector_field", "VectorField"): VectorField,
         ("manimlib.mobject.vector_field", "StreamLines"): StreamLines,
         (
@@ -13984,6 +14070,7 @@ def _install_schema_surface():
         ("manimlib.mobject.number_line", "NumberLine"): NumberLine,
         ("manimlib.mobject.number_line", "UnitInterval"): UnitInterval,
         ("manimlib.mobject.number_line", "Slider"): Slider,
+        ("manimlib.mobject.probability", "SampleSpace"): SampleSpace,
         ("manimlib.mobject.coordinate_systems", "CoordinateSystem"): CoordinateSystem,
         ("manimlib.mobject.coordinate_systems", "Axes"): Axes,
         ("manimlib.mobject.coordinate_systems", "ThreeDAxes"): ThreeDAxes,

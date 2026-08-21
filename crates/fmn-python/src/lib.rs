@@ -3404,6 +3404,39 @@ impl BridgeMobject {
         install_native_tree(slf, factory, fmn_library::svg_document_mobject(&document))
     }
 
+    /// `VMobjectFromSVGPath(path_obj)` over the same hardened Chisel path
+    /// parser as `SVGMobject`. The wrapper contains exactly one path, whose
+    /// native child becomes this proxy's root rather than an extra family
+    /// level.
+    fn _build_svg_path<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        path_data: &str,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let limits = fmn_library::svg::SvgLimits::default();
+        let escaped = path_data
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;");
+        let source = format!("<svg><path d=\"{escaped}\"/></svg>");
+        if source.len() > limits.max_bytes {
+            return Err(native_error(fmn_library::svg::SvgError::TooLarge {
+                bytes: source.len(),
+                limit: limits.max_bytes,
+            }));
+        }
+        let document = fmn_library::svg::SvgDocument::parse_with_limits(
+            source.as_bytes(),
+            &limits,
+        )
+        .map_err(native_error)?;
+        let family = fmn_library::svg_document_mobject(&document);
+        let path = family.children().first().cloned().unwrap_or_default();
+        install_native_tree(slf, factory, path)
+    }
+
     /// Split a source's live shared-anchor run with Atlas's
     /// `CurvesAsSubmobjects` builder. Python reapplies the source style to
     /// each returned child, matching the Reference's constructor body.

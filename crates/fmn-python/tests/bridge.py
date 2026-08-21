@@ -3069,6 +3069,83 @@ else:
     raise AssertionError("SingleStringTex accepted an external template")
 assert not hasattr(failed_single_tex, "submobjects")
 
+# VMobjectFromSVGPath consumes the pinned Reference path object's d() text,
+# but Chisel owns command parsing, arc conversion, and shared-anchor output.
+svg_mobjects = importlib.import_module("manimlib.mobject.svg.svg_mobject")
+assert svg_mobjects.VMobjectFromSVGPath.__bases__ == (VMobject,)
+assert str(inspect.signature(svg_mobjects.VMobjectFromSVGPath)) == (
+    "(path_obj, **kwargs)"
+)
+
+
+class NativeSvgPath:
+    def __init__(self, data):
+        self.data = data
+
+    def d(self):
+        return self.data
+
+
+default_svg_path = svg_mobjects.VMobjectFromSVGPath(
+    NativeSvgPath("M 0 0 L 1 0")
+)
+assert np.isclose(default_svg_path.get_fill_opacity(), 0.0)
+assert np.isclose(default_svg_path.get_stroke_opacity(), 1.0)
+assert np.isclose(default_svg_path.get_stroke_width(), 4.0)
+
+native_path_object = NativeSvgPath(
+    "M 0 0 L 2 0 Q 3 1 4 0 A 1 1 0 0 1 5 1 Z"
+)
+native_svg_path = svg_mobjects.VMobjectFromSVGPath(
+    native_path_object,
+    fill_color=manimlib.BLUE,
+    fill_opacity=0.4,
+    stroke_color=manimlib.GREEN,
+    stroke_width=2.25,
+    joint_type="bevel",
+    anti_alias_width=2.0,
+    scale_stroke_with_zoom=True,
+)
+assert native_svg_path.path_obj is native_path_object
+assert native_svg_path.transform_cache is None
+assert native_svg_path.get_num_points() > 0
+assert native_svg_path.data.dtype.names == (
+    "point",
+    "stroke_rgba",
+    "stroke_width",
+    "joint_angle",
+    "fill_rgba",
+    "base_normal",
+    "fill_border_width",
+)
+assert np.isclose(native_svg_path.get_width(), 5.0, atol=1e-6)
+assert np.isclose(native_svg_path.get_height(), 1.0, atol=1e-6)
+assert native_svg_path.get_fill_color() == manimlib.BLUE
+assert np.isclose(native_svg_path.get_fill_opacity(), 0.4)
+assert native_svg_path.get_stroke_color() == manimlib.GREEN
+assert np.isclose(native_svg_path.get_stroke_width(), 2.25)
+assert native_svg_path.get_joint_type() == VMobject.joint_type_map["bevel"]
+assert np.isclose(native_svg_path.get_anti_alias_width(), 2.0)
+assert native_svg_path.uniforms["scale_stroke_with_zoom"] is True
+native_svg_scene = Scene()
+native_svg_scene.add(native_svg_path)
+assert native_svg_path._is_bound()
+
+failed_svg_path = svg_mobjects.VMobjectFromSVGPath.__new__(
+    svg_mobjects.VMobjectFromSVGPath
+)
+try:
+    svg_mobjects.VMobjectFromSVGPath.__init__(
+        failed_svg_path,
+        NativeSvgPath("M 0 0 L nope"),
+    )
+except ValueError as error:
+    assert "path" in str(error).lower(), error
+else:
+    raise AssertionError("VMobjectFromSVGPath accepted malformed path data")
+assert list(failed_svg_path.submobjects) == []
+assert failed_svg_path._is_bound() is False
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.
@@ -8860,6 +8937,47 @@ except NotImplementedError as error:
 else:
     raise AssertionError("Slider silently dropped an unsupported line option")
 assert not hasattr(failed_slider, "submobjects")
+
+# SampleSpace is the probability shelf's native Rectangle specialization,
+# not a schema-generated constructor refusal. Atlas owns its dimensions and
+# VMobject style while the portal preserves the Reference-only label scale.
+probability = importlib.import_module("manimlib.mobject.probability")
+assert probability.SampleSpace.__bases__ == (manimlib.Rectangle,)
+assert str(inspect.signature(probability.SampleSpace)) == (
+    "(width=3, height=3, fill_color='#444444', fill_opacity=1, "
+    "stroke_width=0.5, stroke_color='#BBBBBB', "
+    "default_label_scale_val=1, **kwargs)"
+)
+sample_space = probability.SampleSpace(
+    width=5.0,
+    height=2.5,
+    fill_color=manimlib.BLUE,
+    fill_opacity=0.75,
+    stroke_width=1.25,
+    stroke_color=manimlib.YELLOW,
+    default_label_scale_val=0.8,
+    z_index=7,
+)
+assert np.isclose(sample_space.get_width(), 5.0, atol=1e-6)
+assert np.isclose(sample_space.get_height(), 2.5, atol=1e-6)
+assert sample_space.get_fill_color() == manimlib.BLUE
+assert np.isclose(sample_space.get_fill_opacity(), 0.75)
+assert sample_space.get_stroke_color() == manimlib.YELLOW
+assert np.isclose(sample_space.get_stroke_width(), 1.25)
+assert sample_space.default_label_scale_val == 0.8
+assert sample_space.z_index == 7
+sample_space_scene = Scene()
+sample_space_scene.add(sample_space)
+assert sample_space._is_bound()
+
+failed_sample_space = probability.SampleSpace.__new__(probability.SampleSpace)
+try:
+    probability.SampleSpace.__init__(failed_sample_space, unsupported=True)
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("SampleSpace silently discarded an unknown option")
+assert not hasattr(failed_sample_space, "submobjects")
 
 refusing_label_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0))
 refusing_label_children = len(refusing_label_line.submobjects)
