@@ -1322,6 +1322,47 @@ assert np.allclose(
     [[-4.0, -1.0, 0.0], [1.0, 2.0, 0.0], [6.0, 5.0, 0.0]],
 )
 
+# Camera is a real Lumen CameraConfig/Camera build rather than the schema's
+# constructor refusal. Its Python frame keeps the Reference's mutable identity
+# while native construction owns resolution, fps, color, sample, and light
+# validation plus the initial aspect correction.
+camera_module = importlib.import_module("manimlib.camera.camera")
+assert camera_module.Camera.__bases__ == (object,)
+native_camera = camera_module.Camera(
+    frame_config={"frame_shape": (10.0, 8.0), "center_point": (1.0, 2.0, 0.0)},
+    resolution=(640, 320),
+    fps=24,
+    background_color=manimlib.BLUE,
+    background_opacity=0.75,
+    max_allowable_norm=20.0,
+    light_source_position=(-3.0, 4.0, 5.0),
+    samples=4,
+)
+assert native_camera.get_pixel_shape() == (640, 320)
+assert native_camera.get_pixel_width() == 640
+assert native_camera.get_pixel_height() == 320
+assert native_camera.get_aspect_ratio() == 2.0
+assert np.allclose(native_camera.get_frame_shape(), (10.0, 5.0))
+assert np.allclose(native_camera.get_frame_center(), (1.0, 2.0, 0.0))
+assert native_camera.fps == 24
+assert native_camera.samples == 4
+assert native_camera.max_allowable_norm == 20.0
+assert np.allclose(native_camera.light_source.get_center(), (-3.0, 4.0, 5.0))
+native_camera.refresh_uniforms()
+assert native_camera.uniforms["pixel_size"] == 10.0 / 640.0
+
+failed_camera = camera_module.Camera.__new__(camera_module.Camera)
+try:
+    camera_module.Camera.__init__(failed_camera, background_image="image.png")
+except NotImplementedError as error:
+    assert str(error) == (
+        "Camera() keyword(s) not yet routed to the native builder: "
+        "background_image"
+    )
+else:
+    raise AssertionError("Camera accepted the unrouted background image seam")
+assert not hasattr(failed_camera, "_core")
+
 live_box = manimlib.Square()
 live_box_before = live_box.get_bounding_box().copy()
 live_box.get_points()[:, 0] += 2.0

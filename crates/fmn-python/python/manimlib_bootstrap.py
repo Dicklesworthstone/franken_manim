@@ -10296,6 +10296,133 @@ class CameraFrame(Mobject):
         )
 
 
+class Camera:
+    """The Reference capture-camera surface over Lumen's native builder.
+
+    Lumen owns validated resolution, frame-rate, color, clipping, sample, and
+    light configuration. The Python ``CameraFrame`` remains the live identity
+    scenes mutate, initialized to the exact aspect-corrected shape returned by
+    that native camera.
+    """
+
+    def __init__(
+        self,
+        window=None,
+        background_image=None,
+        frame_config=dict(),
+        resolution=(1920, 1080),
+        fps=30,
+        background_color=_BLACK,
+        background_opacity=1.0,
+        max_allowable_norm=14.222222222222221,
+        image_mode="RGBA",
+        n_channels=4,
+        pixel_array_dtype=_np.uint8,
+        light_source_position=(-10.0, 10.0, 10.0),
+        samples=0,
+    ):
+        _refuse_unrouted(
+            "Camera()",
+            [
+                ("window", window is not None),
+                ("background_image", background_image is not None),
+                ("image_mode", image_mode != "RGBA"),
+                ("n_channels", n_channels != 4),
+                ("pixel_array_dtype", pixel_array_dtype is not _np.uint8),
+            ],
+        )
+        if not isinstance(frame_config, dict):
+            raise TypeError("Camera frame_config must be a dict")
+
+        frame = CameraFrame(**frame_config)
+        background_rgb = tuple(_color_to_rgb(background_color))
+        core = _CameraCore(
+            frame._core,
+            resolution,
+            fps,
+            background_rgb,
+            background_opacity,
+            max_allowable_norm,
+            _vec3(light_source_position),
+            samples,
+        )
+        frame._core.set_shape(core.frame_shape())
+        light_source = Point(light_source_position)
+
+        self._core = core
+        self.window = None
+        self.background_image = None
+        self.default_pixel_shape = tuple(core.pixel_shape())
+        self.fps = core.fps()
+        self.max_allowable_norm = core.max_allowable_norm()
+        self.image_mode = "RGBA"
+        self.n_channels = 4
+        self.pixel_array_dtype = _np.uint8
+        self.light_source_position = _np.array(core.light_source_position())
+        self.samples = core.samples()
+        self.rgb_max_val = float(_np.iinfo(self.pixel_array_dtype).max)
+        self.background_rgba = list(
+            _color_to_rgba(background_color, background_opacity)
+        )
+        self.uniforms = {}
+        self.frame = frame
+        self.light_source = light_source
+
+    def get_pixel_size(self):
+        return self.frame.get_width() / self.get_pixel_width()
+
+    def get_pixel_shape(self):
+        return tuple(self._core.pixel_shape())
+
+    def get_pixel_width(self):
+        return self.get_pixel_shape()[0]
+
+    def get_pixel_height(self):
+        return self.get_pixel_shape()[1]
+
+    def get_aspect_ratio(self):
+        width, height = self.get_pixel_shape()
+        return width / height
+
+    def get_frame_height(self):
+        return self.frame.get_height()
+
+    def get_frame_width(self):
+        return self.frame.get_width()
+
+    def get_frame_shape(self):
+        return (self.get_frame_width(), self.get_frame_height())
+
+    def get_frame_center(self):
+        return self.frame.get_center()
+
+    def get_location(self):
+        return tuple(self.frame.get_implied_camera_location())
+
+    def resize_frame_shape(self, fixed_dimension=False):
+        width, height = self.get_frame_shape()
+        if fixed_dimension:
+            width = self.get_aspect_ratio() * height
+        else:
+            height = width / self.get_aspect_ratio()
+        self.frame._core.set_shape((width, height))
+
+    def refresh_uniforms(self):
+        frame = self.frame
+        self.uniforms.update(
+            view=tuple(frame.get_view_matrix().T.flatten()),
+            frame_scale=frame.get_scale(),
+            frame_rescale_factors=(
+                2.0 / (_FRAME_HEIGHT * _ASPECT_RATIO),
+                2.0 / _FRAME_HEIGHT,
+                frame.get_scale() / frame.get_focal_distance(),
+            ),
+            pixel_size=self.get_pixel_size(),
+            camera_position=tuple(frame.get_implied_camera_location()),
+            light_position=tuple(self.light_source.get_location()),
+        )
+
+
 class Scene(_SceneCore):
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -10336,23 +10463,12 @@ class Scene(_SceneCore):
 
     @property
     def camera(self):
-        # The minimal camera surface: the schema's Camera class (whose
-        # unbound methods stay precise placeholders) holding this scene's
-        # frame. State-real for `frame`; nothing else is silently stubbed.
+        # Scene and Camera share one live CameraFrame identity, matching the
+        # Reference while capture configuration is built by Lumen.
         camera = self.__dict__.get("_camera")
         if camera is None:
-            camera_class = getattr(_FMN_ROOT, "Camera", None)
-            if isinstance(camera_class, type):
-                camera = camera_class.__new__(camera_class)
-                camera.args = ()
-            else:
-                camera = _types.SimpleNamespace()
+            camera = Camera()
             camera.frame = self.frame
-            # The Reference's Camera.init_light_source: a real Point at the
-            # camera config's light_source_position default (the same
-            # [-10, 10, 10] Lumen's CameraConfig declares). State-real:
-            # scenes move it and read it back through the Stage.
-            camera.light_source = Point((-10.0, 10.0, 10.0))
             self.__dict__["_camera"] = camera
         return camera
 
@@ -14067,6 +14183,7 @@ def _install_schema_surface():
             "StringMobject",
         ): StringMobject,
         ("manimlib.camera.camera_frame", "CameraFrame"): CameraFrame,
+        ("manimlib.camera.camera", "Camera"): Camera,
         ("manimlib.mobject.types.vectorized_mobject", "VGroup"): VGroup,
         (
             "manimlib.mobject.types.vectorized_mobject",

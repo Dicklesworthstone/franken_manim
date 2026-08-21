@@ -9164,6 +9164,16 @@ struct PyCameraFrameCore {
     frame: fmn_scene::studio_bridge::CameraFrame,
 }
 
+/// Lumen's capture-camera configuration behind the public Python `Camera`.
+///
+/// The portal keeps Python's mutable `CameraFrame` object as the live scene
+/// identity, while this value makes construction and capture configuration go
+/// through Lumen's validated builder instead of a schema-only Python shell.
+#[pyclass(unsendable, name = "_CameraCore")]
+struct PyCameraCore {
+    camera: Camera,
+}
+
 fn camera_error(error: fmn_scene::studio_bridge::CameraError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -9326,6 +9336,65 @@ impl PyCameraFrameCore {
     }
 }
 
+#[pymethods]
+impl PyCameraCore {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    fn py_new(
+        frame: PyRef<'_, PyCameraFrameCore>,
+        resolution: [u32; 2],
+        fps: u32,
+        background_rgb: [f64; 3],
+        background_opacity: f64,
+        max_allowable_norm: f64,
+        light_source_position: [f64; 3],
+        samples: u8,
+    ) -> PyResult<Self> {
+        let background = fmn_core::color::Srgb {
+            r: background_rgb[0],
+            g: background_rgb[1],
+            b: background_rgb[2],
+        }
+        .to_linear(background_opacity);
+        let camera = Camera::new(CameraConfig {
+            resolution: (resolution[0], resolution[1]),
+            fps,
+            background,
+            max_allowable_norm,
+            samples,
+            light_source_position,
+            frame: frame.frame.clone(),
+        })
+        .map_err(camera_error)?;
+        Ok(Self { camera })
+    }
+
+    fn pixel_shape(&self) -> (u32, u32) {
+        self.camera.pixel_shape()
+    }
+
+    fn fps(&self) -> u32 {
+        self.camera.fps()
+    }
+
+    fn max_allowable_norm(&self) -> f64 {
+        self.camera.max_allowable_norm()
+    }
+
+    fn samples(&self) -> u8 {
+        self.camera.samples()
+    }
+
+    fn light_source_position(&self) -> [f64; 3] {
+        self.camera.light_source_position()
+    }
+
+    fn frame_shape(&self) -> (f64, f64) {
+        let shape = self.camera.frame().shape();
+        (shape[0], shape[1])
+    }
+}
+
 fn execute_bootstrap(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     // Direct ExtensionFileLoader users do not install the module in
     // sys.modules until after create_module returns, but our bootstrap must
@@ -9348,6 +9417,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_class::<PyRecordView>()?;
     module.add_class::<PyGilProbe>()?;
     module.add_class::<PyCameraFrameCore>()?;
+    module.add_class::<PyCameraCore>()?;
     module.add_class::<PyFieldProbe>()?;
     module.add_class::<ladder::PyBatchedUpdater>()?;
     module.add_class::<ladder::PyArrayUpdater>()?;
