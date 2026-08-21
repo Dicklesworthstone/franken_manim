@@ -495,6 +495,19 @@ class _AnimationBuilder:
         self.can_pass_args = False
         return self
 
+    def build(self):
+        if self.overridden_animation is not None:
+            return self.overridden_animation
+        return _MethodAnimation(self.mobject, self.methods, **self.anim_args)
+
+
+def override_animate(method):
+    def decorator(animation_method):
+        method._override_animate = animation_method
+        return animation_method
+
+    return decorator
+
 
 class _UpdaterBuilder:
     """Reference mobject.py:2339 verbatim: `mob.always.method(*args)`
@@ -8267,9 +8280,7 @@ class Scene(_SceneCore):
         def build_spec(proto, nested):
             if isinstance(proto, _AnimationBuilder):
                 if proto.overridden_animation is not None:
-                    raise NotImplementedError(
-                        "overridden animations are not yet routed to the engine"
-                    )
+                    return build_spec(proto.build(), nested)
                 spec_args = {}
                 for key, value in proto.anim_args.items():
                     if key not in ("run_time", "rate_func", "lag_ratio"):
@@ -10201,6 +10212,20 @@ class MoveToTarget(Transform):
         super().__init__(mobject, target, **kwargs)
 
 
+class _MethodAnimation(MoveToTarget):
+    def __init__(self, mobject, methods, **kwargs):
+        self.methods = methods
+        super().__init__(mobject, **kwargs)
+
+
+def prepare_animation(anim):
+    if isinstance(anim, _AnimationBuilder):
+        return anim.build()
+    if isinstance(anim, Animation):
+        return anim
+    raise TypeError(f"Object {anim} cannot be converted to an animation")
+
+
 class ReplacementTransform(Transform):
     _native_kind = "replacement_transform"
 
@@ -11275,6 +11300,10 @@ def _install_schema_surface():
     _resolved_constants = _resolve_symbolic_constants(rows)
 
     specials = {
+        (
+            "manimlib.mobject.mobject",
+            "_AnimationBuilder",
+        ): _AnimationBuilder,
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
         ("manimlib.mobject.mobject", "Group"): Group,
         ("manimlib.mobject.mobject", "Point"): Point,
@@ -11531,6 +11560,10 @@ def _install_schema_surface():
             "ApplyComplexFunction",
         ): ApplyComplexFunction,
         ("manimlib.animation.transform", "MoveToTarget"): MoveToTarget,
+        (
+            "manimlib.animation.transform",
+            "_MethodAnimation",
+        ): _MethodAnimation,
         ("manimlib.animation.transform", "ReplacementTransform"): ReplacementTransform,
         ("manimlib.animation.transform", "TransformFromCopy"): TransformFromCopy,
         ("manimlib.animation.transform", "Restore"): Restore,
@@ -11569,6 +11602,20 @@ def _install_schema_surface():
         cls.__module__ = module_name
         setattr(_ensure_module(module_name), name, cls)
         classes_by_name.setdefault(name, cls)
+
+    special_functions = {
+        (
+            "manimlib.mobject.mobject",
+            "override_animate",
+        ): override_animate,
+        (
+            "manimlib.animation.animation",
+            "prepare_animation",
+        ): prepare_animation,
+    }
+    for (module_name, name), function in special_functions.items():
+        function.__module__ = module_name
+        setattr(_ensure_module(module_name), name, function)
 
     class_rows = [
         row for row in rows if row[2] == "class" and "." not in row[1]
@@ -12359,6 +12406,32 @@ def _install_mobject_functions():
         mobject.add_updater(updater)
         return mobject
 
+    def always_shift(mobject, direction=_RIGHT, rate=0.1):
+        if not isinstance(mobject, Mobject):
+            raise TypeError(
+                "always_shift requires a Mobject; got "
+                + type(mobject).__name__
+            )
+        direction = _np.asarray(_vec3(direction), dtype=float)
+        rate = float(rate)
+        mobject.add_updater(
+            lambda mob, dt: mob.shift(rate * dt * direction)
+        )
+        return mobject
+
+    def always_rotate(mobject, rate=20 * _DEG, **kwargs):
+        if not isinstance(mobject, Mobject):
+            raise TypeError(
+                "always_rotate requires a Mobject; got "
+                + type(mobject).__name__
+            )
+        rate = float(rate)
+        rotation_kwargs = dict(kwargs)
+        mobject.add_updater(
+            lambda mob, dt: mob.rotate(rate * dt, **rotation_kwargs)
+        )
+        return mobject
+
     def turn_animation_into_updater(animation, cycle=False, **kwargs):
         # mobject_update_utils.py:83 over Python-driven animations: the
         # updater re-applies the animation's own interpolate each frame.
@@ -12415,6 +12488,8 @@ def _install_mobject_functions():
         "assert_is_mobject_method": assert_is_mobject_method,
         "always": always,
         "f_always": f_always,
+        "always_shift": always_shift,
+        "always_rotate": always_rotate,
         "turn_animation_into_updater": turn_animation_into_updater,
     }
     module = _ensure_module("manimlib.mobject.mobject_update_utils")

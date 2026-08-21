@@ -2850,6 +2850,90 @@ assert len(release_observations) == 2
 assert np.allclose([row[0] for row in release_observations], [0.0, 1.0 / 30.0])
 assert np.allclose([row[1] for row in release_observations], [1.0 / 30.0, 2.0 / 30.0])
 
+# The public builder helpers preserve the pinned Reference's typed boundary,
+# single-assignment animation arguments, and unchainable override contract.
+animation_module = importlib.import_module("manimlib.animation.animation")
+mobject_module = importlib.import_module("manimlib.mobject.mobject")
+transform_module = importlib.import_module("manimlib.animation.transform")
+assert manimlib.prepare_animation is animation_module.prepare_animation
+assert manimlib.override_animate is mobject_module.override_animate
+assert mobject_module._AnimationBuilder is type(geometry.Square().animate)
+
+builder_scene = Scene()
+builder_mover = geometry.Rectangle(width=1.0, height=0.5)
+builder_start = builder_mover.get_center().copy()
+builder_scene.play(
+    builder_mover.animate.shift(manimlib.RIGHT),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(builder_mover.get_center(), builder_start + manimlib.RIGHT)
+
+chain_mover = geometry.Rectangle(width=1.0, height=0.5)
+chain = chain_mover.animate(
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+).scale(2.0).shift(manimlib.UP)
+try:
+    chain.set_anim_args(run_time=1.0)
+except ValueError as error:
+    assert str(error) == (
+        "Animation arguments can only be passed by calling ``animate`` "
+        "or ``set_anim_args`` and can only be passed once"
+    )
+else:
+    raise AssertionError("_AnimationBuilder accepted animation arguments twice")
+prepared_chain = animation_module.prepare_animation(chain)
+assert isinstance(prepared_chain, transform_module._MethodAnimation)
+assert len(prepared_chain.methods) == 2
+Scene().play(prepared_chain)
+assert np.isclose(chain_mover.get_width(), 2.0)
+assert np.allclose(chain_mover.get_center(), manimlib.UP)
+
+
+class OverrideAnimateSquare(geometry.Square):
+    def nudge(self, vector):
+        return self.shift(vector)
+
+    @mobject_module.override_animate(nudge)
+    def _nudge_animation(self, vector, **kwargs):
+        return manimlib.ApplyMethod(self.shift, vector, **kwargs)
+
+
+override_scene = Scene()
+override_mover = OverrideAnimateSquare()
+override_scene.play(
+    override_mover.animate.nudge(manimlib.RIGHT),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(override_mover.get_center(), manimlib.RIGHT)
+
+for override_chain in (
+    OverrideAnimateSquare().animate.nudge(manimlib.RIGHT),
+    OverrideAnimateSquare().animate.shift(manimlib.UP),
+):
+    try:
+        (
+            override_chain.shift(manimlib.UP)
+            if override_chain.overridden_animation is not None
+            else override_chain.nudge(manimlib.RIGHT)
+        )
+    except NotImplementedError as error:
+        assert str(error) == (
+            "Method chaining is currently not supported for "
+            "overridden animations"
+        )
+    else:
+        raise AssertionError("_AnimationBuilder chained an overridden animation")
+
+try:
+    animation_module.prepare_animation(None)
+except TypeError as error:
+    assert str(error) == "Object None cannot be converted to an animation"
+else:
+    raise AssertionError("prepare_animation accepted None")
+
 update_animation = importlib.import_module("manimlib.animation.update")
 callback_scene = Scene()
 callback_mover = geometry.Rectangle(width=1.0, height=1.0)
@@ -10430,6 +10514,56 @@ else:
     raise AssertionError(
         "turn_animation_into_updater accepted a native-segment class"
     )
+
+# always_shift / always_rotate are thin dt-updater skins: Scene.wait and
+# Scene.play own the frame clock, while the helpers only apply dt-scaled
+# Marionette mutations in updater insertion order.
+shifted_forever = geometry.Rectangle(width=1.0, height=1.0)
+shifted_start = shifted_forever.get_center().copy()
+assert (
+    update_utils.always_shift(
+        shifted_forever, direction=manimlib.RIGHT, rate=3.0
+    )
+    is shifted_forever
+)
+shifted_scene = Scene()
+shifted_scene.add(shifted_forever)
+shifted_scene.wait(2.0 / 30.0)
+assert shifted_forever.get_center()[0] > shifted_start[0]
+
+rotating_forever = geometry.Line(manimlib.RIGHT, 2.0 * manimlib.RIGHT)
+rotation_samples = []
+assert (
+    update_utils.always_rotate(
+        rotating_forever,
+        rate=math.pi,
+        about_point=manimlib.ORIGIN,
+    )
+    is rotating_forever
+)
+rotating_forever.add_updater(
+    lambda mob: rotation_samples.append(mob.get_points().copy()), call=False
+)
+rotating_scene = Scene()
+rotating_scene.add(rotating_forever)
+rotating_scene.play(specialized_animation.Delay(run_time=2.0 / 30.0))
+assert len(rotation_samples) >= 2
+assert not np.allclose(rotation_samples[0], rotation_samples[-1])
+
+for helper, invalid in (
+    (update_utils.always_shift, None),
+    (update_utils.always_rotate, "not a mobject"),
+):
+    try:
+        helper(invalid)
+    except TypeError as error:
+        assert str(error) == (
+            helper.__name__
+            + " requires a Mobject; got "
+            + type(invalid).__name__
+        )
+    else:
+        raise AssertionError(helper.__name__ + " accepted a non-Mobject")
 
 # fm-5wq.4.70: audit of the transform leftovers. Restore/ScaleInPlace/
 # ShrinkToCenter/FadeToColor/ApplyPointwiseFunctionToCenter were already
