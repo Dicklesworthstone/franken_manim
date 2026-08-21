@@ -736,7 +736,8 @@ fn integer_interpolate_fixture_matches_fmn_geom() {
     let alphas = [0.05, 0.25, 0.5, 0.75, 0.95];
     assert_eq!(reference.len(), alphas.len(), "fixture row count");
     for (row, alpha) in reference.iter().zip(alphas) {
-        let (index, residue) = integer_interpolate(0, 10, alpha);
+        let (index, residue) =
+            integer_interpolate(0, 10, alpha).expect("fixture alphas are finite and in range");
         let ours = [index as f64, residue];
         let error = (row[0] - ours[0]).abs().max((row[1] - ours[1]).abs());
         assert!(
