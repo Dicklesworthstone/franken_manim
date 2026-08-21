@@ -7629,6 +7629,163 @@ class SpeechBubble(Bubble):
         return result
 
 
+class ThoughtBubble(Bubble):
+    """Rounded cloud and circle stem over native Union geometry."""
+
+    def __init__(
+        self,
+        content=None,
+        buff=_SMALL_BUFF,
+        filler_shape=(2.0, 1.0),
+        bulge_radius=0.35,
+        bulge_overlap=0.25,
+        noise_factor=0.1,
+        circle_radii=[0.1, 0.15, 0.2],
+        **kwargs,
+    ):
+        self.bulge_radius = float(bulge_radius)
+        self.bulge_overlap = float(bulge_overlap)
+        self.noise_factor = float(noise_factor)
+        self.circle_radii = list(circle_radii)
+        super().__init__(content, buff, filler_shape, **kwargs)
+
+    def get_body(self, content, direction, buff):
+        rect = SurroundingRectangle(content, buff=buff)
+        rect.round_corners()
+        radius = self.bulge_radius
+        step = (1.0 - self.bulge_overlap) * (2.0 * radius)
+        noise = self.noise_factor
+        corners = [
+            rect.get_corner(vector)
+            for vector in (
+                _DL,
+                _LEFT + _UP,
+                _RIGHT + _UP,
+                _RIGHT + _DOWN,
+            )
+        ]
+        points = []
+        for corner, next_corner in zip(corners, corners[1:] + corners[:1]):
+            n_alphas = int(
+                _np.linalg.norm(corner - next_corner) / step
+            ) + 1
+            for alpha in _np.linspace(0.0, 1.0, n_alphas):
+                jitter = (
+                    noise
+                    * (step / n_alphas)
+                    * (getattr(_FMN_ROOT, "random").random() - 0.5)
+                )
+                points.append(
+                    _interpolate(corner, next_corner, float(alpha) + jitter)
+                )
+        cloud = Union(
+            rect,
+            *(
+                Circle(
+                    radius=radius
+                    * (
+                        1.0
+                        + noise
+                        * getattr(_FMN_ROOT, "random").random()
+                    )
+                ).move_to(point)
+                for point in points
+            ),
+        )
+        cloud.set_stroke(_WHITE, 2)
+
+        circles = VGroup(
+            *(Circle(radius=radius) for radius in self.circle_radii)
+        )
+        circle_buff = 0.25 * self.circle_radii[0]
+        circles.arrange(_RIGHT + _UP, buff=circle_buff)
+        circles[1].shift(circle_buff * (_RIGHT + _DOWN))
+        circles.next_to(
+            cloud,
+            _DOWN,
+            4.0 * circle_buff,
+            aligned_edge=_LEFT,
+        )
+        circles.set_stroke(_WHITE, 2)
+        result = VGroup(*circles, cloud)
+        if direction[0] > 0:
+            result.flip()
+        return result
+
+
+class Piano(VGroup):
+    """White/black keys over native Rectangle and Difference geometry."""
+
+    def __init__(
+        self,
+        n_white_keys=52,
+        black_pattern=(0, 2, 3, 5, 6),
+        white_keys_per_octave=7,
+        white_key_dims=(0.15, 1.0),
+        black_key_dims=(0.1, 0.66),
+        key_buff=0.02,
+        white_key_color=_WHITE,
+        black_key_color=_GREY_E,
+        total_width=13,
+        **kwargs,
+    ):
+        self.n_white_keys = _operator.index(n_white_keys)
+        if self.n_white_keys <= 0:
+            raise ValueError("Piano n_white_keys must be positive")
+        self.black_pattern = [int(index) for index in black_pattern]
+        self.white_keys_per_octave = _operator.index(white_keys_per_octave)
+        self.white_key_dims = tuple(float(value) for value in white_key_dims)
+        self.black_key_dims = tuple(float(value) for value in black_key_dims)
+        self.key_buff = float(key_buff)
+        self.white_key_color = white_key_color
+        self.black_key_color = black_key_color
+        self.total_width = float(total_width)
+        super().__init__(**kwargs)
+        self.add_white_keys()
+        self.add_black_keys()
+        self.sort_keys()
+        if len(self.submobjects) > 1:
+            self[:-1].reverse_points()
+        self.set_width(self.total_width)
+
+    def add_white_keys(self):
+        key = Rectangle(*self.white_key_dims)
+        key.set_fill(self.white_key_color, 1)
+        key.set_stroke(width=0)
+        self.white_keys = key.get_grid(1, self.n_white_keys, buff=self.key_buff)
+        self.add(*self.white_keys)
+
+    def add_black_keys(self):
+        key = Rectangle(*self.black_key_dims)
+        key.set_fill(self.black_key_color, 1)
+        key.set_stroke(width=0)
+        self.black_keys = VGroup()
+        for index in range(len(self.white_keys) - 1):
+            if index % self.white_keys_per_octave not in self.black_pattern:
+                continue
+            wk1 = self.white_keys[index]
+            wk2 = self.white_keys[index + 1]
+            black_key = key.copy()
+            black_key.move_to(0.5 * (wk1.get_top() + wk2.get_top()), _UP)
+            cutter = black_key.copy()
+            cutter.stretch(
+                (black_key.get_width() + self.key_buff) / black_key.get_width(),
+                0,
+            )
+            cutter.stretch(
+                (black_key.get_height() + self.key_buff) / black_key.get_height(),
+                1,
+            )
+            cutter.move_to(black_key, _UP)
+            for white_key in (wk1, wk2):
+                white_key.become(Difference(white_key, cutter).match_style(white_key))
+            self.black_keys.add(black_key)
+        self.add(*self.black_keys)
+
+    def sort_keys(self):
+        self.sort(lambda point: point[0])
+
+
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
@@ -15621,6 +15778,8 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Dartboard"): Dartboard,
         ("manimlib.mobject.svg.drawings", "Bubble"): Bubble,
         ("manimlib.mobject.svg.drawings", "SpeechBubble"): SpeechBubble,
+        ("manimlib.mobject.svg.drawings", "Piano"): Piano,
+        ("manimlib.mobject.svg.drawings", "ThoughtBubble"): ThoughtBubble,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (

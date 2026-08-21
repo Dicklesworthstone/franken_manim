@@ -4311,12 +4311,75 @@ assert speech.get_tip()[1] < speech.content.get_bottom()[1]
 circle_content = manimlib.Circle(radius=0.4)
 circled = drawings.SpeechBubble(circle_content)
 assert circled.content is circle_content
+
+assert drawings.ThoughtBubble.__bases__ == (drawings.Bubble,)
+assert list(inspect.signature(drawings.ThoughtBubble).parameters) == [
+    "content",
+    "buff",
+    "filler_shape",
+    "bulge_radius",
+    "bulge_overlap",
+    "noise_factor",
+    "circle_radii",
+    "kwargs",
+]
+thought = drawings.ThoughtBubble()
+assert thought.body is thought.submobjects[0]
+assert thought.content is thought.submobjects[1]
+assert np.isclose(thought.bulge_radius, 0.35)
+assert np.isclose(thought.bulge_overlap, 0.25)
+assert np.isclose(thought.noise_factor, 0.1)
+assert thought.circle_radii == [0.1, 0.15, 0.2]
+assert len(thought.body.submobjects) == 4
+assert all(
+    isinstance(circle, manimlib.Circle)
+    for circle in thought.body.submobjects[:3]
+)
+assert thought.body[-1].has_points()
+assert thought.body[0].get_center()[1] < thought.body[-1].get_bottom()[1]
+assert thought.body.get_fill_color() == manimlib.BLACK
+assert thought.body.get_stroke_color() == manimlib.WHITE
+right_thought = drawings.ThoughtBubble(
+    direction=manimlib.RIGHT,
+    noise_factor=0.0,
+    circle_radii=[0.08, 0.12, 0.16],
+)
+assert right_thought.circle_radii == [0.08, 0.12, 0.16]
+assert right_thought.direction[0] > 0
 try:
     drawings.Bubble()
 except NotImplementedError as error:
     assert "Bubbles_speech.svg" in str(error)
 else:
     raise AssertionError("Bubble constructed an SVG-file body")
+
+assert drawings.Piano.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.Piano).parameters) == [
+    "n_white_keys",
+    "black_pattern",
+    "white_keys_per_octave",
+    "white_key_dims",
+    "black_key_dims",
+    "key_buff",
+    "white_key_color",
+    "black_key_color",
+    "total_width",
+    "kwargs",
+]
+# One extra white key so the A-based pattern yields a full five-black octave.
+piano = drawings.Piano(n_white_keys=8, total_width=4.0)
+assert len(piano.white_keys) == 8
+assert len(piano.black_keys) == 5
+assert np.isclose(piano.get_width(), 4.0, atol=1e-5)
+assert piano.white_keys[0].get_fill_color() == manimlib.WHITE
+assert piano.black_keys[0].get_fill_color() == manimlib.GREY_E
+assert np.isclose(piano.black_keys[0].get_stroke_width(), 0.0)
+try:
+    drawings.Piano(n_white_keys=0)
+except ValueError as error:
+    assert "positive" in str(error)
+else:
+    raise AssertionError("Piano accepted zero white keys")
 
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
