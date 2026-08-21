@@ -1660,6 +1660,9 @@ assert event_scene.hold_on_wait is False
 assert event_scene.on_key_press(ord("q"), 2) is None  # pyglet MOD_CTRL
 assert event_scene.quit_interaction is True
 assert event_scene.on_key_release(ord("q"), 2) is None
+# Clear the ctrl-q flag so later windowless pins (is_window_closing) see
+# the default; the True pin above already proved the chord sets it.
+event_scene.quit_interaction = False
 assert event_scene.on_resize(640, 480) is None
 assert event_scene.on_show() is None
 assert event_scene.on_hide() is None
