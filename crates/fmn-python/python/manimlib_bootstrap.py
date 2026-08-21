@@ -11684,6 +11684,14 @@ class Camera:
             light_position=tuple(self.light_source.get_location()),
         )
 
+    def convert_pixel_array(self, pixel_array, convert_from_floats=False):
+        retval = _np.array(pixel_array)
+        if convert_from_floats:
+            retval = _np.round(
+                retval * self.rgb_max_val
+            ).astype(self.pixel_array_dtype)
+        return retval.astype(self.pixel_array_dtype)
+
 
 class ThreeDCamera(Camera):
     """Camera with Lumen's Reference four-sample constructor default."""
@@ -11697,6 +11705,7 @@ class Scene(_SceneCore):
     scroll_sensitivity = 20
     drag_to_pan = True
     max_num_saved_states = 50
+    default_wait_time = 1.0
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -11766,6 +11775,10 @@ class Scene(_SceneCore):
         self.always_update_mobjects = bool(
             kwargs.get("always_update_mobjects", False)
         )
+        self.default_wait_time = float(
+            kwargs.get("default_wait_time", type(self).default_wait_time)
+        )
+        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", False))
 
     @property
     def frame(self):
@@ -12132,9 +12145,18 @@ class Scene(_SceneCore):
             None if lag_ratio is None else float(lag_ratio),
         )
 
-    def wait(self, duration=None, **kwargs):
-        stop_condition = kwargs.pop("stop_condition", None)
-        ignore_presenter_mode = bool(kwargs.pop("ignore_presenter_mode", False))
+    def wait(
+        self,
+        duration=None,
+        stop_condition=None,
+        note=None,
+        ignore_presenter_mode=False,
+        **kwargs,
+    ):
+        # Reference logs `note` only in presenter-mode hold. The portal has
+        # no pyglet logger; accept the argument so source-unedited scenes
+        # compile, and skip the host log.
+        del note
         if kwargs:
             raise NotImplementedError(
                 "Scene.wait unsupported keyword(s): "
@@ -12145,10 +12167,12 @@ class Scene(_SceneCore):
                 "Scene.wait stop_condition must be callable or None; got "
                 + type(stop_condition).__name__
             )
+        if duration is None:
+            duration = self.default_wait_time
         self._wait(
-            None if duration is None else float(duration),
+            float(duration),
             stop_condition,
-            ignore_presenter_mode,
+            bool(ignore_presenter_mode),
         )
 
     def wait_until(self, stop_condition, max_time=60):

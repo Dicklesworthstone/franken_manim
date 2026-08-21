@@ -2188,6 +2188,11 @@ assert default_wait_scene.wait() is None
 assert math.isclose(default_wait_scene.get_time(), 2.0 / 30.0)
 assert default_wait_scene.leave_progress_bars is False
 assert Scene(leave_progress_bars=True).leave_progress_bars is True
+assert str(inspect.signature(scene_module.Scene.wait)) == (
+    "(self, duration=None, stop_condition=None, note=None, "
+    "ignore_presenter_mode=False, **kwargs)"
+)
+assert Scene().wait(1.0 / 30.0, note="slide") is None
 
 copy_source = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
@@ -17496,3 +17501,36 @@ assert np.allclose(
 assert np.isclose(
     uniforms_camera.uniforms["pixel_size"], uniforms_camera.get_pixel_size()
 )
+
+# fm-5wq.4: Camera.convert_pixel_array matches the Reference contract —
+# uint8 data round-trips unchanged, and convert_from_floats scales [0, 1]
+# floats by rgb_max_val and rounds into the pixel dtype.
+assert str(inspect.signature(camera_module.Camera.convert_pixel_array)) == (
+    "(self, pixel_array, convert_from_floats=False)"
+)
+convert_camera = camera_module.Camera(resolution=(640, 360))
+assert convert_camera.rgb_max_val == 255.0
+assert convert_camera.pixel_array_dtype is np.uint8
+convert_uint8 = np.array([[0, 51, 255], [7, 128, 200]], dtype=np.uint8)
+converted_uint8 = convert_camera.convert_pixel_array(convert_uint8)
+assert converted_uint8.dtype == np.uint8
+assert np.array_equal(converted_uint8, convert_uint8)
+convert_floats = np.array([[0.0, 0.2, 1.0]])
+converted_floats = convert_camera.convert_pixel_array(
+    convert_floats, convert_from_floats=True
+)
+assert converted_floats.dtype == np.uint8
+assert np.array_equal(converted_floats, np.array([[0, 51, 255]], dtype=np.uint8))
+# Plain lists convert too; the untouched-float path truncates via astype.
+assert np.array_equal(
+    convert_camera.convert_pixel_array([[0.0, 0.9, 2.0]]),
+    np.array([[0, 0, 2]], dtype=np.uint8),
+)
+
+# Planted negative: a non-array-like payload is a TypeError, never a hang.
+try:
+    convert_camera.convert_pixel_array(object(), convert_from_floats=True)
+except TypeError:
+    pass
+else:
+    raise AssertionError("convert_pixel_array accepted a non-array payload")
