@@ -9114,11 +9114,6 @@ class LinearNumberSlider(ControlMobject):
         fill_color = tuple(
             _color_to_rgb(handle_config.get("fill_color", _GREY_A))
         )
-        if stroke_color != fill_color:
-            raise NotImplementedError(
-                "LinearNumberSlider requires matching native handle stroke "
-                "and fill colors"
-            )
 
         self.value_type = _np.dtype(value_type).type
         self.min_value = float(min_value)
@@ -9138,6 +9133,7 @@ class LinearNumberSlider(ControlMobject):
             handle_radius,
             handle_fill_opacity,
             stroke_color,
+            fill_color,
         )
         parts = []
         for shell, child_specs in specs:

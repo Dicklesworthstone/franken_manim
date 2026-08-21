@@ -2568,6 +2568,18 @@ custom_linear = interactive.LinearNumberSlider(
 assert np.isclose(custom_linear.slider.get_width(), 0.4)
 assert np.isclose(custom_linear.slider.get_fill_opacity(), 0.4)
 
+split_handle = interactive.LinearNumberSlider(
+    0.0,
+    circle_kwargs={
+        "radius": 0.1,
+        "stroke_color": manimlib.RED,
+        "fill_color": manimlib.GREEN,
+        "fill_opacity": 1.0,
+    },
+)
+assert split_handle.slider.get_stroke_color() == manimlib.RED
+assert split_handle.slider.get_fill_color() == manimlib.GREEN
+
 # ColorSliders is the Reference's Group, not a ControlMobject. Atlas owns its
 # checkerboard/swatch and the four native LinearNumberSlider compositions.
 color_sliders = interactive.ColorSliders()

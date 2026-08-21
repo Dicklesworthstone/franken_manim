@@ -3126,7 +3126,8 @@ impl BridgeMobject {
         corner_radius: f64,
         handle_radius: f64,
         handle_fill_opacity: f64,
-        handle_color: [f64; 3],
+        handle_stroke_color: [f64; 3],
+        handle_fill_color: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
         let mut slider = fmn_library::LinearNumberSlider::new(value).map_err(native_error)?;
         if min_value > 10.0 {
@@ -3148,10 +3149,15 @@ impl BridgeMobject {
             .map_err(native_error)?
             .handle_radius(handle_radius)
             .handle_fill_opacity(handle_fill_opacity)
-            .handle_color(fmn_core::color::Srgb {
-                r: handle_color[0],
-                g: handle_color[1],
-                b: handle_color[2],
+            .handle_stroke_color(fmn_core::color::Srgb {
+                r: handle_stroke_color[0],
+                g: handle_stroke_color[1],
+                b: handle_stroke_color[2],
+            })
+            .handle_fill_color(fmn_core::color::Srgb {
+                r: handle_fill_color[0],
+                g: handle_fill_color[1],
+                b: handle_fill_color[2],
             });
         let mut composition = fmn_mobject::Mobject::from(slider.composition());
         let children = std::mem::take(&mut composition.submobjects);

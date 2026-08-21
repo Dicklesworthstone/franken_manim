@@ -786,7 +786,8 @@ pub struct LinearNumberSlider {
     corner_radius: f64,
     handle_radius: f64,
     handle_fill_opacity: f64,
-    handle_color: Srgb,
+    handle_stroke_color: Srgb,
+    handle_fill_color: Srgb,
     bar: VMobject,
     handle: VMobject,
     axis: VMobject,
@@ -819,7 +820,8 @@ impl LinearNumberSlider {
             corner_radius: 0.0375,
             handle_radius: 0.1,
             handle_fill_opacity: 1.0,
-            handle_color: GREY_A,
+            handle_stroke_color: GREY_A,
+            handle_fill_color: GREY_A,
             bar: VMobject::new(),
             handle: VMobject::new(),
             axis: VMobject::new(),
@@ -914,11 +916,28 @@ impl LinearNumberSlider {
         self
     }
 
-    /// Handle colour (`circle_kwargs` stroke+fill `GREY_A`). Used by
-    /// [`ColorSliders`] to tint the R/G/B handles.
+    /// Handle colour (`circle_kwargs` stroke+fill). Used by
+    /// [`ColorSliders`] to tint the R/G/B handles; sets both lanes.
     #[must_use]
     pub fn handle_color(mut self, color: Srgb) -> Self {
-        self.handle_color = color;
+        self.handle_stroke_color = color;
+        self.handle_fill_color = color;
+        self.handle = self.build_handle(self.handle_center());
+        self
+    }
+
+    /// Handle stroke colour (`circle_kwargs["stroke_color"]`).
+    #[must_use]
+    pub fn handle_stroke_color(mut self, color: Srgb) -> Self {
+        self.handle_stroke_color = color;
+        self.handle = self.build_handle(self.handle_center());
+        self
+    }
+
+    /// Handle fill colour (`circle_kwargs["fill_color"]`).
+    #[must_use]
+    pub fn handle_fill_color(mut self, color: Srgb) -> Self {
+        self.handle_fill_color = color;
         self.handle = self.build_handle(self.handle_center());
         self
     }
@@ -1163,8 +1182,8 @@ impl LinearNumberSlider {
             .radius(self.handle_radius)
             .style(
                 Style::default()
-                    .stroke(self.handle_color, Style::default().stroke_width, 1.0)
-                    .fill(self.handle_color, self.handle_fill_opacity),
+                    .stroke(self.handle_stroke_color, Style::default().stroke_width, 1.0)
+                    .fill(self.handle_fill_color, self.handle_fill_opacity),
             )
             .build()
             .moved_to(center)
@@ -2090,6 +2109,13 @@ mod tests {
             .handle_fill_opacity(0.4);
         assert!((slider.handle().length_over_dim(0) - 0.4).abs() < 1e-9);
         assert_eq!(slider.handle().style().fill_opacity, 0.4);
+
+        let split = LinearNumberSlider::new(0.0)
+            .expect("valid slider")
+            .handle_stroke_color(RED)
+            .handle_fill_color(GREEN);
+        assert_eq!(split.handle().style().stroke_color, RED);
+        assert_eq!(split.handle().style().fill_color, GREEN);
     }
 
     #[test]
