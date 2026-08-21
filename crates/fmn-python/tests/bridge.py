@@ -8329,6 +8329,25 @@ assert np.allclose(
     atol=1e-6,
 )
 
+default_disk3d = three_dimensions.Disk3D()
+assert default_disk3d.n_records() == 2 * 100
+
+back_disk3d = three_dimensions.Disk3D(resolution=(2, 5), z_index=-1)
+front_disk3d = three_dimensions.Disk3D(resolution=(2, 5), z_index=1)
+disk3d_order_scene = Scene().add(front_disk3d, back_disk3d)
+assert disk3d_order_scene.get_mobjects() == [back_disk3d, front_disk3d]
+
+failed_disk3d = three_dimensions.Disk3D.__new__(three_dimensions.Disk3D)
+try:
+    three_dimensions.Disk3D.__init__(failed_disk3d, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Disk3D() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Disk3D keyword reached the native builder")
+assert not hasattr(failed_disk3d, "submobjects")
+
 square3d = three_dimensions.Square3D(
     side_length=3.0,
     u_range=(-2.0, 2.0),
