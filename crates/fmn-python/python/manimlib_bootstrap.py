@@ -2246,6 +2246,12 @@ class EventDispatcher:
         self.mouse_point = Point()
         self.mouse_drag_point = Point()
         self.pressed_keys = set()
+        # The Reference exposes the corrected spelling as the typo's exact
+        # alias. Cache one bound method under both names so instance identity
+        # (`dispatcher.add_listener is dispatcher.add_listner`) is stable.
+        listener_adder = self.add_listner
+        self.add_listner = listener_adder
+        self.add_listener = listener_adder
 
     def add_listner(self, event_listner):
         if not isinstance(event_listner, EventListener):
@@ -2253,6 +2259,8 @@ class EventDispatcher:
         bucket = self.event_listners.setdefault(event_listner.event_type, [])
         if event_listner not in bucket:
             bucket.append(event_listner)
+
+    add_listener = add_listner
 
     def remove_listner(self, event_listner):
         bucket = self.event_listners.get(event_listner.event_type)
