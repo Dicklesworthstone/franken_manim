@@ -12093,6 +12093,7 @@ class InteractiveScene(Scene):
         fill_color=_GREY_C,
         num_decimal_places=1,
     )
+    selection_nudge_size = 0.05
     select_top_level_mobs = True
 
     def embed(self, namespace=None):
@@ -12408,6 +12409,37 @@ class InteractiveScene(Scene):
         self.selection_rectangle.fixed_corner = self.frame.to_fixed_frame_point(
             self.mouse_point.get_center()
         )
+
+    def gather_new_selection(self):
+        self.is_selecting = False
+        rectangle = getattr(self, "selection_rectangle", None)
+        if rectangle is None or rectangle not in self.mobjects:
+            return
+        self.remove(rectangle)
+        additions = []
+        rect_bb = rectangle.get_bounding_box()
+        buff = 1e-2
+        for mob in reversed(self.get_selection_search_set()):
+            mob_bb = mob.get_bounding_box()
+            ff_min = self.frame.to_fixed_frame_point(mob_bb[0])
+            ff_max = self.frame.to_fixed_frame_point(mob_bb[2])
+            is_in_selection = not any(
+                (
+                    (ff_max < rect_bb[0] - buff).any(),
+                    (ff_min > rect_bb[2] + buff).any(),
+                )
+            )
+            if is_in_selection:
+                additions.append(mob)
+                if rectangle.get_arc_length() < 1e-2:
+                    break
+        self.toggle_from_selection(*additions)
+
+    def nudge_selection(self, vect, large=False):
+        nudge = self.selection_nudge_size
+        if large:
+            nudge *= 10
+        self.selection.shift(nudge * vect)
 
     def group_selection(self):
         group = self.get_group(*self.selection)

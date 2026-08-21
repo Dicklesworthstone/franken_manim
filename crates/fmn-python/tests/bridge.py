@@ -2912,6 +2912,53 @@ assert list(scope_scene.selection) == [scope_parent]
 assert scope_parent in scope_scene.get_selection_search_set()
 assert scope_child_a not in scope_scene.get_selection_search_set()
 
+# fm-5wq.4: gather_new_selection ends a sweep, hit-tests the live rectangle
+# against the search set in fixed-frame coordinates, and toggles matches.
+# A missing rectangle is a no-op besides clearing is_selecting. nudge_selection
+# shifts the live selection Group by selection_nudge_size (x10 when large).
+assert str(inspect.signature(InteractiveScene.gather_new_selection)) == (
+    "(self)"
+)
+assert str(inspect.signature(InteractiveScene.nudge_selection)) == (
+    "(self, vect, large=False)"
+)
+assert np.isclose(InteractiveScene.selection_nudge_size, 0.05)
+gather_scene = InteractiveScene()
+gather_scene.setup()
+gather_hit = manimlib.Circle().move_to([0.0, 0.0, 0.0])
+gather_miss = manimlib.Circle().move_to([10.0, 0.0, 0.0])
+gather_scene.add(gather_hit, gather_miss)
+assert gather_scene.gather_new_selection() is None
+assert gather_scene.is_selecting is False
+assert len(gather_scene.selection) == 0
+gather_scene.enable_selection()
+assert gather_scene.is_selecting is True
+assert gather_scene.selection_rectangle in gather_scene.mobjects
+assert gather_scene.gather_new_selection() is None
+assert gather_scene.is_selecting is False
+assert gather_scene.selection_rectangle not in gather_scene.mobjects
+assert gather_hit in gather_scene.selection
+assert gather_miss not in gather_scene.selection
+
+nudge_scene = InteractiveScene()
+nudge_scene.setup()
+nudge_mob = manimlib.Circle()
+nudge_scene.add(nudge_mob)
+nudge_scene.add_to_selection(nudge_mob)
+nudge_start = nudge_mob.get_center().copy()
+assert nudge_scene.nudge_selection(manimlib.RIGHT) is None
+assert np.allclose(
+    nudge_mob.get_center(),
+    nudge_start + InteractiveScene.selection_nudge_size * manimlib.RIGHT,
+)
+assert nudge_scene.nudge_selection(manimlib.UP, large=True) is None
+assert np.allclose(
+    nudge_mob.get_center(),
+    nudge_start
+    + InteractiveScene.selection_nudge_size * manimlib.RIGHT
+    + 10.0 * InteractiveScene.selection_nudge_size * manimlib.UP,
+)
+
 
 # The schema-generated import topology and exact-name aliases are present.
 geometry = importlib.import_module("manimlib.mobject.geometry")
