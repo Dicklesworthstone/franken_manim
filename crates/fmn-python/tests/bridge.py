@@ -11488,16 +11488,35 @@ except ValueError as error:
 else:
     raise AssertionError("bare Fade played without a target")
 
-# The concrete fade still plays through the rebased hierarchy: opacity
-# actually drops to zero.
+# The concrete fade still plays through the rebased hierarchy. The native
+# finish contract is the Reference's restore-then-remove (fading.py:76):
+# fade_out finishes at final_alpha_value = 0, restoring the records, and
+# only THEN the remover takes the dot out of the scene — a mid-play probe
+# sees the fade actually happen.
 fade_out_dot = manimlib.Dot()
-fade_base_scene.add(fade_out_dot)
+fade_out_probe = manimlib.Dot().move_to((3.0, 0.0, 0.0))
+fade_base_scene.add(fade_out_dot, fade_out_probe)
+fade_out_alphas = []
+
+
+def _fade_out_capture(mobject, dt):
+    del mobject
+    if dt > 0:
+        fade_out_alphas.append(float(fade_out_dot.data["fill_rgba"][0, 3]))
+
+
+fade_out_probe.add_updater(_fade_out_capture)
 fade_base_scene.play(
     fading.FadeOut(fade_out_dot),
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert np.allclose(fade_out_dot.data["fill_rgba"][:, 3], 0.0)
+fade_out_probe.remove_updater(_fade_out_capture)
+assert len(fade_out_alphas) == 2, fade_out_alphas
+assert math.isclose(fade_out_alphas[0], 0.5, rel_tol=0.0, abs_tol=1e-9)
+assert math.isclose(fade_out_alphas[1], 0.0, rel_tol=0.0, abs_tol=1e-9)
+assert fade_out_dot not in fade_base_scene.get_mobjects()
+assert np.allclose(fade_out_dot.data["fill_rgba"][:, 3], 1.0)
 
 
 # ------------------------------------------ FocusOn Mobject focus_point
