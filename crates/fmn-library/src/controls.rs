@@ -2713,6 +2713,25 @@ mod tests {
     }
 
     #[test]
+    fn color_sliders_rect_size_rebuilds_or_refuses_geometry() {
+        let sliders = ColorSliders::new()
+            .expect("locked sliders are valid")
+            .rect_size(1.0, 0.25)
+            .expect("positive swatch dimensions");
+        assert!((sliders.color_box().length_over_dim(0) - 1.0).abs() < 1e-9);
+        assert!((sliders.color_box().length_over_dim(1) - 0.25).abs() < 1e-9);
+
+        for width in [0.0, f64::NAN] {
+            assert!(matches!(
+                ColorSliders::new()
+                    .expect("locked sliders are valid")
+                    .rect_size(width, 0.5),
+                Err(SliderError::Geometry(_))
+            ));
+        }
+    }
+
+    #[test]
     fn color_sliders_set_value_updates_swatch() {
         let mut sliders = ColorSliders::new().expect("locked sliders are valid");
         sliders.set_value(0.0, 0.0, 0.0, 1.0).expect("in range");
