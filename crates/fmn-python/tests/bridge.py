@@ -3014,6 +3014,39 @@ assert np.allclose(
     + 10.0 * InteractiveScene.selection_nudge_size * manimlib.UP,
 )
 
+# fm-5wq.4: free-axis grabbing preserves the mouse-to-selection offset and
+# moves the native selection Group as one unit without requiring pyglet.
+assert str(inspect.signature(InteractiveScene.prepare_grab)) == "(self)"
+assert str(inspect.signature(InteractiveScene.handle_grabbing)) == (
+    "(self, point)"
+)
+grab_scene = InteractiveScene()
+grab_scene.setup()
+grab_circle = manimlib.Circle().move_to([0.0, 0.0, 0.0])
+grab_scene.add(grab_circle)
+grab_scene.add_to_selection(grab_circle)
+grab_scene.mouse_point.move_to([1.0, 0.0, 0.0])
+grab_start = grab_circle.get_center().copy()
+assert grab_scene.prepare_grab() is None
+assert grab_scene.is_grabbing is True
+assert np.allclose(
+    grab_scene.mouse_to_selection,
+    np.array([1.0, 0.0, 0.0]) - grab_start,
+)
+assert grab_scene.handle_grabbing([2.0, 1.0, 0.0]) is None
+assert np.allclose(grab_scene.selection.get_center(), [1.0, 1.0, 0.0])
+assert np.allclose(grab_circle.get_center(), grab_start + [1.0, 1.0, 0.0])
+
+empty_grab_scene = InteractiveScene()
+empty_grab_scene.setup()
+empty_grab_scene.mouse_point.move_to([1.0, 0.0, 0.0])
+assert empty_grab_scene.prepare_grab() is None
+assert empty_grab_scene.is_grabbing is True
+assert np.allclose(
+    empty_grab_scene.mouse_to_selection,
+    [1.0, 0.0, 0.0],
+)
+
 
 # The schema-generated import topology and exact-name aliases are present.
 geometry = importlib.import_module("manimlib.mobject.geometry")

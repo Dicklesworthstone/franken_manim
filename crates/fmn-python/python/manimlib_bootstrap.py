@@ -12451,6 +12451,27 @@ class InteractiveScene(Scene):
             nudge *= 10
         self.selection.shift(nudge * vect)
 
+    def prepare_grab(self):
+        mouse_point = self.mouse_point.get_center()
+        selection_points = self.selection.get_all_points()
+        selection_center = (
+            self.selection.get_center()
+            if len(selection_points) > 0
+            else _ORIGIN
+        )
+        self.mouse_to_selection = mouse_point - selection_center
+        self.is_grabbing = True
+
+    def handle_grabbing(self, point):
+        if getattr(self, "window", None) is not None:
+            raise NotImplementedError(
+                "InteractiveScene constrained h/v/z grabs require a host "
+                "window key-state adapter"
+            )
+        self.selection.move_to(
+            _np.array(_vec3(point)) - self.mouse_to_selection
+        )
+
     def group_selection(self):
         group = self.get_group(*self.selection)
         self.add(group)
