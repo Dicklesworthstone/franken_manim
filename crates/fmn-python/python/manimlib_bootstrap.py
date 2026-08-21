@@ -8876,6 +8876,68 @@ class Write(DrawBorderThenFill):
         return {"stroke_color": tuple(_color_to_rgb(self.stroke_color))}
 
 
+class ShowIncreasingSubsets(_NativeAnimation):
+    """creation.py:176 through Choreo's native subset reveal
+    (fm-5wq.4.58): the group's child list is rewritten each frame from
+    the construction-time snapshot, with the Reference's raw-alpha rate
+    application and banker's rounding owned by the native mechanism."""
+
+    _native_kind = "show_increasing_subsets"
+    _int_round_default = "round"
+
+    def __init__(
+        self,
+        group,
+        int_func=None,
+        suspend_mobject_updating=False,
+        **kwargs,
+    ):
+        if not isinstance(group, Mobject):
+            raise TypeError(
+                type(self).__name__
+                + " requires a Mobject family; "
+                + type(group).__name__
+                + " has no submobject list to reveal"
+            )
+        if not group.submobjects:
+            raise ValueError(
+                type(self).__name__
+                + " requires a family with submobjects; the group is empty"
+            )
+        self._int_round = self._classify_int_func(int_func)
+        super().__init__(
+            group,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
+        )
+
+    def _classify_int_func(self, int_func):
+        # The two Reference rounding rules the native shelf keeps as data
+        # (np.round is ties-to-even, np.ceil is ceiling); anything else
+        # refuses precisely instead of silently rounding differently.
+        if int_func is None:
+            return self._int_round_default
+        if int_func is _np.round:
+            return "round"
+        if int_func is _np.ceil:
+            return "ceil"
+        raise NotImplementedError(
+            type(self).__name__
+            + " int_func must be np.round or np.ceil, the native "
+            "rounding rules"
+        )
+
+    def _native_params(self):
+        return {"int_round": self._int_round}
+
+
+class ShowSubmobjectsOneByOne(ShowIncreasingSubsets):
+    """creation.py:200: ceiling rounding, one visible child at a time."""
+
+    _native_kind = "show_submobjects_one_by_one"
+    _int_round_default = "ceil"
+
+
 class FadeIn(_NativeAnimation):
     _native_kind = "fade_in"
 
@@ -10464,6 +10526,14 @@ def _install_schema_surface():
             "DrawBorderThenFill",
         ): DrawBorderThenFill,
         ("manimlib.animation.creation", "Write"): Write,
+        (
+            "manimlib.animation.creation",
+            "ShowIncreasingSubsets",
+        ): ShowIncreasingSubsets,
+        (
+            "manimlib.animation.creation",
+            "ShowSubmobjectsOneByOne",
+        ): ShowSubmobjectsOneByOne,
         ("manimlib.animation.fading", "FadeIn"): FadeIn,
         ("manimlib.animation.fading", "FadeOut"): FadeOut,
         ("manimlib.animation.fading", "VFadeIn"): VFadeIn,

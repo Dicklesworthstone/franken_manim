@@ -6776,6 +6776,7 @@ struct AnimSpec {
     stroke_color: Option<[f64; 3]>,
     stroke_width: Option<f64>,
     bounds_kind: String,
+    int_round: String,
     point: [f64; 3],
     point_color: Option<[f64; 3]>,
     color: Option<[f64; 3]>,
@@ -6902,6 +6903,10 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .map(|value| value.extract())
             .transpose()?,
         bounds_kind: match params.get_item("bounds_kind")? {
+            Some(value) => value.extract()?,
+            None => String::new(),
+        },
+        int_round: match params.get_item("int_round")? {
             Some(value) => value.extract()?,
             None => String::new(),
         },
@@ -7083,6 +7088,29 @@ fn build_native_animation(
             spec.surface_resolution,
             spec.surface_axis,
         )),
+        "show_increasing_subsets" | "show_submobjects_one_by_one" => {
+            // fm-5wq.4.58: Choreo's subset reveal. The constructors seed
+            // the Reference default rounding; an explicit `int_func` from
+            // the bootstrap overrides it as data.
+            let mut subsets = if spec.kind == "show_submobjects_one_by_one" {
+                fmn_anim::show_submobjects_one_by_one(stage, need_mob(spec.mob)?)
+            } else {
+                fmn_anim::show_increasing_subsets(stage, need_mob(spec.mob)?)
+            }
+            .map_err(anim_error)?;
+            match spec.int_round.as_str() {
+                "" => {}
+                "round" => subsets = subsets.with_int_round(fmn_anim::IntRound::Round),
+                "ceil" => subsets = subsets.with_int_round(fmn_anim::IntRound::Ceil),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "int_func {other:?} is not a native rounding rule \
+                         (np.round or np.ceil)"
+                    )));
+                }
+            }
+            Box::new(subsets)
+        }
         "write" => {
             let mut write = fmn_anim::write(stage, need_mob(spec.mob)?);
             if let Some(rgb) = spec.stroke_color {

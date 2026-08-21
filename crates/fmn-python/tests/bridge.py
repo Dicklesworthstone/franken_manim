@@ -9510,3 +9510,89 @@ except TypeError as error:
     assert "TransformMatchingStrings expects two StringMobject" in str(error), error
 else:
     raise AssertionError("TransformMatchingStrings accepted a non-StringMobject")
+
+
+# --------------------------- ShowIncreasingSubsets / ShowSubmobjectsOneByOne
+# fm-5wq.4.58: the subset reveals play through Choreo's native mechanism —
+# the group's child list is rewritten each frame from the construction-time
+# snapshot.
+
+subset_children = [
+    geometry.Rectangle(width=0.5, height=0.5),
+    geometry.Rectangle(width=0.6, height=0.6),
+    geometry.Rectangle(width=0.7, height=0.7),
+]
+subset_group = manimlib.VGroup(*subset_children)
+subset_scene = Scene()
+subset_probe = geometry.Rectangle(width=1.0, height=1.0)
+subset_counts = []
+subset_scene.play(
+    creation_animation.ShowIncreasingSubsets(subset_group),
+    update_animation.UpdateFromFunc(
+        subset_probe,
+        lambda mob: subset_counts.append(len(subset_group.submobjects)),
+    ),
+    run_time=4.0 / 30.0,
+)
+# The reveal only grows, on child-count boundaries, and finishes whole.
+assert set(subset_counts) <= {0, 1, 2, 3}, subset_counts
+assert subset_counts == sorted(subset_counts), subset_counts
+assert subset_counts[-1] == 3, subset_counts
+assert len(subset_group.submobjects) == 3
+
+one_children = [
+    geometry.Rectangle(width=0.5, height=0.5),
+    geometry.Rectangle(width=0.6, height=0.6),
+    geometry.Rectangle(width=0.7, height=0.7),
+]
+one_group = manimlib.VGroup(*one_children)
+one_scene = Scene()
+one_probe = geometry.Rectangle(width=1.0, height=1.0)
+one_counts = []
+one_scene.play(
+    creation_animation.ShowSubmobjectsOneByOne(one_group),
+    update_animation.UpdateFromFunc(
+        one_probe,
+        lambda mob: one_counts.append(len(one_group.submobjects)),
+    ),
+    run_time=4.0 / 30.0,
+)
+# One child at a time, and the Reference's clip-to-n-1 quirk leaves the
+# second-to-last child visible at the end — ported verbatim natively.
+assert set(one_counts) <= {0, 1}, one_counts
+assert len(one_group.submobjects) == 1
+assert one_group.submobjects[0] is one_children[1]
+
+# int_func routes as data: the two native rounding rules pass, anything
+# else refuses precisely.
+assert (
+    creation_animation.ShowIncreasingSubsets(
+        manimlib.VGroup(geometry.Rectangle(width=0.5, height=0.5)),
+        int_func=np.ceil,
+    )._native_params()["int_round"]
+    == "ceil"
+)
+try:
+    creation_animation.ShowIncreasingSubsets(
+        manimlib.VGroup(geometry.Rectangle(width=0.5, height=0.5)),
+        int_func=abs,
+    )
+except NotImplementedError as error:
+    assert "np.round or np.ceil" in str(error)
+else:
+    raise AssertionError("ShowIncreasingSubsets accepted a foreign int_func")
+
+# Named refusals: a non-Mobject target and an empty family.
+try:
+    creation_animation.ShowIncreasingSubsets("not a mobject")
+except TypeError as error:
+    assert "requires a Mobject family" in str(error)
+else:
+    raise AssertionError("ShowIncreasingSubsets accepted a non-Mobject")
+
+try:
+    creation_animation.ShowSubmobjectsOneByOne(manimlib.VGroup())
+except ValueError as error:
+    assert "the group is empty" in str(error)
+else:
+    raise AssertionError("ShowSubmobjectsOneByOne accepted an empty family")
