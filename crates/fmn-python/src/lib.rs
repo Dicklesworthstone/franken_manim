@@ -1859,8 +1859,9 @@ impl BridgeMobject {
     /// Chisel owns the exact clamped integer interpolation used throughout
     /// the animation and path surfaces.
     #[staticmethod]
-    fn _integer_interpolate(start: i64, end: i64, alpha: f64) -> (i64, f64) {
+    fn _integer_interpolate(start: i64, end: i64, alpha: f64) -> PyResult<(i64, f64)> {
         fmn_library::integer_interpolate(start, end, alpha)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
     /// Preflight the Python-proxy half of `Mobject.add_n_more_submobjects`
@@ -7067,10 +7068,7 @@ impl PyScene {
     /// restored engine root batch. This deliberately performs no Stage write:
     /// SceneState's canonical checkpoint bytes must survive proxy reseating.
     #[pyo3(signature = (*mobjects))]
-    fn _reseat_engine_roots(
-        slf: &Bound<'_, Self>,
-        mobjects: &Bound<'_, PyTuple>,
-    ) -> PyResult<()> {
+    fn _reseat_engine_roots(slf: &Bound<'_, Self>, mobjects: &Bound<'_, PyTuple>) -> PyResult<()> {
         let handles = scene_proxy_handles(slf, mobjects)?;
         let roots = slf.borrow().engine.borrow().stage().roots().to_vec();
         if handles != roots {

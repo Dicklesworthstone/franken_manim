@@ -468,8 +468,18 @@ impl Stage {
             .map(|row| [f64::from(row[0]), f64::from(row[1]), f64::from(row[2])])
             .collect();
         let max_index = i64::try_from(axis_len - 1).map_err(|_| StageError::SchemaMismatch)?;
-        let (lower_index, lower_residue) = bezier::integer_interpolate(0, max_index, a);
-        let (upper_index, upper_residue) = bezier::integer_interpolate(0, max_index, b);
+        let (lower_index, lower_residue) = if max_index <= 0 {
+            (0, 0.0)
+        } else {
+            bezier::integer_interpolate(0, max_index, a)
+                .map_err(|_| StageError::SchemaMismatch)?
+        };
+        let (upper_index, upper_residue) = if max_index <= 0 {
+            (0, 0.0)
+        } else {
+            bezier::integer_interpolate(0, max_index, b)
+                .map_err(|_| StageError::SchemaMismatch)?
+        };
         let lower_index = usize::try_from(lower_index).map_err(|_| StageError::SchemaMismatch)?;
         let upper_index = usize::try_from(upper_index).map_err(|_| StageError::SchemaMismatch)?;
         let lerp = |p: Vec3, q: Vec3, alpha: f64| {
