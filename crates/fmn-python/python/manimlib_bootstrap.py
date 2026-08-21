@@ -11143,6 +11143,94 @@ class CheckpointManager:
         self.checkpoint_states = {}
 
 
+class InteractiveSceneEmbed:
+    """IPython embed surface over Scene + CheckpointManager.
+
+    Construction is headless. Launching the shell and GUI hooks refuse
+    with CapabilityError when IPython or a pyglet window is absent;
+    Studio owns interactive windows.
+    """
+
+    def __init__(self, scene):
+        if not isinstance(scene, Scene):
+            raise TypeError("InteractiveSceneEmbed scene must be a Scene")
+        self.scene = scene
+        self.checkpoint_manager = CheckpointManager()
+        self.shell = None
+
+    def launch(self):
+        self.shell = self.get_ipython_shell_for_embedded_scene()
+        return self.shell
+
+    def get_ipython_shell_for_embedded_scene(self):
+        return _portal_embed(self.scene)
+
+    def get_shortcuts(self):
+        scene = self.scene
+        shortcuts = {
+            "play": scene.play,
+            "wait": scene.wait,
+            "add": scene.add,
+            "remove": scene.remove,
+            "remove_all_except": scene.remove_all_except,
+            "clear": scene.clear,
+            "checkpoint_paste": self.checkpoint_paste,
+            "clear_checkpoints": self.checkpoint_manager.clear_checkpoints,
+        }
+        for name in (
+            "focus",
+            "save_state",
+            "undo",
+            "redo",
+            "i2g",
+            "i2m",
+        ):
+            if hasattr(scene, name):
+                shortcuts[name] = getattr(scene, name)
+        return shortcuts
+
+    def checkpoint_paste(self, skip=False, record=False, progress_bar=True):
+        del skip, record, progress_bar
+        return self.checkpoint_manager.checkpoint_paste(self.shell, self.scene)
+
+    def enable_gui(self):
+        raise _CapabilityError(
+            "the Reference IPython GUI hook is unavailable; "
+            "FrankenManim Studio owns interactive windows"
+        )
+
+    def ensure_frame_update_post_cell(self):
+        raise _CapabilityError(
+            "the Reference IPython GUI hook is unavailable; "
+            "FrankenManim Studio owns interactive windows"
+        )
+
+    def ensure_flash_on_error(self):
+        raise _CapabilityError(
+            "the Reference IPython GUI hook is unavailable; "
+            "FrankenManim Studio owns interactive windows"
+        )
+
+    def auto_reload(self):
+        raise _CapabilityError(
+            "auto_reload requires the manimgl IPython embed loop"
+        )
+
+    def reload_scene(self, embed_line=None):
+        del embed_line
+        raise _CapabilityError(
+            "reload_scene requires the manimgl IPython embed loop"
+        )
+
+    def validate_syntax(self, file_path):
+        try:
+            source = _pathlib.Path(file_path).read_text(encoding="utf-8")
+            compile(source, file_path, "exec")
+        except (OSError, SyntaxError, UnicodeError):
+            return False
+        return True
+
+
 class Animation:
     def __init__(
         self,
@@ -14868,6 +14956,10 @@ def _install_schema_surface():
         ("manimlib.scene.scene", "SceneState"): SceneState,
         ("manimlib.scene.scene", "ThreeDScene"): ThreeDScene,
         ("manimlib.scene.scene_embed", "CheckpointManager"): CheckpointManager,
+        (
+            "manimlib.scene.scene_embed",
+            "InteractiveSceneEmbed",
+        ): InteractiveSceneEmbed,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
     }

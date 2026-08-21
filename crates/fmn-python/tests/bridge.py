@@ -1505,6 +1505,30 @@ except ImportError:
     else:
         raise AssertionError("checkpoint_paste succeeded without pyperclip")
 
+assert embed_module.InteractiveSceneEmbed.__bases__ == (object,)
+assert str(inspect.signature(embed_module.InteractiveSceneEmbed)) == "(scene)"
+embed_scene = Scene()
+embedded = embed_module.InteractiveSceneEmbed(embed_scene)
+assert embedded.scene is embed_scene
+assert isinstance(embedded.checkpoint_manager, embed_module.CheckpointManager)
+assert embedded.get_shortcuts()["add"] == embed_scene.add
+assert embedded.validate_syntax("/no/such/file.py") is False
+try:
+    embedded.enable_gui()
+except Exception as error:
+    assert "Studio owns interactive windows" in str(error)
+else:
+    raise AssertionError("enable_gui did not refuse the pyglet GUI hook")
+failed_embed = embed_module.InteractiveSceneEmbed.__new__(
+    embed_module.InteractiveSceneEmbed
+)
+try:
+    embed_module.InteractiveSceneEmbed.__init__(failed_embed, manimlib.Square())
+except TypeError as error:
+    assert str(error) == "InteractiveSceneEmbed scene must be a Scene"
+else:
+    raise AssertionError("InteractiveSceneEmbed accepted a non-Scene")
+
 live_box = manimlib.Square()
 live_box_before = live_box.get_bounding_box().copy()
 live_box.get_points()[:, 0] += 2.0
