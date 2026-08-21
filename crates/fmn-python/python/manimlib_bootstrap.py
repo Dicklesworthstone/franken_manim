@@ -12435,8 +12435,8 @@ class Scene(_SceneCore):
 
     def is_window_closing(self):
         window = self.get_window()
-        return bool(window) and (
-            bool(getattr(window, "is_closing", False)) or self.quit_interaction
+        return self.quit_interaction or (
+            bool(window) and bool(getattr(window, "is_closing", False))
         )
 
     def interact(self):

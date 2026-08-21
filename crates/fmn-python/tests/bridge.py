@@ -1688,8 +1688,8 @@ assert reset_scene.on_key_press(ord("r"), 0) is None
 assert np.allclose(reset_scene.frame.get_center(), [0.0, 0.0, 0.0], atol=1e-5)
 
 # fm-5wq.4: Scene.embed/interact are no-ops without a pyglet window;
-# is_window_closing stays false until quit_interaction and a host window
-# both exist; set_floor_plane routes xy/xz onto native euler axes.
+# is_window_closing observes quit_interaction without requiring a host
+# window; set_floor_plane routes xy/xz onto native euler axes.
 assert str(inspect.signature(scene_module.Scene.interact)) == "(self)"
 assert str(inspect.signature(scene_module.Scene.embed)) == (
     "(self, close_scene_on_exit=True, show_animation_progress=False)"
@@ -1702,7 +1702,7 @@ assert event_scene.interact() is None
 assert event_scene.embed() is None
 assert event_scene.is_window_closing() is False
 event_scene.quit_interaction = True
-assert event_scene.is_window_closing() is False
+assert event_scene.is_window_closing() is True
 event_scene.quit_interaction = False
 assert event_scene.set_floor_plane() is None
 assert event_scene.frame._core.euler_axes() == "zxz"
@@ -1805,6 +1805,14 @@ except scene_module.EndScene:
     pass
 else:
     raise AssertionError("update_skipping_status missed end_at_animation_number")
+
+# fm-5wq.4: show_animation_progress is a constructor flag defaulting to
+# False, stored per-instance with the same bool() coercion as Scene's other
+# host-free flags.
+assert scene_module.Scene.show_animation_progress is False
+assert Scene().show_animation_progress is False
+assert Scene(show_animation_progress=True).show_animation_progress is True
+assert Scene(show_animation_progress="yes").show_animation_progress is True
 
 # fm-5wq.4: temp_skip/temp_progress_bar are host-free context managers;
 # temp_record names the missing file-writer insert seam; temp_config_change
