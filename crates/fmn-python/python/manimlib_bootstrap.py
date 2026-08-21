@@ -10840,6 +10840,40 @@ class Scene(_SceneCore):
                 mobject._dispatch_updater(updater, dt)
 
 
+class ThreeDScene(Scene):
+    """Scene with the Reference three-d camera default and add-time depth/stroke."""
+
+    samples = 4
+    default_frame_orientation = (-30, 70)
+    always_depth_test = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.frame.reorient(*self.default_frame_orientation)
+        self.frame.make_orientation_default()
+
+    @property
+    def camera(self):
+        camera = self.__dict__.get("_camera")
+        if camera is None:
+            camera = Camera(samples=int(self.samples))
+            camera.frame = self.frame
+            self.__dict__["_camera"] = camera
+        return camera
+
+    def add(self, *mobjects, set_depth_test=True, perp_stroke=True):
+        for mobject in mobjects:
+            if (
+                set_depth_test
+                and not mobject.is_fixed_in_frame()
+                and self.always_depth_test
+            ):
+                mobject.apply_depth_test()
+            if isinstance(mobject, VMobject) and mobject.has_stroke() and perp_stroke:
+                mobject.set_flat_stroke(False)
+        return super().add(*mobjects)
+
+
 class InteractiveScene(Scene):
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
@@ -14551,6 +14585,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.brace", "BraceText"): BraceText,
         ("manimlib.mobject.svg.brace", "LineBrace"): LineBrace,
         ("manimlib.scene.scene", "Scene"): Scene,
+        ("manimlib.scene.scene", "ThreeDScene"): ThreeDScene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
     }

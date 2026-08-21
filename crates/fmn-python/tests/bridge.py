@@ -1395,6 +1395,33 @@ else:
     raise AssertionError("ThreeDCamera accepted the unrouted background image seam")
 assert not hasattr(failed_three_d_camera, "_core")
 
+scene_module = importlib.import_module("manimlib.scene.scene")
+assert scene_module.ThreeDScene.__bases__ == (scene_module.Scene,)
+assert scene_module.ThreeDScene.samples == 4
+assert scene_module.ThreeDScene.default_frame_orientation == (-30, 70)
+assert scene_module.ThreeDScene.always_depth_test is True
+assert str(inspect.signature(scene_module.ThreeDScene.add)) == (
+    "(self, *mobjects, set_depth_test=True, perp_stroke=True)"
+)
+three_d_scene = scene_module.ThreeDScene()
+assert three_d_scene.camera.samples == 4
+assert np.allclose(
+    three_d_scene.frame.get_euler_angles()[:2],
+    np.deg2rad([-30.0, 70.0]),
+)
+depth_circle = manimlib.Circle()
+three_d_scene.add(depth_circle)
+assert depth_circle.uniforms["depth_test"] is True
+assert depth_circle.get_flat_stroke() is False
+assert depth_circle._is_bound()
+fixed_circle = manimlib.Circle()
+fixed_circle.fix_in_frame()
+three_d_scene.add(fixed_circle)
+assert fixed_circle.uniforms["depth_test"] is False
+skipped_circle = manimlib.Circle()
+three_d_scene.add(skipped_circle, set_depth_test=False, perp_stroke=False)
+assert skipped_circle.uniforms["depth_test"] is False
+
 live_box = manimlib.Square()
 live_box_before = live_box.get_bounding_box().copy()
 live_box.get_points()[:, 0] += 2.0
