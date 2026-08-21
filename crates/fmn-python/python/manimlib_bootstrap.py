@@ -11742,7 +11742,13 @@ def _composition_timings(group):
 
 def _composition_timeline_position(group, alpha, max_end):
     """fmn-anim composition.rs `timeline_position`: time_span re-window,
-    then the rate curve, scaled by max_end_time."""
+    then the rate curve, scaled onto the timeline. The scale is the
+    group's EXPLICIT run_time when one was given (fm-5wq.4.88: the group
+    alpha the native slot hands the driver is already t / run_time, so
+    rate(alpha) * run_time is absolute seconds and a python leaf's
+    nominal window spans exactly its share of the actual play), falling
+    back to max_end_time — the native group_config default — when the
+    group derives its run_time from the members."""
     span = getattr(group, "time_span", None)
     if span is not None:
         start, end = span
@@ -11753,7 +11759,15 @@ def _composition_timeline_position(group, alpha, max_end):
     rate = getattr(group, "rate_func", None)
     if rate is None:
         rate = getattr(_FMN_ROOT, "smooth", lambda value: value)
-    return rate(float(alpha)) * max_end
+    scale = max_end
+    explicit = getattr(group, "run_time", None)
+    try:
+        explicit = None if explicit is None else float(explicit)
+    except (TypeError, ValueError):
+        explicit = None
+    if explicit is not None and explicit > 0:
+        scale = explicit
+    return rate(float(alpha)) * scale
 
 
 def _drive_python_composition(group, alpha):
