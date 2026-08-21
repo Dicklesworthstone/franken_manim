@@ -12641,3 +12641,16 @@ except ValueError as error:
     assert "positive finite" in str(error)
 else:
     raise AssertionError("Tetrahedron accepted a zero edge")
+
+# fm-5wq.4.130: audit result — the pinned Reference (6199a00) has NO
+# Arrow3D: three_dimensions' directed-solid surface is Line3D and Cone
+# (both Cylinder-based). Arrow3D is ManimCE surface outside the pin, so
+# there is no class, no _refuse_unrouted, and no leftover kwargs to
+# route; inventing it would widen the exact 663-name wildcard surface.
+assert not hasattr(manimlib, "Arrow3D")
+arrow3d_probe_module = importlib.import_module(
+    "manimlib.mobject.three_dimensions"
+)
+assert not hasattr(arrow3d_probe_module, "Arrow3D")
+assert hasattr(arrow3d_probe_module, "Line3D")
+assert hasattr(arrow3d_probe_module, "Cone")
