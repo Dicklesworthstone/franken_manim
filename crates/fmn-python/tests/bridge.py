@@ -2763,6 +2763,12 @@ assert list(grouped_selection) == [left_selected, right_selected]
 assert grouped_selection in group_scene.mobjects
 assert left_selected not in group_scene.selection
 assert right_selected not in group_scene.selection
+assert str(inspect.signature(InteractiveScene.ungroup_selection)) == "(self)"
+assert group_scene.ungroup_selection() is None
+assert list(group_scene.selection) == [left_selected, right_selected]
+assert grouped_selection not in group_scene.selection
+assert left_selected in group_scene.mobjects
+assert right_selected in group_scene.mobjects
 
 
 # The schema-generated import topology and exact-name aliases are present.

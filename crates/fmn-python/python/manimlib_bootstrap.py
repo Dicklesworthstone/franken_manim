@@ -12355,6 +12355,15 @@ class InteractiveScene(Scene):
         self.clear_selection()
         self.add_to_selection(group)
 
+    def ungroup_selection(self):
+        pieces = []
+        for mob in list(self.selection):
+            self.remove(mob)
+            pieces.extend(list(mob))
+        self.clear_selection()
+        self.add(*pieces)
+        self.add_to_selection(*pieces)
+
 
 class BlankScene(InteractiveScene):
     """extract_scene's empty InteractiveScene; construct enters embed."""
