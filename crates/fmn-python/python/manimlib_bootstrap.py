@@ -10854,7 +10854,7 @@ class ShowPassingFlashAround(VShowPassingFlash):
         rect = SurroundingRectangle(
             mobject,
             stroke_width=stroke_width,
-            stroke_color=stroke_color,
+            color=stroke_color,
             buff=buff,
         )
         # The Reference's ShowPassingFlash works on continuous path bounds.
