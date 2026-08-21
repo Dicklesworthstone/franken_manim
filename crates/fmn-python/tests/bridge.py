@@ -2076,7 +2076,10 @@ assert suspension_order == [("parent", 0.5)]
 # Public updater removal and suspension remain effective across later native
 # Scene.play segments, not only direct Scene.update calls.
 updater_lifecycle_scene = Scene()
-updater_lifecycle_target = Mobject()
+# A bare Mobject is point-free and therefore keeps the Reference's zero
+# bounding box even after a shift.  Use the point-bearing Mobject subclass so
+# get_center() is a real witness that the bystander's dt updater ran.
+updater_lifecycle_target = manimlib.Point()
 updater_lifecycle_clock = Mobject()
 updater_lifecycle_scene.add(updater_lifecycle_target, updater_lifecycle_clock)
 
