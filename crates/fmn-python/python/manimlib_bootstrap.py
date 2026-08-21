@@ -12064,6 +12064,8 @@ class InteractiveScene(Scene):
         stroke_color=_GREY_A,
         stroke_width=[3, 0, 3],
     )
+    selection_rectangle_stroke_color = _WHITE
+    selection_rectangle_stroke_width = 1.0
 
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
@@ -12080,6 +12082,32 @@ class InteractiveScene(Scene):
         crosshair.set_style(**self.crosshair_style)
         crosshair.fix_in_frame()
         return crosshair
+
+    def get_selection_rectangle(self):
+        rect = Rectangle(
+            stroke_color=self.selection_rectangle_stroke_color,
+            stroke_width=self.selection_rectangle_stroke_width,
+        )
+        rect.fix_in_frame()
+        rect.fixed_corner = _ORIGIN.copy()
+        return rect
+
+    def get_color_palette(self):
+        colors = getattr(self, "palette_colors", None)
+        if colors is None:
+            colors = _FMN_ROOT.MANIM_COLORS
+        palette = VGroup(
+            *(
+                Square(side_length=1, fill_color=color, fill_opacity=1)
+                for color in colors
+            )
+        )
+        palette.set_stroke(width=0)
+        palette.arrange(_RIGHT, buff=0.5)
+        palette.set_width(_FRAME_SHAPE[0] - 0.5)
+        palette.to_edge(_DOWN, buff=_SMALL_BUFF)
+        palette.fix_in_frame()
+        return palette
 
 
 class BlankScene(InteractiveScene):

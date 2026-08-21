@@ -2510,6 +2510,24 @@ assert len(crosshair.submobjects) == 2
 assert np.isclose(crosshair.get_width(), 0.2)
 assert crosshair.is_fixed_in_frame()
 assert crosshair.get_stroke_color() == manimlib.GREY_A
+assert str(inspect.signature(InteractiveScene.get_selection_rectangle)) == (
+    "(self)"
+)
+selection_rect = interactive_scene.get_selection_rectangle()
+assert isinstance(selection_rect, manimlib.Rectangle)
+assert selection_rect.get_stroke_color() == manimlib.WHITE
+assert np.isclose(selection_rect.get_stroke_width(), 1.0)
+assert selection_rect.is_fixed_in_frame()
+assert np.allclose(selection_rect.fixed_corner, manimlib.ORIGIN)
+assert str(inspect.signature(InteractiveScene.get_color_palette)) == "(self)"
+palette = interactive_scene.get_color_palette()
+assert isinstance(palette, manimlib.VGroup)
+assert len(palette.submobjects) == len(manimlib.MANIM_COLORS)
+assert palette.is_fixed_in_frame()
+assert np.isclose(palette.get_width(), manimlib.FRAME_WIDTH - 0.5, atol=1e-4)
+assert palette.submobjects[0].get_fill_color() == manimlib.color_to_hex(
+    manimlib.MANIM_COLORS[0]
+)
 
 
 # The schema-generated import topology and exact-name aliases are present.
