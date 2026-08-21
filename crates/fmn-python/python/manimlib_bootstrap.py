@@ -572,22 +572,30 @@ def _family_preorder(root):
     return result
 
 
-def _copy_mobject_graph(root, deep, memo=None):
+def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
     if memo is None:
         memo = {}
     existing = memo.get(id(root))
     if existing is not None:
         return existing
 
-    bound_shells = root._copy_family_shells()
-    if bound_shells is None:
+    detach_live = detach_bound and root._is_bound()
+    if detach_live:
         pairs = []
         for old in _family_preorder(root):
             new = type(old).__new__(type(old))
-            old._copy_detached_state_to(new)
+            new._restore_engine_state(old._engine_state())
             pairs.append((old, new))
     else:
-        pairs = list(bound_shells)
+        bound_shells = root._copy_family_shells()
+        if bound_shells is None:
+            pairs = []
+            for old in _family_preorder(root):
+                new = type(old).__new__(type(old))
+                old._copy_detached_state_to(new)
+                pairs.append((old, new))
+        else:
+            pairs = list(bound_shells)
 
     mapping = {old: new for old, new in pairs}
     for old, new in pairs:
@@ -8026,6 +8034,14 @@ class ThreeDModel(Group):
         _hang_native_children(self, specs)
         self.obj_file = str(path)
         self.height = float(height)
+
+    def copy(self, deep=False):
+        return _copy_mobject_graph(
+            self,
+            bool(deep),
+            {},
+            detach_bound=True,
+        )
 
 
 # The module postpones annotations globally, while the pinned Reference
