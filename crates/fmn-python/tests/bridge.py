@@ -1668,6 +1668,25 @@ assert np.allclose(undo_key_circle.get_center(), undo_key_saved)
 assert undo_key_scene.on_key_press(ord("z"), 2 | 1) is None  # CTRL|SHIFT-z
 assert np.allclose(undo_key_circle.get_center(), undo_key_moved)
 
+# fm-5wq.4: reset-r plays a native camera-frame lerp back to the default
+# state; focus is a no-op without a host window; set_background_color
+# writes Camera.background_rgba through the one color model.
+assert str(inspect.signature(scene_module.Scene.focus)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.set_background_color)) == (
+    "(self, background_color, background_opacity=1)"
+)
+assert event_scene.focus() is None
+assert event_scene.set_background_color(manimlib.RED, 0.5) is None
+assert np.allclose(
+    event_scene.camera.background_rgba,
+    [*manimlib.color_to_rgb(manimlib.RED), 0.5],
+)
+reset_scene = Scene()
+reset_scene.frame.shift([2.0, 1.0, 0.0])
+assert not np.allclose(reset_scene.frame.get_center(), [0.0, 0.0, 0.0])
+assert reset_scene.on_key_press(ord("r"), 0) is None
+assert np.allclose(reset_scene.frame.get_center(), [0.0, 0.0, 0.0], atol=1e-5)
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()

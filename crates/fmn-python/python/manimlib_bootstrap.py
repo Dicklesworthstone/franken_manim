@@ -12184,6 +12184,17 @@ class Scene(_SceneCore):
     def on_close(self):
         pass
 
+    def focus(self):
+        window = self.get_window()
+        if window is None:
+            return
+        window.focus()
+
+    def set_background_color(self, background_color, background_opacity=1):
+        self.camera.background_rgba = list(
+            _color_to_rgba(background_color, background_opacity)
+        )
+
 
 def _mobject_looks_identical(mobject, other):
     if type(mobject) is not type(other):
