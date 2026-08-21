@@ -17793,3 +17793,21 @@ else:
     raise AssertionError(
         "Scene camera_config silently accepted background_image"
     )
+assert config_scene.camera.get_pixel_width() == 640
+# A refused window= also defers to first .camera access — Scene() itself
+# stays lazy and never constructs the Camera.
+refused_window_scene = Scene(camera_config=dict(window=object()))
+try:
+    refused_window_scene.camera
+except NotImplementedError as error:
+    assert str(error) == (
+        "Camera() keyword(s) not yet routed to the native builder: window"
+    )
+else:
+    raise AssertionError("Scene camera_config silently accepted window")
+try:
+    Scene(camera_config=1)
+except TypeError as error:
+    assert str(error) == "Scene camera_config must be a dict"
+else:
+    raise AssertionError("Scene accepted an integer camera_config")
