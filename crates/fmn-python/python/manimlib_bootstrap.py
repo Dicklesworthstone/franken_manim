@@ -12071,6 +12071,16 @@ class InteractiveScene(Scene):
         radius=0.05,
         glow_factor=2.0,
     )
+    cursor_location_config = dict(
+        font_size=24,
+        fill_color=_GREY_C,
+        num_decimal_places=3,
+    )
+    time_label_config = dict(
+        font_size=24,
+        fill_color=_GREY_C,
+        num_decimal_places=1,
+    )
 
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
@@ -12141,6 +12151,33 @@ class InteractiveScene(Scene):
         place(dots)
         dots.add_updater(place)
         return dots
+
+    def get_information_label(self):
+        loc_label = VGroup(
+            *(
+                DecimalNumber(**self.cursor_location_config)
+                for _ in range(3)
+            )
+        )
+
+        def update_coords(label):
+            mouse = getattr(self, "mouse_point", None)
+            location = mouse.get_center() if mouse is not None else _ORIGIN
+            for mob, coord in zip(label, location):
+                mob.set_value(float(coord))
+            height = float(label.get_height())
+            label.arrange(_RIGHT, buff=height if height > 0 else _SMALL_BUFF)
+            label.to_corner(_RIGHT + _DOWN, buff=_SMALL_BUFF)
+            label.fix_in_frame()
+            return label
+
+        update_coords(loc_label)
+        loc_label.add_updater(update_coords)
+        time_label = DecimalNumber(0, **self.time_label_config)
+        time_label.to_corner(_LEFT + _DOWN, buff=_SMALL_BUFF)
+        time_label.fix_in_frame()
+        time_label.add_updater(lambda mob, dt=0: mob.increment_value(dt))
+        return VGroup(loc_label, time_label)
 
 
 class BlankScene(InteractiveScene):

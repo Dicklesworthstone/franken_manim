@@ -2539,6 +2539,23 @@ assert corner_dots.get_num_points() == 4
 assert np.isclose(corner_dots.get_radius(), 0.05)
 assert np.isclose(corner_dots.get_glow_factor(), 2.0)
 assert len(corner_dots.updaters) == 1
+assert str(inspect.signature(InteractiveScene.get_information_label)) == (
+    "(self)"
+)
+info_label = interactive_scene.get_information_label()
+assert isinstance(info_label, manimlib.VGroup)
+assert len(info_label.submobjects) == 2
+loc_label, time_label = info_label.submobjects
+assert isinstance(loc_label, manimlib.VGroup)
+assert len(loc_label.submobjects) == 3
+assert all(
+    isinstance(part, manimlib.DecimalNumber) for part in loc_label
+)
+assert isinstance(time_label, manimlib.DecimalNumber)
+assert loc_label.is_fixed_in_frame()
+assert time_label.is_fixed_in_frame()
+assert np.isclose(time_label.get_value(), 0.0)
+assert time_label.get_fill_color() == manimlib.GREY_C
 
 
 # The schema-generated import topology and exact-name aliases are present.
