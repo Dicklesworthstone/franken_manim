@@ -8580,6 +8580,27 @@ class ChangeSpeed(Animation):
         )
 
 
+class Delay(Animation):
+    """A timed hold (fm-5wq.4.66): `run_time` seconds pass on the engine
+    clock and nothing mutates. The held mobject is an internal empty
+    `Mobject`, so no user state is ever touched. Not a pinned-Reference
+    class (specialized.py has no Delay) — compatibility surface for
+    Succession/LaggedStart galleries under the wider ecosystem's spelling.
+    """
+
+    def __init__(self, run_time=1.0, **kwargs):
+        run_time = float(run_time)
+        if not (run_time >= 0.0 and _math.isfinite(run_time)):
+            raise ValueError(
+                "Delay run_time must be a finite non-negative duration; "
+                "got " + repr(run_time)
+            )
+        super().__init__(Mobject(), run_time=run_time, **kwargs)
+
+    def interpolate_mobject(self, alpha):
+        del alpha  # a hold mutates nothing
+
+
 class ChangingDecimal(Animation):
     """The Reference's update mechanism pointed at `DecimalNumber.set_value`
     (fm-5wq.4.55, animation/numbers.py): each frame feeds the time-spanned
@@ -10889,6 +10910,7 @@ def _install_schema_surface():
             "MaintainPositionRelativeTo",
         ): MaintainPositionRelativeTo,
         ("manimlib.animation.speed", "ChangeSpeed"): ChangeSpeed,
+        ("manimlib.animation.specialized", "Delay"): Delay,
         ("manimlib.animation.numbers", "ChangingDecimal"): ChangingDecimal,
         ("manimlib.animation.numbers", "ChangeDecimalToValue"): ChangeDecimalToValue,
         ("manimlib.animation.numbers", "CountInFrom"): CountInFrom,

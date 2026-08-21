@@ -9976,3 +9976,40 @@ except NotImplementedError as error:
     assert "clock-remap seam" in str(error)
 else:
     raise AssertionError("ChangeSpeed constructed without its native seam")
+
+
+# ------------------------------------------------------------------- Delay
+# fm-5wq.4.66: a timed hold — the engine clock advances, nothing mutates.
+
+specialized_animation = importlib.import_module("manimlib.animation.specialized")
+
+delay_scene = Scene()
+delay_witness = geometry.Rectangle(width=1.0, height=1.0)
+delay_witness.shift([0.5, -0.5, 0.0])
+delay_scene.add(delay_witness)
+delay_before = delay_witness.get_center().copy()
+delay_time_before = delay_scene.get_time()
+delay_scene.play(specialized_animation.Delay(run_time=2.0 / 30.0))
+assert abs(delay_scene.get_time() - delay_time_before - 2.0 / 30.0) < 1e-9
+assert np.allclose(delay_witness.get_center(), delay_before)
+
+# Delay composes into a same-play pair: the other animation still runs.
+delay_pair_scene = Scene()
+delay_probe = geometry.Rectangle(width=1.0, height=1.0)
+delay_frames = []
+delay_pair_scene.play(
+    specialized_animation.Delay(run_time=2.0 / 30.0),
+    update_animation.UpdateFromFunc(
+        delay_probe, lambda mob: delay_frames.append(True)
+    ),
+    run_time=2.0 / 30.0,
+)
+assert len(delay_frames) >= 2, delay_frames
+
+# Negative: a negative (or non-finite) run_time is a named error.
+try:
+    specialized_animation.Delay(run_time=-1.0)
+except ValueError as error:
+    assert "finite non-negative duration" in str(error)
+else:
+    raise AssertionError("Delay accepted a negative run_time")
