@@ -5299,6 +5299,37 @@ except TypeError as error:
 else:
     raise AssertionError("ControlPanel silently discarded opener_kwargs.bogus")
 
+# VMobject color= on panel_kwargs / opener_kwargs fills and strokes unless
+# fill_color / stroke_color win. add_controls keeps the constructor fill.
+color_panel = interactive.ControlPanel(
+    interactive.Checkbox(True),
+    panel_kwargs=dict(color=manimlib.RED, stroke_width=2.0),
+    opener_kwargs=dict(color=manimlib.BLUE, stroke_width=1.0),
+)
+assert color_panel.panel.get_fill_color() == manimlib.RED
+assert color_panel.panel.get_stroke_color() == manimlib.RED
+assert color_panel.panel_opener.submobjects[0].get_fill_color() == manimlib.BLUE
+assert color_panel.panel_opener.submobjects[0].get_stroke_color() == (
+    manimlib.BLUE
+)
+color_panel_identity = color_panel.panel
+assert color_panel.add_controls(interactive.EnableDisableButton(True)) is None
+assert color_panel.panel is color_panel_identity
+assert color_panel.panel.get_fill_color() == manimlib.RED
+assert color_panel.panel.get_stroke_color() == manimlib.RED
+assert color_panel.remove_controls(color_panel.controls.submobjects[-1]) is None
+assert color_panel.panel.get_fill_color() == manimlib.RED
+override_color_panel = interactive.ControlPanel(
+    panel_kwargs=dict(
+        color=manimlib.RED,
+        fill_color=manimlib.GREEN,
+        stroke_color=manimlib.YELLOW,
+        stroke_width=2.0,
+    ),
+)
+assert override_color_panel.panel.get_fill_color() == manimlib.GREEN
+assert override_color_panel.panel.get_stroke_color() == manimlib.YELLOW
+
 # PGroup is Atlas's native point-cloud family root, with the original live
 # PMobject proxies grafted beneath it in Reference order.
 point_cloud_mobjects = importlib.import_module(

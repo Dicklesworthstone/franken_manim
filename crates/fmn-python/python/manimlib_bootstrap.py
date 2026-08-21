@@ -11116,6 +11116,7 @@ class ControlPanel(Group):
             - {
                 "width",
                 "height",
+                "color",
                 "fill_color",
                 "fill_opacity",
                 "stroke_color",
@@ -11135,6 +11136,7 @@ class ControlPanel(Group):
             - {
                 "width",
                 "height",
+                "color",
                 "fill_color",
                 "fill_opacity",
                 "stroke_color",
@@ -11207,18 +11209,42 @@ class ControlPanel(Group):
             (
                 float(panel_config.get("width", _FRAME_SHAPE[0] / 4.0)),
                 float(panel_config.get("height", _MED_SMALL_BUFF + _FRAME_HEIGHT)),
-                tuple(_color_to_rgb(panel_config.get("fill_color", _GREY_C))),
+                tuple(
+                    _color_to_rgb(
+                        panel_config.get(
+                            "fill_color", panel_config.get("color", _GREY_C)
+                        )
+                    )
+                ),
                 float(panel_config.get("fill_opacity", 1.0)),
-                tuple(_color_to_rgb(panel_config.get("stroke_color", _GREY_A))),
+                tuple(
+                    _color_to_rgb(
+                        panel_config.get(
+                            "stroke_color", panel_config.get("color", _GREY_A)
+                        )
+                    )
+                ),
                 float(panel_config.get("stroke_width", 0.0)),
                 float(panel_config.get("stroke_opacity", 1.0)),
             ),
             (
                 float(opener_config.get("width", _FRAME_SHAPE[0] / 8.0)),
                 float(opener_config.get("height", 0.5)),
-                tuple(_color_to_rgb(opener_config.get("fill_color", _GREY_C))),
+                tuple(
+                    _color_to_rgb(
+                        opener_config.get(
+                            "fill_color", opener_config.get("color", _GREY_C)
+                        )
+                    )
+                ),
                 float(opener_config.get("fill_opacity", 1.0)),
-                tuple(_color_to_rgb(opener_config.get("stroke_color", _GREY_A))),
+                tuple(
+                    _color_to_rgb(
+                        opener_config.get(
+                            "stroke_color", opener_config.get("color", _GREY_A)
+                        )
+                    )
+                ),
                 float(opener_config.get("stroke_width", 4.0)),
                 float(opener_config.get("stroke_opacity", 1.0)),
             ),
