@@ -50,3 +50,19 @@ pub mod fill;
 pub mod ir;
 pub mod scene;
 pub mod sdf;
+
+/// The infallible arc spelling this spike was written against. fm-4tb.1 made
+/// `QuadPath::arc` fallible (`try_arc`, typed refusals for non-finite angles
+/// and component-budget overflow); every arc in this historical spike has
+/// finite constant parameters, so those refusals are unreachable here.
+#[must_use]
+pub fn arc(
+    start_angle: f64,
+    angle: f64,
+    radius: f64,
+    arc_center: [f64; 3],
+    n_components: Option<usize>,
+) -> fmn_geom::QuadPath {
+    fmn_geom::QuadPath::try_arc(start_angle, angle, radius, arc_center, n_components)
+        .expect("spike arc parameters are finite constants under the component budget")
+}

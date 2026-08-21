@@ -128,7 +128,7 @@ fn render_gradient_fills() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
         },
     )?;
 
-    let circle = QuadPath::arc(
+    let circle = fmn_spike_accelerator::arc(
         0.0,
         -std::f64::consts::TAU,
         205.48,

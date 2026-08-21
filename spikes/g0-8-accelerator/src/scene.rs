@@ -144,7 +144,7 @@ pub fn build(width: u32, height: u32, tile: u32) -> RenderIr {
     // not a private approximation of a circle.
     for (i, color) in [RED_C, GREEN_C, YELLOW_C].into_iter().enumerate() {
         let start = std::f64::consts::PI * (0.15 + 0.10 * i as f64);
-        let p = QuadPath::arc(
+        let p = crate::arc(
             start,
             std::f64::consts::PI * 1.4,
             h * 0.26,
@@ -298,7 +298,7 @@ pub fn build_fill(width: u32, height: u32, tile: u32) -> RenderIr {
             (h * 0.20, std::f64::consts::TAU),
             (h * 0.11, -std::f64::consts::TAU),
         ] {
-            let a = QuadPath::arc(0.0, angle, radius, c, None);
+            let a = crate::arc(0.0, angle, radius, c, None);
             let [start, _, _] = a.nth_curve_points(0).expect("an arc has curves");
             ring.start_new_path(start);
             for i in 0..a.num_curves() {
@@ -364,7 +364,7 @@ pub fn build_fill(width: u32, height: u32, tile: u32) -> RenderIr {
 
     // ---- overlapping translucent discs, in painter order.
     for (i, color) in [GREEN_C, BLUE_B, WHITE].into_iter().enumerate() {
-        let p = QuadPath::arc(
+        let p = crate::arc(
             0.0,
             std::f64::consts::TAU,
             h * 0.15,
@@ -382,7 +382,7 @@ pub fn build_fill(width: u32, height: u32, tile: u32) -> RenderIr {
     for i in 0..24 {
         let col = i % 8;
         let row = i / 8;
-        let p = QuadPath::arc(
+        let p = crate::arc(
             0.0,
             std::f64::consts::TAU,
             h * 0.022,
@@ -513,7 +513,7 @@ pub fn calibration(panel: CalibrationPanel, width: u32, height: u32, tile: u32) 
             // Circle: least-squares fit of the captured edge gave centre
             // (539.49, 1195.86) with R = 205.48 px.
             let (ccx, ccy, r) = (sx(1195.86), sy(539.49), sx(205.48));
-            let circle = QuadPath::arc(0.0, std::f64::consts::TAU, r, [ccx, ccy, 0.0], None);
+            let circle = crate::arc(0.0, std::f64::consts::TAU, r, [ccx, ccy, 0.0], None);
             let mut cfill = flat(PURPLE, 0.5, 0.0);
             cfill.rgba_end = linear(TEAL, 0.5);
             cfill.gradient_axis = [

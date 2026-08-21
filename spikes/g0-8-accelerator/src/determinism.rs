@@ -97,7 +97,7 @@ pub fn build(width: u32, height: u32, tile: u32, alpha: f64) -> RenderIr {
     {
         let r = h * (0.18 + 0.10 * a_smooth);
         let c = [w * 0.30, h * 0.42, 0.0];
-        let p = QuadPath::arc(0.0, std::f64::consts::TAU, r, c, None);
+        let p = crate::arc(0.0, std::f64::consts::TAU, r, c, None);
         let mut st = Style::flat(linear(BLUE_C, 0.85), 0.0, aaw);
         st.rgba_end = linear(TEAL_B, 0.85);
         st.gradient_axis = [
@@ -115,8 +115,8 @@ pub fn build(width: u32, height: u32, tile: u32, alpha: f64) -> RenderIr {
         let c = [w * 0.68, h * 0.40];
         let outer = h * 0.22;
         let inner = outer * (0.35 + 0.25 * a_there_back);
-        let mut p = QuadPath::arc(0.0, std::f64::consts::TAU, outer, [c[0], c[1], 0.0], None);
-        let hole = QuadPath::arc(0.0, -std::f64::consts::TAU, inner, [c[0], c[1], 0.0], None);
+        let mut p = crate::arc(0.0, std::f64::consts::TAU, outer, [c[0], c[1], 0.0], None);
+        let hole = crate::arc(0.0, -std::f64::consts::TAU, inner, [c[0], c[1], 0.0], None);
         p.add_subpath(hole.points())
             .expect("the hole is a valid subpath");
         let mut st = Style::flat(linear(YELLOW_C, 0.9), 0.0, aaw);

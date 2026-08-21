@@ -320,7 +320,7 @@ mod tests {
         // so the bar is 0.5 % of the area rather than exactness — tight enough
         // that a winding or ordering bug cannot hide inside it.
         let r = 22.0;
-        let p = QuadPath::arc(0.0, std::f64::consts::TAU, r, [32.0, 32.0, 0.0], None);
+        let p = crate::arc(0.0, std::f64::consts::TAU, r, [32.0, 32.0, 0.0], None);
         let mut ir = RenderIr::new(
             TileGrid {
                 width: 64,

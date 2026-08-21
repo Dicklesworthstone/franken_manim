@@ -1378,7 +1378,7 @@ mod tests {
         // crossings are doing the work. Quadratics approximate a circle to a
         // small but nonzero error, so the bar is 0.5 % of the area.
         let r = 22.0;
-        let p = QuadPath::arc(0.0, std::f64::consts::TAU, r, [32.0, 32.0, 0.0], None);
+        let p = crate::arc(0.0, std::f64::consts::TAU, r, [32.0, 32.0, 0.0], None);
         let mut ir = RenderIr::new(grid(64), [0.0; 4]);
         ir.compile_path(&p, Style::flat([1.0; 4], 0.0, 1.5), DrawKind::Fill)
             .unwrap();
@@ -1448,7 +1448,7 @@ mod tests {
         // In f64 they must agree to rounding; if they ever do not, one of the
         // two kernels is computing something else.
         let r = 20.0;
-        let p = QuadPath::arc(0.0, std::f64::consts::TAU, r, [32.0, 30.0, 0.0], None);
+        let p = crate::arc(0.0, std::f64::consts::TAU, r, [32.0, 30.0, 0.0], None);
         let mut ir = RenderIr::new(grid(64), [0.0; 4]);
         ir.compile_path(&p, Style::flat([1.0; 4], 0.0, 1.5), DrawKind::Fill)
             .unwrap();
@@ -1512,7 +1512,7 @@ mod tests {
         // not only for a window wide enough that no piece enters at its edge.
         // The original version of this test used one full-width window and saw
         // nothing.
-        let p = QuadPath::arc(0.0, std::f64::consts::TAU, 19.5, [31.5, 30.25, 0.0], None);
+        let p = crate::arc(0.0, std::f64::consts::TAU, 19.5, [31.5, 30.25, 0.0], None);
         let mut ir = RenderIr::new(grid(64), [0.0; 4]);
         ir.compile_path(&p, Style::flat([1.0; 4], 0.0, 1.5), DrawKind::Fill)
             .unwrap();
@@ -1543,7 +1543,7 @@ mod tests {
         // The arithmetic floor, exactly as the stroke stage measures it: same
         // algorithm, same geometry, only the scalar width changes.
         let r = 21.0;
-        let p = QuadPath::arc(0.0, std::f64::consts::TAU, r, [32.0, 32.0, 0.0], None);
+        let p = crate::arc(0.0, std::f64::consts::TAU, r, [32.0, 32.0, 0.0], None);
         let mut ir = RenderIr::new(grid(64), [0.0; 4]);
         ir.compile_path(&p, Style::flat([1.0; 4], 0.0, 1.5), DrawKind::Fill)
             .unwrap();
