@@ -4542,6 +4542,32 @@ except TypeError as error:
 else:
     raise AssertionError("ColorSliders silently discarded sliders_kwargs.bogus")
 
+# fm-5wq.4: shared sliders_kwargs min_value/max_value ride the native
+# slider_overrides range onto all four sliders. RGB set_value clamps into
+# the shared [0, 1] range (the Reference's assert_value is the port's
+# documented clamp) while get_value keeps its fixed /255 RGB
+# normalization; alpha's default range is already [0, 1], so the shared
+# range leaves alpha behavior unchanged. An unordered range is the named
+# native SliderError surfaced as ValueError — no hang, no silent swap.
+ranged_color_sliders = interactive.ColorSliders(
+    sliders_kwargs=dict(min_value=0, max_value=1)
+)
+ranged_color_sliders.set_value(2.0, 0.5, 300.0, 1.5)
+assert np.allclose(
+    ranged_color_sliders.get_value(),
+    [1.0 / 255.0, 0.5 / 255.0, 1.0 / 255.0, 1.0],
+)
+try:
+    interactive.ColorSliders(
+        sliders_kwargs=dict(min_value=1.0, max_value=0.0)
+    )
+except ValueError as error:
+    assert "ordered" in str(error), error
+else:
+    raise AssertionError(
+        "ColorSliders accepted an unordered min_value/max_value range"
+    )
+
 swatch_identity = color_sliders.swatch
 sliders_identity = color_sliders.sliders
 color_sliders.set_value(64.0, 128.0, 255.0, 0.5)
