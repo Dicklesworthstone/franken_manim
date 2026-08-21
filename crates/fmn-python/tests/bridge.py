@@ -9540,8 +9540,14 @@ assert manimlib.__abi_policy__ == "cpython-3.13-full-abi"
 
 console_code, console_out, console_err = run_portal_console("--version")
 assert console_code == 0
+# The version line reports the RUNNING interpreter (sys.version_info) —
+# the host CPython this very suite executes under — while the wheel ABI
+# policy strings above/below stay pinned to the built ABI. A hardcoded
+# minor here would lie whenever the host interpreter moves.
 assert console_out.startswith(
-    f"fmn-python {_expected_package_version} (CPython 3.13."
+    "fmn-python "
+    + _expected_package_version
+    + f" (CPython {sys.version_info.major}.{sys.version_info.minor}."
 ), console_out
 assert console_err == ""
 
