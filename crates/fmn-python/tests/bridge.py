@@ -3338,6 +3338,43 @@ try:
     assert [cls.__name__ for cls in classes] == ["Demo", "Also"]
     assert all(extract_scene.is_child_scene(cls, extracted) for cls in classes)
     assert extract_scene.is_child_scene(extracted.Scene, extracted) is False
+    demo = extract_scene.scene_from_class(extracted.Demo, {}, {})
+    assert isinstance(demo, extracted.Demo)
+    named = extract_scene.get_scenes_to_render(
+        classes, {}, {"scene_names": ["Also"]}
+    )
+    assert len(named) == 1
+    assert isinstance(named[0], extracted.Also)
+    written = extract_scene.get_scenes_to_render(
+        classes, {}, {"write_all": True}
+    )
+    assert [type(scene).__name__ for scene in written] == ["Demo", "Also"]
+    lone = extract_scene.get_scenes_to_render([extracted.Demo], {}, {})
+    assert len(lone) == 1
+    assert isinstance(lone[0], extracted.Demo)
+    try:
+        extract_scene.get_scenes_to_render(
+            classes, {}, {"scene_names": ["Missing"]}
+        )
+    except ValueError as error:
+        assert "Missing" in str(error)
+        assert "Demo" in str(error)
+    else:
+        raise AssertionError("missing scene names were silent")
+    try:
+        extract_scene.get_scenes_to_render(classes, {}, {})
+    except bridge_errors.CapabilityError as error:
+        assert "prompt_user_for_choice" in str(error)
+    else:
+        raise AssertionError("ambiguous scene choice did not refuse")
+    try:
+        extract_scene.scene_from_class(manimlib.Square, {}, {})
+    except TypeError as error:
+        assert str(error) == (
+            "scene_from_class scene_class must be a Scene subclass"
+        )
+    else:
+        raise AssertionError("scene_from_class accepted a non-Scene")
 finally:
     pathlib.Path(extract_path).unlink(missing_ok=True)
 

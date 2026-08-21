@@ -11248,7 +11248,7 @@ def get_scene_classes(module):
     return [
         member
         for member in vars(module).values()
-        if is_child_scene(member, module)
+        if _is_child_scene(member, module)
     ]
 
 
@@ -11261,6 +11261,76 @@ def get_module(run_config):
     return _MODULE_LOADER.get_module(
         file_name,
         is_during_reload=bool(run_config.get("is_during_reload", False)),
+    )
+
+
+_is_child_scene = is_child_scene
+_scene_from_class = scene_from_class
+_note_missing_scenes = note_missing_scenes
+
+
+def scene_from_class(scene_class, scene_config, run_config):
+    if not _inspect.isclass(scene_class):
+        raise TypeError("scene_from_class scene_class must be a Scene subclass")
+    try:
+        if not issubclass(scene_class, Scene):
+            raise TypeError(
+                "scene_from_class scene_class must be a Scene subclass"
+            )
+    except TypeError as error:
+        raise TypeError(
+            "scene_from_class scene_class must be a Scene subclass"
+        ) from error
+    if not isinstance(scene_config, dict):
+        raise TypeError("scene_from_class scene_config must be a dict")
+    if not isinstance(run_config, dict):
+        raise TypeError("scene_from_class run_config must be a dict")
+    del run_config
+    return scene_class(**dict(scene_config))
+
+
+def note_missing_scenes(arg_names, module_names):
+    missing = ", ".join(str(name) for name in arg_names)
+    available = ", ".join(str(name) for name in module_names)
+    raise ValueError(f"No scenes named {missing}; available: {available}")
+
+
+def prompt_user_for_choice(scene_classes):
+    del scene_classes
+    raise _CapabilityError(
+        "prompt_user_for_choice is unavailable; pass scene_names or write_all"
+    )
+
+
+def get_scenes_to_render(all_scene_classes, scene_config, run_config):
+    if not isinstance(all_scene_classes, (list, tuple)):
+        raise TypeError("get_scenes_to_render all_scene_classes must be a list")
+    if not isinstance(scene_config, dict):
+        raise TypeError("get_scenes_to_render scene_config must be a dict")
+    if not isinstance(run_config, dict):
+        raise TypeError("get_scenes_to_render run_config must be a dict")
+    classes = list(all_scene_classes)
+    if bool(run_config.get("write_all", False)):
+        return [
+            _scene_from_class(cls, scene_config, run_config) for cls in classes
+        ]
+    names = [str(name) for name in (run_config.get("scene_names") or [])]
+    if names:
+        by_name = {cls.__name__: cls for cls in classes}
+        missing = [name for name in names if name not in by_name]
+        if missing:
+            _note_missing_scenes(missing, [cls.__name__ for cls in classes])
+        return [
+            _scene_from_class(by_name[name], scene_config, run_config)
+            for name in names
+        ]
+    if len(classes) == 1:
+        return [_scene_from_class(classes[0], scene_config, run_config)]
+    if not classes:
+        return []
+    raise _CapabilityError(
+        "get_scenes_to_render needs scene_names or write_all; "
+        "interactive prompt_user_for_choice is unavailable"
     )
 
 
@@ -15387,6 +15457,10 @@ def _install_schema_surface():
         ("manimlib.extract_scene", "is_child_scene"): is_child_scene,
         ("manimlib.extract_scene", "get_scene_classes"): get_scene_classes,
         ("manimlib.extract_scene", "get_module"): get_module,
+        ("manimlib.extract_scene", "scene_from_class"): scene_from_class,
+        ("manimlib.extract_scene", "note_missing_scenes"): note_missing_scenes,
+        ("manimlib.extract_scene", "prompt_user_for_choice"): prompt_user_for_choice,
+        ("manimlib.extract_scene", "get_scenes_to_render"): get_scenes_to_render,
     }
     for (module_name, name), function in special_functions.items():
         function.__module__ = module_name
