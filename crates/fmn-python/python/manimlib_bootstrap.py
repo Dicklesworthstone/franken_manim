@@ -11683,6 +11683,14 @@ class Scene(_SceneCore):
             return VGroup(*mobjects)
         return Group(*mobjects)
 
+    def point_to_mobject(self, point, search_set=None, buff=0):
+        if search_set is None:
+            search_set = self.mobjects
+        for mobject in reversed(search_set):
+            if mobject.is_point_touching(point, buff=buff):
+                return mobject
+        return None
+
     def run(self):
         return self._run_lifecycle()
 
@@ -12531,6 +12539,30 @@ class InteractiveScene(Scene):
             self.add(self.color_palette)
         else:
             self.remove(self.color_palette)
+
+    def handle_sweeping_selection(self, point):
+        mobject = self.point_to_mobject(
+            point,
+            search_set=self.get_selection_search_set(),
+            buff=_SMALL_BUFF,
+        )
+        if mobject is not None:
+            self.add_to_selection(mobject)
+
+    def choose_color(self, point):
+        unselectables = getattr(self, "unselectables", None) or []
+        to_search = [
+            member
+            for mobject in self.mobjects
+            for member in mobject.family_members_with_points()
+            if mobject not in unselectables
+        ]
+        mobject = self.point_to_mobject(point, to_search)
+        if mobject is not None:
+            self.selection.set_color(mobject.get_color())
+        palette = getattr(self, "color_palette", None)
+        if palette is not None:
+            self.remove(palette)
 
     def group_selection(self):
         group = self.get_group(*self.selection)

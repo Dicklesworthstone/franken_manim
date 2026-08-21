@@ -3158,6 +3158,44 @@ assert (
 assert palette_scene.toggle_color_palette() is None
 assert palette_scene.color_palette not in palette_scene.mobjects
 
+# fm-5wq.4: Scene.point_to_mobject walks the reversed search set through
+# is_point_touching. handle_sweeping_selection adds the top hit from the
+# selection search set; choose_color recolors the live selection from the
+# first pointful family member under the cursor and unmounts the palette.
+assert str(inspect.signature(Scene.point_to_mobject)) == (
+    "(self, point, search_set=None, buff=0)"
+)
+assert str(inspect.signature(InteractiveScene.handle_sweeping_selection)) == (
+    "(self, point)"
+)
+assert str(inspect.signature(InteractiveScene.choose_color)) == "(self, point)"
+sweep_hit_scene = InteractiveScene()
+sweep_hit_scene.setup()
+sweep_hit = manimlib.Circle().move_to([0.0, 0.0, 0.0])
+sweep_miss = manimlib.Circle().move_to([10.0, 0.0, 0.0])
+sweep_hit_scene.add(sweep_hit, sweep_miss)
+assert sweep_hit_scene.point_to_mobject(sweep_hit.get_center()) is sweep_hit
+assert sweep_hit_scene.point_to_mobject([100.0, 0.0, 0.0]) is None
+assert sweep_hit_scene.handle_sweeping_selection(sweep_hit.get_center()) is None
+assert sweep_hit in sweep_hit_scene.selection
+assert sweep_miss not in sweep_hit_scene.selection
+assert sweep_hit_scene.handle_sweeping_selection([100.0, 0.0, 0.0]) is None
+assert list(sweep_hit_scene.selection) == [sweep_hit]
+
+recolor_scene = InteractiveScene()
+recolor_scene.setup()
+recolor_target = manimlib.Circle().set_color(manimlib.BLUE)
+recolor_source = manimlib.Square().set_color(manimlib.RED).move_to(
+    [3.0, 0.0, 0.0]
+)
+recolor_scene.add(recolor_target, recolor_source)
+recolor_scene.add_to_selection(recolor_target)
+recolor_scene.toggle_color_palette()
+assert recolor_scene.color_palette in recolor_scene.mobjects
+assert recolor_scene.choose_color(recolor_source.get_center()) is None
+assert recolor_target.get_color() == manimlib.RED
+assert recolor_scene.color_palette not in recolor_scene.mobjects
+
 
 # The schema-generated import topology and exact-name aliases are present.
 geometry = importlib.import_module("manimlib.mobject.geometry")
