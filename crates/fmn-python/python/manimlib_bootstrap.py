@@ -4806,6 +4806,7 @@ class SampleSpace(Rectangle):
         default_label_scale_val=1,
         **kwargs,
     ):
+        _preflight_vmobject_style_kwargs(dict(kwargs))
         super().__init__(
             width,
             height,
