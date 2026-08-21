@@ -12533,6 +12533,16 @@ else:
     raise AssertionError("TracingTail accepted an unknown kwarg")
 
 
+# fm-5wq.4.129: the pinned Reference (6199a00) does not define or
+# wildcard-export Octahedron. It is a ManimCE polyhedron, so there are no
+# constructor kwargs to route on the supported manimlib surface.
+assert not hasattr(manimlib, "Octahedron")
+octahedron_module = importlib.import_module(
+    "manimlib.mobject.three_dimensions"
+)
+assert not hasattr(octahedron_module, "Octahedron")
+
+
 # --------------------------------------- DashedVMobject leftover kwargs
 # fm-5wq.4.124: the **kwargs surface is the Reference's — style/config
 # keywords flow into VMobject.__init__, and the trailing match_style pass
@@ -12571,3 +12581,16 @@ except TypeError as error:
     assert "expects a VMobject" in str(error)
 else:
     raise AssertionError("DashedVMobject accepted a non-VMobject")
+
+# fm-5wq.4.127: audit result — the pinned Reference (6199a00) has NO
+# Icosahedron: the 663-name surface's only polyhedron is Dodecahedron
+# (three_dimensions, VGroup3D). Icosahedron/Tetrahedron/Octahedron are
+# ManimCE polyhedra outside the pin, so there is no class, no leftover
+# kwargs, and nothing to route; inventing one would break the exact
+# wildcard surface. Pin the absence so a stray CE import can't sneak in.
+assert not hasattr(manimlib, "Icosahedron")
+three_dimensions_module = importlib.import_module(
+    "manimlib.mobject.three_dimensions"
+)
+assert not hasattr(three_dimensions_module, "Icosahedron")
+assert hasattr(three_dimensions_module, "Dodecahedron")
