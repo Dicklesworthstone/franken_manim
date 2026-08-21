@@ -1446,9 +1446,15 @@ assert str(inspect.signature(scene_module.SceneState)) == (
     "(scene, ignore=None)"
 )
 assert str(inspect.signature(scene_module.Scene.get_state)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.save_state)) == "(self)"
 assert str(inspect.signature(scene_module.Scene.restore_state)) == (
     "(self, scene_state)"
 )
+saved_scene = Scene()
+assert saved_scene.undo_stack == []
+assert saved_scene.save_state() is saved_scene
+assert len(saved_scene.undo_stack) == 1
+assert isinstance(saved_scene.undo_stack[0], scene_module.SceneState)
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()

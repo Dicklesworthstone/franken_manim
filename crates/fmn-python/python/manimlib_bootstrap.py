@@ -11961,6 +11961,10 @@ class Scene(_SceneCore):
     def get_state(self):
         return SceneState(self)
 
+    def save_state(self):
+        self.undo_stack.append(self.get_state())
+        return self
+
     def restore_state(self, scene_state):
         if not isinstance(scene_state, SceneState):
             raise TypeError("restore_state expects a SceneState")
