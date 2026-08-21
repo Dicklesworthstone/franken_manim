@@ -10704,13 +10704,14 @@ class FocusOn(Transform):
         **kwargs,
     ):
         if isinstance(focus_point, _BridgeMobject):
-            # fm-5wq.4.77: a Mobject focus point follows live. The native
-            # focus_on segment shrinks toward the construction-time
-            # centre; the scene-updater phase runs AFTER each frame's
-            # segment interpolation (the six-step order), so a follow
-            # updater on the shrinking dot re-centres it on the live
-            # target every frame — the Reference's move_to updater, on
-            # the on-screen dot instead of the detached target.
+            # fm-5wq.4.77: a Mobject focus point follows live. The follow
+            # case is Python-driven end to end (the instance drops its
+            # native kind, so Scene.play routes it through the 4.97
+            # python-callback slot): each frame rebuilds the shrinking
+            # dot at the target's CURRENT centre via become — the
+            # Reference's move_to updater semantics, with the radius and
+            # opacity lerp inlined — so co-playing with the target's own
+            # .animate stays an ordinary mixed play.
             self._focus_target = focus_point
             self.focus_point = _np.array(_vec3(focus_point.get_center()))
         else:
@@ -10732,9 +10733,35 @@ class FocusOn(Transform):
             **kwargs,
         )
         if self._focus_target is not None:
-            self.mobject.add_updater(
-                lambda dot: dot.move_to(self._focus_target)
+            self._native_kind = None
+            # The python-callback slot floats these; the native spec path
+            # tolerates None but the callback path must not crash on it.
+            if self.rate_func is None:
+                self.rate_func = getattr(
+                    _FMN_ROOT, "smooth", lambda value: value
+                )
+            if self.lag_ratio is None:
+                self.lag_ratio = 0.0
+
+    def begin(self):
+        if self._focus_target is None:
+            return super().begin()
+        self.interpolate(0.0)
+
+    def interpolate_mobject(self, alpha):
+        if self._focus_target is None:
+            return super().interpolate_mobject(alpha)
+        rated = self.rate_func(self.time_spanned_alpha(float(alpha)))
+        radius = (1.0 - rated) * (_FRAME_X_RADIUS + _FRAME_Y_RADIUS)
+        self.mobject.become(
+            Dot(
+                self._focus_target.get_center(),
+                radius=max(radius, 0.0),
+                stroke_width=0,
+                fill_color=self.color,
+                fill_opacity=rated * self.opacity,
             )
+        )
 
     def create_target(self):
         return Dot(
