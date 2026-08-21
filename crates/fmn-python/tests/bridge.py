@@ -12602,3 +12602,42 @@ three_dimensions_module = importlib.import_module(
 )
 assert not hasattr(three_dimensions_module, "Icosahedron")
 assert hasattr(three_dimensions_module, "Dodecahedron")
+
+
+# ------------------------------------------------ Tetrahedron kwargs
+# fm-5wq.4.128: ecosystem-compat regular tetrahedron over four native
+# Polygon faces; kwargs route through the shared VGroup3D split, and
+# unknown keys stay its named refusal.
+
+tetra_module = importlib.import_module("manimlib.mobject.three_dimensions")
+tetra = tetra_module.Tetrahedron(edge_length=2.0)
+assert len(tetra.submobjects) == 4
+assert all(face.has_points() for face in tetra.submobjects)
+# Every face is equilateral with the requested edge.
+tetra_first_points = tetra.submobjects[0].get_start_anchors()
+tetra_edge = np.linalg.norm(tetra_first_points[0] - tetra_first_points[1])
+assert np.isclose(tetra_edge, 2.0, atol=1e-9)
+# Style and 3D-config kwargs route: fill, shading, and depth test.
+tetra_styled = tetra_module.Tetrahedron(
+    edge_length=1.0,
+    fill_color=manimlib.RED,
+    fill_opacity=0.5,
+    shading=(0.1, 0.2, 0.3),
+    depth_test=False,
+)
+assert np.isclose(tetra_styled.submobjects[0].get_fill_opacity(), 0.5)
+
+# Named refusals: an unknown kwarg, and a non-positive edge.
+try:
+    tetra_module.Tetrahedron(bogus=True)
+except NotImplementedError as error:
+    assert "bogus" in str(error)
+else:
+    raise AssertionError("Tetrahedron silently dropped bogus")
+
+try:
+    tetra_module.Tetrahedron(edge_length=0.0)
+except ValueError as error:
+    assert "positive finite" in str(error)
+else:
+    raise AssertionError("Tetrahedron accepted a zero edge")

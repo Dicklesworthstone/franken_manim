@@ -8195,6 +8195,61 @@ class VPrism(VCube):
         _apply_vgroup3d_config(self, depth_test, shading, joint_type)
 
 
+class Tetrahedron(VGroup3D):
+    """The regular tetrahedron under the wider manim ecosystem's spelling
+    (fm-5wq.4.128) — not a pinned-Reference class (three_dimensions.py has
+    only Dodecahedron among the polyhedra), the same provenance posture as
+    Delay/AddTextLetterByLetter. Four native Polygon faces on the
+    even-parity (±1, ±1, ±1) corners scaled to the requested edge, styled
+    and depth-tested through the shared VGroup3D config path; unknown
+    kwargs stay _split_native_vgroup3d_kwargs' named refusal."""
+
+    def __init__(
+        self,
+        edge_length=2.0,
+        fill_color=_BLUE_E,
+        fill_opacity=1,
+        stroke_color=_BLUE_E,
+        stroke_width=1,
+        **kwargs,
+    ):
+        edge_length = float(edge_length)
+        if not (edge_length > 0.0 and _math.isfinite(edge_length)):
+            raise ValueError(
+                "Tetrahedron edge_length must be a positive finite "
+                "length; got " + repr(edge_length)
+            )
+        style, depth_test, shading, joint_type = (
+            _split_native_vgroup3d_kwargs(
+                "Tetrahedron()", kwargs, (0.2, 0.2, 0.2)
+            )
+        )
+        unit = edge_length / (2.0 * _math.sqrt(2.0))
+        corners = (
+            (unit, unit, unit),
+            (unit, -unit, -unit),
+            (-unit, unit, -unit),
+            (-unit, -unit, unit),
+        )
+        faces = [
+            Polygon(corners[0], corners[1], corners[2]),
+            Polygon(corners[0], corners[1], corners[3]),
+            Polygon(corners[0], corners[2], corners[3]),
+            Polygon(corners[1], corners[2], corners[3]),
+        ]
+        super().__init__(
+            *faces,
+            depth_test=depth_test,
+            shading=shading,
+            joint_type=joint_type,
+        )
+        style.setdefault("fill_color", fill_color)
+        style.setdefault("fill_opacity", fill_opacity)
+        style.setdefault("stroke_color", stroke_color)
+        style.setdefault("stroke_width", stroke_width)
+        _apply_vmobject_style_kwargs(self, style)
+
+
 class Dodecahedron(VGroup3D):
     def __init__(
         self,
@@ -12484,6 +12539,7 @@ def _install_schema_surface():
         ("manimlib.mobject.three_dimensions", "VCube"): VCube,
         ("manimlib.mobject.three_dimensions", "VPrism"): VPrism,
         ("manimlib.mobject.three_dimensions", "Dodecahedron"): Dodecahedron,
+        ("manimlib.mobject.three_dimensions", "Tetrahedron"): Tetrahedron,
         ("manimlib.mobject.three_dimensions", "Prismify"): Prismify,
         ("manimlib.mobject.three_dimensions", "SurfaceMesh"): SurfaceMesh,
         ("manimlib.mobject.geometry", "Elbow"): Elbow,
