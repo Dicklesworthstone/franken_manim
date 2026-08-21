@@ -10924,6 +10924,29 @@ class Textbox(ControlMobject):
         self.box.become(box)
         return False
 
+    def on_key_press(self, mob, event_data):
+        # PygletWindowKeys is a refused leak; these are pyglet.window.key.
+        symbol = int(event_data["symbol"])
+        modifiers = int(event_data["modifiers"])
+        char = chr(symbol)
+        if not mob.isActive:
+            return None
+        old_value = mob.get_value()
+        new_value = old_value
+        if char.isalnum():
+            if (modifiers & 1) or (modifiers & 8):
+                new_value = old_value + char.upper()
+            else:
+                new_value = old_value + char.lower()
+        elif symbol == 0x020:
+            new_value = old_value + char
+        elif symbol == 0xFF09:
+            new_value = old_value + "\t"
+        elif symbol == 0xFF08:
+            new_value = old_value[:-1] or ""
+        mob.set_value(new_value)
+        return False
+
 
 class ControlPanel(Group):
     """Atlas's native GREY_C panel, opener tab, and controls column."""

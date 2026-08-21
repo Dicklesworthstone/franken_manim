@@ -2957,6 +2957,40 @@ assert textbox.box_on_mouse_press(
 ) is False
 assert textbox.isActive is True
 assert textbox.box.get_stroke_color() == manimlib.BLUE
+assert str(inspect.signature(interactive.Textbox.on_key_press)) == (
+    "(self, mob, event_data)"
+)
+assert textbox.on_key_press(
+    textbox, {"symbol": ord("a"), "modifiers": 0}
+) is False
+assert textbox.get_value() == "committeda"
+assert textbox.text is textbox_text
+assert textbox.on_key_press(
+    textbox, {"symbol": ord("b"), "modifiers": 1}
+) is False
+assert textbox.get_value() == "committedaB"
+assert textbox.on_key_press(
+    textbox, {"symbol": 0x020, "modifiers": 0}
+) is False
+assert textbox.get_value() == "committedaB "
+assert textbox.on_key_press(
+    textbox, {"symbol": 0xFF09, "modifiers": 0}
+) is False
+assert textbox.get_value() == "committedaB \t"
+assert textbox.on_key_press(
+    textbox, {"symbol": 0xFF08, "modifiers": 0}
+) is False
+assert textbox.get_value() == "committedaB "
+assert textbox.box_on_mouse_press(
+    textbox.box, {"point": np.zeros(3)}
+) is False
+assert textbox.isActive is False
+assert textbox.on_key_press(
+    textbox, {"symbol": ord("x"), "modifiers": 0}
+) is None
+assert textbox.get_value() == "committedaB "
+assert textbox.box is textbox_box
+assert textbox.text is textbox_text
 
 styled_textbox = interactive.Textbox(
     "hi",
