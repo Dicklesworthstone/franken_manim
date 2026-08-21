@@ -2326,6 +2326,40 @@ assert np.allclose(native_cubic.get_points()[-1], [2.0, 0.0, 0.0])
 assert native_cubic.get_stroke_color() == manimlib.BLUE
 assert np.isclose(native_cubic.get_stroke_width(), 2.5)
 
+# fm-5wq.4.140: the remaining VMobject kwargs route through the shared
+# native style pass after the cubic control points have been built.
+styled_cubic = geometry.CubicBezier(
+    (-1.0, 0.0, 0.0),
+    (-0.5, 1.0, 0.0),
+    (0.5, 1.0, 0.0),
+    (1.0, 0.0, 0.0),
+    fill_color=manimlib.RED,
+    fill_opacity=0.35,
+    stroke_color=manimlib.GREEN,
+    stroke_opacity=0.6,
+    stroke_width=3.25,
+    flat_stroke=True,
+)
+assert styled_cubic.get_fill_color() == manimlib.RED
+assert np.isclose(styled_cubic.get_fill_opacity(), 0.35)
+assert styled_cubic.get_stroke_color() == manimlib.GREEN
+assert np.isclose(styled_cubic.get_stroke_opacity(), 0.6)
+assert np.isclose(styled_cubic.get_stroke_width(), 3.25)
+assert styled_cubic.get_flat_stroke() is True
+
+try:
+    geometry.CubicBezier(
+        (-1.0, 0.0, 0.0),
+        (-0.5, 1.0, 0.0),
+        (0.5, 1.0, 0.0),
+        (1.0, 0.0, 0.0),
+        wobble_amount=1,
+    )
+except TypeError as error:
+    assert "wobble_amount" in str(error), error
+else:
+    raise AssertionError("CubicBezier silently ignored an unknown keyword")
+
 failed_cubic = geometry.CubicBezier.__new__(geometry.CubicBezier)
 try:
     geometry.CubicBezier.__init__(
