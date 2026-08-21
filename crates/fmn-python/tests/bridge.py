@@ -8411,6 +8411,9 @@ assert tuple(inspect.signature(matrix_module.IntegerMatrix).parameters) == (
 assert tuple(inspect.signature(matrix_module.TexMatrix).parameters) == (
     "matrix", "tex_config", "config"
 )
+assert tuple(inspect.signature(matrix_module.Matrix.element_to_mobject).parameters) == (
+    "self", "element"
+)
 
 integer_tex_matrix = matrix_module.Matrix(
     [[1, 22], [333, 4]],
@@ -8489,6 +8492,35 @@ assert np.isclose(first_float_entry.get_value(), 9.5)
 assert np.allclose(
     first_float_entry.get_edge_center(manimlib.LEFT), first_float_edge, atol=1e-6
 )
+mapped_tex_entry = integer_tex_matrix.element_to_mobject(0)
+assert isinstance(mapped_tex_entry, manimlib.Tex)
+assert mapped_tex_entry.get_tex() == "0"
+assert mapped_tex_entry.family_members_with_points()
+assert all(
+    member.get_fill_color() == manimlib.BLUE
+    for member in mapped_tex_entry.family_members_with_points()
+)
+mapped_decimal_entry = float_matrix.element_to_mobject(7.25)
+assert isinstance(mapped_decimal_entry, manimlib.DecimalNumber)
+assert mapped_decimal_entry.get_value() == 7.25
+assert mapped_decimal_entry.family_members_with_points()
+passthrough_entry = manimlib.Circle()
+assert integer_tex_matrix.element_to_mobject(passthrough_entry) is passthrough_entry
+try:
+    integer_tex_matrix.element_to_mobject(1 + 2j)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Matrix.element_to_mobject complex entries await the native "
+        "complex entry factory"
+    )
+else:
+    raise AssertionError("Matrix.element_to_mobject accepted a complex entry")
+try:
+    matrix_module.Matrix.element_to_mobject(object(), 0)
+except TypeError as error:
+    assert str(error) == "Matrix.element_to_mobject requires a Matrix instance"
+else:
+    raise AssertionError("Matrix.element_to_mobject accepted a non-Matrix self")
 mixed_matrix = matrix_module.Matrix(
     [[1.25, "x"], [2, 3.5]],
     element_config=dict(num_decimal_places=1, font_size=30),

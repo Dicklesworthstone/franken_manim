@@ -6198,6 +6198,11 @@ def _initialize_scalar_matrix(
     ]
     matrix._matrix_kind = kind
     matrix._matrix_shape = (n_rows, n_cols)
+    matrix._matrix_entry_font_size = float(font_size)
+    matrix._matrix_decimal_places = (
+        2 if decimal_places is None else int(decimal_places)
+    )
+    matrix._matrix_entry_style = dict(entry_style)
     return matrix
 
 
@@ -6293,11 +6298,32 @@ class Matrix(VMobject):
             "grid engine; use Matrix(...)"
         )
 
-    def element_to_mobject(self, *args, **kwargs):
-        del args, kwargs
-        raise NotImplementedError(
-            "Matrix.element_to_mobject outside construction awaits the native "
-            "heterogeneous entry-transfer seam"
+    def element_to_mobject(self, element):
+        if not isinstance(self, Matrix):
+            raise TypeError(
+                "Matrix.element_to_mobject requires a Matrix instance"
+            )
+        if isinstance(element, complex):
+            raise NotImplementedError(
+                "Matrix.element_to_mobject complex entries await the native "
+                "complex entry factory"
+            )
+        if isinstance(element, VMobject):
+            return element
+        style = dict(self._matrix_entry_style)
+        if isinstance(element, (float, _np.floating)) and not isinstance(
+            element, bool
+        ):
+            return DecimalNumber(
+                float(element),
+                num_decimal_places=self._matrix_decimal_places,
+                font_size=self._matrix_entry_font_size,
+                **style,
+            )
+        return Tex(
+            str(element),
+            font_size=self._matrix_entry_font_size,
+            **style,
         )
 
     def create_brackets(self, *args, **kwargs):
