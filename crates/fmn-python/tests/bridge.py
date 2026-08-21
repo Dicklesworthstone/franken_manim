@@ -1573,6 +1573,101 @@ assert np.allclose(redo_circle.get_center(), redo_moved_center)
 assert len(redo_scene.undo_stack) == 1
 assert redo_scene.redo_stack == []
 
+# fm-5wq.4: Scene pointer/scroll/key events are host-free. The pyglet
+# Window is not required to move the native Points, scale the camera
+# frame, or dispatch undo/redo/hold_on_wait/quit. pan_3d/pan stay skipped
+# until Studio binds a key-state adapter.
+assert str(inspect.signature(scene_module.Scene.get_window)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.on_mouse_motion)) == (
+    "(self, point, d_point)"
+)
+assert str(inspect.signature(scene_module.Scene.on_mouse_drag)) == (
+    "(self, point, d_point, buttons, modifiers)"
+)
+assert str(inspect.signature(scene_module.Scene.on_mouse_press)) == (
+    "(self, point, button, mods)"
+)
+assert str(inspect.signature(scene_module.Scene.on_mouse_release)) == (
+    "(self, point, button, mods)"
+)
+assert str(inspect.signature(scene_module.Scene.on_mouse_scroll)) == (
+    "(self, point, offset, x_pixel_offset, y_pixel_offset)"
+)
+assert str(inspect.signature(scene_module.Scene.on_key_press)) == (
+    "(self, symbol, modifiers)"
+)
+assert str(inspect.signature(scene_module.Scene.on_key_release)) == (
+    "(self, symbol, modifiers)"
+)
+assert str(inspect.signature(scene_module.Scene.on_resize)) == (
+    "(self, width, height)"
+)
+assert str(inspect.signature(scene_module.Scene.on_show)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.on_hide)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.on_close)) == "(self)"
+assert scene_module.Scene.pan_sensitivity == 0.5
+assert scene_module.Scene.scroll_sensitivity == 20
+assert scene_module.Scene.drag_to_pan is True
+event_scene = Scene()
+assert event_scene.get_window() is None
+assert event_scene.hold_on_wait is False
+assert event_scene.quit_interaction is False
+assert event_scene.on_mouse_motion([1.0, 2.0, 0.0], [0.1, 0.0, 0.0]) is None
+assert np.allclose(event_scene.mouse_point.get_center(), [1.0, 2.0, 0.0])
+assert np.allclose(event_scene.mouse_drag_point.get_center(), [0.0, 0.0, 0.0])
+assert event_scene.on_mouse_drag([3.0, 4.0, 0.0], [0.0, 0.0, 0.0], 1, 0) is None
+assert np.allclose(event_scene.mouse_drag_point.get_center(), [3.0, 4.0, 0.0])
+assert np.allclose(event_scene.mouse_point.get_center(), [1.0, 2.0, 0.0])
+frame_center = event_scene.frame.get_center().copy()
+assert event_scene.on_mouse_drag(
+    [3.0, 4.0, 0.0], [0.5, -0.25, 0.0], 1, 0
+) is None
+assert np.allclose(
+    event_scene.frame.get_center(),
+    frame_center - np.array([0.5, -0.25, 0.0]),
+)
+assert event_scene.on_mouse_press([-1.0, 0.5, 0.0], 1, 0) is None
+assert np.allclose(event_scene.mouse_drag_point.get_center(), [-1.0, 0.5, 0.0])
+assert event_scene.on_mouse_release(manimlib.ORIGIN, 0, 0) is None
+scroll_width = event_scene.frame.get_width()
+pixel_height = event_scene.camera.get_pixel_height()
+assert pixel_height > 0
+assert event_scene.on_mouse_scroll(
+    manimlib.ORIGIN,
+    [0.0, 1.0, 0.0],
+    0.0,
+    0.01 * pixel_height,
+) is None
+assert np.isclose(
+    event_scene.frame.get_width(),
+    scroll_width * (1.0 - event_scene.scroll_sensitivity * 0.01),
+)
+event_scene.hold_on_wait = True
+assert event_scene.on_key_press(ord(" "), 0) is None
+assert event_scene.hold_on_wait is False
+event_scene.hold_on_wait = True
+assert event_scene.on_key_press(0xFF53, 0) is None  # pyglet RIGHT
+assert event_scene.hold_on_wait is False
+assert event_scene.on_key_press(ord("q"), 2) is None  # pyglet MOD_CTRL
+assert event_scene.quit_interaction is True
+assert event_scene.on_key_release(ord("q"), 2) is None
+assert event_scene.on_resize(640, 480) is None
+assert event_scene.on_show() is None
+assert event_scene.on_hide() is None
+assert event_scene.on_close() is None
+
+undo_key_scene = Scene()
+undo_key_circle = manimlib.Circle()
+undo_key_scene.add(undo_key_circle)
+undo_key_saved = undo_key_circle.get_center().copy()
+undo_key_scene.save_state()
+undo_key_circle.shift([1.0, 0.0, 0.0])
+undo_key_moved = undo_key_circle.get_center().copy()
+assert undo_key_scene.on_key_press(ord("z"), 2) is None  # CTRL-z
+assert np.allclose(undo_key_circle.get_center(), undo_key_saved)
+assert undo_key_scene.on_key_press(ord("z"), 2 | 1) is None  # CTRL|SHIFT-z
+assert np.allclose(undo_key_circle.get_center(), undo_key_moved)
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
