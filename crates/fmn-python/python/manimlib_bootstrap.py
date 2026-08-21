@@ -7300,6 +7300,97 @@ class Clock(VGroup):
         self.add(circle, ticks, self.hour_hand, self.minute_hand)
 
 
+class Speedometer(VMobject):
+    """Arc, tick labels, and needle over native Arc/Line/Integer/Polygon."""
+
+    def __init__(
+        self,
+        arc_angle=4.0 * _math.pi / 3.0,
+        num_ticks=8,
+        tick_length=0.2,
+        needle_width=0.1,
+        needle_height=0.8,
+        needle_color=_YELLOW,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.arc_angle = float(arc_angle)
+        self.num_ticks = _operator.index(num_ticks)
+        self.tick_length = float(tick_length)
+        self.needle_width = float(needle_width)
+        self.needle_height = float(needle_height)
+        self.needle_color = needle_color
+        if not _math.isfinite(self.arc_angle):
+            raise ValueError("Speedometer arc_angle must be finite")
+        if self.num_ticks <= 0:
+            raise ValueError("Speedometer num_ticks must be positive")
+        for name, value in (
+            ("tick_length", self.tick_length),
+            ("needle_width", self.needle_width),
+            ("needle_height", self.needle_height),
+        ):
+            if not _math.isfinite(value) or value <= 0:
+                raise ValueError(
+                    "Speedometer " + name + " must be positive and finite"
+                )
+
+        start_angle = _math.pi / 2.0 + self.arc_angle / 2.0
+        end_angle = _math.pi / 2.0 - self.arc_angle / 2.0
+        self.arc = Arc(start_angle=start_angle, angle=-self.arc_angle)
+        self.add(self.arc)
+        for index, angle in enumerate(
+            _np.linspace(start_angle, end_angle, self.num_ticks)
+        ):
+            vect = _np.array(
+                [_math.cos(angle), _math.sin(angle), 0.0], dtype=float
+            )
+            tick = Line((1.0 - self.tick_length) * vect, vect)
+            label = Integer(10 * index)
+            label.set_height(self.tick_length)
+            label.shift((1.0 + self.tick_length) * vect)
+            self.add(tick, label)
+
+        needle = Polygon(
+            _LEFT,
+            _UP,
+            _RIGHT,
+            stroke_width=0,
+            fill_opacity=1,
+            fill_color=self.needle_color,
+        )
+        needle.stretch_to_fit_width(self.needle_width)
+        needle.stretch_to_fit_height(self.needle_height)
+        needle.rotate(start_angle - _math.pi / 2.0, about_point=_ORIGIN)
+        self.add(needle)
+        self.needle = needle
+        self.center_offset = VMobject.get_center(self)
+
+    def get_center(self):
+        result = VMobject.get_center(self)
+        if hasattr(self, "center_offset"):
+            result = result - self.center_offset
+        return result
+
+    def get_needle_tip(self):
+        return self.needle.get_anchors()[1]
+
+    def get_needle_angle(self):
+        return _BridgeMobject._angle_of_vector(
+            _vec3(self.get_needle_tip() - self.get_center())
+        )
+
+    def rotate_needle(self, angle):
+        self.needle.rotate(float(angle), about_point=self.arc.get_arc_center())
+        return self
+
+    def move_needle_to_velocity(self, velocity):
+        max_velocity = 10.0 * (self.num_ticks - 1)
+        proportion = float(velocity) / max_velocity
+        start_angle = _math.pi / 2.0 + self.arc_angle / 2.0
+        target_angle = start_angle - self.arc_angle * proportion
+        return self.rotate_needle(target_angle - self.get_needle_angle())
+
+
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
@@ -15287,6 +15378,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "Exmark"): Exmark,
         ("manimlib.mobject.svg.drawings", "Clock"): Clock,
         ("manimlib.mobject.svg.drawings", "ClockPassesTime"): ClockPassesTime,
+        ("manimlib.mobject.svg.drawings", "Speedometer"): Speedometer,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (

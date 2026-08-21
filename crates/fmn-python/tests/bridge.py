@@ -4161,6 +4161,58 @@ except TypeError as error:
 else:
     raise AssertionError("ClockPassesTime accepted a non-Clock mobject")
 
+assert drawings.Speedometer.__bases__ == (manimlib.VMobject,)
+assert list(inspect.signature(drawings.Speedometer).parameters) == [
+    "arc_angle",
+    "num_ticks",
+    "tick_length",
+    "needle_width",
+    "needle_height",
+    "needle_color",
+    "kwargs",
+]
+speedometer = drawings.Speedometer()
+assert speedometer.arc is speedometer.submobjects[0]
+assert speedometer.needle is speedometer.submobjects[-1]
+assert speedometer.num_ticks == 8
+assert len(speedometer.submobjects) == 2 + 2 * 8
+assert np.allclose(speedometer.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+start_angle = math.pi / 2.0 + speedometer.arc_angle / 2.0
+end_angle = math.pi / 2.0 - speedometer.arc_angle / 2.0
+tip = speedometer.get_needle_tip() - speedometer.get_center()
+tip = tip / np.linalg.norm(tip)
+assert np.allclose(
+    tip,
+    [math.cos(start_angle), math.sin(start_angle), 0.0],
+    atol=1e-6,
+)
+assert speedometer.move_needle_to_velocity(70.0) is speedometer
+tip = speedometer.get_needle_tip() - speedometer.get_center()
+tip = tip / np.linalg.norm(tip)
+assert np.allclose(
+    tip,
+    [math.cos(end_angle), math.sin(end_angle), 0.0],
+    atol=1e-6,
+)
+custom_speedometer = drawings.Speedometer(
+    arc_angle=math.pi,
+    num_ticks=4,
+    tick_length=0.25,
+    needle_width=0.2,
+    needle_height=0.5,
+    needle_color=manimlib.RED,
+)
+assert custom_speedometer.num_ticks == 4
+assert len(custom_speedometer.submobjects) == 2 + 2 * 4
+assert np.isclose(custom_speedometer.needle.get_width(), 0.2)
+assert custom_speedometer.needle.get_fill_color() == manimlib.RED
+try:
+    drawings.Speedometer(num_ticks=0)
+except ValueError as error:
+    assert "positive" in str(error)
+else:
+    raise AssertionError("Speedometer accepted zero num_ticks")
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.
