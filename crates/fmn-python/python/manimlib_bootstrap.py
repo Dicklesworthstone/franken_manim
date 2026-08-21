@@ -5902,6 +5902,15 @@ class MarkupText(StringMobject):
         return self.get_string()
 
 
+class _Alignment:
+    """Pango alignment token used by MarkupText's Reference canvas."""
+
+    VAL_DICT = {"LEFT": 0, "CENTER": 1, "RIGHT": 2}
+
+    def __init__(self, s):
+        self.value = self.VAL_DICT[str(s).upper()]
+
+
 class Text(MarkupText):
     _native_markup = False
 
@@ -14381,6 +14390,14 @@ def _install_schema_surface():
             "manimlib.mobject.mobject",
             "_AnimationBuilder",
         ): _AnimationBuilder,
+        (
+            "manimlib.mobject.mobject",
+            "_UpdaterBuilder",
+        ): _UpdaterBuilder,
+        (
+            "manimlib.mobject.mobject",
+            "_FunctionalUpdaterBuilder",
+        ): _FunctionalUpdaterBuilder,
         ("manimlib.mobject.mobject", "Mobject"): Mobject,
         ("manimlib.mobject.mobject", "Group"): Group,
         ("manimlib.mobject.mobject", "Point"): Point,
@@ -14559,6 +14576,7 @@ def _install_schema_surface():
         ("manimlib.mobject.coordinate_systems", "ComplexPlane"): ComplexPlane,
         ("manimlib.mobject.svg.text_mobject", "MarkupText"): MarkupText,
         ("manimlib.mobject.svg.text_mobject", "Text"): Text,
+        ("manimlib.mobject.svg.text_mobject", "_Alignment"): _Alignment,
         ("manimlib.mobject.svg.text_mobject", "Code"): Code,
         ("manimlib.mobject.svg.tex_mobject", "Tex"): Tex,
         ("manimlib.mobject.svg.tex_mobject", "TexText"): TexText,

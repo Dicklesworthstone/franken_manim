@@ -3936,6 +3936,18 @@ transform_module = importlib.import_module("manimlib.animation.transform")
 assert manimlib.prepare_animation is animation_module.prepare_animation
 assert manimlib.override_animate is mobject_module.override_animate
 assert mobject_module._AnimationBuilder is type(geometry.Square().animate)
+assert mobject_module._UpdaterBuilder is type(geometry.Square().always)
+assert mobject_module._FunctionalUpdaterBuilder is type(
+    geometry.Square().f_always
+)
+always_dot = geometry.Dot()
+always_dot.always.shift(manimlib.RIGHT)
+assert np.allclose(always_dot.get_center(), manimlib.RIGHT)
+always_dot.update(0.0)
+assert np.allclose(always_dot.get_center(), 2 * manimlib.RIGHT)
+f_always_dot = geometry.Dot()
+f_always_dot.f_always.move_to(lambda: manimlib.UP)
+assert np.allclose(f_always_dot.get_center(), manimlib.UP)
 
 builder_scene = Scene()
 builder_mover = geometry.Rectangle(width=1.0, height=0.5)
@@ -8598,6 +8610,19 @@ assert manimlib.MarkupText.__mro__[:4] == (
     SVGMobject,
     VMobject,
 )
+assert text_module._Alignment.VAL_DICT == {
+    "LEFT": 0,
+    "CENTER": 1,
+    "RIGHT": 2,
+}
+assert str(inspect.signature(text_module._Alignment)) == "(s)"
+assert text_module._Alignment("center").value == 1
+try:
+    text_module._Alignment("bogus")
+except KeyError:
+    pass
+else:
+    raise AssertionError("_Alignment accepted an unknown alignment token")
 
 plain_text = manimlib.Text("café café")
 assert isinstance(plain_text, StringMobject)
