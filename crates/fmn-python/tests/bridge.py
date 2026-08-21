@@ -12927,33 +12927,75 @@ except TypeError as error:
 else:
     raise AssertionError("RoundedRectangle silently dropped bogus")
 
-
-# ------------------------------------- RoundedRectangle leftover kwargs
-# fm-5wq.4.136: the **kwargs surface is the Reference's verbatim flow into
-# the shared style preflight; the Reference docstring's own example
-# spelling works, and unknown keys stay the named refusal.
-
-rr_kw = geometry.RoundedRectangle(
-    width=3.0, height=4.0, corner_radius=1.0, color=manimlib.BLUE
+# fm-5wq.4.138: audit result — Dot has no _refuse_unrouted: point/radius
+# route natively and the four public style values re-route through the
+# ordinary style path with **kwargs, whose preflight names unknown keys.
+# Pinned here: the schema default contract (radius 0.08, black zero-width
+# stroke, white fill at opacity 1, ORIGIN), positional point routing, and
+# Dot's own unknown-kwarg TypeError.
+dot_default = geometry.Dot()
+assert math.isclose(
+    dot_default.get_width(), 0.16, rel_tol=0.0, abs_tol=2e-3
 )
-assert np.allclose([rr_kw.get_width(), rr_kw.get_height()], [3.0, 4.0])
-# The color shorthand reaches both paint channels through the preflight.
-assert rr_kw.get_stroke_color() == manimlib.BLUE
-rr_filled = geometry.RoundedRectangle(
-    width=2.0,
-    height=1.0,
-    corner_radius=0.25,
-    fill_color=manimlib.RED,
-    fill_opacity=0.5,
-    stroke_width=6.0,
+assert np.allclose(dot_default.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+assert np.allclose(dot_default.data["fill_rgba"][:, :3], 1.0)
+assert np.allclose(dot_default.data["fill_rgba"][:, 3], 1.0)
+assert np.allclose(dot_default.data["stroke_width"], 0.0)
+assert np.allclose(dot_default.data["stroke_rgba"][:, :3], 0.0)
+
+dot_positional = geometry.Dot([1.0, -0.5, 0.0], radius=0.2)
+assert np.allclose(dot_positional.get_center(), [1.0, -0.5, 0.0], atol=1e-6)
+assert math.isclose(
+    dot_positional.get_width(), 0.4, rel_tol=0.0, abs_tol=2e-3
 )
-assert np.isclose(rr_filled.get_fill_opacity(), 0.5)
-assert np.isclose(rr_filled.get_stroke_width(), 6.0)
+
+try:
+    geometry.Dot(glow_factor=2)
+except TypeError as error:
+    assert "glow_factor" in str(error), error
+else:
+    raise AssertionError("Dot silently ignored an unknown keyword")
+
+
+# ------------------------------------------------ Line leftover kwargs
+# fm-5wq.4.139: the constructor surface is the Reference's verbatim —
+# buff and path_arc route natively, Mobject endpoints resolve through
+# pointify onto boundaries, style kwargs ride the shared preflight, and
+# unknown keys stay its named refusal.
+
+line_kw_buff = geometry.Line(manimlib.LEFT, manimlib.RIGHT, buff=0.25)
+assert np.isclose(line_kw_buff.get_length(), 1.5)
+line_kw_arc = geometry.Line(
+    manimlib.LEFT, manimlib.RIGHT, path_arc=math.pi / 2.0
+)
+assert line_kw_arc.get_arc_length() > 2.05  # bowed past the straight chord
+line_kw_color = geometry.Line(
+    [1.0, 2.0, 0.0], [-2.0, -3.0, 0.0], color=manimlib.BLUE
+)
+assert line_kw_color.get_stroke_color() == manimlib.BLUE
+
+# Mobject endpoints: the line meets each circle at its boundary, not its
+# centre — pointify hands back the facing boundary point.
+line_kw_a = geometry.Circle(radius=0.5)
+line_kw_a.move_to([-2.0, 0.0, 0.0])
+line_kw_b = geometry.Circle(radius=0.5)
+line_kw_b.move_to([2.0, 0.0, 0.0])
+line_kw_between = geometry.Line(line_kw_a, line_kw_b)
+assert np.isclose(
+    np.linalg.norm(line_kw_between.get_start() - line_kw_a.get_center()),
+    0.5,
+    atol=1e-6,
+)
+assert np.isclose(
+    np.linalg.norm(line_kw_between.get_end() - line_kw_b.get_center()),
+    0.5,
+    atol=1e-6,
+)
 
 # Unknown keywords stay the shared preflight's named refusal.
 try:
-    geometry.RoundedRectangle(bogus=True)
+    geometry.Line(manimlib.LEFT, manimlib.RIGHT, bogus=True)
 except TypeError as error:
     assert "bogus" in str(error)
 else:
-    raise AssertionError("RoundedRectangle silently dropped bogus")
+    raise AssertionError("Line silently dropped bogus")
