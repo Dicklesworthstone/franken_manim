@@ -8585,6 +8585,35 @@ assert text_signature.parameters["path_string_config"].default == {
     "use_simple_quadratic_approx": True
 }
 
+assert text_module.Code.__bases__ == (text_module.MarkupText,)
+assert str(inspect.signature(text_module.Code)) == (
+    "(code, font='Consolas', font_size=24, lsh=1.0, fill_color=None, "
+    "stroke_color=None, language='python', code_style='monokai', **kwargs)"
+)
+native_code = text_module.Code("x = 1")
+assert native_code.get_text() == "x = 1"
+assert native_code.code == "x = 1"
+assert native_code.font == "Consolas"
+assert native_code.font_size == 24
+assert native_code.lsh == 1.0
+assert native_code.language == "python"
+assert native_code.code_style == "monokai"
+assert native_code.get_num_points() > 0
+colored_code = text_module.Code("y", fill_color=manimlib.GREEN)
+assert colored_code.get_fill_color() == manimlib.GREEN
+code_scene = Scene().add(native_code)
+assert native_code._is_bound()
+failed_code = text_module.Code.__new__(text_module.Code)
+try:
+    text_module.Code.__init__(failed_code, "x", language="rust")
+except NotImplementedError as error:
+    assert str(error) == (
+        "Code() keyword(s) not yet routed to the native builder: language"
+    )
+else:
+    raise AssertionError("Code silently accepted an unrouted language")
+assert not hasattr(failed_code, "submobjects")
+
 tex = manimlib.Tex("E = mc^2", isolate=["mc"])
 tex_signature = inspect.signature(manimlib.Tex)
 assert tex_signature.parameters["tex_strings"].annotation == "str"

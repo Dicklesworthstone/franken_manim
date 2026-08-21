@@ -5882,6 +5882,51 @@ class Text(MarkupText):
         )
 
 
+class Code(MarkupText):
+    """The Reference's Code over Scribe MarkupText as literal source.
+
+    Pygments highlighting is not in the governed closure; off-default
+    language / code_style / font / lsh stay named refusals until the fmd
+    highlighter is wired. Default Consolas/monokai attributes are stored
+    while the bundled text face typesets the source.
+    """
+
+    _native_markup = False
+
+    def __init__(
+        self,
+        code,
+        font="Consolas",
+        font_size=24,
+        lsh=1.0,
+        fill_color=None,
+        stroke_color=None,
+        language="python",
+        code_style="monokai",
+        **kwargs,
+    ):
+        _refuse_unrouted(
+            "Code()",
+            [
+                ("font", font != "Consolas"),
+                ("lsh", lsh != 1.0),
+                ("language", language != "python"),
+                ("code_style", code_style != "monokai"),
+            ],
+        )
+        style = dict(kwargs)
+        if fill_color is not None:
+            style["fill_color"] = fill_color
+        if stroke_color is not None:
+            style["stroke_color"] = stroke_color
+        super().__init__(str(code), font_size=font_size, **style)
+        self.code = str(code)
+        self.font = font
+        self.lsh = lsh
+        self.language = language
+        self.code_style = code_style
+
+
 class Tex(StringMobject):
     """The Reference's Tex over fmd-math (fmn-library tex.rs). When a
     source exceeds fmd-math's current tier, the engine's refusal names
@@ -14348,6 +14393,7 @@ def _install_schema_surface():
         ("manimlib.mobject.coordinate_systems", "ComplexPlane"): ComplexPlane,
         ("manimlib.mobject.svg.text_mobject", "MarkupText"): MarkupText,
         ("manimlib.mobject.svg.text_mobject", "Text"): Text,
+        ("manimlib.mobject.svg.text_mobject", "Code"): Code,
         ("manimlib.mobject.svg.tex_mobject", "Tex"): Tex,
         ("manimlib.mobject.svg.tex_mobject", "TexText"): TexText,
         (
