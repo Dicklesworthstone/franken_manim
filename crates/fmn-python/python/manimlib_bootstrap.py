@@ -10955,8 +10955,6 @@ class SceneState:
             raise TypeError("restore_scene expects a Scene")
         if scene is self._scene and self._checkpoint is not None:
             scene._restore_checkpoint_bytes(self._checkpoint)
-            scene.num_plays = self.num_plays
-            return
         restored = [
             mobject.become(copy, match_updaters=True)
             for mobject, copy in self.mobjects_to_copies.items()
