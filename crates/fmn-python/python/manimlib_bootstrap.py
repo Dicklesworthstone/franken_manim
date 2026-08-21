@@ -8030,6 +8030,7 @@ class Cube(SGroup):
         **kwargs,
     ):
         depth_test = kwargs.pop("depth_test", True)
+        z_index = int(kwargs.pop("z_index", 0))
         _refuse_unrouted(
             type(self).__name__ + "()",
             [(name, True) for name in sorted(kwargs)],
@@ -8044,6 +8045,7 @@ class Cube(SGroup):
             _native_surface_shell_factory,
             float(side_length),
             self.resolution,
+            z_index,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)

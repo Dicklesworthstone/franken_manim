@@ -3682,9 +3682,12 @@ impl BridgeMobject {
         factory: &Bound<'py, PyAny>,
         side_length: f64,
         square_resolution: (usize, usize),
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
         let cube = fmn_library::Cube::new(side_length)
-            .square_resolution(square_resolution.0, square_resolution.1);
+            .square_resolution(square_resolution.0, square_resolution.1)
+            .build()
+            .with_z_index(z_index);
         install_native_tree(slf, factory, cube)
     }
 

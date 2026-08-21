@@ -8395,6 +8395,11 @@ dense_cube = three_dimensions.Cube(square_resolution=(3, 4))
 assert dense_cube.resolution == (3, 4)
 assert all(face.n_records() == 3 * 4 for face in dense_cube.submobjects)
 
+back_cube = three_dimensions.Cube(z_index=-1)
+front_cube = three_dimensions.Cube(z_index=1)
+cube_order_scene = Scene().add(front_cube, back_cube)
+assert cube_order_scene.get_mobjects() == [back_cube, front_cube]
+
 failed_cube = three_dimensions.Cube.__new__(three_dimensions.Cube)
 try:
     three_dimensions.Cube.__init__(failed_cube, bogus=True)
