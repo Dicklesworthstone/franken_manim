@@ -6966,8 +6966,12 @@ fn build_native_animation(
     let is_composition = matches!(
         spec.kind.as_str(),
         "animation_group"
+            | "broadcast"
             | "flash"
+            | "flashy_fade_in"
             | "lagged_start"
+            | "show_creation_then_destruction_around"
+            | "show_creation_then_fade_around"
             | "show_creation_then_fade_out"
             | "succession"
             | "transform_matching_strings"
@@ -7021,6 +7025,33 @@ fn build_native_animation(
                 )
                 .map_err(anim_error)?,
             )
+        }
+        "broadcast"
+        | "flashy_fade_in"
+        | "show_creation_then_destruction_around"
+        | "show_creation_then_fade_around" => {
+            let mut members = Vec::with_capacity(spec.members.len());
+            for member in spec.members {
+                members.push(build_native_animation(stage, member)?);
+            }
+            let name = match spec.kind.as_str() {
+                "broadcast" => "Broadcast",
+                "flashy_fade_in" => "FlashyFadeIn",
+                "show_creation_then_destruction_around" => {
+                    "ShowCreationThenDestructionAround"
+                }
+                "show_creation_then_fade_around" => "ShowCreationThenFadeAround",
+                _ => unreachable!(),
+            };
+            let mut group = fmn_anim::AnimationGroup::with_lag_ratio(
+                stage,
+                members,
+                spec.group_lag,
+            )
+            .map_err(anim_error)?
+            .with_name(name);
+            fmn_anim::Animation::state_mut(&mut group).config.remover = spec.remover;
+            Box::new(group)
         }
         "transform_matching_tex" | "transform_matching_strings" => {
             let members = fmn_anim::transform_matching_keys(
@@ -7087,6 +7118,14 @@ fn build_native_animation(
             need_mob(spec.mob)?,
             spec.surface_resolution,
             spec.surface_axis,
+        )),
+        "maintain_position_relative_to" => Box::new(fmn_anim::MaintainPositionRelativeTo::new(
+            // fm-5wq.4.62: update.py:53 — the construction-time offset is
+            // captured here, at spec build, exactly the Reference's
+            // `self.diff = mobject.get_center() - tracked.get_center()`.
+            stage,
+            need_mob(spec.mob)?,
+            need_target(spec.target)?,
         )),
         "show_increasing_subsets" | "show_submobjects_one_by_one" => {
             // fm-5wq.4.58: Choreo's subset reveal. The constructors seed
@@ -7262,6 +7301,9 @@ fn build_native_animation(
             if spec.path_arc != 0.0 {
                 restore = restore.with_path_arc(spec.path_arc, spec.path_arc_axis);
             }
+            fmn_anim::Animation::state_mut(&mut restore)
+                .config
+                .remover = spec.remover;
             Box::new(restore)
         }
         other => {

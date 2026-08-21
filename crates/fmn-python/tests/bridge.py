@@ -3557,6 +3557,98 @@ for moving_target_type, moving_target in (
             f"{moving_target_type.__name__} silently froze a moving Mobject target"
         )
 
+# Specialized Broadcast and the final composition-backed indication leaves
+# are ordinary native compositions: LaggedStart/Restore for expanding rings,
+# FadeIn plus a passing outline for FlashyFadeIn, and surrounding-rectangle
+# creation/fade compositions that keep tracking their target.
+specialized = importlib.import_module("manimlib.animation.specialized")
+assert specialized.Broadcast.__bases__ == (manimlib.LaggedStart,)
+assert indication.FlashyFadeIn.__bases__ == (manimlib.AnimationGroup,)
+assert indication.AnimationOnSurroundingRectangle.__bases__ == (
+    manimlib.AnimationGroup,
+)
+assert indication.ShowCreationThenDestructionAround.__bases__ == (
+    indication.AnimationOnSurroundingRectangle,
+)
+assert indication.ShowCreationThenFadeAround.__bases__ == (
+    indication.AnimationOnSurroundingRectangle,
+)
+
+broadcast_focus = geometry.Dot([1.0, -0.5, 0.0])
+broadcast_scene = Scene()
+broadcast_scene.add(broadcast_focus)
+broadcast = specialized.Broadcast(
+    broadcast_focus,
+    small_radius=0.05,
+    big_radius=1.5,
+    n_circles=3,
+    start_stroke_width=6.0,
+    color=manimlib.BLUE,
+    run_time=2.0 / 30.0,
+    lag_ratio=0.2,
+)
+assert len(broadcast.circles) == 3
+assert all(circle.saved_state is not None for circle in broadcast.circles)
+broadcast_scene.play(broadcast, rate_func=manimlib.linear)
+assert broadcast_focus in broadcast_scene.get_mobjects()
+assert all(
+    circle not in broadcast_scene.get_mobjects()
+    for circle in broadcast.circles
+)
+
+flashy_mobject = geometry.Square().set_fill(manimlib.BLUE, opacity=1.0)
+flashy_scene = Scene()
+flashy = indication.FlashyFadeIn(
+    flashy_mobject,
+    stroke_width=5.0,
+    fade_lag=0.25,
+    time_width=0.6,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(flashy.outline.data["fill_rgba"][:, 3], 0.0)
+flashy_scene.play(flashy)
+assert flashy_mobject in flashy_scene.get_mobjects()
+assert flashy.outline not in flashy_scene.get_mobjects()
+
+destruction_target = geometry.Rectangle(width=2.0, height=1.0)
+destruction_around_scene = Scene()
+destruction_around_scene.add(destruction_target)
+destruction_around = indication.ShowCreationThenDestructionAround(
+    destruction_target,
+    stroke_width=4.0,
+    stroke_color=manimlib.GREEN,
+    buff=0.2,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+destruction_around_scene.play(destruction_around)
+assert destruction_target in destruction_around_scene.get_mobjects()
+assert destruction_around.rectangle not in destruction_around_scene.get_mobjects()
+
+fade_around_target = geometry.Square()
+fade_around_scene = Scene()
+fade_around_scene.add(fade_around_target)
+fade_around = indication.ShowCreationThenFadeAround(
+    fade_around_target,
+    stroke_width=3.0,
+    stroke_color=manimlib.YELLOW,
+    buff=0.15,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+fade_around_scene.play(fade_around)
+assert fade_around_target in fade_around_scene.get_mobjects()
+assert fade_around.rectangle not in fade_around_scene.get_mobjects()
+
+try:
+    specialized.Broadcast(None)
+except TypeError as error:
+    assert "manimlib.animation.specialized.Broadcast" in str(error)
+    assert "NoneType" in str(error)
+else:
+    raise AssertionError("Broadcast accepted None")
+
 # Restore is a Transform onto Marionette's saved-state copy, so its standard
 # path-arc parameters route through the same native path function.
 restore_scene = Scene()
