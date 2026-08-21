@@ -2651,6 +2651,14 @@ stroked_checkbox.toggle_value()
 assert stroked_checkbox.box_content is stroked_content
 assert np.isclose(stroked_checkbox.box_content.get_stroke_width(), 4.0)
 assert stroked_checkbox.box_content.get_fill_color() == manimlib.RED
+assert str(inspect.signature(interactive.Checkbox.get_checkmark)) == "(self)"
+assert str(inspect.signature(interactive.Checkbox.get_cross)) == "(self)"
+native_check = checkbox_true.get_checkmark()
+native_cross = checkbox_true.get_cross()
+assert native_check is not checkbox_true.box_content
+assert native_cross is not checkbox_true.box_content
+assert len(native_check.get_points()) == checked_points
+assert len(native_cross.get_points()) == crossed_points
 
 # EnableDisableButton is a one-box native control on the same real tracker
 # base. Construction preserves the Reference's default-white quirk; the first
@@ -2888,6 +2896,26 @@ assert np.isclose(
     0.5,
 )
 
+custom_color_sliders = interactive.ColorSliders(
+    default_rgb_value=64,
+    default_a_value=0.4,
+)
+assert np.allclose(
+    custom_color_sliders.get_value(),
+    [64.0 / 255.0, 64.0 / 255.0, 64.0 / 255.0, 0.4],
+)
+assert np.allclose(
+    manimlib.color_to_rgb(
+        custom_color_sliders.selected_color_box.get_fill_color()
+    ),
+    [64.0 / 255.0, 64.0 / 255.0, 64.0 / 255.0],
+    atol=1.0 / 255.0,
+)
+assert np.isclose(
+    custom_color_sliders.selected_color_box.get_fill_opacity(),
+    0.4,
+)
+
 failed_color_sliders = interactive.ColorSliders.__new__(
     interactive.ColorSliders
 )
@@ -2973,6 +3001,15 @@ assert textbox.box.get_stroke_color() == manimlib.RED
 assert textbox.box_on_mouse_press(
     textbox.box, {"point": np.zeros(3)}
 ) is False
+assert textbox.isActive is True
+assert textbox.box.get_stroke_color() == manimlib.BLUE
+assert str(inspect.signature(interactive.Textbox.active_anim)) == (
+    "(self, isActive)"
+)
+textbox.active_anim(False)
+assert textbox.isActive is True
+assert textbox.box.get_stroke_color() == manimlib.RED
+textbox.active_anim(True)
 assert textbox.isActive is True
 assert textbox.box.get_stroke_color() == manimlib.BLUE
 assert str(inspect.signature(interactive.Textbox.on_key_press)) == (

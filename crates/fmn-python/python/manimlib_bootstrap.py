@@ -10445,10 +10445,17 @@ class Checkbox(ControlMobject):
         if not isinstance(value, bool):
             raise AssertionError("Checkbox value must be bool")
 
+    def get_checkmark(self):
+        _, content = self._native_checkbox_parts(True)
+        return content
+
+    def get_cross(self):
+        _, content = self._native_checkbox_parts(False)
+        return content
+
     def set_value_anim(self, value):
-        box, content = self._native_checkbox_parts(value)
-        self.box.become(box)
-        self.box_content.become(content)
+        mark = self.get_checkmark() if value else self.get_cross()
+        self.box_content.become(mark)
 
     def toggle_value(self):
         self.set_value(not bool(self.get_value()))
@@ -10731,10 +10738,6 @@ class ColorSliders(Group):
         self.sliders_buff = float(sliders_buff)
         self.default_rgb_value = float(default_rgb_value)
         self.default_a_value = float(default_a_value)
-        if self.default_rgb_value != 255.0 or self.default_a_value != 1.0:
-            raise NotImplementedError(
-                "ColorSliders custom default values are not routed to the native builder"
-            )
         self._color_slider_components = (
             self.default_rgb_value,
             self.default_rgb_value,
@@ -10743,7 +10746,10 @@ class ColorSliders(Group):
         )
         swatch, sliders = self._native_color_slider_parts(
             self._color_slider_components,
-            apply_value=False,
+            apply_value=(
+                self.default_rgb_value != 255.0
+                or self.default_a_value != 1.0
+            ),
         )
         super().__init__(swatch, sliders)
         self.swatch = swatch
@@ -10921,11 +10927,17 @@ class Textbox(ControlMobject):
         )
         self.text.become(candidate)
 
+    def active_anim(self, isActive):
+        was = self.isActive
+        self.isActive = bool(isActive)
+        box, _ = self._native_textbox_parts(self._textbox_value, None)
+        self.box.become(box)
+        self.isActive = was
+
     def box_on_mouse_press(self, mob, event_data):
         del mob, event_data
         self.isActive = not self.isActive
-        box, _ = self._native_textbox_parts(self._textbox_value, None)
-        self.box.become(box)
+        self.active_anim(self.isActive)
         return False
 
     def on_key_press(self, mob, event_data):
