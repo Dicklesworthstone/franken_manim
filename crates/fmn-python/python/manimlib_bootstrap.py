@@ -12195,6 +12195,39 @@ class Scene(_SceneCore):
             _color_to_rgba(background_color, background_opacity)
         )
 
+    def is_window_closing(self):
+        window = self.get_window()
+        return bool(window) and (
+            bool(getattr(window, "is_closing", False)) or self.quit_interaction
+        )
+
+    def interact(self):
+        # Reference interact is a pyglet event loop. Headless scenes return;
+        # a bound window is Studio-owned and must not hang this process.
+        if self.get_window() is None:
+            return
+        raise _CapabilityError(
+            "Scene.interact requires a host window; "
+            "FrankenManim Studio owns interactive windows"
+        )
+
+    def embed(self, close_scene_on_exit=True, show_animation_progress=False):
+        del close_scene_on_exit, show_animation_progress
+        if self.get_window() is None:
+            return
+        raise _CapabilityError(
+            "Scene.embed requires a host window; "
+            "FrankenManim Studio owns interactive windows"
+        )
+
+    def set_floor_plane(self, plane="xy"):
+        if plane == "xy":
+            self.frame.set_euler_axes("zxz")
+        elif plane == "xz":
+            self.frame.set_euler_axes("zxy")
+        else:
+            raise Exception("Only `xz` and `xy` are valid floor planes")
+
 
 def _mobject_looks_identical(mobject, other):
     if type(mobject) is not type(other):

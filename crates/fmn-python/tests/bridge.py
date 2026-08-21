@@ -1687,6 +1687,47 @@ assert not np.allclose(reset_scene.frame.get_center(), [0.0, 0.0, 0.0])
 assert reset_scene.on_key_press(ord("r"), 0) is None
 assert np.allclose(reset_scene.frame.get_center(), [0.0, 0.0, 0.0], atol=1e-5)
 
+# fm-5wq.4: Scene.embed/interact are no-ops without a pyglet window;
+# is_window_closing stays false until quit_interaction and a host window
+# both exist; set_floor_plane routes xy/xz onto native euler axes.
+assert str(inspect.signature(scene_module.Scene.interact)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.embed)) == (
+    "(self, close_scene_on_exit=True, show_animation_progress=False)"
+)
+assert str(inspect.signature(scene_module.Scene.is_window_closing)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.set_floor_plane)) == (
+    "(self, plane='xy')"
+)
+assert event_scene.interact() is None
+assert event_scene.embed() is None
+assert event_scene.is_window_closing() is False
+event_scene.quit_interaction = True
+assert event_scene.is_window_closing() is False
+event_scene.quit_interaction = False
+assert event_scene.set_floor_plane() is None
+assert event_scene.frame._core.euler_axes() == "zxz"
+assert event_scene.set_floor_plane("xz") is None
+assert event_scene.frame._core.euler_axes() == "zxy"
+try:
+    event_scene.set_floor_plane("yz")
+except Exception as error:
+    assert str(error) == "Only `xz` and `xy` are valid floor planes"
+else:
+    raise AssertionError("set_floor_plane accepted a non-xy/xz plane")
+windowed_scene = Scene(window=object())
+try:
+    windowed_scene.interact()
+except bridge_errors.CapabilityError as error:
+    assert "Studio owns interactive windows" in str(error)
+else:
+    raise AssertionError("interact entered a host window loop")
+try:
+    windowed_scene.embed()
+except bridge_errors.CapabilityError as error:
+    assert "Studio owns interactive windows" in str(error)
+else:
+    raise AssertionError("embed launched a host IPython session")
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
