@@ -2861,7 +2861,9 @@ mod tests {
         stage
             .add_to_scene(cursor)
             .unwrap_or_else(|e| std::panic::panic_any(format!("root: {e}")));
-        let tail = TracingTail::new()
+        let default_tail = TracingTail::new();
+        assert_eq!(default_tail.prefill, 15);
+        let tail = default_tail
             .add_to_stage(&mut stage, cursor)
             .unwrap_or_else(|e| std::panic::panic_any(format!("tail: {e}")));
         stage
@@ -2881,17 +2883,21 @@ mod tests {
 
         let custom_tail = TracingTail::new()
             .with_time_per_anchor(1.0 / 30.0)
-            .unwrap_or_else(|error| std::panic::panic_any(format!("cadence: {error}")))
+            .unwrap_or_else(|error| std::panic::panic_any(format!("cadence: {error}")));
+        assert_eq!(custom_tail.prefill, 30);
+        let custom_tail = custom_tail
             .add_to_stage(&mut stage, cursor)
             .unwrap_or_else(|error| std::panic::panic_any(format!("custom tail: {error}")));
         let custom_points = stage
             .get_points(custom_tail)
             .unwrap_or_else(|| std::panic::panic_any("custom tail points"));
         assert_eq!(custom_points.len(), 59);
-        assert!(matches!(
-            TracingTail::new().with_time_per_anchor(0.0),
-            Err(FieldError::NonFiniteControl { .. })
-        ));
+        for cadence in [0.0, -1.0, f64::NAN] {
+            assert!(matches!(
+                TracingTail::new().with_time_per_anchor(cadence),
+                Err(FieldError::NonFiniteControl { .. })
+            ));
+        }
         assert!(!classify_wait(&stage, false).is_pure());
     }
 
