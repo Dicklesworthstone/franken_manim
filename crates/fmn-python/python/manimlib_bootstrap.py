@@ -7637,8 +7637,14 @@ class AnimatedStreamLines(VGroup):
             run_time = self._line_run_times[index]
             if not _math.isfinite(run_time) or run_time <= 0.0:
                 continue
-            adjusted = max(self._line_times[index], 0.0) % run_time
-            alpha = adjusted / run_time
+            # Reference vector_field.py: `alpha = time_ratio % 1` on the
+            # SIGNED time — Python's modulo wraps a negative lag into
+            # [0, 1), so a lagged line is a phase offset already mid-cycle,
+            # not a line frozen at alpha 0. The old max(time, 0.0) clamp
+            # froze every still-lagged line, which also made a wait tick a
+            # visible no-op after the construction-time updater pass
+            # (fm-5wq.4.74, bridge.py:11655).
+            alpha = (self._line_times[index] / run_time) % 1.0
             mu = (1.0 - alpha) * (-self.time_width / 2.0) + alpha * (
                 1.0 + self.time_width / 2.0
             )
