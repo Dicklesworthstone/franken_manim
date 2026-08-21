@@ -2545,6 +2545,61 @@ except NotImplementedError as error:
 else:
     raise AssertionError("LinearNumberSlider silently ignored handle radius")
 
+# ColorSliders is the Reference's Group, not a ControlMobject. Atlas owns its
+# checkerboard/swatch and the four native LinearNumberSlider compositions.
+color_sliders = interactive.ColorSliders()
+assert interactive.ColorSliders.__bases__ == (manimlib.Group,)
+assert interactive.ControlMobject not in interactive.ColorSliders.__mro__
+assert list(color_sliders.submobjects) == [
+    color_sliders.swatch,
+    color_sliders.sliders,
+]
+assert list(color_sliders.swatch.submobjects) == [
+    color_sliders.background,
+    color_sliders.selected_color_box,
+]
+assert list(color_sliders.sliders.submobjects) == [
+    color_sliders.r_slider,
+    color_sliders.g_slider,
+    color_sliders.b_slider,
+    color_sliders.a_slider,
+]
+assert all(len(slider.submobjects) == 3 for slider in color_sliders.sliders)
+assert np.allclose(color_sliders.get_value(), [1.0, 1.0, 1.0, 1.0])
+
+swatch_identity = color_sliders.swatch
+sliders_identity = color_sliders.sliders
+color_sliders.set_value(64.0, 128.0, 255.0, 0.5)
+assert color_sliders.swatch is swatch_identity
+assert color_sliders.sliders is sliders_identity
+assert np.allclose(
+    color_sliders.get_value(),
+    [64.0 / 255.0, 128.0 / 255.0, 1.0, 0.5],
+)
+assert np.allclose(
+    _color_to_rgb(color_sliders.selected_color_box.get_fill_color()),
+    [64.0 / 255.0, 128.0 / 255.0, 1.0],
+    atol=1.0 / 255.0,
+)
+assert np.isclose(
+    color_sliders.selected_color_box.get_fill_opacity(),
+    0.5,
+)
+
+failed_color_sliders = interactive.ColorSliders.__new__(
+    interactive.ColorSliders
+)
+try:
+    interactive.ColorSliders.__init__(
+        failed_color_sliders,
+        unsupported=True,
+    )
+except TypeError as error:
+    assert str(error) == "unexpected keyword arguments: unsupported"
+else:
+    raise AssertionError("ColorSliders silently discarded an unknown option")
+assert not hasattr(failed_color_sliders, "submobjects")
+
 # Atlas already owns these curve, corner, and camera-frame primitives. Their
 # public classes must drive those native builders rather than stop at the
 # schema-generated constructor refusal which previously occupied each row.

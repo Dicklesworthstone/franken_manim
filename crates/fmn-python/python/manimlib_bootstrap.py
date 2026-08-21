@@ -9170,6 +9170,143 @@ class LinearNumberSlider(ControlMobject):
         self.bar, self.slider, self.slider_axis = parts
 
 
+class ColorSliders(Group):
+    """Atlas's four-channel slider bank and checkerboard swatch."""
+
+    def __init__(
+        self,
+        sliders_kwargs=dict(),
+        rect_kwargs=dict(width=2.0, height=0.5, stroke_opacity=1.0),
+        background_grid_kwargs=dict(
+            colors=[_GREY_A, _GREY_C],
+            single_square_len=0.1,
+        ),
+        sliders_buff=_MED_LARGE_BUFF,
+        default_rgb_value=255,
+        default_a_value=1,
+        **kwargs,
+    ):
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
+            )
+        if sliders_kwargs:
+            raise NotImplementedError(
+                "ColorSliders sliders_kwargs are not routed to the native builder"
+            )
+        rect_config = dict(rect_kwargs)
+        rect_unknown = sorted(
+            set(rect_config) - {"width", "height", "stroke_opacity"}
+        )
+        if rect_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join("rect_kwargs." + name for name in rect_unknown)
+            )
+        if (
+            float(rect_config.get("width", 2.0)) != 2.0
+            or float(rect_config.get("height", 0.5)) != 0.5
+            or float(rect_config.get("stroke_opacity", 1.0)) != 1.0
+        ):
+            raise NotImplementedError(
+                "ColorSliders rect_kwargs are not routed to the native builder"
+            )
+        grid_config = dict(background_grid_kwargs)
+        grid_unknown = sorted(
+            set(grid_config) - {"colors", "single_square_len"}
+        )
+        if grid_unknown:
+            raise TypeError(
+                "unexpected keyword arguments: "
+                + ", ".join(
+                    "background_grid_kwargs." + name for name in grid_unknown
+                )
+            )
+        grid_colors = [
+            tuple(_color_to_rgb(color))
+            for color in grid_config.get("colors", [_GREY_A, _GREY_C])
+        ]
+        if grid_colors != [
+            tuple(_color_to_rgb(_GREY_A)),
+            tuple(_color_to_rgb(_GREY_C)),
+        ] or float(grid_config.get("single_square_len", 0.1)) != 0.1:
+            raise NotImplementedError(
+                "ColorSliders background_grid_kwargs are not routed to the native builder"
+            )
+
+        self.sliders_kwargs = dict(sliders_kwargs)
+        self.rect_kwargs = rect_config
+        self.background_grid_kwargs = grid_config
+        self.sliders_buff = float(sliders_buff)
+        self.default_rgb_value = float(default_rgb_value)
+        self.default_a_value = float(default_a_value)
+        if self.default_rgb_value != 255.0 or self.default_a_value != 1.0:
+            raise NotImplementedError(
+                "ColorSliders custom default values are not routed to the native builder"
+            )
+        self._color_slider_components = (
+            self.default_rgb_value,
+            self.default_rgb_value,
+            self.default_rgb_value,
+            self.default_a_value,
+        )
+        swatch, sliders = self._native_color_slider_parts(
+            self._color_slider_components,
+            apply_value=False,
+        )
+        super().__init__(swatch, sliders)
+        self.swatch = swatch
+        self.background, self.selected_color_box = swatch.submobjects
+        self.sliders = sliders
+        (
+            self.r_slider,
+            self.g_slider,
+            self.b_slider,
+            self.a_slider,
+        ) = sliders.submobjects
+
+    def _native_color_slider_parts(self, components, *, apply_value):
+        specs = self._build_color_sliders(
+            _native_shell_factory,
+            *components,
+            self.sliders_buff,
+            bool(apply_value),
+        )
+        parts = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            parts.append(shell)
+        if (
+            len(parts) != 2
+            or len(parts[0].submobjects) != 2
+            or len(parts[1].submobjects) != 4
+        ):
+            raise RuntimeError(
+                "native ColorSliders family contract drift: expected swatch + four sliders"
+            )
+        return parts
+
+    def get_value(self):
+        red, green, blue, alpha = self._color_slider_components
+        return _np.array([red / 255.0, green / 255.0, blue / 255.0, alpha])
+
+    def set_value(self, r, g, b, a):
+        components = (float(r), float(g), float(b), float(a))
+        swatch, sliders = self._native_color_slider_parts(
+            components,
+            apply_value=True,
+        )
+        self.swatch.become(swatch)
+        self.sliders.become(sliders)
+        self._color_slider_components = components
+
+    def get_picked_color(self):
+        return _rgb_to_hex(self.get_value()[:3])
+
+    def get_picked_opacity(self):
+        return float(self.get_value()[3])
+
+
 class CameraFrame(Mobject):
     """The Reference's camera frame (manimlib/camera/camera_frame.py) as a
     real Mobject whose authoritative state lives in one engine
@@ -13191,6 +13328,7 @@ def _install_schema_surface():
             "manimlib.mobject.interactive",
             "LinearNumberSlider",
         ): LinearNumberSlider,
+        ("manimlib.mobject.interactive", "ColorSliders"): ColorSliders,
         ("manimlib.mobject.types.vectorized_mobject", "VMobject"): VMobject,
         ("manimlib.mobject.svg.svg_mobject", "SVGMobject"): SVGMobject,
         (

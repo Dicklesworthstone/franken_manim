@@ -3154,6 +3154,39 @@ impl BridgeMobject {
         native_shell_specs(slf.py(), factory, children)
     }
 
+    /// `ColorSliders(...)` over Atlas's aggregate swatch plus four-slider
+    /// composition. Python retains the two top-level shells so later native
+    /// rebuilds can update their records without changing public identities.
+    #[allow(clippy::too_many_arguments)]
+    fn _build_color_sliders<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        red: f64,
+        green: f64,
+        blue: f64,
+        alpha: f64,
+        sliders_buff: f64,
+        apply_value: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut sliders = fmn_library::ColorSliders::new()
+            .map_err(native_error)?
+            .sliders_buff(sliders_buff);
+        if apply_value {
+            sliders
+                .set_value(red, green, blue, alpha)
+                .map_err(native_error)?;
+        }
+        let mut composition = fmn_mobject::Mobject::from(sliders.composition());
+        let children = std::mem::take(&mut composition.submobjects);
+        if children.len() != 2 {
+            return Err(PyRuntimeError::new_err(format!(
+                "native ColorSliders family contract drift: expected 2 children, got {}",
+                children.len()
+            )));
+        }
+        native_shell_specs(slf.py(), factory, children)
+    }
+
     /// `SVGMobject(file_name=…, svg_string=…)` over Chisel's hardened
     /// user-SVG document processor (fm-5wq.4.50, G2 criterion 4). The file
     /// is read natively under the processor's declared byte budget — the
