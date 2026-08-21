@@ -8387,6 +8387,25 @@ assert not hasattr(failed_square3d, "submobjects")
 solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
 assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
 
+default_cube = three_dimensions.Cube()
+assert len(default_cube.submobjects) == 6
+assert all(face.n_records() == 2 * 2 for face in default_cube.submobjects)
+
+dense_cube = three_dimensions.Cube(square_resolution=(3, 4))
+assert dense_cube.resolution == (3, 4)
+assert all(face.n_records() == 3 * 4 for face in dense_cube.submobjects)
+
+failed_cube = three_dimensions.Cube.__new__(three_dimensions.Cube)
+try:
+    three_dimensions.Cube.__init__(failed_cube, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Cube() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Cube keyword reached the native builder")
+assert not hasattr(failed_cube, "submobjects")
+
 # Atlas's vectorized 3D shelf is authored rather than schema-generated: the
 # group keeps caller proxy identity while the four concrete solids install
 # Atlas geometry and recurse 3D uniforms through the live family.
@@ -8449,6 +8468,30 @@ for member in vector_group.submobjects:
     assert member.uniforms["depth_test"] is False
     assert np.allclose(member.uniforms["shading"], [0.3, 0.4, 0.5])
     assert member.uniforms["joint_type"] == 3
+
+default_prism = three_dimensions.Prism()
+assert len(default_prism.submobjects) == 6
+assert np.allclose(
+    [default_prism.get_width(), default_prism.get_height(), default_prism.get_depth()],
+    [3.0, 2.0, 1.0],
+    atol=1e-6,
+)
+
+back_prism = three_dimensions.Prism(z_index=-1)
+front_prism = three_dimensions.Prism(z_index=1)
+prism_order_scene = Scene().add(front_prism, back_prism)
+assert prism_order_scene.get_mobjects() == [back_prism, front_prism]
+
+failed_prism = three_dimensions.Prism.__new__(three_dimensions.Prism)
+try:
+    three_dimensions.Prism.__init__(failed_prism, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Prism() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Prism keyword reached the native builder")
+assert not hasattr(failed_prism, "submobjects")
 
 vcube = three_dimensions.VCube(
     side_length=2.5,

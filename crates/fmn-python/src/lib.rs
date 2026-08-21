@@ -3668,8 +3668,12 @@ impl BridgeMobject {
         width: f64,
         height: f64,
         depth: f64,
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
-        install_native_tree(slf, factory, fmn_library::Prism::new(width, height, depth))
+        let prism = fmn_library::Prism::new(width, height, depth)
+            .build()
+            .with_z_index(z_index);
+        install_native_tree(slf, factory, prism)
     }
 
     /// `Cube(side_length)` over the solids shelf.
@@ -3677,8 +3681,11 @@ impl BridgeMobject {
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
         side_length: f64,
+        square_resolution: (usize, usize),
     ) -> PyResult<Bound<'py, PyList>> {
-        install_native_tree(slf, factory, fmn_library::Cube::new(side_length))
+        let cube = fmn_library::Cube::new(side_length)
+            .square_resolution(square_resolution.0, square_resolution.1);
+        install_native_tree(slf, factory, cube)
     }
 
     /// `VCube(side_length, ...)` over Atlas's six vectorized faces. Style

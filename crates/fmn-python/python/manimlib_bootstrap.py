@@ -8032,13 +8032,19 @@ class Cube(SGroup):
         depth_test = kwargs.pop("depth_test", True)
         _refuse_unrouted(
             type(self).__name__ + "()",
-            [("square_resolution", tuple(square_resolution) != (2, 2))]
-            + [(name, True) for name in sorted(kwargs)],
+            [(name, True) for name in sorted(kwargs)],
         )
         _install_live_state(self)
-        self.resolution = (2, 2)
+        self.resolution = (
+            int(square_resolution[0]),
+            int(square_resolution[1]),
+        )
         self.preferred_creation_axis = 1
-        specs = self._build_cube(_native_surface_shell_factory, float(side_length))
+        specs = self._build_cube(
+            _native_surface_shell_factory,
+            float(side_length),
+            self.resolution,
+        )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
 
@@ -8049,12 +8055,17 @@ class Prism(Cube):
         opacity = kwargs.pop("opacity", None)
         shading = kwargs.pop("shading", None)
         depth_test = kwargs.pop("depth_test", True)
+        z_index = int(kwargs.pop("z_index", 0))
         _refuse_unrouted("Prism()", [(name, True) for name in sorted(kwargs)])
         _install_live_state(self)
         self.resolution = (2, 2)
         self.preferred_creation_axis = 1
         specs = self._build_prism(
-            _native_surface_shell_factory, float(width), float(height), float(depth)
+            _native_surface_shell_factory,
+            float(width),
+            float(height),
+            float(depth),
+            z_index,
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
